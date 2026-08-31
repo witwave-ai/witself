@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -609,6 +610,11 @@ func TestMemoryCurationErrorMapping(t *testing.T) {
 			`"code":"feature_not_enabled"`,
 		},
 		{ErrBadInput, http.StatusBadRequest, "invalid memory curation request"},
+		{
+			fmt.Errorf("%w: resolved kind does not match source", ErrBadInput),
+			http.StatusBadRequest,
+			"invalid memory curation request: resolved kind does not match source",
+		},
 		{ErrForbidden, http.StatusForbidden, "memory curation access forbidden"},
 		{ErrNotFound, http.StatusNotFound, "memory curation resource not found"},
 		{ErrIdempotencyConflict, http.StatusConflict, "idempotency key was reused"},

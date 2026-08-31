@@ -278,11 +278,11 @@ func (s *Store) PlanCuration(
 	}
 	draft, err := DecodeMemoryCurationPlanDraft(in.Draft)
 	if err != nil {
-		return PlanMemoryCurationResult{}, ErrMemoryCurationInputInvalid
+		return PlanMemoryCurationResult{}, memoryCurationInputInvalid(err)
 	}
 	requestHash, err := hashMemoryCurationPlanRequest(runID, in.FencingGeneration, draft)
 	if err != nil {
-		return PlanMemoryCurationResult{}, ErrMemoryCurationInputInvalid
+		return PlanMemoryCurationResult{}, memoryCurationInputInvalid(err)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -378,7 +378,7 @@ func (s *Store) PlanCuration(
 		}
 		if err := bindMemoryCurationDraftFactSubjects(ctx, tx, p, &draft); err != nil {
 			if errors.Is(err, ErrFactInputInvalid) {
-				return PlanMemoryCurationResult{}, ErrMemoryCurationInputInvalid
+				return PlanMemoryCurationResult{}, memoryCurationInputInvalid(err)
 			}
 			return PlanMemoryCurationResult{}, err
 		}
@@ -391,7 +391,7 @@ func (s *Store) PlanCuration(
 		}),
 	})
 	if err != nil {
-		return PlanMemoryCurationResult{}, ErrMemoryCurationInputInvalid
+		return PlanMemoryCurationResult{}, memoryCurationInputInvalid(err)
 	}
 	if err := authorizeMemoryCurationPlanProfile(p, acceptance.Plan); err != nil {
 		return PlanMemoryCurationResult{}, err

@@ -803,6 +803,29 @@ func TestMemoryCapabilityRequiresCompleteSurface(t *testing.T) {
 	}
 }
 
+func TestMemoryErrorSurfacesBadInputDetail(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	if !writeMemoryError(
+		recorder,
+		fmt.Errorf("%w: resolved kind does not match source", ErrBadInput),
+		"capture memory",
+	) {
+		t.Fatal("bad input was not handled")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid memory request: resolved kind does not match source") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	writeMemoryError(recorder, ErrBadInput, "capture memory")
+	if !strings.Contains(recorder.Body.String(), `"invalid memory request"`) {
+		t.Fatalf("bare bad input body = %s", recorder.Body.String())
+	}
+}
+
 func TestMemoryErrorPreservesMessagingFeatureRefusal(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	if !writeMemoryError(

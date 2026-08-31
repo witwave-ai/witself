@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -314,7 +313,7 @@ func mapMemoryError(err error) error {
 	case errors.As(err, &featureErr):
 		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMemoryInputInvalid):
-		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMemoryInputInvalid, err)
 	case errors.Is(err, store.ErrMemoryNotFound):
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrMemoryForbidden), errors.Is(err, store.ErrAccountNotActive), errors.Is(err, store.ErrAgentNotFound):

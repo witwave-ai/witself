@@ -2050,6 +2050,19 @@ var ErrResumeWrongCategory = errors.New("suspension category does not match")
 // filter). Maps to 400.
 var ErrBadInput = errors.New("bad input")
 
+// badInputMessage keeps a lane's generic 400 message while surfacing the
+// specific validation detail an ErrBadInput chain carries, so a caller can
+// repair the request without guessing. Details are bounded validation
+// messages that at most echo the caller's own input, never stored content.
+func badInputMessage(generic string, err error) string {
+	detail := strings.TrimPrefix(err.Error(), ErrBadInput.Error())
+	detail = strings.TrimSpace(strings.TrimPrefix(detail, ":"))
+	if detail == "" {
+		return generic
+	}
+	return generic + ": " + detail
+}
+
 // ErrForbidden signals an authenticated principal crossing a resource's
 // authorization boundary (-> 403).
 var ErrForbidden = errors.New("forbidden")

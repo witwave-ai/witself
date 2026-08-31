@@ -165,6 +165,16 @@ func TestMapMemoryCurationErrorPreservesExactConditions(t *testing.T) {
 		}
 	}
 
+	detailed := mapMemoryCurationError(fmt.Errorf(
+		"%w: resolved kind does not match source", store.ErrMemoryCurationInputInvalid,
+	))
+	if !errors.Is(detailed, server.ErrBadInput) {
+		t.Fatalf("detailed input error lost the sentinel: %v", detailed)
+	}
+	if want := server.ErrBadInput.Error() + ": resolved kind does not match source"; detailed.Error() != want {
+		t.Fatalf("detailed input error = %q, want %q", detailed.Error(), want)
+	}
+
 	blocked := &store.MemoryCurationRollbackBlockedError{Blockers: []store.MemoryCurationRollbackBlocker{{
 		Kind: "dependent_memory", MemoryID: "mem_1", Version: 2,
 	}}}

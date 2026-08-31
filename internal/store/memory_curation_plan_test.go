@@ -628,6 +628,42 @@ func FuzzMemoryCurationCanonicalRawJSONNeverPanics(f *testing.F) {
 	})
 }
 
+func TestMemoryCurationInputInvalidPreservesValidationDetail(t *testing.T) {
+	// The production shape that motivated this: resolved transcript evidence
+	// with no resolved_kind must reject with the specific store message, not
+	// only the bare sentinel.
+	draft := validCurationDraft(MemoryCurationPlanAction{
+		Ordinal: 1, Operation: MemoryCurationOperationCreate,
+		Create: &MemoryCurationCreateAction{LocalRef: "summary",
+			Snapshot: MemoryCurationMemorySnapshot{Content: "Summary", Kind: "decision",
+				Evidence: []MemoryCurationEvidence{{
+					Type: "transcript", ResolutionState: MemoryEvidenceResolved,
+					SourceTranscriptID: "tr_1", SourceSequenceFrom: 1, SourceSequenceUntil: 2,
+				}}}},
+	})
+	_, err := AcceptMemoryCurationPlan(draft, MemoryCurationPlanAcceptOptions{
+		PlanRevision: 1, Allocator: fixedCurationAllocator("mem_plan_summary"),
+	})
+	if err == nil {
+		t.Fatal("resolved evidence without resolved_kind was accepted")
+	}
+	wrapped := memoryCurationInputInvalid(err)
+	if !errors.Is(wrapped, ErrMemoryCurationInputInvalid) {
+		t.Fatalf("wrapped error = %v, want ErrMemoryCurationInputInvalid", wrapped)
+	}
+	if !strings.Contains(wrapped.Error(), "resolved kind does not match source") {
+		t.Fatalf("wrapped error lost the validation detail: %v", wrapped)
+	}
+
+	if got := memoryCurationInputInvalid(ErrMemoryInputInvalid); got != ErrMemoryCurationInputInvalid {
+		t.Fatalf("bare sentinel = %v, want bare ErrMemoryCurationInputInvalid", got)
+	}
+	got := memoryCurationInputInvalid(memoryCurationInvalidf("draft revision must be positive"))
+	if want := ErrMemoryCurationInputInvalid.Error() + ": draft revision must be positive"; got.Error() != want {
+		t.Fatalf("trimmed detail = %q, want %q", got.Error(), want)
+	}
+}
+
 func completeMemoryCurationPlanDraft() MemoryCurationPlanDraft {
 	when := time.Date(2025, 2, 3, 4, 5, 6, 7, time.FixedZone("offset", -7*60*60))
 	return validCurationDraft(

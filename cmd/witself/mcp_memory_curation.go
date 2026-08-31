@@ -417,9 +417,9 @@ type mcpMemoryCurationEvidence struct {
 	InputEvidenceID     string                             `json:"input_evidence_id,omitempty" jsonschema:"exact materialized evidence input id"`
 	Type                string                             `json:"type" jsonschema:"transcript, memory, message, import, or another supported evidence type"`
 	Role                string                             `json:"role,omitempty" jsonschema:"supports, contradicts, or context"`
-	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable"`
+	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable; a resolved row requires resolved_kind plus exactly one matching source field"`
 	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator"`
-	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"resolved source kind"`
+	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"REQUIRED whenever resolution_state is resolved: transcript, memory, message, import_artifact, or artifact; must name the populated source field (source_transcript_id with a sequence range, source_memory, source_message_id, source_import_locator, or artifact_excerpt)"`
 	SourceTranscriptID  string                             `json:"source_transcript_id,omitempty" jsonschema:"exact frozen transcript id"`
 	SourceSequenceFrom  int64                              `json:"source_sequence_from,omitempty" jsonschema:"first exact frozen transcript sequence"`
 	SourceSequenceUntil int64                              `json:"source_sequence_until,omitempty" jsonschema:"last exact frozen transcript sequence"`
