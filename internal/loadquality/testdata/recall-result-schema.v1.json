@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://witself.witwave.ai/schemas/memory-recall-load-result.v1.schema.json",
+  "title": "Witself narrative-memory recall load result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "harness_version",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "postgresql_version",
+    "environment",
+    "workload",
+    "measurements",
+    "outcomes"
+  ],
+  "properties": {
+    "schema": { "const": "witself.memory-recall-load-result.v1" },
+    "harness_version": { "const": "1" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "outcome": { "const": "pass" },
+    "postgresql_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "commit", "provider", "hardware_tier", "go_version", "goos", "goarch", "logical_cpus"],
+      "properties": {
+        "release": { "$ref": "#/$defs/safe_metadata" },
+        "commit": { "$ref": "#/$defs/safe_metadata" },
+        "provider": { "$ref": "#/$defs/safe_label" },
+        "hardware_tier": { "$ref": "#/$defs/safe_label" },
+        "go_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "goos": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "goarch": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "logical_cpus": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "synthetic_accounts",
+        "synthetic_agents",
+        "cardinalities",
+        "query_iterations",
+        "concurrency",
+        "vector_dimensions",
+        "coverage_percentages",
+        "pagination_limit",
+        "result_budget"
+      ],
+      "properties": {
+        "seed": { "type": "integer" },
+        "synthetic_accounts": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "synthetic_agents": { "type": "integer", "minimum": 3, "maximum": 6 },
+        "cardinalities": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 10, "maximum": 10000 }
+        },
+        "query_iterations": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "concurrency": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "vector_dimensions": { "type": "integer", "minimum": 2, "maximum": 4096 },
+        "coverage_percentages": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 100 }
+        },
+        "pagination_limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "result_budget": { "type": "integer", "minimum": 2, "maximum": 256 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cardinality_ladder", "vector_coverage", "hybrid_quality", "vector_safety", "pagination"],
+      "properties": {
+        "cardinality_ladder": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "items": { "$ref": "#/$defs/cardinality_measurement" }
+        },
+        "vector_coverage": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/vector_coverage_measurement" }
+        },
+        "hybrid_quality": { "$ref": "#/$defs/operation_stats" },
+        "vector_safety": { "$ref": "#/$defs/operation_stats" },
+        "pagination": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cardinality_ladder", "vector_coverage", "hybrid_quality", "vector_safety", "pagination"],
+      "properties": {
+        "cardinality_ladder": { "$ref": "#/$defs/cardinality_outcome" },
+        "vector_coverage": { "$ref": "#/$defs/vector_coverage_outcome" },
+        "hybrid_quality": { "$ref": "#/$defs/hybrid_quality_outcome" },
+        "vector_safety": { "$ref": "#/$defs/vector_safety_outcome" },
+        "pagination": { "$ref": "#/$defs/pagination_outcome" }
+      }
+    }
+  },
+  "$defs": {
+    "safe_label": {
+      "type": "string",
+      "description": "Operator-typed dotless label; dots are rejected so a pasted database hostname cannot be retained.",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+_-]{0,127}$"
+    },
+    "safe_metadata": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "operation_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "wall_duration_ms", "throughput_per_second", "minimum_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "wall_duration_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "throughput_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "minimum_ms": { "type": "number", "minimum": 0 },
+        "p50_ms": { "type": "number", "minimum": 0 },
+        "p95_ms": { "type": "number", "minimum": 0 },
+        "p99_ms": { "type": "number", "minimum": 0 },
+        "maximum_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "cardinality_measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_count", "lexical_recall"],
+      "properties": {
+        "memory_count": { "type": "integer", "minimum": 10, "maximum": 10000 },
+        "lexical_recall": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "vector_coverage_measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["coverage_percent", "vector_attach", "hybrid_recall"],
+      "properties": {
+        "coverage_percent": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "vector_attach": { "$ref": "#/$defs/operation_stats" },
+        "hybrid_recall": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "cardinality_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenants", "seeded_memories", "recall_calls", "all_lexical", "all_complete"],
+      "properties": {
+        "tenants": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "seeded_memories": { "type": "integer", "minimum": 20, "maximum": 50000 },
+        "recall_calls": { "type": "integer", "minimum": 2, "maximum": 5000 },
+        "all_lexical": { "const": true },
+        "all_complete": { "const": true }
+      }
+    },
+    "vector_coverage_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases", "all_profiles_listed"],
+      "properties": {
+        "cases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/vector_coverage_case" }
+        },
+        "all_profiles_listed": { "const": true }
+      }
+    },
+    "vector_coverage_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage_percent",
+        "eligible_memories",
+        "attached_vectors",
+        "recall_calls",
+        "vector_candidates",
+        "vector_matches",
+        "reported_vector_coverage",
+        "degraded",
+        "candidate_limit",
+        "candidate_truncated",
+        "hybrid_used",
+        "metadata_stable"
+      ],
+      "properties": {
+        "coverage_percent": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "eligible_memories": { "type": "integer", "minimum": 10, "maximum": 256 },
+        "attached_vectors": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "recall_calls": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "vector_candidates": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "vector_matches": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "reported_vector_coverage": { "$ref": "#/$defs/positive_rate" },
+        "degraded": { "type": "boolean" },
+        "candidate_limit": { "const": 256 },
+        "candidate_truncated": { "type": "boolean" },
+        "hybrid_used": { "const": true },
+        "metadata_stable": { "const": true }
+      }
+    },
+    "hybrid_quality_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases", "recall_calls", "score_components_verified", "all_ranks_passed"],
+      "properties": {
+        "cases": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/hybrid_relevance_case" }
+        },
+        "recall_calls": { "type": "integer", "minimum": 3, "maximum": 3000 },
+        "score_components_verified": { "const": true },
+        "all_ranks_passed": { "const": true }
+      }
+    },
+    "hybrid_relevance_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "passed", "observed_rank", "maximum_rank", "vector_used", "lexical_used", "similarity_used"],
+      "properties": {
+        "name": { "enum": ["vector_only", "lexical_only", "both_signals"] },
+        "passed": { "const": true },
+        "observed_rank": { "const": 1 },
+        "maximum_rank": { "const": 1 },
+        "vector_used": { "type": "boolean" },
+        "lexical_used": { "type": "boolean" },
+        "similarity_used": { "type": "boolean" }
+      }
+    },
+    "vector_safety_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recall_calls", "sensitive_broad_redacted", "sensitive_exact_owner_visible", "cross_agent_isolated", "cross_account_isolated", "all_vector_queries"],
+      "properties": {
+        "recall_calls": { "const": 4 },
+        "sensitive_broad_redacted": { "const": true },
+        "sensitive_exact_owner_visible": { "const": true },
+        "cross_agent_isolated": { "const": true },
+        "cross_account_isolated": { "const": true },
+        "all_vector_queries": { "const": true }
+      }
+    },
+    "pagination_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repeat_runs",
+        "pages_per_run",
+        "hits_per_run",
+        "recall_calls",
+        "result_budget",
+        "attached_vectors",
+        "vector_candidates",
+        "vector_matches",
+        "reported_vector_coverage",
+        "tenant_vector_fraction",
+        "candidate_limit",
+        "candidate_truncated",
+        "page_limits_honored",
+        "result_budget_reached",
+        "no_duplicate_ids",
+        "ordering_stable"
+      ],
+      "properties": {
+        "repeat_runs": { "const": 2 },
+        "pages_per_run": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer", "minimum": 2, "maximum": 256 }
+        },
+        "hits_per_run": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer", "minimum": 2, "maximum": 256 }
+        },
+        "recall_calls": { "type": "integer", "minimum": 4, "maximum": 512 },
+        "result_budget": { "type": "integer", "minimum": 2, "maximum": 256 },
+        "attached_vectors": { "const": 256 },
+        "vector_candidates": { "const": 256 },
+        "vector_matches": { "const": 256 },
+        "reported_vector_coverage": { "const": 1 },
+        "tenant_vector_fraction": { "$ref": "#/$defs/positive_rate" },
+        "candidate_limit": { "const": 256 },
+        "candidate_truncated": { "const": true },
+        "page_limits_honored": { "const": true },
+        "result_budget_reached": { "const": true },
+        "no_duplicate_ids": { "const": true },
+        "ordering_stable": { "const": true }
+      }
+    },
+    "positive_rate": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    }
+  }
+}

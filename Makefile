@@ -40,7 +40,24 @@ MEMORY_CURATION_LOAD_COMMIT               ?= $(shell git rev-parse HEAD)
 MEMORY_CURATION_LOAD_PROVIDER             ?= local
 MEMORY_CURATION_LOAD_HARDWARE             ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load feature-status build check check-infra
+# Leave the recall result path empty by default so ParseRecallOptions can use
+# its pid-scoped path. This avoids concurrent Make invocations choosing the
+# same retained evidence file.
+MEMORY_RECALL_LOAD_RESULTS                     ?=
+MEMORY_RECALL_LOAD_SEED                        ?= 20260831
+MEMORY_RECALL_LOAD_CARDINALITIES               ?= 100,500,2000
+MEMORY_RECALL_LOAD_QUERY_ITERATIONS            ?= 10
+MEMORY_RECALL_LOAD_CONCURRENCY                 ?= 4
+MEMORY_RECALL_LOAD_VECTOR_DIMENSIONS           ?= 32
+MEMORY_RECALL_LOAD_VECTOR_COVERAGE_PERCENTAGES ?= 100,50
+MEMORY_RECALL_LOAD_PAGINATION_LIMIT            ?= 64
+MEMORY_RECALL_LOAD_RESULT_BUDGET               ?= 256
+MEMORY_RECALL_LOAD_RELEASE                     ?= $(shell git describe --tags --always --dirty)
+MEMORY_RECALL_LOAD_COMMIT                      ?= $(shell git rev-parse HEAD)
+MEMORY_RECALL_LOAD_PROVIDER                    ?= local
+MEMORY_RECALL_LOAD_HARDWARE                    ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load feature-status build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -134,6 +151,33 @@ test-memory-curation-load: ## Run the opt-in deterministic PostgreSQL memory-cur
 	@go test ./internal/store -run '^TestNarrativeMemoryCurationLoadPostgres$$' \
 			-count=1 -v -timeout 12m
 	@printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_CURATION_LOAD_RESULTS"
+
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD := 1
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_RESULTS := $(MEMORY_RECALL_LOAD_RESULTS)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_SEED := $(MEMORY_RECALL_LOAD_SEED)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_CARDINALITIES := $(MEMORY_RECALL_LOAD_CARDINALITIES)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_QUERY_ITERATIONS := $(MEMORY_RECALL_LOAD_QUERY_ITERATIONS)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_CONCURRENCY := $(MEMORY_RECALL_LOAD_CONCURRENCY)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_VECTOR_DIMENSIONS := $(MEMORY_RECALL_LOAD_VECTOR_DIMENSIONS)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_VECTOR_COVERAGE_PERCENTAGES := $(MEMORY_RECALL_LOAD_VECTOR_COVERAGE_PERCENTAGES)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_PAGINATION_LIMIT := $(MEMORY_RECALL_LOAD_PAGINATION_LIMIT)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_RESULT_BUDGET := $(MEMORY_RECALL_LOAD_RESULT_BUDGET)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_RELEASE := $(MEMORY_RECALL_LOAD_RELEASE)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_COMMIT := $(MEMORY_RECALL_LOAD_COMMIT)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_PROVIDER := $(MEMORY_RECALL_LOAD_PROVIDER)
+test-memory-recall-load: export WITSELF_MEMORY_RECALL_LOAD_HARDWARE_TIER := $(MEMORY_RECALL_LOAD_HARDWARE)
+test-memory-recall-load: ## Run the opt-in deterministic PostgreSQL memory-recall load/quality harness
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryRecallLoadPostgres$$' \
+			-count=1 -v -timeout 12m
+	@if [ -n "$$WITSELF_MEMORY_RECALL_LOAD_RESULTS" ]; then \
+		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_RECALL_LOAD_RESULTS"; \
+	else \
+		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
+	fi
 
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
