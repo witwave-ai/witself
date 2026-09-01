@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://witself.witwave.ai/schemas/memory-curation-load-result.v1.schema.json",
+  "title": "Witself narrative-memory curation load result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "harness_version",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "postgresql_version",
+    "environment",
+    "workload",
+    "measurements",
+    "outcomes"
+  ],
+  "properties": {
+    "schema": { "const": "witself.memory-curation-load-result.v1" },
+    "harness_version": { "const": "1" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "outcome": { "const": "pass" },
+    "postgresql_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "commit", "provider", "hardware_tier", "go_version", "goos", "goarch", "logical_cpus"],
+      "properties": {
+        "release": { "$ref": "#/$defs/safe_metadata" },
+        "commit": { "$ref": "#/$defs/safe_metadata" },
+        "provider": { "$ref": "#/$defs/safe_label" },
+        "hardware_tier": { "$ref": "#/$defs/safe_label" },
+        "go_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "goos": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "goarch": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "logical_cpus": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "synthetic_accounts",
+        "synthetic_agents",
+        "coalescing_requests",
+        "claim_requests",
+        "claim_workers",
+        "paging_cardinalities",
+        "page_size",
+        "chain_backlog",
+        "chain_cap",
+        "chain_depth",
+        "lease_cycles",
+        "max_attempts"
+      ],
+      "properties": {
+        "seed": { "type": "integer" },
+        "synthetic_accounts": { "const": 2 },
+        "synthetic_agents": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "coalescing_requests": { "type": "integer", "minimum": 2, "maximum": 10000 },
+        "claim_requests": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "claim_workers": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "paging_cardinalities": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 500 }
+        },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "chain_backlog": { "type": "integer", "minimum": 2, "maximum": 32000 },
+        "chain_cap": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "chain_depth": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "lease_cycles": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "max_attempts": { "type": "integer", "minimum": 2, "maximum": 20 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_coalescing",
+        "claim_start",
+        "input_page",
+        "plan",
+        "plan_get",
+        "apply",
+        "lease_renew",
+        "lease_apply_race",
+        "typed_refusal",
+        "abandon"
+      ],
+      "properties": {
+        "request_coalescing": { "$ref": "#/$defs/operation_stats" },
+        "claim_start": { "$ref": "#/$defs/operation_stats" },
+        "input_page": { "$ref": "#/$defs/operation_stats" },
+        "plan": { "$ref": "#/$defs/operation_stats" },
+        "plan_get": { "$ref": "#/$defs/operation_stats" },
+        "apply": { "$ref": "#/$defs/operation_stats" },
+        "lease_renew": { "$ref": "#/$defs/operation_stats" },
+        "lease_apply_race": { "$ref": "#/$defs/operation_stats" },
+        "typed_refusal": { "$ref": "#/$defs/operation_stats" },
+        "abandon": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_coalescing",
+        "claim_contention",
+        "input_paging",
+        "plan_lifecycle",
+        "lease_churn",
+        "stale_plan_conflict",
+        "abandon_requeue"
+      ],
+      "properties": {
+        "request_coalescing": { "$ref": "#/$defs/request_coalescing" },
+        "claim_contention": { "$ref": "#/$defs/claim_contention" },
+        "input_paging": { "$ref": "#/$defs/input_paging" },
+        "plan_lifecycle": { "$ref": "#/$defs/plan_lifecycle" },
+        "lease_churn": { "$ref": "#/$defs/lease_churn" },
+        "stale_plan_conflict": { "$ref": "#/$defs/stale_plan_conflict" },
+        "abandon_requeue": { "$ref": "#/$defs/abandon_requeue" }
+      }
+    }
+  },
+  "$defs": {
+    "safe_label": {
+      "type": "string",
+      "description": "Operator-typed dotless label. Dots are rejected so a pasted database hostname can never be retained as evidence metadata.",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+_-]{0,127}$"
+    },
+    "safe_metadata": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "operation_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "wall_duration_ms", "throughput_per_second", "minimum_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "wall_duration_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "throughput_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "minimum_ms": { "type": "number", "minimum": 0 },
+        "p50_ms": { "type": "number", "minimum": 0 },
+        "p95_ms": { "type": "number", "minimum": 0 },
+        "p99_ms": { "type": "number", "minimum": 0 },
+        "maximum_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "request_coalescing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calls", "created", "coalesced", "queue_depth", "coalescing_ratio", "all_coalesced"],
+      "properties": {
+        "calls": { "type": "integer", "minimum": 2, "maximum": 10000 },
+        "created": { "const": 1 },
+        "coalesced": { "type": "integer", "minimum": 1, "maximum": 9999 },
+        "queue_depth": { "const": 1 },
+        "coalescing_ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "all_coalesced": { "const": true }
+      }
+    },
+    "claim_contention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "attempts", "wins", "losses", "win_rate", "loss_rate", "single_winner_per_request"],
+      "properties": {
+        "requests": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "attempts": { "type": "integer", "minimum": 2, "maximum": 4096 },
+        "wins": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "losses": { "type": "integer", "minimum": 1, "maximum": 4032 },
+        "win_rate": { "$ref": "#/$defs/rate" },
+        "loss_rate": { "$ref": "#/$defs/rate" },
+        "single_winner_per_request": { "const": true }
+      }
+    },
+    "input_paging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runs", "pages", "inputs", "exhausted_runs", "duplicate_inputs", "paged_to_exhaustion"],
+      "properties": {
+        "runs": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "pages": { "type": "integer", "minimum": 2, "maximum": 10010 },
+        "inputs": { "type": "integer", "minimum": 2, "maximum": 10010 },
+        "exhausted_runs": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "duplicate_inputs": { "const": 0 },
+        "paged_to_exhaustion": { "const": true }
+      }
+    },
+    "plan_lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plans",
+        "plan_gets",
+        "applies",
+        "empty_applies",
+        "create_applies",
+        "create_actions",
+        "empty_cursor_advances",
+        "follow_up_requests",
+        "max_chain_depth",
+        "drained_chains",
+        "empty_plan_advanced_cursors",
+        "backlog_drained"
+      ],
+      "properties": {
+        "plans": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "plan_gets": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "applies": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "empty_applies": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "create_applies": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "create_actions": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "empty_cursor_advances": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "follow_up_requests": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "max_chain_depth": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "drained_chains": { "const": 1 },
+        "empty_plan_advanced_cursors": { "const": true },
+        "backlog_drained": { "const": true }
+      }
+    },
+    "lease_churn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cycles",
+        "live_renewals",
+        "renew_after_expiry",
+        "reconciliations",
+        "requeues",
+        "apply_race_attempts",
+        "apply_race_wins",
+        "apply_race_refusals",
+        "stale_fence_refusals",
+        "double_apply_successes",
+        "expired_renew_reconciled",
+        "no_double_apply"
+      ],
+      "properties": {
+        "cycles": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "live_renewals": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "renew_after_expiry": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "reconciliations": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "requeues": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "apply_race_attempts": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "apply_race_wins": { "const": 1 },
+        "apply_race_refusals": { "type": "integer", "minimum": 1, "maximum": 63 },
+        "stale_fence_refusals": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "double_apply_successes": { "const": 0 },
+        "expired_renew_reconciled": { "const": true },
+        "no_double_apply": { "const": true }
+      }
+    },
+    "stale_plan_conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wrong_plan_hash_refusals", "duplicate_plan_refusals", "stale_fence_refusals", "typed_refusals", "all_refusals_typed"],
+      "properties": {
+        "wrong_plan_hash_refusals": { "const": 1 },
+        "duplicate_plan_refusals": { "const": 1 },
+        "stale_fence_refusals": { "type": "integer", "minimum": 2, "maximum": 84 },
+        "typed_refusals": { "type": "integer", "minimum": 4, "maximum": 86 },
+        "all_refusals_typed": { "const": true }
+      }
+    },
+    "abandon_requeue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preview_abandons",
+        "preview_requeues",
+        "preview_attempt_count_before",
+        "preview_attempt_count_after",
+        "failure_abandons",
+        "expiry_interruptions",
+        "retry_requeues",
+        "dead_letters",
+        "terminal_attempt_count",
+        "post_terminal_start_refusals",
+        "preview_budget_preserved",
+        "dead_letter_terminal"
+      ],
+      "properties": {
+        "preview_abandons": { "const": 1 },
+        "preview_requeues": { "const": 1 },
+        "preview_attempt_count_before": { "const": 0 },
+        "preview_attempt_count_after": { "const": 0 },
+        "failure_abandons": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "expiry_interruptions": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "retry_requeues": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "dead_letters": { "const": 1 },
+        "terminal_attempt_count": { "type": "integer", "minimum": 2, "maximum": 20 },
+        "post_terminal_start_refusals": { "const": 1 },
+        "preview_budget_preserved": { "const": true },
+        "dead_letter_terminal": { "const": true }
+      }
+    },
+    "rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

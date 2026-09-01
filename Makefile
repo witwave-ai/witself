@@ -24,7 +24,23 @@ MEMORY_LOAD_QUALITY_COMMIT      ?= $(shell git rev-parse HEAD)
 MEMORY_LOAD_QUALITY_PROVIDER    ?= local
 MEMORY_LOAD_QUALITY_HARDWARE    ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality feature-status build check check-infra
+MEMORY_CURATION_LOAD_RESULTS              ?= /tmp/witself-memory-curation-load.json
+MEMORY_CURATION_LOAD_SEED                 ?= 20260831
+MEMORY_CURATION_LOAD_COALESCING_REQUESTS  ?= 24
+MEMORY_CURATION_LOAD_CLAIM_REQUESTS       ?= 6
+MEMORY_CURATION_LOAD_CLAIM_WORKERS        ?= 4
+MEMORY_CURATION_LOAD_PAGING_CARDINALITIES ?= 4,16,64
+MEMORY_CURATION_LOAD_PAGE_SIZE            ?= 8
+MEMORY_CURATION_LOAD_CHAIN_BACKLOG        ?= 24
+MEMORY_CURATION_LOAD_CHAIN_CAP            ?= 6
+MEMORY_CURATION_LOAD_LEASE_CYCLES         ?= 3
+MEMORY_CURATION_LOAD_MAX_ATTEMPTS         ?= 3
+MEMORY_CURATION_LOAD_RELEASE              ?= $(shell git describe --tags --always --dirty)
+MEMORY_CURATION_LOAD_COMMIT               ?= $(shell git rev-parse HEAD)
+MEMORY_CURATION_LOAD_PROVIDER             ?= local
+MEMORY_CURATION_LOAD_HARDWARE             ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load feature-status build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -93,6 +109,31 @@ test-memory-load-quality: ## Run the opt-in deterministic PostgreSQL memory load
 	@go test ./internal/store -run '^TestNarrativeMemoryLoadQualityPostgres$$' \
 			-count=1 -v -timeout 30m
 	@printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_LOAD_QUALITY_RESULTS"
+
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD := 1
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_RESULTS := $(MEMORY_CURATION_LOAD_RESULTS)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_SEED := $(MEMORY_CURATION_LOAD_SEED)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_COALESCING_REQUESTS := $(MEMORY_CURATION_LOAD_COALESCING_REQUESTS)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_CLAIM_REQUESTS := $(MEMORY_CURATION_LOAD_CLAIM_REQUESTS)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_CLAIM_WORKERS := $(MEMORY_CURATION_LOAD_CLAIM_WORKERS)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_PAGING_CARDINALITIES := $(MEMORY_CURATION_LOAD_PAGING_CARDINALITIES)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_PAGE_SIZE := $(MEMORY_CURATION_LOAD_PAGE_SIZE)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_CHAIN_BACKLOG := $(MEMORY_CURATION_LOAD_CHAIN_BACKLOG)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_CHAIN_CAP := $(MEMORY_CURATION_LOAD_CHAIN_CAP)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_LEASE_CYCLES := $(MEMORY_CURATION_LOAD_LEASE_CYCLES)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_MAX_ATTEMPTS := $(MEMORY_CURATION_LOAD_MAX_ATTEMPTS)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_RELEASE := $(MEMORY_CURATION_LOAD_RELEASE)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_COMMIT := $(MEMORY_CURATION_LOAD_COMMIT)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_PROVIDER := $(MEMORY_CURATION_LOAD_PROVIDER)
+test-memory-curation-load: export WITSELF_MEMORY_CURATION_LOAD_HARDWARE_TIER := $(MEMORY_CURATION_LOAD_HARDWARE)
+test-memory-curation-load: ## Run the opt-in deterministic PostgreSQL memory-curation load/lifecycle harness
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryCurationLoadPostgres$$' \
+			-count=1 -v -timeout 12m
+	@printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_CURATION_LOAD_RESULTS"
 
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
