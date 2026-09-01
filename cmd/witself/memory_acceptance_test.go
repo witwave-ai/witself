@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,5 +101,39 @@ func TestAcceptanceReleasePairPinsVersionAndCommit(t *testing.T) {
 	cli.Commit = "abcdef2"
 	if acceptanceReleasePair(server, cli) {
 		t.Fatal("mismatched release pair was accepted")
+	}
+}
+
+// The live server's /v1/version payload carries protocol fields the CLI does
+// not model (account_evacuation_protocol, account_provision_protocol, and
+// whatever future builds add). The acceptance preflight must read the release
+// identity from that payload without rejecting fields it does not know:
+// production runs against v0.0.270 cells failed with "unknown field" before
+// this pin existed.
+func TestFetchAcceptanceServerBuildToleratesUnknownFields(t *testing.T) {
+	payload := `{"schema_version":"witself.v0","version":"0.0.270","commit":"a8d963d","date":"2026-09-01T01:00:00Z","account_evacuation_protocol":3,"account_provision_protocol":2,"future_field":{"nested":true}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, payload+"\n")
+	}))
+	defer server.Close()
+	build, err := fetchAcceptanceServerBuild(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("fetchAcceptanceServerBuild: %v", err)
+	}
+	want := runtimeacceptance.Build{Version: "0.0.270", Commit: "a8d963d", Date: "2026-09-01T01:00:00Z"}
+	if build != want {
+		t.Fatalf("build = %#v, want %#v", build, want)
+	}
+}
+
+func TestFetchAcceptanceServerBuildStillRequiresCompleteIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"schema_version":"witself.v0","version":"0.0.270","commit":"","date":"2026-09-01T01:00:00Z"}`)
+	}))
+	defer server.Close()
+	if _, err := fetchAcceptanceServerBuild(context.Background(), server.URL); err == nil {
+		t.Fatal("incomplete build identity was accepted")
 	}
 }

@@ -702,8 +702,11 @@ func fetchAcceptanceServerBuild(ctx context.Context, endpoint string) (runtimeac
 	if resp.StatusCode != http.StatusOK {
 		return runtimeacceptance.Build{}, fmt.Errorf("version endpoint returned %s", resp.Status)
 	}
+	// Tolerate unknown fields: /v1/version is a growing public surface (the
+	// server already adds protocol fields the CLI does not model), and the
+	// acceptance gate only needs the release identity below. Strict decoding
+	// here would break the acceptance preflight against every newer server.
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 64*1024))
-	decoder.DisallowUnknownFields()
 	var out struct {
 		SchemaVersion string `json:"schema_version"`
 		Version       string `json:"version"`
