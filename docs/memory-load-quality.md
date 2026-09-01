@@ -1,8 +1,9 @@
 # Narrative Memory Load And Quality Harnesses
 
-Status: three executable PostgreSQL slices. This runbook defines the original
-opt-in lexical-memory baseline, the bounded curation load/lifecycle slice, and
-the lexical plus client-vector/hybrid recall load/quality slice for
+Status: four executable PostgreSQL slices. This runbook defines the original
+opt-in lexical-memory baseline, the bounded curation load/lifecycle slice, the
+lexical plus client-vector/hybrid recall load/quality slice, and the
+whole-account archive round-trip/retrieval-projection slice for
 production-readiness issue
 [#46](https://github.com/witwave-ai/witself/issues/46). They provide useful,
 reproducible evidence, but individually or together, they do not close that
@@ -562,6 +563,163 @@ backlog, managed-cloud scaling, or semantic quality beyond the deliberately
 labeled synthetic cases. In particular, it does not prove that a vector-near
 memory omitted by the 256-candidate preselection can be found.
 
+## Archive Round-Trip And Projection Slice
+
+`TestNarrativeMemoryArchiveLoadPostgres` is the fourth executable slice. It
+runs in a fresh disposable schema and uses the production store export, archive
+reader, import, memory, transcript, vector, curation-relation, suspension, and
+resume paths. Its synthetic fixtures are deterministic from a signed 64-bit
+seed. It calls no AI, model, embedding provider, runtime client, MCP server,
+secret store, or sealed-plane operation.
+
+For each configured memory cardinality, the harness:
+
+1. Seeds exact bounded counts of memories, versions, evidence records,
+   relations, tags, transcript entries, one portable vector profile, and one
+   current-head vector per memory. Seed duration is recorded, not asserted.
+2. Pins a recall snapshot and runs two deterministic lexical plus two
+   deterministic client-vector/hybrid queries before export.
+3. System-suspends the account with the `evacuation` category, counts every
+   portable table, and streams a purpose-`self`, format-version-1 tar+gzip
+   archive through `ExportAccountSelf`.
+4. Re-reads the complete artifact with `internal/export.Read`. A successful
+   read verifies manifest/chunk ordering, newline-delimited rows, SHA-256
+   checksums, bytes, row totals, and the final checksum trailer. The harness
+   additionally requires the complete canonical table registry and confirms
+   that `memory_versions` does not carry the generated `search_document`
+   column.
+5. Purges all portable rows in reverse canonical-registry order, deletes the
+   account row in the same store, proves the account is absent, imports the
+   suspended self archive, and compares exact exported, checksum-verified, and
+   imported row counts for every manifest table before resuming the account.
+6. Repeats the same pinned lexical and hybrid recalls after import. Ranked
+   memory-id sequences, all score components, and retrieval metadata must be
+   exactly equal. The ids and scores are compared inline and are not retained
+   in the result.
+7. Uses the first pre-export lexical query to prove full broad redaction of a
+   sensitive memory, then proves the same redaction after import alongside
+   explicit owner visibility, same-realm cross-agent isolation, and
+   cross-account isolation.
+
+The status transition is deliberate. `ExportAccountSelf` accepts active,
+suspended, or closed accounts, while ordinary `ImportAccount` accepts only a
+suspended or closed manifest. The harness uses the reversible suspended path;
+it does not pretend that an active self archive is directly importable and it
+does not permanently close the fixture account.
+
+The retrieval projection is not a separately callable rebuild. PostgreSQL
+defines `memory_versions.search_document` as a `GENERATED ALWAYS ... STORED`
+`tsvector`; import omits that column and normal inserts materialize it. Exact
+before/after recall equivalence is therefore the projection-rebuild proof.
+Both `memory_vector_profiles` and `memory_vectors` are portable canonical
+archive tables, so this slice requires hybrid equivalence, complete compatible
+candidate coverage, and exact imported vector receipt/hash agreement rather
+than falling back to lexical-only evidence. Import also validates each hash
+against the carried vector components.
+
+### Run The Archive Slice
+
+Start PostgreSQL or select a dedicated test database, export its DSN through
+the trusted environment, and run:
+
+```sh
+export WITSELF_TEST_DATABASE_URL='postgres://witself:witself@localhost:5432/witself?sslmode=disable'
+make test-memory-archive-load
+```
+
+The result path is empty by default so the harness chooses
+`/tmp/witself-memory-archive-load-<pid>.json`. Defaults and hard bounds are:
+
+| Setting | Default | Bound |
+|---|---:|---:|
+| Seed | `20260831` | signed 64-bit integer |
+| Memory cardinalities | `100,500,2000` | 2-5 strictly increasing values, each 10-10000 |
+| Versions per memory | `2` | 2-8 |
+| Evidence records per memory | `2` | 1-8 |
+| Relations per memory | `1` | 1-4 |
+| Tags per version | `3` | 1-16 |
+| Transcript-backed memory share | `25` percent | 1-100 percent, selecting at least one memory |
+| Transcript entries per selected memory | `2` | 1-8 |
+| Vector dimensions | `32` | 2-4096 |
+
+Override only bounded fixture controls and safe evidence metadata:
+
+```sh
+make test-memory-archive-load \
+  MEMORY_ARCHIVE_LOAD_RESULTS=/trusted-artifacts/memory-archive-load.json \
+  MEMORY_ARCHIVE_LOAD_SEED=20260831 \
+  MEMORY_ARCHIVE_LOAD_CARDINALITIES=100,500,2000 \
+  MEMORY_ARCHIVE_LOAD_VERSIONS_PER_MEMORY=2 \
+  MEMORY_ARCHIVE_LOAD_EVIDENCE_PER_MEMORY=2 \
+  MEMORY_ARCHIVE_LOAD_RELATIONS_PER_MEMORY=1 \
+  MEMORY_ARCHIVE_LOAD_TAGS_PER_VERSION=3 \
+  MEMORY_ARCHIVE_LOAD_TRANSCRIPT_SHARE_PERCENT=25 \
+  MEMORY_ARCHIVE_LOAD_TRANSCRIPT_ENTRIES_PER_SELECTED_MEMORY=2 \
+  MEMORY_ARCHIVE_LOAD_VECTOR_DIMENSIONS=32 \
+  MEMORY_ARCHIVE_LOAD_RELEASE=v0.0.172 \
+  MEMORY_ARCHIVE_LOAD_COMMIT=67ec81d3f5485f1865f87e265ae9f33fa15c6988 \
+  MEMORY_ARCHIVE_LOAD_PROVIDER=gcp \
+  MEMORY_ARCHIVE_LOAD_HARDWARE=cloud-sql-postgres-18-tier-name
+```
+
+The direct Go command is:
+
+```sh
+WITSELF_MEMORY_ARCHIVE_LOAD=1 \
+WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS=/trusted-artifacts/memory-archive-load.json \
+go test ./internal/store \
+  -run '^TestNarrativeMemoryArchiveLoadPostgres$' \
+  -count=1 -v -timeout 15m
+```
+
+Every multi-rung workload budgets one two-minute context deadline per
+cardinality rung (a three-rung ladder gets six minutes), and the whole
+harness has a twelve-minute guard. Those are operational runaway bounds, not performance
+assertions or SLOs. Provider and hardware tier must be dotless labels containing
+only letters, digits, `+`, `_`, or `-`; release and commit metadata may contain
+dots.
+
+### Archive Result Contract
+
+The retained document has schema `witself.memory-archive-load-result.v1` and
+harness version `1`. Its separate, additional-properties-closed Draft 2020-12
+schema is `internal/loadquality/testdata/archive-result-schema.v1.json`; none of
+the first three result schemas is modified.
+
+Each cardinality retains:
+
+- `OperationStats` for seed, export, full verification, import, lexical recall
+  before and after, hybrid recall before and after, and post-import safety;
+- export/import row and byte throughput, archive and verified-chunk bytes,
+  manifest format/schema/purpose/status, chunk/table/non-empty-table counts,
+  and exact row totals;
+- the complete lexicographically sorted 74-table v1 registry with exported,
+  verified, and imported counts, including explicit zero-row tables;
+- focal counts for memories, versions, evidence, relations, transcript
+  conversations/entries, vector profiles/vectors, and JSON tag assignments;
+- four value-free recall-equivalence cases with hit counts and exact ranking,
+  score-component, and metadata assertions; and
+- value-free archive-integrity, same-store, vector-portability, sensitive-
+  redaction, and isolation assertions.
+
+Validation ties every count to the declared workload formula: one seed,
+export, verification, and import measurement per cardinality; two lexical and
+two hybrid calls both before and after; four safety calls; all configured
+cardinalities; the complete pinned registry; exact per-table and focal counts;
+and all inline correctness assertions. A partial run cannot serialize a pass.
+Summary booleans are only roll-ups of the inline store/archive comparisons; the
+comparisons are the proof. In particular, `sensitive_broad_redacted` rolls up
+both pre-export and post-import full-field redaction checks, while vector
+round-trip rolls up exact profile fields, receipt hashes, dimensions, timestamps,
+row counts, and hybrid vector-use/coverage assertions.
+
+Pinned `AsOf`, change-sequence, and deleted-memory-count coordinates make all
+returned score components deterministic within one round trip, so the contract
+uses exact float equality and a documented tolerance of zero. The harness does
+not compare timings to an absolute threshold. It is local store-level evidence,
+not a large-archive SLO, managed-cloud capacity claim, rollback drill, or proof
+of behavior across different schemas or releases.
+
 ## Evidence Checklist
 
 Retain the JSON result with:
@@ -576,34 +734,38 @@ For lexical comparisons, use the same seed and corpus digest. For curation
 comparisons, use the same seed and complete workload shape. For recall
 comparisons, use the same seed, cardinality ladder, iteration/concurrency shape,
 vector dimensions and coverage percentages, and pagination shape. Never compare
-ranked ids across independently created schemas. Change one workload dimension
-at a time. A dirty checkout should be labeled exploratory, not a release
-baseline.
+ranked ids across independently created schemas. For archive comparisons, use
+the same seed, complete cardinality/focal-count shape, vector dimensions, and
+canonical result-contract version; the exact ranked-id comparison occurs only
+inside each same-account round trip. Change one workload dimension at a time. A
+dirty checkout should be labeled exploratory, not a release baseline.
 
 ## What Still Remains For Issue #46
 
-These three slices intentionally do **not** claim production readiness. Issue #46
+These four slices intentionally do **not** claim production readiness. Issue #46
 still requires:
 
 1. Broader production instrumentation. Bounded HTTP, memory operation/recall,
    vector coverage/fallback, and curation domain-call metrics are implemented.
    Durable run-transition and lease-event metrics, queue-age distributions,
-   archive/rebuild timing,
-   remaining operation coverage, dashboards, alerts, and measured defaults
+   broader archive/rebuild timing, remaining operation coverage, dashboards,
+   alerts, and measured defaults
    still remain.
 2. Queue and curation load beyond this bounded local slice: rollback under
    contention, production queue/backlog-age distributions, larger and more
    concurrent shapes, managed-cloud repetitions, and reviewed safe limits/SLOs.
 3. Managed-cloud and larger client-vector/hybrid repetitions, explicit
-   zero-compatible-vector lexical fallback, ANN/projection scale and rebuild
-   behavior, and reviewed tuning beyond the fixed 256-candidate correctness
-   baseline. The third slice covers deterministic complete/partial coverage and
-   bounded degradation, not those production-scale questions.
-4. Whole-account export/import, retrieval-projection rebuild, rollback, and
-   large-archive duration.
+   zero-compatible-vector lexical fallback, ANN/projection scale, and reviewed
+   tuning beyond the fixed 256-candidate correctness baseline. The recall and
+   archive slices cover deterministic bounded degradation and same-account
+   import projection materialization, not those production-scale questions.
+4. Archive rollback/failure-injection drills, concurrently mutating export
+   sources beyond the snapshot contract, cross-release compatibility matrices,
+   and representative managed-cloud large-archive durations. The fourth slice
+   covers successful complete same-store round trips only.
 5. Larger high-cardinality shapes for versions, evidence, relations,
-   transcripts, and concurrent agents. The lexical noise and recall tenant
-   ceilings of 10,000 memories are bounded fixtures, not capacity claims.
+   transcripts, concurrent agents, and archive bytes. Current ceilings are
+   bounded fixture and correctness guards, not capacity claims.
 6. A richer adjudicated relevance corpus with false-positive and ranking
    metrics beyond the two exact lexical and three constructed hybrid cases in
    the current harnesses.

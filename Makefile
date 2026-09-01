@@ -57,7 +57,25 @@ MEMORY_RECALL_LOAD_COMMIT                      ?= $(shell git rev-parse HEAD)
 MEMORY_RECALL_LOAD_PROVIDER                    ?= local
 MEMORY_RECALL_LOAD_HARDWARE                    ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load feature-status build check check-infra
+# Leave the archive result path empty by default so ParseArchiveOptions can use
+# its pid-scoped path. This avoids concurrent Make invocations choosing the
+# same retained evidence file.
+MEMORY_ARCHIVE_LOAD_RESULTS                                ?=
+MEMORY_ARCHIVE_LOAD_SEED                                   ?= 20260831
+MEMORY_ARCHIVE_LOAD_CARDINALITIES                          ?= 100,500,2000
+MEMORY_ARCHIVE_LOAD_VERSIONS_PER_MEMORY                    ?= 2
+MEMORY_ARCHIVE_LOAD_EVIDENCE_PER_MEMORY                    ?= 2
+MEMORY_ARCHIVE_LOAD_RELATIONS_PER_MEMORY                   ?= 1
+MEMORY_ARCHIVE_LOAD_TAGS_PER_VERSION                       ?= 3
+MEMORY_ARCHIVE_LOAD_TRANSCRIPT_SHARE_PERCENT               ?= 25
+MEMORY_ARCHIVE_LOAD_TRANSCRIPT_ENTRIES_PER_SELECTED_MEMORY ?= 2
+MEMORY_ARCHIVE_LOAD_VECTOR_DIMENSIONS                      ?= 32
+MEMORY_ARCHIVE_LOAD_RELEASE                                ?= $(shell git describe --tags --always --dirty)
+MEMORY_ARCHIVE_LOAD_COMMIT                                 ?= $(shell git rev-parse HEAD)
+MEMORY_ARCHIVE_LOAD_PROVIDER                               ?= local
+MEMORY_ARCHIVE_LOAD_HARDWARE                               ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load feature-status build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -175,6 +193,34 @@ test-memory-recall-load: ## Run the opt-in deterministic PostgreSQL memory-recal
 			-count=1 -v -timeout 12m
 	@if [ -n "$$WITSELF_MEMORY_RECALL_LOAD_RESULTS" ]; then \
 		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_RECALL_LOAD_RESULTS"; \
+	else \
+		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
+	fi
+
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD := 1
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS := $(MEMORY_ARCHIVE_LOAD_RESULTS)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_SEED := $(MEMORY_ARCHIVE_LOAD_SEED)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_CARDINALITIES := $(MEMORY_ARCHIVE_LOAD_CARDINALITIES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_VERSIONS_PER_MEMORY := $(MEMORY_ARCHIVE_LOAD_VERSIONS_PER_MEMORY)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_EVIDENCE_PER_MEMORY := $(MEMORY_ARCHIVE_LOAD_EVIDENCE_PER_MEMORY)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_RELATIONS_PER_MEMORY := $(MEMORY_ARCHIVE_LOAD_RELATIONS_PER_MEMORY)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_TAGS_PER_VERSION := $(MEMORY_ARCHIVE_LOAD_TAGS_PER_VERSION)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_TRANSCRIPT_SHARE_PERCENT := $(MEMORY_ARCHIVE_LOAD_TRANSCRIPT_SHARE_PERCENT)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_TRANSCRIPT_ENTRIES_PER_SELECTED_MEMORY := $(MEMORY_ARCHIVE_LOAD_TRANSCRIPT_ENTRIES_PER_SELECTED_MEMORY)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_VECTOR_DIMENSIONS := $(MEMORY_ARCHIVE_LOAD_VECTOR_DIMENSIONS)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_RELEASE := $(MEMORY_ARCHIVE_LOAD_RELEASE)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_COMMIT := $(MEMORY_ARCHIVE_LOAD_COMMIT)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_PROVIDER := $(MEMORY_ARCHIVE_LOAD_PROVIDER)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_HARDWARE_TIER := $(MEMORY_ARCHIVE_LOAD_HARDWARE)
+test-memory-archive-load: ## Run the opt-in deterministic whole-account archive round-trip harness
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryArchiveLoadPostgres$$' \
+			-count=1 -v -timeout 15m
+	@if [ -n "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS" ]; then \
+		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS"; \
 	else \
 		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
 	fi
