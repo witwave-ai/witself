@@ -75,7 +75,25 @@ MEMORY_ARCHIVE_LOAD_COMMIT                                 ?= $(shell git rev-pa
 MEMORY_ARCHIVE_LOAD_PROVIDER                               ?= local
 MEMORY_ARCHIVE_LOAD_HARDWARE                               ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load feature-status build check check-infra
+# Leave the concurrency result path empty by default so the harness can select
+# its pid-scoped path and concurrent invocations cannot replace each other's
+# retained evidence.
+MEMORY_CONCURRENCY_LOAD_RESULTS                   ?=
+MEMORY_CONCURRENCY_LOAD_SEED                      ?= 20260901
+MEMORY_CONCURRENCY_LOAD_ACCOUNTS                  ?= 4
+MEMORY_CONCURRENCY_LOAD_REALMS_PER_ACCOUNT        ?= 2
+MEMORY_CONCURRENCY_LOAD_AGENTS_PER_REALM          ?= 4
+MEMORY_CONCURRENCY_LOAD_SEED_MEMORIES_PER_AGENT   ?= 4
+MEMORY_CONCURRENCY_LOAD_WORKERS_PER_AGENT         ?= 2
+MEMORY_CONCURRENCY_LOAD_OPERATIONS_PER_WORKER     ?= 2
+MEMORY_CONCURRENCY_LOAD_ISOLATION_ITERATIONS      ?= 2
+MEMORY_CONCURRENCY_LOAD_CLAIM_WORKERS             ?= 4
+MEMORY_CONCURRENCY_LOAD_RELEASE                   ?= $(shell git describe --tags --always --dirty)
+MEMORY_CONCURRENCY_LOAD_COMMIT                    ?= $(shell git rev-parse HEAD)
+MEMORY_CONCURRENCY_LOAD_PROVIDER                  ?= local
+MEMORY_CONCURRENCY_LOAD_HARDWARE                  ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load feature-status build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -221,6 +239,34 @@ test-memory-archive-load: ## Run the opt-in deterministic whole-account archive 
 			-count=1 -v -timeout 15m
 	@if [ -n "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS" ]; then \
 		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS"; \
+	else \
+		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
+	fi
+
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD := 1
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_RESULTS := $(MEMORY_CONCURRENCY_LOAD_RESULTS)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_SEED := $(MEMORY_CONCURRENCY_LOAD_SEED)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_ACCOUNTS := $(MEMORY_CONCURRENCY_LOAD_ACCOUNTS)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_REALMS_PER_ACCOUNT := $(MEMORY_CONCURRENCY_LOAD_REALMS_PER_ACCOUNT)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_AGENTS_PER_REALM := $(MEMORY_CONCURRENCY_LOAD_AGENTS_PER_REALM)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_SEED_MEMORIES_PER_AGENT := $(MEMORY_CONCURRENCY_LOAD_SEED_MEMORIES_PER_AGENT)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_WORKERS_PER_AGENT := $(MEMORY_CONCURRENCY_LOAD_WORKERS_PER_AGENT)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_OPERATIONS_PER_WORKER := $(MEMORY_CONCURRENCY_LOAD_OPERATIONS_PER_WORKER)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_ISOLATION_ITERATIONS := $(MEMORY_CONCURRENCY_LOAD_ISOLATION_ITERATIONS)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_CLAIM_WORKERS := $(MEMORY_CONCURRENCY_LOAD_CLAIM_WORKERS)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_RELEASE := $(MEMORY_CONCURRENCY_LOAD_RELEASE)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_COMMIT := $(MEMORY_CONCURRENCY_LOAD_COMMIT)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_PROVIDER := $(MEMORY_CONCURRENCY_LOAD_PROVIDER)
+test-memory-concurrency-load: export WITSELF_MEMORY_CONCURRENCY_LOAD_HARDWARE_TIER := $(MEMORY_CONCURRENCY_LOAD_HARDWARE)
+test-memory-concurrency-load: ## Run the opt-in concurrent-agent and tenant-isolation harness
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryConcurrencyLoadPostgres$$' \
+			-count=1 -v -timeout 5h
+	@if [ -n "$$WITSELF_MEMORY_CONCURRENCY_LOAD_RESULTS" ]; then \
+		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_CONCURRENCY_LOAD_RESULTS"; \
 	else \
 		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
 	fi
