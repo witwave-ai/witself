@@ -27,8 +27,8 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.269
-    imageTag: 0.0.269
+    chartVersion: 0.0.270
+    imageTag: 0.0.270
     backendKind: managed
     # Schema-28's compatibility hold expired long ago (cells run schema 94);
     # in-product permanent fact deletion backs the published privacy policy.
