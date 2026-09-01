@@ -1,10 +1,11 @@
 # Narrative Memory Load And Quality Harnesses
 
-Status: two executable PostgreSQL slices. This runbook defines the original
-opt-in lexical-memory baseline and the bounded curation load/lifecycle slice for
+Status: three executable PostgreSQL slices. This runbook defines the original
+opt-in lexical-memory baseline, the bounded curation load/lifecycle slice, and
+the lexical plus client-vector/hybrid recall load/quality slice for
 production-readiness issue
 [#46](https://github.com/witwave-ai/witself/issues/46). They provide useful,
-reproducible evidence, but neither separately nor together do they close that
+reproducible evidence, but individually or together, they do not close that
 issue; the remaining gates are listed below.
 
 ## What The Lexical Harness Proves
@@ -44,11 +45,12 @@ sanitized, but a native PostgreSQL error printed by `go test` can contain
 topology or principal metadata; run the harness only in a trusted terminal or
 runner.
 
-The result never contains:
+No retained result contains:
 
 - a DSN, hostname, port, database name, or database user;
 - an account, realm, agent, or memory id;
 - a query, memory value, tag set, content hash, or sensitive marker;
+- a vector profile id, vector hash, query vector, or stored vector components;
 - a token, credential, secret, or resource id; or
 - a transcript or client prompt.
 
@@ -326,6 +328,240 @@ advances issue #46's queue/curation load requirement; it does not close issue
   primary proof; the booleans exist so evidence consumers do not have to parse
   the test source to know which invariants a pass implies.
 
+## Recall Load And Quality Slice
+
+`TestNarrativeMemoryRecallLoadPostgres` is the third executable slice. It runs
+against one PostgreSQL endpoint in a fresh, disposable schema, applies the
+complete migration set, creates only synthetic tenants, agents, memories,
+vector profiles, and vectors, and drops the complete schema during cleanup.
+For vector storage and recall, the harness observes only the public store
+surface: `CreateMemoryVectorProfile`, `ListMemoryVectorProfiles`,
+`PutMemoryVector`, and `RecallMemories`. Production store code and recall
+behavior are not replaced or weakened for the test.
+
+Vectors are always supplied by the client. The backend never embeds memory or
+query text, and this harness calls no AI, model, embedding service, runtime
+client, MCP server, secret store, or sealed-plane operation. Synthetic vectors
+are generated deterministically by expanding `SHA-256(seed:index)` to the
+configured profile dimension and L2-normalizing the components. The harness
+creates no agent token. Quality fixtures deliberately make a labeled memory's
+vector near its query vector and distractor vectors far from it, so the expected
+ranks follow from the fixture rather than chance or an embedding model.
+
+The five named workload deadlines are `cardinality ladder`, `vector coverage`,
+`hybrid relevance quality`, `vector safety`, and `pagination ordering`. Each is
+two minutes inside the nine-minute overall driver context. The Make target has
+a separate 12-minute `go test` timeout. A signed 64-bit seed makes every
+generated corpus token and vector deterministic; store-assigned ids and wall
+clock time are never random seeds.
+
+### What The Recall Harness Proves
+
+The bounded workload exercises and measures:
+
+1. **Cardinality ladder.** Separate tenant fixtures contain each configured
+   memory count. Concurrent workers issue the declared number of lexical-only
+   recalls at every cardinality and assert that every call reports lexical mode
+   and completes normally. Per-cardinality latency and throughput remain
+   separate rather than being averaged across fixture sizes.
+2. **Vector coverage.** Immutable client vector profiles are listed back and a
+   deterministic fraction of the smallest tenant's eligible memories receives
+   a vector for each configured coverage case: exactly
+   `floor(memory_count * coverage_percent / 100)`. The defaults exercise both
+   complete and partial coverage. Each case records attachment and hybrid-recall
+   measurements, requested and reported coverage, vector candidate/match
+   counts, degradation, candidate-budget metadata, whether recall metadata
+   stayed stable, and whether every created immutable profile listed back
+   unchanged.
+3. **Hybrid relevance quality.** Three labeled cases prove that a vector-near
+   memory with no lexical signal is found, a lexically matching memory without
+   a vector is found, and a memory carrying both signals ranks above
+   single-signal distractors. Each case records only its safe label, observed
+   and maximum acceptable rank, and whether the expected lexical, similarity,
+   and `vector_used` score components were observed. Version 1 pins both the
+   observed and maximum acceptable rank to `1` for all three cases.
+4. **Vector redaction and isolation.** Broad recall still redacts sensitive
+   content, explicit exact-owner recall can reveal the synthetic sensitive
+   fixture, and same-account cross-agent plus cross-account reads remain
+   isolated when a client query vector and profile are supplied.
+5. **Pagination and limit behavior.** At the largest cardinality, two identical
+   traversals page to the configured result budget. The harness checks every
+   page limit, absence of duplicate ids, the reported candidate budget and
+   truncation state, and identical ranked-id order across those repeated
+   queries within the same run.
+
+Recall returns the scoring components that the assertions inspect. Lexical
+mode currently uses
+`0.60*lexical + 0.25*salience + 0.15*recency`; hybrid mode uses
+`0.50*similarity + 0.30*lexical + 0.12*salience + 0.08*recency` and reports
+whether a compatible vector contributed to each hit.
+
+### Run The Recall Slice
+
+Keep the DSN in the trusted parent environment and invoke the dedicated target:
+
+```sh
+make db-up
+export WITSELF_TEST_DATABASE_URL='postgres://witself:witself@localhost:5432/witself?sslmode=disable'
+make test-memory-recall-load
+```
+
+Unless overridden, the result path is
+`/tmp/witself-memory-recall-load-<pid>.json`. It is process-scoped so concurrent
+runs cannot atomically rename over one another. Every workload control is
+bounded:
+
+| Setting | Default | Allowed range |
+|---|---:|---:|
+| Seed | `20260831` | signed 64-bit integer |
+| Tenant memory cardinalities | `100,500,2000` | 2-5 strictly increasing values, each `10..10000`; smallest at most `256`, largest greater than `256` |
+| Query iterations per cardinality/coverage case | `10` | `1..1000`, and at least the configured concurrency |
+| Concurrent lexical workers | `4` | `2..64` |
+| Vector profile dimensions | `32` | `2..4096` |
+| Vector coverage percentages | `100,50` | 2-4 strictly decreasing values; first `100`, remainder `1..99`; smallest-cardinality count at the lowest coverage must be at least one |
+| Pagination limit | `64` | `1..100` |
+| Pagination result budget | `256` | `2..256`, greater than the page limit and no greater than the largest cardinality |
+
+Override only bounded workload and safe evidence metadata:
+
+```sh
+make test-memory-recall-load \
+  MEMORY_RECALL_LOAD_RESULTS=/trusted-artifacts/memory-recall-load.json \
+  MEMORY_RECALL_LOAD_SEED=20260831 \
+  MEMORY_RECALL_LOAD_CARDINALITIES=100,500,2000 \
+  MEMORY_RECALL_LOAD_QUERY_ITERATIONS=10 \
+  MEMORY_RECALL_LOAD_CONCURRENCY=4 \
+  MEMORY_RECALL_LOAD_VECTOR_DIMENSIONS=32 \
+  MEMORY_RECALL_LOAD_VECTOR_COVERAGE_PERCENTAGES=100,50 \
+  MEMORY_RECALL_LOAD_PAGINATION_LIMIT=64 \
+  MEMORY_RECALL_LOAD_RESULT_BUDGET=256 \
+  MEMORY_RECALL_LOAD_RELEASE=v0.0.172 \
+  MEMORY_RECALL_LOAD_COMMIT=67ec81d3f5485f1865f87e265ae9f33fa15c6988 \
+  MEMORY_RECALL_LOAD_PROVIDER=gcp \
+  MEMORY_RECALL_LOAD_HARDWARE=cloud-sql-postgres-18-tier-name
+```
+
+The direct Go command is available for a trusted runner:
+
+```sh
+WITSELF_MEMORY_RECALL_LOAD=1 \
+WITSELF_MEMORY_RECALL_LOAD_RESULTS=/trusted-artifacts/memory-recall-load.json \
+go test ./internal/store \
+  -run '^TestNarrativeMemoryRecallLoadPostgres$' \
+  -count=1 -v -timeout 12m
+```
+
+All other controls use the `WITSELF_MEMORY_RECALL_LOAD_*` names defined in
+`internal/loadquality/recall.go`. The Make target is preferred because it
+records the current Git description and commit by default.
+
+### Recall Result Contract
+
+The retained document has schema `witself.memory-recall-load-result.v1` and
+harness version `1`. Its strict, additional-properties-closed Draft 2020-12
+JSON Schema is checked in at
+`internal/loadquality/testdata/recall-result-schema.v1.json`; it is a new
+contract and does not modify either existing result schema.
+
+The document records UTC bounds and a pass outcome, safe environment and
+PostgreSQL software metadata, the seed and complete bounded workload shape,
+`OperationStats` measurements, and aggregate value-free outcomes. Every
+`OperationStats` has count, wall duration, throughput, minimum, p50, p95, p99,
+and maximum latency. The workload fields are `seed`, `synthetic_accounts`,
+`synthetic_agents`, `cardinalities`, `query_iterations`, `concurrency`,
+`vector_dimensions`, `coverage_percentages`, `pagination_limit`, and
+`result_budget`. The synthetic-account count equals the number of cardinalities
+and the synthetic-agent count is one greater. The measurements are:
+
+- `cardinality_ladder[]`, with `memory_count` and `lexical_recall` stats;
+- `vector_coverage[]`, with `coverage_percent`, `vector_attach`, and
+  `hybrid_recall` stats; and
+- `hybrid_quality`, `vector_safety`, and `pagination` stats.
+
+The outcome objects retain these exact aggregate fields:
+
+| Outcome | Fields |
+|---|---|
+| `cardinality_ladder` | `tenants`, `seeded_memories`, `recall_calls`, `all_lexical`, `all_complete` |
+| `vector_coverage.cases[]` | `coverage_percent`, `eligible_memories`, `attached_vectors`, `recall_calls`, `vector_candidates`, `vector_matches`, `reported_vector_coverage`, `degraded`, `candidate_limit`, `candidate_truncated`, `hybrid_used`, `metadata_stable` |
+| `vector_coverage` | `cases`, `all_profiles_listed` |
+| `hybrid_quality.cases[]` | `name`, `passed`, `observed_rank`, `maximum_rank`, `vector_used`, `lexical_used`, `similarity_used` |
+| `hybrid_quality` | `cases`, `recall_calls`, `score_components_verified`, `all_ranks_passed` |
+| `vector_safety` | `recall_calls`, `sensitive_broad_redacted`, `sensitive_exact_owner_visible`, `cross_agent_isolated`, `cross_account_isolated`, `all_vector_queries` |
+| `pagination` | `repeat_runs`, `pages_per_run`, `hits_per_run`, `recall_calls`, `result_budget`, `attached_vectors`, `vector_candidates`, `vector_matches`, `reported_vector_coverage`, `tenant_vector_fraction`, `candidate_limit`, `candidate_truncated`, `page_limits_honored`, `result_budget_reached`, `no_duplicate_ids`, `ordering_stable` |
+
+`pages_per_run` and `hits_per_run` are two-element integer arrays, one entry for
+each repeated traversal. Both runs must report
+`ceil(result_budget / pagination_limit)` pages and exactly `result_budget` hits.
+
+Validation ties every measurement count and outcome counter to the declared
+workload formulas. It also requires every labeled rank, coverage relationship,
+redaction/isolation assertion, and pagination assertion to pass. A partial run
+therefore cannot be serialized as successful evidence. The validated document
+is written atomically with mode `0600`.
+
+In particular, the ladder performs `query_iterations` recalls per cardinality;
+each coverage case performs `query_iterations` recalls and exactly the
+floor-derived number of vector attachments; the three quality cases perform
+`3 * query_iterations` recalls; vector safety performs four recalls; and the
+two pagination traversals perform
+`2 * ceil(result_budget / pagination_limit)` recalls. Validation rejects a
+document whose operation counts or aggregate counters disagree with those
+formulas.
+
+The recall result never retains a DSN or endpoint identity; an account, realm,
+agent, memory, vector-profile, or other resource id; query or memory text;
+tags, links, content hashes, vector hashes, raw query vectors, stored vector
+components, sensitive markers, or ranked-id sequences; or any prompt, token,
+credential, or secret. Safe case labels and aggregate counts, ratios,
+latencies, ranks, and booleans are the only workload evidence retained.
+
+### Recall Slice Honesty Notes
+
+- `provider` and `hardware_tier` are operator-supplied labels, not measured
+  values. They must be dotless and contain only letters, digits, `+`, `_`, or
+  `-`, preventing a pasted hostname from passing as a label. `release` and
+  `commit` intentionally accept dots because release descriptions can require
+  them.
+- Summary booleans such as `all_lexical`, `metadata_stable`,
+  `score_components_verified`, `all_vector_queries`, and `ordering_stable` are
+  roll-ups of inline store-observing assertions. They are not later independent
+  measurements. The inline assertions are the primary proof; the booleans make
+  the resulting contract self-describing.
+- Hybrid recall first selects a deterministic candidate universe by lexical,
+  salience, recency, and id ordering, then applies vector scoring. That universe
+  is hard-capped at 256 candidates. At the default largest cardinality the
+  pagination workload therefore traverses only the reported 256-row snapshot
+  subset and requires `candidate_truncated=true`; it does not imply exhaustive
+  vector search across all 2,000 tenant memories.
+- `vector_coverage` is the store-reported compatible-vector ratio inside that
+  eligible candidate universe. Coverage cases run against the smallest tenant.
+  For pagination, the harness attaches vectors only to the deterministic
+  top-256 candidates, so reported bounded-universe coverage is `1` while
+  `tenant_vector_fraction` is the exact float64 ratio
+  `256 / largest_cardinality`. Neither is an estimate of an unobserved embedding
+  pipeline or a claim that every memory in the largest tenant has been
+  embedded.
+- Retained coverage and tenant-fraction values are the exact fixture ratios.
+  Inline assertions require the store's coverage metadata and the sanitized
+  roll-up to equal those ratios.
+- Pagination ordering is compared only across repeated identical queries in
+  one disposable-schema run. Store-assigned ids are deterministic tie-breakers
+  within the pinned snapshot but are not seeded, so the harness deliberately
+  does not compare ranked-id sequences across independently created schemas.
+- Latencies use monotonic process time, nearest-rank percentiles, and wall time
+  for concurrent throughput. They are recorded, never checked against an
+  absolute wall-clock threshold.
+
+This slice advances issue #46's lexical FTS and client-supplied vector/hybrid
+recall requirement at bounded tenant cardinalities. It is store-level evidence,
+not an SLO or capacity claim. It does not exercise a real embedding model,
+backend-generated vectors (there are none), ANN/pgvector candidate generation,
+HTTP or wide-area network contention, deployed-client behavior, production
+backlog, managed-cloud scaling, or semantic quality beyond the deliberately
+labeled synthetic cases. In particular, it does not prove that a vector-near
+memory omitted by the 256-candidate preselection can be found.
+
 ## Evidence Checklist
 
 Retain the JSON result with:
@@ -337,13 +573,16 @@ Retain the JSON result with:
 - any operator-approved exception.
 
 For lexical comparisons, use the same seed and corpus digest. For curation
-comparisons, use the same seed and complete workload shape. Change one workload
-dimension at a time. A dirty checkout should be labeled exploratory, not a
-release baseline.
+comparisons, use the same seed and complete workload shape. For recall
+comparisons, use the same seed, cardinality ladder, iteration/concurrency shape,
+vector dimensions and coverage percentages, and pagination shape. Never compare
+ranked ids across independently created schemas. Change one workload dimension
+at a time. A dirty checkout should be labeled exploratory, not a release
+baseline.
 
 ## What Still Remains For Issue #46
 
-These two slices intentionally do **not** claim production readiness. Issue #46
+These three slices intentionally do **not** claim production readiness. Issue #46
 still requires:
 
 1. Broader production instrumentation. Bounded HTTP, memory operation/recall,
@@ -355,24 +594,28 @@ still requires:
 2. Queue and curation load beyond this bounded local slice: rollback under
    contention, production queue/backlog-age distributions, larger and more
    concurrent shapes, managed-cloud repetitions, and reviewed safe limits/SLOs.
-3. Optional client-vector and hybrid-recall scale, coverage degradation, and
-   explicit lexical-only fallback under partial/missing vectors.
+3. Managed-cloud and larger client-vector/hybrid repetitions, explicit
+   zero-compatible-vector lexical fallback, ANN/projection scale and rebuild
+   behavior, and reviewed tuning beyond the fixed 256-candidate correctness
+   baseline. The third slice covers deterministic complete/partial coverage and
+   bounded degradation, not those production-scale questions.
 4. Whole-account export/import, retrieval-projection rebuild, rollback, and
    large-archive duration.
 5. Larger high-cardinality shapes for versions, evidence, relations,
-   transcripts, and concurrent agents. The present maximum of 10,000 noise
-   memories is a bounded first fixture, not a capacity claim.
+   transcripts, and concurrent agents. The lexical noise and recall tenant
+   ceilings of 10,000 memories are bounded fixtures, not capacity claims.
 6. A richer adjudicated relevance corpus with false-positive and ranking
-   metrics beyond the two exact lexical cases in v1.
+   metrics beyond the two exact lexical and three constructed hybrid cases in
+   the current harnesses.
 7. Client-side curation quality, duplicate growth, supersession quality,
    summarization drift, and model token/cost envelopes. Those require explicit
    client inference and remain outside this model-free store harness.
 8. Managed-cloud baselines on representative hardware, documented production
    SLOs/alerts/safe limits, degraded-mode drills, and measured default tuning.
-9. A protected repeatable workflow that uploads this sanitized result and
+9. A protected repeatable workflow that uploads these sanitized results and
    identifies the release, PostgreSQL tier, and runner without exposing
    credentials.
 
-No production default should be changed from either local result. Production
+No production default should be changed from any local result. Production
 defaults and thresholds require repeated GCP/AWS/Azure measurements and an
 explicit review of the retained evidence.
