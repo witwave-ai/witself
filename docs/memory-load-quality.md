@@ -1033,6 +1033,95 @@ operation counts, isolation iterations, claim-worker count, and result-contract
 version. Change one workload dimension at a time. A dirty checkout should be
 labeled exploratory, not a release baseline.
 
+## Measured Local Envelopes And Tuning Synthesis
+
+This section synthesizes the five slices' banked evidence into one reference
+picture. Every number below is a **local reference envelope** measured on the
+operator's arm64 workstation (dotless hardware tier `unspecified`, local
+PostgreSQL 16 in Docker, baseline host load from a resident agent fleet), at
+v0.0.269–v0.0.270 store code. They are reproducibility anchors and regression
+references, **not production SLOs and not capacity claims** — the managed-cloud
+baselines item below still stands, and no production default changes from any
+local result.
+
+Evidence documents referenced here live as private 0600 JSON under
+`~/.witself/evidence/` (lexical baseline v0.0.269; curation, recall, archive
+post-fix runs of 2026-08-31/09-01; concurrency runs at 8, 32, and 256
+principals of 2026-09-01).
+
+### Observed operation envelopes (local tier)
+
+Single-flow costs, measured sequentially or at low concurrency:
+
+| Operation family | Fixture context | p50 | p95 | Notes |
+|---|---|---|---|---|
+| Capture | 254 sequential captures (lexical baseline) | 9.2 ms | 15.1 ms | ~97/s sequential throughput |
+| Lexical recall | 100–500 memories, 4-way concurrency | 17–29 ms | 26–96 ms | cardinality-flat in this range |
+| Lexical recall | 2,000 memories, 4-way concurrency | 87 ms | ~2.0 s | tail grows with candidate set; see tuning note 3 |
+| Hybrid recall | 32-dim vectors, quality fixtures | ~1.0 s | ~1.8 s | ~10× lexical at these fixtures; see tuning note 4 |
+| Hybrid recall | 50% vector coverage probes | 13 ms | 20 ms | bounded degradation path is cheap |
+| Curation request (coalescing) | 24 requests, 2 accounts | 138 ms | 170 ms | includes coalescing work |
+| Curation claim | uncontended | 16 ms | 43 ms | typed refusal ~1 ms |
+| Curation input page | 8-row pages | 3.5 ms | 5.8 ms | paging is not a bottleneck |
+| Curation plan / apply | empty and small plans | 7–11 ms | 8–14 ms | control-plane ops are cheap |
+| Archive export | 100→2,000 memories/account | — | — | 7.7k→40.7k rows/s (amortizes up) |
+| Archive import | 100→2,000 memories/account | — | — | 1.3–1.8k rows/s, flat |
+| Archive verify | checksum re-read | 9–162 ms total | — | negligible at these sizes |
+
+Whole-fleet saturation behavior (concurrency slice; every store call across
+the fleet racing on one local PostgreSQL):
+
+| Scale | Mixed capture p50/p99 | Isolation probe p50/p99 | Claim p95 (contended) | Fan-out lexical p50 |
+|---|---|---|---|---|
+| 32 principals | 455 ms / 594 ms | 71 ms / 597 ms | 465 ms | 28 ms |
+| 256 principals | 3.4 s / 6.1 s | 288 ms / 6.2 s | 5.1 s | 159 ms |
+
+The 256-principal numbers are queueing delay under deliberate saturation of a
+single local database, not per-operation cost; correctness (zero cross-tenant
+rows, zero sensitive leaks, single-winner claims, exact counters) held at every
+scale, which is what the slice certifies.
+
+### What the evidence justifies (tuning synthesis)
+
+1. **Proportional deadline units are correct and generous.** The worst
+   observed complete phase at maximum topology finishes in seconds against a
+   budget of minutes (one 2-minute unit per rung or per 8-principal batch).
+   Keep the units; do not add absolute bounds — the archive slice's 123.9 s
+   flake against a flat 2-minute bound is the standing counterexample.
+2. **Import is the archive bottleneck.** Export throughput amortizes upward
+   with cardinality while import stays flat at ~1.3–1.8k rows/s (~20× slower
+   than export at 2,000 memories). Runbook expectations and any future restore
+   progress reporting should be sized from import, not export. The measured
+   local anchor: a 663k-row account (the live self-export proof) would import
+   in roughly 6–9 minutes at this rate on this tier.
+3. **The lexical tail marks the 256-candidate revisit criterion.** Lexical
+   recall stays tens of milliseconds through 500 memories but the p95 reaches
+   ~2 s at 2,000 memories under 4-way concurrency. The fixed 256-row candidate
+   preselection remains the correctness baseline; treat a p95 regression past
+   this envelope at ≤2,000 memories — or growth in typical per-agent active
+   memory counts toward 2,000 — as the trigger to take up the ANN/projection
+   work already listed under remaining item 3.
+4. **Hybrid recall is a premium path at full coverage.** ~1 s p50 at the
+   32-dim quality fixtures versus tens of milliseconds lexical; the bounded
+   50%-coverage degradation path costs close to lexical. Nothing here blocks
+   correctness; managed-cloud repetitions with production vector dimensions
+   (remaining item 3) should precede any latency promise for hybrid recall.
+5. **Curation control-plane costs are negligible at every measured scale.**
+   Request/claim/page/plan/apply all sit in single-digit-to-low-hundreds of
+   milliseconds uncontended, and contended claim latency is queueing on the
+   winner's lease, by design. The per-batch lease-renewal cadence added in the
+   fifth slice keeps the maximum topology inside the 30-minute lease with two
+   orders of magnitude of headroom.
+6. **Harness defaults are the measured defaults.** Each slice's default knobs
+   (documented per slice above) completed inside their proportional budgets on
+   this tier with full exact-count validation; they are the recommended
+   regression shapes. Raising a knob toward its cap changes wall time roughly
+   linearly in the workload formulas — no measured cliff was observed inside
+   the supported bounds.
+
+Cross-release comparisons must follow the Evidence Checklist rules above:
+same seed, same complete workload shape, one dimension changed at a time.
+
 ## What Still Remains For Issue #46
 
 These five slices intentionally do **not** claim production readiness. Issue #46
