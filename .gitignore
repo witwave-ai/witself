@@ -27,6 +27,7 @@ dist-charts/
 .wrangler/
 
 # stray local go build outputs (binaries build into ./bin via make build)
+/witself
 /witself-admin
 /witself-tui
 /witself-server
