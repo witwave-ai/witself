@@ -1675,10 +1675,20 @@ after a live, version-gated conformance test passes.
 - [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
   load-test queue claims and fencing, bounded curation plans, lexical/vector
   indexes, archive rebuild, high-cardinality accounts, and concurrent agents.
+  All five bounded local harness slices are merged with banked sanitized
+  evidence (lexical baseline, curation lifecycle, recall quality, archive
+  round-trip, and concurrent-agent tenant isolation at up to 256 principals);
+  the production-scale tail is enumerated in
+  [memory-load-quality.md](memory-load-quality.md) under "What Still Remains".
 - [ ] Establish documented baselines and operating thresholds for latency,
   throughput, queue age, stale-plan/conflict rates, duplicate growth, recall
   usefulness, summarization drift, sensitive exposure, client-side inference
   cost, rebuild duration, degraded lexical-only behavior, and rollback success.
+  The local half is documented: measured reference envelopes and the tuning
+  conclusions they justify live in the "Measured Local Envelopes And Tuning
+  Synthesis" section of
+  [memory-load-quality.md](memory-load-quality.md); production SLOs still
+  require managed-cloud baselines.
 - [ ] Measure and set the remaining production defaults:
 
   - checkpoint/evidence thresholds and curation budgets;
