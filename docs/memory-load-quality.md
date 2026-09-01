@@ -1,10 +1,10 @@
 # Narrative Memory Load And Quality Harnesses
 
-Status: four executable PostgreSQL slices. This runbook defines the original
+Status: five executable PostgreSQL slices. This runbook defines the original
 opt-in lexical-memory baseline, the bounded curation load/lifecycle slice, the
 lexical plus client-vector/hybrid recall load/quality slice, and the
-whole-account archive round-trip/retrieval-projection slice for
-production-readiness issue
+whole-account archive round-trip/retrieval-projection slice, plus the
+concurrent-agent and tenant-isolation slice for production-readiness issue
 [#46](https://github.com/witwave-ai/witself/issues/46). They provide useful,
 reproducible evidence, but individually or together, they do not close that
 issue; the remaining gates are listed below.
@@ -720,6 +720,296 @@ not compare timings to an absolute threshold. It is local store-level evidence,
 not a large-archive SLO, managed-cloud capacity claim, rollback drill, or proof
 of behavior across different schemas or releases.
 
+## Concurrent Agents And Tenant-Isolation Slice
+
+`TestNarrativeMemoryConcurrencyLoadPostgres` is the fifth executable slice. It
+runs directly against one PostgreSQL endpoint in a fresh disposable schema,
+applies the complete migration set, creates a bounded synthetic
+account/realm/agent fleet, and drops the complete schema during cleanup. A
+signed 64-bit seed determines every harness-generated fixture value and canary;
+store-assigned ids and wall-clock time are never random seeds.
+
+The workload mutations and memory/curation operations call only production
+store methods. Test-only read-only SQL records PostgreSQL version metadata and
+checks the complete curation cursor table. The harness performs no inference
+and calls no AI or model, embedding service, runtime client, MCP server, secret
+store, or sealed-plane operation. It creates no agent token. Curation winners
+use the exact empty plan, so this slice measures deterministic queue, fencing,
+and cursor behavior without pretending to evaluate client curation quality.
+
+### What The Concurrency Harness Proves
+
+The bounded workload exercises five related cases across the complete synthetic
+fleet:
+
+1. **Multi-tenant topology.** The harness creates the configured accounts,
+   realms per account, and agents per realm. Every principal receives exactly
+   `seed_memories_per_agent` non-sensitive canary memories plus one sensitive
+   memory. Canary and sensitive markers are deterministic and unique to their
+   principal, and every returned fixture is asserted against its exact expected
+   value before aggregate counters are recorded.
+2. **Concurrent mixed operations.** Every agent launches
+   `workers_per_agent` workers as part of one whole-fleet start. Each worker
+   performs `operations_per_worker` capture/lexical-recall/adjust batches. Every
+   recall must return exactly one expected row, not merely a non-empty page, and
+   every hit is checked for the exact calling account, realm, owner kind, and
+   owner id. Capture and adjustment receipts are also compared to their exact
+   expected versions and values. An all-worker-and-probe readiness gate pins the
+   whole-fleet release. After that release, every probe signals that it has begun
+   before the coordinator releases the mixed workers from their second gate.
+3. **Isolation under load.** Dedicated probes are launched in the same phase as
+   the mixed workers. Each principal and iteration performs one broad recall, three
+   one-row owner-control recalls, and one cross-account, one cross-realm, and
+   one cross-agent recall. The broad recall must return the exact seeded count:
+   all non-sensitive canaries plus one fully redacted sensitive row. Every
+   owner control must return exactly one expected row, and every corresponding
+   foreign query must return zero rows. Every returned content value is scanned
+   against every synthetic foreign canary and sensitive marker. Overlap is
+   measured per probe store call via an atomic in-flight mixed-operation counter,
+   retained as `overlap_operation_samples`, structurally biased by the
+   workers-wait-for-probes-begun rendezvous, and required `>=1` only when
+   isolation iterations `>=2`.
+4. **Concurrent curation claims.** Every principal enqueues one request. Three
+   foreign principals probe that request across the account, realm, and agent
+   boundaries and must receive the typed not-found refusal. The configured
+   owner claim workers then race each request across the fleet; exactly one wins
+   and all other owner attempts receive the expected busy refusal. Each winner
+   applies the reviewed empty plan, advances exactly its own cursor, and cannot
+   advance a foreign owner's cursor.
+5. **Sensitive fan-out.** One selected owner's exact sensitive fixture content
+   is used as the lexical query for every principal. The owner, with sensitive
+   inclusion explicitly enabled, must receive exactly one exact-value hit.
+   Every other principal receives zero rows, even though each uses that same
+   targeted query.
+
+Each operation family retains `OperationStats`: count, wall duration,
+throughput, minimum, p50, p95, p99, and maximum latency. Concurrent families use
+their real phase or subphase wall time rather than the sum of individual call
+durations. The seed family passes the sum of its measured capture durations as
+its wall interval, and the sequential curation-apply family likewise sums only
+its measured apply durations. Curation claim sums its two concurrent subphase
+walls; sensitive fan-out sums the measured owner-call duration and foreign
+concurrent wall. Timings use monotonic process time and nearest-rank percentiles.
+
+### Run The Concurrency Slice
+
+Keep the DSN in the trusted parent environment and invoke the dedicated target:
+
+```sh
+export WITSELF_TEST_DATABASE_URL='postgres://witself:witself@localhost:5432/witself?sslmode=disable'
+make test-memory-concurrency-load
+```
+
+The result path is empty by default so the harness chooses
+`/tmp/witself-memory-concurrency-load-<pid>.json`. Concurrent invocations
+therefore cannot atomically rename over one another. Defaults and hard bounds
+are:
+
+| Setting | Default | Allowed range |
+|---|---:|---:|
+| Seed | `20260901` | signed 64-bit integer |
+| Synthetic accounts | `4` | `2..8` |
+| Realms per account | `2` | `2..4` |
+| Agents per realm | `4` | `2..8` |
+| Non-sensitive seed memories per agent | `4` | `1..64` |
+| Mixed-operation workers per agent | `2` | `2..8`, no greater than seed memories per agent |
+| Capture/recall/adjust batches per worker | `2` | `1..50` |
+| Isolation probe iterations per agent | `2` | `1..50` |
+| Owner claim workers per request | `4` | `2..32` |
+
+The default topology contains 8 realms and 32 principals. The largest accepted
+topology contains 32 realms and 256 principals. Override only bounded workload
+controls and safe evidence metadata:
+
+```sh
+make test-memory-concurrency-load \
+  MEMORY_CONCURRENCY_LOAD_RESULTS=/trusted-artifacts/memory-concurrency-load.json \
+  MEMORY_CONCURRENCY_LOAD_SEED=20260901 \
+  MEMORY_CONCURRENCY_LOAD_ACCOUNTS=4 \
+  MEMORY_CONCURRENCY_LOAD_REALMS_PER_ACCOUNT=2 \
+  MEMORY_CONCURRENCY_LOAD_AGENTS_PER_REALM=4 \
+  MEMORY_CONCURRENCY_LOAD_SEED_MEMORIES_PER_AGENT=4 \
+  MEMORY_CONCURRENCY_LOAD_WORKERS_PER_AGENT=2 \
+  MEMORY_CONCURRENCY_LOAD_OPERATIONS_PER_WORKER=2 \
+  MEMORY_CONCURRENCY_LOAD_ISOLATION_ITERATIONS=2 \
+  MEMORY_CONCURRENCY_LOAD_CLAIM_WORKERS=4 \
+  MEMORY_CONCURRENCY_LOAD_RELEASE=v0.0.172 \
+  MEMORY_CONCURRENCY_LOAD_COMMIT=67ec81d3f5485f1865f87e265ae9f33fa15c6988 \
+  MEMORY_CONCURRENCY_LOAD_PROVIDER=gcp \
+  MEMORY_CONCURRENCY_LOAD_HARDWARE=cloud-sql-postgres-18-tier-name
+```
+
+The direct Go command is available for a trusted runner:
+
+```sh
+WITSELF_MEMORY_CONCURRENCY_LOAD=1 \
+WITSELF_MEMORY_CONCURRENCY_LOAD_RESULTS=/trusted-artifacts/memory-concurrency-load.json \
+go test ./internal/store \
+  -run '^TestNarrativeMemoryConcurrencyLoadPostgres$' \
+  -count=1 -v -timeout 5h
+```
+
+All controls use the `WITSELF_MEMORY_CONCURRENCY_LOAD_*` names defined in
+`internal/loadquality/concurrency.go`; the Make variables above forward to
+those names. The Make target is preferred because it records the current Git
+description and commit by default. `WITSELF_TEST_DATABASE_URL` is deliberately
+not a Make variable and is never part of the result contract.
+
+Deadlines are proportional to the selected topology. One fixed agent batch is
+eight principals, so the budget-unit count is
+`ceil(synthetic_principals / 8)`. Every phase that scales across agents receives
+that many `ConcurrencyAgentBatchDeadline` units, and one unit is two minutes.
+The default 32-principal fleet therefore receives four units, or eight minutes,
+for each scaling phase; the maximum 256-principal fleet receives 32 units, or
+64 minutes. The overall driver context is derived from all phase budgets plus a
+setup guard, and the Make target's five-hour timeout is a separate outer guard.
+These are runaway bounds, not latency thresholds or SLOs.
+
+Claimed curation runs have a 30-minute maximum lease, while the proportional
+curation phase can be longer. Preparation therefore runs in fixed
+`ConcurrencyAgentBatchSize` batches of eight jobs. Immediately before every
+preparation batch, the harness renews the complete live job set with a fresh
+batch epoch; no gap between those renewals includes more than one batch's work.
+It renews the complete set once more immediately before building `knownCursors`
+and reading the initial cursor snapshot. During sequential apply, it retains the
+existing cadence that renews the remaining unapplied suffix immediately before
+each eight-job apply batch.
+
+### Concurrency Result Contract
+
+The retained document has schema
+`witself.memory-concurrency-load-result.v1` and harness version `1`. Its
+separate, additional-properties-closed Draft 2020-12 JSON Schema is
+`internal/loadquality/testdata/concurrency-result-schema.v1.json`, with `$id`
+`https://witself.witwave.ai/schemas/memory-concurrency-load-result.v1.schema.json`.
+None of the first four result schemas is modified.
+
+The workload records `seed`, `synthetic_accounts`, `realms_per_account`,
+`agents_per_realm`, `synthetic_realms`, `synthetic_principals`,
+`seed_memories_per_agent`, `workers_per_agent`, `operations_per_worker`,
+`isolation_iterations`, and `claim_workers`. The measurements are exactly
+`seed`, `mixed_capture`, `mixed_recall`, `mixed_adjust`, `isolation_probe`,
+`curation_request`, `curation_claim`, `curation_apply`, and
+`sensitive_fanout`.
+
+The outcome objects retain these exact aggregate fields:
+
+| Outcome | Fields |
+|---|---|
+| `topology` | `accounts`, `realms`, `principals`, `canary_memories`, `sensitive_memories`, `seeded_memories`, `all_principals_seeded`, `all_canaries_unique`, `all_sensitive_seeded` |
+| `mixed_operations` | `workers`, `operation_batches`, `capture_calls`, `recall_calls`, `adjust_calls`, `recall_hits`, `owner_checks`, `foreign_hits`, `overlap_operation_samples`, `exact_recall_values`, `exact_adjust_values`, `all_hits_exact_owner`, `whole_fleet_start_synchronized`, `all_operations_complete` |
+| `isolation` | `probe_agents`, `probe_rounds`, `broad_recall_calls`, `broad_hits`, `broad_visible_canaries`, `broad_sensitive_redactions`, `own_control_recall_calls`, `own_control_hits`, `cross_account_recall_calls`, `cross_realm_recall_calls`, `cross_agent_recall_calls`, `marker_scans`, `foreign_hits`, `foreign_canary_hits`, `sensitive_content_hits`, `broad_counts_exact`, `own_counts_exact`, `all_hits_exact_owner`, `no_foreign_canaries`, `no_sensitive_content`, `cross_account_isolated`, `cross_realm_isolated`, `cross_agent_isolated` |
+| `curation_claims` | `requests`, `request_calls`, `owner_claim_attempts`, `owner_claim_wins`, `owner_claim_losses`, `foreign_claim_attempts`, `cross_account_refusals`, `cross_realm_refusals`, `cross_agent_refusals`, `typed_foreign_refusals`, `foreign_claim_wins`, `apply_calls`, `owner_cursor_advances`, `foreign_cursor_advances`, `single_winner_per_request`, `all_foreign_claims_typed`, `only_owner_cursor_advanced`, `all_requests_applied` |
+| `sensitive_fanout` | `query_calls`, `owner_query_calls`, `foreign_query_calls`, `owner_hits`, `foreign_hits`, `sensitive_content_leaks`, `owner_exact_read_succeeded`, `all_foreign_queries_isolated` |
+
+Validation uses these exact formulas. Let `P = accounts * realms_per_account *
+agents_per_realm`, `M = seed_memories_per_agent`, `W = workers_per_agent`,
+`O = operations_per_worker`, `I = isolation_iterations`, and
+`C = claim_workers`:
+
+- topology creates `P*M` canary memories, `P` sensitive memories, and
+  `P*(M+1)` total seed captures;
+- mixed work launches `P*W` workers and performs `P*W*O` capture calls,
+  lexical recalls, adjustments, exact recall hits, and per-hit owner checks;
+- isolation performs `P*I` probe rounds and `7*P*I` measured recalls. Those
+  rounds must yield exactly `P*I*(M+1)` broad hits, `P*I*M` visible canaries,
+  `P*I` sensitive redactions, `3*P*I` one-hit owner controls, and `P*I`
+  zero-hit probes for each of the three foreign dimensions. The marker-scan
+  count is exactly broad hits plus owner-control hits. The retained overlap
+  sample count is in `0..7*P*I`, and it must be at least one when `I >= 2`;
+- curation performs `P` request calls, `P*C` owner claim attempts, `P` wins,
+  `P*(C-1)` owner losses, `3*P` typed foreign claim attempts, and `P` applies
+  and owner cursor advances. The claim measurement count is `P*(C+3)`; foreign
+  claim wins and foreign cursor advances must both remain zero; and
+- sensitive fan-out performs `P` queries: one owner query with one exact hit
+  and `P-1` foreign queries with zero hits.
+
+Every measurement count and aggregate counter must satisfy those formulas, all
+foreign-hit and sensitive-leak counters must be zero, and every required inline
+assertion must pass before a `pass` document can be serialized. A partial run
+therefore cannot produce passing evidence. The validated document is written
+atomically with mode `0600`.
+
+The concurrency result never retains a DSN or endpoint identity; an account,
+realm, agent, memory, request, run, cursor, receipt, or other store/workload
+resource id; an idempotency or coalescing key; query text, memory, tag, canary,
+or sensitive-marker content; a vector or embedding payload; a content or plan
+hash; or any prompt, token, credential, or secret. Only bounded workload
+dimensions, aggregate counters, safe environment metadata (including the
+explicitly supplied release and commit labels), operation statistics, and
+assertion roll-ups are retained.
+
+### Verified Store-Scoping Premises
+
+The harness relies on and directly checks these production-store properties:
+
+- `RecallMemories` accepts only an agent principal, verifies that the supplied
+  account/realm/agent tuple is live, and pins its snapshot watermark to that
+  same owner lane.
+- Both lexical candidate selection and returned-payload loading constrain
+  `account_id`, `realm_id`, `owner_kind='agent'`, and `owner_id`. The harness
+  nevertheless compares all four returned owner coordinates on every hit; it
+  does not treat the SQL predicate alone as evidence.
+- Broad recall does not exclude an owner's sensitive row by default. It can
+  return the row with caller-authored value fields cleared and `redacted=true`.
+  That is why the exact broad count is `M+1`, while the exact visible-canary
+  count is `M` and the sensitive-redaction count is one per probe round.
+- `IncludeSensitive=true` changes visibility only inside the caller's already
+  scoped owner lane. It cannot select a different account, realm, or agent. The
+  sensitive fan-out case checks both directions with an exact owner hit and
+  exact zero foreign hits.
+- Curation request and run loads bind ids to the caller's account, realm, and
+  owner lane. A foreign request id therefore returns the typed
+  `ErrMemoryCurationNotFound` refusal rather than disclosing or claiming the
+  request. Expected owner contention losses are separately asserted as
+  `ErrMemoryCurationBusy`.
+- Curation cursor inputs and cursor updates carry the same account, realm, and
+  owner predicates. The harness maps each apply receipt to the corresponding
+  owner and checks the complete cursor table so an owner-only success cannot
+  hide a foreign advance.
+
+### Concurrency Slice Honesty Notes
+
+- `provider` and `hardware_tier` are operator-supplied labels, not measured
+  values. They must be dotless and contain only letters, digits, `+`, `_`, or
+  `-`, preventing a pasted hostname from passing as a label. `release` and
+  `commit` may contain dots.
+- Summary booleans such as `all_hits_exact_owner`, `broad_counts_exact`,
+  `whole_fleet_start_synchronized`, `all_foreign_claims_typed`,
+  `only_owner_cursor_advanced`, and `all_foreign_queries_isolated` are roll-ups
+  of inline coordination or store-observing assertions. Each represented
+  condition has a fail-fast path before evidence is emitted; they are not later
+  independent measurements. `whole_fleet_start_synchronized` specifically
+  requires every worker and probe to reach the shared readiness gate, no
+  participant to cross it before coordinator release, and every participant to
+  cross it afterward. Exact returned values and owner tuples, typed `errors.Is`
+  checks, winner maps, full marker scans, and cursor-table comparisons are the
+  primary proof.
+- `overlap_operation_samples` is a direct counter, not a summary boolean.
+  Overlap is measured per probe store call via an atomic in-flight
+  mixed-operation counter, retained as `overlap_operation_samples`,
+  structurally biased by the workers-wait-for-probes-begun rendezvous, and
+  required `>=1` only when isolation iterations `>=2`.
+- Winner input paging (`GetCurationRunInputs`, in 200-row pages), empty-plan
+  submission (`PlanCuration`), stored-plan read-back (`GetCurationPlan`), the
+  per-batch fenced lease renewals from preparation and apply, the additional
+  pre-cursor-snapshot renewal (`RenewCuration`), and read-only full cursor-table
+  audits are lease/validation housekeeping, not named workload measurements.
+  They remain inside the proportional curation phase deadline but are excluded
+  from named-operation latency and throughput.
+- "Whole-fleet concurrency" means all configured synthetic principals and
+  workers contend through one test process, store pool, PostgreSQL endpoint,
+  and disposable schema. It does not simulate multiple deployed client
+  processes, HTTP/MCP transport, wide-area networking, failover, connection
+  pool diversity, or production background workers.
+- The exact marker scans cover the synthetic content values returned by these
+  recalls. They do not prove absence from native PostgreSQL errors, database
+  logs, backups, metrics, side channels, or unrelated interfaces.
+- This is model-free store correctness and timing evidence. It does not measure
+  semantic recall usefulness, client curation quality, model tokens or cost,
+  a real embedding pipeline, managed-cloud capacity, or a production SLO. No
+  production threshold or default should be inferred from a local pass.
+
 ## Evidence Checklist
 
 Retain the JSON result with:
@@ -737,12 +1027,15 @@ vector dimensions and coverage percentages, and pagination shape. Never compare
 ranked ids across independently created schemas. For archive comparisons, use
 the same seed, complete cardinality/focal-count shape, vector dimensions, and
 canonical result-contract version; the exact ranked-id comparison occurs only
-inside each same-account round trip. Change one workload dimension at a time. A
-dirty checkout should be labeled exploratory, not a release baseline.
+inside each same-account round trip. For concurrency comparisons, use the same
+seed, complete account/realm/agent topology, seed-memory count, worker and
+operation counts, isolation iterations, claim-worker count, and result-contract
+version. Change one workload dimension at a time. A dirty checkout should be
+labeled exploratory, not a release baseline.
 
 ## What Still Remains For Issue #46
 
-These four slices intentionally do **not** claim production readiness. Issue #46
+These five slices intentionally do **not** claim production readiness. Issue #46
 still requires:
 
 1. Broader production instrumentation. Bounded HTTP, memory operation/recall,
@@ -764,8 +1057,9 @@ still requires:
    and representative managed-cloud large-archive durations. The fourth slice
    covers successful complete same-store round trips only.
 5. Larger high-cardinality shapes for versions, evidence, relations,
-   transcripts, concurrent agents, and archive bytes. Current ceilings are
-   bounded fixture and correctness guards, not capacity claims.
+   transcripts, archive bytes, and concurrency beyond the fifth slice's bounded
+   256-principal topology. Current ceilings are fixture and correctness guards,
+   not capacity claims.
 6. A richer adjudicated relevance corpus with false-positive and ranking
    metrics beyond the two exact lexical and three constructed hybrid cases in
    the current harnesses.

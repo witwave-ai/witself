@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://witself.witwave.ai/schemas/memory-concurrency-load-result.v1.schema.json",
+  "title": "Witself narrative-memory concurrency and tenant-isolation load result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "harness_version",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "postgresql_version",
+    "environment",
+    "workload",
+    "measurements",
+    "outcomes"
+  ],
+  "properties": {
+    "schema": { "const": "witself.memory-concurrency-load-result.v1" },
+    "harness_version": { "const": "1" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "outcome": { "const": "pass" },
+    "postgresql_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "commit", "provider", "hardware_tier", "go_version", "goos", "goarch", "logical_cpus"],
+      "properties": {
+        "release": { "$ref": "#/$defs/safe_metadata" },
+        "commit": { "$ref": "#/$defs/safe_metadata" },
+        "provider": { "$ref": "#/$defs/safe_label" },
+        "hardware_tier": { "$ref": "#/$defs/safe_label" },
+        "go_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "goos": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "goarch": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "logical_cpus": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "synthetic_accounts",
+        "realms_per_account",
+        "agents_per_realm",
+        "synthetic_realms",
+        "synthetic_principals",
+        "seed_memories_per_agent",
+        "workers_per_agent",
+        "operations_per_worker",
+        "isolation_iterations",
+        "claim_workers"
+      ],
+      "properties": {
+        "seed": { "type": "integer" },
+        "synthetic_accounts": { "type": "integer", "minimum": 2, "maximum": 8 },
+        "realms_per_account": { "type": "integer", "minimum": 2, "maximum": 4 },
+        "agents_per_realm": { "type": "integer", "minimum": 2, "maximum": 8 },
+        "synthetic_realms": { "type": "integer", "minimum": 4, "maximum": 32 },
+        "synthetic_principals": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "seed_memories_per_agent": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "workers_per_agent": { "type": "integer", "minimum": 2, "maximum": 8 },
+        "operations_per_worker": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "isolation_iterations": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "claim_workers": { "type": "integer", "minimum": 2, "maximum": 32 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "mixed_capture",
+        "mixed_recall",
+        "mixed_adjust",
+        "isolation_probe",
+        "curation_request",
+        "curation_claim",
+        "curation_apply",
+        "sensitive_fanout"
+      ],
+      "properties": {
+        "seed": { "$ref": "#/$defs/operation_stats" },
+        "mixed_capture": { "$ref": "#/$defs/operation_stats" },
+        "mixed_recall": { "$ref": "#/$defs/operation_stats" },
+        "mixed_adjust": { "$ref": "#/$defs/operation_stats" },
+        "isolation_probe": { "$ref": "#/$defs/operation_stats" },
+        "curation_request": { "$ref": "#/$defs/operation_stats" },
+        "curation_claim": { "$ref": "#/$defs/operation_stats" },
+        "curation_apply": { "$ref": "#/$defs/operation_stats" },
+        "sensitive_fanout": { "$ref": "#/$defs/operation_stats" }
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topology", "mixed_operations", "isolation", "curation_claims", "sensitive_fanout"],
+      "properties": {
+        "topology": { "$ref": "#/$defs/topology" },
+        "mixed_operations": { "$ref": "#/$defs/mixed_operations" },
+        "isolation": { "$ref": "#/$defs/isolation" },
+        "curation_claims": { "$ref": "#/$defs/curation_claims" },
+        "sensitive_fanout": { "$ref": "#/$defs/sensitive_fanout" }
+      }
+    }
+  },
+  "$defs": {
+    "safe_label": {
+      "type": "string",
+      "description": "Operator-typed dotless label. Dots are rejected so a pasted database hostname cannot be retained as evidence metadata.",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+_-]{0,127}$"
+    },
+    "safe_metadata": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "operation_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "wall_duration_ms", "throughput_per_second", "minimum_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "wall_duration_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "throughput_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "minimum_ms": { "type": "number", "minimum": 0 },
+        "p50_ms": { "type": "number", "minimum": 0 },
+        "p95_ms": { "type": "number", "minimum": 0 },
+        "p99_ms": { "type": "number", "minimum": 0 },
+        "maximum_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accounts",
+        "realms",
+        "principals",
+        "canary_memories",
+        "sensitive_memories",
+        "seeded_memories",
+        "all_principals_seeded",
+        "all_canaries_unique",
+        "all_sensitive_seeded"
+      ],
+      "properties": {
+        "accounts": { "type": "integer", "minimum": 2, "maximum": 8 },
+        "realms": { "type": "integer", "minimum": 4, "maximum": 32 },
+        "principals": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "canary_memories": { "type": "integer", "minimum": 8, "maximum": 16384 },
+        "sensitive_memories": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "seeded_memories": { "type": "integer", "minimum": 16, "maximum": 16640 },
+        "all_principals_seeded": { "const": true },
+        "all_canaries_unique": { "const": true },
+        "all_sensitive_seeded": { "const": true }
+      }
+    },
+    "mixed_operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workers",
+        "operation_batches",
+        "capture_calls",
+        "recall_calls",
+        "adjust_calls",
+        "recall_hits",
+        "owner_checks",
+        "foreign_hits",
+        "overlap_operation_samples",
+        "exact_recall_values",
+        "exact_adjust_values",
+        "all_hits_exact_owner",
+        "whole_fleet_start_synchronized",
+        "all_operations_complete"
+      ],
+      "properties": {
+        "workers": { "type": "integer", "minimum": 16, "maximum": 2048 },
+        "operation_batches": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "capture_calls": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "recall_calls": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "adjust_calls": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "recall_hits": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "owner_checks": { "type": "integer", "minimum": 16, "maximum": 102400 },
+        "foreign_hits": { "const": 0 },
+        "overlap_operation_samples": { "type": "integer", "minimum": 0, "maximum": 89600 },
+        "exact_recall_values": { "const": true },
+        "exact_adjust_values": { "const": true },
+        "all_hits_exact_owner": { "const": true },
+        "whole_fleet_start_synchronized": { "const": true },
+        "all_operations_complete": { "const": true }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_agents",
+        "probe_rounds",
+        "broad_recall_calls",
+        "broad_hits",
+        "broad_visible_canaries",
+        "broad_sensitive_redactions",
+        "own_control_recall_calls",
+        "own_control_hits",
+        "cross_account_recall_calls",
+        "cross_realm_recall_calls",
+        "cross_agent_recall_calls",
+        "marker_scans",
+        "foreign_hits",
+        "foreign_canary_hits",
+        "sensitive_content_hits",
+        "broad_counts_exact",
+        "own_counts_exact",
+        "all_hits_exact_owner",
+        "no_foreign_canaries",
+        "no_sensitive_content",
+        "cross_account_isolated",
+        "cross_realm_isolated",
+        "cross_agent_isolated"
+      ],
+      "properties": {
+        "probe_agents": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "probe_rounds": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "broad_recall_calls": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "broad_hits": { "type": "integer", "minimum": 16, "maximum": 832000 },
+        "broad_visible_canaries": { "type": "integer", "minimum": 8, "maximum": 819200 },
+        "broad_sensitive_redactions": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "own_control_recall_calls": { "type": "integer", "minimum": 24, "maximum": 38400 },
+        "own_control_hits": { "type": "integer", "minimum": 24, "maximum": 38400 },
+        "cross_account_recall_calls": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "cross_realm_recall_calls": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "cross_agent_recall_calls": { "type": "integer", "minimum": 8, "maximum": 12800 },
+        "marker_scans": { "type": "integer", "minimum": 40, "maximum": 870400 },
+        "foreign_hits": { "const": 0 },
+        "foreign_canary_hits": { "const": 0 },
+        "sensitive_content_hits": { "const": 0 },
+        "broad_counts_exact": { "const": true },
+        "own_counts_exact": { "const": true },
+        "all_hits_exact_owner": { "const": true },
+        "no_foreign_canaries": { "const": true },
+        "no_sensitive_content": { "const": true },
+        "cross_account_isolated": { "const": true },
+        "cross_realm_isolated": { "const": true },
+        "cross_agent_isolated": { "const": true }
+      }
+    },
+    "curation_claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requests",
+        "request_calls",
+        "owner_claim_attempts",
+        "owner_claim_wins",
+        "owner_claim_losses",
+        "foreign_claim_attempts",
+        "cross_account_refusals",
+        "cross_realm_refusals",
+        "cross_agent_refusals",
+        "typed_foreign_refusals",
+        "foreign_claim_wins",
+        "apply_calls",
+        "owner_cursor_advances",
+        "foreign_cursor_advances",
+        "single_winner_per_request",
+        "all_foreign_claims_typed",
+        "only_owner_cursor_advanced",
+        "all_requests_applied"
+      ],
+      "properties": {
+        "requests": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "request_calls": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "owner_claim_attempts": { "type": "integer", "minimum": 16, "maximum": 8192 },
+        "owner_claim_wins": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "owner_claim_losses": { "type": "integer", "minimum": 8, "maximum": 7936 },
+        "foreign_claim_attempts": { "type": "integer", "minimum": 24, "maximum": 768 },
+        "cross_account_refusals": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "cross_realm_refusals": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "cross_agent_refusals": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "typed_foreign_refusals": { "type": "integer", "minimum": 24, "maximum": 768 },
+        "foreign_claim_wins": { "const": 0 },
+        "apply_calls": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "owner_cursor_advances": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "foreign_cursor_advances": { "const": 0 },
+        "single_winner_per_request": { "const": true },
+        "all_foreign_claims_typed": { "const": true },
+        "only_owner_cursor_advanced": { "const": true },
+        "all_requests_applied": { "const": true }
+      }
+    },
+    "sensitive_fanout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_calls",
+        "owner_query_calls",
+        "foreign_query_calls",
+        "owner_hits",
+        "foreign_hits",
+        "sensitive_content_leaks",
+        "owner_exact_read_succeeded",
+        "all_foreign_queries_isolated"
+      ],
+      "properties": {
+        "query_calls": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "owner_query_calls": { "const": 1 },
+        "foreign_query_calls": { "type": "integer", "minimum": 7, "maximum": 255 },
+        "owner_hits": { "const": 1 },
+        "foreign_hits": { "const": 0 },
+        "sensitive_content_leaks": { "const": 0 },
+        "owner_exact_read_succeeded": { "const": true },
+        "all_foreign_queries_isolated": { "const": true }
+      }
+    }
+  }
+}
