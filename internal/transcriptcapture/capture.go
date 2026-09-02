@@ -23,7 +23,11 @@ import (
 )
 
 const (
-	maxRawPayloadBytes           = 8 * 1024
+	maxRawPayloadBytes = 8 * 1024
+	// maxEntryPayloadBytes mirrors the server's transcript entry payload cap
+	// (store maxTranscriptJSONBytes). An entry whose payload exceeds it is
+	// rejected on append, which blocks every later event of that transcript.
+	maxEntryPayloadBytes         = 16 * 1024
 	maxStructuredBytes           = 4 * 1024
 	maxNativeTranscriptTailBytes = 16 * 1024 * 1024
 	maxNativeTranscriptScanBytes = 64 * 1024 * 1024
@@ -1996,6 +2000,18 @@ func (e Event) Entries() []Entry {
 	return append(entries, e.entriesWithoutRecovered()...)
 }
 
+// entryPayloadFits adds key/value to payload only when the encoded payload
+// stays within maxEntryPayloadBytes; otherwise payload is left unchanged.
+func entryPayloadFits(payload map[string]any, key string, value any) bool {
+	payload[key] = value
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > maxEntryPayloadBytes {
+		delete(payload, key)
+		return false
+	}
+	return true
+}
+
 func (e Event) entriesWithoutRecovered() []Entry {
 	chunks := splitUTF8(e.Body, entryBodyChunkSize)
 	if len(chunks) == 0 {
@@ -2032,23 +2048,35 @@ func (e Event) entriesWithoutRecovered() []Entry {
 		if e.CaptureMode == ModeRaw && e.SourceTranscriptPath != "" {
 			payload["source_transcript_path"] = e.SourceTranscriptPath
 		}
-		if i == 0 && len(e.Raw) > 0 {
-			if len(e.Raw) <= maxRawPayloadBytes {
+		if i == 0 {
+			// Budget the optional data and raw copies against the server's
+			// entry payload cap. Data (the normalized capture content) is
+			// admitted first; the raw hook payload only if it still fits.
+			// Whatever does not fit is replaced by a digest marker so the
+			// entry stays value-free and byte-identical on every retry.
+			if len(e.Data) > 0 {
 				var value any
-				if json.Unmarshal(e.Raw, &value) == nil {
-					payload["raw"] = value
+				if json.Unmarshal(e.Data, &value) == nil && !entryPayloadFits(payload, "data", value) {
+					sum := sha256.Sum256(e.Data)
+					payload["data_omitted"] = true
+					payload["data_bytes"] = len(e.Data)
+					payload["data_sha256"] = hex.EncodeToString(sum[:])
 				}
-			} else {
-				sum := sha256.Sum256(e.Raw)
-				payload["raw_omitted"] = true
-				payload["raw_bytes"] = len(e.Raw)
-				payload["raw_sha256"] = hex.EncodeToString(sum[:])
 			}
-		}
-		if i == 0 && len(e.Data) > 0 {
-			var value any
-			if json.Unmarshal(e.Data, &value) == nil {
-				payload["data"] = value
+			if len(e.Raw) > 0 {
+				embedded := false
+				if len(e.Raw) <= maxRawPayloadBytes {
+					var value any
+					if json.Unmarshal(e.Raw, &value) == nil {
+						embedded = entryPayloadFits(payload, "raw", value)
+					}
+				}
+				if !embedded && (len(e.Raw) > maxRawPayloadBytes || json.Valid(e.Raw)) {
+					sum := sha256.Sum256(e.Raw)
+					payload["raw_omitted"] = true
+					payload["raw_bytes"] = len(e.Raw)
+					payload["raw_sha256"] = hex.EncodeToString(sum[:])
+				}
 			}
 		}
 		raw, _ := json.Marshal(payload)
