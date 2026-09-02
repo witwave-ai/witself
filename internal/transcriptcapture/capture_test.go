@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
@@ -721,7 +722,7 @@ func TestSensitiveTurnSuppressesUnknownFutureHookShape(t *testing.T) {
 }
 
 func TestPendingTurnUploadWaitsForTerminalFence(t *testing.T) {
-	base := time.Unix(100, 0).UTC()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	prompt := PendingEvent{Path: "prompt", Event: Event{
 		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
 		TurnID: "turn-1", HookEvent: "UserPromptSubmit", OccurredAt: base,
@@ -764,6 +765,154 @@ func TestPendingTurnUploadWaitsForTerminalFence(t *testing.T) {
 		if !PendingEventUploadReady(event, []PendingEvent{prompt, nextPrompt, response}) {
 			t.Fatalf("agent-response-fenced event remained blocked: %#v", event.Event)
 		}
+	}
+}
+
+func TestReadinessIndexPreservesTimestampBoundaries(t *testing.T) {
+	base := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	current := PendingEvent{Path: "current", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-1", HookEvent: "PreToolUse", OccurredAt: base,
+	}}
+	tests := []struct {
+		name      string
+		candidate Event
+		want      bool
+	}{
+		{
+			name: "session end at equal time",
+			candidate: Event{Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+				TurnID: "turn-1", HookEvent: "SessionEnd", OccurredAt: base},
+			want: true,
+		},
+		{
+			name: "terminal at equal time",
+			candidate: Event{Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+				TurnID: "turn-1", HookEvent: "StopFailure", OccurredAt: base},
+			want: true,
+		},
+		{
+			name: "different prompt at equal time",
+			candidate: Event{Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+				TurnID: "turn-2", HookEvent: "UserPromptSubmit", OccurredAt: base},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			all := []PendingEvent{current, {Path: "candidate", Event: test.candidate}}
+			if got := NewReadinessIndex(all).UploadReady(current); got != test.want {
+				t.Fatalf("UploadReady() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReadinessIndexDoesNotReleaseOpenTurnByAge(t *testing.T) {
+	current := PendingEvent{Path: "current", Event: Event{
+		Runtime: RuntimeCodex, Location: Location{ID: "loc_1"}, SessionID: "session-1",
+		TurnID: "turn-1", HookEvent: "PreToolUse",
+		OccurredAt: time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+	}}
+	if NewReadinessIndex([]PendingEvent{current}).UploadReady(current) {
+		t.Fatal("old open turn was eligible for transcript upload")
+	}
+}
+
+func TestReadinessIndexMatchesOriginalQuadraticImplementation(t *testing.T) {
+	random := rand.New(rand.NewSource(323))
+	now := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	runtimes := []string{RuntimeCodex, RuntimeClaudeCode}
+	locations := []string{"loc_a", "loc_b"}
+	sessions := []string{"session-a", "session-b", "session-c"}
+	turns := []string{"", " ", "turn-1", "turn-2", "turn-3"}
+	hooks := []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "AgentResponse", "Stop", "StopFailure", "SessionEnd"}
+
+	for corpus := 0; corpus < 300; corpus++ {
+		pending := make([]PendingEvent, 1+random.Intn(80))
+		for i := range pending {
+			occurredAt := now.Add(-time.Duration(random.Intn(180)) * time.Second)
+			pending[i] = PendingEvent{Path: fmt.Sprintf("%03d-%03d", corpus, i), Event: Event{
+				Runtime:    runtimes[random.Intn(len(runtimes))],
+				Location:   Location{ID: locations[random.Intn(len(locations))]},
+				SessionID:  sessions[random.Intn(len(sessions))],
+				TurnID:     turns[random.Intn(len(turns))],
+				HookEvent:  hooks[random.Intn(len(hooks))],
+				OccurredAt: occurredAt,
+			}}
+		}
+		index := NewReadinessIndex(pending)
+		for eventIndex, current := range pending {
+			want := pendingEventUploadReadyQuadraticReference(current, pending)
+			if got := index.UploadReady(current); got != want {
+				t.Fatalf("corpus %d event %d readiness = %v, want %v: %#v", corpus, eventIndex, got, want, current.Event)
+			}
+		}
+	}
+}
+
+func pendingEventUploadReadyQuadraticReference(current PendingEvent, all []PendingEvent) bool {
+	event := current.Event
+	if strings.TrimSpace(event.TurnID) == "" {
+		return true
+	}
+	transcriptID := event.TranscriptExternalID()
+	for _, candidate := range all {
+		other := candidate.Event
+		if other.TranscriptExternalID() != transcriptID || other.SessionID != event.SessionID ||
+			other.OccurredAt.Before(event.OccurredAt) {
+			continue
+		}
+		if other.HookEvent == "SessionEnd" {
+			return true
+		}
+		if other.TurnID == event.TurnID && (other.HookEvent == "AgentResponse" ||
+			other.HookEvent == "Stop" || other.HookEvent == "StopFailure") {
+			return true
+		}
+		if other.HookEvent == "UserPromptSubmit" && other.TurnID != event.TurnID &&
+			other.OccurredAt.After(event.OccurredAt) {
+			return true
+		}
+	}
+	return false
+}
+
+var readinessBenchmarkReadyCount int
+
+func BenchmarkReadinessIndexScaling(b *testing.B) {
+	for _, size := range []int{1_000, 10_000, 50_000} {
+		b.Run(fmt.Sprintf("events-%d", size), func(b *testing.B) {
+			now := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+			pending := make([]PendingEvent, size)
+			for i := range pending {
+				session := i % 165
+				turn := (i / 165) % 32
+				hook := "PostToolUse"
+				if i%17 == 0 {
+					hook = "UserPromptSubmit"
+				} else if i%31 == 0 {
+					hook = "Stop"
+				}
+				pending[i] = PendingEvent{Path: fmt.Sprintf("%08d", i), Event: Event{
+					Runtime: RuntimeCodex, Location: Location{ID: fmt.Sprintf("loc-%d", session%4)},
+					SessionID: fmt.Sprintf("session-%03d", session), TurnID: fmt.Sprintf("turn-%02d", turn),
+					HookEvent: hook, OccurredAt: now.Add(time.Duration(i%256) * time.Millisecond),
+				}}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				index := NewReadinessIndex(pending)
+				ready := 0
+				for _, current := range pending {
+					if index.UploadReady(current) {
+						ready++
+					}
+				}
+				readinessBenchmarkReadyCount = ready
+			}
+		})
 	}
 }
 
