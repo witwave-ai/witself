@@ -132,6 +132,60 @@ six distinct transcript IDs. This proves that explicit capture in one session
 is used by another session instead of accidentally reusing the provider's
 conversation buffer.
 
+### Driving the stages headlessly
+
+Each stage can be one non-interactive provider session, which is the easiest
+way to guarantee six distinct sessions. Two provider details decide whether
+those sessions can do real Witself work:
+
+- Claude Code: a headless session cannot answer permission prompts, so every
+  Witself tool call is silently denied unless the server's tools are
+  pre-authorized. Use the equals form of the variadic flag — `claude -p
+  --allowedTools="mcp__witself__*" "$PROMPT"` — because `--allowedTools
+  "mcp__witself__*" "$PROMPT"` swallows the prompt as another tool name.
+  Without it, the stages that need live calls fail while the stages that hold
+  on behavior alone (redaction, isolation) still pass.
+- Codex: `codex exec --skip-git-repo-check -C "$HOME" "$PROMPT"` with
+  `approval_policy = "never"` in `~/.codex/config.toml` needs no extra
+  authorization for MCP tools. Never pass `--ephemeral`: the managed hooks
+  capture persisted sessions only.
+
+Rebinding a runtime with managed (administrator-owned) hooks needs an
+interactive terminal because `witself install` escalates for the hook files
+itself; never wrap the driver in `sudo`, because the integration lock guard
+requires the caller's own uid. A restore over a test binding must pass explicit
+empty `--endpoint ""` and `--token-file ""`, because `witself install`
+inherits unset flags from the previous binding.
+
+### Retries need a fresh subject
+
+The verifier locates each stage by its exact prompt text and deliberately
+voids a stage whose prompt appears more than once across the subject's
+transcripts, so a replayed or partially re-run stage cannot be mistaken for the
+original. Once the stages of a run have executed, that run can be re-verified
+but its stages can never be re-executed. A retry is therefore always a fresh
+subject agent plus a fresh `prepare`; preparation refuses a subject that
+already holds narrative memories from an earlier attempt.
+
+### The checkpoint case is backend state only
+
+`applied_empty_curation_checkpoint` is proven by direct backend reads of the
+fixture request, never by transcripts. Stage sessions process the synthetic
+checkpoint only incidentally, so either run one dedicated housekeeping session
+after the six stages (a prompt asking the client to handle its pending memory
+checkpoint) or complete the checkpoint directly with the subject's token —
+`witself memory curate start`, page `show` to the end, `plan` the canonical
+empty plan, `apply` — and then re-run `verify` alone against the same state.
+Both paths are valid by design.
+
+### Transcripts must have reached the server
+
+Verification reads server-side transcripts. A capture outbox that is not
+draining (`~/.witself/capture/outbox/<runtime>/`) makes every
+transcript-based case fail at once even though the sessions behaved
+correctly. Check the outbox before a certification window and, when in doubt,
+run `witself transcript flush --runtime <runtime>` before `verify`.
+
 After all six stages complete, verify and retain sanitized evidence:
 
 ```text
@@ -264,5 +318,18 @@ Common failures are intentionally specific:
 - `cross_agent_isolation` — the peer could not retrieve its fixture or the
   subject's default owner scope could retrieve it.
 
-Failed runs remain inspectable and retryable. The harness performs no permanent
-deletion and does not broaden cross-agent policy to make a test pass.
+Two patterns point at the driver rather than the runtime:
+
+- every transcript-based case fails while `applied_empty_curation_checkpoint`
+  passes — the stage prompts appear more than once in the subject's
+  transcripts (a re-executed run) or the transcripts never reached the server
+  (a stalled capture outbox); and
+- `identity_binding`, `explicit_narrative_capture`, `history_dependent_recall`,
+  and `same_agent_cross_session_continuity` fail while
+  `sensitive_exact_and_broad_redaction` and `cross_agent_isolation` pass — the
+  headless sessions could not call Witself tools (permission wall).
+
+Failed runs remain inspectable; `verify` can be re-run against the same state
+at any time, but re-executing stages requires a fresh subject and a fresh
+`prepare` as described above. The harness performs no permanent deletion and
+does not broaden cross-agent policy to make a test pass.
