@@ -1126,20 +1126,236 @@ func TestCaptureAppendBatchesRetainCountLimitAndOrder(t *testing.T) {
 	}
 }
 
+func TestLatestCaptureActivitySelectionsUseFirstLatestObservation(t *testing.T) {
+	base := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	event := func(id, session string, occurredAt time.Time) transcriptcapture.PendingEvent {
+		return transcriptcapture.PendingEvent{Path: id, Event: transcriptcapture.Event{
+			ID: id, Runtime: transcriptcapture.RuntimeCodex,
+			Location: transcriptcapture.Location{ID: "loc_1"}, SessionID: session,
+			OccurredAt: occurredAt,
+		}}
+	}
+	ready := []transcriptcapture.PendingEvent{
+		event("a-old", "session-a", base),
+		event("b-first-latest", "session-b", base.Add(2*time.Second)),
+		event("a-latest", "session-a", base.Add(2*time.Second)),
+		event("b-equal-later", "session-b", base.Add(2*time.Second)),
+	}
+	selections := latestCaptureActivitySelections(ready)
+	if len(selections) != 2 || selections[0].Event.ID != "b-first-latest" || selections[1].Event.ID != "a-latest" {
+		t.Fatalf("latest activity selections = %#v", selections)
+	}
+}
+
+func TestCapturePendingAppendBatchesNeverSplitChunkedEventAtSharedBoundary(t *testing.T) {
+	pending := make([]transcriptcapture.PendingEvent, 0, maxCaptureAppendBatchEntries+1)
+	for i := 0; i < maxCaptureAppendBatchEntries-1; i++ {
+		id := fmt.Sprintf("small-%03d", i)
+		pending = append(pending, transcriptcapture.PendingEvent{Path: id + ".json", Event: transcriptcapture.Event{
+			ID: id, Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1", Body: "small",
+		}})
+	}
+	spanningPath := "spanning.json"
+	pending = append(pending, transcriptcapture.PendingEvent{Path: spanningPath, Event: transcriptcapture.Event{
+		ID: "spanning", Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1",
+		Body: strings.Repeat("x", 61*1024),
+	}})
+	pending = append(pending, transcriptcapture.PendingEvent{Path: "trailing.json", Event: transcriptcapture.Event{
+		ID: "trailing", Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1", Body: "last",
+	}})
+
+	batches, remaining, err := capturePendingAppendBatches(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 2 || len(batches[0].inputs) != maxCaptureAppendBatchEntries-1 || len(batches[1].inputs) != 3 {
+		t.Fatalf("owned batch sizes = %d / %d", len(batches[0].inputs), len(batches[1].inputs))
+	}
+	containsPath := func(batch pendingCaptureAppendBatch, path string) bool {
+		for _, pendingEvent := range batch.events {
+			if pendingEvent.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	if remaining[spanningPath] != 1 || containsPath(batches[0], spanningPath) ||
+		!containsPath(batches[1], spanningPath) {
+		t.Fatalf("spanning file ownership = remaining %d / first %v / second %v",
+			remaining[spanningPath], batches[0].events, batches[1].events)
+	}
+	if remaining["trailing.json"] != 1 || containsPath(batches[0], "trailing.json") ||
+		!containsPath(batches[1], "trailing.json") {
+		t.Fatalf("trailing file ownership = remaining %d / first %v / second %v",
+			remaining["trailing.json"], batches[0].events, batches[1].events)
+	}
+	flattened := append(append([]client.AppendTranscriptEntryInput{}, batches[0].inputs...), batches[1].inputs...)
+	if flattened[maxCaptureAppendBatchEntries-1].ExternalID != "spanning:0" ||
+		flattened[maxCaptureAppendBatchEntries].ExternalID != "spanning:1" ||
+		flattened[maxCaptureAppendBatchEntries+1].ExternalID != "trailing:0" {
+		t.Fatalf("coalesced order or idempotency keys changed around boundary: %#v", flattened[maxCaptureAppendBatchEntries-1:])
+	}
+}
+
+func TestCapturePendingAppendBatchesPreserveOversizedEventBatches(t *testing.T) {
+	oversized := transcriptcapture.Event{
+		ID: "oversized", Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1",
+		HookEvent: "SessionEnd", Kind: "session.ended", Role: "system",
+	}
+	oversized.RecoveredMessages = make([]transcriptcapture.RecoveredMessage, maxCaptureAppendBatchEntries)
+	for index := range oversized.RecoveredMessages {
+		oversized.RecoveredMessages[index] = transcriptcapture.RecoveredMessage{
+			ID: fmt.Sprintf("recovered-%03d", index), Kind: "message.assistant", Role: "assistant", Body: "small",
+		}
+	}
+	wantOversized, err := captureAppendBatches(oversized.Entries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wantOversized) != 2 {
+		t.Fatalf("old per-event batches = %d, want 2", len(wantOversized))
+	}
+	pending := []transcriptcapture.PendingEvent{
+		{Path: "before.json", Event: transcriptcapture.Event{ID: "before", Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1"}},
+		{Path: "oversized.json", Event: oversized},
+		{Path: "after.json", Event: transcriptcapture.Event{ID: "after", Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1"}},
+	}
+	batches, remaining, err := capturePendingAppendBatches(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != len(wantOversized)+2 || remaining["oversized.json"] != len(wantOversized) {
+		t.Fatalf("coalesced batch count/ownership = %d/%d", len(batches), remaining["oversized.json"])
+	}
+	for index, want := range wantOversized {
+		gotBatch := batches[index+1]
+		if len(gotBatch.events) != 1 || gotBatch.events[0].Path != "oversized.json" {
+			t.Fatalf("oversized batch %d ownership = %#v", index, gotBatch.events)
+		}
+		gotJSON, gotErr := json.Marshal(gotBatch.inputs)
+		wantJSON, wantErr := json.Marshal(want)
+		if gotErr != nil || wantErr != nil {
+			t.Fatalf("marshal old/new batch %d = %v/%v", index, gotErr, wantErr)
+		}
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("oversized batch %d changed from the old per-event path", index)
+		}
+	}
+}
+
+func TestCapturePendingAppendBatchesAccountForInterEventSeparators(t *testing.T) {
+	const envelopeBytes = len(`{"entries":[]}`)
+	makeEvent := func(index, quoteCount int) transcriptcapture.PendingEvent {
+		id := fmt.Sprintf("event-%03d", index)
+		return transcriptcapture.PendingEvent{Path: id + ".json", Event: transcriptcapture.Event{
+			ID: id, Runtime: transcriptcapture.RuntimeCodex, SessionID: "session-1",
+			Body: strings.Repeat("\"", quoteCount),
+		}}
+	}
+	contribution := func(pendingEvent transcriptcapture.PendingEvent) int {
+		t.Helper()
+		batches, err := captureAppendBatches(pendingEvent.Event.Entries())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(batches) != 1 || len(batches[0]) != 1 {
+			t.Fatalf("fixture event batches = %#v", batches)
+		}
+		requestBytes, err := captureAppendRequestBytes(batches[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return requestBytes - envelopeBytes
+	}
+	findEvent := func(index, limit int) (transcriptcapture.PendingEvent, int) {
+		t.Helper()
+		low, high := 0, 60*1024
+		var selected transcriptcapture.PendingEvent
+		selectedBytes := -1
+		for low <= high {
+			middle := low + (high-low)/2
+			candidate := makeEvent(index, middle)
+			candidateBytes := contribution(candidate)
+			if candidateBytes <= limit {
+				selected, selectedBytes = candidate, candidateBytes
+				low = middle + 1
+			} else {
+				high = middle - 1
+			}
+		}
+		if selectedBytes < 0 {
+			t.Fatalf("no fixture event fits %d bytes", limit)
+		}
+		return selected, selectedBytes
+	}
+
+	maxEventBytes := contribution(makeEvent(0, 60*1024))
+	minEventBytes := contribution(makeEvent(0, 0))
+	pending := make([]transcriptcapture.PendingEvent, 0, maxCaptureAppendBatchEntries)
+	accountedBytes := envelopeBytes
+	for maxCaptureAppendRequestBytes-accountedBytes > 2*maxEventBytes {
+		event := makeEvent(len(pending), 60*1024)
+		pending = append(pending, event)
+		accountedBytes += contribution(event)
+	}
+	remaining := maxCaptureAppendRequestBytes - accountedBytes
+	firstLimit := min(maxEventBytes, remaining-minEventBytes)
+	first, firstBytes := findEvent(len(pending), firstLimit)
+	pending = append(pending, first)
+	accountedBytes += firstBytes
+	second, secondBytes := findEvent(len(pending), maxCaptureAppendRequestBytes-accountedBytes)
+	pending = append(pending, second)
+	accountedBytes += secondBytes
+	if len(pending) > maxCaptureAppendBatchEntries || accountedBytes > maxCaptureAppendRequestBytes ||
+		accountedBytes+len(pending)-1 <= maxCaptureAppendRequestBytes {
+		t.Fatalf("separator fixture events/accounted/encoded = %d/%d/%d",
+			len(pending), accountedBytes, accountedBytes+len(pending)-1)
+	}
+
+	batches, _, err := capturePendingAppendBatches(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) < 2 {
+		t.Fatalf("separator-aware batching produced %d batch(es)", len(batches))
+	}
+	for index, batch := range batches {
+		raw, err := json.Marshal(struct {
+			Entries []client.AppendTranscriptEntryInput `json:"entries"`
+		}{Entries: batch.inputs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) > maxCaptureAppendRequestBytes {
+			t.Fatalf("batch %d bytes = %d, limit = %d", index, len(raw), maxCaptureAppendRequestBytes)
+		}
+	}
+}
+
 func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".witself")
 	t.Setenv("WITSELF_HOME", home)
 	var mu sync.Mutex
 	var appended []map[string]any
+	var activityBodies []map[string]any
 	routeMisses := 0
+	createRequests := 0
+	appendRequests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
 			routeMisses++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode activity: %v", err)
+			}
+			activityBodies = append(activityBodies, body)
 			http.NotFound(w, r) // pre-activity server during a rolling upgrade
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			createRequests++
 			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			appendRequests++
 			var body struct {
 				Entries []map[string]any `json:"entries"`
 			}
@@ -1198,14 +1414,370 @@ func TestCaptureOutboxFlushesWholeVisibleTurn(t *testing.T) {
 	if len(appended) != 3 {
 		t.Fatalf("appended = %#v", appended)
 	}
-	if routeMisses != 3 {
-		t.Fatalf("activity compatibility probes = %d, want 3", routeMisses)
+	if routeMisses != 1 || len(activityBodies) != 1 || activityBodies[0]["event"] != "Stop" {
+		t.Fatalf("latest activity compatibility probe = %d / %#v, want one Stop", routeMisses, activityBodies)
+	}
+	if createRequests != 1 || appendRequests != 1 {
+		t.Fatalf("transcript create/append requests = %d/%d, want 1/1", createRequests, appendRequests)
 	}
 	if appended[1]["body"] != "the full original prompt" || appended[2]["body"] != "the full final response" {
 		t.Fatalf("visible turn = %#v", appended)
 	}
 	if appended[2]["reply_to_external_id"] != appended[1]["external_id"] {
 		t.Fatalf("reply link = %#v", appended[2])
+	}
+}
+
+func TestCaptureFlushBadRequestIsolatesRejectedMiddleEvent(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	var rejectedEventID string
+	var requests [][]string
+	touches := 0
+	creates := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			touches++
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-09-01T12:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			creates++
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []struct {
+					ExternalID string `json:"external_id"`
+				} `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode append: %v", err)
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			ids := make([]string, len(body.Entries))
+			rejected := false
+			for index, entry := range body.Entries {
+				ids[index] = entry.ExternalID
+				if strings.HasPrefix(entry.ExternalID, rejectedEventID+":") {
+					rejected = true
+				}
+			}
+			requests = append(requests, ids)
+			if rejected {
+				http.Error(w, "poison capture event", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeClaudeCode, srv.URL)
+
+	events := make([]transcriptcapture.Event, 3)
+	for index := range events {
+		event, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+			`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself"}`,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		events[index] = event
+	}
+	rejectedEventID = events[1].ID
+
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}); code != 1 {
+		t.Fatalf("isolating flush code = %d, want 1", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeClaudeCode, rejectedEventID)
+	wantRequests := [][]string{
+		{events[0].ID + ":0", events[1].ID + ":0", events[2].ID + ":0"},
+		{events[0].ID + ":0"},
+		{events[1].ID + ":0"},
+		{events[2].ID + ":0"},
+	}
+	if len(requests) != len(wantRequests) {
+		t.Fatalf("append requests = %#v, want %#v", requests, wantRequests)
+	}
+	for index := range wantRequests {
+		if !slices.Equal(requests[index], wantRequests[index]) {
+			t.Fatalf("append request %d = %v, want %v", index, requests[index], wantRequests[index])
+		}
+	}
+	if touches != 1 || creates != 1 {
+		t.Fatalf("touch/create attempts = %d/%d, want 1/1", touches, creates)
+	}
+
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}); code != 1 {
+		t.Fatalf("poison retry flush code = %d, want 1", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeClaudeCode, rejectedEventID)
+	if len(requests) != 5 || !slices.Equal(requests[4], []string{rejectedEventID + ":0"}) {
+		t.Fatalf("poison retry requests = %#v", requests)
+	}
+}
+
+func TestCaptureFlushRejectedFirstEventDoesNotSkipLaterSameTranscriptEvents(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	var rejectedEventID string
+	var requests [][]string
+	touches := 0
+	creates := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			touches++
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-09-01T12:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			creates++
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []struct {
+					ExternalID string `json:"external_id"`
+				} `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode append: %v", err)
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			ids := make([]string, len(body.Entries))
+			rejected := false
+			for index, entry := range body.Entries {
+				ids[index] = entry.ExternalID
+				if strings.HasPrefix(entry.ExternalID, rejectedEventID+":") {
+					rejected = true
+				}
+			}
+			requests = append(requests, ids)
+			if rejected {
+				http.Error(w, "poison first event", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeClaudeCode, srv.URL)
+
+	first, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-a","hook_event_name":"SessionStart","cwd":"/src/a"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	separator, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-b","hook_event_name":"SessionStart","cwd":"/src/b"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-a","hook_event_name":"SessionStart","cwd":"/src/a"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-a","hook_event_name":"SessionStart","cwd":"/src/a"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedEventID = first.ID
+
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}); code != 1 {
+		t.Fatalf("first-poison flush code = %d, want 1", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeClaudeCode, first.ID)
+	wantRequests := [][]string{
+		{first.ID + ":0"},
+		{separator.ID + ":0"},
+		{second.ID + ":0", third.ID + ":0"},
+	}
+	if len(requests) != len(wantRequests) {
+		t.Fatalf("append requests = %#v, want %#v", requests, wantRequests)
+	}
+	for index := range wantRequests {
+		if !slices.Equal(requests[index], wantRequests[index]) {
+			t.Fatalf("append request %d = %v, want %v", index, requests[index], wantRequests[index])
+		}
+	}
+	if touches != 2 || creates != 2 {
+		t.Fatalf("touch/create attempts = %d/%d, want 2/2", touches, creates)
+	}
+}
+
+func TestCaptureFlushRejectedOversizedEventSkipsItsLaterBatchesButContinues(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	var requests [][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-09-01T12:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []struct {
+					ExternalID string `json:"external_id"`
+				} `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode append: %v", err)
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			ids := make([]string, len(body.Entries))
+			rejected := false
+			for index, entry := range body.Entries {
+				ids[index] = entry.ExternalID
+				if strings.HasPrefix(entry.ExternalID, "recovered-000:") {
+					rejected = true
+				}
+			}
+			requests = append(requests, ids)
+			if rejected {
+				http.Error(w, "poison oversized event", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeClaudeCode, srv.URL)
+
+	oversized, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized.RecoveredMessages = make([]transcriptcapture.RecoveredMessage, maxCaptureAppendBatchEntries)
+	for index := range oversized.RecoveredMessages {
+		oversized.RecoveredMessages[index] = transcriptcapture.RecoveredMessage{
+			ID: fmt.Sprintf("recovered-%03d", index), Kind: "message.assistant", Role: "assistant", Body: "small",
+		}
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeClaudeCode)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("oversized pending event = %d / %v", len(pending), err)
+	}
+	raw, err := json.Marshal(oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending[0].Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	following, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+		`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}); code != 1 {
+		t.Fatalf("oversized-poison flush code = %d, want 1", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeClaudeCode, oversized.ID)
+	if len(requests) != 2 || len(requests[0]) != maxCaptureAppendBatchEntries ||
+		!slices.Equal(requests[1], []string{following.ID + ":0"}) {
+		t.Fatalf("oversized rejection requests = %#v", requests)
+	}
+	for _, request := range requests {
+		if slices.Contains(request, oversized.ID+":0") {
+			t.Fatalf("later oversized sub-batch was uploaded: %#v", requests)
+		}
+	}
+}
+
+func TestCaptureFlushSlicesSameTranscriptGroupsAt256Events(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	var batchSizes []int
+	touches := 0
+	creates := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			touches++
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-09-01T12:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			creates++
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []json.RawMessage `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode append: %v", err)
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			batchSizes = append(batchSizes, len(body.Entries))
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeClaudeCode, srv.URL)
+
+	for range maxCaptureFlushSliceEvents + 1 {
+		if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeClaudeCode, []byte(
+			`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself"}`,
+		)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}); code != 0 {
+		t.Fatalf("sliced flush code = %d", code)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 || !slices.Equal(batchSizes, []int{100, 100, 56, 1}) {
+		t.Fatalf("pending/batch sizes = %d/%v", len(pending), batchSizes)
+	}
+	if touches != 1 || creates != 1 {
+		t.Fatalf("touch/create attempts = %d/%d, want 1/1", touches, creates)
+	}
+}
+
+func configureCaptureFlushTest(t *testing.T, runtime, endpoint string) {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	location, err := transcriptcapture.EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+		Runtime: runtime, CaptureMode: transcriptcapture.ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: location,
+		Endpoint: endpoint, TokenFile: tokenPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertOnlyCaptureEventPending(t *testing.T, runtime, eventID string) {
+	t.Helper()
+	pending, err := transcriptcapture.Pending(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Event.ID != eventID {
+		t.Fatalf("pending capture events = %#v, want only %q", pending, eventID)
 	}
 }
 
@@ -1335,13 +1907,63 @@ func TestPrepareTranscriptFlushRejectsBindingChanges(t *testing.T) {
 	}
 	pending := []transcriptcapture.PendingEvent{{Path: "/unused/event.json", Event: event}}
 	blocked := map[string]error{}
+	held := map[string]error{}
 	ready, err := prepareTranscriptFlushEvents(pending, transcriptcapture.Config{
 		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", Realm: "default",
 		Agent: "new-agent", AgentID: "agent_new", AgentName: "new-agent",
 		Location: transcriptcapture.Location{ID: "loc_1", Name: "home"},
-	}, blocked)
-	if err == nil || !strings.Contains(err.Error(), "does not match") || len(ready) != 0 || len(blocked) != 1 {
-		t.Fatalf("binding-change preparation = ready %#v / blocked %#v / err %v", ready, blocked, err)
+	}, blocked, held)
+	if err == nil || !strings.Contains(err.Error(), "does not match") || len(ready) != 0 || len(blocked) != 0 || len(held) != 1 {
+		t.Fatalf("binding-change preparation = ready %#v / blocked %#v / held %#v / err %v", ready, blocked, held, err)
+	}
+	if hasUnblockedCaptureEvent(pending, blocked, held) || countBlockedCaptureEvents(pending, blocked, held) != 1 {
+		t.Fatal("a held event counted as uploadable work")
+	}
+}
+
+// Events captured while the runtime was temporarily bound to another agent
+// share the identity-free transcript key with the installed identity's later
+// events of the same session. Holding them aside must not block those events:
+// on the founder's machine 39 such events blocked 1,201 later events for ten
+// hours (issue #323).
+func TestPrepareTranscriptFlushHoldsMismatchedEventsWithoutBlockingTheTranscript(t *testing.T) {
+	cfg := transcriptcapture.Config{
+		Runtime: transcriptcapture.RuntimeClaudeCode, Account: "default", Realm: "default",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott",
+		Location: transcriptcapture.Location{ID: "loc_1", Name: "home"},
+	}
+	matching := transcriptcapture.Event{
+		Runtime: cfg.Runtime, Account: cfg.Account, Realm: cfg.Realm,
+		Agent: cfg.Agent, AgentID: cfg.AgentID, AgentName: cfg.AgentName, Location: cfg.Location,
+		SessionID: "session-shared", ID: "evt_scott", HookEvent: "SessionStart", Kind: "session.started", Role: "system",
+	}
+	foreign := matching
+	foreign.ID = "evt_foreign"
+	foreign.Agent, foreign.AgentID, foreign.AgentName = "cc-accept-1", "agent_foreign", "cc-accept-1"
+	pending := []transcriptcapture.PendingEvent{
+		{Path: "/unused/foreign.json", Event: foreign},
+		{Path: "/unused/scott.json", Event: matching},
+	}
+	blocked := map[string]error{}
+	held := map[string]error{}
+	ready, err := prepareTranscriptFlushEvents(pending, cfg, blocked, held)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("held preparation err = %v", err)
+	}
+	if len(ready) != 1 || ready[0].Event.ID != matching.ID {
+		t.Fatalf("installed identity's event was not selected: ready %#v", ready)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("mismatched event blocked the shared transcript: %#v", blocked)
+	}
+	if _, isHeld := held["/unused/foreign.json"]; !isHeld || len(held) != 1 {
+		t.Fatalf("held = %#v", held)
+	}
+	if hasUnblockedCaptureEvent(pending[:1], blocked, held) {
+		t.Fatal("a held-only outbox would respawn a successor flush forever")
+	}
+	if countBlockedCaptureEvents(pending, blocked, held) != 1 {
+		t.Fatalf("deferred count = %d, want 1", countBlockedCaptureEvents(pending, blocked, held))
 	}
 }
 
@@ -1413,20 +2035,20 @@ func TestPrepareTranscriptFlushBlocksOnlyTheDeferredTranscript(t *testing.T) {
 		{Path: "/unused/a.json", Event: deferred},
 		{Path: "/unused/b.json", Event: readyEvent},
 	}
-	ready, err := prepareTranscriptFlushEvents(pending, cfg, blocked)
+	ready, err := prepareTranscriptFlushEvents(pending, cfg, blocked, map[string]error{})
 	if err != nil || len(ready) != 1 || ready[0].Event.ID != readyEvent.ID {
 		t.Fatalf("per-transcript preparation = ready %#v / blocked %#v / err %v", ready, blocked, err)
 	}
 
 	seen := map[string]struct{}{pending[0].Path: {}}
 	reopenRetryableBlockedTranscripts(pending[:1], blocked, seen)
-	if hasUnblockedCaptureEvent(pending[:1], blocked) {
+	if hasUnblockedCaptureEvent(pending[:1], blocked, map[string]error{}) {
 		t.Fatal("deferred-only outbox became uploadable without a new hook")
 	}
 	newSameTranscript := transcriptcapture.PendingEvent{Path: "/unused/a-new.json", Event: deferred}
 	newSameTranscript.Event.ID = "evt_a_new"
 	reopenRetryableBlockedTranscripts([]transcriptcapture.PendingEvent{pending[0], newSameTranscript}, blocked, seen)
-	if !hasUnblockedCaptureEvent([]transcriptcapture.PendingEvent{pending[0], newSameTranscript}, blocked) {
+	if !hasUnblockedCaptureEvent([]transcriptcapture.PendingEvent{pending[0], newSameTranscript}, blocked, map[string]error{}) {
 		t.Fatal("a new same-transcript hook did not reopen retryable finalization")
 	}
 }
@@ -1597,9 +2219,19 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	var once sync.Once
 	var mu sync.Mutex
 	appended := 0
+	touches := 0
+	creates := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			mu.Lock()
+			touches++
+			mu.Unlock()
+			http.NotFound(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			mu.Lock()
+			creates++
+			mu.Unlock()
 			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
 			once.Do(func() {
@@ -1642,8 +2274,16 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("flush did not start")
 	}
-	if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCodex, []byte(`{"session_id":"session-2","hook_event_name":"SessionStart"}`)); err != nil {
-		t.Fatal(err)
+	// Queued while the first iteration is mid-flight: one more event for the
+	// transcript already being drained, and one for a transcript this run has
+	// not seen yet. Both must land in the same foreground invocation.
+	for _, raw := range []string{
+		`{"session_id":"session-1","hook_event_name":"SessionStart"}`,
+		`{"session_id":"session-2","hook_event_name":"SessionStart"}`,
+	} {
+		if _, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCodex, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	close(resume)
 	select {
@@ -1660,8 +2300,11 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(pending) != 0 || appended != 2 {
-		t.Fatalf("pending/appended = %d/%d", len(pending), appended)
+	// session-1 is touched once per outer iteration (twice) and created once;
+	// session-2 is touched and created once in the second iteration.
+	if len(pending) != 0 || appended != 3 || touches != 3 || creates != 2 {
+		t.Fatalf("pending/appended/touched/created = %d/%d/%d/%d, want 0/3/3/2",
+			len(pending), appended, touches, creates)
 	}
 }
 

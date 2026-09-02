@@ -134,6 +134,35 @@ type PendingEvent struct {
 	Event Event
 }
 
+// ReadinessIndex answers pending-event upload gates without rescanning the
+// complete outbox for every event.
+type ReadinessIndex struct {
+	sessionEnds     map[readinessSessionKey]time.Time
+	terminals       map[readinessTurnKey]time.Time
+	promptTimelines map[readinessSessionKey]readinessPromptTimeline
+}
+
+type readinessSessionKey struct {
+	transcriptID string
+	sessionID    string
+}
+
+type readinessTurnKey struct {
+	session readinessSessionKey
+	turnID  string
+}
+
+type readinessPrompt struct {
+	occurredAt time.Time
+	turnID     string
+}
+
+type readinessPromptTimeline struct {
+	prompts            []readinessPrompt
+	suffixFirstTurn    []string
+	suffixHasOtherTurn []bool
+}
+
 type hookInput struct {
 	SessionID            string          `json:"session_id"`
 	SessionIDCamel       string          `json:"sessionId"`
@@ -2213,35 +2242,102 @@ func RedactPendingTurn(runtime, sessionID, turnID string) error {
 	return nil
 }
 
-// PendingEventUploadReady reports whether enough of the local provider turn is
-// present to know whether its content must be suppressed. Turn content stays
-// local until AgentResponse, Stop/StopFailure, SessionEnd, or the next real
-// user prompt. This closes the prompt-enqueue versus later secret-tool race.
-func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
+// NewReadinessIndex builds the per-flush lookup used by UploadReady. Building
+// it scans the pending slice once, then sorts each session's prompt timeline.
+func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
+	index := &ReadinessIndex{
+		sessionEnds:     make(map[readinessSessionKey]time.Time),
+		terminals:       make(map[readinessTurnKey]time.Time),
+		promptTimelines: make(map[readinessSessionKey]readinessPromptTimeline),
+	}
+	promptsBySession := make(map[readinessSessionKey][]readinessPrompt)
+	for _, pending := range all {
+		event := pending.Event
+		session := readinessSessionKey{
+			transcriptID: event.TranscriptExternalID(),
+			sessionID:    event.SessionID,
+		}
+		switch event.HookEvent {
+		case "SessionEnd":
+			if latest, exists := index.sessionEnds[session]; !exists || event.OccurredAt.After(latest) {
+				index.sessionEnds[session] = event.OccurredAt
+			}
+		case "AgentResponse", "Stop", "StopFailure":
+			turn := readinessTurnKey{session: session, turnID: event.TurnID}
+			if latest, exists := index.terminals[turn]; !exists || event.OccurredAt.After(latest) {
+				index.terminals[turn] = event.OccurredAt
+			}
+		case "UserPromptSubmit":
+			promptsBySession[session] = append(promptsBySession[session], readinessPrompt{
+				occurredAt: event.OccurredAt,
+				turnID:     event.TurnID,
+			})
+		}
+	}
+	for session, prompts := range promptsBySession {
+		sort.SliceStable(prompts, func(i, j int) bool {
+			return prompts[i].occurredAt.Before(prompts[j].occurredAt)
+		})
+		timeline := readinessPromptTimeline{
+			prompts:            prompts,
+			suffixFirstTurn:    make([]string, len(prompts)),
+			suffixHasOtherTurn: make([]bool, len(prompts)),
+		}
+		for i := len(prompts) - 1; i >= 0; i-- {
+			timeline.suffixFirstTurn[i] = prompts[i].turnID
+			if i+1 < len(prompts) {
+				timeline.suffixFirstTurn[i] = timeline.suffixFirstTurn[i+1]
+				timeline.suffixHasOtherTurn[i] = timeline.suffixHasOtherTurn[i+1] ||
+					prompts[i].turnID != timeline.suffixFirstTurn[i+1]
+			}
+		}
+		index.promptTimelines[session] = timeline
+	}
+	return index
+}
+
+// UploadReady reports whether enough of the local provider turn is present to
+// know whether its content must be suppressed. Turn content stays local until
+// AgentResponse, Stop/StopFailure, SessionEnd, or the next real user prompt.
+// This closes the prompt-enqueue versus later secret-tool race.
+func (index *ReadinessIndex) UploadReady(current PendingEvent) bool {
 	event := current.Event
 	if strings.TrimSpace(event.TurnID) == "" {
 		return true
 	}
-	transcriptID := event.TranscriptExternalID()
-	for _, candidate := range all {
-		other := candidate.Event
-		if other.TranscriptExternalID() != transcriptID || other.SessionID != event.SessionID ||
-			other.OccurredAt.Before(event.OccurredAt) {
-			continue
-		}
-		if other.HookEvent == "SessionEnd" {
-			return true
-		}
-		if other.TurnID == event.TurnID && (other.HookEvent == "AgentResponse" ||
-			other.HookEvent == "Stop" || other.HookEvent == "StopFailure") {
-			return true
-		}
-		if other.HookEvent == "UserPromptSubmit" && other.TurnID != event.TurnID &&
-			other.OccurredAt.After(event.OccurredAt) {
-			return true
-		}
+	session := readinessSessionKey{
+		transcriptID: event.TranscriptExternalID(),
+		sessionID:    event.SessionID,
+	}
+	if endedAt, exists := index.sessionEnds[session]; exists && !endedAt.Before(event.OccurredAt) {
+		return true
+	}
+	turn := readinessTurnKey{session: session, turnID: event.TurnID}
+	terminalAt, terminalExists := index.terminals[turn]
+	if terminalExists && !terminalAt.Before(event.OccurredAt) {
+		return true
+	}
+	if timeline, exists := index.promptTimelines[session]; exists &&
+		timeline.hasDifferentTurnAfter(event.OccurredAt, event.TurnID) {
+		return true
 	}
 	return false
+}
+
+func (timeline readinessPromptTimeline) hasDifferentTurnAfter(occurredAt time.Time, turnID string) bool {
+	firstLater := sort.Search(len(timeline.prompts), func(i int) bool {
+		return timeline.prompts[i].occurredAt.After(occurredAt)
+	})
+	if firstLater == len(timeline.prompts) {
+		return false
+	}
+	return timeline.suffixFirstTurn[firstLater] != turnID || timeline.suffixHasOtherTurn[firstLater]
+}
+
+// PendingEventUploadReady retains the original convenience API. Flush callers
+// should build one ReadinessIndex and reuse it for the complete pending slice.
+func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
+	return NewReadinessIndex(all).UploadReady(current)
 }
 
 // FinalizePending prepares one locally durable event for upload. Grok writes

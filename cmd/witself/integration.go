@@ -31,6 +31,7 @@ const (
 	foregroundFlushLockPollPeriod = 50 * time.Millisecond
 	maxCaptureAppendRequestBytes  = 7 * 1024 * 1024
 	maxCaptureAppendBatchEntries  = 100
+	maxCaptureFlushSliceEvents    = 256
 )
 
 // GUI-backed runtime CLIs can take several seconds to cold-start before their
@@ -2139,9 +2140,11 @@ func transcriptFlush(args []string) int {
 		return 1
 	}
 	blockedTranscripts := map[string]error{}
+	heldPaths := map[string]error{}
+	createdTranscripts := map[string]client.Transcript{}
 	seenPaths := map[string]struct{}{}
 	rememberCapturePaths(pending, seenPaths)
-	ready, prepareErr := prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts)
+	ready, prepareErr := prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts, heldPaths)
 	var deferredErr error
 	if prepareErr != nil {
 		deferredErr = prepareErr
@@ -2161,8 +2164,11 @@ func transcriptFlush(args []string) int {
 			connected = true
 		}
 		activityRetryPending := false
-		for _, pendingEvent := range ready {
-			event := pendingEvent.Event
+		activityErrorReported := map[string]struct{}{}
+		activityAttempts := map[string]captureActivityAttempt{}
+		for _, selection := range latestCaptureActivitySelections(ready) {
+			event := selection.Event
+			transcriptID := event.TranscriptExternalID()
 			observation := event.ActivityObservation()
 			_, activityErr := client.TouchAgentActivity(ctx, conn.Endpoint, conn.Token, client.AgentActivityInput{
 				Runtime: observation.Runtime, LocationID: observation.LocationID, Location: observation.Location,
@@ -2178,54 +2184,128 @@ func transcriptFlush(args []string) int {
 					activityErr = nil
 				}
 			}
-			tr, err := client.CreateTranscript(ctx, conn.Endpoint, conn.Token, client.CreateTranscriptInput{
-				ExternalID: event.TranscriptExternalID(),
-				Title:      event.TranscriptTitle(),
-				Metadata:   event.TranscriptMetadata(),
-			})
-			if err != nil {
-				if errors.Is(err, client.ErrBadRequest) {
-					// One rejected event must not wedge every other transcript's
-					// flush; block this transcript for the run and move on.
-					fmt.Fprintf(os.Stderr, "witself: create capture transcript rejected: %v\n", err)
-					blockedTranscripts[event.TranscriptExternalID()] = err
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "witself: create capture transcript: %v\n", err)
-				return 1
+			activityAttempts[transcriptID] = captureActivityAttempt{err: activityErr}
+		}
+
+		for first := 0; first < len(ready); {
+			transcriptID := ready[first].Event.TranscriptExternalID()
+			last := first + 1
+			for last < len(ready) && ready[last].Event.TranscriptExternalID() == transcriptID {
+				last++
 			}
-			captureEntries := event.Entries()
-			inputBatches, err := captureAppendBatches(captureEntries)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "witself: prepare capture event: %v\n", err)
-				return 1
-			}
-			appendRejected := false
-			for _, inputs := range inputBatches {
-				if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, inputs); err != nil {
+			group := ready[first:last]
+			first = last
+
+			tr, created := createdTranscripts[transcriptID]
+			if !created {
+				event := group[0].Event
+				tr, err = client.CreateTranscript(ctx, conn.Endpoint, conn.Token, client.CreateTranscriptInput{
+					ExternalID: transcriptID,
+					Title:      event.TranscriptTitle(),
+					Metadata:   event.TranscriptMetadata(),
+				})
+				if err != nil {
 					if errors.Is(err, client.ErrBadRequest) {
-						fmt.Fprintf(os.Stderr, "witself: append capture event rejected: %v\n", err)
-						blockedTranscripts[event.TranscriptExternalID()] = err
-						appendRejected = true
-						break
+						fmt.Fprintf(os.Stderr, "witself: create capture transcript rejected: %v\n", err)
+						blockedTranscripts[transcriptID] = err
+						continue
 					}
-					fmt.Fprintf(os.Stderr, "witself: append capture event: %v\n", err)
+					fmt.Fprintf(os.Stderr, "witself: create capture transcript: %v\n", err)
 					return 1
 				}
+				createdTranscripts[transcriptID] = tr
 			}
-			if appendRejected {
-				continue
+
+			activityErr := activityAttempts[transcriptID].err
+			rejectedPaths := map[string]struct{}{}
+			for sliceFirst := 0; sliceFirst < len(group); sliceFirst += maxCaptureFlushSliceEvents {
+				sliceLast := min(sliceFirst+maxCaptureFlushSliceEvents, len(group))
+				inputBatches, remainingBatches, err := capturePendingAppendBatches(group[sliceFirst:sliceLast])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "witself: prepare capture events: %v\n", err)
+					return 1
+				}
+				for _, batch := range inputBatches {
+					if len(batch.events) == 1 {
+						if _, rejected := rejectedPaths[batch.events[0].Path]; rejected {
+							continue
+						}
+					}
+					if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, batch.inputs); err != nil {
+						if !errors.Is(err, client.ErrBadRequest) {
+							fmt.Fprintf(os.Stderr, "witself: append capture events: %v\n", err)
+							return 1
+						}
+						fmt.Fprintf(os.Stderr, "witself: append capture events rejected: %v\n", err)
+						if len(batch.events) == 1 {
+							blockedTranscripts[transcriptID] = err
+							rejectedPaths[batch.events[0].Path] = struct{}{}
+							continue
+						}
+						for _, pendingEvent := range batch.events {
+							rejected, appendErr := appendSingleCaptureEvent(ctx, conn, tr.ID, pendingEvent)
+							if appendErr != nil {
+								if !rejected {
+									fmt.Fprintf(os.Stderr, "witself: append capture event: %v\n", appendErr)
+									return 1
+								}
+								fmt.Fprintf(os.Stderr, "witself: append capture event rejected: %v\n", appendErr)
+								blockedTranscripts[transcriptID] = appendErr
+								rejectedPaths[pendingEvent.Path] = struct{}{}
+								continue
+							}
+							if activityErr != nil {
+								continue
+							}
+							if err := transcriptcapture.RemovePending(pendingEvent.Path); err != nil {
+								fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
+								return 1
+							}
+							delete(remainingBatches, pendingEvent.Path)
+							flushed++
+						}
+						continue
+					}
+					if activityErr != nil {
+						continue
+					}
+					for _, pendingEvent := range batch.events {
+						remainingBatches[pendingEvent.Path]--
+						if remainingBatches[pendingEvent.Path] != 0 {
+							continue
+						}
+						if err := transcriptcapture.RemovePending(pendingEvent.Path); err != nil {
+							fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
+							return 1
+						}
+						delete(remainingBatches, pendingEvent.Path)
+						flushed++
+					}
+				}
+				if activityErr == nil {
+					// Events always produce at least one entry today. Retain this
+					// zero-entry path handling so the acknowledgement rule remains
+					// complete if a future event intentionally produces none.
+					for path, remaining := range remainingBatches {
+						if remaining != 0 {
+							continue
+						}
+						if err := transcriptcapture.RemovePending(path); err != nil {
+							fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
+							return 1
+						}
+						delete(remainingBatches, path)
+						flushed++
+					}
+				}
 			}
 			if activityErr != nil {
-				fmt.Fprintf(os.Stderr, "witself: record agent activity: %v\n", activityErr)
+				if _, reported := activityErrorReported[transcriptID]; !reported {
+					fmt.Fprintf(os.Stderr, "witself: record agent activity: %v\n", activityErr)
+					activityErrorReported[transcriptID] = struct{}{}
+				}
 				activityRetryPending = true
-				continue
 			}
-			if err := transcriptcapture.RemovePending(pendingEvent.Path); err != nil {
-				fmt.Fprintf(os.Stderr, "witself: acknowledge capture event: %v\n", err)
-				return 1
-			}
-			flushed++
 		}
 		if activityRetryPending {
 			return 1
@@ -2236,7 +2316,7 @@ func transcriptFlush(args []string) int {
 			return 1
 		}
 		reopenRetryableBlockedTranscripts(pending, blockedTranscripts, seenPaths)
-		ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts)
+		ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts, heldPaths)
 		if deferredErr == nil && prepareErr != nil {
 			deferredErr = prepareErr
 		}
@@ -2253,13 +2333,13 @@ func transcriptFlush(args []string) int {
 		return 1
 	}
 	reopenRetryableBlockedTranscripts(remaining, blockedTranscripts, seenPaths)
-	if hasUnblockedCaptureEvent(remaining, blockedTranscripts) {
+	if hasUnblockedCaptureEvent(remaining, blockedTranscripts, heldPaths) {
 		if err := startBackgroundFlush(runtimeName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 			return 1
 		}
 	}
-	deferred := countBlockedCaptureEvents(remaining, blockedTranscripts)
+	deferred := countBlockedCaptureEvents(remaining, blockedTranscripts, heldPaths)
 	if deferred > 0 {
 		if deferredErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
@@ -2269,6 +2349,42 @@ func transcriptFlush(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)\n", flushed, runtimeName)
 	return 0
+}
+
+type captureActivityAttempt struct {
+	err error
+}
+
+type captureActivitySelection struct {
+	index int
+	transcriptcapture.PendingEvent
+}
+
+// latestCaptureActivitySelections retains the first event at an equal maximum
+// timestamp. The activity projection advances only on a strictly newer
+// EventOccurredAt, so this matches the event that the old per-event loop left
+// visible while reducing the HTTP work to one request per transcript. The
+// selections are emitted at their original event indexes so equal maxima from
+// different transcripts retain their old request order too.
+func latestCaptureActivitySelections(
+	ready []transcriptcapture.PendingEvent,
+) []captureActivitySelection {
+	latest := make(map[string]captureActivitySelection)
+	for index, pendingEvent := range ready {
+		transcriptID := pendingEvent.Event.TranscriptExternalID()
+		selection, exists := latest[transcriptID]
+		if !exists || pendingEvent.Event.OccurredAt.After(selection.Event.OccurredAt) {
+			latest[transcriptID] = captureActivitySelection{index: index, PendingEvent: pendingEvent}
+		}
+	}
+	selections := make([]captureActivitySelection, 0, len(latest))
+	for index, pendingEvent := range ready {
+		selection, exists := latest[pendingEvent.Event.TranscriptExternalID()]
+		if exists && selection.index == index {
+			selections = append(selections, selection)
+		}
+	}
+	return selections
 }
 
 func transcriptFlushContext(detached bool) (context.Context, context.CancelFunc) {
@@ -2281,31 +2397,41 @@ func transcriptFlushContext(detached bool) (context.Context, context.CancelFunc)
 	return context.WithCancel(context.Background())
 }
 
+// prepareTranscriptFlushEvents selects the events this flush may upload.
+// blocked is keyed by transcript and covers retryable transcript-wide waits
+// (turn gates, deferred finalization) and per-run rejections. held is keyed
+// by outbox path: an event captured under a different runtime binding can
+// never be uploaded with the installed credential, and the transcript key is
+// identity-free, so holding it aside must not block the installed identity's
+// later events in the same session. Held events stay pending for a future
+// binding that matches them and never count as uploadable work.
 func prepareTranscriptFlushEvents(
 	pending []transcriptcapture.PendingEvent,
 	cfg transcriptcapture.Config,
 	blocked map[string]error,
+	held map[string]error,
 ) ([]transcriptcapture.PendingEvent, error) {
 	ready := make([]transcriptcapture.PendingEvent, 0, len(pending))
+	readiness := transcriptcapture.NewReadinessIndex(pending)
 	var firstErr error
 	for _, pendingEvent := range pending {
 		transcriptID := pendingEvent.Event.TranscriptExternalID()
 		if _, exists := blocked[transcriptID]; exists {
 			continue
 		}
-		if !transcriptcapture.PendingEventUploadReady(pendingEvent, pending) {
+		if err := captureEventBindingError(pendingEvent.Event, cfg); err != nil {
+			held[pendingEvent.Path] = err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !readiness.UploadReady(pendingEvent) {
 			// A prompt and its turn stay local until a terminal fence reveals
 			// whether a later sealed tool requires synchronous suppression.
 			// A later hook creates a new outbox path and reopens this retryable
 			// transcript through the normal background-flush logic.
 			blocked[transcriptID] = nil
-			continue
-		}
-		if err := captureEventBindingError(pendingEvent.Event, cfg); err != nil {
-			blocked[transcriptID] = err
-			if firstErr == nil {
-				firstErr = err
-			}
 			continue
 		}
 		finalized, uploadReady, err := transcriptcapture.FinalizePending(pendingEvent)
@@ -2353,8 +2479,11 @@ func stableCaptureIdentityMatches(eventID, configID, eventName, configName strin
 	return false
 }
 
-func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked map[string]error) bool {
+func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked, held map[string]error) bool {
 	for _, pendingEvent := range pending {
+		if _, isHeld := held[pendingEvent.Path]; isHeld {
+			continue
+		}
 		if _, exists := blocked[pendingEvent.Event.TranscriptExternalID()]; !exists {
 			return true
 		}
@@ -2362,14 +2491,131 @@ func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked 
 	return false
 }
 
-func countBlockedCaptureEvents(pending []transcriptcapture.PendingEvent, blocked map[string]error) int {
+func countBlockedCaptureEvents(pending []transcriptcapture.PendingEvent, blocked, held map[string]error) int {
 	count := 0
 	for _, pendingEvent := range pending {
+		if _, isHeld := held[pendingEvent.Path]; isHeld {
+			count++
+			continue
+		}
 		if _, exists := blocked[pendingEvent.Event.TranscriptExternalID()]; exists {
 			count++
 		}
 	}
 	return count
+}
+
+type pendingCaptureAppendBatch struct {
+	inputs []client.AppendTranscriptEntryInput
+	events []transcriptcapture.PendingEvent
+}
+
+// capturePendingAppendBatches coalesces whole events in pending order. An
+// event that exceeds either append limit by itself retains the exact batches
+// produced by the old per-event path; only such an event may span batches.
+func capturePendingAppendBatches(
+	pending []transcriptcapture.PendingEvent,
+) ([]pendingCaptureAppendBatch, map[string]int, error) {
+	const envelopeBytes = len(`{"entries":[]}`)
+	batches := make([]pendingCaptureAppendBatch, 0, len(pending)/maxCaptureAppendBatchEntries+1)
+	remainingBatches := make(map[string]int, len(pending))
+	current := pendingCaptureAppendBatch{
+		inputs: make([]client.AppendTranscriptEntryInput, 0, min(len(pending), maxCaptureAppendBatchEntries)),
+		events: make([]transcriptcapture.PendingEvent, 0, min(len(pending), maxCaptureAppendBatchEntries)),
+	}
+	currentBytes := envelopeBytes
+	flushCurrent := func() {
+		if len(current.inputs) == 0 {
+			return
+		}
+		batches = append(batches, current)
+		current = pendingCaptureAppendBatch{
+			inputs: make([]client.AppendTranscriptEntryInput, 0, min(len(pending), maxCaptureAppendBatchEntries)),
+			events: make([]transcriptcapture.PendingEvent, 0, min(len(pending), maxCaptureAppendBatchEntries)),
+		}
+		currentBytes = envelopeBytes
+	}
+	for _, pendingEvent := range pending {
+		remainingBatches[pendingEvent.Path] = 0
+		eventBatches, err := captureAppendBatches(pendingEvent.Event.Entries())
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(eventBatches) == 0 {
+			continue
+		}
+		if len(eventBatches) > 1 {
+			flushCurrent()
+			for _, inputs := range eventBatches {
+				batches = append(batches, pendingCaptureAppendBatch{
+					inputs: inputs,
+					events: []transcriptcapture.PendingEvent{pendingEvent},
+				})
+				remainingBatches[pendingEvent.Path]++
+			}
+			continue
+		}
+
+		inputs := eventBatches[0]
+		eventBytes, err := captureAppendRequestBytes(inputs)
+		if err != nil {
+			return nil, nil, err
+		}
+		separatorBytes := 0
+		if len(current.inputs) > 0 {
+			separatorBytes = 1
+		}
+		if len(current.inputs)+len(inputs) > maxCaptureAppendBatchEntries ||
+			currentBytes+separatorBytes+eventBytes-envelopeBytes > maxCaptureAppendRequestBytes {
+			flushCurrent()
+			separatorBytes = 0
+		}
+		if len(inputs) > maxCaptureAppendBatchEntries || eventBytes > maxCaptureAppendRequestBytes {
+			return nil, nil, errors.New("one capture event batch exceeds the safe append request size")
+		}
+		current.inputs = append(current.inputs, inputs...)
+		current.events = append(current.events, pendingEvent)
+		currentBytes += separatorBytes + eventBytes - envelopeBytes
+		remainingBatches[pendingEvent.Path]++
+	}
+	flushCurrent()
+	return batches, remainingBatches, nil
+}
+
+func captureAppendRequestBytes(inputs []client.AppendTranscriptEntryInput) (int, error) {
+	bytes := len(`{"entries":[]}`)
+	for index, input := range inputs {
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return 0, err
+		}
+		if index > 0 {
+			bytes++
+		}
+		bytes += len(raw)
+	}
+	return bytes, nil
+}
+
+// appendSingleCaptureEvent retries one event through the original per-event
+// append shape. A large event can still require several requests; its first
+// deterministic rejection stops only that event.
+func appendSingleCaptureEvent(
+	ctx context.Context,
+	conn agentConnection,
+	transcriptID string,
+	pending transcriptcapture.PendingEvent,
+) (bool, error) {
+	batches, err := captureAppendBatches(pending.Event.Entries())
+	if err != nil {
+		return false, err
+	}
+	for _, inputs := range batches {
+		if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, transcriptID, inputs); err != nil {
+			return errors.Is(err, client.ErrBadRequest), err
+		}
+	}
+	return false, nil
 }
 
 func captureAppendBatches(entries []transcriptcapture.Entry) ([][]client.AppendTranscriptEntryInput, error) {
