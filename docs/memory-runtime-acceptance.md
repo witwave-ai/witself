@@ -183,8 +183,34 @@ Both paths are valid by design.
 Verification reads server-side transcripts. A capture outbox that is not
 draining (`~/.witself/capture/outbox/<runtime>/`) makes every
 transcript-based case fail at once even though the sessions behaved
-correctly. Check the outbox before a certification window and, when in doubt,
-run `witself transcript flush --runtime <runtime>` before `verify`.
+correctly. Check the outbox before a certification window.
+
+When the stages are driven headlessly, always run
+`witself transcript flush --runtime <runtime>` in the foreground immediately
+before `verify`: a headless session (`claude -p`, `codex exec`) exits right
+after its `Stop` hook and takes the detached flush it spawned down with it, so
+its transcript stays local unless a longer-lived session on the same binding
+happens to flush later. In one autonomous window every stage behaved
+correctly, verification failed all six transcript-based cases, and a single
+foreground flush followed by `verify` alone turned the same run into a pass.
+
+### Codex subjects must be minted immediately before the run
+
+The Codex desktop app runs its own background agents through the same
+`codex` hooks, so within seconds of rebinding `codex` to a subject one of
+them is captured under that identity and the subject acquires a pending
+memory checkpoint; `prepare` then refuses it. Create the synthetic codex
+subject right before `prepare` (and mint a fresh one on that refusal rather
+than reusing a subject), and never leave `codex` bound to a subject longer
+than the run needs.
+
+### Autonomous windows must not overlap other sessions on the binding
+
+Rebinding a runtime changes the identity for every session of that runtime
+on the machine. An operator's own interactive session — including the agent
+driving the window — is captured as the subject for anything it does while
+the binding is switched. Drive a window as one uninterrupted process and
+make no other calls on that runtime until it has restored the binding.
 
 After all six stages complete, verify and retain sanitized evidence:
 
