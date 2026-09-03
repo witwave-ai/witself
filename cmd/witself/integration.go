@@ -2123,23 +2123,8 @@ func transcriptFlush(args []string) int {
 	}
 	heldPaths := map[string]error{}
 	quarantined := 0
-	if runtimeName == transcriptcapture.RuntimeCodex && len(pending) > 0 {
-		// Quarantine once at the start of this flush. Current capture code never
-		// queues a new ephemeral Codex event. Failed moves remain in the outbox
-		// but are held from upload for this run, including across drain re-reads,
-		// so repeating the partition would only repeat a reported failure.
-		moved, remaining, quarantineErr := transcriptcapture.QuarantineEphemeral(runtimeName, pending)
-		quarantined = len(moved)
-		pending = remaining
-		if quarantineErr != nil {
-			fmt.Fprintf(os.Stderr, "witself: quarantine ephemeral capture event: %v\n", quarantineErr)
-		}
-		for _, pendingEvent := range remaining {
-			if strings.TrimSpace(pendingEvent.Event.SourceTranscriptPath) == "" {
-				heldPaths[pendingEvent.Path] = errors.New("ephemeral Codex capture event could not be quarantined")
-			}
-		}
-	}
+	pending, partitioned := partitionEphemeralCodex(runtimeName, pending, heldPaths)
+	quarantined += partitioned
 	if len(pending) == 0 {
 		release()
 		lockHeld = false
@@ -2148,21 +2133,31 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: recheck capture outbox: %v\n", err)
 			return 1
 		}
-		if len(remaining) > 0 {
+		remaining, partitioned = partitionEphemeralCodex(runtimeName, remaining, heldPaths)
+		quarantined += partitioned
+		if hasUnblockedCaptureEvent(remaining, nil, heldPaths) {
 			if err := startBackgroundFlush(runtimeName); err != nil {
 				fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 				return 1
 			}
 		}
-		if quarantined > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined)
+		deferred := countBlockedCaptureEvents(remaining, nil, heldPaths)
+		if quarantined > 0 || deferred > 0 {
+			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined)
 		}
 		writeSkippedEphemeralSessionSummary(runtimeName)
+		if deferred > 0 {
+			return 1
+		}
 		return 0
 	}
 	cfg, err := transcriptcapture.LoadConfig(runtimeName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		if quarantined > 0 {
+			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined)
+			writeSkippedEphemeralSessionSummary(runtimeName)
+		}
 		return 1
 	}
 	blockedTranscripts := map[string]error{}
@@ -2340,6 +2335,8 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
 			return 1
 		}
+		pending, partitioned = partitionEphemeralCodex(runtimeName, pending, heldPaths)
+		quarantined += partitioned
 		reopenRetryableBlockedTranscripts(pending, blockedTranscripts, seenPaths)
 		ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts, heldPaths)
 		if deferredErr == nil && prepareErr != nil {
@@ -2357,6 +2354,8 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: recheck capture outbox: %v\n", err)
 		return 1
 	}
+	remaining, partitioned = partitionEphemeralCodex(runtimeName, remaining, heldPaths)
+	quarantined += partitioned
 	reopenRetryableBlockedTranscripts(remaining, blockedTranscripts, seenPaths)
 	if hasUnblockedCaptureEvent(remaining, blockedTranscripts, heldPaths) {
 		if err := startBackgroundFlush(runtimeName); err != nil {
@@ -2376,6 +2375,55 @@ func transcriptFlush(args []string) int {
 	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined)
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
+}
+
+// partitionEphemeralCodex applies the upload boundary to every outbox snapshot,
+// including snapshots taken while a long-running flush is draining. An older
+// hooked binary can continue to queue pathless Codex events until it is
+// upgraded, so the initial partition alone is not a sufficient boundary.
+// Failed moves are retained and held for the rest of this run; excluding those
+// already-held paths from later attempts also reports each failure only once.
+func partitionEphemeralCodex(
+	runtimeName string,
+	pending []transcriptcapture.PendingEvent,
+	held map[string]error,
+) (remaining []transcriptcapture.PendingEvent, quarantined int) {
+	if runtimeName != transcriptcapture.RuntimeCodex || len(pending) == 0 {
+		return pending, 0
+	}
+	candidates := make([]transcriptcapture.PendingEvent, 0, len(pending))
+	for _, pendingEvent := range pending {
+		if strings.TrimSpace(pendingEvent.Event.SourceTranscriptPath) != "" {
+			continue
+		}
+		if _, isHeld := held[pendingEvent.Path]; !isHeld {
+			candidates = append(candidates, pendingEvent)
+		}
+	}
+	if len(candidates) == 0 {
+		return pending, 0
+	}
+	moved, unmoved, err := transcriptcapture.QuarantineEphemeral(runtimeName, candidates)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: quarantine ephemeral capture event: %v\n", err)
+	}
+	unmovedPaths := make(map[string]struct{}, len(unmoved))
+	for _, pendingEvent := range unmoved {
+		unmovedPaths[pendingEvent.Path] = struct{}{}
+	}
+	remaining = make([]transcriptcapture.PendingEvent, 0, len(pending)-len(moved))
+	for _, pendingEvent := range pending {
+		if strings.TrimSpace(pendingEvent.Event.SourceTranscriptPath) == "" {
+			if _, wasHeld := held[pendingEvent.Path]; !wasHeld {
+				if _, wasNotMoved := unmovedPaths[pendingEvent.Path]; !wasNotMoved {
+					continue
+				}
+			}
+			held[pendingEvent.Path] = errors.New("ephemeral Codex capture event could not be quarantined")
+		}
+		remaining = append(remaining, pendingEvent)
+	}
+	return remaining, len(moved)
 }
 
 func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined int) {

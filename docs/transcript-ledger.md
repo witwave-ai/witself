@@ -214,14 +214,20 @@ rollout, so Witself does not treat it as the agent's narrative record. This
 structurally excludes the desktop app's internal background agents, without
 matching prompt text, and also excludes deliberately ephemeral sessions such as
 `codex exec --ephemeral` and non-persisted app-server threads. Witself neither
-captures nor emits automatic memory hydration for those sessions. It keeps a
-value-free, session-hash-named audit marker under
+captures nor emits automatic memory hydration for those sessions. This boundary
+is enforced by the `witself` binary that the managed Codex hook runner executes,
+so the exclusion takes effect only once that executable carries this release;
+until then an older hooked binary can still queue ephemeral events, which each
+flush by the new build re-quarantines. Witself keeps a value-free,
+session-hash-named audit marker under
 `~/.witself/capture/skipped/codex/` containing only `schema_version`, `runtime`,
 `reason`, `session_hash`, `first_seen`, `last_seen`, `events`, `hook_events`,
 `runtime_version`, and `model`. On flush, already-queued Codex events without a
 source transcript path are moved, never deleted, into
 `~/.witself/capture/quarantine/codex/`; an operator may inspect or delete that
-quarantine directory by hand.
+quarantine directory by hand. A move that fails is held from upload for that
+run, and the flush exits 1. The cumulative record is the quarantine directory
+plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
 Captured content is NUL-safe: NUL bytes and their JSON escape sequences are
 replaced with U+FFFD in bodies at capture (both the hook and batch-assembly

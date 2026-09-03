@@ -1,6 +1,7 @@
 package transcriptcapture
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/local"
@@ -22,10 +23,11 @@ const (
 	maxSkippedSessionBytes      = 64 * 1024
 	maxSkippedSessionMarkers    = 512
 	skippedSessionRetention     = 30 * 24 * time.Hour
-	skippedSessionLockWait      = 2 * time.Second
 	skippedSessionLockPoll      = 5 * time.Millisecond
 	skippedSessionLockStale     = 30 * time.Second
 )
+
+var skippedSessionLockWait = 2 * time.Second
 
 // SkippedSession is the value-free local audit record for one non-persisted
 // Codex session. SessionHash is a truncated SHA-256 digest; no session id or
@@ -124,7 +126,7 @@ func QuarantineEphemeral(runtime string, pending []PendingEvent) (moved, remaini
 			hookEvent,
 			item.Event.RuntimeVersion,
 			item.Event.Model,
-			time.Now().UTC(),
+			item.Event.OccurredAt.UTC(),
 		); markerErr != nil {
 			err = errors.Join(err, fmt.Errorf("record skipped session for %s: %w", filepath.Base(destination), markerErr))
 		}
@@ -184,7 +186,9 @@ func recordSkippedSession(runtime, sessionID, hookEvent, runtimeVersion, model s
 	if runtimeVersion = truncateUTF8(strings.TrimSpace(runtimeVersion), 256); runtimeVersion != "" || marker.Events == 0 {
 		marker.RuntimeVersion = runtimeVersion
 	}
-	if model = truncateUTF8(strings.TrimSpace(model), 256); model != "" || marker.Events == 0 {
+	model = truncateUTF8(strings.TrimSpace(model), 256)
+	if model != "" && model != codexAutoReviewModel && canonicalSkippedHookEvent(hookEvent) != HookEventCodexPermissionReview &&
+		(marker.Model == "" || marker.Model == codexAutoReviewModel) {
 		marker.Model = model
 	}
 	marker.Events++
@@ -192,7 +196,7 @@ func recordSkippedSession(runtime, sessionID, hookEvent, runtimeVersion, model s
 	if err := writeJSONAtomic(path, marker); err != nil {
 		return err
 	}
-	pruneSkippedSessions(dir, path, seenAt)
+	pruneSkippedSessions(dir, path, time.Now().UTC())
 	return nil
 }
 
@@ -269,11 +273,12 @@ func validSkippedSessionHash(value string) bool {
 
 func acquireSkippedSessionLock(markerPath string) (func(), error) {
 	lockPath := markerPath + ".lock"
+	pid := os.Getpid()
 	deadline := time.Now().Add(skippedSessionLockWait)
 	for {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			if _, writeErr := fmt.Fprintf(file, "%d\n", os.Getpid()); writeErr != nil {
+			if _, writeErr := fmt.Fprintf(file, "%d\n", pid); writeErr != nil {
 				_ = file.Close()
 				_ = os.Remove(lockPath)
 				return nil, writeErr
@@ -282,33 +287,51 @@ func acquireSkippedSessionLock(markerPath string) (func(), error) {
 				_ = os.Remove(lockPath)
 				return nil, closeErr
 			}
-			return func() { _ = os.Remove(lockPath) }, nil
+			return func() { releaseSkippedSessionLock(lockPath, pid) }, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		if running, known := flushLockOwnerRunning(lockPath); known && !running {
-			_ = os.Remove(lockPath)
-			continue
-		}
-		info, statErr := os.Lstat(lockPath)
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
-		}
-		if statErr != nil {
-			return nil, fmt.Errorf("inspect skipped session marker lock: %w", statErr)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, errors.New("skipped session marker lock is not a regular file")
-		}
-		if time.Since(info.ModTime()) > skippedSessionLockStale {
-			_ = os.Remove(lockPath)
-			continue
+		running, known := flushLockOwnerRunning(lockPath)
+		switch {
+		case known && !running:
+			if removeErr := os.Remove(lockPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("remove abandoned skipped session marker lock: %w", removeErr)
+			}
+		case !known:
+			info, statErr := os.Lstat(lockPath)
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("inspect skipped session marker lock: %w", statErr)
+			}
+			if statErr == nil {
+				if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+					return nil, errors.New("skipped session marker lock is not a regular file")
+				}
+				if time.Since(info.ModTime()) > skippedSessionLockStale {
+					if removeErr := os.Remove(lockPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+						return nil, fmt.Errorf("remove stale skipped session marker lock: %w", removeErr)
+					}
+				}
+			}
 		}
 		if !time.Now().Before(deadline) {
 			return nil, errors.New("timed out acquiring skipped session marker lock")
 		}
-		time.Sleep(skippedSessionLockPoll)
+		wait := min(skippedSessionLockPoll, time.Until(deadline))
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+}
+
+func releaseSkippedSessionLock(lockPath string, pid int) {
+	raw, err := os.ReadFile(lockPath)
+	if err != nil {
+		return
+	}
+	ownerPID, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err == nil && ownerPID == pid {
+		_ = os.Remove(lockPath)
 	}
 }
 
@@ -317,25 +340,56 @@ func pruneSkippedSessions(dir, currentPath string, now time.Time) {
 	if err != nil {
 		return
 	}
-	markers := make([]os.DirEntry, 0, len(entries))
+	type markerFile struct {
+		path    string
+		modTime time.Time
+	}
+	markers := make([]markerFile, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
-			markers = append(markers, entry)
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
 		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		markers = append(markers, markerFile{
+			path:    filepath.Join(dir, entry.Name()),
+			modTime: info.ModTime(),
+		})
 	}
 	if len(markers) <= maxSkippedSessionMarkers {
 		return
 	}
+	sort.Slice(markers, func(i, j int) bool {
+		if markers[i].modTime.Equal(markers[j].modTime) {
+			return markers[i].path < markers[j].path
+		}
+		return markers[i].modTime.Before(markers[j].modTime)
+	})
+	currentPath = filepath.Clean(currentPath)
+	removed := make(map[string]bool)
+	remaining := len(markers)
+	remove := func(marker markerFile) {
+		if filepath.Clean(marker.path) == currentPath || removed[marker.path] {
+			return
+		}
+		if removeErr := os.Remove(marker.path); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+			removed[marker.path] = true
+			remaining--
+		}
+	}
 	cutoff := now.Add(-skippedSessionRetention)
-	for _, entry := range markers {
-		path := filepath.Join(dir, entry.Name())
-		if path == currentPath {
-			continue
+	for _, marker := range markers {
+		if marker.modTime.Before(cutoff) {
+			remove(marker)
 		}
-		marker, valid, err := readSkippedSession(path)
-		if err == nil && valid && marker.LastSeen.Before(cutoff) {
-			_ = os.Remove(path)
+	}
+	for _, marker := range markers {
+		if remaining <= maxSkippedSessionMarkers {
+			break
 		}
+		remove(marker)
 	}
 }
 
@@ -370,40 +424,65 @@ func movePendingToQuarantine(runtime, destinationDir string, item PendingEvent) 
 		return "", false, fmt.Errorf("quarantine pending event %s: source is not a trusted regular file", filepath.Base(item.Path))
 	}
 	destination = filepath.Join(destinationDir, filepath.Base(source))
-	if _, err := os.Lstat(destination); err == nil {
-		return "", false, fmt.Errorf("quarantine pending event %s: destination already exists", filepath.Base(item.Path))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", false, fmt.Errorf("quarantine pending event %s: inspect destination: %w", filepath.Base(item.Path), err)
+	if reconciled, reconcileErr := reconcileExistingQuarantineDestination(source, destination); reconcileErr != nil {
+		return "", false, fmt.Errorf("quarantine pending event %s: %w", filepath.Base(item.Path), reconcileErr)
+	} else if reconciled {
+		return destination, true, nil
 	}
 	if err := os.Chmod(source, 0o600); err != nil {
 		return "", false, fmt.Errorf("secure pending event %s before quarantine: %w", filepath.Base(item.Path), err)
 	}
 	if renameErr := os.Rename(source, destination); renameErr == nil {
 		return destination, true, nil
-	} else if !errors.Is(renameErr, syscall.EXDEV) {
-		return "", false, fmt.Errorf("quarantine pending event %s: %w", filepath.Base(item.Path), renameErr)
+	}
+	if reconciled, reconcileErr := reconcileExistingQuarantineDestination(source, destination); reconcileErr != nil {
+		return "", false, fmt.Errorf("quarantine pending event %s: %w", filepath.Base(item.Path), reconcileErr)
+	} else if reconciled {
+		return destination, true, nil
 	}
 	if err := copyThenRemove(source, destination); err != nil {
-		return "", false, fmt.Errorf("quarantine pending event %s across filesystems: %w", filepath.Base(item.Path), err)
+		return "", false, fmt.Errorf("quarantine pending event %s after rename failed: %w", filepath.Base(item.Path), err)
 	}
 	return destination, true, nil
 }
 
 func copyThenRemove(source, destination string) error {
+	if reconciled, err := reconcileExistingQuarantineDestination(source, destination); err != nil {
+		return err
+	} else if reconciled {
+		return nil
+	}
 	src, err := os.Open(source)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = src.Close() }()
-	dst, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	srcOpen := true
+	defer func() {
+		if srcOpen {
+			_ = src.Close()
+		}
+	}()
+	sourceInfo, err := src.Stat()
 	if err != nil {
 		return err
 	}
-	copyOK := false
+	if sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.Mode().IsRegular() || !trustedPathIdentity(source, sourceInfo) {
+		return errors.New("source is not a trusted regular file")
+	}
+
+	tempPath := filepath.Join(filepath.Dir(destination), ".tmp-"+filepath.Base(destination))
+	dst, err := openQuarantineTemp(tempPath)
+	if err != nil {
+		return err
+	}
+	dstOpen := true
+	tempExists := true
 	defer func() {
-		_ = dst.Close()
-		if !copyOK {
-			_ = os.Remove(destination)
+		if dstOpen {
+			_ = dst.Close()
+		}
+		if tempExists {
+			_ = os.Remove(tempPath)
 		}
 	}()
 	if _, err := io.Copy(dst, src); err != nil {
@@ -415,14 +494,138 @@ func copyThenRemove(source, destination string) error {
 	if err := dst.Close(); err != nil {
 		return err
 	}
+	dstOpen = false
 	if err := src.Close(); err != nil {
 		return err
 	}
+	srcOpen = false
+	if reconciled, err := reconcileExistingQuarantineDestination(source, destination); err != nil {
+		return err
+	} else if reconciled {
+		return nil
+	}
+	if err := os.Rename(tempPath, destination); err != nil {
+		if reconciled, reconcileErr := reconcileExistingQuarantineDestination(source, destination); reconcileErr != nil {
+			return reconcileErr
+		} else if reconciled {
+			return nil
+		}
+		return err
+	}
+	tempExists = false
 	if err := os.Remove(source); err != nil {
 		return err
 	}
-	copyOK = true
 	return nil
+}
+
+func openQuarantineTemp(path string) (*os.File, error) {
+	for attempts := 0; attempts < 2; attempts++ {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			return nil, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !trustedPathIdentity(path, info) {
+			return nil, errors.New("quarantine temporary path is not a trusted regular file")
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, errors.New("quarantine temporary path remained busy")
+}
+
+func reconcileExistingQuarantineDestination(source, destination string) (bool, error) {
+	info, err := os.Lstat(destination)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect destination: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !trustedPathIdentity(destination, info) {
+		return false, errors.New("destination already exists")
+	}
+	equal, err := trustedRegularFilesEqual(source, destination)
+	if err != nil {
+		return false, fmt.Errorf("compare existing destination: %w", err)
+	}
+	if !equal {
+		return false, errors.New("destination already exists")
+	}
+	if err := os.Remove(source); err != nil {
+		return false, fmt.Errorf("remove reconciled source: %w", err)
+	}
+	return true, nil
+}
+
+func trustedRegularFilesEqual(firstPath, secondPath string) (bool, error) {
+	first, firstInfo, err := openTrustedRegularFile(firstPath)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = first.Close() }()
+	second, secondInfo, err := openTrustedRegularFile(secondPath)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = second.Close() }()
+	if firstInfo.Size() != secondInfo.Size() {
+		return false, nil
+	}
+	firstBuffer := make([]byte, 32*1024)
+	secondBuffer := make([]byte, len(firstBuffer))
+	remaining := firstInfo.Size()
+	for remaining > 0 {
+		chunk := min(int64(len(firstBuffer)), remaining)
+		if _, err := io.ReadFull(first, firstBuffer[:chunk]); err != nil {
+			return false, err
+		}
+		if _, err := io.ReadFull(second, secondBuffer[:chunk]); err != nil {
+			return false, err
+		}
+		if !bytes.Equal(firstBuffer[:chunk], secondBuffer[:chunk]) {
+			return false, nil
+		}
+		remaining -= chunk
+	}
+	var firstExtra, secondExtra [1]byte
+	firstN, firstErr := first.Read(firstExtra[:])
+	secondN, secondErr := second.Read(secondExtra[:])
+	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+		return false, firstErr
+	}
+	if secondErr != nil && !errors.Is(secondErr, io.EOF) {
+		return false, secondErr
+	}
+	return firstN == 0 && secondN == 0 && errors.Is(firstErr, io.EOF) && errors.Is(secondErr, io.EOF), nil
+}
+
+func openTrustedRegularFile(path string) (*os.File, os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !trustedPathIdentity(path, info) {
+		_ = file.Close()
+		return nil, nil, errors.New("file is not a trusted regular file")
+	}
+	return file, info, nil
 }
 
 func skippedDir(runtime string) (string, error) {

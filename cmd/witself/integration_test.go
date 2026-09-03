@@ -1547,6 +1547,130 @@ func TestTranscriptFlushQuarantinesEphemeralCodexBacklog(t *testing.T) {
 	}
 }
 
+func TestTranscriptFlushQuarantinesAllEphemeralCodexBacklogWithoutHTTP(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", home)
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeCodex, srv.URL)
+
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := transcriptcapture.Event{
+		SchemaVersion: transcriptcapture.SchemaVersion, Runtime: transcriptcapture.RuntimeCodex,
+		CaptureMode: cfg.CaptureMode, Account: cfg.Account, Realm: cfg.Realm,
+		Agent: cfg.Agent, AgentID: cfg.AgentID, AgentName: cfg.AgentName, Location: cfg.Location,
+		RunID: "run_all_ephemeral", HookEvent: "SessionStart", NativeHookEvent: "SessionStart",
+		Kind: "session.started", Role: "system", CWD: "/src/witself",
+	}
+	wantQuarantined := make(map[string][]byte, 2)
+	sourcePaths := make([]string, 0, 2)
+	for index := range 2 {
+		event := base
+		event.ID = fmt.Sprintf("evt_ephemeral_%d", index+1)
+		event.SessionID = fmt.Sprintf("ephemeral-session-%d", index+1)
+		event.OccurredAt = time.Date(2026, 9, 2, 10, 0, index, 0, time.UTC)
+		basename := fmt.Sprintf("%020d-%s.json", index+1, event.ID)
+		path, raw, err := writeCapturePendingFixture(home, transcriptcapture.RuntimeCodex, basename, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourcePaths = append(sourcePaths, path)
+		wantQuarantined[basename] = raw
+	}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex})
+	})
+	wantStderr := "flushed 0 codex transcript event(s); quarantined 2 ephemeral event(s)\n" +
+		"skipped ephemeral sessions: 2 session(s), 2 event(s) (not captured; see ~/.witself/capture/skipped/codex/)\n"
+	if code != 0 || stdout != "" || stderr != wantStderr {
+		t.Fatalf("all-ephemeral flush = code %d stdout %q stderr %q, want stderr %q", code, stdout, stderr, wantStderr)
+	}
+	if requests != 0 {
+		t.Fatalf("all-ephemeral flush made %d HTTP request(s)", requests)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after all-ephemeral flush = %#v / %v", pending, err)
+	}
+	for _, source := range sourcePaths {
+		if _, err := os.Stat(source); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("quarantined source %s still exists: %v", source, err)
+		}
+	}
+	quarantineDir := filepath.Join(home, "capture", "quarantine", transcriptcapture.RuntimeCodex)
+	quarantinedPaths, err := filepath.Glob(filepath.Join(quarantineDir, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantinedPaths) != len(wantQuarantined) {
+		t.Fatalf("quarantined paths = %v", quarantinedPaths)
+	}
+	for _, path := range quarantinedPaths {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, exists := wantQuarantined[filepath.Base(path)]
+		if !exists || !slices.Equal(got, want) {
+			t.Fatalf("quarantined %s bytes changed or basename was not preserved", path)
+		}
+	}
+}
+
+func TestTranscriptFlushReportsQuarantineBeforeLoadConfigError(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", home)
+	base := transcriptcapture.Event{
+		SchemaVersion: transcriptcapture.SchemaVersion, Runtime: transcriptcapture.RuntimeCodex,
+		CaptureMode: transcriptcapture.ModeRaw, Account: "default", Realm: "default",
+		Agent: "scott", AgentID: "agent_1", AgentName: "scott",
+		RunID: "run_missing_config", HookEvent: "SessionStart", NativeHookEvent: "SessionStart",
+		Kind: "session.started", Role: "system", CWD: "/src/witself",
+	}
+	persisted := base
+	persisted.ID = "evt_persisted_missing_config"
+	persisted.SessionID = "persisted-session-missing-config"
+	persisted.SourceTranscriptPath = "/tmp/.codex/sessions/persisted-missing-config/rollout.jsonl"
+	persisted.OccurredAt = time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	if _, _, err := writeCapturePendingFixture(
+		home, transcriptcapture.RuntimeCodex,
+		"00000000000000000001-evt_persisted_missing_config.json", persisted,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ephemeral := base
+	ephemeral.ID = "evt_ephemeral_missing_config"
+	ephemeral.SessionID = "ephemeral-session-missing-config"
+	ephemeral.OccurredAt = time.Date(2026, 9, 2, 10, 0, 1, 0, time.UTC)
+	if _, _, err := writeCapturePendingFixture(
+		home, transcriptcapture.RuntimeCodex,
+		"00000000000000000002-evt_ephemeral_missing_config.json", ephemeral,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex})
+	})
+	if code != 1 || stdout != "" ||
+		!strings.Contains(stderr, "flushed 0 codex transcript event(s); quarantined 1 ephemeral event(s)\n") ||
+		!strings.Contains(stderr, "skipped ephemeral sessions: 1 session(s), 1 event(s) (not captured; see ~/.witself/capture/skipped/codex/)\n") {
+		t.Fatalf("missing-config quarantine flush = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 1 || pending[0].Event.ID != persisted.ID {
+		t.Fatalf("pending after missing-config quarantine = %#v / %v", pending, err)
+	}
+}
+
 func TestTranscriptFlushQuarantineDoesNotAffectClaudeCodeMissingPath(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".witself")
 	t.Setenv("WITSELF_HOME", home)
@@ -2004,6 +2128,26 @@ func configureCaptureFlushTest(t *testing.T, runtime, endpoint string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeCapturePendingFixture(
+	home, runtime, basename string,
+	event transcriptcapture.Event,
+) (string, []byte, error) {
+	raw, err := json.MarshalIndent(event, "", "  ")
+	if err != nil {
+		return "", nil, err
+	}
+	raw = append(raw, '\n')
+	outbox := filepath.Join(home, "capture", "outbox", runtime)
+	if err := os.MkdirAll(outbox, 0o700); err != nil {
+		return "", nil, err
+	}
+	path := filepath.Join(outbox, basename)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return "", nil, err
+	}
+	return path, raw, nil
 }
 
 func assertOnlyCaptureEventPending(t *testing.T, runtime, eventID string) {
@@ -2544,6 +2688,145 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	}
 }
 
+func TestCaptureFlushQuarantinesEphemeralCodexEventQueuedWhileDraining(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", home)
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+	// A nonexistent override makes any unexpected post-release respawn fail the
+	// foreground invocation instead of silently launching a test subprocess.
+	t.Setenv(witselfExecutableTestEnv, filepath.Join(t.TempDir(), "background-flush-must-not-start"))
+
+	var arrival transcriptcapture.Event
+	const arrivalBasename = "00000000000000000002-evt_ephemeral_mid_drain.json"
+	var once sync.Once
+	var mu sync.Mutex
+	var requestPaths []string
+	var appendedIDs []string
+	var arrivalPath string
+	var arrivalRaw []byte
+	var arrivalErr error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestPaths = append(requestPaths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []struct {
+					ExternalID string `json:"external_id"`
+				} `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			once.Do(func() {
+				path, raw, err := writeCapturePendingFixture(
+					home, transcriptcapture.RuntimeCodex, arrivalBasename, arrival,
+				)
+				mu.Lock()
+				arrivalPath, arrivalRaw, arrivalErr = path, raw, err
+				mu.Unlock()
+			})
+			mu.Lock()
+			writeErr := arrivalErr
+			for _, entry := range body.Entries {
+				appendedIDs = append(appendedIDs, entry.ExternalID)
+			}
+			mu.Unlock()
+			if writeErr != nil {
+				http.Error(w, "queue mid-drain event", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeCodex, srv.URL)
+
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := transcriptcapture.Event{
+		SchemaVersion: transcriptcapture.SchemaVersion, Runtime: transcriptcapture.RuntimeCodex,
+		CaptureMode: cfg.CaptureMode, Account: cfg.Account, Realm: cfg.Realm,
+		Agent: cfg.Agent, AgentID: cfg.AgentID, AgentName: cfg.AgentName, Location: cfg.Location,
+		RunID: "run_mid_drain", HookEvent: "SessionStart", NativeHookEvent: "SessionStart",
+		Kind: "session.started", Role: "system", CWD: "/src/witself",
+	}
+	persisted := base
+	persisted.ID = "evt_persisted_mid_drain"
+	persisted.SessionID = "persisted-session-mid-drain"
+	persisted.SourceTranscriptPath = "/tmp/.codex/sessions/persisted-mid-drain/rollout.jsonl"
+	persisted.OccurredAt = time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	if _, _, err := writeCapturePendingFixture(
+		home, transcriptcapture.RuntimeCodex,
+		"00000000000000000001-evt_persisted_mid_drain.json", persisted,
+	); err != nil {
+		t.Fatal(err)
+	}
+	arrival = base
+	arrival.ID = "evt_ephemeral_mid_drain"
+	arrival.SessionID = "ephemeral-session-mid-drain"
+	arrival.OccurredAt = time.Date(2026, 9, 2, 10, 0, 1, 0, time.UTC)
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex})
+	})
+	if code != 0 || stdout != "" || !strings.Contains(stderr,
+		"flushed 1 codex transcript event(s); quarantined 1 ephemeral event(s)") {
+		t.Fatalf("mid-drain quarantine flush = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	mu.Lock()
+	gotRequestPaths := append([]string(nil), requestPaths...)
+	gotAppendedIDs := append([]string(nil), appendedIDs...)
+	gotArrivalPath := arrivalPath
+	gotArrivalRaw := append([]byte(nil), arrivalRaw...)
+	gotArrivalErr := arrivalErr
+	mu.Unlock()
+	if gotArrivalErr != nil {
+		t.Fatalf("queue mid-drain fixture: %v", gotArrivalErr)
+	}
+	wantRequestPaths := []string{
+		"POST /v1/self/activity",
+		"POST /v1/transcripts",
+		"POST /v1/transcripts/trn_1/entries:batch",
+	}
+	if !slices.Equal(gotRequestPaths, wantRequestPaths) {
+		t.Fatalf("mid-drain request paths = %v, want %v", gotRequestPaths, wantRequestPaths)
+	}
+	// Entry external IDs are "<event id>:<entry index>"; the persisted event's
+	// single entry must be the only one appended.
+	if !slices.Equal(gotAppendedIDs, []string{persisted.ID + ":0"}) {
+		t.Fatalf("mid-drain appended entry IDs = %v, want only %q", gotAppendedIDs, persisted.ID+":0")
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after mid-drain quarantine = %#v / %v", pending, err)
+	}
+	if _, err := os.Stat(gotArrivalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mid-drain source %s still exists: %v", gotArrivalPath, err)
+	}
+	quarantinedPath := filepath.Join(
+		home, "capture", "quarantine", transcriptcapture.RuntimeCodex, arrivalBasename,
+	)
+	quarantinedRaw, err := os.ReadFile(quarantinedPath)
+	if err != nil || !slices.Equal(quarantinedRaw, gotArrivalRaw) {
+		t.Fatalf("mid-drain quarantined bytes = %q / %v", quarantinedRaw, err)
+	}
+	skipped, err := transcriptcapture.SkippedSessions(transcriptcapture.RuntimeCodex)
+	if err != nil || len(skipped) != 1 || skipped[0].Events != 1 {
+		t.Fatalf("mid-drain skipped inventory = %#v / %v", skipped, err)
+	}
+}
+
 func TestCuratorSessionHookDoesNotCaptureItself(t *testing.T) {
 	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
 	t.Setenv("WITSELF_CURATOR_SESSION", "1")
@@ -2565,7 +2848,7 @@ func TestCuratorSessionHookDoesNotCaptureItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = input.Close() }()
-	if _, err := input.WriteString(`{"session_id":"curator-session","hook_event_name":"SessionStart"}`); err != nil {
+	if _, err := input.WriteString(`{"session_id":"curator-session","hook_event_name":"SessionStart","transcript_path":"/tmp/.codex/sessions/curator/rollout.jsonl"}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := input.Seek(0, 0); err != nil {
@@ -2584,6 +2867,13 @@ func TestCuratorSessionHookDoesNotCaptureItself(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("curator hook queued %d self-capture events", len(pending))
+	}
+	skipped, err := transcriptcapture.SkippedSessions(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("curator hook recorded %d skipped self-capture session(s)", len(skipped))
 	}
 }
 
