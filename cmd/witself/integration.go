@@ -2133,9 +2133,8 @@ func transcriptFlush(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: recheck capture outbox: %v\n", err)
 			return 1
 		}
-		remaining, partitioned = partitionEphemeralCodex(runtimeName, remaining, heldPaths)
-		quarantined += partitioned
-		if hasUnblockedCaptureEvent(remaining, nil, heldPaths) {
+		remaining, ephemeral := dropEphemeralCodex(runtimeName, remaining, heldPaths)
+		if ephemeral > 0 || hasUnblockedCaptureEvent(remaining, nil, heldPaths) {
 			if err := startBackgroundFlush(runtimeName); err != nil {
 				fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 				return 1
@@ -2354,10 +2353,9 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: recheck capture outbox: %v\n", err)
 		return 1
 	}
-	remaining, partitioned = partitionEphemeralCodex(runtimeName, remaining, heldPaths)
-	quarantined += partitioned
+	remaining, ephemeral := dropEphemeralCodex(runtimeName, remaining, heldPaths)
 	reopenRetryableBlockedTranscripts(remaining, blockedTranscripts, seenPaths)
-	if hasUnblockedCaptureEvent(remaining, blockedTranscripts, heldPaths) {
+	if ephemeral > 0 || hasUnblockedCaptureEvent(remaining, blockedTranscripts, heldPaths) {
 		if err := startBackgroundFlush(runtimeName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: restart capture flush: %v\n", err)
 			return 1
@@ -2377,12 +2375,43 @@ func transcriptFlush(args []string) int {
 	return 0
 }
 
-// partitionEphemeralCodex applies the upload boundary to every outbox snapshot,
-// including snapshots taken while a long-running flush is draining. An older
-// hooked binary can continue to queue pathless Codex events until it is
-// upgraded, so the initial partition alone is not a sufficient boundary.
-// Failed moves are retained and held for the rest of this run; excluding those
-// already-held paths from later attempts also reports each failure only once.
+// dropEphemeralCodex excludes newly arrived pathless Codex events from a
+// snapshot taken after this flush released its lock. Moving outbox files is
+// only safe under the lock (a concurrent flusher may already be moving the
+// same file, and its move would otherwise be reported here as a failed
+// quarantine), so post-release arrivals are neither moved, held, nor counted
+// as deferred work; the caller respawns a background flush, which partitions
+// them under its own lock. Events already held by this run (a move that failed
+// under the lock) stay in the snapshot: they remain deferred work and must not
+// respawn a flush that would only fail the same move again.
+func dropEphemeralCodex(
+	runtimeName string,
+	pending []transcriptcapture.PendingEvent,
+	held map[string]error,
+) (kept []transcriptcapture.PendingEvent, dropped int) {
+	if runtimeName != transcriptcapture.RuntimeCodex {
+		return pending, 0
+	}
+	kept = make([]transcriptcapture.PendingEvent, 0, len(pending))
+	for _, pendingEvent := range pending {
+		if strings.TrimSpace(pendingEvent.Event.SourceTranscriptPath) == "" {
+			if _, isHeld := held[pendingEvent.Path]; !isHeld {
+				dropped++
+				continue
+			}
+		}
+		kept = append(kept, pendingEvent)
+	}
+	return kept, dropped
+}
+
+// partitionEphemeralCodex applies the upload boundary to every outbox snapshot
+// taken while this flush holds the lock, including snapshots taken while a
+// long-running flush is draining. An older hooked binary can continue to queue
+// pathless Codex events until it is upgraded, so the initial partition alone is
+// not a sufficient boundary. Failed moves are retained and held for the rest
+// of this run; excluding those already-held paths from later attempts also
+// reports each failure only once.
 func partitionEphemeralCodex(
 	runtimeName string,
 	pending []transcriptcapture.PendingEvent,
