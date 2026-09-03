@@ -14,6 +14,10 @@ ENDPOINT      := http://localhost:8080
 # and CI can never disagree about what clean means.
 GOLANGCI_LINT_VERSION := v2.12.2
 
+# Keep the vulnerability scanner identical locally and in CI; upgrade these
+# pins together so the gate cannot float between runs.
+GOVULNCHECK_VERSION := v1.7.0
+
 MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
 MEMORY_LOAD_QUALITY_SEED        ?= 20260717
 MEMORY_LOAD_QUALITY_NOISE       ?= 250
@@ -93,7 +97,7 @@ MEMORY_CONCURRENCY_LOAD_COMMIT                    ?= $(shell git rev-parse HEAD)
 MEMORY_CONCURRENCY_LOAD_PROVIDER                  ?= local
 MEMORY_CONCURRENCY_LOAD_HARDWARE                  ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load feature-status build check check-infra
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load feature-status build check check-go-mod-tidy govulncheck check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -274,15 +278,24 @@ test-memory-concurrency-load: ## Run the opt-in concurrent-agent and tenant-isol
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
 
-check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lint) — run before every push
+check-go-mod-tidy: ## Verify both Go modules are tidy without modifying them
+	go mod tidy -diff
+	cd infra/pulumi && go mod tidy -diff
+
+govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+check: ## Run CI's exact local gate set — run before every push
+	$(MAKE) check-go-mod-tidy
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needs to run on:"; echo "$$unformatted"; exit 1; \
 	fi
 	go vet ./...
 	go build ./...
-	go test ./... -race -timeout=30m
+	go test ./... -race -shuffle=on -timeout=30m
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	$(MAKE) govulncheck
 	$(MAKE) check-infra
 	@echo "check: all gates green"
 

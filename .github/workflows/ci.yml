@@ -34,15 +34,23 @@ jobs:
       # this DSN they intentionally skip, which can hide PostgreSQL semantics.
       WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: |
             go.sum
             infra/pulumi/go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: go mod tidy
+        run: |
+          go mod tidy -diff
+          (cd infra/pulumi && go mod tidy -diff)
 
       - name: gofmt
         run: |
@@ -62,7 +70,25 @@ jobs:
         # migrations behind one advisory lock. The full race build now sits
         # close to 20 minutes on a noisy hosted runner, so keep a bounded but
         # non-flaky margin for the lock queue.
-        run: go test ./... -race -timeout=30m
+        env:
+          WITSELF_TEST_REQUIRE_DATABASE: "1"
+          WITSELF_TEST_REQUIRE_NODE: "1"
+        run: |
+          go test ./... \
+            -race \
+            -shuffle=on \
+            -timeout=30m \
+            -covermode=atomic \
+            -coverprofile="$RUNNER_TEMP/go-coverage.out"
+          go tool cover -func="$RUNNER_TEMP/go-coverage.out"
+
+      - name: Upload Go coverage
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: go-coverage
+          path: ${{ runner.temp }}/go-coverage.out
+          if-no-files-found: error
 
       - name: golangci-lint
         run: |
@@ -79,10 +105,6 @@ jobs:
           go test ./...
           golangci-lint run ./...
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-
       - name: Cloudflare agent-email Worker gates
         run: |
           npm --prefix infra/cloudflare/agent-email ci
@@ -95,24 +117,31 @@ jobs:
           npm --prefix infra/cloudflare/agent-email-send test
           npm --prefix infra/cloudflare/agent-email-send run bundle:check
 
+      - name: Cloudflare support-email-intake Worker gates
+        run: |
+          npm --prefix infra/cloudflare/support-email-intake ci
+          npm --prefix infra/cloudflare/support-email-intake test
+          npm --prefix infra/cloudflare/support-email-intake run bundle:check
+
       - name: Cloudflare control-plane Worker gates
         run: |
           npm --prefix infra/cloudflare/control-plane ci
           npm --prefix infra/cloudflare/control-plane test
+          npm --prefix infra/cloudflare/control-plane run bundle:check
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
   release-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: false
@@ -149,17 +178,15 @@ jobs:
   static-analysis:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Pin and run ShellCheck and actionlint
         run: bash scripts/test-ci-static-analysis.sh
 
   homebrew-formula:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -190,11 +217,11 @@ jobs:
             runner: windows-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -318,9 +345,8 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -338,9 +364,8 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: azure/setup-helm@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.16.4
 
