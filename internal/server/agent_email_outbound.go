@@ -209,7 +209,7 @@ func AgentEmailOutboundProviderEventHTTPHandler(
 	}
 	mux := http.NewServeMux()
 	registerAgentEmailOutboundProviderEventRoute(mux, token, apply)
-	return mux, nil
+	return securityResponseHeaders(mux), nil
 }
 
 func registerAgentEmailOutboundProviderEventRoute(
@@ -422,6 +422,7 @@ func requireAgentEmailSendPrincipal(
 	h func(http.ResponseWriter, *http.Request, DomainPrincipal),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		token, ok := bearerToken(r)
 		if !ok {
 			writeAgentEmailOutboundCodedError(w, http.StatusUnauthorized, "auth_failed", "missing bearer token", false)
@@ -698,6 +699,7 @@ func requireAgentEmailSendOperatorAnyStatus(
 	h func(http.ResponseWriter, *http.Request, principal),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		token, ok := bearerToken(r)
 		if !ok {
 			writeAgentEmailOutboundCodedError(w, http.StatusUnauthorized, "auth_failed", "missing bearer token", false)

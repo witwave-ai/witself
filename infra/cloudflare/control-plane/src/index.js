@@ -282,11 +282,41 @@ export class AgentEmailDomainRegistry extends DurableAgentEmailDomainRegistry {
   }
 }
 
+const RESPONSE_SECURITY_HEADERS = Object.freeze({
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+});
+
 const json = (obj, status = 200, extra = {}) =>
   new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json", ...extra },
+    headers: {
+      "Content-Type": "application/json",
+      ...extra,
+      ...RESPONSE_SECURITY_HEADERS,
+    },
   });
+
+// Apply the edge-wide security headers after routing so responses constructed
+// by imported handlers and responses streamed through from the container are
+// covered too. Reusing response.body keeps pass-through bodies streaming.
+// Existing cache policy is authoritative; protected routes only receive the
+// default no-store policy when the selected response did not set one.
+function withResponseSecurityHeaders(response, noStore) {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(RESPONSE_SECURITY_HEADERS)) {
+    headers.set(name, value);
+  }
+  if (noStore && !headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "no-store");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
 
 const err = (msg, status) => json({ schema_version: "witself.v0", error: msg }, status);
 
@@ -4513,8 +4543,61 @@ async function handleAccountBackups(request, env, url) {
   }
 }
 
-export default {
-  async fetch(request, env, ctx) {
+// Authentication is a property of the selected route, not of whether an
+// arbitrary request happens to carry an Authorization header. Keeping this
+// list aligned with the dispatch table also gives pre-auth 401/405 responses
+// the same no-store boundary without changing public-route cache behavior.
+function isProtectedWorkerRoute(pathname) {
+  return pathname === SUPPORT_EMAIL_INTAKE_PATH ||
+    pathname === "/v1/cells" ||
+    CELL_PATH.test(pathname) ||
+    PURGE_PATH.test(pathname) ||
+    EVACUATE_PATH.test(pathname) ||
+    RESTORE_PATH.test(pathname) ||
+    PROBE_PATH.test(pathname) ||
+    pathname === "/v1/invites" ||
+    INVITE_PATH.test(pathname) ||
+    pathname === "/v1/admins" ||
+    ADMIN_PATH.test(pathname) ||
+    ADMIN_REVOKE_PATH.test(pathname) ||
+    Boolean(matchAdminPolicyPath(pathname)) ||
+    Boolean(matchRealmEmailCanonicalClosePath(pathname)) ||
+    Boolean(matchRealmEmailAliasCustomerPath(pathname)) ||
+    Boolean(matchAgentEmailDomainCustomerPath(pathname)) ||
+    isAgentEmailDomainRecoveryAdminPath(pathname) ||
+    isAgentEmailDomainAdminPath(pathname) ||
+    isRealmEmailAliasRecoveryAdminPath(pathname) ||
+    isRealmEmailAliasAdminPath(pathname) ||
+    isAgentEmailOperationsLeasePath(pathname) ||
+    pathname === EDGE_MANAGED_DELIVERY_READINESS_PATH ||
+    isRealmEmailRoutePath(pathname) ||
+    pathname === "/v1/admin/whoami" ||
+    pathname === "/v1/admin/cells" ||
+    pathname === "/v1/admin/events" ||
+    pathname === "/v1/admin/tickets" ||
+    ADMIN_ACCOUNT_TICKET_PATH.test(pathname) ||
+    ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(pathname) ||
+    ADMIN_ACCOUNT_TICKET_STATE_PATH.test(pathname) ||
+    ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH.test(pathname) ||
+    ADMIN_ACCOUNT_SUPPORT_POLICY_PATH.test(pathname) ||
+    pathname === "/v1/placement" ||
+    pathname === "/v1/placement-runner" ||
+    pathname === "/v1/placement-status" ||
+    PLACEMENT_RESCUE_PATH.test(pathname) ||
+    pathname === "/v1/placement:run" ||
+    pathname === "/v1/placement:restore" ||
+    pathname === "/v1/placement:rebalance" ||
+    pathname === ACCOUNT_BACKUP_STATUS_PATH ||
+    pathname === ACCOUNT_BACKUP_RUN_PATH ||
+    pathname === ACCOUNT_BACKUP_RESTORE_DRILL_PATH ||
+    pathname === "/v1/reaper" ||
+    ACCOUNT_CLOSE_PATH.test(pathname) ||
+    ACCOUNT_RESEND_PATH.test(pathname) ||
+    ACCOUNT_CHANGE_EMAIL_PATH.test(pathname) ||
+    isInternalBridgePath(pathname);
+}
+
+async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // Machine lifecycle callbacks carry their own bridge authority, and the
@@ -4902,6 +4985,15 @@ export default {
 
     // Cold path: the Go container.
     return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const pathname = new URL(request.url).pathname;
+    return withResponseSecurityHeaders(
+      await handleFetch(request, env, ctx),
+      isProtectedWorkerRoute(pathname),
+    );
   },
 
   // Cron: pending-account expiry plus opt-in placement restore/rebalance.
