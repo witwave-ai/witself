@@ -1993,6 +1993,9 @@ func transcriptHook(args []string) int {
 		return 0
 	}
 	event, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw)
+	if errors.Is(err, transcriptcapture.ErrEphemeralSessionSkipped) {
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself capture: %v\n", err)
 		return 0
@@ -2118,6 +2121,25 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
 		return 1
 	}
+	heldPaths := map[string]error{}
+	quarantined := 0
+	if runtimeName == transcriptcapture.RuntimeCodex && len(pending) > 0 {
+		// Quarantine once at the start of this flush. Current capture code never
+		// queues a new ephemeral Codex event. Failed moves remain in the outbox
+		// but are held from upload for this run, including across drain re-reads,
+		// so repeating the partition would only repeat a reported failure.
+		moved, remaining, quarantineErr := transcriptcapture.QuarantineEphemeral(runtimeName, pending)
+		quarantined = len(moved)
+		pending = remaining
+		if quarantineErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: quarantine ephemeral capture event: %v\n", quarantineErr)
+		}
+		for _, pendingEvent := range remaining {
+			if strings.TrimSpace(pendingEvent.Event.SourceTranscriptPath) == "" {
+				heldPaths[pendingEvent.Path] = errors.New("ephemeral Codex capture event could not be quarantined")
+			}
+		}
+	}
 	if len(pending) == 0 {
 		release()
 		lockHeld = false
@@ -2132,6 +2154,10 @@ func transcriptFlush(args []string) int {
 				return 1
 			}
 		}
+		if quarantined > 0 {
+			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined)
+		}
+		writeSkippedEphemeralSessionSummary(runtimeName)
 		return 0
 	}
 	cfg, err := transcriptcapture.LoadConfig(runtimeName)
@@ -2140,7 +2166,6 @@ func transcriptFlush(args []string) int {
 		return 1
 	}
 	blockedTranscripts := map[string]error{}
-	heldPaths := map[string]error{}
 	createdTranscripts := map[string]client.Transcript{}
 	seenPaths := map[string]struct{}{}
 	rememberCapturePaths(pending, seenPaths)
@@ -2344,11 +2369,44 @@ func transcriptFlush(args []string) int {
 		if deferredErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
 		}
-		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)\n", flushed, runtimeName, deferred)
+		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined)
+		writeSkippedEphemeralSessionSummary(runtimeName)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)\n", flushed, runtimeName)
+	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined)
+	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
+}
+
+func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined int) {
+	if deferred > 0 {
+		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)",
+			flushed, runtime, deferred)
+	} else {
+		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)", flushed, runtime)
+	}
+	if quarantined > 0 {
+		fmt.Fprintf(os.Stderr, "; quarantined %d ephemeral event(s)", quarantined)
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+func writeSkippedEphemeralSessionSummary(runtime string) {
+	skipped, err := transcriptcapture.SkippedSessions(runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read skipped ephemeral sessions: %v\n", err)
+		return
+	}
+	if len(skipped) == 0 {
+		return
+	}
+	var events uint64
+	for _, session := range skipped {
+		events += session.Events
+	}
+	fmt.Fprintf(os.Stderr,
+		"skipped ephemeral sessions: %d session(s), %d event(s) (not captured; see ~/.witself/capture/skipped/%s/)\n",
+		len(skipped), events, runtime)
 }
 
 type captureActivityAttempt struct {
@@ -2400,11 +2458,11 @@ func transcriptFlushContext(detached bool) (context.Context, context.CancelFunc)
 // prepareTranscriptFlushEvents selects the events this flush may upload.
 // blocked is keyed by transcript and covers retryable transcript-wide waits
 // (turn gates, deferred finalization) and per-run rejections. held is keyed
-// by outbox path: an event captured under a different runtime binding can
-// never be uploaded with the installed credential, and the transcript key is
-// identity-free, so holding it aside must not block the installed identity's
-// later events in the same session. Held events stay pending for a future
-// binding that matches them and never count as uploadable work.
+// by outbox path: an event captured under a different runtime binding, or an
+// ephemeral Codex event whose quarantine move failed, cannot be uploaded in
+// this run. The transcript key is identity-free, so holding one path aside
+// must not block later eligible events in the same session. Held events stay
+// pending and never count as uploadable work.
 func prepareTranscriptFlushEvents(
 	pending []transcriptcapture.PendingEvent,
 	cfg transcriptcapture.Config,
@@ -2415,6 +2473,9 @@ func prepareTranscriptFlushEvents(
 	readiness := transcriptcapture.NewReadinessIndex(pending)
 	var firstErr error
 	for _, pendingEvent := range pending {
+		if _, exists := held[pendingEvent.Path]; exists {
+			continue
+		}
 		transcriptID := pendingEvent.Event.TranscriptExternalID()
 		if _, exists := blocked[transcriptID]; exists {
 			continue

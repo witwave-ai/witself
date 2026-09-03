@@ -42,6 +42,10 @@ const (
 	codexAutoReviewModel         = "codex-auto-review"
 )
 
+// ErrEphemeralSessionSkipped identifies a Codex hook whose session has no
+// persistent Codex rollout and therefore is not part of transcript capture.
+var ErrEphemeralSessionSkipped = errors.New("codex ephemeral session is not captured")
+
 // Event is one durable, provider-neutral hook event in the local outbox.
 type Event struct {
 	SchemaVersion        string             `json:"schema_version"`
@@ -276,6 +280,23 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 	}
 	if input.SessionID == "" || input.HookEventName == "" {
 		return Event{}, errors.New("hook input requires session_id and hook_event_name")
+	}
+	if cfg.Runtime == RuntimeCodex && strings.TrimSpace(input.TranscriptPath) == "" {
+		// Witself captures the Codex threads that Codex itself persists. A
+		// session with no rollout (transcript_path null) is not the agent's
+		// narrative record, which excludes desktop background agents without
+		// prompt-signature matching. Deliberately ephemeral sessions such as
+		// codex exec --ephemeral and non-persisted app-server threads are
+		// excluded by the same structural rule, by design.
+		_ = recordSkippedSession(
+			cfg.Runtime,
+			input.SessionID,
+			input.HookEventName,
+			input.RuntimeVersion,
+			input.Model,
+			time.Now().UTC(),
+		)
+		return Event{}, ErrEphemeralSessionSkipped
 	}
 
 	eventID, err := id.New("evt")
@@ -2539,8 +2560,12 @@ func sessionStatePath(runtime, sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return filepath.Join(home, "capture", "state", runtime, sessionHash(sessionID)+".json"), nil
+}
+
+func sessionHash(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
-	return filepath.Join(home, "capture", "state", runtime, hex.EncodeToString(sum[:16])+".json"), nil
+	return hex.EncodeToString(sum[:16])
 }
 
 func loadSessionState(runtime, sessionID string) (sessionState, error) {

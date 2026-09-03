@@ -208,6 +208,21 @@ witself transcript flush --runtime grok-build
 witself transcript flush --runtime cursor
 ```
 
+Codex capture follows Codex's own persistence boundary: when a hook's
+`transcript_path` is null or empty, Codex did not persist that session as a
+rollout, so Witself does not treat it as the agent's narrative record. This
+structurally excludes the desktop app's internal background agents, without
+matching prompt text, and also excludes deliberately ephemeral sessions such as
+`codex exec --ephemeral` and non-persisted app-server threads. Witself neither
+captures nor emits automatic memory hydration for those sessions. It keeps a
+value-free, session-hash-named audit marker under
+`~/.witself/capture/skipped/codex/` containing only `schema_version`, `runtime`,
+`reason`, `session_hash`, `first_seen`, `last_seen`, `events`, `hook_events`,
+`runtime_version`, and `model`. On flush, already-queued Codex events without a
+source transcript path are moved, never deleted, into
+`~/.witself/capture/quarantine/codex/`; an operator may inspect or delete that
+quarantine directory by hand.
+
 Captured content is NUL-safe: NUL bytes and their JSON escape sequences are
 replaced with U+FFFD in bodies at capture (both the hook and batch-assembly
 halves sanitize) and rejected in identifiers, and residual unstorable input

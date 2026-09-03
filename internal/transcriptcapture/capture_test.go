@@ -2,14 +2,19 @@ package transcriptcapture
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -80,11 +85,11 @@ func TestCodexAutoReviewRemainsInternalAndPreservesParentTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"SessionStart","model":"gpt-5.6-sol"}`)
-	prompt := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"parent-turn","model":"gpt-5.6-sol","prompt":"real user prompt"}`)
-	permission := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"PermissionRequest","turn_id":"parent-turn","model":"gpt-5.6-sol","tool_name":"mcp__witself__write"}`)
-	review := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"review-turn","model":"codex-auto-review","prompt":"internal-review-canary","tool_input":{"secret":"internal-tool-canary"},"reason":"internal-reason-canary"}`)
-	stop := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"Stop","model":"gpt-5.6-sol","last_assistant_message":"done"}`)
+	start := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"SessionStart","model":"gpt-5.6-sol","transcript_path":"/tmp/codex-session.jsonl"}`)
+	prompt := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"parent-turn","model":"gpt-5.6-sol","prompt":"real user prompt","transcript_path":"/tmp/codex-session.jsonl"}`)
+	permission := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"PermissionRequest","turn_id":"parent-turn","model":"gpt-5.6-sol","tool_name":"mcp__witself__write","transcript_path":"/tmp/codex-session.jsonl"}`)
+	review := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"UserPromptSubmit","turn_id":"review-turn","model":"codex-auto-review","prompt":"internal-review-canary","tool_input":{"secret":"internal-tool-canary"},"reason":"internal-reason-canary","transcript_path":"/tmp/codex-session.jsonl"}`)
+	stop := enqueueTestHook(t, RuntimeCodex, `{"session_id":"session-1","hook_event_name":"Stop","model":"gpt-5.6-sol","last_assistant_message":"done","transcript_path":"/tmp/codex-session.jsonl"}`)
 
 	if start.RunID == "" || prompt.RunID != start.RunID || permission.RunID != start.RunID ||
 		review.RunID != start.RunID || stop.RunID != start.RunID {
@@ -127,6 +132,470 @@ func TestCodexAutoReviewRemainsInternalAndPreservesParentTurn(t *testing.T) {
 	}
 	if len(pending) != 5 || userEntries != 1 {
 		t.Fatalf("pending/user entries = %d/%d, want 5/1", len(pending), userEntries)
+	}
+}
+
+func TestCodexEphemeralHooksAreSkippedAndAudited(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	saveTestCaptureConfig(t, RuntimeCodex)
+
+	const (
+		sessionID   = "ephemeral-session-id-canary"
+		promptValue = "ephemeral-prompt-canary"
+		toolValue   = "ephemeral-tool-input-canary"
+	)
+	hooks := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "null path SessionStart",
+			raw:  `{"session_id":"ephemeral-session-id-canary","hook_event_name":"SessionStart","transcript_path":null,"runtime_version":"0.149.0","model":"gpt-5.6-sol","cwd":"cwd-canary"}`,
+		},
+		{
+			name: "absent path UserPromptSubmit",
+			raw:  `{"session_id":"ephemeral-session-id-canary","hook_event_name":"UserPromptSubmit","runtime_version":"0.149.0","model":"gpt-5.6-sol","prompt":"ephemeral-prompt-canary"}`,
+		},
+		{
+			name: "empty path PreToolUse",
+			raw:  `{"session_id":"ephemeral-session-id-canary","hook_event_name":"PreToolUse","transcript_path":"","runtime_version":"0.149.0","model":"gpt-5.6-sol","tool_name":"functions.exec_command","tool_input":{"command":"ephemeral-tool-input-canary"}}`,
+		},
+	}
+	for _, hook := range hooks {
+		t.Run(hook.name, func(t *testing.T) {
+			event, err := EnqueueHook(RuntimeCodex, []byte(hook.raw))
+			if !errors.Is(err, ErrEphemeralSessionSkipped) {
+				t.Fatalf("skip error = %v", err)
+			}
+			if event.ID != "" || event.Runtime != "" || event.SessionID != "" || len(event.Raw) != 0 {
+				t.Fatalf("skipped event = %#v, want zero value", event)
+			}
+		})
+	}
+
+	pending, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(pending))
+	}
+	stateFiles, err := filepath.Glob(filepath.Join(witselfHome, "capture", "state", RuntimeCodex, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stateFiles) != 0 {
+		t.Fatalf("ephemeral hooks wrote session state: %v", stateFiles)
+	}
+
+	sum := sha256.Sum256([]byte(sessionID))
+	wantHash := hex.EncodeToString(sum[:16])
+	markers, err := SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("markers = %#v, want one", markers)
+	}
+	marker := markers[0]
+	if marker.SchemaVersion != 1 || marker.Runtime != RuntimeCodex ||
+		marker.Reason != "ephemeral_session" || marker.SessionHash != wantHash ||
+		marker.Events != 3 || marker.RuntimeVersion != "0.149.0" || marker.Model != "gpt-5.6-sol" {
+		t.Fatalf("marker = %#v", marker)
+	}
+	wantHookEvents := map[string]uint64{"SessionStart": 1, "UserPromptSubmit": 1, "PreToolUse": 1}
+	if !mapsEqual(marker.HookEvents, wantHookEvents) {
+		t.Fatalf("hook event counts = %#v, want %#v", marker.HookEvents, wantHookEvents)
+	}
+	if marker.FirstSeen.Location() != time.UTC || marker.LastSeen.Location() != time.UTC || marker.LastSeen.Before(marker.FirstSeen) {
+		t.Fatalf("marker timestamps = %s / %s", marker.FirstSeen, marker.LastSeen)
+	}
+	markerPath := filepath.Join(witselfHome, "capture", "skipped", RuntimeCodex, wantHash+".json")
+	markerRaw, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, canary := range []string{sessionID, promptValue, toolValue, "cwd-canary"} {
+		if bytes.Contains(markerRaw, []byte(canary)) {
+			t.Fatalf("marker retained canary %q: %s", canary, markerRaw)
+		}
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(markerRaw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	wantFields := []string{
+		"schema_version", "runtime", "reason", "session_hash", "first_seen",
+		"last_seen", "events", "hook_events", "runtime_version", "model",
+	}
+	if len(fields) != len(wantFields) {
+		t.Fatalf("marker fields = %v", sortedRawMessageKeys(fields))
+	}
+	for _, field := range wantFields {
+		if _, ok := fields[field]; !ok {
+			t.Fatalf("marker missing field %q: %s", field, markerRaw)
+		}
+	}
+	if info, err := os.Stat(markerPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("marker permissions = %v / %v", info, err)
+	}
+	if info, err := os.Stat(filepath.Dir(markerPath)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("marker directory permissions = %v / %v", info, err)
+	}
+}
+
+func TestCodexPersistedHooksAreCapturedWithoutSkipMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	saveTestCaptureConfig(t, RuntimeCodex)
+
+	for _, raw := range []string{
+		`{"session_id":"persisted-session","hook_event_name":"SessionStart","transcript_path":"/tmp/persisted.jsonl"}`,
+		`{"session_id":"persisted-session","hook_event_name":"UserPromptSubmit","transcript_path":"/tmp/persisted.jsonl","prompt":"persisted-prompt-canary"}`,
+		`{"session_id":"persisted-session","hook_event_name":"PreToolUse","transcript_path":"/tmp/persisted.jsonl","tool_name":"functions.exec_command","tool_input":{"command":"persisted-tool-canary"}}`,
+	} {
+		if _, err := EnqueueHook(RuntimeCodex, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 3 {
+		t.Fatalf("pending = %d, want 3", len(pending))
+	}
+	markers, err := SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 0 {
+		t.Fatalf("persisted session markers = %#v", markers)
+	}
+}
+
+func TestClaudeEmptyTranscriptPathsRemainCaptured(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	saveTestCaptureConfig(t, RuntimeClaudeCode)
+
+	for _, raw := range []string{
+		`{"session_id":"claude-session","hook_event_name":"SessionStart","transcript_path":null}`,
+		`{"session_id":"claude-session","hook_event_name":"UserPromptSubmit","prompt":"claude-prompt-canary"}`,
+		`{"session_id":"claude-session","hook_event_name":"PreToolUse","transcript_path":"","tool_name":"Bash","tool_input":{"command":"claude-tool-canary"}}`,
+	} {
+		if _, err := EnqueueHook(RuntimeClaudeCode, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Pending(RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 3 {
+		t.Fatalf("Claude pending = %d, want 3", len(pending))
+	}
+	markers, err := SkippedSessions(RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 0 {
+		t.Fatalf("Claude skip markers = %#v", markers)
+	}
+}
+
+func TestSkippedSessionMarkersAreIndependentAndCorruptMarkerIsReplaced(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	saveTestCaptureConfig(t, RuntimeCodex)
+
+	hooks := []string{
+		`{"session_id":"ephemeral-a","hook_event_name":"SessionStart","transcript_path":null}`,
+		`{"session_id":"ephemeral-a","hook_event_name":"UserPromptSubmit","transcript_path":null,"prompt":"a-canary"}`,
+		`{"session_id":"ephemeral-b","hook_event_name":"PreToolUse","transcript_path":null,"tool_input":{"value":"b-canary"}}`,
+	}
+	for _, raw := range hooks {
+		if _, err := EnqueueHook(RuntimeCodex, []byte(raw)); !errors.Is(err, ErrEphemeralSessionSkipped) {
+			t.Fatalf("skip error = %v", err)
+		}
+	}
+	markers, err := SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]uint64)
+	for _, marker := range markers {
+		counts[marker.SessionHash] = marker.Events
+	}
+	hashA := testSessionHash("ephemeral-a")
+	hashB := testSessionHash("ephemeral-b")
+	if len(markers) != 2 || counts[hashA] != 2 || counts[hashB] != 1 {
+		t.Fatalf("independent markers = %#v", markers)
+	}
+
+	markerAPath := filepath.Join(witselfHome, "capture", "skipped", RuntimeCodex, hashA+".json")
+	if err := os.WriteFile(markerAPath, []byte("corrupt-marker-canary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnqueueHook(RuntimeCodex, []byte(`{"session_id":"ephemeral-a","hook_event_name":"Stop","transcript_path":null}`)); !errors.Is(err, ErrEphemeralSessionSkipped) {
+		t.Fatalf("skip after corrupt marker = %v", err)
+	}
+	markers, err = SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts = make(map[string]uint64)
+	for _, marker := range markers {
+		counts[marker.SessionHash] = marker.Events
+	}
+	if len(markers) != 2 || counts[hashA] != 1 || counts[hashB] != 1 {
+		t.Fatalf("markers after corrupt replacement = %#v", markers)
+	}
+	replaced, err := os.ReadFile(markerAPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(replaced, []byte("corrupt-marker-canary")) || bytes.Contains(replaced, []byte("ephemeral-a")) {
+		t.Fatalf("corrupt marker was not safely replaced: %s", replaced)
+	}
+}
+
+func TestSkippedSessionConcurrentUpdatesRetainEveryCount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	const updates = 32
+	start := make(chan struct{})
+	errs := make(chan error, updates)
+	var workers sync.WaitGroup
+	for index := 0; index < updates; index++ {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			<-start
+			hookEvent := "SessionStart"
+			if index%2 == 1 {
+				hookEvent = "PreToolUse"
+			}
+			errs <- recordSkippedSession(RuntimeCodex, "concurrent-session", hookEvent, "0.149.0", "gpt-5.6-sol", time.Now().UTC())
+		}(index)
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	markers, err := SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 1 || markers[0].Events != updates ||
+		markers[0].HookEvents["SessionStart"] != updates/2 ||
+		markers[0].HookEvents["PreToolUse"] != updates/2 {
+		t.Fatalf("concurrent marker counts = %#v", markers)
+	}
+	locks, err := filepath.Glob(filepath.Join(home, ".witself", "capture", "skipped", RuntimeCodex, "*.lock"))
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("marker locks after updates = %v / %v", locks, err)
+	}
+}
+
+func TestCodexEphemeralMarkerFailureStillReturnsSkipSentinel(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	saveTestCaptureConfig(t, RuntimeCodex)
+	captureDir := filepath.Join(witselfHome, "capture")
+	if err := os.MkdirAll(captureDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(captureDir, "skipped"), []byte("blocks-marker-directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	event, err := EnqueueHook(RuntimeCodex, []byte(`{"session_id":"ephemeral-marker-failure","hook_event_name":"UserPromptSubmit","transcript_path":null,"prompt":"must-not-queue"}`))
+	if !errors.Is(err, ErrEphemeralSessionSkipped) {
+		t.Fatalf("skip error = %v", err)
+	}
+	if event.ID != "" || event.Runtime != "" || event.SessionID != "" || len(event.Raw) != 0 {
+		t.Fatalf("skipped event = %#v, want zero value", event)
+	}
+	pending, pendingErr := Pending(RuntimeCodex)
+	if pendingErr != nil {
+		t.Fatal(pendingErr)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("marker failure queued %d events", len(pending))
+	}
+}
+
+func TestQuarantineEphemeralMovesOnlyPathlessCodexEvents(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	base := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	events := []Event{
+		{SchemaVersion: SchemaVersion, ID: "evt-persisted-1", Runtime: RuntimeCodex, SessionID: "persisted-a", HookEvent: "SessionStart", NativeHookEvent: "SessionStart", SourceTranscriptPath: "/tmp/a.jsonl", OccurredAt: base},
+		{SchemaVersion: SchemaVersion, ID: "evt-ephemeral-1", Runtime: RuntimeCodex, SessionID: "ephemeral-a", HookEvent: "UserPromptSubmit", NativeHookEvent: "UserPromptSubmit", Body: "backlog-prompt-canary", OccurredAt: base.Add(time.Second)},
+		{SchemaVersion: SchemaVersion, ID: "evt-persisted-2", Runtime: RuntimeCodex, SessionID: "persisted-b", HookEvent: "Stop", NativeHookEvent: "Stop", SourceTranscriptPath: "/tmp/b.jsonl", OccurredAt: base.Add(2 * time.Second)},
+		{SchemaVersion: SchemaVersion, ID: "evt-ephemeral-2", Runtime: RuntimeCodex, SessionID: "ephemeral-b", HookEvent: "PreToolUse", NativeHookEvent: "PreToolUse", Body: "backlog-tool-canary", OccurredAt: base.Add(3 * time.Second)},
+	}
+	for _, event := range events {
+		if err := writeOutboxEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := make(map[string][]byte)
+	for _, item := range pending {
+		raw, err := os.ReadFile(item.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original[filepath.Base(item.Path)] = raw
+	}
+	for _, item := range pending {
+		if strings.TrimSpace(item.Event.SourceTranscriptPath) == "" {
+			if err := os.Chmod(item.Path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+
+	moved, remaining, err := QuarantineEphemeral(RuntimeCodex, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 2 || len(remaining) != 2 {
+		t.Fatalf("moved/remaining = %d/%d, want 2/2", len(moved), len(remaining))
+	}
+	for _, item := range moved {
+		baseName := filepath.Base(item.Path)
+		if filepath.Dir(item.Path) != filepath.Join(witselfHome, "capture", "quarantine", RuntimeCodex) {
+			t.Fatalf("quarantine path = %q", item.Path)
+		}
+		got, err := os.ReadFile(item.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, original[baseName]) {
+			t.Fatalf("quarantined bytes changed for %s", baseName)
+		}
+		outboxPath := filepath.Join(witselfHome, "capture", "outbox", RuntimeCodex, baseName)
+		if _, err := os.Stat(outboxPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("quarantined source still exists: %s / %v", outboxPath, err)
+		}
+		if info, err := os.Stat(item.Path); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("quarantined permissions = %v / %v", info, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(witselfHome, "capture", "quarantine", RuntimeCodex)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("quarantine directory permissions = %v / %v", info, err)
+	}
+	reloaded, err := Pending(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 2 {
+		t.Fatalf("reloaded pending = %d, want 2", len(reloaded))
+	}
+	for _, item := range reloaded {
+		if strings.TrimSpace(item.Event.SourceTranscriptPath) == "" {
+			t.Fatalf("ephemeral event remained pending: %#v", item.Event)
+		}
+	}
+	markers, err := SkippedSessions(RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 2 || markers[0].Events != 1 || markers[1].Events != 1 {
+		t.Fatalf("quarantine markers = %#v", markers)
+	}
+}
+
+func TestQuarantineEphemeralMoveFailureLeavesSourcePending(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	event := Event{
+		SchemaVersion: SchemaVersion, ID: "evt-ephemeral-collision", Runtime: RuntimeCodex,
+		SessionID: "ephemeral-collision", HookEvent: "SessionStart", OccurredAt: time.Now().UTC(),
+	}
+	if err := writeOutboxEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(RuntimeCodex)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending before collision = %#v / %v", pending, err)
+	}
+	sourceRaw, err := os.ReadFile(pending[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quarantine := filepath.Join(witselfHome, "capture", "quarantine", RuntimeCodex)
+	if err := os.MkdirAll(quarantine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(quarantine, filepath.Base(pending[0].Path))
+	const collisionCanary = "existing-quarantine-file-canary\n"
+	if err := os.WriteFile(destination, []byte(collisionCanary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, remaining, err := QuarantineEphemeral(RuntimeCodex, pending)
+	if err == nil || len(moved) != 0 || len(remaining) != 1 {
+		t.Fatalf("collision moved/remaining/error = %d/%d/%v", len(moved), len(remaining), err)
+	}
+	gotSource, readErr := os.ReadFile(pending[0].Path)
+	if readErr != nil || !bytes.Equal(gotSource, sourceRaw) {
+		t.Fatalf("failed move changed pending source: %q / %v", gotSource, readErr)
+	}
+	gotDestination, readErr := os.ReadFile(destination)
+	if readErr != nil || string(gotDestination) != collisionCanary {
+		t.Fatalf("failed move overwrote quarantine destination: %q / %v", gotDestination, readErr)
+	}
+	markers, markerErr := SkippedSessions(RuntimeCodex)
+	if markerErr != nil || len(markers) != 0 {
+		t.Fatalf("failed move wrote skipped marker = %#v / %v", markers, markerErr)
+	}
+}
+
+func TestQuarantineEphemeralIsCodexOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	event := Event{
+		SchemaVersion: SchemaVersion, ID: "evt-claude-pathless", Runtime: RuntimeClaudeCode,
+		SessionID: "claude-session", HookEvent: "SessionStart", OccurredAt: time.Now().UTC(),
+	}
+	if err := writeOutboxEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, remaining, err := QuarantineEphemeral(RuntimeClaudeCode, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 0 || len(remaining) != 1 {
+		t.Fatalf("Claude moved/remaining = %d/%d", len(moved), len(remaining))
+	}
+	reloaded, err := Pending(RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 1 {
+		t.Fatalf("Claude pending = %d, want 1", len(reloaded))
 	}
 }
 
@@ -193,7 +662,7 @@ func TestPinnedHookAgentMustMatchInstalledBinding(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	raw := []byte(`{"session_id":"session-1","hook_event_name":"SessionStart"}`)
+	raw := []byte(`{"session_id":"session-1","hook_event_name":"SessionStart","transcript_path":"/tmp/codex-session.jsonl"}`)
 	if _, err := EnqueueHookForAgent(RuntimeCodex, "different-agent", raw); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("mismatch error = %v", err)
 	}
@@ -2906,9 +3375,65 @@ func assertNullableProvenance(t *testing.T, value map[string]any, key, want stri
 
 func enqueueTestHook(t *testing.T, runtime, raw string) Event {
 	t.Helper()
+	if runtime == RuntimeCodex {
+		var input map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &input); err == nil {
+			_, hasSnakePath := input["transcript_path"]
+			_, hasCamelPath := input["transcriptPath"]
+			if !hasSnakePath && !hasCamelPath {
+				input["transcript_path"] = json.RawMessage(`"/tmp/codex-persisted-session.jsonl"`)
+				encoded, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw = string(encoded)
+			}
+		}
+	}
 	event, err := EnqueueHook(runtime, []byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return event
+}
+
+func saveTestCaptureConfig(t *testing.T, runtime string) {
+	t.Helper()
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(Config{
+		Runtime: runtime, CaptureMode: ModeRaw,
+		Account: "default", Realm: "default", Agent: "scott",
+		AgentID: "agent_1", AgentName: "scott", Location: loc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mapsEqual(got, want map[string]uint64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for key, value := range want {
+		if got[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedRawMessageKeys(values map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func testSessionHash(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:16])
 }
