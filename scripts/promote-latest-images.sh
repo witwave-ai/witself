@@ -36,6 +36,15 @@ if ! git clone --quiet --depth=1 --branch "$branch" -- "$repository_url" "$tap_d
   exit 1
 fi
 
+# Prints the release version encoded in a rendered formula's GitHub release
+# URLs. Homebrew scans the version from the URL, so the formula carries no
+# explicit version line (brew audit reports one as redundant). Every URL must
+# name the same release; anything else prints more than one line or nothing.
+formula_release_version() {
+  sed -n 's#^ *url "https://github\.com/witwave-ai/witself/releases/download/v\([^/"]*\)/[^"]*"$#\1#p' "$1" \
+    | LC_ALL=C sort -u
+}
+
 semantic_version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 formulae=(witself witself-admin witself-infra)
 version=
@@ -47,9 +56,8 @@ for name in "${formulae[@]}"; do
     exit 1
   fi
 
-  candidate_count=$(awk '/^  version "[^"]*"$/ { count++ } END { print count + 0 }' "$formula")
-  candidate=$(sed -n 's/^  version "\([^"]*\)"$/\1/p' "$formula")
-  if (( candidate_count != 1 )) || [[ -z $candidate || $candidate == *$'\n'* ]]; then
+  candidate=$(formula_release_version "$formula")
+  if [[ -z $candidate || $candidate == *$'\n'* ]]; then
     echo "error: cannot resolve one version from Formula/$name.rb" >&2
     exit 1
   fi

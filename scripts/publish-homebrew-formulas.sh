@@ -122,6 +122,15 @@ semver_compare() {
   done
 }
 
+# Prints the release version encoded in a rendered formula's GitHub release
+# URLs. Homebrew scans the version from the URL, so the formula carries no
+# explicit version line (brew audit reports one as redundant). Every URL must
+# name the same release; anything else prints more than one line or nothing.
+formula_release_version() {
+  sed -n 's#^ *url "https://github\.com/witwave-ai/witself/releases/download/v\([^/"]*\)/[^"]*"$#\1#p' "$1" \
+    | LC_ALL=C sort -u
+}
+
 formulae=(witself witself-admin witself-infra)
 for name in "${formulae[@]}"; do
   formula="$output_dir/Formula/$name.rb"
@@ -129,8 +138,8 @@ for name in "${formulae[@]}"; do
     echo "error: rendered formula is missing: $formula" >&2
     exit 1
   fi
-  if ! grep -Fqx "  version \"$version\"" "$formula"; then
-    echo "error: $formula does not declare version $version" >&2
+  if [[ $(formula_release_version "$formula") != "$version" ]]; then
+    echo "error: $formula does not release version $version" >&2
     exit 1
   fi
   if command -v ruby >/dev/null 2>&1; then
@@ -198,7 +207,7 @@ for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
   for name in "${formulae[@]}"; do
     current_formula="$tap_dir/Formula/$name.rb"
     [[ -f $current_formula ]] || continue
-    candidate=$(sed -n 's/^  version "\([^"]*\)"$/\1/p' "$current_formula")
+    candidate=$(formula_release_version "$current_formula")
     if [[ -z $candidate || $candidate == *$'\n'* ]]; then
       echo "error: cannot resolve one current version from $current_formula" >&2
       exit 1

@@ -8,6 +8,13 @@ trap 'rm -rf -- "$work_dir"' EXIT
 version=1.2.3
 formula_dir="$work_dir/rendered"
 seed_dir="$work_dir/seed"
+
+# The version a formula releases is scanned from its GitHub release URL, so
+# tests read it the same way the publisher and promoter do.
+release_version_of_stdin() {
+  sed -n 's#^ *url "https://github\.com/witwave-ai/witself/releases/download/v\([^/"]*\)/[^"]*"$#\1#p' \
+    | LC_ALL=C sort -u
+}
 remote_dir="$work_dir/homebrew-tap.git"
 mkdir -p "$formula_dir/Formula"
 
@@ -17,8 +24,7 @@ write_formula() {
     "class $class_name < Formula" \
     "  desc \"Release publisher fixture for $name\"" \
     '  homepage "https://github.com/witwave-ai/witself"' \
-    "  version \"$version\"" \
-    '  url "https://example.invalid/archive.tar.gz"' \
+    "  url \"https://github.com/witwave-ai/witself/releases/download/v$version/${name}_${version}_darwin_arm64.tar.gz\"" \
     "  sha256 \"$(printf '%064d' 0)\"" \
     '  def install' \
     "    bin.install \"$name\"" \
@@ -67,7 +73,7 @@ write_formula witself-infra WitselfInfra
 bash "$repo_root/scripts/publish-homebrew-formulas.sh" \
   "$formula_dir" "$version" "file://$remote_dir" main
 published_version=$(git --git-dir="$remote_dir" show main:Formula/witself.rb \
-  | sed -n 's/^  version "\([^"]*\)"$/\1/p')
+  | release_version_of_stdin)
 [[ $published_version == "$version" ]] \
   || { echo "error: SemVer build metadata was not published" >&2; exit 1; }
 
@@ -97,7 +103,7 @@ after_retry_count=$(git --git-dir="$remote_dir" rev-list --count main)
 [[ $after_retry_count -eq $((before_retry_count + 1)) ]] \
   || { echo "error: retry publication did not create exactly one remote commit" >&2; exit 1; }
 retry_version=$(git --git-dir="$remote_dir" show main:Formula/witself.rb \
-  | sed -n 's/^  version "\([^"]*\)"$/\1/p')
+  | release_version_of_stdin)
 [[ $retry_version == "$version" ]] \
   || { echo "error: retry publication did not converge" >&2; exit 1; }
 
@@ -110,7 +116,7 @@ skip_output=$(bash "$repo_root/scripts/publish-homebrew-formulas.sh" \
 [[ $skip_output == *"already contains newer"* ]] \
   || { echo "error: older release was not reported as a safe no-op" >&2; exit 1; }
 after_downgrade=$(git --git-dir="$remote_dir" show main:Formula/witself.rb \
-  | sed -n 's/^  version "\([^"]*\)"$/\1/p')
+  | release_version_of_stdin)
 [[ $after_downgrade == 1.2.4 ]] \
   || { echo "error: skipped downgrade changed the tap" >&2; exit 1; }
 
@@ -150,7 +156,7 @@ PATH="$mock_bin:$PATH" \
     https://github.com/witwave-ai/homebrew-tap.git main
 
 github_version=$(git --git-dir="$github_remote" show main:Formula/witself.rb \
-  | sed -n 's/^  version "\([^"]*\)"$/\1/p')
+  | release_version_of_stdin)
 [[ $github_version == "$version" ]] \
   || { echo "error: authenticated publisher path did not push" >&2; exit 1; }
 helper_count=$(grep -Fc authenticated "$git_log")

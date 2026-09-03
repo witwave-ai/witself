@@ -69,7 +69,9 @@ func TestRenderFormulasHashesAndContent(t *testing.T) {
 		text := string(content)
 
 		assertContains(t, text, fmt.Sprintf("desc %q", expected.description))
-		assertContains(t, text, `version "1.2.3-rc.1"`)
+		if strings.Contains(text, "\n  version \"") {
+			t.Errorf("%s declares an explicit version; Homebrew scans it from the release URL and brew audit rejects the redundant line", filename)
+		}
 		assertContains(t, text, fmt.Sprintf(`system bin/%q, %q`, expected.binary, expected.testArg))
 		if strings.Contains(text, `#{bin}`) {
 			t.Errorf("%s contains deprecated interpolated bin path", filename)

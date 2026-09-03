@@ -36,14 +36,15 @@ write_formula() {
   if [[ $formula_version == duplicate ]]; then
     printf '%s\n' \
       "class $class_name < Formula" \
-      '  version "1.2.3"' \
-      '  version ""' \
+      "  url \"https://github.com/witwave-ai/witself/releases/download/v1.2.3/${name}_1.2.3_darwin_arm64.tar.gz\"" \
+      "  url \"https://github.com/witwave-ai/witself/releases/download/v/${name}_darwin_amd64.tar.gz\"" \
       'end' > "$directory/Formula/$name.rb"
     return
   fi
   printf '%s\n' \
     "class $class_name < Formula" \
-    "  version \"$formula_version\"" \
+    "  url \"https://github.com/witwave-ai/witself/releases/download/v$formula_version/${name}_${formula_version}_darwin_arm64.tar.gz\"" \
+    "  url \"https://github.com/witwave-ai/witself/releases/download/v$formula_version/${name}_${formula_version}_linux_amd64.tar.gz\"" \
     'end' > "$directory/Formula/$name.rb"
 }
 
