@@ -1,11 +1,13 @@
 # Witself Backup And Recovery
 
-Status: draft with an implementation-backed sealed-plane amendment. Decision:
+Status: implementation-backed backup and recovery contract with a sealed-plane
+amendment. Decision:
 v0 backup/export carries a **dual posture**, one per plane. The OPEN plane
-(memories + facts) supports first-class structured/plaintext identity export
-and round-trippable import. The SEALED plane (secrets + TOTP) travels only as
-client-encrypted ciphertext, wrapped DEKs, public AVK bindings, and value-free
-lifecycle history, never plaintext and never client key material.
+(memories + facts) supports a first-class customer whole-account export and a
+separate operator-side evacuation archive round trip. The SEALED plane (secrets
+and TOTP) travels only as client-encrypted ciphertext, wrapped DEKs, public AVK
+bindings, and value-free lifecycle history, never plaintext and never client
+key material.
 
 > **Sealed-plane custody amendment (accepted 2026-07-19):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
@@ -174,9 +176,10 @@ V0 posture (open plane — memories + facts):
 - Backups preserve all identity data and the metadata needed to bring a realm
   fully back, including memories, facts, primary flags, memory edit history,
   policies, group membership, group-owned records, messages, and audit.
-- Identity export is a supported plaintext feature, not a forbidden one.
-  `witself export` produces structured, human-readable, round-trippable identity
-  data; `witself import` restores it. See
+- Customer export is supported, not forbidden. `witself export` produces a
+  checksum-verified whole-account logical archive. Archive import is an
+  operator-side account-move/restore primitive; there is no customer
+  `witself import` command. See
   [Identity Export And Import](#identity-export-and-import).
 - Open-plane recovery does **not** require any KMS or key-material custody.
   There is no encrypted-only export, no no-plaintext rule, and no break-glass
@@ -194,10 +197,11 @@ V0 posture (sealed plane — secrets + TOTP):
   `aad_context`) plus the `realm_keys`/`secret_deks` wrapping rows and KMS key
   identity + rotation metadata. Never plaintext secret values, never TOTP seeds
   or codes, never key material. See [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
-- Secrets and TOTP seeds are **excluded from the plaintext identity export**.
-  `witself export` covers the open plane only and never emits a plaintext secret
-  value or seed. The only secret backup is the encrypted envelope plus KMS key
-  identity. See [Identity Export And Import](#identity-export-and-import) and
+- Secrets and TOTP seeds are **excluded from plaintext export**. The whole-account
+  `witself export` archive carries their client-encrypted envelopes and public,
+  value-free lifecycle state, but never emits a plaintext secret value, seed,
+  AVK, or recovery artifact. See
+  [Identity Export And Import](#identity-export-and-import) and
   [key-hierarchy.md](key-hierarchy.md).
 - Sealed-plane recovery depends on KMS key material being retained.
   **CMK loss = the sealed plane is crypto-shredded** (every per-realm KEK, hence
@@ -398,21 +402,19 @@ rebuildable acceleration, not canonical archive data or a restore prerequisite.
 
 ## Identity Export And Import
 
-First-class structured/plaintext identity export and round-trippable import is a
-headline Witself feature for the **open plane**. Export/import is the
-user-facing, portable counterpart to operational backups: backups protect a
-realm operationally; export/import moves identity between agents, realms, and
-environments.
+The shipped customer surface is a whole-account logical archive:
+`witself export` downloads `GET /v1/export` with the selected managed account's
+operator credential. There is no customer `witself import` command. A separate
+archive from the paired evacuation-export route is consumed by the
+provision-token-authorized operator import for account moves; the customer
+`purpose=self` artifact is not accepted there.
 
-**Sealed-plane carve-out.** `witself export` covers memories and facts only.
-Secrets and TOTP seeds are **never** in the plaintext identity export — there is
-no plaintext secret value or seed in any export artifact. The only secret backup
-is the encrypted envelope plus KMS key identity described in
-[Sealed-Plane Secret Backup](#sealed-plane-secret-backup); an operator who wants
-encrypted secret blobs in a portable artifact uses that explicit, audited,
-separate path, not the identity export. Sealed material is never embedded, never
-recalled, never in the self-digest, and never ingested either. See
-[key-hierarchy.md](key-hierarchy.md).
+**Sealed-plane carve-out.** The whole-account archive includes portable
+client-encrypted secret/TOTP state, public AVK bindings, and value-free lifecycle
+history. It never includes a plaintext secret value or TOTP seed, an AVK, a
+local key file, an enrollment private key, pairing/passphrase material, or a
+recovery artifact. Sealed material is never embedded, recalled, placed in the
+self-digest, or ingested either. See [key-hierarchy.md](key-hierarchy.md).
 
 **Future sealed plaintext export (post-v0).** A plaintext secret/TOTP export is
 not part of v0 and is tracked as a post-v0 candidate in
@@ -426,52 +428,43 @@ design doc separate from this normal backup/export guidance. It would route
 through the audited reveal ceremony, not `witself export`. See
 [secret-model.md](secret-model.md) and [threat-model.md](threat-model.md).
 
-Export rules:
+Customer export rules:
 
-- `witself export` emits a structured, human-readable, plaintext export of an
-  agent's self: all memories (content, kind, tags, source, salience, links,
-  timestamps, and **edit history**), all facts (values, `primary` flags,
-  `sensitive` flags, format hints, source, and edit history), and the agent's
-  identity anchors.
-- For operators, export can include realm-level context: **policies**,
-  **security-group membership**, and **group-owned** memories and facts.
-- Export defaults to JSON using the `witself.v0` schema version. A
-  directory/file layout suitable for diffing and version control is also
-  supported.
-- Identity references (`witself://…`) are preserved on export and re-resolved on
-  import. Dangling references are reported, not silently dropped.
+- `witself export` emits the complete portable account archive as a gzip/tar
+  stream with `manifest.json`, ordered JSONL table chunks, and a trailing
+  `checksums.json`. Its manifest purpose is `self`; it carries neither a backup
+  id nor an evacuation id.
+- The command is account-scoped, not agent-scoped. It accepts `--account`,
+  `--endpoint`, `--out`, and `--force`; without `--out` it chooses a dated
+  `.tar.gz` filename for the selected account.
+- The server permits an active, suspended, or closed account, takes a read-only
+  `REPEATABLE READ` snapshot, and performs no reconciliation write or account-row
+  lock. It allows only one concurrent self export per account.
+- The CLI downloads beside the destination, verifies the manifest and every
+  chunk checksum before installation, refuses to overwrite without `--force`,
+  and preserves an incomplete or invalid download under an `.unverified` name.
 - A permanently deleted memory exports only its value-free head tombstone and
   the complete `memory_deleted_references` retry-shield set. The tombstone binds
   receipt/idempotency hashes, prior version, deterministic scrub revision,
   purged row counts, and retry-shield count/digest; no purged version, evidence,
   relation, content-derived hash, locator, or raw retry key may reappear.
-- Export requires an explicit output path selection.
-- Export produces an `identity.exported` audit event when audit is available.
 - Export must not include raw tokens.
 
 Sensitivity handling (display-level, not encryption):
 
-- `sensitive` facts and memories are exported in clear by default — the open
-  plane embraces plaintext export. There is no reveal ceremony and no value-size
-  split for identity data. `sensitive` is the open plane's lightweight redaction
-  marker, distinct from the sealed plane: an actual credential belongs in a
-  secret (sealed, never exported), not a sensitive fact. See
+- `sensitive` facts and memories remain open-plane account data in the archive.
+  There is no reveal ceremony or value-size split for identity data. `sensitive`
+  is the open plane's lightweight redaction marker, distinct from the sealed
+  plane: an actual credential belongs in a secret, whose value remains encrypted
+  in the archive. See
   [facts-model.md](facts-model.md) and [secret-model.md](secret-model.md).
-- Exporting `sensitive` records requires an audit `--reason` and emits a
-  warning.
-- Export is least-privilege authorized. Operators may scope exports to
-  non-sensitive records (for example for sharing or diffing) where policy
-  allows.
 
-Import rules:
+Operator-side archive import rules:
 
-- `witself import` restores an exported self into the same or a different
-  agent/realm, preserving primary flags, sensitive markers, links, and (where
-  chosen) edit history.
-- Import is idempotent by stable id where ids are preserved, and supports a
-  rename/remap mode when importing into a different agent or realm.
-- Import is audited (`identity.imported`) and supports `--dry-run` to preview
-  created/updated/conflicting records without persisting.
+- The server-side evacuation import consumes the logical archive only through
+  `POST /v1/accounts/{account_id}:import-evacuation`, with the provision token
+  and exact evacuation id. It is account-wide and not exposed by the customer
+  CLI.
 - Importing facts re-applies primary promotion atomically, demoting any prior
   primary of the same logical kind so the at-most-one-primary invariant holds.
 - Imported references are re-resolved and re-checked for authorization; a
@@ -530,10 +523,11 @@ Import rules:
   address domain; accepted legacy configuration is never treated as proof that
   a new mailbox was issued on that domain.
 
-The implemented whole-account exporter requires the account to be suspended or
-closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
-and holds a shared lock on the account row, so a concurrent resume cannot create
-a torn archive.
+Periodic backups and customer `ExportAccountSelf` accept active, suspended, or
+closed accounts and use read-only `REPEATABLE READ` transactions without an
+account-row lock or reconciliation writes. Of these paths, only evacuation
+export requires the account to be suspended or closed and holds the account-row
+fence.
 
 Before any ordinary, evacuation, or periodic-backup account archive writes
 bytes, the exporter compares the live Goose migration version with the schema
@@ -541,9 +535,11 @@ embedded in its server binary. An out-of-date replica fails closed when the
 database is newer and must be upgraded before retrying, rather than writing a
 lossy archive whose manifest hides columns that replica cannot project.
 
-Local development exports use the same `witself export`/`witself import` paths
-for fixtures, demos, backup, and migration, so the local backend exercises the
-real export contract rather than a parallel format. See
+Customer self exports and operator evacuation archives share the versioned
+layout and checksum machinery, but their manifest identity and lifecycle fences
+are distinct. The import route accepts the paired suspended/closed evacuation
+archive with its exact evacuation ID, not the active-capable customer
+`purpose=self` artifact; none of this implies a customer import command. See
 [cli-command-surface.md](cli-command-surface.md).
 
 ## Restore Scope
@@ -755,11 +751,12 @@ successful restore drill and the other acceptance prerequisites complete.
 
 ### Civo PostgreSQL pre-migration backup
 
-The two reviewed Civo development databases use standalone PostgreSQL on an
-in-cluster persistent volume. `civo-sandbox-usw2-dev` serves development
-accounts. `civo-sandbox-use1-backup` is an empty isolated validation-only target
-registered `backup_validation_target=true` and `accepting=false`; do not move or
-import accounts into it until it is deliberately upgraded and reclassified.
+The two reviewed Civo production databases use standalone PostgreSQL on an
+in-cluster persistent volume. `civo-sandbox-usw2-dev` is the serving cell despite
+its legacy name. `civo-sandbox-use1-backup` is the empty, isolated rollback-only
+drill target, registered `backup_validation_target=true` and `accepting=false`;
+do not place or commit restored accounts there unless it is deliberately
+reclassified.
 Before changing either cell's GitOps image or chart to a release that may
 advance the schema, create a separate logical
 backup with [`scripts/civo-pre-migration-backup.sh`](../scripts/civo-pre-migration-backup.sh).
@@ -1009,10 +1006,11 @@ control-plane repoint that completes a move.
 
 Migration is dual-plane, matching the two postures above:
 
-- **Open plane (memories + facts + curation + messaging)** moves via the first-class
-  export/import described in [Identity Export And Import](#identity-export-and-import):
-  `witself export` from cell A, `witself import` into cell B. Identity data
-  travels in clear by design, so no KMS custody is involved. Migration-0032
+- **Open plane (memories + facts + curation + messaging)** moves through the
+  operator-side whole-account evacuation export/import described in
+  [Identity Export And Import](#identity-export-and-import), not through a
+  customer `witself import` command. Identity data travels in clear by design,
+  so no KMS custody is involved. Migration-0032
   client-supplied vector profiles/rows move in the same archive under the
   [Client-Supplied Vectors](#client-supplied-vectors) validation rules.
 - **Sealed plane (secrets + TOTP)** is KMS-rooted per cell/cloud, so it cannot be
@@ -1028,7 +1026,7 @@ Migration is dual-plane, matching the two postures above:
 Agent-email mailboxes, messages, aliases, permanent domain-route reservations,
 send controls, outbound messages, provider-event receipts, and recipient
 suppressions are account spine state. They move in the implemented whole-account
-logical archive, not the per-agent plaintext identity export. Freeze
+logical archive, not a per-agent identity artifact. Freeze
 export/import and cell movement during any mixed-version wave until every
 possible destination accepts the source archive schema. For schema 90 that
 means every destination understands the schema-89 outbound streams and the
@@ -1057,9 +1055,10 @@ A managed or self-hosted restore should proceed in this order:
 
 1. Confirm the target `witself-server` build and its expected migration version.
 2. Restore the Postgres system of record from backup.
-3. Apply or verify migrations with `witself-server migrate` so the restored
-   database matches the build (advisory lock; Helm migration Job in Kubernetes).
-   See [storage.md](storage.md).
+3. Start the target build against the restored database while the destination
+   remains out of service. Database-backed server/worker startup applies the
+   embedded forward Goose migrations under the shared migration lock; a failure
+   aborts startup. See [storage.md](storage.md).
 4. Restore object/blob storage when used.
 5. Rebuild the derived full-text index. Restore schema-32 vector profiles and
    rows through the validated archive streams; rebuild any future ANN
@@ -1098,10 +1097,7 @@ A managed or self-hosted restore should proceed in this order:
    lexical fallback, not an unsupported memory service.
 10. Verify health and readiness probes and metrics. See
     [observability-and-operations.md](observability-and-operations.md).
-11. Confirm a sample of cross-agent access decisions with `policy test` so the
-    restored default-deny surface behaves as expected. See
-    [access-policy.md](access-policy.md).
-12. Confirm restore/recovery audit events are present, including any
+11. Confirm restore/recovery audit events are present, including any
     `key.rotated` and sealed-plane events when the sealed plane is enabled. See
     [audit-retention.md](audit-retention.md).
 

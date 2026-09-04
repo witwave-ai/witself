@@ -7,11 +7,22 @@ accounts, add `--name NAME` at create and `--account NAME` everywhere after.
 
 ## Create an account on Witself Cloud
 
-Requires an invite code.
+Open self-service signup is live. An invite-less signup records acceptance of
+the current Terms of Service and Privacy Policy and must pass the production
+Turnstile challenge. The first attempt returns the public challenge URL; open
+it, complete the check, then repeat the command with the displayed token:
 
-Before launch, a platform operator can mint a named, capped code and inspect
-its live use count through the control plane. Disable it immediately when the
-cohort should stop accepting signups; disabling does not reset the count or
+```sh
+witself account create --email scott@witwave.ai --accept-terms
+witself account create --email scott@witwave.ai --accept-terms \
+  --challenge TURNSTILE_TOKEN
+```
+
+Production also applies daily quotas of 10 signups per source IP and 500
+globally, in addition to the fixed edge request limits. Invite codes remain an
+optional controlled-cohort path. A platform operator can mint a named, capped
+code and inspect its live use count through the control plane. Disable it when
+the cohort should stop accepting signups; disabling does not reset the count or
 remove historical use records.
 
 ```sh
@@ -19,10 +30,6 @@ witself-admin invite create --code launch-2026 --max-uses 100 \
   --expires 2026-09-30T23:59:59Z --note "launch cohort"
 witself-admin invite show launch-2026
 witself-admin invite disable launch-2026
-```
-
-```sh
-witself account create --email scott@witwave.ai --invite launch-2026
 ```
 
 The account is remembered locally as `default` (binding in
@@ -364,11 +371,12 @@ curl https://self.witwave.ai/v1/directory/<account-id>
 
 Before running `scripts/roll-cell.sh` for a release that can advance the
 database schema, run the encrypted logical backup and disposable restore drill
-for **both** reviewed Civo databases. `civo-sandbox-usw2-dev` is the serving
-development cell. `civo-sandbox-use1-backup` is an isolated validation-only
-target registered `backup_validation_target=true` and `accepting=false`, with no
-registered accounts; do not move or import accounts into it until it has been
-deliberately upgraded and reclassified. This is not the account-archive or
+for **both** reviewed Civo production databases. `civo-sandbox-usw2-dev` is the
+serving cell despite its legacy name. `civo-sandbox-use1-backup` is an isolated
+rollback-only drill target registered `backup_validation_target=true` and
+`accepting=false`, with no registered accounts; do not move or import accounts
+into it until it has been deliberately upgraded and reclassified. This is not
+the account-archive or
 periodic R2 backup path.
 
 Use an explicit owner-only kubeconfig/context for each cell, an existing

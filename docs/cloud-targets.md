@@ -2,8 +2,8 @@
 
 Status: provider substrate and executable certification gate implemented; live
 certification still in progress. The Pulumi cell program provisions AWS, GCP,
-Azure, and a cost-optimized Civo development cell. AWS remains the first
-production-hardening target. The same
+Azure, and the cost-optimized Civo production substrate that currently operates
+Witself. AWS remains the first managed-PostgreSQL certification target. The same
 provider-neutral 3-by-3 memory/account-move gate is now runnable against all
 three managed PostgreSQL services, but a cloud is not certified until a
 specific release passes that gate on its real endpoints.
@@ -32,7 +32,7 @@ archive format AWS-specific.
 
 AWS is first for:
 
-- The first production PostgreSQL narrative-memory conformance deployment.
+- The first managed-PostgreSQL narrative-memory conformance deployment.
 - The first production KMS integration for the sealed plane.
 - The first production-shaped Helm values example.
 - The first CI or smoke environment that exercises cloud-shaped infrastructure.
@@ -40,7 +40,7 @@ AWS is first for:
 The executable Pulumi substrate is already implemented for AWS, GCP, Azure, and
 Civo. AWS, GCP, and Azure provision a provider-specific Kubernetes cluster,
 private managed PostgreSQL, networking, secret delivery, DNS, and the optional
-GitOps bootstrap. Civo is a deliberately inexpensive development profile: K3s,
+GitOps bootstrap. Civo is the deliberately inexpensive production substrate: K3s,
 Civo networking and native DNS, Traefik NodePort ingress, cert-manager TLS, and
 in-cluster PostgreSQL on a Civo persistent volume.
 That implementation status must not be confused with certification: the same
@@ -66,7 +66,7 @@ The current executable provider paths live under `infra/pulumi`:
 1. AWS: EKS and RDS PostgreSQL.
 2. GCP: GKE and Cloud SQL for PostgreSQL.
 3. Azure: AKS and Azure Database for PostgreSQL Flexible Server.
-4. Civo: managed K3s and in-cluster PostgreSQL for development.
+4. Civo: production managed K3s and in-cluster PostgreSQL.
 
 Pulumi unit and compile tests prove that these provider graphs can be built.
 They do not prove that a live managed database accepts every migration or that
@@ -152,8 +152,9 @@ The fleet spans AWS, GCP, Azure, and Civo, across multiple accounts per cloud.
   stack; all four provider graphs are implemented. The three hyperscaler
   managed-PostgreSQL paths must pass the same
   conformance and cell-move gates before it is described as certified.
-  Civo remains an experimental development channel until its in-cluster
-  PostgreSQL profile has a separately defined production certification bar.
+  Civo is the current production provider: `civo-sandbox-usw2-dev` is the
+  serving cell despite its legacy name, while `civo-sandbox-use1-backup` is the
+  non-accepting rollback-only drill target.
 - **Placement is by region and data-residency.** A thin global control plane picks
   the home cell for a new tenant by region / data-residency requirement, capacity
   across the fleet, and provider/account preference. The cloud target a tenant

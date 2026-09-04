@@ -229,6 +229,23 @@ quarantine directory by hand. A move that fails is held from upload for that
 run, and the flush exits 1. The cumulative record is the quarantine directory
 plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
+### Known capture limitations
+
+- [Issue #339](https://github.com/witwave-ai/witself/issues/339): a headless
+  session can exit with the detached flush it spawned, leaving its durable
+  events local. Run `witself transcript flush --runtime <runtime>` in the
+  foreground before verifying delivery.
+- [Issue #335](https://github.com/witwave-ai/witself/issues/335): Codex
+  app-server delegated sessions end without a terminal fence, so their final
+  turn remains in the local outbox.
+- [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
+  persistence-boundary exclusion was merged on `main` by
+  [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
+  remains unreleased; `v0.0.272` is `9dc2f3d`. It takes effect only after a
+  release containing `fcf6e1c` is installed as the hooked binary. Until then,
+  keep using the fresh-subject-per-run workaround in
+  [memory-runtime-acceptance.md](memory-runtime-acceptance.md#older-codex-hook-binaries-require-fresh-subjects).
+
 Captured content is NUL-safe: NUL bytes and their JSON escape sequences are
 replaced with U+FFFD in bodies at capture (both the hook and batch-assembly
 halves sanitize) and rejected in identifiers, and residual unstorable input
@@ -352,6 +369,10 @@ verbatim and does not meter the restore itself. `GET /v1/usage` and
 realm/account aggregation and billing conversion remain deferred.
 
 ## Structured Objects And File Artifacts
+
+The object-store adapter in this section is roadmap-only and is not
+implemented. Current integrations may use only the bounded inline behavior
+described below.
 
 Postgres `jsonb` is the right first-slice home for small structured objects:
 tool arguments, result summaries, citations, decisions, and other bounded JSON.

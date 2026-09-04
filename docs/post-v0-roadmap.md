@@ -236,6 +236,16 @@ diagnostics, and metering for stored attachment bytes. Because message content
 is untrusted input to the receiving agent, attachment handling also needs an
 explicit injection and memory-poisoning review before promotion.
 
+## Deferred Transcript File Artifacts
+
+Generated documents, images, archives, and other transcript-linked binary
+artifacts require a cell-local object-store adapter. Postgres would retain
+portable `art_` metadata and immutable revisions while object storage holds the
+bytes; portable account archives must carry both the metadata and blob content.
+Until that adapter ships, transcript integrations are limited to bounded
+structured `payload` values and refuse non-empty file attachments. See
+[transcript-ledger.md](transcript-ledger.md#structured-objects-and-file-artifacts).
+
 ## Deferred Agent Activity Hardening
 
 ### Projection Cardinality And Installation Lifecycle

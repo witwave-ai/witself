@@ -24,8 +24,8 @@ storage-encryption references are unaffected.
 Witself is one product with two data planes. These walkthroughs cover both. The
 **open plane** is the Witself identity payload: adding and recalling memories,
 setting and reading facts, granting cross-agent access through policy, organizing
-agents into security groups, exchanging messages, and exporting/importing an
-agent's self. The **sealed plane** is agent credential material: creating and
+agents into security groups, exchanging messages, and exporting a whole-account
+archive. The **sealed plane** is agent credential material: creating and
 revealing secrets, enrolling TOTP and generating codes, generating passwords, and
 injecting secret references into a subprocess at runtime. The platform spine
 (install, auth, setup, token files, MCP, self-host, local dev) is shared by both
@@ -155,33 +155,46 @@ Expected behavior:
 
 ## 3. Add Billing Info Later
 
-Billing reuses the Witpass managed apparatus verbatim; this is a brief stub.
+Managed Stripe billing is generally available through the provider-neutral
+commands below.
 See [billing-and-limits.md](billing-and-limits.md) for plans, metered
-dimensions, soft/hard limits, and crypto rails.
+dimensions, soft/hard limits, and the roadmap-only crypto-rail contract.
 
-Add a payment method after setup:
-
-```sh
-witself billing payment-methods add \
-  --setup \
-  --type card \
-  --set-default \
-  --open \
-  --json
-```
-
-Subscribe or change plans with a promo code:
+Preview, then start the hosted payment-method setup flow:
 
 ```sh
-witself billing subscribe team \
-  --realm prod \
-  --promo-code FOUNDERS25 \
-  --checkout \
-  --open \
+witself billing setup \
+  --reason "add billing method" \
+  --email billing@example.com \
+  --dry-run \
   --json
+
+witself billing setup \
+  --reason "add billing method" \
+  --email billing@example.com \
+  --idempotency-key billing-setup-001 \
+  --yes \
+  --open
 ```
 
-Crypto payment rail example:
+Preview, then request a plan upgrade:
+
+```sh
+witself plan upgrade \
+  --reason "upgrade to Team" \
+  --dry-run \
+  --json \
+  team
+
+witself plan upgrade \
+  --reason "upgrade to Team" \
+  --idempotency-key plan-upgrade-team-001 \
+  --yes \
+  --json \
+  team
+```
+
+Crypto payment rail example (roadmap only; not implemented):
 
 ```sh
 witself billing crypto quote \
@@ -201,8 +214,11 @@ Expected behavior:
 
 - The CLI never accepts raw card numbers, bank credentials, wallet private keys,
   wallet seed phrases, or raw wallet credentials.
-- Hosted flows are resumable through `witself billing sessions show`.
-- Crypto payment is a payment rail, not a Witself utility-token requirement.
+- Hosted setup returns a provider action when customer input is required;
+  `witself billing show` reports the resulting state.
+- If implemented, crypto payment would be a payment rail, not a Witself
+  utility-token requirement. No current CLI or provider integration implements
+  the example above.
 
 ## 4. Agent Runtime Starts From A Token File
 
@@ -657,70 +673,43 @@ Expected behavior:
   responsibility-aware eligibility, and granular policy-scope enforcement
   remain later slices.
 
-## 10. Export And Import An Agent's Self
+## 10. Export A Whole Account
 
-Export an agent's self as structured, round-trippable, plaintext identity data
-(the deliberate inverse of Witpass's encrypted-only export stance):
-
-```sh
-witself export \
-  --agent archivist \
-  --include-history \
-  --out ./archivist-self.json \
-  --json
-```
-
-Exporting `sensitive` records is warned-on and requires a reason; operators may
-scope exports to non-sensitive records:
+Export all portable state for the selected managed account to a verified logical
+archive:
 
 ```sh
 witself export \
-  --agent archivist \
-  --include-sensitive \
-  --reason "operator-requested identity backup" \
-  --out ./archivist-self.full.json \
-  --json
+  --account acme \
+  --out ./acme-account.tar.gz
 ```
 
-Operator export with realm-level context (policies and group membership):
+Without `--out`, the CLI chooses a dated
+`witself-export-<account>-<UTC-YYYYMMDD>.tar.gz` filename. It refuses to replace
+an existing destination unless `--force` is explicit:
 
 ```sh
 witself export \
-  --realm prod \
-  --include-policies \
-  --include-groups \
-  --out ./prod-realm-self.json \
-  --json
-```
-
-Preview an import before persisting, then import into the same or a different
-agent (remap mode when the target differs):
-
-```sh
-witself import \
-  --in ./archivist-self.json \
-  --dry-run \
-  --json
-
-witself import \
-  --in ./archivist-self.json \
-  --target-agent archivist-restored \
-  --remap \
-  --reason "restore from backup into a new agent" \
-  --json
+  --account acme \
+  --out ./acme-account.tar.gz \
+  --force
 ```
 
 Expected behavior:
 
-- Export defaults to JSON using the `witself.v0` schema; a diff-friendly
-  directory/file layout is also supported.
-- Export preserves memories (content, kind, tags, source, salience, links,
-  timestamps, edit history), facts (values, `primary`/`sensitive` flags, format,
-  history), and identity anchors.
-- `witself://…` references are preserved on export and re-resolved on import;
-  dangling references are reported, not silently dropped.
-- Import is idempotent by stable id where ids are preserved, supports
-  rename/remap, is audited, and supports `--dry-run`.
+- The command uses the account-scoped operator credential and `GET /v1/export`;
+  it is account-wide rather than agent- or realm-scoped.
+- The gzip/tar archive carries a `self` manifest, ordered JSONL table chunks,
+  and trailing checksums. The CLI verifies the manifest and every chunk before
+  installing the requested file.
+- Open-plane account data is portable in the archive. Secret/TOTP values remain
+  client-encrypted; AVKs, recovery artifacts, and raw tokens are excluded.
+- A partial or invalid download is retained with an `.unverified` suffix for
+  inspection rather than installed as the requested archive.
+- There is no customer `witself import` command. Account archive import is a
+  separate provision-token-authorized server operation used by operators for
+  paired evacuation archives during account moves; it does not accept this
+  `purpose=self` customer artifact.
 
 ## 11. Agent Creates And Reveals A Sealed Secret
 
@@ -1102,11 +1091,19 @@ Expected behavior:
 
 ## 17. Self-Hosted Bootstrap
 
-Install with Helm:
+Generate the bootstrap token before Helm install and mount it through
+`bootstrap.existingSecret`:
 
 ```sh
+witself gen-bootstrap-token --out ./bootstrap.token
+kubectl create namespace witself --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n witself create secret generic witself-bootstrap \
+  --from-file=token=./bootstrap.token \
+  --from-literal=ttl=15m
+# Set bootstrap.existingSecret.name: witself-bootstrap in witself-values.yaml.
+
 helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
-  --version 0.1.0 \
+  --version 0.0.272 \
   --namespace witself \
   --create-namespace \
   --values ./witself-values.yaml
@@ -1115,60 +1112,74 @@ helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
 Verify the Kubernetes rollout, health probes, and metrics endpoint:
 
 ```sh
-kubectl -n witself rollout status deploy/witself
+kubectl -n witself rollout status deploy/witself-witself-server
+```
 
-kubectl -n witself port-forward deploy/witself 8080:8080 8081:8081 9090:9090
+Keep the port-forward running in a second terminal:
 
+```sh
+kubectl -n witself port-forward \
+  deploy/witself-witself-server 8080:8080 8081:8081 9090:9090
+```
+
+Then verify the probes and metrics from the first terminal:
+
+```sh
 curl -fsS http://127.0.0.1:8081/livez
 curl -fsS http://127.0.0.1:8081/readyz
 curl -fsS http://127.0.0.1:8081/startupz
 curl -fsS http://127.0.0.1:9090/metrics | head
 ```
 
-Run migrations when appropriate (PostgreSQL is the sole system of record):
+Exchange the adopted one-time bootstrap token for an operator token:
 
 ```sh
-witself-server migrate status --config ./witself-server.toml
-witself-server migrate up --config ./witself-server.toml
-```
-
-Create a one-time first-operator bootstrap token:
-
-```sh
-witself-server bootstrap token \
-  --config ./witself-server.toml \
-  --ttl 15m \
-  --out ./bootstrap.token
-```
-
-Bootstrap the self-hosted operator context, realm, and agents:
-
-```sh
-witself setup \
+witself auth login \
   --endpoint https://witself.internal.example.com \
   --bootstrap-token-file ./bootstrap.token \
-  --account "Acme Agents" \
-  --realm prod \
-  --agent archivist \
-  --token-out archivist=./witself-tokens/archivist.token \
-  --json
+  --out ./operator.token
+```
+
+Create the realm and agent, then issue its token:
+
+```sh
+witself realm create \
+  --endpoint https://witself.internal.example.com \
+  --token-file ./operator.token \
+  prod
+
+witself agent create \
+  --endpoint https://witself.internal.example.com \
+  --token-file ./operator.token \
+  --realm REALM_ID \
+  archivist
+
+witself token create \
+  --endpoint https://witself.internal.example.com \
+  --token-file ./operator.token \
+  --agent AGENT_ID \
+  --out ./witself-tokens/archivist.token
 ```
 
 Expected behavior:
 
-- Self-hosted setup is explicit through `--endpoint`.
+- Self-hosted administration is explicit through `--endpoint` and
+  `--token-file`.
 - There is no default admin username/password.
 - The bootstrap token is short-lived, single-use, and not an ordinary operator
   token.
+- Database migrations run automatically under the shared migration lock before
+  each database-backed process becomes Ready; there is no migration command or
+  chart migration Job.
 - The chart owns Kubernetes probes and metrics wiring through values.
 - The self-hosted backend needs PostgreSQL and serves deterministic lexical
   recall without any model credential or model egress. Optional implemented
   client-supplied vectors use portable JSONB, and capability discovery reports
   vector-profile support and coverage separately from the lexical baseline.
-- When the sealed plane is enabled, a configured KMS provider
-  (`WITSELF_KMS_PROVIDER` / `WITSELF_KMS_KEY_ID`) is a required dependency and
-  gates readiness; the open plane does not depend on KMS. See
-  [self-hosting.md](self-hosting.md) and [key-hierarchy.md](key-hierarchy.md).
+- Sealed values remain client-encrypted under the client-custodied AVK; the
+  current chart has no backend KMS or sealed-plane-switch settings. See
+  [self-hosting.md](self-hosting.md) and
+  [client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ## 18. Local Development Mode
 
@@ -1233,9 +1244,6 @@ spec:
   guardrails.
 - `message send` must derive `from` from the token only, and reject any attempt
   to set the sender via input.
-- `witself export`/`witself import` need `--dry-run`, `--include-history`,
-  `--include-sensitive` (with `--reason`), `--remap`, and dangling-reference
-  reporting to be round-trippable.
 - Promo codes need to be first-class on `witself setup`, `witself account
   create`, and `witself billing subscribe`.
 - Hosted provider flows need `--open`/`--no-open` and a generic `witself billing
@@ -1258,8 +1266,8 @@ spec:
   sealed-plane metadata reads available.
 - The sealed-plane carve-outs must hold across every command: secret values and
   TOTP seeds are never embedded, recalled, in the self-digest, ingested, or
-  plaintext-exported, and KMS is a required dependency only when the sealed plane
-  is enabled.
+  plaintext-exported. Current archives carry only client-encrypted sealed
+  values, and the backend has no KMS or decrypt-key dependency.
 
 ## Related Docs
 

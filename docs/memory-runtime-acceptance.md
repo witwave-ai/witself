@@ -6,6 +6,11 @@ Codex, Claude Code, Cursor, and Grok Build. GitHub Copilot's phase-one
 guided-MCP adapter has no transcript hooks and remains outside this gate, as
 does Gemini.
 
+Current #45 status: Claude Code and Codex are certified on Witself `v0.0.272`
+at commit `9dc2f3d` by runs `mra_2dqbqpx7rfbjkd65` and
+`mra_pbqlmrwvoguyj322`, respectively. The Cursor and Grok Build legs remain, so
+the four-runtime gate stays open.
+
 This is a live-client test, not a backend simulation. `witself` prepares
 isolated synthetic fixtures and exact prompts, the operator gives each prompt
 to the real authenticated AI client, and `witself` verifies the resulting
@@ -194,15 +199,17 @@ happens to flush later. In one autonomous window every stage behaved
 correctly, verification failed all six transcript-based cases, and a single
 foreground flush followed by `verify` alone turned the same run into a pass.
 
-### Codex subjects must be minted immediately before the run
+### Older Codex hook binaries require fresh subjects
 
-The Codex desktop app runs its own background agents through the same
-`codex` hooks, so within seconds of rebinding `codex` to a subject one of
-them is captured under that identity and the subject acquires a pending
-memory checkpoint; `prepare` then refuses it. Create the synthetic codex
-subject right before `prepare` (and mint a fresh one on that refusal rather
-than reusing a subject), and never leave `codex` bound to a subject longer
-than the run needs.
+The [#336](https://github.com/witwave-ai/witself/issues/336) capture exclusion
+was merged on `main` by
+[#341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but remains
+unreleased; `v0.0.272` is `9dc2f3d`. It takes effect only after a release
+containing `fcf6e1c` is installed as the hooked binary. Until then, Codex
+desktop background agents can be captured under a freshly bound subject and
+make `prepare` refuse its pending memory checkpoint. Keep creating the synthetic
+Codex subject immediately before each run (and mint a fresh one after that
+refusal) until the hooked executable is upgraded.
 
 ### Autonomous windows must not overlap other sessions on the binding
 
@@ -215,7 +222,7 @@ make no other calls on that runtime until it has restored the binding.
 After all six stages complete, verify and retain sanitized evidence:
 
 ```text
-witself transcript flush --runtime grok-build  # Grok Build only
+witself transcript flush --runtime <runtime>
 
 witself memory acceptance verify \
   --state ~/.witself/acceptance/mra_example.json \
@@ -227,12 +234,12 @@ witself memory acceptance verify \
 work already performed by the active client. It never wakes a client or starts
 a background process. Use `--wait 0` for one immediate check.
 
-The explicit Grok flush is a deterministic post-client transcript fence. Grok
-persists its final assistant chunk after its synchronous Stop hook returns, so
-the command finalizes any last local Stop event from the already-closed native
-session before verification. It launches neither Grok nor inference. Normal
-interactive use also retries automatically through the Stop-triggered one-shot
-flusher and every later Grok hook.
+For Grok specifically, the explicit flush is also a deterministic post-client
+transcript fence. Grok persists its final assistant chunk after its synchronous
+Stop hook returns, so the command finalizes any last local Stop event from the
+already-closed native session before verification. It launches neither Grok nor
+inference. Normal interactive use also retries automatically through the
+Stop-triggered one-shot flusher and every later Grok hook.
 
 Repeat with fresh provider-bound subject agents for `claude-code`, `cursor`,
 and `grok-build`. A #45 certification set consists of four `status: "pass"`

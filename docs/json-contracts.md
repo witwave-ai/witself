@@ -400,6 +400,9 @@ The HTTP `GET /v1/capabilities` response is **bare/flat**: a top-level
 not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as the
 `data` payload of the standard envelope.)
 
+The `crypto_payments` member retained in this target example is roadmap-only;
+no current server or CLI implements that rail.
+
 ```json
 {
   "schema_version": "witself.v0",
@@ -474,7 +477,7 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
     },
     "crypto_payments": {
       "supported": false,
-      "reason": "provider_not_configured"
+      "reason": "not_implemented"
     },
     "support": {
       "supported": false,
@@ -3514,16 +3517,16 @@ Account summary:
   "primary_email": "ops@example.com",
   "billing_email": "billing@example.com",
   "support_email": "support@example.com",
-  "created_at": "2026-06-26T18:00:00Z",
-  "updated_at": "2026-06-26T18:00:00Z",
-  "consent_terms_version": "draft-2026-08-22",
-  "consent_privacy_version": "draft-2026-08-22",
-  "consent_recorded_at": "2026-06-26T18:00:00Z"
+  "created_at": "2026-08-31T18:00:00Z",
+  "updated_at": "2026-08-31T18:00:00Z",
+  "consent_terms_version": "2026-08-31",
+  "consent_privacy_version": "2026-08-31",
+  "consent_recorded_at": "2026-08-31T18:00:00Z"
 }
 ```
 
-The three `consent_*` fields are the dark signup consent capture and are
-omitted (`omitempty`) for accounts whose signup carried no consent.
+The three `consent_*` fields record the live signup consent path and are omitted
+(`omitempty`) for accounts whose signup carried no consent.
 
 Account billing summary (implemented control-plane read surface):
 
@@ -3863,8 +3866,9 @@ Invoice summary:
 Hosted provider session result:
 
 Used when a command starts a provider-hosted flow such as checkout,
-payment-method setup, crypto payment, identity verification, or another external
-approval session.
+payment-method setup, identity verification, or another external approval
+session. Crypto-specific kinds and fields in the examples below are roadmap-only
+contract sketches; crypto payment rails are not implemented.
 
 ```json
 {
@@ -3900,7 +3904,7 @@ Rules:
   should avoid persisting full URLs unless policy explicitly allows it.
 - `metadata` must contain only non-sensitive context.
 
-Crypto payment quote:
+Crypto payment quote (roadmap; not implemented):
 
 ```json
 {
@@ -3921,7 +3925,7 @@ Crypto payment quote:
 }
 ```
 
-Crypto payment status:
+Crypto payment status (roadmap; not implemented):
 
 ```json
 {
@@ -3956,12 +3960,12 @@ Support ticket summary:
 Rules:
 
 - Payment methods must be redacted summaries, not raw payment details.
-- Crypto payment responses may include provider names, quote IDs, checkout URLs,
+- A future crypto payment response may include provider names, quote IDs, checkout URLs,
   hosted session IDs, next commands, redacted wallet/payment metadata, assets,
   networks, amounts, and statuses. They must not include wallet seed phrases,
   private keys, raw wallet credentials, or provider secrets.
-- Crypto payment support is a payment rail, not a Witself utility-token
-  requirement.
+- The roadmap crypto payment support is a payment rail, not a Witself
+  utility-token requirement.
 - Support tickets and diagnostics must not include memory content, fact values,
   message bodies/payloads, embedding vectors, or raw tokens unless a future
   explicit secure-support channel is designed for that purpose.
@@ -4171,6 +4175,8 @@ Rules:
     `billing.crypto.payment.failed`, `billing.crypto.refund.created`,
     `billing.crypto.provider_event.reconciled`, `support.ticket.created`,
     `support.ticket.commented`, `support.ticket.closed`, `support.bundle.created`.
+    The six `billing.crypto.*` names are reserved roadmap contract names; no
+    current server or CLI emits them.
   - Collaboration (cross-realm): `conversation.started`,
     `conversation.state_changed`, `conversation.completed`,
     `conversation.failed`, `conversation.canceled`, `federation.peer_allowed`,
@@ -4189,12 +4195,13 @@ Rules:
   operator `actor` plus a `reason` on destructive/cross-agent actions.
 - Audit events must not include memory content, fact values, message
   bodies/payloads, embedding vectors, raw tokens, or raw payment details.
-- Billing and payment audit events may include non-sensitive metadata such as
-  invoice ID, subscription ID, payment provider, payment method type, crypto
-  asset, network, amount, currency, status, and provider event ID. They must not
-  include raw payment details, card numbers, provider tokens, wallet seed
-  phrases, wallet private keys, raw wallet credentials, or full wallet
-  identifiers.
+- Current billing and payment audit events may include non-sensitive metadata
+  such as invoice ID, subscription ID, payment provider, payment method type,
+  amount, currency, status, and provider event ID. If the roadmap crypto rail is
+  implemented, its events may also include crypto asset and network. Audit
+  events must not include raw payment details, card numbers, provider tokens,
+  wallet seed phrases, wallet private keys, raw wallet credentials, or full
+  wallet identifiers.
 - `metadata` should contain only non-sensitive request context such as record
   ids, owner agent/group, memory kind, tags, fact name, policy id, message id,
   recipient, and decision outcome.

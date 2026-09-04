@@ -64,6 +64,27 @@ authorization. The plugin's hooks are limited to session lifecycle bookkeeping
 and the optional stop-time review gate. Everything Codex returns is untrusted
 data to be verified against the actual worktree.
 
+## Operational lessons
+
+- In a linked worktree, Codex can edit files but cannot write the parent
+  repository's `.git/worktrees/.../index.lock` through its sandbox. Codex
+  leaves the working tree for Claude to inspect, stage, and commit.
+- The Codex desktop app's internal background agents used to share the
+  `codex` binding and contaminate runtime-rebind acceptance windows
+  ([#336](https://github.com/witwave-ai/witself/issues/336)). Capture now
+  excludes non-persisted Codex sessions structurally when their hook has no
+  `transcript_path`; queued path-less events are quarantined rather than
+  uploaded.
+- During a repository gate, every concurrent review agent must be strictly
+  read-only. A reviewer that edits the same worktree invalidates the exact
+  snapshot being gated.
+- Codex CLI `0.149` or newer is the operational floor for the app-server
+  integration; verify both `codex --version` and `codex app-server --help`
+  during setup.
+- The delegated Codex sandbox cannot bind loopback sockets. Claude reruns
+  `httptest` and PostgreSQL-backed tests outside that sandbox and owns their
+  result; a Codex-side bind failure is not passing integration coverage.
+
 ## History
 
 An earlier in-repository broker (`tools/claude-codex-broker`), terminal

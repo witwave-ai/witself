@@ -130,7 +130,7 @@ F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile wi
 ./bin/witself-infra destroy $F
 ```
 
-### Civo cell
+### Civo production cells
 
 Civo uses an inexpensive K3s worker pool, native Civo DNS, Traefik NodePort
 ingress, cert-manager, and an in-cluster PostgreSQL volume. The control plane is
@@ -138,6 +138,12 @@ free and no managed load balancer is created. A token is read from a per-cell
 mode-0600 file (recommended for multi-account operation) or from the
 `CIVO_TOKEN` environment fallback. Its value is never written to `infra.yaml`
 or Pulumi config.
+
+The managed production fleet currently uses two Civo cells with legacy
+`sandbox`/`dev` names: `civo-sandbox-usw2-dev` is the serving cell and runs the
+fixed two-node `prod` profile; `civo-sandbox-use1-backup` is the non-accepting,
+rollback-only backup-restore drill target. Both are production-operated cells;
+the latter is deliberately excluded from customer placement.
 
 ```sh
 install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"

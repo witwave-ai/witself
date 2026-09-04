@@ -14,8 +14,8 @@ artifact for Witself.
 > agent secrets. The current chart also has no migration Job:
 > `witself-server serve` applies embedded forward Goose migrations before
 > becoming Ready.
-> Sections below that prescribe KMS, a sealed-plane feature switch, or an
-> explicit migration command/Job are retained only as superseded target history.
+> Sections below that prescribe KMS or a sealed-plane feature switch are
+> retained only as superseded target history.
 
 Narrative-memory decision (accepted 2026-07-14): the chart does not configure a
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
@@ -37,7 +37,7 @@ application deployment onto that infrastructure.
 
 Witself reuses the shared platform spine for deployment. The chart skeleton
 (Deployment, Service, ServiceAccount, ConfigMap, Ingress, NetworkPolicy,
-migration Job, monitors, autoscaling, disruption budget) is intentionally the
+monitors, autoscaling, disruption budget) is intentionally the
 same. PostgreSQL carries canonical open-plane data (memories + facts) and its
 deterministic lexical indexes. KMS provider config is present only for the
 sealed plane (secrets + TOTP). There is no server-side model/provider block or
@@ -57,7 +57,7 @@ Expected install shape:
 
 ```sh
 helm install witself oci://ghcr.io/witwave-ai/charts/witself-server \
-  --version 0.1.0 \
+  --version 0.0.272 \
   --namespace witself \
   --create-namespace \
   --values ./witself-values.yaml
@@ -156,8 +156,8 @@ does not require pgvector or an external AI service.
 
 - The external PostgreSQL reached through the chart must support the schema and
   indexes created by the server-owned Goose migrations.
-- The migration Job fails deterministically when the required canonical schema
-  or lexical-index prerequisites cannot be created.
+- Server and worker startup fail deterministically when the required canonical
+  schema or lexical-index prerequisites cannot be created.
 - Readiness gates on PostgreSQL availability, not model/provider reachability.
 - Optional client-vector profiles and JSONB vector rows are created by migration
   `0032`; they require no chart setting or PostgreSQL extension and cannot
@@ -186,7 +186,6 @@ Initial templates should include:
 - Optional worker metrics `Service`.
 - Optional Prometheus Operator `ServiceMonitor`.
 - Optional Prometheus Operator `PodMonitor`.
-- Optional migration `Job`.
 - Optional test hook or notes for health checks.
 
 The chart should not create broad RBAC permissions unless a concrete feature
@@ -338,23 +337,12 @@ values unrecoverable (crypto-shred) and does not affect the open plane.
 
 ## Migrations
 
-Migrations should be explicit and operator-controlled.
-
-Initial chart behavior:
-
-- Include a migration `Job` template.
-- Do not run destructive or backward migrations automatically.
-- Support a controlled install/upgrade path where operators can run:
-  `witself-server migrate status` and `witself-server migrate up`.
-- Require `--yes` or equivalent explicit confirmation for destructive migration
-  paths when supported by the server command.
-- Treat Goose migrations as the server-owned migration mechanism, including the
-  narrative-memory tables, generated search documents, and lexical indexes.
-- Acquire a database advisory lock so concurrent server replicas do not race the
-  migration step.
-
-The chart may support opt-in install or upgrade hooks later, but production
-guidance should prefer an explicit migration job before rolling the server. See
+The chart renders no migration `Job`, and `witself-server` has no `migrate`
+command. Each database-backed server or worker process applies its embedded
+forward Goose migrations at startup under the shared migration lock, before it
+becomes Ready or begins work. A migration failure aborts startup. Destructive or
+backward migrations are not an automatic chart-upgrade path; schema rollback
+requires a separately reviewed recovery procedure. See
 [server-command-surface.md](server-command-surface.md).
 
 ## Values Shape
@@ -364,7 +352,7 @@ Illustrative values:
 ```yaml
 image:
   repository: ghcr.io/witwave-ai/images/witself-server
-  tag: v0.1.0
+  tag: 0.0.272
   pullPolicy: IfNotPresent
 
 server:
@@ -478,10 +466,6 @@ securityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
-
-migrations:
-  enabled: false
-  command: ["witself-server", "migrate", "up"]
 ```
 
 This values shape is illustrative. Exact names can change during
@@ -559,7 +543,7 @@ Terraform should not generate Helm values files containing raw credentials. It
 should create or reference deployment-native secrets, then pass only secret
 names, keys, IDs, and non-sensitive configuration into Helm. Terraform is also
 responsible for provisioning a supported PostgreSQL database before the
-migration Job runs. See
+database-backed workloads start. See
 [terraform-infrastructure.md](terraform-infrastructure.md).
 
 ## CI And Release Checks

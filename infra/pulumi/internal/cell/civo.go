@@ -9,9 +9,10 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-// provisionCivo is the inexpensive development substrate. It is deliberately
-// separate from the AWS/GCP/Azure programs: Civo supplies the network and K3s
-// cluster, while portable application services are reconciled through GitOps.
+// provisionCivo is the cost-optimized Civo production substrate. It is
+// deliberately separate from the AWS/GCP/Azure programs: Civo supplies the
+// network and K3s cluster, while portable application services are reconciled
+// through GitOps.
 func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 	if c.region == "" {
 		return fmt.Errorf("civo:region is required")
