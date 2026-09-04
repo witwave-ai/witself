@@ -21,6 +21,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/timeptr"
 )
 
 // AutoConfigSchemaV1 and the related schema constants identify persisted
@@ -573,7 +574,7 @@ func (s AutoStore) RunPending(ctx context.Context, work AutoWorkFunc) (AutoRunRe
 	// wake created after this point.
 	snapshot := append([]AutoWakeMarker(nil), markers...)
 	now := s.now()
-	status.State, status.LastAttemptAt, status.RetryNotBefore, status.UpdatedAt = AutoStateRunning, timePointer(now), nil, now
+	status.State, status.LastAttemptAt, status.RetryNotBefore, status.UpdatedAt = AutoStateRunning, timeptr.UTC(now), nil, now
 	if err := s.saveStatus(status); err != nil {
 		return result, err
 	}
@@ -644,7 +645,7 @@ func (s AutoStore) recordSuccess(status AutoStatus, outcome AutoWorkOutcome, run
 	if err != nil {
 		return err
 	}
-	status.State, status.LastSuccessAt, status.LastOutcome = state, timePointer(now), outcome
+	status.State, status.LastSuccessAt, status.LastOutcome = state, timeptr.UTC(now), outcome
 	status.LastFailureCode, status.ConsecutiveFailures, status.RetryNotBefore = "", 0, nil
 	status.TotalRuns += runs
 	status.UpdatedAt = now
@@ -659,7 +660,7 @@ func (s AutoStore) recordFailure(status AutoStatus, code string, completedRuns i
 	}
 	status.ConsecutiveFailures++
 	retry := now.Add(autoFailureBackoff(status.ConsecutiveFailures))
-	status.State, status.LastFailureAt = state, timePointer(now)
+	status.State, status.LastFailureAt = state, timeptr.UTC(now)
 	status.LastFailureCode = normalizeAutoFailureCode(code)
 	if status.State == AutoStateBackoff {
 		status.RetryNotBefore = &retry
@@ -952,11 +953,6 @@ func laterTime(left, right time.Time) time.Time {
 		return right
 	}
 	return left
-}
-
-func timePointer(value time.Time) *time.Time {
-	value = value.UTC()
-	return &value
 }
 
 func normalizeAutoFailureCode(code string) string {

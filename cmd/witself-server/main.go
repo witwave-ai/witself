@@ -16,10 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
+	"github.com/witwave-ai/witself/internal/tokenfile"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
@@ -2172,27 +2174,19 @@ func dbDSN() string {
 // WITSELF_BOOTSTRAP_TOKEN remains as a local/dev fallback.
 func bootstrapToken() (string, error) {
 	if path := os.Getenv("WITSELF_BOOTSTRAP_TOKEN_FILE"); path != "" {
-		return readTokenFile(path, true)
+		return tokenfile.Read(path, tokenfile.Options{
+			Description:  "bootstrap token file",
+			UnquotedPath: true,
+		})
 	}
 	if tok := strings.TrimSpace(os.Getenv("WITSELF_BOOTSTRAP_TOKEN")); tok != "" {
 		return tok, nil
 	}
-	return readTokenFile(defaultBootstrapTokenFile, false)
-}
-
-func readTokenFile(path string, required bool) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if !required && errors.Is(err, os.ErrNotExist) {
-			return "", nil
-		}
-		return "", fmt.Errorf("read bootstrap token file %s: %w", path, err)
-	}
-	tok := strings.TrimSpace(string(b))
-	if tok == "" {
-		return "", fmt.Errorf("bootstrap token file %s is empty", path)
-	}
-	return tok, nil
+	return tokenfile.Read(defaultBootstrapTokenFile, tokenfile.Options{
+		Description:  "bootstrap token file",
+		AllowMissing: true,
+		UnquotedPath: true,
+	})
 }
 
 func bootstrapTokenTTL() (time.Duration, error) {
@@ -2211,36 +2205,32 @@ func bootstrapTokenTTL() (time.Duration, error) {
 }
 
 func usage(w io.Writer) {
-	usageLine(w, "witself-server — the Witself backend API server")
-	usageLine(w)
-	usageLine(w, "Usage:")
-	usageLine(w, "  witself-server version    Print version information")
-	usageLine(w, "  witself-server serve      Run the API, health, and metrics listeners")
-	usageLine(w, "  witself-server agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]")
-	usageLine(w, "                           Reconcile the exact production receive cohort")
-	usageLine(w, "  witself-server agent-email canary-manifest --output ABSOLUTE_PATH")
-	usageLine(w, "                           Write a new mode-0600 primary canary manifest")
-	usageLine(w, "  witself-server agent-email provider-event-canary --account-id ID --send-id ID --expected-accepted-at RFC3339 --json")
-	usageLine(w, "                           Prove provider-event replay through localhost HTTP")
-	usageLine(w)
-	usageLine(w, "Listeners (override with env):")
-	usageLine(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")
-	usageLine(w, "  WITSELF_HEALTH_ADDR   default :8081  (/livez /readyz /startupz)")
-	usageLine(w, "  WITSELF_METRICS_ADDR  default :9090  (/metrics)")
-	usageLine(w)
-	usageLine(w, "Database (optional; when set, /readyz gates on it):")
-	usageLine(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
-	usageLine(w)
-	usageLine(w, "Bootstrap (optional first-operator setup):")
-	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
-	usageLine(w, "  WITSELF_PROVISION_TOKEN       enables POST /v1/accounts (control-plane account provisioning)")
-	usageLine(w, "  WITSELF_BACKUP_TOKEN          distinct credential for account backup export and validation")
-	usageLine(w, "  WITSELF_BACKUP_VALIDATION_ENABLED enables rollback-only POST /v1/accounts/{id}:validate-backup (default false)")
-	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
-}
-
-func usageLine(w io.Writer, args ...any) {
-	_, _ = fmt.Fprintln(w, args...)
+	cliout.Line(w, "witself-server — the Witself backend API server")
+	cliout.Line(w)
+	cliout.Line(w, "Usage:")
+	cliout.Line(w, "  witself-server version    Print version information")
+	cliout.Line(w, "  witself-server serve      Run the API, health, and metrics listeners")
+	cliout.Line(w, "  witself-server agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]")
+	cliout.Line(w, "                           Reconcile the exact production receive cohort")
+	cliout.Line(w, "  witself-server agent-email canary-manifest --output ABSOLUTE_PATH")
+	cliout.Line(w, "                           Write a new mode-0600 primary canary manifest")
+	cliout.Line(w, "  witself-server agent-email provider-event-canary --account-id ID --send-id ID --expected-accepted-at RFC3339 --json")
+	cliout.Line(w, "                           Prove provider-event replay through localhost HTTP")
+	cliout.Line(w)
+	cliout.Line(w, "Listeners (override with env):")
+	cliout.Line(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")
+	cliout.Line(w, "  WITSELF_HEALTH_ADDR   default :8081  (/livez /readyz /startupz)")
+	cliout.Line(w, "  WITSELF_METRICS_ADDR  default :9090  (/metrics)")
+	cliout.Line(w)
+	cliout.Line(w, "Database (optional; when set, /readyz gates on it):")
+	cliout.Line(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")
+	cliout.Line(w)
+	cliout.Line(w, "Bootstrap (optional first-operator setup):")
+	cliout.Line(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
+	cliout.Line(w, "  WITSELF_PROVISION_TOKEN       enables POST /v1/accounts (control-plane account provisioning)")
+	cliout.Line(w, "  WITSELF_BACKUP_TOKEN          distinct credential for account backup export and validation")
+	cliout.Line(w, "  WITSELF_BACKUP_VALIDATION_ENABLED enables rollback-only POST /v1/accounts/{id}:validate-backup (default false)")
+	cliout.Line(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }
 
 // mapSupportError translates the store's support-ticket sentinels into

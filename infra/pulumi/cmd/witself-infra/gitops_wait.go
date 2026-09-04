@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -28,13 +29,27 @@ import (
 // instead of retrying the same doomed call until maxWait.
 var errLocalAuth = errors.New("local cloud credentials unavailable")
 
+const awsEKSTokenRefreshBefore = time.Minute
+
+type argoApplicationSource struct {
+	TargetRevision string `json:"targetRevision"`
+}
+
 type argoApplication struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
+	Spec struct {
+		Source  argoApplicationSource   `json:"source"`
+		Sources []argoApplicationSource `json:"sources"`
+	} `json:"spec"`
 	Status struct {
 		Sync struct {
-			Status string `json:"status"`
+			Status     string `json:"status"`
+			ComparedTo struct {
+				Source  argoApplicationSource   `json:"source"`
+				Sources []argoApplicationSource `json:"sources"`
+			} `json:"comparedTo"`
 		} `json:"sync"`
 		Health struct {
 			Status  string `json:"status"`
@@ -55,23 +70,77 @@ type argoApplicationLister interface {
 	ListArgoApplications(ctx context.Context, namespace string) ([]argoApplication, error)
 }
 
-func waitForPostUpConvergence(ctx context.Context, stack auto.Stack, cloud string, argocd bool, maxWait, pollEvery time.Duration) error {
+type argoApplicationExpectation struct {
+	name           string
+	targetRevision string
+}
+
+// expectedBootstrapArgoApplications is the explicit contract for the managed
+// bootstrap chart: Pulumi creates the bootstrap root, and the chart declares
+// the unconditional apps and platform child Applications in
+// .gitops/charts/bootstrap/templates. Nested Applications are intentionally not
+// included because their target revisions are Helm chart versions.
+func expectedBootstrapArgoApplications(targetRevision string) []argoApplicationExpectation {
+	return []argoApplicationExpectation{
+		{name: "bootstrap", targetRevision: targetRevision},
+		{name: "apps", targetRevision: targetRevision},
+		{name: "platform", targetRevision: targetRevision},
+	}
+}
+
+func waitForPostUpConvergence(ctx context.Context, stack auto.Stack, cloud, region, awsProfile string, expected []argoApplicationExpectation, argocd bool, maxWait, pollEvery time.Duration) error {
 	if !argocd {
 		return nil
 	}
 	switch cloud {
+	case "aws":
+		return waitForAWSArgoApplicationsHealthy(ctx, stack, region, awsProfile, expected, maxWait, pollEvery)
 	case "gcp":
-		return waitForGCPArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+		return waitForGCPArgoApplicationsHealthy(ctx, stack, expected, maxWait, pollEvery)
 	case "azure":
-		return waitForAzureArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+		return waitForAzureArgoApplicationsHealthy(ctx, stack, expected, maxWait, pollEvery)
 	case "civo":
-		return waitForCivoArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+		return waitForCivoArgoApplicationsHealthy(ctx, stack, expected, maxWait, pollEvery)
 	default:
 		return nil
 	}
 }
 
-func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+type stackOutputsReader func(context.Context) (auto.OutputMap, error)
+
+type awsArgoListerFactory func(context.Context, auto.OutputMap, string, string) (argoApplicationLister, string, error)
+
+func waitForAWSArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, region, profile string, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
+	return waitForAWSArgoApplicationsHealthyWith(
+		ctx,
+		stack.Outputs,
+		func(ctx context.Context, outs auto.OutputMap, region, profile string) (argoApplicationLister, string, error) {
+			return newAWSArgoListerFromOutputs(ctx, outs, region, profile)
+		},
+		region,
+		profile,
+		expected,
+		maxWait,
+		pollEvery,
+	)
+}
+
+// waitForAWSArgoApplicationsHealthyWith keeps the post-up wiring testable
+// without constructing an Automation API stack or contacting AWS. Production
+// supplies stack.Outputs and newAWSArgoListerFromOutputs above.
+func waitForAWSArgoApplicationsHealthyWith(ctx context.Context, outputs stackOutputsReader, newLister awsArgoListerFactory, region, profile string, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
+	outs, err := outputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read outputs for GitOps verification: %w", err)
+	}
+	lister, namespace, err := newLister(ctx, outs, region, profile)
+	if err != nil {
+		return err
+	}
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, expected, maxWait, pollEvery)
+}
+
+func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
 	outs, err := stack.Outputs(ctx)
 	if err != nil {
 		return fmt.Errorf("read outputs for GitOps verification: %w", err)
@@ -80,9 +149,7 @@ func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, m
 	if err != nil {
 		return err
 	}
-	return waitForArgoApplicationsHealthyWithSyncedOnly(
-		ctx, lister, namespace, maxWait, pollEvery, map[string]bool{"bootstrap": true},
-	)
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, expected, maxWait, pollEvery)
 }
 
 func newCivoArgoListerFromOutputs(outs auto.OutputMap) (*tokenArgoLister, string, error) {
@@ -101,7 +168,7 @@ func newCivoArgoListerFromOutputs(outs auto.OutputMap) (*tokenArgoLister, string
 	return lister, namespace, nil
 }
 
-func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
 	outs, err := stack.Outputs(ctx)
 	if err != nil {
 		return fmt.Errorf("read outputs for GitOps verification: %w", err)
@@ -110,10 +177,10 @@ func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, ma
 	if err != nil {
 		return err
 	}
-	return waitForArgoApplicationsHealthy(ctx, lister, namespace, maxWait, pollEvery)
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, expected, maxWait, pollEvery)
 }
 
-func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
 	outs, err := stack.Outputs(ctx)
 	if err != nil {
 		return fmt.Errorf("read outputs for GitOps verification: %w", err)
@@ -122,14 +189,10 @@ func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, 
 	if err != nil {
 		return err
 	}
-	return waitForArgoApplicationsHealthy(ctx, lister, namespace, maxWait, pollEvery)
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, expected, maxWait, pollEvery)
 }
 
-func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration) error {
-	return waitForArgoApplicationsHealthyWithSyncedOnly(ctx, lister, namespace, maxWait, pollEvery, nil)
-}
-
-func waitForArgoApplicationsHealthyWithSyncedOnly(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration, syncedOnly map[string]bool) error {
+func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationLister, namespace string, expected []argoApplicationExpectation, maxWait, pollEvery time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	started := time.Now()
 
@@ -145,7 +208,7 @@ func waitForArgoApplicationsHealthyWithSyncedOnly(ctx context.Context, lister ar
 		}
 		var reason string
 		if err == nil {
-			ready, why := argoApplicationsReadyWithSyncedOnly(apps, syncedOnly)
+			ready, why := argoApplicationsReady(apps, expected)
 			if ready {
 				fmt.Fprintf(os.Stderr, "Argo CD applications Synced/Healthy (took %s)\n", time.Since(started).Round(time.Second))
 				return nil
@@ -168,15 +231,41 @@ func waitForArgoApplicationsHealthyWithSyncedOnly(ctx context.Context, lister ar
 	}
 }
 
-func argoApplicationsReady(apps []argoApplication) (bool, string) {
-	return argoApplicationsReadyWithSyncedOnly(apps, nil)
-}
-
-func argoApplicationsReadyWithSyncedOnly(apps []argoApplication, syncedOnly map[string]bool) (bool, string) {
+func argoApplicationsReady(apps []argoApplication, expected []argoApplicationExpectation) (bool, string) {
+	if len(expected) == 0 {
+		return false, "no expected Argo CD applications configured"
+	}
 	if len(apps) == 0 {
 		return false, "no Argo CD applications reported yet"
 	}
 	var pending []string
+	byName := make(map[string]argoApplication, len(apps))
+	for _, app := range apps {
+		if app.Metadata.Name != "" {
+			byName[app.Metadata.Name] = app
+		}
+	}
+	for _, want := range expected {
+		app, ok := byName[want.name]
+		if !ok {
+			pending = append(pending, want.name+" missing")
+			continue
+		}
+		if want.targetRevision == "" {
+			pending = append(pending, want.name+" desired target revision is empty")
+			continue
+		}
+		declared := argoApplicationTargetRevisions(app.Spec.Source, app.Spec.Sources)
+		if !allTargetRevisionsEqual(declared, want.targetRevision) {
+			pending = append(pending, fmt.Sprintf("%s declares target revisions %q, want %q", want.name, declared, want.targetRevision))
+			continue
+		}
+		compared := app.Status.Sync.ComparedTo
+		comparedTargets := argoApplicationTargetRevisions(compared.Source, compared.Sources)
+		if len(comparedTargets) != len(declared) || !allTargetRevisionsEqual(comparedTargets, want.targetRevision) {
+			pending = append(pending, fmt.Sprintf("%s last compared target revisions %q, want %q for %d sources", want.name, comparedTargets, want.targetRevision, len(declared)))
+		}
+	}
 	for _, app := range apps {
 		name := app.Metadata.Name
 		if name == "" {
@@ -184,9 +273,6 @@ func argoApplicationsReadyWithSyncedOnly(apps []argoApplication, syncedOnly map[
 		}
 		sync := app.Status.Sync.Status
 		health := app.Status.Health.Status
-		if syncedOnly[name] && sync == "Synced" {
-			continue
-		}
 		if sync == "Synced" && health == "Healthy" {
 			continue
 		}
@@ -213,6 +299,29 @@ func argoApplicationsReadyWithSyncedOnly(apps []argoApplication, syncedOnly map[
 		return true, ""
 	}
 	return false, strings.Join(pending, "; ")
+}
+
+func argoApplicationTargetRevisions(source argoApplicationSource, sources []argoApplicationSource) []string {
+	if len(sources) == 0 {
+		return []string{strings.TrimSpace(source.TargetRevision)}
+	}
+	targets := make([]string, 0, len(sources))
+	for _, item := range sources {
+		targets = append(targets, strings.TrimSpace(item.TargetRevision))
+	}
+	return targets
+}
+
+func allTargetRevisionsEqual(got []string, want string) bool {
+	if len(got) == 0 {
+		return false
+	}
+	for _, revision := range got {
+		if revision != want {
+			return false
+		}
+	}
+	return true
 }
 
 type gcpArgoLister struct {
@@ -310,13 +419,33 @@ type tokenArgoLister struct {
 	token   string
 }
 
+type eksBearerToken struct {
+	value     string
+	expiresAt time.Time
+}
+
+type eksTokenProvider func(context.Context) (eksBearerToken, error)
+
+// refreshingEKSBearerTransport owns the short-lived credential used by every
+// AWS Kubernetes request. The cache is shared by post-up polling and the
+// cell-health readyz/node/Application probes, so guard it for concurrent use.
+type refreshingEKSBearerTransport struct {
+	base          http.RoundTripper
+	provider      eksTokenProvider
+	now           func() time.Time
+	refreshBefore time.Duration
+
+	mu    sync.Mutex
+	token eksBearerToken
+}
+
 // newAWSArgoListerFromOutputs builds a cluster prober for EKS. EKS
 // doesn't hand back a kubeconfig with an embedded token the way GKE/AKS
 // do, so we assemble one: DescribeCluster (SDK, cell profile) for the
 // apiserver endpoint + CA, and `aws eks get-token` for a short-lived
 // bearer — the same CLI-token pattern GCP (gcloud) and Azure (az)
-// already use. The result is a plain tokenArgoLister, so all its
-// readyz/nodes/argo methods work unchanged.
+// already use. The bearer transport refreshes before expiration and
+// retries one 401 with a newly minted token, covering every lister probe.
 func newAWSArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap, region, profile string) (*tokenArgoLister, string, error) {
 	clusterName := outputString(outs, "eksCluster")
 	if clusterName == "" {
@@ -349,7 +478,10 @@ func newAWSArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap, regio
 	if !roots.AppendCertsFromPEM(ca) {
 		return nil, "", fmt.Errorf("EKS certificate authority did not contain PEM data")
 	}
-	token, err := awsEKSToken(ctx, clusterName, region, profile)
+	provider := func(ctx context.Context) (eksBearerToken, error) {
+		return awsEKSToken(ctx, clusterName, region, profile)
+	}
+	token, err := provider(ctx)
 	if err != nil {
 		return nil, "", err
 	}
@@ -357,12 +489,18 @@ func newAWSArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap, regio
 	if namespace == "" {
 		namespace = "argocd"
 	}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+	}
 	return &tokenArgoLister{
 		baseURL: strings.TrimRight(*desc.Cluster.Endpoint, "/"),
-		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		client: &http.Client{Timeout: 30 * time.Second, Transport: &refreshingEKSBearerTransport{
+			base:          transport,
+			provider:      provider,
+			now:           time.Now,
+			refreshBefore: awsEKSTokenRefreshBefore,
+			token:         token,
 		}},
-		token: token,
 	}, namespace, nil
 }
 
@@ -371,7 +509,7 @@ func newAWSArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap, regio
 // the cluster's aws-auth mapping). get-token is local — it presigns an
 // STS GetCallerIdentity, no cluster call — so it only needs valid
 // credentials for the profile.
-func awsEKSToken(ctx context.Context, cluster, region, profile string) (string, error) {
+func awsEKSToken(ctx context.Context, cluster, region, profile string) (eksBearerToken, error) {
 	args := []string{"eks", "get-token", "--cluster-name", cluster, "--output", "json"}
 	if region != "" {
 		args = append(args, "--region", region)
@@ -385,28 +523,107 @@ func awsEKSToken(ctx context.Context, cluster, region, profile string) (string, 
 	out, err := cmd.Output()
 	if err != nil {
 		if d := strings.TrimSpace(stderr.String()); d != "" {
-			return "", fmt.Errorf("aws eks get-token: %s", oneLine(d))
+			return eksBearerToken{}, fmt.Errorf("aws eks get-token: %s", oneLine(d))
 		}
-		return "", fmt.Errorf("aws eks get-token: %w", err)
+		return eksBearerToken{}, fmt.Errorf("aws eks get-token: %w", err)
 	}
 	return parseEKSToken(out)
 }
 
-// parseEKSToken pulls the bearer token out of `aws eks get-token
-// --output json` ({"status":{"token":"k8s-aws-v1.…"}}).
-func parseEKSToken(raw []byte) (string, error) {
+// parseEKSToken pulls the bearer token and its authoritative expiration out of
+// `aws eks get-token --output json`.
+func parseEKSToken(raw []byte) (eksBearerToken, error) {
 	var resp struct {
 		Status struct {
-			Token string `json:"token"`
+			Token               string `json:"token"`
+			ExpirationTimestamp string `json:"expirationTimestamp"`
 		} `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", fmt.Errorf("parse eks token: %w", err)
+		return eksBearerToken{}, fmt.Errorf("parse EKS token: %w", err)
 	}
-	if resp.Status.Token == "" {
-		return "", fmt.Errorf("aws eks get-token returned an empty token")
+	token := strings.TrimSpace(resp.Status.Token)
+	if token == "" {
+		return eksBearerToken{}, fmt.Errorf("aws eks get-token returned an empty token")
 	}
-	return resp.Status.Token, nil
+	rawExpiration := strings.TrimSpace(resp.Status.ExpirationTimestamp)
+	if rawExpiration == "" {
+		return eksBearerToken{}, fmt.Errorf("aws eks get-token returned no expiration timestamp")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, rawExpiration)
+	if err != nil {
+		return eksBearerToken{}, fmt.Errorf("parse EKS token expiration: %w", err)
+	}
+	return eksBearerToken{value: token, expiresAt: expiresAt}, nil
+}
+
+func (t *refreshingEKSBearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.currentToken(req.Context(), false, "")
+	if err != nil {
+		return nil, fmt.Errorf("get EKS bearer token: %w", err)
+	}
+	resp, err := t.roundTrip(req, token.value)
+	if err != nil {
+		return resp, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("EKS transport returned no response")
+	}
+	if resp.StatusCode != http.StatusUnauthorized || req.Body != nil {
+		return resp, nil
+	}
+
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	refreshed, err := t.currentToken(req.Context(), true, token.value)
+	if err != nil {
+		return nil, fmt.Errorf("refresh EKS bearer token after HTTP 401: %w", err)
+	}
+	return t.roundTrip(req, refreshed.value)
+}
+
+func (t *refreshingEKSBearerTransport) roundTrip(req *http.Request, token string) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+token)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
+func (t *refreshingEKSBearerTransport) currentToken(ctx context.Context, force bool, rejected string) (eksBearerToken, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := time.Now
+	if t.now != nil {
+		now = t.now
+	}
+	current := t.token
+	usable := current.value != "" && current.expiresAt.After(now().Add(t.refreshBefore))
+	if usable && (!force || current.value != rejected) {
+		return current, nil
+	}
+	if t.provider == nil {
+		return eksBearerToken{}, fmt.Errorf("no EKS token provider configured")
+	}
+	fresh, err := t.provider(ctx)
+	if err != nil {
+		return eksBearerToken{}, err
+	}
+	if fresh.value == "" {
+		return eksBearerToken{}, fmt.Errorf("EKS token provider returned an empty token")
+	}
+	if fresh.expiresAt.IsZero() {
+		return eksBearerToken{}, fmt.Errorf("EKS token provider returned no expiration")
+	}
+	if !fresh.expiresAt.After(now()) {
+		return eksBearerToken{}, fmt.Errorf("EKS token provider returned an expired token")
+	}
+	t.token = fresh
+	return fresh, nil
 }
 
 func newAzureArgoListerFromOutputs(ctx context.Context, outs auto.OutputMap) (*tokenArgoLister, string, error) {

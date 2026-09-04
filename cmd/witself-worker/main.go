@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemailoutbound"
+	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 	"github.com/witwave-ai/witself/internal/worker"
@@ -481,8 +482,8 @@ func serve() int {
 		)
 	}
 
-	healthAddr := envOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081")
-	metricsAddr := envOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090")
+	healthAddr := envconfig.TrimmedOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081")
+	metricsAddr := envconfig.TrimmedOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090")
 	fmt.Fprintln(os.Stderr, "witself-worker: migrated; database ready")
 	fmt.Fprintf(os.Stderr, "witself-worker: health listening on %s\n", healthAddr)
 	fmt.Fprintf(os.Stderr, "witself-worker: metrics listening on %s\n", metricsAddr)
@@ -988,13 +989,6 @@ func dbDSN(lookup func(string) (string, bool)) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
-}
-
-func envOr(lookup func(string) (string, bool), key, fallback string) string {
-	if value, ok := lookup(key); ok && strings.TrimSpace(value) != "" {
-		return strings.TrimSpace(value)
-	}
-	return fallback
 }
 
 func retentionMetricResult(result store.TranscriptRetentionBatchResult) worker.RetentionResult {

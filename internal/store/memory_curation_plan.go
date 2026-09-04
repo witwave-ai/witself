@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"reflect"
 	"regexp"
@@ -17,6 +16,8 @@ import (
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 )
 
 const (
@@ -292,7 +293,7 @@ func DecodeMemoryCurationPlanDraft(raw []byte) (MemoryCurationPlanDraft, error) 
 	if err := decoder.Decode(&draft); err != nil {
 		return MemoryCurationPlanDraft{}, memoryCurationInvalidf("decode plan JSON: %v", err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return MemoryCurationPlanDraft{}, memoryCurationInvalidf("decode plan JSON: %v", err)
 	}
 	return draft, nil
@@ -1009,7 +1010,7 @@ func canonicalMemoryCurationJSON(value any) ([]byte, error) {
 	if err := decoder.Decode(&decoded); err != nil {
 		return nil, memoryCurationInvalidf("decode canonical plan: %v", err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return nil, memoryCurationInvalidf("decode canonical plan: %v", err)
 	}
 	var canonical bytes.Buffer
@@ -1267,10 +1268,14 @@ func rejectDuplicateJSONNames(raw []byte) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := consumeUniqueJSONValue(decoder); err != nil {
+	if err := jsonstrict.ConsumeUniqueValue(decoder); err != nil {
+		var duplicate *jsonstrict.DuplicateKeyError
+		if errors.As(err, &duplicate) {
+			return fmt.Errorf("duplicate object member %q", duplicate.Key)
+		}
 		return err
 	}
-	return requireJSONEOF(decoder)
+	return jsonstrict.RequireEOF(decoder)
 }
 
 // encoding/json deliberately replaces lone UTF-16 surrogate escapes with the
@@ -1337,73 +1342,6 @@ func parseJSONHexCodeUnit(raw []byte, offset int) (uint16, bool) {
 		}
 	}
 	return value, true
-}
-
-func consumeUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, isDelimiter := token.(json.Delim)
-	if !isDelimiter {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object member name is not a string")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate object member %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim('}') {
-			return errors.New("object did not terminate")
-		}
-	case '[':
-		for decoder.More() {
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim(']') {
-			return errors.New("array did not terminate")
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
-	}
-	return nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var trailing any
-	err := decoder.Decode(&trailing)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return errors.New("unexpected trailing JSON value")
 }
 
 // regexpMustCompile is kept local so this file does not add mutable package

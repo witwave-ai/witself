@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/billing"
+	"github.com/witwave-ai/witself/internal/timeptr"
 )
 
 const (
@@ -536,7 +537,7 @@ func (m *Manager) executeClaimedBillingMutation(
 		return BillingMutationResult{
 			Kind: BillingMutationResultAction, URL: action.URL,
 			ProviderObjectID: action.ProviderObjectID,
-			ActionExpiresAt:  timePointer(action.ExpiresAt),
+			ActionExpiresAt:  timeptr.NonZero(action.ExpiresAt),
 		}, nil
 	case BillingMutationExecutionUpgradeContact,
 		BillingMutationExecutionUpgradeSelfServe:
@@ -985,14 +986,6 @@ func billingResultFromOutcome(out Outcome) BillingMutationResult {
 		result.Effective = &effective
 	}
 	return result
-}
-
-func timePointer(value time.Time) *time.Time {
-	if value.IsZero() {
-		return nil
-	}
-	cloned := value
-	return &cloned
 }
 
 func billingExecutionFromReceipt(

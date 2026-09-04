@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/infra/pulumi/internal/tokenfile"
 )
 
 var (
@@ -91,7 +93,10 @@ func NewClient(controlPlane, tokenFile string) (*Client, error) {
 
 func fleetToken(tokenFile string) (string, error) {
 	if tokenFile != "" {
-		return readTokenFile(tokenFile)
+		return tokenfile.Read(tokenFile, tokenfile.Options{
+			Description:  "fleet token file",
+			UnquotedPath: true,
+		})
 	}
 	if t := strings.TrimSpace(os.Getenv("WITSELF_FLEET_TOKEN")); t != "" {
 		return t, nil
@@ -110,23 +115,14 @@ func fleetToken(tokenFile string) (string, error) {
 		candidates = append(candidates, filepath.Join(home, ".witself-infra", "fleet.token"))
 	}
 	for _, c := range candidates {
-		if t, err := readTokenFile(c); err == nil {
+		if t, err := tokenfile.Read(c, tokenfile.Options{
+			Description:  "fleet token file",
+			UnquotedPath: true,
+		}); err == nil {
 			return t, nil
 		}
 	}
 	return "", fmt.Errorf("no fleet token: pass -fleet-token-file, set WITSELF_FLEET_TOKEN, or create %s", path)
-}
-
-func readTokenFile(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read fleet token file %s: %w", path, err)
-	}
-	t := strings.TrimSpace(string(b))
-	if t == "" {
-		return "", fmt.Errorf("fleet token file %s is empty", path)
-	}
-	return t, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) (int, string, error) {

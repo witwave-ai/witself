@@ -28,6 +28,7 @@ import (
 	"github.com/witwave-ai/witself/internal/billing"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/textsafe"
 )
 
 // AccountPermission is the account-level capability required by a customer
@@ -757,21 +758,11 @@ func safeBillingURL(raw string) bool {
 
 func billingURLHasUnsafeRune(raw string) bool {
 	for _, r := range raw {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || isBidiControl(r) {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || textsafe.IsBidiControl(r) {
 			return true
 		}
 	}
 	return false
-}
-
-func isBidiControl(r rune) bool {
-	switch r {
-	case '\u061c', '\u200e', '\u200f', '\u202a', '\u202b', '\u202c',
-		'\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069':
-		return true
-	default:
-		return false
-	}
 }
 
 func invalidBillingProviderProjection(kind string) error {

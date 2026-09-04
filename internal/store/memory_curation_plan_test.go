@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/timeptr"
 )
 
 func TestAcceptMemoryCurationPlanNormalizesResolvesHashesAndPreviews(t *testing.T) {
@@ -386,7 +388,7 @@ func TestMemoryCurationPlanValidatesSnapshotsEvidenceTargetsAndFacts(t *testing.
 		{Content: ""},
 		{Content: "not canonical base64", ContentEncoding: "base64"},
 		{Content: "x", Salience: floatPointer(math.NaN())},
-		{Content: "x", OccurredFrom: timePointer(time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)), OccurredUntil: timePointer(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))},
+		{Content: "x", OccurredFrom: timeptr.Of(time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)), OccurredUntil: timeptr.Of(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))},
 	}
 	for index, snapshot := range invalidSnapshots {
 		if _, err := AcceptMemoryCurationPlan(replace(snapshot,
@@ -710,5 +712,3 @@ func fixedCurationAllocator(memoryID string) MemoryCurationMemoryIDAllocator {
 }
 
 func floatPointer(value float64) *float64 { return &value }
-
-func timePointer(value time.Time) *time.Time { return &value }

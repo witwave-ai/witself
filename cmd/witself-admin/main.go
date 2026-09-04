@@ -34,7 +34,10 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/supportstates"
+	"github.com/witwave-ai/witself/internal/textsafe"
+	"github.com/witwave-ai/witself/internal/tokenfile"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
@@ -88,43 +91,39 @@ func run(args []string) int {
 }
 
 func usage(w io.Writer) {
-	usageLine(w, "witself-admin — the Witself fleet-admin CLI")
-	usageLine(w)
-	usageLine(w, "Usage:")
-	usageLine(w, "  witself-admin whoami        Verify an admin token and print its identity")
-	usageLine(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
-	usageLine(w, "  witself-admin invite ...    Manage signup invite codes (list|show|create|disable|enable|delete)")
-	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
-	usageLine(w, "                                (list|watch|show|reply|retriage|state|resolve|close|states)")
-	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|email-receive|email-send|email-retention|plan-override|limit-override)")
-	usageLine(w, "  witself-admin email-alias ...  Review aliases and manage protected names")
-	usageLine(w, "                                (requests|assignments|reserved)")
-	usageLine(w, "  witself-admin email-domain ... Review custom inbound-domain requests")
-	usageLine(w, "                                (requests|audit|journal|recovery)")
-	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
-	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
-	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
-	usageLine(w, "                                (rescue)")
-	usageLine(w, "  witself-admin backup-evidence ... Verify retained Civo pre-migration backup")
-	usageLine(w, "                                artifacts offline; count-only output (verify)")
-	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")
-	usageLine(w, "                                events; self-upgrades and resumes its view)")
-	usageLine(w, "  witself-admin version       Print version information")
-	usageLine(w)
-	usageLine(w, "Tokens (managed dir first; env vars and flags override):")
-	usageLine(w, "  admin: ~/.witself/tokens/admin.token, WITSELF_ADMIN_TOKEN, --token-file, --token")
-	usageLine(w, "  fleet: ~/.witself/tokens/fleet.token, WITSELF_FLEET_TOKEN, --fleet-token")
-	usageLine(w, "  domain recovery: ~/.witself/tokens/agent-email-domain-recovery.token")
-	usageLine(w, "                   WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE or --recovery-token-file")
-	usageLine(w)
-	usageLine(w, "Environment:")
-	usageLine(w, "  WITSELF_CONTROL_PLANE   control-plane URL (default https://self.witwave.ai)")
-	usageLine(w, "  WITSELF_HOME            managed dir root (default ~/.witself)")
-}
-
-func usageLine(w io.Writer, args ...any) {
-	_, _ = fmt.Fprintln(w, args...)
+	cliout.Line(w, "witself-admin — the Witself fleet-admin CLI")
+	cliout.Line(w)
+	cliout.Line(w, "Usage:")
+	cliout.Line(w, "  witself-admin whoami        Verify an admin token and print its identity")
+	cliout.Line(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
+	cliout.Line(w, "  witself-admin invite ...    Manage signup invite codes (list|show|create|disable|enable|delete)")
+	cliout.Line(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
+	cliout.Line(w, "                                (list|watch|show|reply|retriage|state|resolve|close|states)")
+	cliout.Line(w, "  witself-admin account ...   Read/set per-account fleet settings")
+	cliout.Line(w, "                                (support-policy|transcript-retention|messaging|message-retention|email-receive|email-send|email-retention|plan-override|limit-override)")
+	cliout.Line(w, "  witself-admin email-alias ...  Review aliases and manage protected names")
+	cliout.Line(w, "                                (requests|assignments|reserved)")
+	cliout.Line(w, "  witself-admin email-domain ... Review custom inbound-domain requests")
+	cliout.Line(w, "                                (requests|audit|journal|recovery)")
+	cliout.Line(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
+	cliout.Line(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
+	cliout.Line(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
+	cliout.Line(w, "                                (rescue)")
+	cliout.Line(w, "  witself-admin backup-evidence ... Verify retained Civo pre-migration backup")
+	cliout.Line(w, "                                artifacts offline; count-only output (verify)")
+	cliout.Line(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")
+	cliout.Line(w, "                                events; self-upgrades and resumes its view)")
+	cliout.Line(w, "  witself-admin version       Print version information")
+	cliout.Line(w)
+	cliout.Line(w, "Tokens (managed dir first; env vars and flags override):")
+	cliout.Line(w, "  admin: ~/.witself/tokens/admin.token, WITSELF_ADMIN_TOKEN, --token-file, --token")
+	cliout.Line(w, "  fleet: ~/.witself/tokens/fleet.token, WITSELF_FLEET_TOKEN, --fleet-token")
+	cliout.Line(w, "  domain recovery: ~/.witself/tokens/agent-email-domain-recovery.token")
+	cliout.Line(w, "                   WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE or --recovery-token-file")
+	cliout.Line(w)
+	cliout.Line(w, "Environment:")
+	cliout.Line(w, "  WITSELF_CONTROL_PLANE   control-plane URL (default https://self.witwave.ai)")
+	cliout.Line(w, "  WITSELF_HOME            managed dir root (default ~/.witself)")
 }
 
 // cpEndpoint resolves the control-plane URL: --endpoint > env > default.
@@ -164,13 +163,13 @@ func resolveAdminToken(tokenFlag, tokenFileFlag string) (string, error) {
 		return t, nil
 	}
 	if f := strings.TrimSpace(tokenFileFlag); f != "" {
-		return readTokenFile(f)
+		return tokenfile.Read(f, tokenfile.Options{Description: "token file"})
 	}
 	if t := strings.TrimSpace(os.Getenv("WITSELF_ADMIN_TOKEN")); t != "" {
 		return t, nil
 	}
 	if p, err := managedTokenPath("admin.token"); err == nil {
-		if tok, err := readTokenFile(p); err == nil {
+		if tok, err := tokenfile.Read(p, tokenfile.Options{Description: "token file"}); err == nil {
 			return tok, nil
 		}
 	}
@@ -188,23 +187,11 @@ func resolveFleetToken(tokenFlag string) (string, error) {
 		return t, nil
 	}
 	if p, err := managedTokenPath("fleet.token"); err == nil {
-		if tok, err := readTokenFile(p); err == nil {
+		if tok, err := tokenfile.Read(p, tokenfile.Options{Description: "token file"}); err == nil {
 			return tok, nil
 		}
 	}
 	return "", fmt.Errorf("no fleet token — expected ~/.witself/tokens/fleet.token, WITSELF_FLEET_TOKEN, or --fleet-token TOKEN")
-}
-
-func readTokenFile(path string) (string, error) {
-	buf, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read token file %q: %w", path, err)
-	}
-	tok := strings.TrimSpace(string(buf))
-	if tok == "" {
-		return "", fmt.Errorf("token file %q is empty", path)
-	}
-	return tok, nil
 }
 
 // jsonFlag adds --json to a FlagSet — same convention as the witself CLI.
@@ -259,16 +246,11 @@ func tabSafe(s string) string {
 		case '\t', '\n', '\r', '\u2028', '\u2029':
 			return ' '
 		}
-		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || isBidiControl(r) {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || textsafe.IsBidiControl(r) {
 			return -1
 		}
 		return r
 	}, s)
-}
-
-func isBidiControl(r rune) bool {
-	return r == '\u061c' || r == '\u200e' || r == '\u200f' ||
-		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
 }
 
 // whoamiCmd: witself-admin whoami

@@ -9,9 +9,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
+	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/supportrunner"
 	"github.com/witwave-ai/witself/internal/version"
 	"github.com/witwave-ai/witself/internal/worker"
@@ -107,8 +107,8 @@ func serve(
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	healthAddr := envOr(lookup, "WITSELF_HEALTH_ADDR", ":8081")
-	metricsAddr := envOr(lookup, "WITSELF_METRICS_ADDR", ":9090")
+	healthAddr := envconfig.TrimmedOr(lookup, "WITSELF_HEALTH_ADDR", ":8081")
+	metricsAddr := envconfig.TrimmedOr(lookup, "WITSELF_METRICS_ADDR", ":9090")
 	_, _ = fmt.Fprintf(stderr, "witself-support-runner: health listening on %s\n", healthAddr)
 	_, _ = fmt.Fprintf(stderr, "witself-support-runner: metrics listening on %s\n", metricsAddr)
 	if err := registry.Run(ctx, worker.Config{
@@ -120,13 +120,6 @@ func serve(
 	}
 	_, _ = fmt.Fprintln(stderr, "witself-support-runner: shut down cleanly")
 	return 0
-}
-
-func envOr(lookup func(string) (string, bool), name, fallback string) string {
-	if value, ok := lookup(name); ok && strings.TrimSpace(value) != "" {
-		return strings.TrimSpace(value)
-	}
-	return fallback
 }
 
 func usage(w io.Writer) {

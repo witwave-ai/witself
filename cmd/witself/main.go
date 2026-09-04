@@ -19,11 +19,13 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/legacyrunnercleanup"
 	"github.com/witwave-ai/witself/internal/legal"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/textsafe"
 	"github.com/witwave-ai/witself/internal/token"
 	"github.com/witwave-ai/witself/internal/version"
 )
@@ -1311,7 +1313,7 @@ func tabSafe(s string) string {
 		case '\t', '\n', '\r', '\u2028', '\u2029':
 			return ' '
 		}
-		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || isBidiControl(r) {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || textsafe.IsBidiControl(r) {
 			return -1
 		}
 		return r
@@ -4176,58 +4178,54 @@ func readJSONFile(path string) (json.RawMessage, error) {
 }
 
 func usage(w io.Writer) {
-	usageLine(w, "witself — the Witself CLI (alias: ws)")
-	usageLine(w)
-	usageLine(w, "Usage:")
-	usageLine(w, "  witself version              Print version information")
-	usageLine(w, "  witself gen-bootstrap-token  Generate an operator bootstrap token")
-	usageLine(w, "  witself auth login           Exchange a bootstrap token for an operator token")
-	usageLine(w, "  witself account create       Create a Witself Cloud account")
-	usageLine(w, "  witself account adopt        Bind an existing account (id + token) to a local name")
-	usageLine(w, "  witself account list         List this machine's local account names")
-	usageLine(w, "  witself account status       Show an account's lifecycle status")
-	usageLine(w, "  witself account placement    Show or change account cell-placement policy")
-	usageLine(w, "  witself account recover      Email a recovery code, redeem it for a fresh owner token")
-	usageLine(w, "  witself account change-email Move the account to a new address (code-confirmed)")
-	usageLine(w, "  witself account change-display-name  Rename the account (owner only)")
-	usageLine(w, "  witself account suspend      Freeze every write on the account (owner only)")
-	usageLine(w, "  witself account resume       Un-freeze an owner-suspended account")
-	usageLine(w, "  witself account resend-verification  Email a fresh verification link")
-	usageLine(w, "  witself account close        Permanently close an account (owner only)")
-	usageLine(w, "  witself account forget       Remove a local account binding (server untouched)")
-	usageLine(w, "  witself realm create|list|delete|email-alias")
-	usageLine(w, "  witself agent create|list|peers|delete")
-	usageLine(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
-	usageLine(w, "  witself legal [DOCUMENT]    Read the published legal documents and versions")
-	usageLine(w, "  witself export              Download and verify a self-service account archive")
-	usageLine(w, "  witself billing show|invoices|payments|portal|setup  Inspect provider billing and open hosted flows")
-	usageLine(w, "  witself operator list|create|delete")
-	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
-	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")
-	usageLine(w, "  witself usage                Show token-bound agent usage over time")
-	usageLine(w, "  witself fact status|set|get|list|history|delete  Inspect capacity; store, review, and permanently delete durable facts")
-	usageLine(w, "  witself password generate    Generate a password locally with cryptographic randomness")
-	usageLine(w, "  witself vault key init|status|enroll|recovery|rotate|rotation  Manage client-held key custody")
-	usageLine(w, "  witself secret create|status|list|search|show|reveal|archive|restore|delete  Manage agent-owned structured secrets")
-	usageLine(w, "  witself totp show|code       Inspect TOTP metadata or generate a code locally")
-	usageLine(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
-	usageLine(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
-	usageLine(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")
-	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
-	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
-	usageLine(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
-	usageLine(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
-	usageLine(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
-	usageLine(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
-	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
-	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
-	usageLine(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
-	usageLine(w, "  witself help                 Show this help")
-	usageLine(w)
-	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")
-	usageLine(w, `WITSELF_ACCOUNT or "default"). Self-hosted: --endpoint URL --token-file FILE.`)
-}
-
-func usageLine(w io.Writer, args ...any) {
-	_, _ = fmt.Fprintln(w, args...)
+	cliout.Line(w, "witself — the Witself CLI (alias: ws)")
+	cliout.Line(w)
+	cliout.Line(w, "Usage:")
+	cliout.Line(w, "  witself version              Print version information")
+	cliout.Line(w, "  witself gen-bootstrap-token  Generate an operator bootstrap token")
+	cliout.Line(w, "  witself auth login           Exchange a bootstrap token for an operator token")
+	cliout.Line(w, "  witself account create       Create a Witself Cloud account")
+	cliout.Line(w, "  witself account adopt        Bind an existing account (id + token) to a local name")
+	cliout.Line(w, "  witself account list         List this machine's local account names")
+	cliout.Line(w, "  witself account status       Show an account's lifecycle status")
+	cliout.Line(w, "  witself account placement    Show or change account cell-placement policy")
+	cliout.Line(w, "  witself account recover      Email a recovery code, redeem it for a fresh owner token")
+	cliout.Line(w, "  witself account change-email Move the account to a new address (code-confirmed)")
+	cliout.Line(w, "  witself account change-display-name  Rename the account (owner only)")
+	cliout.Line(w, "  witself account suspend      Freeze every write on the account (owner only)")
+	cliout.Line(w, "  witself account resume       Un-freeze an owner-suspended account")
+	cliout.Line(w, "  witself account resend-verification  Email a fresh verification link")
+	cliout.Line(w, "  witself account close        Permanently close an account (owner only)")
+	cliout.Line(w, "  witself account forget       Remove a local account binding (server untouched)")
+	cliout.Line(w, "  witself realm create|list|delete|email-alias")
+	cliout.Line(w, "  witself agent create|list|peers|delete")
+	cliout.Line(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
+	cliout.Line(w, "  witself legal [DOCUMENT]    Read the published legal documents and versions")
+	cliout.Line(w, "  witself export              Download and verify a self-service account archive")
+	cliout.Line(w, "  witself billing show|invoices|payments|portal|setup  Inspect provider billing and open hosted flows")
+	cliout.Line(w, "  witself operator list|create|delete")
+	cliout.Line(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
+	cliout.Line(w, "  witself self show|card       Show the self digest or bounded visual identity card")
+	cliout.Line(w, "  witself usage                Show token-bound agent usage over time")
+	cliout.Line(w, "  witself fact status|set|get|list|history|delete  Inspect capacity; store, review, and permanently delete durable facts")
+	cliout.Line(w, "  witself password generate    Generate a password locally with cryptographic randomness")
+	cliout.Line(w, "  witself vault key init|status|enroll|recovery|rotate|rotation  Manage client-held key custody")
+	cliout.Line(w, "  witself secret create|status|list|search|show|reveal|archive|restore|delete  Manage agent-owned structured secrets")
+	cliout.Line(w, "  witself totp show|code       Inspect TOTP metadata or generate a code locally")
+	cliout.Line(w, "  witself fact delete --yes --fact-id ID --expected-assertion-id ID --expected-candidate-revision REVISION --idempotency-key KEY  Replay an exact deletion")
+	cliout.Line(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
+	cliout.Line(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")
+	cliout.Line(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
+	cliout.Line(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
+	cliout.Line(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
+	cliout.Line(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
+	cliout.Line(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
+	cliout.Line(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
+	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
+	cliout.Line(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
+	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
+	cliout.Line(w, "  witself help                 Show this help")
+	cliout.Line(w)
+	cliout.Line(w, "Cloud commands take --account NAME (a local account name; when omitted,")
+	cliout.Line(w, `WITSELF_ACCOUNT or "default"). Self-hosted: --endpoint URL --token-file FILE.`)
 }

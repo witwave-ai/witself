@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"time"
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 )
 
 // PlannerEnvelopeSchemaV1 and MemoryPlanSchemaV1 identify the planner input and
@@ -97,7 +97,7 @@ func validatePlanDraftForLimit(raw []byte, maximumActions int) error {
 	if err := decoder.Decode(&draft); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidPlannerOutput, err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidPlannerOutput, err)
 	}
 	if draft.Schema != MemoryPlanSchemaV1 || draft.DraftRevision < 1 || draft.Actions == nil || len(draft.Actions) > maximumActions {
@@ -160,7 +160,7 @@ func validateAcceptedPlanForLimit(raw []byte, maximumActions int, planRevision i
 	if err := decoder.Decode(&plan); err != nil {
 		return fmt.Errorf("%w: accepted plan: %v", ErrProtocolResponse, err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return fmt.Errorf("%w: accepted plan: %v", ErrProtocolResponse, err)
 	}
 	if plan.Schema != MemoryPlanSchemaV1 || plan.PlanRevision != planRevision || plan.Actions == nil || len(plan.Actions) > maximumActions {
@@ -201,7 +201,7 @@ func semanticallyEqualJSON(a, b []byte) bool {
 		if err := decoder.Decode(&value); err != nil {
 			return nil, err
 		}
-		if err := requireJSONEOF(decoder); err != nil {
+		if err := jsonstrict.RequireEOF(decoder); err != nil {
 			return nil, err
 		}
 		return value, nil
@@ -217,75 +217,12 @@ func semanticallyEqualJSON(a, b []byte) bool {
 func rejectDuplicateJSONNames(raw []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := consumeUniqueJSONValue(decoder); err != nil {
+	if err := jsonstrict.ConsumeUniqueValue(decoder); err != nil {
+		var duplicate *jsonstrict.DuplicateKeyError
+		if errors.As(err, &duplicate) {
+			return fmt.Errorf("duplicate object member %q", duplicate.Key)
+		}
 		return err
 	}
-	return requireJSONEOF(decoder)
-}
-
-func consumeUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, isDelimiter := token.(json.Delim)
-	if !isDelimiter {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object member name is not a string")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate object member %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim('}') {
-			return errors.New("object did not terminate")
-		}
-	case '[':
-		for decoder.More() {
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim(']') {
-			return errors.New("array did not terminate")
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
-	}
-	return nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var trailing any
-	err := decoder.Decode(&trailing)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return errors.New("unexpected trailing JSON value")
+	return jsonstrict.RequireEOF(decoder)
 }

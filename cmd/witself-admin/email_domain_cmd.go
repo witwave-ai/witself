@@ -12,6 +12,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/tokenfile"
 )
 
 func emailDomainAdminCmd(args []string) int {
@@ -81,7 +82,7 @@ func readAgentEmailDomainRecoveryTokenFile(path string) (string, error) {
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("custom-domain recovery token file %q must be owner-only (mode 0600 or stricter)", path)
 	}
-	return readTokenFile(path)
+	return tokenfile.Read(path, tokenfile.Options{Description: "token file"})
 }
 
 func (c emailDomainRecoveryCommon) recoveryCredentials() (string, string, string, error) {

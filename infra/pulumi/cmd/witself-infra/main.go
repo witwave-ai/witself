@@ -915,7 +915,7 @@ func run(args []string) error {
 			sink.end(cellName, "pulumi.up", "")
 		}
 		if err == nil && *cloud == "civo" {
-			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 20*time.Minute, 20*time.Second)
+			err = waitForPostUpConvergence(ctx, stack, *cloud, *region, *awsProfile, expectedBootstrapArgoApplications(*gitopsRevision), *argocd, 20*time.Minute, 20*time.Second)
 			if err == nil && *controlPlane != "" {
 				outs, outputErr := stack.Outputs(ctx)
 				if outputErr != nil {
@@ -948,7 +948,7 @@ func run(args []string) error {
 			}
 		}
 		if err == nil && *cloud != "civo" {
-			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 15*time.Minute, 20*time.Second)
+			err = waitForPostUpConvergence(ctx, stack, *cloud, *region, *awsProfile, expectedBootstrapArgoApplications(*gitopsRevision), *argocd, 15*time.Minute, 20*time.Second)
 		}
 	case "preview":
 		sink.start(cellName, "pulumi.preview", "")

@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/version"
@@ -2225,17 +2226,10 @@ var (
 // canonical ports :8080 (api), :8081 (health), and :9090 (metrics).
 func ConfigFromEnv() Config {
 	return Config{
-		APIAddr:     envOr("WITSELF_API_ADDR", ":8080"),
-		HealthAddr:  envOr("WITSELF_HEALTH_ADDR", ":8081"),
-		MetricsAddr: envOr("WITSELF_METRICS_ADDR", ":9090"),
+		APIAddr:     envconfig.RawOr(os.LookupEnv, "WITSELF_API_ADDR", ":8080"),
+		HealthAddr:  envconfig.RawOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081"),
+		MetricsAddr: envconfig.RawOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090"),
 	}
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 // Run binds the three listeners, serves until ctx is cancelled (or a listener
@@ -3191,7 +3185,7 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 			return notImpl
 		}
 		backendKind := strings.ToLower(strings.TrimSpace(
-			envOr("WITSELF_BACKEND_KIND", "self-hosted"),
+			envconfig.RawOr(os.LookupEnv, "WITSELF_BACKEND_KIND", "self-hosted"),
 		))
 		if backendKind == "" {
 			backendKind = "self-hosted"
@@ -3235,7 +3229,7 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 			Limits:  map[string]any{},
 			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
 		}
-		if ep := envOr("WITSELF_BILLING_ENDPOINT", ""); validBillingCapabilityEndpoint(ep) {
+		if ep := envconfig.RawOr(os.LookupEnv, "WITSELF_BILLING_ENDPOINT", ""); validBillingCapabilityEndpoint(ep) {
 			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
 		} else if ep != "" {
 			caps.Billing = billingInfo{Supported: false, Reason: "invalid_configuration"}

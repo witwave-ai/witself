@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -125,7 +126,16 @@ func readAntigravitySharedMCPDocument(path string) (antigravitySharedMCPDocument
 
 func rejectDuplicateJSONKeys(raw []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := consumeUniqueJSONValue(decoder); err != nil {
+	if err := jsonstrict.ConsumeUniqueValue(decoder); err != nil {
+		var termination *jsonstrict.ContainerTerminationError
+		if errors.As(err, &termination) {
+			switch termination.Opening {
+			case '{':
+				return errors.New("unterminated JSON object")
+			case '[':
+				return errors.New("unterminated JSON array")
+			}
+		}
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -133,55 +143,6 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 			return errors.New("multiple JSON values are not allowed")
 		}
 		return err
-	}
-	return nil
-}
-
-func consumeUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := map[string]bool{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			if seen[key] {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			seen[key] = true
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return errors.New("unterminated JSON object")
-		}
-	case '[':
-		for decoder.More() {
-			if err := consumeUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return errors.New("unterminated JSON array")
-		}
-	default:
-		return errors.New("unexpected JSON delimiter")
 	}
 	return nil
 }
