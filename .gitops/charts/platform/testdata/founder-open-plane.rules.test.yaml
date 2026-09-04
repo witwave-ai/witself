@@ -225,3 +225,145 @@ tests:
             exp_annotations:
               summary: A support ticket has waited over 24h for its first response — the published promise is one business day.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: transcript entries batch rejection ratio fires above the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="2xx",result="success"}'
+        values: 0+18x30
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="4xx",result="error"}'
+        values: 0+1x30
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="5xx",result="error"}'
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfTranscriptEntriesBatchRejectionRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: Transcript entries:batch responses exceed the bounded rejection ratio.
+              description: More than 5 percent of transcript batch appends have returned 4xx or 5xx for 10 minutes while traffic exceeds 0.01 requests per second; inspect client payload compatibility and server errors.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: transcript entries batch rejection ratio stays quiet below the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="2xx",result="success"}'
+        values: 0+98x30
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="4xx",result="error"}'
+        values: 0+1x30
+      - series: 'witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class="5xx",result="error"}'
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfTranscriptEntriesBatchRejectionRatioHigh
+        exp_alerts: []
+  - name: transcript retention backlog pressure fires after repeated capped scans
+    interval: 1m
+    input_series:
+      - series: 'witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"}'
+        values: 0+0x4 1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x10
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WitselfTranscriptRetentionBacklogPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: transcript-retention
+              witself_alert: "true"
+            exp_annotations:
+              summary: Transcript retention has sustained backlog-pressure signals.
+              description: At least three enforce batches hit the bounded scan cap in 30 minutes for 15 minutes; repeated scan saturation is the available server-side proxy for backlog growth, so inspect holds and worker throughput.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: transcript retention backlog pressure stays quiet below three capped scans
+    interval: 1m
+    input_series:
+      - series: 'witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"}'
+        values: 0+0x14 1+0x14 2+0x30
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WitselfTranscriptRetentionBacklogPressure
+        exp_alerts: []
+  - name: message retention backlog pressure fires after repeated capped scans
+    interval: 1m
+    input_series:
+      - series: 'witself_worker_message_retention_items_total{mode="enforce",kind="scan_capped_batches"}'
+        values: 0+0x4 1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x10
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WitselfMessageRetentionBacklogPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: message-retention
+              witself_alert: "true"
+            exp_annotations:
+              summary: Message retention has sustained backlog-pressure signals.
+              description: At least three enforce batches hit the bounded scan cap in 30 minutes for 15 minutes; repeated scan saturation is the available server-side proxy for backlog growth, so inspect held threads and worker throughput.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: message retention backlog pressure stays quiet below three capped scans
+    interval: 1m
+    input_series:
+      - series: 'witself_worker_message_retention_items_total{mode="enforce",kind="scan_capped_batches"}'
+        values: 0+0x14 1+0x14 2+0x30
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WitselfMessageRetentionBacklogPressure
+        exp_alerts: []
+  - name: fact delete failure ratio fires above the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="DELETE",route="/v1/facts",status_class="2xx",result="success"}'
+        values: 0+9x30
+      - series: 'witself_http_requests_total{method="DELETE",route="/v1/facts/{fact}",status_class="5xx",result="error"}'
+        values: 0+3x30
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfFactDeleteFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: Fact delete requests exceed the bounded server-failure ratio.
+              description: More than 5 percent of fact deletion previews or applies have returned 5xx for 5 minutes; inspect the fact store, audit writes, and deletion transaction failures.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: fact delete failure ratio stays quiet below the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="DELETE",route="/v1/facts",status_class="2xx",result="success"}'
+        values: 0+99x30
+      - series: 'witself_http_requests_total{method="DELETE",route="/v1/facts/{fact}",status_class="5xx",result="error"}'
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfFactDeleteFailureRatioHigh
+        exp_alerts: []
+  - name: avatar generation failure rate fires above the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="POST",route="/v1/self/avatar:generation-failed",status_class="2xx",result="success"}'
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfAvatarGenerationFailureRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: Clients are reporting a sustained avatar generation-failure rate.
+              description: Successful avatar generation-failure reports have exceeded 0.003 per second for 10 minutes; inspect renderer compatibility, proposal validation, and client failure reason classes.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: avatar generation failure rate stays quiet below the threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_http_requests_total{method="POST",route="/v1/self/avatar:generation-failed",status_class="2xx",result="success"}'
+        values: 0+0x9 1+0x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfAvatarGenerationFailureRateHigh
+        exp_alerts: []
