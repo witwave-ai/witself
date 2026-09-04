@@ -68,12 +68,23 @@ func TestIntegrationCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
 func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 	restoreIntegrationCatalogHooks(t)
 	runtimes := transcriptcapture.SupportedRuntimes()
-	delays := make(map[string]time.Duration, len(runtimes))
-	for index, runtimeName := range runtimes {
-		delays[runtimeName] = time.Duration(len(runtimes)-index) * time.Millisecond
+	var probedRuntimes []string
+	probeRelease := make(map[string]chan struct{}, len(runtimes))
+	for _, runtimeName := range runtimes {
+		if !integrationPlatformSupport(runtimeName, integrationCatalogGOOS).SupportedOnPlatform {
+			continue
+		}
+		probedRuntimes = append(probedRuntimes, runtimeName)
+		probeRelease[runtimeName] = make(chan struct{})
 	}
+	probeStarted := make(chan string, len(probedRuntimes))
+	probeCompleted := make(chan string, len(probedRuntimes))
 	probeRuntimeForIntegrationCatalog = func(runtimeName string) integrationDetection {
-		time.Sleep(delays[runtimeName])
+		probeStarted <- runtimeName
+		if release, expected := probeRelease[runtimeName]; expected {
+			<-release
+		}
+		defer func() { probeCompleted <- runtimeName }()
 		switch runtimeName {
 		case transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeCursor, transcriptcapture.RuntimeOpenClaw:
 			return integrationDetection{
@@ -87,6 +98,67 @@ func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 			return integrationDetection{State: integrationDetectionNotFound, Message: "not on PATH"}
 		}
 	}
+	type probeBarrierResult struct {
+		completed []string
+		started   int
+		failure   string
+	}
+	const probeBarrierFixtureInterval = 10 * time.Millisecond
+	barrierResult := make(chan probeBarrierResult, 1)
+	go func() {
+		released := make(map[string]bool, len(probedRuntimes))
+		releaseAll := func() {
+			for runtimeName, release := range probeRelease {
+				if !released[runtimeName] {
+					close(release)
+					released[runtimeName] = true
+				}
+			}
+		}
+		barrierDeadline := time.NewTimer(
+			20 * time.Duration(max(1, len(probedRuntimes))) * probeBarrierFixtureInterval,
+		)
+		defer barrierDeadline.Stop()
+		started := make(map[string]struct{}, len(probedRuntimes))
+		for len(started) < len(probedRuntimes) {
+			select {
+			case runtimeName := <-probeStarted:
+				if _, expected := probeRelease[runtimeName]; !expected {
+					releaseAll()
+					barrierResult <- probeBarrierResult{started: len(started), failure: "unexpected runtime reached probe barrier"}
+					return
+				}
+				if _, duplicate := started[runtimeName]; duplicate {
+					releaseAll()
+					barrierResult <- probeBarrierResult{started: len(started), failure: "runtime reached probe barrier twice"}
+					return
+				}
+				started[runtimeName] = struct{}{}
+			case <-barrierDeadline.C:
+				releaseAll()
+				barrierResult <- probeBarrierResult{started: len(started), failure: "timed out waiting for concurrent probes to reach barrier"}
+				return
+			}
+		}
+		completed := make([]string, 0, len(probedRuntimes))
+		for index := len(probedRuntimes) - 1; index >= 0; index-- {
+			runtimeName := probedRuntimes[index]
+			close(probeRelease[runtimeName])
+			released[runtimeName] = true
+			select {
+			case completedRuntime := <-probeCompleted:
+				completed = append(completed, completedRuntime)
+			case <-barrierDeadline.C:
+				releaseAll()
+				barrierResult <- probeBarrierResult{
+					completed: completed, started: len(started),
+					failure: "timed out waiting for released probe to complete",
+				}
+				return
+			}
+		}
+		barrierResult <- probeBarrierResult{completed: completed, started: len(started)}
+	}()
 	loadIntegrationForCatalog = func(runtimeName string) (transcriptcapture.Config, error) {
 		switch runtimeName {
 		case transcriptcapture.RuntimeCodex:
@@ -107,6 +179,18 @@ func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 	stdout, stderr, code := captureIntegrationsCLI(t, func() int {
 		return integrationsCmd([]string{"--json"})
 	})
+	barrier := <-barrierResult
+	if barrier.failure != "" {
+		t.Fatalf("probe concurrency barrier failed after %d of %d starts: %s",
+			barrier.started, len(probedRuntimes), barrier.failure)
+	}
+	wantCompletionOrder := make([]string, len(probedRuntimes))
+	for index := range probedRuntimes {
+		wantCompletionOrder[index] = probedRuntimes[len(probedRuntimes)-1-index]
+	}
+	if !reflect.DeepEqual(barrier.completed, wantCompletionOrder) {
+		t.Fatalf("probe completion order = %v, want reverse runtime order %v", barrier.completed, wantCompletionOrder)
+	}
 	if code != 0 {
 		t.Fatalf("integrations --json code = %d, stderr = %q", code, stderr)
 	}

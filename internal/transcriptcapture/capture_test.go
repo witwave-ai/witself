@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf16"
 )
@@ -2715,25 +2716,65 @@ func TestFinalizePendingContentFreeGrokTurnPersistsRetryFence(t *testing.T) {
 	}
 }
 
-func TestCompleteGrokAssistantTurnWaitsForDelayedTerminalFence(t *testing.T) {
-	grokHome := filepath.Join(t.TempDir(), ".grok")
-	t.Setenv("GROK_HOME", grokHome)
-	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
-	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+type grokAssistantTurnReadResult struct {
+	body     string
+	model    string
+	complete bool
+	err      error
+}
 
-	writeErr := make(chan error, 1)
+func readGrokAssistantTurnForTest(
+	path string,
+	maxWait time.Duration,
+	pollInterval time.Duration,
+) <-chan grokAssistantTurnReadResult {
+	result := make(chan grokAssistantTurnReadResult, 1)
 	go func() {
-		time.Sleep(75 * time.Millisecond)
+		body, model, complete, err := readCompleteGrokAssistantTurnWithin(
+			path, "prompt-1", "session-1", maxWait, pollInterval,
+		)
+		result <- grokAssistantTurnReadResult{
+			body: body, model: model, complete: complete, err: err,
+		}
+	}()
+	return result
+}
+
+func assertGrokAssistantTurnReadPending(
+	t *testing.T,
+	result <-chan grokAssistantTurnReadResult,
+	wait time.Duration,
+) {
+	t.Helper()
+	select {
+	case got := <-result:
+		t.Fatalf("Grok turn read returned before its terminal fence: %#v", got)
+	case <-time.After(wait):
+	}
+}
+
+func TestCompleteGrokAssistantTurnWaitsForDelayedTerminalFence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const pollInterval = 10 * time.Millisecond
+		const maxWait = 20 * pollInterval
+
+		grokHome := filepath.Join(t.TempDir(), ".grok")
+		t.Setenv("GROK_HOME", grokHome)
+		sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+		if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		result := readGrokAssistantTurnForTest(transcriptPath, maxWait, pollInterval)
+		assertGrokAssistantTurnReadPending(t, result, 2*pollInterval)
+
 		file, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
-			writeErr <- err
-			return
+			t.Fatal(err)
 		}
 		defer func() { _ = file.Close() }()
 		first := strings.Join([]string{
@@ -2741,77 +2782,76 @@ func TestCompleteGrokAssistantTurnWaitsForDelayedTerminalFence(t *testing.T) {
 			`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
 		}, "\n") + "\n"
 		if _, err := file.WriteString(first); err != nil {
-			writeErr <- err
-			return
+			t.Fatal(err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		assertGrokAssistantTurnReadPending(t, result, 2*pollInterval)
+
 		second := strings.Join([]string{
 			`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}`,
 			`{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
 		}, "\n") + "\n"
-		_, err = file.WriteString(second)
-		writeErr <- err
-	}()
+		if _, err := file.WriteString(second); err != nil {
+			t.Fatal(err)
+		}
 
-	body, model, complete, err := readCompleteGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := <-writeErr; err != nil {
-		t.Fatal(err)
-	}
-	if !complete || body != "first\n\nsecond" || model != "grok-4.5" {
-		t.Fatalf("complete Grok response = %t / %q / %q", complete, body, model)
-	}
+		got := <-result
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if !got.complete || got.body != "first\n\nsecond" || got.model != "grok-4.5" {
+			t.Fatalf("complete Grok response = %t / %q / %q", got.complete, got.body, got.model)
+		}
+	})
 }
 
 func TestCompleteGrokAssistantTurnWaitsForIncompleteTrailingLine(t *testing.T) {
-	grokHome := filepath.Join(t.TempDir(), ".grok")
-	t.Setenv("GROK_HOME", grokHome)
-	sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
-	first := strings.Join([]string{
-		`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
-		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(transcriptPath, []byte(first), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		const pollInterval = 10 * time.Millisecond
+		const maxWait = 20 * pollInterval
 
-	writeErr := make(chan error, 1)
-	go func() {
-		time.Sleep(150 * time.Millisecond)
+		grokHome := filepath.Join(t.TempDir(), ".grok")
+		t.Setenv("GROK_HOME", grokHome)
+		sessionDir := filepath.Join(grokHome, "sessions", "workspace", "session-1")
+		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		transcriptPath := filepath.Join(sessionDir, "updates.jsonl")
+		first := strings.Join([]string{
+			`{"method":"session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
+			`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","_meta":{"modelId":"grok-4.5"},"content":{"type":"text","text":"first"}}}}`,
+		}, "\n") + "\n"
+		if err := os.WriteFile(transcriptPath, []byte(first), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		result := readGrokAssistantTurnForTest(transcriptPath, maxWait, pollInterval)
+		assertGrokAssistantTurnReadPending(t, result, 2*pollInterval)
+
 		file, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
-			writeErr <- err
-			return
+			t.Fatal(err)
 		}
 		defer func() { _ = file.Close() }()
 		second := `{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}` + "\n"
 		midpoint := len(second) / 2
 		if _, err := file.WriteString(second[:midpoint]); err != nil {
-			writeErr <- err
-			return
+			t.Fatal(err)
 		}
-		time.Sleep(300 * time.Millisecond)
-		terminal := `{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}` + "\n"
-		_, err = file.WriteString(second[midpoint:] + terminal)
-		writeErr <- err
-	}()
+		assertGrokAssistantTurnReadPending(t, result, 2*pollInterval)
 
-	body, model, complete, err := readCompleteGrokAssistantTurn(transcriptPath, "prompt-1", "session-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := <-writeErr; err != nil {
-		t.Fatal(err)
-	}
-	if !complete || body != "first\n\nsecond" || model != "grok-4.5" {
-		t.Fatalf("complete Grok response = %t / %q / %q", complete, body, model)
-	}
+		terminal := `{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}` + "\n"
+		if _, err := file.WriteString(second[midpoint:] + terminal); err != nil {
+			t.Fatal(err)
+		}
+
+		got := <-result
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if !got.complete || got.body != "first\n\nsecond" || got.model != "grok-4.5" {
+			t.Fatalf("complete Grok response = %t / %q / %q", got.complete, got.body, got.model)
+		}
+	})
 }
 
 func TestCompleteGrokAssistantTurnFailsClosedWithoutTerminalFence(t *testing.T) {
