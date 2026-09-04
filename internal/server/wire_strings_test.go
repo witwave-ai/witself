@@ -52,7 +52,7 @@ func TestSecurityHeadersByRouteAuthentication(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer operator-token")
 		apiMux(Config{Authenticate: auth}).ServeHTTP(recorder, request)
 		response := recorder.Result()
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
@@ -78,7 +78,7 @@ func TestSecurityHeadersByRouteAuthentication(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			tc.handler.ServeHTTP(recorder, request)
 			response := recorder.Result()
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 
 			if response.StatusCode != http.StatusOK {
 				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
@@ -105,7 +105,7 @@ func TestAuthenticatedNoStoreDefaultPreservesExplicitCacheControl(t *testing.T) 
 	request.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(recorder, request)
 	response := recorder.Result()
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if got := response.Header.Get("Cache-Control"); got != "private, no-store" {
 		t.Fatalf("Cache-Control = %q, want explicit route value", got)
