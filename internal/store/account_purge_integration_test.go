@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const (
@@ -31,10 +31,7 @@ const (
 func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	t *testing.T,
 ) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
@@ -289,10 +286,7 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 }
 
 func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
@@ -380,10 +374,7 @@ func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 	t *testing.T,
 ) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)

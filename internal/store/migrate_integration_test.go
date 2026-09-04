@@ -16,16 +16,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
+
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 var migrationTestSchemaSequence atomic.Uint64
 
 func TestMigration73FreshInstallAllowsRetentionPolicyAccountsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -44,10 +43,7 @@ func TestMigration73FreshInstallAllowsRetentionPolicyAccountsPostgres(t *testing
 }
 
 func TestMigration73ReplacesRetentionLaneHashesPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	indexes := []string{
@@ -148,10 +144,7 @@ func TestMigration73ReplacesRetentionLaneHashesPostgres(t *testing.T) {
 }
 
 func TestMigration59AgentEmailPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	tables := []string{
 		"agent_email_addresses", "agent_email_mailboxes",
@@ -382,10 +375,7 @@ func TestMigration59AgentEmailPostgres(t *testing.T) {
 }
 
 func TestMigration57DashboardPreferencesPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 
 	migrationTestUpTo(t, dsn, 56)
@@ -411,10 +401,7 @@ func TestMigration57DashboardPreferencesPostgres(t *testing.T) {
 }
 
 func TestMigration55AgentSecretsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	assertSchema := func(want bool) {
 		t.Helper()
@@ -461,10 +448,7 @@ func TestMigration55AgentSecretsPostgres(t *testing.T) {
 }
 
 func TestMigration56ReplacesHistoricalVaultKeyVersionConstraintPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 55)
@@ -635,10 +619,7 @@ func TestMigration56ReplacesHistoricalVaultKeyVersionConstraintPostgres(t *testi
 }
 
 func TestMigration56DownPreservesCurrentAndReferencedVaultKeyEpochPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("committed current epoch wins", func(t *testing.T) {
 		ctx := context.Background()
@@ -705,10 +686,7 @@ func TestMigration56DownPreservesCurrentAndReferencedVaultKeyEpochPostgres(t *te
 }
 
 func TestMigration56DownRefusesReferencedLosingDuplicatePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 56)
@@ -750,10 +728,7 @@ func TestMigration56DownRefusesReferencedLosingDuplicatePostgres(t *testing.T) {
 }
 
 func TestMigration56DownRefusesActiveVaultLifecyclePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	t.Run("pending enrollment", func(t *testing.T) {
 		ctx := context.Background()
 		st, dsn := newMigrationTestStore(t, baseDSN)
@@ -993,10 +968,7 @@ func migration56AssertActiveLifecycleDownRefused(
 }
 
 func TestMigration37MessageAudiencePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 36)
 	insertMigrationTestMemoryPrincipals(t, st)
@@ -1040,10 +1012,7 @@ func TestMigration37MessageAudiencePostgres(t *testing.T) {
 }
 
 func TestMigration41Postgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("fresh database applies every migration", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
@@ -1762,10 +1731,7 @@ func TestMigration41Postgres(t *testing.T) {
 }
 
 func TestMigrateSerializesReplicasWithAdvisoryLockPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	first, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 61)
@@ -1839,10 +1805,7 @@ func TestMigrateSerializesReplicasWithAdvisoryLockPostgres(t *testing.T) {
 }
 
 func TestTranscriptRetentionCheckUsesStagedValidationPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	const (
 		legacyConstraint = "memory_curation_run_inputs_check"
@@ -1887,10 +1850,7 @@ func TestTranscriptRetentionCheckUsesStagedValidationPostgres(t *testing.T) {
 }
 
 func TestMigration87AgentEmailAddressDomainsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 86)

@@ -6,20 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestVaultKeyRotationStagesAndFlipsAtomically(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -352,10 +350,7 @@ func TestVaultKeyRotationStagesAndFlipsAtomically(t *testing.T) {
 }
 
 func TestExportAccountRejectsNonPortableTerminalVaultLifecyclePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -463,10 +458,7 @@ func TestExportAccountRejectsNonPortableTerminalVaultLifecyclePostgres(t *testin
 }
 
 func TestSensitiveCreateReplayPrecedesVaultKeyMismatchAcrossRotation(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

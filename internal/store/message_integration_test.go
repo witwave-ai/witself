@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestMessagePostgresRoundTrip is opt-in because it needs a disposable real
@@ -17,10 +18,7 @@ import (
 // oldest-unacknowledged receive state, and account archive export/import as
 // one lifecycle.
 func TestMessagePostgresRoundTrip(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {
@@ -505,10 +503,7 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 }
 
 func TestMessageCompletionAfterSenderDeletionPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {
@@ -747,10 +742,7 @@ func TestMessageCompletionAfterSenderDeletionPostgres(t *testing.T) {
 }
 
 func TestMessageIdempotentReplaySurvivesRecipientDeletionPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -860,10 +852,7 @@ func TestMessageIdempotentReplaySurvivesRecipientDeletionPostgres(t *testing.T) 
 }
 
 func TestMessageDeletionAndSuspensionRacesAreFencedPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -1128,10 +1117,7 @@ func receiveMessageRaceError(ctx context.Context, t *testing.T, result <-chan er
 }
 
 func TestMessageAudienceFanoutPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {

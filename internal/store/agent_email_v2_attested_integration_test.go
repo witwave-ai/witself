@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestAgentEmailV2AttestedVerdictsPostgres pins the cell-side inert half of
@@ -16,10 +16,7 @@ import (
 // advisory columns, a v1 envelope stays all-unknown, and neither touches the
 // pinned spam verdict or sender-verification posture.
 func TestAgentEmailV2AttestedVerdictsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

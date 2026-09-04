@@ -4,19 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestVaultKeyLifecycleMutualExclusion(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("sequential fences and terminal escape paths", func(t *testing.T) {
 		ctx := context.Background()

@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestRealmEmailRouteInputGrammar(t *testing.T) {
@@ -47,10 +48,7 @@ func TestRealmEmailRouteInputGrammar(t *testing.T) {
 }
 
 func TestRealmEmailRouteLifecyclePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -219,10 +217,7 @@ func TestRealmEmailRouteLifecyclePostgres(t *testing.T) {
 }
 
 func TestRealmEmailRoutePrepareSerializesCreateAndAliasRacesPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -312,10 +307,7 @@ func TestRealmEmailRoutePrepareSerializesCreateAndAliasRacesPostgres(t *testing.
 }
 
 func TestRealmEmailRouteLifecycleArchiveRoundTripPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, baseDSN)
 	destination, _ := newMigrationTestStore(t, baseDSN)

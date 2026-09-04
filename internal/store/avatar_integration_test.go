@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +16,7 @@ import (
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func createSchema50AvatarAgentForMigrationTest(ctx context.Context, t *testing.T,
@@ -53,10 +53,7 @@ func createSchema50AvatarAgentForMigrationTest(ctx context.Context, t *testing.T
 }
 
 func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 50)
 	ctx := context.Background()
@@ -163,10 +160,7 @@ func TestMigration51BackfillsLockedDigestsAndRefusesCompactedDowngradePostgres(t
 }
 
 func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 50)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -288,10 +282,7 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 }
 
 func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 50)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -519,10 +510,7 @@ func insertAvatarQuotaReconciliationHistory(ctx context.Context, t *testing.T,
 }
 
 func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	tests := []struct {
 		name               string
 		existingAtSchema50 bool
@@ -661,10 +649,7 @@ func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T)
 }
 
 func TestMigration54QuarantinesLegacyWritersAndRefusesV1DowngradePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 53)
 	ctx := context.Background()
@@ -816,10 +801,7 @@ func TestMigration54QuarantinesLegacyWritersAndRefusesV1DowngradePostgres(t *tes
 }
 
 func TestMigration54DownLocksBeforeRendererSafetyCheckPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
@@ -904,10 +886,7 @@ func TestMigration54DownLocksBeforeRendererSafetyCheckPostgres(t *testing.T) {
 }
 
 func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 41)
 	insertMigrationTestMemoryPrincipals(t, st)
@@ -1106,10 +1085,7 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 }
 
 func TestAvatarStyleRevisionConstraintUsesWriterCompatibleValidationPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
@@ -1186,10 +1162,7 @@ func TestAvatarStyleRevisionConstraintUsesWriterCompatibleValidationPostgres(t *
 }
 
 func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 
 	t.Run("up after index build before version record", func(t *testing.T) {
@@ -1238,10 +1211,7 @@ func TestAvatarStyleRolloutConcurrentIndexMigrationIsRetrySafePostgres(t *testin
 }
 
 func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 
 	t.Run("open and mismatched terminal jobs refuse; aligned completed permits", func(t *testing.T) {
@@ -1318,10 +1288,7 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 }
 
 func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
@@ -1386,10 +1353,7 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 }
 
 func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
