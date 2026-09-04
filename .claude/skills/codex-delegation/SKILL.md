@@ -94,6 +94,23 @@ Prefer the smallest lane that answers the question.
    exact reviewed head, verify post-merge CI, then remove your own clean
    merged worktree and branch.
 
+## Slice protocol with the self-review folded in (2026-09-04)
+
+With GPT-6 Astra, an ordinary implementation slice runs as one unit through
+`~/.witself/handoff/codex-slice.sh WORKTREE TASKFILE [FOCUS]`: the write task,
+then a read-only adversarial review of the working tree, then — only when the
+review reports high or medium findings — a `--resume-last` fix task and a
+second review. Claude still reads the final diff, runs the gate, and merges;
+an independent read-only review remains mandatory for changes to production
+code paths (server, store, workers, control plane, capture).
+
+Codex jobs can run the loopback- and PostgreSQL-bound tests themselves: the
+`workspace-write` sandbox has `network_access = true` and the shared Go caches
+as writable roots in `~/.codex/config.toml` (`[sandbox_workspace_write]`), so
+task texts should include the local test DSN
+(`postgres://postgres:test@127.0.0.1:5599/postgres?sslmode=disable`, container
+`witself-test-pg`) and ask for the full package tests, not compile-only runs.
+
 ## Guardrails
 
 - Codex runs as the current OS user. The sandbox bounds file writes to the
