@@ -166,7 +166,7 @@ deployment cells under a thin global control plane.
   provider/platform certification levels, transactional install lifecycle, and
   the evidence required before an AI runtime integration is called supported.
 - [claude-codex-delegation.md](claude-codex-delegation.md): how Claude Code
-  delegates bounded implementation and review work to Codex (GPT-5.6 Sol)
+  delegates bounded implementation and review work to Codex (GPT-6 Astra)
   through OpenAI's official Codex plugin — read-only review lanes, a
   workspace-write task lane that Claude runs only inside its own worktree,
   and the verification and merge ownership Claude keeps.
