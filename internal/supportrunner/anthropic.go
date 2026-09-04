@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 )
 
 const anthropicMaxTokens = 4096
@@ -113,8 +113,11 @@ func decodeAnthropicDecision(raw []byte) (decision, error) {
 	if err := decoder.Decode(&wire); err != nil {
 		return decision{}, fmt.Errorf("decode Anthropic tool input: %w", err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return decision{}, err
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
+		if errors.Is(err, jsonstrict.ErrTrailingValue) {
+			return decision{}, errors.New("anthropic tool input has trailing JSON")
+		}
+		return decision{}, fmt.Errorf("decode trailing Anthropic tool input: %w", err)
 	}
 	if wire.Action == nil {
 		return decision{}, errors.New("anthropic tool input is missing or null required field action")
@@ -140,15 +143,4 @@ func decodeAnthropicDecision(raw []byte) (decision, error) {
 		Retriage:       retriage{Category: *wire.Retriage.Category, Priority: *wire.Retriage.Priority},
 		EscalateReason: *wire.EscalateReason,
 	}, nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("anthropic tool input has trailing JSON")
-		}
-		return fmt.Errorf("decode trailing Anthropic tool input: %w", err)
-	}
-	return nil
 }

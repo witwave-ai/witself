@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 )
 
 // Memory curation input-reference constants identify the frozen source that
@@ -1334,7 +1335,7 @@ func decodeMemoryCurationStoredJSON(raw []byte, destination any) error {
 	if err := decoder.Decode(destination); err != nil {
 		return err
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return err
 	}
 	return nil

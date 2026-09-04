@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/supportrunner"
 )
 
@@ -96,10 +97,10 @@ func TestRunVersionHelpAndUnknownDoNotConstructRunner(t *testing.T) {
 
 func TestEnvOr(t *testing.T) {
 	lookup := mapLookup(map[string]string{"SET": " 127.0.0.1:0 ", "EMPTY": " "})
-	if got := envOr(lookup, "SET", "fallback"); got != "127.0.0.1:0" {
+	if got := envconfig.TrimmedOr(lookup, "SET", "fallback"); got != "127.0.0.1:0" {
 		t.Fatalf("SET = %q", got)
 	}
-	if got := envOr(lookup, "EMPTY", "fallback"); got != "fallback" {
+	if got := envconfig.TrimmedOr(lookup, "EMPTY", "fallback"); got != "fallback" {
 		t.Fatalf("EMPTY = %q", got)
 	}
 }

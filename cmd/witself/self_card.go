@@ -26,6 +26,7 @@ import (
 	"github.com/srwiley/rasterx"
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/textsafe"
 )
 
 const (
@@ -316,17 +317,12 @@ func boundedCardText(value string, width int) string {
 
 func cleanCardText(value string) string {
 	value = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || isBidiControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || textsafe.IsBidiControl(r) {
 			return ' '
 		}
 		return r
 	}, value)
 	return strings.Join(strings.Fields(value), " ")
-}
-
-func isBidiControl(r rune) bool {
-	return r == '\u061c' || r == '\u200e' || r == '\u200f' ||
-		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
 }
 
 func detectSelfCardTerminal() selfCardTerminal {

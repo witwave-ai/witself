@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 	"github.com/witwave-ai/witself/internal/local"
 )
 
@@ -188,7 +189,7 @@ func (s FileStateStore) Load(launchID string) (LaunchState, error) {
 	if err := decoder.Decode(&state); err != nil {
 		return LaunchState{}, fmt.Errorf("parse curator state: %w", err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
 		return LaunchState{}, fmt.Errorf("parse curator state: %w", err)
 	}
 	if err := validateLaunchState(state); err != nil {

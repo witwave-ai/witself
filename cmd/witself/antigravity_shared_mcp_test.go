@@ -184,6 +184,25 @@ func TestAntigravitySharedMCPDriftFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRejectDuplicateJSONKeysPreservesErrorContracts(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "object", raw: `{ `, want: "unterminated JSON object"},
+		{name: "array", raw: `[ `, want: "unterminated JSON array"},
+		{name: "malformed second value", raw: `{} {`, want: "multiple JSON values are not allowed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := rejectDuplicateJSONKeys([]byte(test.raw)); err == nil || err.Error() != test.want {
+				t.Fatalf("rejectDuplicateJSONKeys(%q) error = %v, want %q", test.raw, err, test.want)
+			}
+		})
+	}
+}
+
 func TestAntigravitySharedMCPFingerprintRecoveryAcrossLegacyMigration(t *testing.T) {
 	for _, test := range []struct {
 		name          string

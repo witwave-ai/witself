@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/envconfig"
 )
 
 const (
@@ -79,8 +81,8 @@ func FromEnv(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.ControlPlane = envOr(lookup, controlPlaneEnv, cfg.ControlPlane)
-	cfg.Model = envOr(lookup, modelEnv, cfg.Model)
+	cfg.ControlPlane = envconfig.TrimmedPresentOr(lookup, controlPlaneEnv, cfg.ControlPlane)
+	cfg.Model = envconfig.TrimmedPresentOr(lookup, modelEnv, cfg.Model)
 	if cfg.Interval, err = durationEnv(lookup, intervalEnv, cfg.Interval); err != nil {
 		return Config{}, err
 	}
@@ -186,14 +188,6 @@ func intEnv(lookup func(string) (string, bool), key string, fallback int) (int, 
 		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
 	}
 	return value, nil
-}
-
-func envOr(lookup func(string) (string, bool), key, fallback string) string {
-	raw, ok := lookup(key)
-	if !ok {
-		return fallback
-	}
-	return strings.TrimSpace(raw)
 }
 
 func credentialFromEnv(lookup func(string) (string, bool), fileKey, inlineKey string) (string, error) {

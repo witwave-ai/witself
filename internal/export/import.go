@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 )
 
 // ErrArchiveTooNew is returned when the archive's schema version is newer
@@ -264,7 +266,10 @@ func upgradeRow(table string, row []byte, from, to int) ([]byte, error) {
 	if err := decoder.Decode(&obj); err != nil {
 		return nil, fmt.Errorf("%w: %s row: %v", ErrCorrupt, table, err)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
+		if errors.Is(err, jsonstrict.ErrTrailingValue) {
+			err = errors.New("multiple JSON values")
+		}
 		return nil, fmt.Errorf("%w: %s row: %v", ErrCorrupt, table, err)
 	}
 	if obj == nil {
@@ -287,17 +292,6 @@ func upgradeRow(table string, row []byte, from, to int) ([]byte, error) {
 	return json.Marshal(obj)
 }
 
-func requireJSONEOF(decoder *json.Decoder) error {
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
 // rejectAmbiguousArchiveJSON rejects JSON spellings that encoding/json would
 // otherwise normalize while decoding. Archive control records and rows that
 // cross an upgrader must have one unambiguous interpretation before checksums
@@ -314,7 +308,11 @@ func rejectAmbiguousArchiveJSON(raw []byte) error {
 	if err := consumeUniqueArchiveJSONValue(decoder); err != nil {
 		return err
 	}
-	return requireJSONEOF(decoder)
+	err := jsonstrict.RequireEOF(decoder)
+	if errors.Is(err, jsonstrict.ErrTrailingValue) {
+		return errors.New("multiple JSON values")
+	}
+	return err
 }
 
 func rejectUnpairedArchiveJSONSurrogates(raw []byte) error {

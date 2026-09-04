@@ -15,6 +15,23 @@ import (
 	"github.com/witwave-ai/witself/internal/placement"
 )
 
+func TestConfigFromEnvPreservesRawListenerValues(t *testing.T) {
+	t.Setenv("WITSELF_API_ADDR", " 127.0.0.1:8080 ")
+	t.Setenv("WITSELF_HEALTH_ADDR", "")
+	t.Setenv("WITSELF_METRICS_ADDR", "127.0.0.1:9090")
+
+	cfg := ConfigFromEnv()
+	if cfg.APIAddr != " 127.0.0.1:8080 " {
+		t.Fatalf("APIAddr = %q, want raw environment value", cfg.APIAddr)
+	}
+	if cfg.HealthAddr != ":8081" {
+		t.Fatalf("HealthAddr = %q, want empty-value fallback", cfg.HealthAddr)
+	}
+	if cfg.MetricsAddr != "127.0.0.1:9090" {
+		t.Fatalf("MetricsAddr = %q, want environment value", cfg.MetricsAddr)
+	}
+}
+
 func TestHealthProbes(t *testing.T) {
 	srv := httptest.NewServer(healthMux(nil))
 	defer srv.Close()

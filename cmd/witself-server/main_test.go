@@ -15,13 +15,14 @@ import (
 	"github.com/witwave-ai/witself/internal/store"
 )
 
-func TestReadTokenFileRejectsEmpty(t *testing.T) {
+func TestBootstrapTokenRejectsEmptyExplicitFile(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "bootstrap.token")
 	if err := os.WriteFile(tokenFile, []byte("\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readTokenFile(tokenFile, true); err == nil {
-		t.Fatal("readTokenFile empty file = nil error, want error")
+	t.Setenv("WITSELF_BOOTSTRAP_TOKEN_FILE", tokenFile)
+	if _, err := bootstrapToken(); err == nil {
+		t.Fatal("bootstrapToken empty file = nil error, want error")
 	}
 }
 

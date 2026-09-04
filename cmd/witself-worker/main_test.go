@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/worker"
 )
@@ -347,7 +348,7 @@ func TestDatabaseDSNPreferenceAndListenerDefaults(t *testing.T) {
 	if got := dbDSN(mapLookup(map[string]string{"DATABASE_URL": "postgres://fallback"})); got != "postgres://fallback" {
 		t.Fatalf("fallback dbDSN = %q", got)
 	}
-	if got := envOr(mapLookup(nil), "WITSELF_HEALTH_ADDR", ":8081"); got != ":8081" {
+	if got := envconfig.TrimmedOr(mapLookup(nil), "WITSELF_HEALTH_ADDR", ":8081"); got != ":8081" {
 		t.Fatalf("health default = %q", got)
 	}
 }
