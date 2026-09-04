@@ -25,6 +25,55 @@ type messageRequestHardeningFixture struct {
 	principals map[string]Principal
 }
 
+const messageRequestStalledDeadlineWindow = 2 * time.Second
+
+func assertDatabaseDeadlinePending(
+	t *testing.T,
+	f *messageRequestHardeningFixture,
+	deadline time.Time,
+) {
+	t.Helper()
+	var pending bool
+	if err := f.st.pool.QueryRow(f.ctx, `SELECT clock_timestamp() < $1::timestamptz`, deadline).
+		Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatalf("database deadline %s crossed before the blocked operation was established", deadline)
+	}
+}
+
+func waitForDatabaseDeadline(
+	t *testing.T,
+	f *messageRequestHardeningFixture,
+	deadline time.Time,
+	fixtureWindow time.Duration,
+) {
+	t.Helper()
+	pollInterval := min(fixtureWindow/20, 10*time.Millisecond)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	timeout := time.NewTimer(20 * fixtureWindow)
+	defer timeout.Stop()
+	for {
+		var crossed bool
+		if err := f.st.pool.QueryRow(f.ctx, `SELECT clock_timestamp() >= $1::timestamptz`, deadline).
+			Scan(&crossed); err != nil {
+			t.Fatal(err)
+		}
+		if crossed {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("database clock did not cross fixture deadline %s within %s", deadline, 20*fixtureWindow)
+		case <-f.ctx.Done():
+			t.Fatalf("fixture context ended before database deadline %s: %v", deadline, f.ctx.Err())
+		}
+	}
+}
+
 func newMessageRequestHardeningFixture(t *testing.T, names ...string) *messageRequestHardeningFixture {
 	t.Helper()
 	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
@@ -449,10 +498,13 @@ func TestMessageRequestCompletionRejectsLeaseThatExpiresDuringWorkPostgres(t *te
 	f.offer(t, opened, "bob", "stalled-complete-offer")
 	f.selectAgents(t, opened, "scott", "stalled-complete-select", "bob")
 	claim := f.claim(t, opened, "bob", "stalled-complete-claim")
-	if _, err := f.st.pool.Exec(f.ctx, `
+	var leaseDeadline time.Time
+	if err := f.st.pool.QueryRow(f.ctx, `
 		UPDATE agent_message_request_claims
-		SET lease_expires_at=clock_timestamp()+interval '2 seconds'
-		WHERE id=$1`, claim.ClaimID); err != nil {
+		SET lease_expires_at=clock_timestamp()+($2::bigint * interval '1 microsecond')
+		WHERE id=$1
+		RETURNING lease_expires_at`, claim.ClaimID, messageRequestStalledDeadlineWindow.Microseconds()).
+		Scan(&leaseDeadline); err != nil {
 		t.Fatal(err)
 	}
 	blocker, err := f.st.pool.Begin(f.ctx)
@@ -474,7 +526,7 @@ func TestMessageRequestCompletionRejectsLeaseThatExpiresDuringWorkPostgres(t *te
 		})
 		completionErr <- err
 	}()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(messageRequestStalledDeadlineWindow / 2)
 	claimLocked := false
 	for time.Now().Before(deadline) {
 		probe, err := f.st.pool.Begin(f.ctx)
@@ -498,7 +550,8 @@ func TestMessageRequestCompletionRejectsLeaseThatExpiresDuringWorkPostgres(t *te
 	if !claimLocked {
 		t.Fatal("completion did not acquire its claim fence before blocking")
 	}
-	time.Sleep(2200 * time.Millisecond)
+	assertDatabaseDeadlinePending(t, f, leaseDeadline)
+	waitForDatabaseDeadline(t, f, leaseDeadline, messageRequestStalledDeadlineWindow)
 	if err := blocker.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -531,11 +584,14 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 
 	t.Run("offer rolls back its message after offer deadline", func(t *testing.T) {
 		opened := f.open(t, "scott", "stalled-offer-open", 1)
-		if _, err := f.st.pool.Exec(f.ctx, `
+		var offerDeadline time.Time
+		if err := f.st.pool.QueryRow(f.ctx, `
 			UPDATE agent_message_requests
-			SET offer_deadline=clock_timestamp()+interval '2 seconds',
+			SET offer_deadline=clock_timestamp()+($2::bigint * interval '1 microsecond'),
 			    expires_at=clock_timestamp()+interval '1 hour'
-			WHERE id=$1`, opened.Request.ID); err != nil {
+			WHERE id=$1
+			RETURNING offer_deadline`, opened.Request.ID, messageRequestStalledDeadlineWindow.Microseconds()).
+			Scan(&offerDeadline); err != nil {
 			t.Fatal(err)
 		}
 		blocker, err := f.st.pool.Begin(f.ctx)
@@ -555,7 +611,7 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 			})
 			offerErr <- err
 		}()
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(messageRequestStalledDeadlineWindow / 2)
 		candidateLocked := false
 		for time.Now().Before(deadline) {
 			probe, err := f.st.pool.Begin(f.ctx)
@@ -581,7 +637,8 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 		if !candidateLocked {
 			t.Fatal("offer did not lock its candidate before blocking")
 		}
-		time.Sleep(2200 * time.Millisecond)
+		assertDatabaseDeadlinePending(t, f, offerDeadline)
+		waitForDatabaseDeadline(t, f, offerDeadline, messageRequestStalledDeadlineWindow)
 		if err := blocker.Commit(f.ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -613,12 +670,15 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 	t.Run("selection rolls back claims after request expiry", func(t *testing.T) {
 		opened := f.open(t, "scott", "stalled-selection-open", 1)
 		f.offer(t, opened, "bob", "stalled-selection-offer")
-		if _, err := f.st.pool.Exec(f.ctx, `
+		var requestDeadline time.Time
+		if err := f.st.pool.QueryRow(f.ctx, `
 			UPDATE agent_message_requests
 			SET created_at=clock_timestamp()-interval '2 seconds',
 			    offer_deadline=clock_timestamp()-interval '1 second',
-			    expires_at=clock_timestamp()+interval '2 seconds'
-			WHERE id=$1`, opened.Request.ID); err != nil {
+			    expires_at=clock_timestamp()+($2::bigint * interval '1 microsecond')
+			WHERE id=$1
+			RETURNING expires_at`, opened.Request.ID, messageRequestStalledDeadlineWindow.Microseconds()).
+			Scan(&requestDeadline); err != nil {
 			t.Fatal(err)
 		}
 		blocker, err := f.st.pool.Begin(f.ctx)
@@ -637,7 +697,7 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 			})
 			selectionErr <- err
 		}()
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(messageRequestStalledDeadlineWindow / 2)
 		requestLocked := false
 		for time.Now().Before(deadline) {
 			probe, err := f.st.pool.Begin(f.ctx)
@@ -662,7 +722,8 @@ func TestMessageRequestOfferAndSelectionRejectDeadlinesCrossedDuringWorkPostgres
 		if !requestLocked {
 			t.Fatal("selection did not lock its request before blocking")
 		}
-		time.Sleep(2200 * time.Millisecond)
+		assertDatabaseDeadlinePending(t, f, requestDeadline)
+		waitForDatabaseDeadline(t, f, requestDeadline, messageRequestStalledDeadlineWindow)
 		if err := blocker.Commit(f.ctx); err != nil {
 			t.Fatal(err)
 		}

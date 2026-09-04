@@ -2161,6 +2161,38 @@ func assertOnlyCaptureEventPending(t *testing.T, runtime, eventID string) {
 	}
 }
 
+func waitForCaptureFlushLock(
+	t *testing.T,
+	lockPath string,
+	done <-chan int,
+	fixturePollInterval time.Duration,
+) {
+	t.Helper()
+	poll := time.NewTicker(fixturePollInterval / 5)
+	defer poll.Stop()
+	deadline := time.NewTimer(20 * fixturePollInterval)
+	defer deadline.Stop()
+	for {
+		if _, err := os.Stat(lockPath); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect transcript flush lock: %v", err)
+		}
+		select {
+		case code := <-done:
+			t.Fatalf("transcript flush returned %d before acquiring its observable lock", code)
+		case <-poll.C:
+		case <-deadline.C:
+			if _, err := os.Stat(lockPath); err == nil {
+				return
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("inspect transcript flush lock at deadline: %v", err)
+			}
+			t.Fatalf("transcript flush did not acquire %s within %s", lockPath, 20*fixturePollInterval)
+		}
+	}
+}
+
 func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2236,12 +2268,20 @@ func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
 	if stop.Kind != "turn.completed" {
 		t.Fatalf("Stop was finalized inside the synchronous hook: %#v", stop)
 	}
+	pendingBeforeFlush, err := transcriptcapture.Pending(transcriptcapture.RuntimeGrokBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingBeforeFlush) == 0 {
+		t.Fatal("Grok fixture has no pending event to flush")
+	}
+	flushLockPath := filepath.Join(filepath.Dir(pendingBeforeFlush[0].Path), ".flush.lock")
 
 	done := make(chan int, 1)
 	go func() {
 		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild})
 	}()
-	time.Sleep(100 * time.Millisecond)
+	waitForCaptureFlushLock(t, flushLockPath, done, foregroundFlushLockPollPeriod)
 	updates := strings.Join([]string{
 		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"delayed final response"}}}}`,
