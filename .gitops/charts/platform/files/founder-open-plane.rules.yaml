@@ -146,3 +146,74 @@ groups:
         annotations:
           summary: Witself alerting pipeline heartbeat.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-transcript-capture
+    interval: 30s
+    rules:
+      - alert: WitselfTranscriptEntriesBatchRejectionRatioHigh
+        expr: (sum(rate(witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch",status_class=~"4xx|5xx"}[5m])) / clamp_min(sum(rate(witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch"}[5m])), 0.001)) > 0.05 and sum(rate(witself_http_requests_total{method="POST",route="/v1/transcripts/{transcript}/entries:batch"}[5m])) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Transcript entries:batch responses exceed the bounded rejection ratio.
+          description: More than 5 percent of transcript batch appends have returned 4xx or 5xx for 10 minutes while traffic exceeds 0.01 requests per second; inspect client payload compatibility and server errors.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-retention-backlog
+    interval: 30s
+    rules:
+      - alert: WitselfTranscriptRetentionBacklogPressure
+        expr: sum(increase(witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"}[30m])) >= 3
+        for: 15m
+        labels:
+          severity: warning
+          service: transcript-retention
+          witself_alert: "true"
+        annotations:
+          summary: Transcript retention has sustained backlog-pressure signals.
+          description: At least three enforce batches hit the bounded scan cap in 30 minutes for 15 minutes; repeated scan saturation is the available server-side proxy for backlog growth, so inspect holds and worker throughput.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfMessageRetentionBacklogPressure
+        expr: sum(increase(witself_worker_message_retention_items_total{mode="enforce",kind="scan_capped_batches"}[30m])) >= 3
+        for: 15m
+        labels:
+          severity: warning
+          service: message-retention
+          witself_alert: "true"
+        annotations:
+          summary: Message retention has sustained backlog-pressure signals.
+          description: At least three enforce batches hit the bounded scan cap in 30 minutes for 15 minutes; repeated scan saturation is the available server-side proxy for backlog growth, so inspect held threads and worker throughput.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-fact-delete
+    interval: 30s
+    rules:
+      - alert: WitselfFactDeleteFailureRatioHigh
+        expr: (sum(rate(witself_http_requests_total{method="DELETE",route=~"/v1/facts|/v1/facts/\\{fact\\}",status_class="5xx",result="error"}[15m])) / clamp_min(sum(rate(witself_http_requests_total{method="DELETE",route=~"/v1/facts|/v1/facts/\\{fact\\}"}[15m])), 0.001)) > 0.05 and sum(rate(witself_http_requests_total{method="DELETE",route=~"/v1/facts|/v1/facts/\\{fact\\}"}[15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Fact delete requests exceed the bounded server-failure ratio.
+          description: More than 5 percent of fact deletion previews or applies have returned 5xx for 5 minutes; inspect the fact store, audit writes, and deletion transaction failures.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-avatar-generation
+    interval: 30s
+    rules:
+      - alert: WitselfAvatarGenerationFailureRateHigh
+        expr: sum(rate(witself_http_requests_total{method="POST",route="/v1/self/avatar:generation-failed",status_class="2xx",result="success"}[15m])) > 0.003
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Clients are reporting a sustained avatar generation-failure rate.
+          description: Successful avatar generation-failure reports have exceeded 0.003 per second for 10 minutes; inspect renderer compatibility, proposal validation, and client failure reason classes.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
