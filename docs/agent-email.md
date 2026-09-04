@@ -6,13 +6,18 @@ seven readiness gates used by the rest of Witself.
 
 ## Current Production Status
 
-As of 2026-08-16, agent email is a production service for one exact Founder
+As of 2026-09-02, agent email is a production service for one exact Founder
 account cohort, not a pilot product or a broad customer launch. Production
 receive runs through `witself-agent-email-receive` on `witmail.net`; production
 send runs through the isolated `witself-agent-email-send` adapter using
 `send.witmail.net`, with replies returning to `witmail.net`. The retired
 `witself-agent-email-pilot` Worker remains deployed dark only as rollback and
-historical evidence. It is not a routing target.
+historical evidence. It is not a routing target. Sender-domain hard-fail
+rejection and relay-v2 verdict recording have been live since 2026-08-29
+([#294](https://github.com/witwave-ai/witself/pull/294)):
+Cloudflare's `mx.cloudflare.net` authserv-id is trusted, attested
+`dmarc=fail` is rejected, and the signed relay carries the edge-attested
+SPF/DKIM/DMARC results.
 
 Committed templates and a fresh cell remain fail-closed. The current Founder
 deployment deliberately differs from those defaults:
@@ -25,7 +30,8 @@ deployment deliberately differs from those defaults:
 | Adapter receipt replay | Off | Off; opened only for a bounded operator proof |
 | Adapter lifecycle delivery | Off | Enabled |
 | `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
-| Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; originally enabled on v0.0.252/schema 90 and now running on v0.0.258/schema 93 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
+| Edge DMARC / relay envelope | DMARC rejection off; relay v1 | DMARC hard-fail rejection enabled with trusted authserv-id `mx.cloudflare.net`; relay v2 records signed SPF/DKIM/DMARC results |
+| Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; originally enabled on v0.0.252/schema 90 and now running on v0.0.272/schema 94 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
 | Cell storage ledger | Schema 91 | Live on `civo-sandbox-usw2-dev`; database-triggered 3-GiB/25,000-root admission and 4-GiB/100,000-counted-row hard boundaries |
 
 The lifecycle path uses `witself-agent-email-send-events`, its configured
@@ -34,10 +40,10 @@ folded exactly once after the `v0.0.251` redirect-handling fix, producing one
 provider receipt and one canonical `email_sent` usage observation. That
 observation is operational and non-billable: no invoice, overage, or
 payment-provider conversion is enabled. The original DLQ copy remains retained
-as incident evidence. The multi-account Civo cell hosting the exact Founder
-email cohort now runs application `0.0.258` at schema 93, with the backup
-validation cell converged at the same release and the email edge and control
-plane attested at `0.0.259`. Releases `v0.0.250`
+as incident evidence. As of 2026-09-02, the serving and rollback-validation
+Civo cells both run application `0.0.272` at schema 94. The email edge enabled
+DMARC rejection and relay v2 from the clean `v0.0.262` release on 2026-08-29,
+after a live-header and end-to-end production proof. Releases `v0.0.250`
 and `v0.0.251` were edge-only event-consumer releases; `v0.0.252` added the
 bounded traffic and retention controls, and `v0.0.253` added the independent
 cell-storage ledger and hardened public dispatch front door described below.
@@ -187,7 +193,7 @@ The Founder account has explicit indefinite agent-email retention, so its mail
 is not eligible for age deletion. Its attachment-storage allowance is also
 commercially unlimited, but the live schema-91 platform ledger still refuses
 new roots at 3 GiB/25,000 roots and all positive counted-row writes at
-4 GiB/100,000 rows. The production deployment (now v0.0.258/schema 93) runs
+4 GiB/100,000 rows. The production deployment (now v0.0.272/schema 94) runs
 the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
 run. Activation followed verification of both required pre-migration backups.

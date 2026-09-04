@@ -10,12 +10,13 @@ managed and self-hosted backend API deployments.
 > client-custodied AVK; the backend stores ciphertext and public key metadata
 > and cannot decrypt. `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`,
 > and `WITSELF_KMS_KEY_ID` are not implemented or required. The current binary
-> exposes `version`, `serve`, and the bounded operator-only `agent-email
+> exposes `version`, `help`, `serve`, and the bounded operator-only `agent-email
 > backfill`, `agent-email canary-manifest`, and `agent-email
 > provider-event-canary` actions; `serve` and the mutable
 > backfill apply embedded forward Goose migrations before continuing. Later
 > sections describing KMS configuration, sealed-plane readiness, or separate
-> `migrate`/`config` commands are superseded target history, not current
+> `migrate`, `config`, `bootstrap`, or `healthcheck` commands are superseded
+> target history, not current
 > operational instructions.
 
 Narrative-memory decision (accepted 2026-07-14): the server never invokes an LLM
@@ -55,7 +56,7 @@ and [key-hierarchy.md](key-hierarchy.md).
 - Keep server operation separate from agent/operator identity workflows.
 - Validate configuration before booting, including PostgreSQL for the open
   plane and KMS when the sealed plane is enabled.
-- Run migrations explicitly and safely.
+- Apply embedded forward migrations safely at startup.
 - Provide liveness, readiness, and startup checks for containers and service
   managers.
 - Provide Prometheus-compatible metrics and Kubernetes-compatible health probes.
@@ -72,15 +73,12 @@ and [key-hierarchy.md](key-hierarchy.md).
 ```text
 witself-server
   version
+  help
   serve
   agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]
   agent-email canary-manifest --output ABSOLUTE_PATH
   agent-email provider-event-canary --account-id ID --send-id ID \
     --expected-accepted-at RFC3339 --json
-  migrate up|down|status
-  config check|print
-  bootstrap token
-  healthcheck
 
 witself-worker
   version
@@ -250,7 +248,6 @@ Flags:
 | `--public-url URL` | Public URL. Overrides config. |
 | `--dev` | Run with the local development adapter and deterministic lexical recall. Not production. |
 | `--data-dir PATH` | Development data directory for `--dev`. |
-| `--migrate` | Run pending migrations before serving when safe. |
 | `--read-only` | Start in read-only maintenance mode when supported. |
 | `--metrics-enabled BOOL` | Enable or disable Prometheus metrics. Overrides config. |
 | `--metrics-listen ADDRESS` | Dedicated metrics listen address. Overrides config. |
@@ -378,33 +375,17 @@ postflight detects that race and fails after the provider-event mutation. Keep
 the real Cloudflare delivery gate and queue subscription disabled for the whole
 proof.
 
-## `witself-server migrate`
+## Startup Migrations
 
-Manage backend database migrations. Witself should use Goose migrations behind
-these commands.
+There is no `witself-server migrate` command. With a database DSN configured,
+`witself-server serve` opens PostgreSQL and applies embedded forward Goose
+migrations under the store's shared migration lock before the API begins
+serving. A migration failure aborts startup. The chart renders no separate
+migration Job; backward migration or schema rollback requires a separately
+reviewed recovery procedure.
 
-```sh
-witself-server migrate status --config /etc/witself/server.toml
-witself-server migrate up --config /etc/witself/server.toml
-witself-server migrate down --steps 1 --config /etc/witself/server.toml
-```
-
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--target VERSION` | Migrate to a specific version when supported. |
-| `--steps N` | Number of down migrations to apply. |
-| `--dry-run` | Show planned migration changes without applying them. |
-| `--yes` | Confirm destructive or backward migration actions. |
-
-Migration commands should acquire a migration lock where the storage adapter
-supports it. The Postgres adapter should use advisory locking where practical so
-that concurrent rollouts and Helm migration Jobs do not race.
-
-Migrations must create and verify the PostgreSQL tables, generated search
-documents, and lexical indexes that back open-plane recall. `migrate status`
-should surface whether that canonical schema is current. Migration `0032` adds
+Startup migrations create and verify the PostgreSQL tables, generated search
+documents, and lexical indexes that back open-plane recall. Migration `0032` adds
 `memory_vector_profiles` and `memory_vectors` as portable JSONB data without
 installing pgvector. It does not invoke a model, generate vectors, or perform a
 backend re-embedding side effect. See
@@ -420,7 +401,7 @@ a separate, audited key-rotation operation, not an automatic migration side
 effect; see [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md), and
 [backup-and-recovery.md](backup-and-recovery.md).
 
-## `witself-server config`
+## `witself-server config` (target; not implemented)
 
 Validate and inspect effective server configuration.
 
@@ -470,7 +451,7 @@ are capabilities, not credentials. The KMS provider name, configured CMK key
 identifier, and whether the sealed plane is enabled are safe to print and should
 be shown when configured.
 
-## `witself-server bootstrap`
+## `witself-server bootstrap` (target; not implemented)
 
 Create one-time bootstrap material for first-operator setup in self-hosted
 deployments.
@@ -518,7 +499,7 @@ reference empty; then select an eligible agent and add the reference in a
 config-only rollout. Do not set either form until schema-61-capable code has
 converged on every replica.
 
-## `witself-server healthcheck`
+## `witself-server healthcheck` (target; not implemented)
 
 Run a local liveness, readiness, or startup check for containers and service
 managers.

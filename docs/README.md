@@ -56,6 +56,9 @@ deployment cells under a thin global control plane.
   authoritative secrets implementation plan: client-held per-agent vault key,
   ciphertext-only backend, local password/TOTP/use paths, archive portability,
   fail-closed bootstrap, and four-runtime/three-cloud delivery slices.
+- [sealed-plane-acceptance.md](sealed-plane-acceptance.md): the executable
+  schema-56 vault-key lifecycle gate and the remaining live runtime/cloud
+  certification matrix for the client-custodied sealed plane.
 - [secret-model.md](secret-model.md): the earlier sealed-plane secret data model and
   lifecycle (create/show/reveal/update/rename/copy/archive/restore/delete/grant),
   templates, references, password generation, runtime injection, and the
@@ -104,6 +107,9 @@ deployment cells under a thin global control plane.
   live for the exact Founder production cohort; covers the inverted
   (unverified-sender) trust boundary, fenced foreground processing, retention,
   durable lifecycle queues, and default-off expansion controls.
+- [agent-email-cloudflare-launch-spike.md](agent-email-cloudflare-launch-spike.md):
+  the retired 2026-07-21 Cloudflare limited-pilot spike, preserved only as
+  historical provider evidence.
 - [agent-console.md](agent-console.md): the local, per-agent, content-read-only
   Console presentation matrix, including received and sent email metadata,
   domain-ownership boundaries, degraded states, and the distinction from the
@@ -148,14 +154,17 @@ deployment cells under a thin global control plane.
   confidentiality draft, superseded for vault custody by ADR 0003.
 - [key-hierarchy.md](key-hierarchy.md): the earlier CMK/realm-KEK hierarchy,
   superseded for vault custody by ADR 0003.
-- [cloud-targets.md](cloud-targets.md): AWS-first managed cloud and
-  self-hosted Terraform target decision.
+- [cloud-targets.md](cloud-targets.md): Civo's current production-cell role,
+  AWS-first managed-PostgreSQL certification, and the portable cloud targets.
 - [memory-cloud-conformance.md](memory-cloud-conformance.md): the executable
   AWS/GCP/Azure managed-PostgreSQL and directed account-move certification
   matrix, protected-runner contract, and evidence requirements.
 - [memory-runtime-acceptance.md](memory-runtime-acceptance.md): the executable
   six-session acceptance protocol for Codex, Claude Code, Cursor, and Grok
   Build, including delivery-mode and sanitized-evidence boundaries.
+- [provider-integration-certification.md](provider-integration-certification.md):
+  provider/platform certification levels, transactional install lifecycle, and
+  the evidence required before an AI runtime integration is called supported.
 - [claude-codex-delegation.md](claude-codex-delegation.md): how Claude Code
   delegates bounded implementation and review work to Codex (GPT-5.6 Sol)
   through OpenAI's official Codex plugin — read-only review lanes, a
@@ -171,16 +180,19 @@ deployment cells under a thin global control plane.
   the shared global directory the collaboration relay reuses.
 - [token-lifecycle.md](token-lifecycle.md): durable v0 agent token behavior,
   token file format, rotation, revocation, and agent disable effects.
+- [resource-lifecycle.md](resource-lifecycle.md): the current operator-managed
+  create and delete/revoke behavior for realms, agents, operators, and tokens.
 - [billing-and-limits.md](billing-and-limits.md): account-level plan billing,
   realm-rolled metered dimensions, limits, and overage behavior.
 - [billing-return-pages.md](billing-return-pages.md): value-free hosted
   checkout and portal return routes that hand control back to the AI or CLI.
-- [launch-readiness.md](launch-readiness.md): the working plan of record for
-  the general self-service production launch — decided execution order and the
-  items that need Scott directly.
-- [signup-abuse-hardening.md](signup-abuse-hardening.md): dark open-signup
+- [billing-transition-rollout.md](billing-transition-rollout.md): the guarded
+  plan-transition rollout procedure, canary sequence, and rollback evidence.
+- [launch-readiness.md](launch-readiness.md): the general self-service launch
+  record and the current short list of follow-through that needs Scott directly.
+- [signup-abuse-hardening.md](signup-abuse-hardening.md): live open-signup
   Turnstile, edge throttles, durable daily quotas, fail-closed behavior, and the
-  keyed production enablement checklist.
+  production rollback posture.
 - [data-retention-policy.md](data-retention-policy.md): the consolidated
   customer-facing statement of how long transcripts, messages, the audit trail,
   and raw email are kept, end-of-window actions, and the legal-hold scope.
@@ -190,25 +202,25 @@ deployment cells under a thin global control plane.
   admin overrides, cell snapshots, and whole-conversation enforcement.
 - [message-retention.md](message-retention.md): messaging entitlement,
   independent account overrides, and whole-thread retention enforcement.
-- legal/ — DRAFT legal-page skeletons for owner/counsel review:
+- legal/ — ratified Version 2026-08-31 managed-service terms, in force since
+  2026-08-31:
   [Terms](legal/terms-of-service.md) · [Privacy](legal/privacy-policy.md) ·
   [AUP](legal/acceptable-use.md) · [DPA](legal/data-processing-addendum.md) ·
-  [Refunds](legal/refund-cancellation.md). Not in force until ratified.
+  [Refunds](legal/refund-cancellation.md).
 - [refund-runbook.md](refund-runbook.md): the 14-day refund policy and the
   operator procedure for executing one (Stripe Dashboard only — no CLI verb).
 - [support-policy.md](support-policy.md): the published managed-cloud support
-  policy — entitlement, channels, the 1-business-day promise, AI-first
-  staffing with its fixed human-escalation set.
-- [support-runner.md](support-runner.md): the dark, single-replica AI support
-  first-responder, deterministic escalation gate, configuration, and operator
-  enablement contract.
-- [support-email-intake.md](support-email-intake.md): the dark support@ email
-  intake bridge, DMARC trust boundary, drop reasons, and keyed enablement.
+  policy — entitlement, channels, the unchanged 1-business-day promise, and
+  the current human-driven ticket lane with Claude Code assistance.
+- [support-runner.md](support-runner.md): the parked, staged-but-unloaded AI
+  first-responder, its deterministic escalation gate, and the work required
+  before any future activation.
+- [support-email-intake.md](support-email-intake.md): the parked support@ email
+  bridge, its DMARC trust boundary, and the deployment and gated canary work
+  required before any future activation.
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
-- [backup-and-recovery.md](backup-and-recovery.md): operational backups
-- [backup-and-recovery.md](backup-and-recovery.md): operational backups
-  (including vector data), first-class plaintext identity export, and
-  round-trippable import.
+  (including vector data), whole-account customer export, and the separately
+  fenced operator evacuation archive round trip.
 - [post-v0-roadmap.md](post-v0-roadmap.md): deliberately deferred features,
   including MCP network transport, web dashboard, utility token, cross-realm
   federation, policy `deny` effects, and advanced vector-profile migration.
@@ -221,6 +233,8 @@ deployment cells under a thin global control plane.
 
 ## Interfaces
 
+- [runbooks.md](runbooks.md): hand-testing and operator recipes for the live
+  CLI, account lifecycle, integrations, billing, retention, and recovery paths.
 - [workflow-scripts.md](workflow-scripts.md): step-by-step CLI workflow scripts
   for install, setup, billing, memories, facts, policy, groups, messaging, MCP,
   self-hosted, and local mode.

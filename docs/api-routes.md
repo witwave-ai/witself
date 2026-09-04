@@ -54,7 +54,7 @@ absent from release configuration. DNS is read only after the verification
 gate passes. This slice performs no DNS/provider mutation, MX or Email Routing
 change, or live mail delivery.
 
-Billing-read amendment (dark foundation, implemented in the current checkout):
+Billing-read amendment (implemented and generally available since 2026-08-31):
 the control plane exposes account-scoped provider-neutral billing status,
 bounded invoice/payment history, and hosted setup/portal actions. Reads never
 create provider objects; setup is the explicit first-contact path. Its guarded
@@ -75,9 +75,9 @@ idempotency horizon, and exposes only value-free nested status. Private
 `GET /v1/plan-lifecycle/metrics` uses the internal bridge bearer and closed
 Prometheus labels; `/healthz` remains liveness-only. Receipt schema 2 pins the
 approved effect and monetary terms so catalog drift cannot reinterpret queued
-work. Billing remains dark pending the separate activation gates below.
-No provider/customer identifiers or raw payment data cross the API. This is a
-code-contract statement, not a release, deployment, or live-charging statement.
+work. The live service has general availability enabled, an empty cohort
+allowlist, and no test clock; startup rejects contradictory combinations.
+No provider/customer identifiers or raw payment data cross the API.
 Every billing response uses `Cache-Control: no-store`; optional document links
 that fail hosted-HTTPS validation are omitted, while an unsafe required action
 fails closed. Clients first authenticate the operator against the selected
@@ -174,8 +174,6 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/federation`
 - `/v1/tokens`
 - `/v1/audit`
-- `/v1/exports`
-- `/v1/imports`
 - `/v1/auth`
 - `/v1/bootstrap`
 - `/v1/billing`
@@ -646,13 +644,12 @@ POST /v1/tokens/{token_id}:revoke
 GET  /v1/audit
 GET  /v1/audit/{event_id}
 
-GET  /v1/exports
-POST /v1/exports
-GET  /v1/exports/{export_id}
+# Account-scoped customer self export.
+GET  /v1/export
 
-GET  /v1/imports
-POST /v1/imports
-GET  /v1/imports/{import_id}
+# Provision-token-authorized account-move primitives; not customer routes.
+POST /v1/accounts/{account_id}:export-evacuation
+POST /v1/accounts/{account_id}:import-evacuation
 
 # Target account-token billing surface; the implemented control-plane routes
 # are account-scoped and listed above.
@@ -1456,7 +1453,7 @@ POST /v1/accounts/{account_id}:close
   established invite path and required for an invite-less open signup. They are
   request-body strings (both-or-neither; 1–64 ASCII label characters, starting
   with an alphanumeric and otherwise limited to alphanumerics, dot, underscore,
-  and hyphen) recording dark ToS/privacy consent. Unlike
+  and hyphen) recording the ratified ToS/privacy consent. Unlike
   `turnstile_token`, present consent IS included in the durable request
   fingerprint — a retry with drifted consent is refused as a different
   request — and the versions are stored on the account row at creation with
@@ -1482,8 +1479,8 @@ POST /v1/accounts/{account_id}:close
   cancellation remains available while suspended so the work can be settled
   before close.
 
-`witself account export` is an account-scoped export job served by the
-`/v1/exports` resource, not a dedicated account route.
+The shipped customer command is the top-level `witself export`; it streams the
+authenticated account from the dedicated `GET /v1/export` route.
 
 ## Ownership Routes
 
@@ -1560,27 +1557,22 @@ evaluates it.
 
 ## Export And Import Routes
 
-Identity export and import are first-class Witself resources: the open plane
-(memories and facts) exports as plaintext, the headline durable-state feature.
-The sealed plane participates only as its client-encrypted state: schema-67
-archives include public AVK bindings, terminal enrollment/rotation history,
-ciphertext, wrapped DEKs, and value-free receipts, never plaintext values, TOTP
-seeds, AVKs, local key files, pairing/passphrase material, or recovery
-artifacts. Export rejects active enrollment or rotation work. The client must
-move or recover the matching AVK separately after import. The routes back
-`witself export` and `witself import`:
+`GET /v1/export` is the shipped customer surface behind the account-scoped
+operator credential. It spools one whole-account `self` archive, permits active,
+suspended, and closed accounts, and returns `application/gzip` with
+`X-Witself-Export-Format: 1` and `X-Witself-Export-Purpose: self`. Only one self
+export may run per account per server process. The open-plane rows are portable
+account data; sealed-plane values remain client-encrypted. The archive never
+includes a plaintext secret/TOTP value, AVK, local key file, enrollment private key,
+pairing/passphrase material, or recovery artifact.
 
-- `POST /v1/exports` starts a structured/plaintext identity export (memories
-  with edit history, facts with primary and sensitive flags, and, for
-  operators, policies and group membership). Exporting `sensitive` records
-  requires an audit reason in the body and is reported in `warnings`.
-- `GET /v1/exports/{export_id}` reports export status and the artifact location
-  for large exports staged in object/blob storage.
-- `POST /v1/imports` restores an exported self. It is idempotent by stable id
-  where ids are preserved, supports a rename/remap mode, and supports `dry_run`
-  to preview created, updated, and conflicting records without persisting.
-- `GET /v1/imports/{import_id}` reports import status and the resolved record
-  counts.
+There is no public `/v1/imports` resource and no customer `witself import`
+command. `POST /v1/accounts/{account_id}:import-evacuation` is the distinct
+provision-token-authorized operator primitive for an account move. It requires
+the exact evacuation id and consumes its paired suspended/closed evacuation
+archive, not the active-capable customer `purpose=self` artifact; it is not a
+customer restore API. Its paired operator export route is
+`POST /v1/accounts/{account_id}:export-evacuation`.
 
 ## Agent Avatar Routes
 

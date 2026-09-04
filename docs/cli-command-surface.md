@@ -95,9 +95,9 @@ The implemented CLI command is `witself`. The backend binary stays
   mock/development backend for tests, demos, and early implementation.
 - Memory content, fact values, and message bodies should be accepted from files
   or stdin whenever possible, not only from flags.
-- First-class structured/plaintext identity export and round-trippable import
-  are headline features, not forbidden ones (the deliberate inverse of Witpass's
-  encrypted-only export stance).
+- First-class structured whole-account customer export is a headline feature,
+  not a forbidden one. A separate evacuation archive round-trips only through
+  the operator-side account-move routes; there is no customer import command.
 - The same core service should eventually power the CLI and MCP server.
 
 ## Global Flags
@@ -449,10 +449,11 @@ witself
   whoami
   auth login|logout|status|whoami
   setup
-  account create|show|update|members|invite|remove|set-role|export|close
+  account create|show|update|members|invite|remove|set-role|close
   operator list|create|delete
-  realm create|list|show|use|rename|delete|members|init|status|export|import
-  billing show|usage|limits|plans|subscribe|subscription|payment-methods|sessions|crypto|invoices
+  realm create|list|show|use|rename|delete|members|init|status
+  realm export|import                     # target; not implemented
+  billing show|invoices|payments|portal|setup
   support create|list|show|comment|close
   remember
   self show|card
@@ -481,7 +482,6 @@ witself
   token create|list|revoke|rotate
   audit list|show
   export
-  import
   mcp serve|tools
   dashboard serve|status|stop
   config get|set|list|unset
@@ -557,7 +557,7 @@ limits, and endpoint context.
 
 This command is the CLI view of the backend capability contract. It lets a
 human, script, or AI assistant determine whether the current endpoint supports
-managed billing, payment flows, crypto payments, support tickets, audit, direct
+managed billing, payment flows, roadmap crypto payments, support tickets, audit, direct
 memory/recall/delete support, curation automation, or local-development-only
 behavior before running a command.
 
@@ -846,7 +846,7 @@ part of the durable account-create request fingerprint, so the retry resumes
 the same `provision_id`; the CLI omits it from the JSON request when empty.
 
 `--accept-terms` sends the CLI's compiled-in current legal versions as
-`consent_terms_version`/`consent_privacy_version` (dark consent capture).
+`consent_terms_version`/`consent_privacy_version` (live consent capture).
 Unlike the challenge token, recorded consent IS part of the durable
 account-create request fingerprint, so a resumed signup must be re-run with
 the same flag; omitting the flag keeps the request byte-identical to older
@@ -933,22 +933,6 @@ Flags:
 |---|---|
 | `--dry-run` | Show planned role change without applying it. |
 | `--reason TEXT` | Audit reason. |
-
-### `witself account export`
-
-Export managed-service account metadata when policy allows. The command fails
-with conflict while any agent has a pending/approved vault-key enrollment or an
-open rotation. Expired enrollment requests are settled first; cancel remaining
-work before retrying.
-
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--out PATH` | Write export to a file. |
-| `--include-billing` | Include billing metadata when allowed. |
-| `--include-support` | Include support-ticket metadata when allowed. |
-| `--format json` | Export format. Initial format is JSON. |
 
 ### `witself account close`
 
@@ -1131,13 +1115,13 @@ Flags:
 |---|---|
 | `--check-integrity` | Verify the store can be opened and decoded. |
 
-### `witself realm export`
+### `witself realm export` (target; not implemented)
 
 Export a realm for backup or migration. Unlike Witpass vault export, Witself
 realm export is structured/plaintext and round-trippable by default; it can
 include all agents' memories and facts, edit history, policies, security-group
 membership, and group-owned identity data when the operator is authorized. See
-also the top-level [`witself export`](#witself-export) for single-agent self
+also the top-level [`witself export`](#witself-export) for whole-account customer
 export. Backup, export, and recovery are tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 
@@ -1154,7 +1138,7 @@ Flags:
 | `--no-sensitive` | Exclude `sensitive` memories and facts from the export. |
 | `--reason TEXT` | Required audit reason when exporting `sensitive` records. |
 
-### `witself realm import`
+### `witself realm import` (target; not implemented)
 
 Import a realm backup or export.
 
@@ -1237,13 +1221,15 @@ Upgrade and downgrade targets accept either a public plan name or stable plan
 ID, case-insensitively. The provider-neutral billing status, invoice, payment,
 setup, and portal slice below is also implemented. Subscription management,
 usage/limit aggregation, payment-method CRUD, hosted-session inspection, and
-crypto payments remain the target billing contract.
+crypto payments remain the target billing contract. Crypto payment rails are
+roadmap-only and are not implemented.
 
 ## `witself billing` (partially implemented)
 
-Manage managed-service billing, usage, plans, payment methods, crypto payment
-flows, and invoices from the CLI. Billing attaches at the account level, and
-usage rolls up by realm.
+Manage managed-service billing, usage, plans, payment methods, and invoices from
+the CLI. Billing attaches at the account level, and usage rolls up by realm. The
+broader target contract below also sketches crypto payment flows; those rails
+are roadmap-only and are not implemented.
 
 V0 billing is plan-based and usage-aware. The managed service should meter
 important dimensions internally, but initial pricing should be plan-tier based
@@ -1260,8 +1246,8 @@ witself billing portal [--account NAME] [--endpoint CELL_URL] [--open | --json]
 witself billing setup --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--email EMAIL] [--open | --json]
 ```
 
-These commands are a dark provider-neutral control-plane surface; their
-presence does not enable live charging. Human output keeps the billed plan
+These commands are the provider-neutral customer surface for managed billing,
+which has been generally available since 2026-08-31 (`v0.0.267`, #307). Human output keeps the billed plan
 separate from an effective account override, and a next charge is shown only
 when the provider reports the actual amount. It is never inferred from the
 current plan catalog. Invoice PDFs, receipts, setup, and portal pages remain
@@ -1298,8 +1284,9 @@ stable `session_id`, current `status`, provider URL when applicable,
 the flow. This applies to checkout, payment-method setup, crypto payment, and
 other provider approval sessions.
 
-Crypto payments should be an optional payment rail alongside cards, bank
-payments, invoices, credits, and other traditional methods. The CLI may create
+Roadmap only: crypto payments are not implemented. A future implementation
+could make them an optional payment rail alongside cards, bank payments,
+invoices, credits, and other traditional methods. The CLI may create
 quotes, initiate hosted wallet checkout, and poll payment status, but it must
 not ask for seed phrases, private keys, raw wallet credentials, or direct wallet
 custody. Supported assets and networks should come from the configured payment
@@ -1478,11 +1465,11 @@ Flags:
 | `--dry-run` | Show planned default-payment-method change without applying it. |
 | `--reason TEXT` | Audit reason for changing the default payment method. |
 
-### `witself billing crypto`
+### `witself billing crypto` (roadmap; not implemented)
 
-Manage provider-mediated crypto payment flows. These commands are for payment
-rails such as stablecoins or ETH alongside traditional payments; they are not a
-Witself utility-token surface.
+This target surface would manage provider-mediated crypto payment flows. These
+commands are for payment rails such as stablecoins or ETH alongside traditional
+payments; they are not a Witself utility-token surface.
 
 Crypto payments should normally use hosted provider flows. The CLI can print or
 open a checkout URL, return a payment quote, and poll status. It should never
@@ -4941,63 +4928,39 @@ Flags:
 
 ## `witself export`
 
-Export an agent's self (single-agent identity export). This is the headline,
-plaintext, round-trippable export of a self: all memories (content, kind, tags,
-source, salience, links, timestamps, and edit history) and all facts (values,
-`primary` flags, `sensitive` flags, format hints, and edit history), with
-identity anchors surfaced. For realm-wide operator export including policies and
-groups, use [`witself realm export`](#witself-realm-export). Export/import is
-tracked in [backup-and-recovery.md](backup-and-recovery.md).
-
-`sensitive` records are exported in clear by default; the CLI requires an audit
-`--reason` and warns when exporting `sensitive` records. Identity references are
-preserved on export and re-resolved on import; dangling references are reported,
-not silently dropped.
+Download a whole-account logical archive from the account's current cell. The
+command authenticates with the selected managed account's operator credential,
+calls `GET /v1/export`, and verifies the `self` manifest plus every trailing
+chunk checksum before installing the archive. The archive includes all portable
+account state; sealed values remain client-encrypted, and raw AVKs, recovery
+artifacts, and raw tokens are excluded. See
+[backup-and-recovery.md](backup-and-recovery.md).
 
 ```sh
-witself export --out ./self.json
-witself export --agent archivist --out ./archivist-self/ --format dir
-witself export --no-sensitive --out ./self-public.json
+witself export
+witself export --account acme --out ./acme-account.tar.gz
+witself export --account acme --out ./acme-account.tar.gz --force
 ```
+
+Without `--out`, the CLI uses
+`witself-export-<account>-<UTC-YYYYMMDD>.tar.gz`. It downloads to a temporary
+file beside the destination, refuses an existing destination unless `--force`
+is explicit, and preserves incomplete or invalid downloads with an
+`.unverified` suffix. Success prints the path, schema/server versions, table and
+row counts, and byte count.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--agent NAME_OR_ID` | Operator/admin or self-permitted caller: export a specific agent's self. Default: the token-bound agent. |
-| `--out PATH` | Write export to a file or directory. |
-| `--format json|dir` | Export layout. `json` is a single file; `dir` is a diff/VCS-friendly directory layout. Default: `json` (`witself.v0` schema). |
-| `--include-history` | Include memory/fact edit history. Default: true. |
-| `--memory-kind KIND` | Restrict exported memories to a kind. Repeatable. |
-| `--no-sensitive` | Exclude `sensitive` memories and facts. |
-| `--reason TEXT` | Required audit reason when the export includes `sensitive` records. |
+| `--account NAME` | Select the configured managed account to export. |
+| `--endpoint URL` | Select its cell endpoint explicitly. |
+| `--out FILE` | Write the verified `.tar.gz` archive to this file. |
+| `--force` | Replace an existing output file after verification. |
 
-## `witself import`
-
-Import an exported self into the same or a different agent/realm, preserving
-`primary` flags, `sensitive` markers, links, and (where chosen) edit history.
-Import is idempotent by stable id where ids are preserved and supports a
-rename/remap mode when importing into a different agent. Import is audited and
-supports `--dry-run`.
-
-```sh
-witself import --in ./self.json
-witself import --in ./archivist-self/ --remap-agent archivist=archivist-copy --dry-run
-```
-
-Flags:
-
-| Flag | Description |
-|---|---|
-| `--in PATH` | Read import from a file or directory. |
-| `--agent NAME_OR_ID` | Target agent to import into. Default: the agent recorded in the export or the token-bound agent. |
-| `--remap-agent FROM=TO` | Remap an owning agent on import. Repeatable. |
-| `--merge` | Merge into the target agent's existing self. |
-| `--replace` | Replace the target agent's existing self. |
-| `--include-history` | Import edit history where present. Default: true. |
-| `--dry-run` | Validate and show planned created/updated/conflicting records and dangling references without writing. |
-| `--yes` | Skip confirmation for replacement. |
-| `--reason TEXT` | Audit reason. Required when importing `sensitive` records. |
+There is no customer `witself import` command. The server-side archive import is
+a provision-token-authorized account-evacuation primitive for operators moving
+accounts between cells; it is not a customer CLI counterpart to this command.
 
 ## `witself mcp`
 
@@ -5455,7 +5418,6 @@ is tracked in [v0-scope.md](v0-scope.md).
 - `witself message read`
 - `witself reference resolve`
 - `witself export`
-- `witself import`
 - `witself mcp tools` as a schema preview command, even before `mcp serve`
   exists
 
@@ -5464,7 +5426,7 @@ before managed APIs are ready. It validates the same model-free lexical recall
 contract offline and is not a production milestone. This slice is enough to
 validate human use, deterministic recall, deterministic facts,
 default-deny policy, security groups, inter-agent messaging, identity references,
-and round-trippable export/import while the managed backend takes shape. The
+and verified whole-account export while the managed backend takes shape. The
 open-plane (memory/fact/identity) core ships first; the sealed credential plane
 (`password generate`, `secret`, `run`, `totp`) is a defined v0 slice that
 validates generated passwords, reveal-gated secrets, runtime injection, and

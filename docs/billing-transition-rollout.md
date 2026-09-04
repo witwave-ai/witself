@@ -1,11 +1,16 @@
-# Billing Transition Dark-Rollout Guard
+# Billing Transition Rollout Guard
 
-Status: operator runbook for the first Stripe sandbox plan-transition release.
-Production charging and production Stripe webhooks remain dark.
+Status: historical operator runbook for the first Stripe sandbox
+plan-transition release. Managed Stripe charging and production webhooks reached
+general availability on 2026-08-31 in `v0.0.267` (#307).
+
+> The dark-cohort instructions below record the one-time pre-GA ceremony and its
+> `v0.0.254` compatibility boundary. They are not the current production state
+> and must not be rerun against the generally available billing service.
 
 ## Supported scope
 
-The currently implemented self-serve transition is deliberately narrow:
+The first implemented pre-GA self-serve transition was deliberately narrow:
 
 - Personal (`free`) to Professional (`standard`) through a Stripe test-mode
   hosted checkout;
@@ -14,9 +19,10 @@ The currently implemented self-serve transition is deliberately narrow:
 - exact cancellation and replay of those pending hosted or period-end effects;
 - read-only invoice, payment, and normalized settled-refund history.
 
-Team and Enterprise remain unavailable for self-serve purchase. Paid-to-paid
-changes, Team usage billing, Enterprise contracting, dunning, and creating or
-managing refunds are not part of this rollout. Reading a settled refund is not
+Team and Enterprise were unavailable for self-serve purchase during this
+canary; Team was made purchasable before GA, while Enterprise remains
+contract-only. Paid-to-paid changes, Team usage billing, Enterprise contracting,
+dunning, and creating or managing refunds were not part of this rollout. Reading a settled refund is not
 authority to initiate one. The first canary must use a disposable Stripe
 sandbox account in the explicit account cohort; it must not use a founder,
 employee, or customer account.
@@ -327,11 +333,11 @@ though the wrapper creates it privately, its exact JSON content may be copied
 into the shared rollout report. Do not share the source fences or provisional
 artifact.
 
-This collector closes the implementation gap only. Billing remains dark and
-conditional. Activation is still blocked until this ceremony has produced and
-retained real zero-hazard production evidence, all configured success, cancel,
-and portal-return routes are live on owned HTTPS surfaces, and the complete
-Stripe sandbox canary below has been retained.
+At this point in the historical sequence, the collector closed only the
+implementation gap: billing was still dark and conditional. Activation remained
+blocked until the ceremony produced and retained real zero-hazard production
+evidence, all configured success, cancel, and portal-return routes were live on
+owned HTTPS surfaces, and the complete Stripe sandbox canary below was retained.
 
 Do not put account ids, operation ids, customer ids, provider object ids,
 emails, URLs, reasons, claim tokens, object keys, ETags, or raw errors in this
@@ -447,9 +453,10 @@ sequence of generic `secret:put:break-glass`, `wrangler secret put`, or
 `wrangler secret delete` commands cannot satisfy this boundary. Do not use
 those commands for the cohort or test clock, or for the lifecycle gate as part
 of this billing canary and darkening ceremony. The separately reviewed
-nonbilling lifecycle activation remains governed by its own runbook. Until the
-atomic transition and darkening orchestrator exists and is hermetically tested,
-stop after step 7 below and keep billing dark.
+nonbilling lifecycle activation remains governed by its own runbook. At the time,
+the absent atomic transition/darkening orchestrator required operators to stop
+after step 7 and keep billing dark. The completed production cutover and GA
+activation superseded that stop point.
 
 ## Activation sequence
 
@@ -491,26 +498,27 @@ stop after step 7 below and keep billing dark.
    `:plan` and atomic `:plan-fit-apply` protocols return the reviewed strict
    envelopes under a non-mutating refusal/replay probe. An old Worker or cell is
    a hard abort, not a compatibility mode.
-8. **Blocked on current main.** Only the future reviewed atomic orchestrator may
-   install one disposable sandbox account and optional test clock. After it
+8. **Historical blocker, resolved before GA.** Only the reviewed atomic
+   orchestrator could install one disposable sandbox account and optional test clock. After it
    proves the exact Worker and refreshed Go Container, exercise setup, Personal
    to Professional checkout, signed webhook replay, exact idempotent retry,
    Professional to Personal fit rejection and fit success, period-boundary
    scheduling, test-clock advance when selected, and exact pending
    cancellation. Retain value-free results and access-controlled Stripe
    sandbox object evidence.
-9. That same orchestrator must darken before it returns success: atomically
+9. That same orchestrator had to darken before it returned success: atomically
    remove the allowlist and optional test clock so customer mutations fail
    closed, refresh and verify the empty-cohort Container, then remove
    `CP_PLAN_LIFECYCLE_ENABLED`, stop and drain every remaining writer, and prove
    the cohort and lifecycle-gate state through the canonical source fence. It
    must also retain a separate exact test-clock absence attestation bound to
-   those fence observations before the final zero-hazard inventory; the current
-   source-fence artifact does not expose that secret name. Production live mode
-   and production webhooks remain disabled.
+   those fence observations before the final zero-hazard inventory; the
+   source-fence artifact did not expose that secret name. Production live mode
+   and production webhooks remained disabled for this sandbox canary.
 
-Abort and return to the empty dark cohort on any unknown record, incomplete
-scan, stale inventory, unexpected provider object, response-loss ambiguity,
+During this historical canary, operators had to abort and return to the empty
+dark cohort on any unknown record, incomplete scan, stale inventory, unexpected
+provider object, response-loss ambiguity,
 fit-authority disagreement, webhook signature/replay anomaly, old replica,
 test clock outside the single disposable cohort, nonzero recovery backlog, or
 attempted Team/Enterprise/refund mutation. Keep the cohort empty and forward-

@@ -1,9 +1,10 @@
 # AI Support Runner
 
-Status: dark operator tooling. The `witself-support-runner` binary is inert by
+Status: parked on 2026-08-31. The `witself-support-runner` binary is staged but
+unloaded; no runner process serves the production queue. It remains inert by
 default and refuses to serve unless `WITSELF_SUPPORT_RUNNER_ENABLED=true` is
-set explicitly. Shipping the binary or configuring its credentials does not
-activate it.
+set explicitly. Live support is human-driven through `witself-admin ticket`
+commands, with Claude Code sessions assisting.
 
 The runner is a single-purpose, read-mostly first responder for the managed
 support queue. It lists and reads tickets through the fleet-admin control-plane
@@ -106,7 +107,8 @@ interval.
 
 ## Enablement checklist
 
-Before setting the gate to `true`:
+Activation remains parked. Before loading the binary and setting the gate to
+`true`:
 
 1. Provision a dedicated single-replica host with private health and metrics
    listeners and normal process supervision.

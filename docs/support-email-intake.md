@@ -1,16 +1,18 @@
 # Support Email Intake
 
-Status: dark. The support@ intake bridge is installed but inert unless both
-the email Worker and control-plane intake gates are set to the exact string
-`true`. Shipping or deploying either Worker does not activate the channel.
+Status: parked on 2026-08-31. The support@ intake Worker is not deployed, and
+the control-plane intake route remains gated off. The bridge is inert unless
+both the email Worker and control-plane intake gates are set to the exact
+string `true`. Live support remains human-driven through in-product tickets and
+the `witself-admin ticket` commands, with Claude Code sessions assisting.
 
 ## Flow
 
-Cloudflare Email Routing sends only the `support@witwave.ai` address rule to
-the isolated support-email Worker. The Worker rejects messages over 256 KiB,
-drops loops and automated mail, accepts a single plain sender only after a
-trusted `Authentication-Results` header reports `dmarc=pass`, extracts bounded
-plain text, and posts one authenticated request to the control plane.
+When activated, Cloudflare Email Routing sends only the `support@witwave.ai`
+address rule to the isolated support-email Worker. The Worker rejects messages
+over 256 KiB, drops loops and automated mail, accepts a single plain sender only
+after a trusted `Authentication-Results` header reports `dmarc=pass`, extracts
+bounded plain text, and posts one authenticated request to the control plane.
 
 The control plane takes a short processing reservation and retains terminal
 email message-ID deduplication for seven days. It asks every cell for active
@@ -80,20 +82,21 @@ Control-plane dispositions are `duplicate`, `drop_unmatched`,
 
 ## Enablement checklist
 
-These are **needs-Scott** activation steps. Enable only after the edge-DMARC
-authserv-id has been captured and verified:
+Activation remains parked. The edge-DMARC authserv-id was captured and verified
+as `mx.cloudflare.net` on 2026-08-29; these steps remain before enablement:
 
-1. In Cloudflare Email Routing for `witwave.ai`, preserve the existing
+1. Reverify the already staged shared intake token on the control plane, and
+   install the same value as the isolated Worker's
+   `CONTROL_PLANE_SUPPORT_INTAKE_TOKEN` secret without committing it.
+2. Render and deploy the isolated support-email Worker with
+   `SUPPORT_EMAIL_INTAKE_ENABLED=false`, the canonical control-plane URL, and
+   `SUPPORT_EMAIL_AUTH_RESULTS_AUTHSERV_ID=mx.cloudflare.net`.
+3. In Cloudflare Email Routing for `witwave.ai`, preserve the existing
    catch-all unchanged and add one exact `support@witwave.ai` address rule for
    the isolated support-email Worker.
-2. Send a probe through that route, capture Cloudflare's real authserv-id from
-   its `Authentication-Results` header, and configure
-   `SUPPORT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` with the reviewed value.
-3. Mint one random `SUPPORT_EMAIL_INTAKE_TOKEN`. Install the same value as the
-   control-plane `SUPPORT_EMAIL_INTAKE_TOKEN` and bridge
-   `CONTROL_PLANE_SUPPORT_INTAKE_TOKEN` secrets without committing it.
-4. Deploy both Workers with their gates still `false`; verify configuration,
-   bindings, value-free logging, fleet health, and the preserved catch-all.
+4. Verify both Workers' configuration and bindings, value-free logging, fleet
+   health, the trusted authserv-id, and the preserved catch-all while both
+   gates remain `false`.
 5. Set `CP_SUPPORT_EMAIL_INTAKE_ENABLED=true`, then set
    `SUPPORT_EMAIL_INTAKE_ENABLED=true`, and send one authenticated canary from
    the contact email of a support-entitled test account.

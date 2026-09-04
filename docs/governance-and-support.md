@@ -119,25 +119,26 @@ Managed Witself Cloud already implements durable account-scoped support tickets
 and messages through tenant CLI/API and fleet-admin CLI/TUI surfaces, with
 audit and archive/import coverage.
 
-The published customer-facing policy for the general self-service launch —
-entitlement by plan, channels, the first-response promise, AI-first staffing
-and its fixed human-escalation set — is [support-policy.md](support-policy.md).
-The remaining open gates (the dark support@ intake bridge, the dark AI first
-responder, and the production rollout canary) are tracked there as explicit
-launch-status notes rather than silent claims. Support is enforced as a plan
-entitlement at ticket admission — an applied plan snapshot without the support
-feature cannot open tickets — while the per-account `support_policy` remains an
-independent audited fleet-operator switch; channels, hours, severities,
-response targets, and escalation are decided in the published policy, and the
-first-response promise is backed by a live breach alert.
+The published customer-facing policy for the generally available service —
+entitlement by plan, channels, the first-response promise, current human-driven
+staffing, and the fixed human-escalation set for any future AI responder — is
+[support-policy.md](support-policy.md). The support@ intake bridge and AI first
+responder were parked on 2026-08-31; neither is part of the live support lane.
+Support is enforced as a plan entitlement at ticket admission — an applied plan
+snapshot without the support feature cannot open tickets — while the
+per-account `support_policy` remains an independent audited fleet-operator
+switch; channels, hours, severities, response targets, and escalation are
+decided in the published policy, and the first-response promise is backed by a
+live breach alert.
 
-When those gates are closed, managed support may cover:
+Managed support covers:
 
 - Account and billing help.
 - Service availability issues.
 - Managed backend incidents.
-- Hosted payment flow issues, including crypto payment rails.
-- Managed identity export, import, and recovery assistance.
+- Hosted payment flow issues. Crypto payment rails are roadmap-only and are not
+  implemented.
+- Managed whole-account export and operator-side import/recovery assistance.
 - The implemented managed support-ticket workflow.
 
 Self-hosted support should be explicit by support level:
@@ -202,7 +203,8 @@ Some managed-service features may be disabled, replaced, or unsupported in
 self-hosted deployments:
 
 - Billing commands.
-- Hosted payment flows, including crypto payment rails.
+- Hosted payment flows; any crypto payment rail remains roadmap-only and is not
+  implemented.
 - Witself support-ticket workflows.
 - Managed abuse controls and rate limits.
 - Managed plan limits.

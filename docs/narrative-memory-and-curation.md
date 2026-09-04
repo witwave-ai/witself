@@ -1651,7 +1651,10 @@ not optional post-v0 product features.
   [memory-runtime-acceptance.md](memory-runtime-acceptance.md).
 - [ ] Complete [issue #45](https://github.com/witwave-ai/witself/issues/45):
   exercise Codex, Claude Code, Cursor, and Grok Build with their real
-  authenticated clients and isolated synthetic test agents.
+  authenticated clients and isolated synthetic test agents. Claude Code and
+  Codex are certified on `v0.0.272` / `9dc2f3d` by runs
+  `mra_2dqbqpx7rfbjkd65` and `mra_pbqlmrwvoguyj322`, respectively; the Cursor
+  and Grok Build legs remain.
 - [ ] Verify explicit capture, history-dependent recall without a user search
   instruction, one pending foreground curation checkpoint, sensitive recall and
   broad-result redaction, same-agent continuity, and cross-agent isolation.

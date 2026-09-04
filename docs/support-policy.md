@@ -1,12 +1,12 @@
 # Support Policy
 
-Status: the published managed-cloud support policy for the general
-self-service launch. This is the customer-facing promise; the operator's
+Status: the published support policy for the generally available managed-cloud
+service. This is the customer-facing promise; the operator's
 procedures live beside it ([refund-runbook.md](refund-runbook.md), the
 [Support Boundary](governance-and-support.md#support-boundary), and
 [self-host-support.md](self-host-support.md) for everything self-hosted).
-Where a mechanism is still activating at cutover, the *Launch status* note in
-that section says so — the policy never claims a channel that is not live.
+Email intake and the AI responder were parked on 2026-08-31; the *Current
+status* notes below distinguish them from the live, human-driven ticket lane.
 
 ## Who has support
 
@@ -33,24 +33,26 @@ independent operator control.
   and their messages are account-scoped, retained per the
   [data-retention policy](data-retention-policy.md), and included in account
   export.
-- **Email** — support@witwave.ai reaches the same queue. *Launch status: the
-  intake bridge activates at cutover; until then the in-product channel is
-  the supported path.* Email intake requires a DMARC-authenticated sender whose
-  address matches the account contact email.
+- **Email** — parked on 2026-08-31. The intake Worker is not deployed, so
+  support@witwave.ai does not currently feed the ticket queue; use the
+  in-product channel. If activated later, email intake requires a
+  DMARC-authenticated sender whose address matches the account contact email.
 
 ## The promise
 
 **First response within 1 business day** (Monday–Friday, excluding US federal
-holidays). *Launch status: the AI first responder described below activates
-with the support runner; until then tickets are answered by a human within
-the same 1-business-day promise.* Once active, responses usually arrive much
-sooner, at any hour — the first responder is an AI assistant on duty around
-the clock.
+holidays). Tickets are currently answered by a human through the fleet-admin
+ticket tools, with Claude Code sessions assisting. The AI first responder was
+parked on 2026-08-31 and is not on duty; that does not change the
+1-business-day promise.
 
-## How it is staffed: AI-first, humans for what matters
+## How it is staffed
 
-First-line support — triage, questions, diagnostics, how-to, known-issue
-answers — is handled by an AI assistant. Three commitments come with that:
+Support is human-driven. Operators use the `witself-admin ticket` commands to
+list, show, reply to, retriage, resolve, and close tickets, with Claude Code
+sessions assisting. The parked AI runner is staged but unloaded. If activated
+later, it would handle first-line triage, questions, diagnostics, how-to, and
+known-issue answers under three commitments:
 
 1. **Labeled, always.** Assistant replies are attributed to the assistant in
    the ticket thread, never presented as a human.
@@ -77,8 +79,9 @@ suspected security issues; those are worked first regardless of arrival order.
 ## What managed support covers
 
 Account and billing help; service availability issues; managed backend
-incidents; hosted payment-flow issues; managed identity export, import, and
-recovery assistance; and the support-ticket workflow itself.
+incidents; hosted payment-flow issues; managed whole-account export and
+operator-side archive import/recovery assistance; and the support-ticket
+workflow itself.
 
 Not covered: your own agent/client code, prompt engineering, third-party
 tools, and anything on the self-hosted side (see

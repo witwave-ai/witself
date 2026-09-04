@@ -1,7 +1,8 @@
 # Witself Billing And Limits
 
-Status: draft. Decision: v0 billing is account-level, plan-based, usage-aware,
-and not raw per-call billing at launch.
+Status: managed Stripe billing is generally available. This document also
+retains broader billing-and-limits target contracts. Decision: v0 billing is
+account-level, plan-based, usage-aware, and not raw per-call billing at launch.
 
 This document and `web/plans/plans.json` define packaging and resolved account
 behavior, not feature readiness. The canonical [Feature Status](feature-status.md)
@@ -62,29 +63,24 @@ V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.
 
-The current checkout implements a dark provider-neutral lifecycle and an
-account-scoped billing read/setup contract: status, actual provider next charge,
-redacted payment-method summary, bounded invoice/payment history, and
-provider-hosted setup/portal actions. The Stripe test-mode transition slice is
-limited to Personal to Professional purchase and Professional to Personal
-period-end downgrade/cancellation. Team, Enterprise, paid-to-paid changes,
-automated dunning policy or collection mutations, and refund mutations remain
-out. Its presence does not enable live Stripe, charging, or production
-webhooks. The exclusive `v0.0.254` cutover and forward-fix rules are in
-[billing-transition-rollout.md](billing-transition-rollout.md). Billing,
-payment, crypto payment, and invoice commands may otherwise remain
-contract-shaped and capability-gated while the
-core product matures across both planes — the open plane (realm, agent, memory,
-fact, policy, group, message, and audit) and the sealed plane (secret and TOTP).
-The metered payload spans identity usage and credential usage; the sealed-plane
-dimensions count events only and never carry secret or seed values.
+Managed Stripe billing and production webhooks have been generally available
+since 2026-08-31 (`v0.0.267`, #307). The account-scoped provider-neutral
+read/setup contract includes status, actual provider next charge, redacted
+payment-method summary, bounded invoice/payment history, and provider-hosted
+setup/portal actions. Personal, Professional, and Team are available; Enterprise
+contracting, paid-to-paid changes, refund mutations, and crypto payment rails
+remain outside the implemented customer surface. The exclusive `v0.0.254`
+cutover and forward-fix procedure is retained as historical context in
+[billing-transition-rollout.md](billing-transition-rollout.md). The metered
+payload spans identity usage and credential usage; sealed-plane dimensions count
+events only and never carry secret or seed values.
 
 The optional `WITSELF_CP_STRIPE_TEST_CLOCK_ID` exists only to attach one fresh,
 disposable test customer to a Stripe test clock for retained period-boundary
 acceptance. It must be cleared before any broader cohort and is refused in live
 mode; it is not general subscription-time control.
 
-The dark lifecycle requires every setup, upgrade, downgrade, and pending-change
+The live lifecycle requires every setup, upgrade, downgrade, and pending-change
 cancel apply request to carry an audit reason, `confirmed: true`, and an
 account-scoped `Idempotency-Key`. The control plane derives actor id and role
 from `billing:manage` authority, persists a mutation receipt before the
@@ -175,35 +171,23 @@ last success, and the oldest pending timestamp observed in that bounded sample.
 Health remains liveness-only; no account, operation, provider, plan, customer,
 actor, digest, URL, or raw error becomes a metric label.
 
-Production payment activation remains gated on an explicit operational and
-security review. Account billing reads and mutations now derive distinct
-`billing:read` and `billing:manage` authority from the cell-authenticated
-account role; older cells that omit the role fail closed. At minimum,
-activation must retain real-provider proof of the implemented exact managed-
-subscription projection, exact-subscription dunning, and deterministic
-equal-time event ordering; reconcile restored control-plane state against
-provider truth; and implement the Team usage-billing policy. The implemented
-Personal downgrade path now requires an atomic, cell-backed fit apply and exact
-provider target; that does not make paid-to-paid Team transitions complete.
-Production must also compensate partial multi-subscription downgrades and retain
-completed receipts under an explicit bounded policy without ever deleting
-unresolved work. The implemented reconciler now stops unsafe automatic provider
-retries before the idempotency horizon, but operations that reach that guard
-still need an operator/provider-object resolution path. Hosted-action receipts
-now expire and refresh under their exact operation fence rather than replaying
-a stale URL forever; retained sandbox expiry and response-loss proof is still
-required.
+Production payment activation completed on 2026-08-31. Account billing reads and
+mutations derive distinct `billing:read` and `billing:manage` authority from the
+cell-authenticated account role; older cells that omit the role fail closed. The
+live control plane runs with general availability explicitly true, an empty
+account allowlist, and no test clock; startup refuses either contradictory
+combination. The retained cutover evidence covered a promotion-code Checkout,
+signed webhook-to-entitlement processing, a paid zero-dollar invoice, and a
+period-end downgrade.
 
-This mutation surface remains dark behind an empty account cohort. The exact
-reader/canceller release tree must carry the reviewed
-`internal/billing/lifecycle/compatibility/exact-provider-target-v1` capability
-marker; squash-merge ancestry or a version number is not proof. The actual
-predecessor `v0.0.254` can broad-cancel a prepared downgrade from either its API
-path or its reconciler, so it cannot coexist with a prepared-downgrade writer.
-Every old API and reconciliation process must be fully drained before the first
-new writer. Rollback to `v0.0.254` is unsupported once this transition release
-is introduced; keep the cohort empty and forward-fix instead. The count-only
-inventory, quarantine procedure, and hermetic preflight are in
+The `v0.0.254` reader/canceller compatibility boundary and empty-cohort ceremony
+were one-time pre-GA controls. That predecessor can broad-cancel a prepared
+downgrade, so it remains an unsupported rollback target; production forward-fixes
+on the current exact-provider-target lineage. Paid-to-paid transitions,
+Enterprise contracting, refund creation, and usage conversion into charges
+remain outside the implemented surface, but they are feature limits rather than
+evidence of an inactive production billing service. The historical count-only
+inventory, quarantine procedure, and hermetic preflight remain in
 [billing-transition-rollout.md](billing-transition-rollout.md).
 
 The account fold now gives cancellation precedence over activation and recovery
@@ -1508,9 +1492,10 @@ recommended next command for the CLI/agent to surface.
 
 ## Crypto Payment Rails
 
-Witself retains the full Witpass payment apparatus, including crypto rails, with
-no Witself-managed wallet custody. Crypto payment support sits alongside
-traditional payment methods rather than replacing them.
+**Roadmap only — not implemented.** The contract below preserves the proposed
+Witpass crypto-rail shape, with no Witself-managed wallet custody. It does not
+describe a current CLI command, API route, provider integration, or production
+payment option.
 
 Posture:
 
@@ -1589,30 +1574,31 @@ Usage and limits output should include:
 
 Backends should report billing capabilities:
 
-- Managed Witself Cloud: billing is expected to be supported as the product
-  matures.
+- Managed Witself Cloud: Stripe-backed billing is generally available for the
+  current purchasable plans.
 - Self-hosted: billing may be disabled, local-only, or wired to the operator's
   own billing system. Self-hosting must not require Witself-managed billing (see
   [self-hosting.md](self-hosting.md)).
 - Local development: billing is normally unsupported or mocked.
 
 Unsupported billing operations should return `unsupported_operation` with
-capability context. Crypto payment is independently capability-gated: a backend
-may support fiat billing while reporting crypto rails as unsupported.
+capability context. Crypto payments are not implemented; the roadmap contract
+requires them to remain independently capability-gated if built, so fiat billing
+does not imply crypto-rail support.
 
 V0 clients should treat billing capability discovery as authoritative. A command
 shape can exist before the backend supports live billing or crypto settlement.
 
 ## Pricing Follow-Up
 
-The exact plan names, prices, included quantities, and overage policy are still
-business decisions. V0 should preserve pricing flexibility while collecting
-enough usage data to make those decisions responsibly. The embedding-operation
-and vector-storage dimensions in particular carry real provider cost and should
-be observed before fixed inclusions are set. On the sealed plane, `secret_read`,
-`totp_code`, and `encrypted_storage_byte` carry real KMS and envelope-storage
-cost and should be observed on the same basis (see
-[key-hierarchy.md](key-hierarchy.md)).
+The live catalog sets the Personal, Professional, and Team plan names, monthly
+prices ($0, $30, and $250), included quantities, and feature entitlements.
+Overage policy, usage conversion, future catalog changes, and Enterprise terms
+remain business follow-up. The embedding-operation and vector-storage
+dimensions in particular carry real provider cost and should be observed before
+fixed overage pricing is set. On the sealed plane, `secret_read`, `totp_code`,
+and `encrypted_storage_byte` carry real envelope-storage cost and should be
+observed on the same basis (see [key-hierarchy.md](key-hierarchy.md)).
 
 ## Related Docs
 

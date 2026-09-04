@@ -139,8 +139,9 @@ not the production model.
   plaintext-exported.
 - Let humans use the same product from a clear, safe CLI, with or without AI
   assistance, and with no privileged AI-only path.
-- Make first-class structured/plaintext identity export and round-trippable
-  import a headline feature, not a forbidden one.
+- Make first-class structured whole-account customer export a headline feature,
+  with separately fenced operator evacuation export/import for account moves;
+  do not expose a customer import command.
 - Drive managed-service account administration through the CLI, including customer
   account details, operators, billing, payments, usage, and support.
 - Provide a complete CLI bootstrap path to create a managed realm and issue tokens
@@ -196,10 +197,11 @@ nor the client-custodied sealed plane adds a backend KMS dependency; the crypto
 subset and future slices are tracked in
 [client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
-Billing, support, payment, crypto payment, and broader managed-account operations
-may appear as command, API, and JSON contract shapes in v0, but they can be
-capability-gated until the managed service is ready. Unsupported operations must
-return deterministic `unsupported_operation` responses with capability context.
+Managed fiat billing is live. Crypto payment rails are roadmap-only and not
+implemented even where command, API, or JSON target shapes are retained. Other
+managed-account operations may remain capability-gated; unsupported operations
+must return deterministic `unsupported_operation` responses with capability
+context.
 
 Inter-agent messaging is **fully in scope** for v0 (durable mailbox, delivery,
 ordering, and acknowledgement), not a stub.
@@ -322,8 +324,8 @@ CLI-managed service workflows should include:
 - Managing subscription state.
 - Managing payment methods.
 - Applying promo codes during setup, account creation, or subscription changes.
-- Managing crypto payment flows alongside traditional payment methods when
-  supported.
+- Managing future crypto payment flows alongside traditional payment methods is
+  roadmap-only; no crypto rail is implemented.
 - Viewing and downloading invoices.
 - Opening, listing, commenting on, and closing support tickets.
 - Exporting account, realm, identity, usage, invoice, and support data where
@@ -341,9 +343,10 @@ still own the workflow. It should create the session, show the URL or open it on
 request, return a resumable session ID, poll or watch status, and emit
 machine-readable completion state.
 
-Crypto payment support should sit alongside traditional payment methods rather
-than replacing them. The initial posture is provider-mediated checkout, invoice,
-or subscription payment with no Witself-managed wallet custody. Witself should not
+Crypto payment support is roadmap-only and is not implemented. If built, it
+should sit alongside traditional payment methods rather than replacing them. The
+initial posture is provider-mediated checkout, invoice, or subscription payment
+with no Witself-managed wallet custody. Witself should not
 collect wallet seed phrases, private keys, or raw wallet credentials in CLI flags,
 environment variables, config files, logs, support tickets, or billing metadata.
 
@@ -963,23 +966,25 @@ parent, causal depth, sender, account, or realm routing.
 
 ### Identity Export and Import
 
-First-class structured/plaintext identity export and round-trippable import is a
-headline Witself feature and the inverse of Witpass's encrypted-only export
-stance. Export/import is tracked in [backup-and-recovery.md](backup-and-recovery.md).
+First-class structured whole-account export is a shipped Witself feature. The
+customer `purpose=self` artifact has no evacuation identity and is not accepted
+by the import route. Operator-side account moves instead round-trip a separately
+fenced evacuation export carrying the exact evacuation ID; there is no customer
+import command. Both archive paths are tracked in
+[backup-and-recovery.md](backup-and-recovery.md).
 
 Export posture:
 
-- `witself export` produces a structured, human-readable, plaintext export of an
-  agent's self: all memories (with content, kind, tags, source, salience, links,
-  timestamps, and **edit history**), all facts (with values, `primary` flags,
-  `sensitive` flags, format hints, and edit history), and the agent's identity
-  anchors.
-- Account export also carries the complete curation graph introduced by
+- `witself export` downloads a checksum-verified gzip/tar archive for the
+  selected account. It contains `manifest.json`, ordered JSONL table chunks,
+  and a trailing `checksums.json`, including all portable account-owned state.
+- The shared logical archive schema carries the complete curation graph introduced by
   migration `0030`: lanes, cursors, requests, runs, frozen inputs, actions,
   mutation receipts, and curation attribution. Import validates graph scope and
   hashes, interrupts active leases, clears active lanes, and advances fences so
   an in-flight source-cell client cannot apply after the move.
-- Account export carries migration-0037 direct/explicit-list/realm messages and
+- The shared logical archive schema carries migration-0037
+  direct/explicit-list/realm messages and
   their immutable delivery snapshots; migration-0035 reply causality/depth;
   delivery/read/ack state; migration-0034 processing state; migration-0036
   deterministic `failure_count`; and the full migration-0038 open-request
@@ -989,35 +994,26 @@ Export posture:
   open-request reservations/claims are cancelled and fenced forward so work
   from the source cell cannot complete after import. Archives older than schema
   36 upgrade direct failure counts to zero.
-- For operators, export can include realm-level context: policies, security-group
-  membership, and group-owned memories and facts.
-- Export is round-trippable: `witself import` restores an exported self into the
-  same or a different agent/realm, preserving primary flags, sensitive markers,
-  links, and (where chosen) edit history.
-- Export defaults to JSON using the `witself.v0` schema version; a directory/file
-  layout suitable for diffing and version control is also supported.
-- `sensitive` facts and memories are exported in clear by default (Witself
-  embraces plaintext export), but the CLI requires an audit `--reason` and warns
-  when exporting `sensitive` records. Operators may scope exports to non-sensitive
-  records.
-- Identity references (`witself://…`) are preserved on export and re-resolved on
-  import; dangling references are reported, not silently dropped.
+- Both artifact types include sensitive markers, links, and full memory/fact
+  version history. Open-plane values remain readable archive data.
+- Stable identifiers and graph references are preserved. Evacuation import
+  validates archive scope, ordering, hashes, foreign keys, and version-specific
+  invariants before committing any rows.
 
-Sealed-plane carve-out (#2): `witself export` excludes the sealed plane. Secret
-field values and TOTP seeds are **never** present in the plaintext export, the
-self-digest, `digest emit`, or `ingest`. Secret backup is a separate,
-encrypted-only path (envelope ciphertext + KMS key identity, never plaintext)
-behind an explicit, audited flag, covered in
-[backup-and-recovery.md](backup-and-recovery.md). A secret reference may appear in
-a memory or fact, but it resolves to plaintext only through the reveal ceremony,
-never through export.
+Sealed-plane carve-out (#2): the whole-account archive includes client-encrypted
+secret/TOTP envelopes, wrapped per-field DEKs, public AVK bindings, and
+value-free lifecycle history. It never contains plaintext secret values or TOTP
+seeds, an AVK or recovery artifact, raw token material, or a server-side decrypt
+path. A secret reference may appear in a memory or fact, but it resolves to
+plaintext only through the reveal ceremony, never through export.
 
 Import posture:
 
-- Import is idempotent by stable id where ids are preserved, and supports a
-  rename/remap mode when importing into a different agent or realm.
-- Import is audited and supports `--dry-run` to preview created/updated/conflicting
-  records without persisting.
+- Import is exposed only through the provision-token-authorized server-side
+  account evacuation route. It accepts the paired suspended/closed evacuation
+  archive with the exact evacuation ID under account-move fencing; it does not
+  accept the active-capable customer `purpose=self` artifact. There is no
+  customer `witself import`, rename/remap mode, or customer dry-run command.
 
 ### Identity References
 
@@ -1068,11 +1064,11 @@ secret material must honor all of them.
   `ingest` from `CLAUDE.md`/`AGENTS.md`/`GEMINI.md`. Credentials in those files are
   ignored, not absorbed. (Carve-out #4; see
   [context-hydration.md](context-hydration.md).)
-- **Never plaintext-exported.** `witself export` excludes the sealed plane.
-  Identity (memory + fact) plaintext export stays the headline feature; secret
-  backup is encrypted-only (envelope ciphertext + KMS key identity, never
-  plaintext) behind an explicit, audited, separate flag. The self-digest, `digest
-  emit`, and `ingest` never carry secrets. (Carve-out #2; see
+- **Never plaintext-exported.** The whole-account archive carries sealed-plane
+  rows only as client-encrypted secret/TOTP envelopes, wrapped per-field DEKs,
+  public AVK bindings, and value-free lifecycle history. It never carries
+  plaintext values, an AVK or recovery artifact, or raw token material. The
+  self-digest, `digest emit`, and `ingest` never carry secrets. (Carve-out #2; see
   [Backup, Export, And Recovery](#backup-export-and-recovery) and
   [backup-and-recovery.md](backup-and-recovery.md).)
 - **Reveal-gated values.** Secret field values and TOTP codes are returned only by
@@ -1522,9 +1518,11 @@ The self-hosted support model is tracked in
 
 ### Backup, Export, And Recovery
 
-Decision: v0 supports first-class structured/plaintext identity export and
-round-trippable import, in addition to operational backups. This is the deliberate
-inverse of the Witpass encrypted-only stance.
+Decision: v0 supports first-class, checksum-verified whole-account customer
+export in addition to operational backups. A distinct, evacuation-ID-bound
+archive round-trips through the operator-side account-move import; the customer
+`purpose=self` artifact is not importable and there is no customer import
+command.
 
 Backup and recovery posture:
 
@@ -1534,24 +1532,22 @@ Backup and recovery posture:
   be backed up for convenience but are rebuildable derived data.
 - Backups include Postgres, object/blob storage when used, the migration version,
   and server configuration needed to reconnect to storage.
-- Identity export is a supported plaintext feature, not a forbidden one (see
+- Customer export is supported (see
   [Identity Export and Import](#identity-export-and-import)). `witself export`
-  produces structured, round-trippable identity data; `witself import` restores
-  it.
+  produces the complete portable `purpose=self` account archive. Operator
+  account moves use the separate paired evacuation export/import routes.
 - Self-hosted operators are responsible for backing up Postgres, object/blob
   storage when used, Terraform state, and deployment configuration.
 - Managed cloud recovery restores customer identity data and service availability.
 
-Because export is plaintext by default, exports of `sensitive` open-plane records
-are warned-on, require an audit `--reason`, and are least-privilege authorized;
-operators may restrict exports to non-sensitive records. Recovery and export are
-audited.
+Open-plane facts and memories, including records marked `sensitive`, remain
+readable account data in the archive. Customer export is restricted to the
+account's operator credential; the read-only self-export handler records no
+successful-export audit mutation.
 
-Sealed plane (carve-out #2): the sealed plane is excluded from the plaintext
-export entirely. Secret backup is encrypted-only — envelope ciphertext plus the
-KMS key identity and rotation metadata, never plaintext — and is the only path
-that backs up secret material. Loss of the CMK/KMS access crypto-shreds secret
-values but does not affect the recoverable plaintext open plane. The dual backup
+Sealed plane (carve-out #2): portable client-encrypted secret/TOTP envelopes and
+their public, value-free lifecycle records are included in the account archive,
+but plaintext values and client-held key material are not. The dual backup
 posture is carried in [backup-and-recovery.md](backup-and-recovery.md).
 
 The backup, export, and recovery model is tracked in
@@ -1631,8 +1627,8 @@ Billing attaches at the account level, and usage rolls up by realm. One paying
 customer can support multiple realms, each holding multiple agents.
 
 Decision: v0 billing is plan-based and usage-aware, not raw per-call billing at
-launch. The full managed billing apparatus is retained from Witpass, including
-crypto payment rails.
+launch. Managed fiat billing is live; the retained crypto-payment contract is
+roadmap-only and not implemented.
 
 Billing posture:
 
@@ -1643,10 +1639,10 @@ Billing posture:
 - V0 should not require raw per-call billing or per-agent invoice line items.
 - Overage behavior should be configurable by plan and dimension: `warn`,
   `throttle`, or `block`.
-- The full managed apparatus is retained: plans, usage-aware metering, soft/hard
-  limits, payment methods, invoices, crypto payment rails (USDC/USDT/ETH via
-  provider, no wallet custody), support tickets, CLI-first service admin, and
-  capability-gating with `unsupported_operation`.
+- The managed apparatus includes plans, usage-aware metering, soft/hard limits,
+  payment methods, invoices, support tickets, CLI-first service admin, and
+  capability-gating with `unsupported_operation`. Crypto payment rails
+  (USDC/USDT/ETH via a provider, no wallet custody) remain a roadmap contract.
 
 V0 metered dimensions span both planes:
 
@@ -1885,8 +1881,8 @@ Sealed plane:
   process; see [Runtime Injection](#runtime-injection-witself-run)).
 
 Inherited: `version`, `capabilities`, `whoami`, `auth`, `setup`, `account`,
-`realm`, `agent`, `token`, `audit`, `billing`, `support`, `export`, `import`,
-`reference`, `mcp`, `config`, `completion`.
+`realm`, `agent`, `token`, `audit`, `billing`, `support`, `export`, `reference`,
+`mcp`, `config`, `completion`.
 
 The MCP tool catalog spans both planes:
 
@@ -2019,8 +2015,8 @@ including:
 - Account profile, account member, and role changes.
 - Billing plan, subscription, payment-method, invoice, refund, and payment
   provider actions.
-- Crypto payment quote, checkout/session, confirmation, failure, refund, and
-  provider reconciliation actions.
+- Future crypto payment quote, checkout/session, confirmation, failure, refund,
+  and provider reconciliation actions if the roadmap rail is implemented.
 - Support ticket create, comment, close, and diagnostic-bundle actions.
 
 Audit records must not contain memory content, fact values, message bodies or
@@ -2032,15 +2028,18 @@ Audit may include non-sensitive context such as record ids (including `sec_`,
 names, field names, policy and grant ids, message ids, recipient, the
 `server_side_decrypt` flag, and decision outcome.
 
-Audit records for billing and payment actions may include non-sensitive context
-such as account ID, realm ID, invoice ID, subscription ID, payment provider,
-payment method type, crypto asset, network, amount, currency, status, and provider
-event ID. They must not contain raw payment details, card numbers, provider
-tokens, wallet seed phrases, wallet private keys, raw wallet credentials, or full
-wallet identifiers.
+Audit records for current billing and payment actions may include non-sensitive
+context such as account ID, realm ID, invoice ID, subscription ID, payment
+provider, payment method type, amount, currency, status, and provider event ID.
+If the roadmap crypto rail is implemented, its audit records may also include
+crypto asset and network. Audit records must not contain raw payment details,
+card numbers, provider tokens, wallet seed phrases, wallet private keys, raw
+wallet credentials, or full wallet identifiers.
 
 Identity and payment audit event names should be stable enough for support,
-reconciliation, and customer exports. Initial event names include:
+reconciliation, and customer exports. The `billing.crypto.*` names in the
+target list below are reserved for the roadmap rail and are not emitted by
+current code. Initial event names include:
 
 - `memory.added`
 - `memory.adjusted`
@@ -2156,8 +2155,9 @@ Local backend requirements:
 - Write store files atomically.
 - Restrict local file permissions where the OS supports it.
 - Keep tokens out of config files by default.
-- Support export/import for test fixtures, demos, backup, and migration (using the
-  same `witself export`/`witself import` paths).
+- Exercise the shared logical archive reader/writer in fixtures and migration
+  tests. The customer CLI surface is export-only; archive import remains a
+  server-side operator primitive.
 - Exercise the same model-free lexical/structured recall contract used by
   deployed cells; no paid or local model provider is required.
 
@@ -2388,15 +2388,15 @@ Helm chart requirements:
 - Chart values must support referencing existing Kubernetes Secrets rather than
   placing raw secrets in `values.yaml`.
 - The chart should include Service, Deployment, ServiceAccount, ConfigMap,
-  optional Ingress, optional NetworkPolicy, and migration Job templates.
+  optional Ingress, and optional NetworkPolicy templates.
 - The chart should include liveness, readiness, startup, metrics scraping,
   ServiceMonitor, PodMonitor, resources, autoscaling, disruption budget, security
   context, and network policy support where practical.
 - The chart should use separate named container ports for API, health, and
   metrics, and should not expose health or metrics through public ingress by
   default.
-- Automatic migrations should be opt-in and explicit. Production operators should
-  be able to run migrations as a controlled job before upgrades.
+- Each database-backed process runs forward migrations under the shared
+  migration lock before becoming Ready. The chart exposes no migration Job.
 - Helm docs must clearly label any dev-only convenience values.
 - Chart releases should be linted, rendered, schema-validated, signed or
   provenance-attested, and published publicly.
@@ -2762,10 +2762,9 @@ Optional vector posture:
 Migration posture:
 
 - Database migrations use Goose.
-- Migrations are run through `witself-server migrate`, with an advisory lock,
-  rather than through the public customer/operator CLI.
-- Helm should expose an explicit migration Job path before rolling
-  `witself-server`.
+- Database-backed `witself-server` processes run forward migrations at startup
+  under the shared migration lock before becoming Ready. There is no separate
+  `witself-server migrate` command or Helm migration Job.
 - Migration `0030` introduces the curation lanes, cursors, requests, runs,
   frozen inputs, strict actions, mutation receipts, reversible attribution, and
   account-archive streams. It adds no vector extension and no model provider.
