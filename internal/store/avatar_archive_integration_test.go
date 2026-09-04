@@ -40,7 +40,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = deleteAvatarAccountForArchiveRoundTrip(context.Background(), st, provisioned.AccountID)
+		_ = deleteAvatarAccountForIntegrationTest(context.Background(), st, provisioned.AccountID)
 	}()
 	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 		t.Fatalf("activate account = %t / %v", activated, err)
@@ -220,7 +220,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 		t.Fatalf("archived continuity fingerprint style = %v", err)
 	}
 
-	if err := deleteAvatarAccountForArchiveRoundTrip(ctx, st, provisioned.AccountID); err != nil {
+	if err := deleteAvatarAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
@@ -312,7 +312,7 @@ func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = deleteAvatarAccountForArchiveRoundTrip(context.Background(), st, provisioned.AccountID)
+		_ = deleteAvatarAccountForIntegrationTest(context.Background(), st, provisioned.AccountID)
 	}()
 	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 		t.Fatalf("activate account = %t / %v", activated, err)
@@ -415,7 +415,7 @@ func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
 	if err := st.ExportAccount(ctx, provisioned.AccountID, "source-cell", "test", &archive); err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteAvatarAccountForArchiveRoundTrip(ctx, st, provisioned.AccountID); err != nil {
+	if err := deleteAvatarAccountForIntegrationTest(ctx, st, provisioned.AccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ImportAccount(ctx, provisioned.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
@@ -745,12 +745,11 @@ func readAvatarArchiveRows(t *testing.T, raw []byte, currentSchema int) (archive
 	return manifest, rows
 }
 
-// deleteAvatarAccountForArchiveRoundTrip clears avatar ledgers in dependency
+// deleteAvatarAccountForIntegrationTest clears avatar ledgers in dependency
 // order before using the shared account test cleanup. In particular,
 // prior_active_version intentionally has no cascading delete, so deleting an
-// agent with a multi-activation history directly is not a valid evacuation
-// fixture.
-func deleteAvatarAccountForArchiveRoundTrip(ctx context.Context, st *Store, accountID string) error {
+// agent with a multi-activation history directly cannot clean up the fixture.
+func deleteAvatarAccountForIntegrationTest(ctx context.Context, st *Store, accountID string) error {
 	tx, err := st.pool.Begin(ctx)
 	if err != nil {
 		return err

@@ -42,9 +42,22 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleaned := false
+	cleanup := func() error {
+		if cleaned {
+			return nil
+		}
+		if err := deleteAvatarAccountForIntegrationTest(context.Background(), phaseA,
+			provisioned.AccountID); err != nil {
+			return err
+		}
+		cleaned = true
+		return nil
+	}
 	defer func() {
-		_ = deleteAccountForIntegrationTest(context.Background(), phaseA,
-			provisioned.AccountID)
+		if err := cleanup(); err != nil {
+			t.Errorf("clean up avatar compaction gate account: %v", err)
+		}
 	}()
 	if activated, err := phaseA.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
 		t.Fatalf("activate account = %t / %v", activated, err)
@@ -252,6 +265,21 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 	if _, err := phaseB.GetAvatarVersion(ctx, agent, compactedVersion); err == nil ||
 		!strings.Contains(err.Error(), "lacks a recoverable locked-layer digest") {
 		t.Fatalf("unrecoverable compacted-row read error = %v", err)
+	}
+
+	// Model the next shuffled test opening and migrating the shared database.
+	// The committed corrupt-row fixture must be gone before another store runs
+	// the strict startup finalizer.
+	if err := cleanup(); err != nil {
+		t.Fatalf("clean up committed compacted-row fixture: %v", err)
+	}
+	next, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	if err := next.Migrate(); err != nil {
+		t.Fatalf("migrate store after compacted-row fixture cleanup: %v", err)
 	}
 }
 
