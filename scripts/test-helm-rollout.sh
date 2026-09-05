@@ -1898,7 +1898,7 @@ server_documents = YAML.load_stream(File.read(serving_server_render)).compact
   pdb = server_documents.find { |doc| doc["kind"] == "PodDisruptionBudget" && doc.dig("metadata", "name") == name }
   check("#{name}: serving replicas and PDB must tolerate one unavailable pod", deployment && deployment.dig("spec", "replicas") == 2 && pdb && pdb.dig("spec", "minAvailable") == 1 && pdb.dig("spec", "selector") == deployment.dig("spec", "selector"))
   selector = deployment.dig("spec", "selector", "matchLabels")
-  check("#{name}: serving spread must match pods by hostname with capacity fallback", deployment.dig("spec", "template", "spec", "topologySpreadConstraints") == [{"maxSkew" => 1, "topologyKey" => "kubernetes.io/hostname", "whenUnsatisfiable" => "ScheduleAnyway", "labelSelector" => {"matchLabels" => selector}}] && selector.all? { |key, value| deployment.dig("spec", "template", "metadata", "labels", key) == value })
+  check("#{name}: serving spread must be hard by hostname (DoNotSchedule)", deployment.dig("spec", "template", "spec", "topologySpreadConstraints") == [{"maxSkew" => 1, "topologyKey" => "kubernetes.io/hostname", "whenUnsatisfiable" => "DoNotSchedule", "labelSelector" => {"matchLabels" => selector}}] && selector.all? { |key, value| deployment.dig("spec", "template", "metadata", "labels", key) == value })
 end
 
 pg = child_values(backup)
