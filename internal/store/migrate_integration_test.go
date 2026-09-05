@@ -2104,31 +2104,20 @@ func newMigrationTestStore(t migrationTestReporter, baseDSN string) (*Store, str
 	if err != nil {
 		t.Fatal(err)
 	}
+	schemaStarted := time.Now()
 	if _, err := admin.Exec(`CREATE SCHEMA ` + schema); err != nil {
 		_ = admin.Close()
 		t.Fatalf("create test schema: %v", err)
 	}
-	dsn, err := migrationTestDSNWithSearchPath(baseDSN, schema)
-	if err != nil {
-		_, _ = admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`)
-		_ = admin.Close()
-		t.Fatal(err)
-	}
-	st, err := Open(context.Background(), dsn)
-	if err != nil {
-		_, _ = admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`)
-		_ = admin.Close()
-		t.Fatal(err)
-	}
-	if err := st.Ping(context.Background()); err != nil {
-		st.Close()
-		_, _ = admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`)
-		_ = admin.Close()
-		t.Fatal(err)
-	}
+	var st *Store
+	// Register before opening the store so setup failures use the same bounded
+	// schema cleanup as successful fixtures.
 	t.Cleanup(func() {
-		st.Close()
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanupTimeout := migrationTestSchemaCleanupTimeout(time.Since(schemaStarted))
+		if st != nil {
+			st.Close()
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
 		if _, err := admin.ExecContext(cleanupCtx, `DROP SCHEMA `+schema+` CASCADE`); err != nil {
 			t.Errorf("drop migration test schema %s: %v", schema, err)
@@ -2137,7 +2126,49 @@ func newMigrationTestStore(t migrationTestReporter, baseDSN string) (*Store, str
 			t.Errorf("close migration test admin connection: %v", err)
 		}
 	})
+	dsn, err := migrationTestDSNWithSearchPath(baseDSN, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	return st, dsn
+}
+
+// migrationTestSchemaCleanupTimeout gives DROP CASCADE three times the elapsed
+// lifetime of this fixture, measured from CREATE SCHEMA to cleanup entry. That
+// conservatively includes migrations and writes performed by callers after the
+// helper returns, without relying on another fixture or process's speed. The
+// one-minute floor allows catalog/lock contention when host load rises after a
+// fast setup; the old fixed ten-second budget flaked during concurrent builds.
+func migrationTestSchemaCleanupTimeout(fixtureElapsed time.Duration) time.Duration {
+	return max(3*fixtureElapsed, time.Minute)
+}
+
+func TestMigrationSchemaCleanupTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{"setup failed immediately", 0, time.Minute},
+		{"fast fixture", time.Second, time.Minute},
+		{"floor boundary", 20 * time.Second, time.Minute},
+		{"above floor", 20*time.Second + time.Nanosecond, time.Minute + 3*time.Nanosecond},
+		{"slow fixture", 45 * time.Second, 135 * time.Second},
+		{"loaded fixture", 2 * time.Minute, 6 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := migrationTestSchemaCleanupTimeout(tc.elapsed); got != tc.want {
+				t.Fatalf("schema cleanup timeout for %s = %s, want %s", tc.elapsed, got, tc.want)
+			}
+		})
+	}
 }
 
 func migrationTestDSNWithSearchPath(baseDSN, schema string) (string, error) {
