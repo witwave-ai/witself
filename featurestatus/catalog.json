@@ -102,7 +102,7 @@
       "id": "account-lifecycle",
       "name": "Account lifecycle and movement",
       "area": "Platform",
-      "summary": "Activation, suspension, closure with dark 30-day-grace erasure, archive/import, and account evacuation/placement are implemented; serving-cell monitoring is accepted; broad movement stays frozen until destination-cell monitoring and multi-cell drills complete; realm placement and dual-write cutover stay out of scope.",
+      "summary": "Activation, suspension, closure with enforced 30-day-grace erasure, customer account export, operator archive/import, and evacuation are implemented. Serving-cell monitoring is accepted; broad movement awaits destination monitoring and multi-cell drills. Realm placement and dual-write cutover remain out of scope.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "docs": [
@@ -114,11 +114,15 @@
       "gates": {
         "behavior": {
           "state": "pass",
-          "summary": "Lifecycle transitions, archive/import, evacuation fences, and resumable control-plane state have transactional and crash-recovery coverage.",
+          "summary": "Lifecycle transitions, enforced closed-account purge, witself export via GET /v1/export, and operator evacuation/import are implemented. Customer exports use a read-only snapshot and CLI checksum verification without suspending the account.",
           "evidence": [
+            "cmd/witself/export.go",
             "docs/deployment-cells.md",
+            "internal/server/export_self_test.go",
             "internal/store/account_purge_integration_test.go",
-            "internal/store/evacuation_integration_test.go"
+            "internal/store/evacuation_integration_test.go",
+            "internal/store/export.go",
+            "internal/store/self_export_integration_test.go"
           ]
         },
         "entitlement_policy": {
@@ -156,9 +160,12 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "The placement runner is intentionally paused; widening requires every accepting destination to meet schema, headroom, and monitoring gates.",
+          "summary": "Account purge is enabled in enforce mode on both cells after preview review (#313), with the 720h grace unchanged. Placement remains paused until accepting destinations meet schema, headroom, monitoring, and movement-drill gates.",
           "evidence": [
+            ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
+            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             "docs/deployment-cells.md",
+            "docs/launch-readiness.md",
             "docs/runbooks.md"
           ]
         },
@@ -191,9 +198,9 @@
       "id": "account-onboarding-recovery",
       "name": "Managed account onboarding and recovery",
       "area": "Identity",
-      "summary": "Invite-gated signup, cell placement, email verification and resend, credential recovery, CAS-guarded email change and undo, and crash-safe CLI provisioning are implemented and contract-tested for managed accounts; abuse controls are implemented dark with keyed enablement, and release acceptance remains limited.",
+      "summary": "Open CLI signup with Turnstile and daily quotas of 10 per IP and 500 globally has been live since 2026-08-29 (#295). Placement, verification/resend, recovery, email change/undo, and crash-safe provisioning are implemented; broader recovery canaries and operational alerts remain open.",
       "implementation": "implemented",
-      "managed_rollout": "limited",
+      "managed_rollout": "general",
       "docs": [
         "docs/cli-command-surface.md",
         "docs/runbooks.md",
@@ -213,20 +220,23 @@
         },
         "entitlement_policy": {
           "state": "pass",
-          "summary": "Managed signup requires an authorized invite, self-hosted operation has no signup, and account identity and cell placement remain control-plane authoritative.",
+          "summary": "Managed invite-less signup is open behind Turnstile, positive daily quotas, and explicit Terms/Privacy consent. Invites remain supported; self-hosted operation has no signup. Account identity and placement remain control-plane authoritative.",
           "evidence": [
             "docs/runbooks.md",
-            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs",
+            "infra/cloudflare/control-plane/wrangler.template.jsonc"
           ]
         },
         "bounds_abuse": {
-          "state": "conditional",
-          "summary": "Inputs, invite use, verification and recovery state, retries, and pending-account lifetime are bounded, and durable signup abuse controls (Turnstile break-glass, per-IP and global daily quotas, edge IP rate limits) are implemented dark: committed limits are 0, Turnstile secrets absent, enablement keyed.",
+          "state": "pass",
+          "summary": "Open signup enforces Turnstile, durable daily quotas of 10 per IP and 500 globally, edge IP rate limits, bounded pending state, and retry controls. Zero quotas fail closed for invite-less signup; setting CP_SIGNUP_OPEN=false restores invite-only signup.",
           "evidence": [
             "docs/signup-abuse-hardening.md",
             "infra/cloudflare/control-plane/src/account-signup-runtime.mjs",
             "infra/cloudflare/control-plane/src/signup-counters.mjs",
-            "infra/cloudflare/control-plane/test/signup-abuse.test.mjs"
+            "infra/cloudflare/control-plane/test/deploy-config.test.mjs",
+            "infra/cloudflare/control-plane/test/signup-abuse.test.mjs",
+            "infra/cloudflare/control-plane/wrangler.template.jsonc"
           ]
         },
         "observability": {
@@ -251,27 +261,30 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Signup remains invite-gated and the repository does not retain a current release-specific end-to-end signup, verification, recovery, and undo canary.",
+          "summary": "Open signup activation is recorded for 2026-08-29 (#295). Retained current-release invite-less signup through active/verified status, resend, recovery, email-change undo, crash-resume, and cleanup canaries remain incomplete.",
           "evidence": [
-            "docs/runbooks.md"
+            "docs/launch-readiness.md",
+            "docs/runbooks.md",
+            "https://github.com/witwave-ai/witself/commit/e2a4c2b6507c263bbc7f68eb3a0ddfcd5940a4fb",
+            "infra/cloudflare/control-plane/wrangler.template.jsonc"
           ]
         },
         "docs_support": {
           "state": "pass",
-          "summary": "Customer setup, pending verification, resend, credential recovery, email change, undo, and incomplete-signup cleanup are documented.",
+          "summary": "Customer setup and recovery are documented. Five legal pages were ratified as Version 2026-08-31 (#309/#311); witself legal reads them, and signup records the accepted Terms and Privacy versions.",
           "evidence": [
+            "cmd/witself/legal.go",
             "docs/cli-command-surface.md",
-            "docs/runbooks.md"
+            "docs/launch-readiness.md",
+            "docs/legal/privacy-policy.md",
+            "docs/legal/terms-of-service.md",
+            "docs/runbooks.md",
+            "internal/legal/legal.go",
+            "web/legal/index.js"
           ]
         }
       },
       "open_gates": [
-        {
-          "id": "signup-abuse-limits",
-          "gate_ids": ["bounds_abuse"],
-          "summary": "Enable the implemented-dark signup abuse controls: mint the Turnstile widget and provide its keys, choose positive per-IP and global daily limits, and land the keyed activation change.",
-          "ref": "docs/signup-abuse-hardening.md"
-        },
         {
           "id": "signup-operations-alerting",
           "gate_ids": ["observability"],
@@ -281,7 +294,7 @@
         {
           "id": "signup-release-canary",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Retain a current invite-through-active-account canary plus resend, recovery, email-change undo, crash-resume, and cleanup evidence before widening signup.",
+          "summary": "Retain current-release invite-less signup through active/verified status, resend, recovery, email-change undo, crash-resume, and cleanup evidence; open signup and its Turnstile/quota activation are already recorded.",
           "ref": "docs/runbooks.md"
         }
       ]
@@ -322,12 +335,14 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Lifecycle metrics and audit events exist and the serving cell now has an end-to-end tested production alert path (server and generic worker-job alerts routed to PagerDuty with a dead-man heartbeat), but no avatar-specific alert rules or SLO exist.",
+          "summary": "The accepted serving-cell alert path exists. #357 adds a tested avatar generation-failure report-rate rule from HTTP metrics. Live loading proof, lifecycle/compaction/quota alerts, and an avatar SLO remain open.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/agent-avatars.md",
             "docs/launch-readiness.md",
-            "docs/observability-and-operations.md"
+            "docs/observability-and-operations.md",
+            "internal/server/metrics.go"
           ]
         },
         "recovery": {
@@ -359,7 +374,7 @@
         {
           "id": "avatar-operations-alerting",
           "gate_ids": ["observability"],
-          "summary": "Define an avatar SLO and add avatar-specific alert rules for lifecycle, failure, compaction, and quota metrics; the tested external alert receiver already exists.",
+          "summary": "Retain live proof for the #357 generation-failure report-rate rule; define an avatar SLO and add lifecycle, compaction, and quota alerts on actual metrics.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -562,8 +577,8 @@
       "summary": "Inbound email on witmail.net is a production service for the exact Founder cohort, with account entitlements, canonical addressing, bounded storage, retention, rate gates, durable claims, and Cloudflare-to-cell route authority.",
       "implementation": "implemented",
       "managed_rollout": "limited",
-      "evidence_release": "v0.0.258",
-      "evidence_scope": "Exact Founder receive deployment at v0.0.258/schema 93 on both cells with restore-verified pre-migration backups; edge attested at 0.0.259 with relay-v2/DMARC gates dark; the fresh real-mail canary evidence remains operator-retained.",
+      "evidence_release": "v0.0.262",
+      "evidence_scope": "Founder receive with schema-93-or-later support; #294 records v0.0.262 edge relay v2 and DMARC rejection live on 2026-08-29, with attested dkim=pass and delivered dmarc=none probes. Full claim/read/ack/retention acceptance remains open.",
       "plan_feature_keys": [
         "agent_email_receive"
       ],
@@ -604,10 +619,12 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Raw-size, byte, sender, recipient, realm, account, storage-ledger, root-count, and hard-row ceilings are enforced, and advisory edge-attested SPF/DKIM/DMARC verdict recording plus dark DMARC rejection landed; trusted sender authentication, spam classification, and provider-wide pressure handling remain incomplete.",
+          "summary": "Size, rate, storage-ledger, root-count, and row ceilings are enforced. Relay v2 records edge-attested SPF/DKIM/DMARC results; trusted-header dmarc=fail rejection is live (#294). Verdicts do not authorize client actions; spam/reputation, edge preflight, and provider backpressure remain incomplete.",
           "evidence": [
             "docs/agent-email.md",
-            "docs/threat-model.md"
+            "docs/threat-model.md",
+            "infra/cloudflare/agent-email/src/authenticity.mjs",
+            "infra/cloudflare/agent-email/src/index.js"
           ]
         },
         "observability": {
@@ -630,11 +647,11 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Release v0.0.258 (schema 93) is live on both cells for the Founder cohort with the edge attested at 0.0.259 and all relay-v2/DMARC gates dark, but broad-plan enrollment and a repo-recorded fresh real-mail canary remain open.",
+          "summary": "Founder receive is live; #294 records v0.0.262 relay v2 and DMARC rejection with real attested dkim=pass and correctly delivered dmarc=none mail. Broader plan enrollment and full claim/read/ack/retention canaries remain open.",
           "evidence": [
             "docs/agent-email.md",
             "docs/launch-readiness.md",
-            "https://github.com/witwave-ai/witself/releases/tag/v0.0.258"
+            "https://github.com/witwave-ai/witself/commit/cca1ebcacb189f4153b6e106c3ebe13ca4ac6eb0"
           ]
         },
         "docs_support": {
@@ -662,13 +679,13 @@
         {
           "id": "fresh-real-mail-canary",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Retain a v0.0.253-or-later real inbound mail canary through claim, read, acknowledge, and retention accounting.",
+          "summary": "Retain a current-release real inbound canary through claim, read, acknowledge, and retention accounting, and verify broader plan enrollment; #294 already records live relay-v2 and DMARC probe delivery.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "inbound-abuse-classification",
           "gate_ids": ["bounds_abuse"],
-          "summary": "Define and verify sender authentication, spam/reputation policy, and provider-wide backpressure before cohort expansion.",
+          "summary": "Define and verify spam/reputation policy and provider-wide backpressure before cohort expansion; edge-attested authentication results and trusted-header DMARC failure rejection are already live.",
           "ref": "docs/threat-model.md"
         }
       ]
@@ -869,7 +886,7 @@
       "id": "audit-trail-retention",
       "name": "Account audit trail and retention",
       "area": "Governance",
-      "summary": "The value-free account event registry, durable audit rows, owner-facing account events API and CLI, filtering, pagination, and authorization are implemented; retention modes, scheduled cleanup, export, and plan policy remain a building slice.",
+      "summary": "The value-free account event registry, durable rows, owner API/CLI, filters, pagination, and authorization are implemented; whole-account witself export includes audit rows. Dedicated audit export, retention modes, scheduled cleanup, and plan policy remain a building slice.",
       "implementation": "building",
       "managed_rollout": "limited",
       "docs": [
@@ -880,10 +897,11 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Event append, registry validation, account list, filters, pagination, and authorization work; delete, archive, hold, status, export, and scheduled retention do not.",
+          "summary": "Event append, registry validation, account list, filters, pagination, and authorization work. Whole-account exports include account_events; dedicated audit export/status, delete/archive/hold modes, and scheduled retention remain unimplemented.",
           "evidence": [
             "docs/audit-retention.md",
-            "internal/store/events_test.go"
+            "internal/store/events_test.go",
+            "internal/store/export.go"
           ]
         },
         "entitlement_policy": {
@@ -912,10 +930,11 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Canonical rows survive ordinary database backup and account movement, while the specified archive, hold, export, and retention-failure recovery paths are not implemented or drilled.",
+          "summary": "Canonical audit rows survive database backup, account movement, and customer account export. Dedicated audit archive/hold/export and retention-failure recovery paths remain unimplemented or undrilled.",
           "evidence": [
             "docs/audit-retention.md",
-            "docs/backup-and-recovery.md"
+            "docs/backup-and-recovery.md",
+            "internal/store/export.go"
           ]
         },
         "rollout_canaries": {
@@ -927,7 +946,7 @@
         },
         "docs_support": {
           "state": "conditional",
-          "summary": "Unimplemented defaults, modes, export, and commands are still presented as decisions, and the data-retention policy describes the 365-day audit default, delete/archive/hold modes, and audit.retention.swept sweep as code-enforced although no audit sweeper, Helm audit-retention value, or plan audit key exists.",
+          "summary": "The audit contract labels retention and dedicated audit export as target-only, but data-retention-policy still describes a 365-day default, delete/archive/hold modes, and audit.retention.swept as enforced without an audit sweeper, Helm value, or plan key.",
           "evidence": [
             "docs/audit-retention.md",
             "docs/data-retention-policy.md"
@@ -938,7 +957,7 @@
         {
           "id": "audit-doc-reconciliation",
           "gate_ids": ["docs_support"],
-          "summary": "Separate the implemented account-events core from target retention, export, hold, metering, and command behavior throughout the audit contract.",
+          "summary": "Reconcile data-retention-policy with the implemented account-events core and target-only dedicated audit export, retention, hold, and metering contract; whole-account export already includes audit rows.",
           "ref": "docs/audit-retention.md"
         },
         {
@@ -956,7 +975,7 @@
         {
           "id": "audit-retention-recovery",
           "gate_ids": ["recovery"],
-          "summary": "Implement and drill audit export, archive verification, hold preservation, interrupted sweep recovery, account movement, and restore reconciliation.",
+          "summary": "Implement and drill dedicated audit export, archive verification, hold preservation, and interrupted sweep recovery; reconcile those semantics with existing whole-account export and restore.",
           "ref": "docs/backup-and-recovery.md"
         }
       ]
@@ -965,9 +984,11 @@
       "id": "billing-plan-transitions",
       "name": "Billing and plan transitions",
       "area": "Commercial",
-      "summary": "The dark Stripe stack is code-complete: free-to-paid checkout for Professional and Team, exact Professional-to-Personal downgrade, a paid-to-paid contact-path guard, Stripe Tax, a fail-closed GA gate, a dunning contract test, and a refund runbook behind an empty cohort; charging and webhooks stay dark pending cutover.",
-      "implementation": "building",
-      "managed_rollout": "dark",
+      "summary": "Managed Stripe billing is generally available since 2026-08-31 (#307/#308, v0.0.267), with Professional/Team checkout, webhook entitlement updates, Professional-to-Personal downgrade, and live Stripe Tax. Paid-to-paid execution, Enterprise, automated dunning/refund mutations, and recovery follow-ons remain open.",
+      "implementation": "implemented",
+      "managed_rollout": "general",
+      "evidence_release": "v0.0.267",
+      "evidence_scope": "GA activation recorded in #308 after #307 bridged the flag; #306 retains zero-dollar Checkout, signed webhook-to-entitlement, paid invoice, period-end downgrade, and live Tax proof. This is launch evidence, not a fresh health check.",
       "docs": [
         "docs/billing-and-limits.md",
         "docs/billing-transition-rollout.md"
@@ -993,21 +1014,19 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Idempotency, exact provider cancellation, recovery fencing, a complete fenced count-only R2 collector with a canonical capture wrapper, and exact-reader preflight exist; receipt retention, operator terminalization, and retained production cutover proof remain incomplete.",
+          "summary": "Exact idempotency, provider cancellation, recovery fences, and count-only rollout preflight exist; the one-time production cutover is complete. Completed-receipt retention and deterministic-failure terminalization remain incomplete.",
           "evidence": [
-            "cmd/witself-control-plane/billing_rollout_inventory_test.go",
+            "cmd/witself-control-plane/main.go",
             "docs/billing-transition-rollout.md",
-            "infra/cloudflare/control-plane/test/billing-rollout-source-fence.test.mjs",
+            "infra/cloudflare/control-plane/src/bridge.mjs",
             "internal/billing/lifecycle/rollout_inventory_test.go",
             "scripts/billing-transition-rollout-preflight.sh",
-            "scripts/capture-billing-rollout-inventory.sh",
-            "scripts/test-billing-transition-rollout-preflight.sh",
-            "scripts/test-capture-billing-rollout-inventory.sh"
+            "scripts/capture-billing-rollout-inventory.sh"
           ]
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist, and a live PagerDuty-routed production alert stack now runs on the prod cell; none of its 14 rules cover billing, and billing-specific alerts, provider event dashboards, and billing support escalation remain unconnected.",
+          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist. The accepted serving-cell PagerDuty/dead-man path is live; the rule pack still has no billing-specific rule, and provider-event dashboards and billing escalation integration remain open.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/billing-and-limits.md",
@@ -1017,9 +1036,10 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Crash-resumable mutation recovery and failed/recovered projection exist, the dunning contract is pinned by a hermetic test, and refunds have an operator runbook; a real-provider activation/forward-fix drill, restore reconciliation, dunning/collection mutations, and ambiguous-old-work terminalization remain unproven.",
+          "summary": "Crash-resumable mutation recovery and the dunning contract are tested; refunds have an operator runbook. Live Checkout, webhook, invoice, and downgrade proof is retained. Restore reconciliation, forward-fix drills, and deterministic-failure terminalization remain open.",
           "evidence": [
             "docs/billing-and-limits.md",
+            "docs/billing-transition-rollout.md",
             "docs/refund-runbook.md",
             "internal/billing/lifecycle/billing_durability_test.go",
             "internal/billing/lifecycle/dunning_contract_test.go"
@@ -1027,15 +1047,16 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "The transition stack stays dark behind an empty cohort and a fail-closed GA gate; owned HTTPS return routes run on the control-plane Worker and the six CP_STRIPE_* secrets are staged dark per the launch plan, but no end-to-end transition proof is retained and charging and webhooks stay disabled until the keyed cutover.",
+          "summary": "General availability at v0.0.267 is recorded with an empty allowlist and no test clock. Retained live proof covers zero-dollar Checkout, signed webhook-to-entitlement, paid invoice, period-end downgrade, and Stripe Tax; a nonzero customer-charge proof remains outstanding.",
           "evidence": [
+            "cmd/witself-control-plane/main.go",
             "docs/billing-and-limits.md",
             "docs/billing-return-pages.md",
             "docs/billing-transition-rollout.md",
             "docs/launch-readiness.md",
-            "infra/cloudflare/control-plane/src/billing-return-pages.mjs",
-            "scripts/stage-stripe-live-secrets.sh",
-            "scripts/test-billing-transition-rollout-preflight.sh"
+            "https://github.com/witwave-ai/witself/commit/c0d319bbcfea3a348bb52c802674a83a0c75435c",
+            "https://github.com/witwave-ai/witself/commit/f5ec4e62601ef119c6f868330060702c58cdfa65",
+            "infra/cloudflare/control-plane/src/billing-return-pages.mjs"
           ]
         },
         "docs_support": {
@@ -1053,7 +1074,7 @@
         {
           "id": "billing-operations",
           "gate_ids": ["observability", "recovery"],
-          "summary": "Connect billing metrics, alerts, receipt retention, support escalation, and operator recovery.",
+          "summary": "Connect billing-specific metrics, alerts, provider-event dashboards, and support escalation; retain restore reconciliation and a forward-fix drill on the current provider-target lineage.",
           "ref": "docs/billing-and-limits.md"
         },
         {
@@ -1063,21 +1084,15 @@
           "ref": "docs/billing-and-limits.md"
         },
         {
-          "id": "billing-v254-exclusive-cutover",
-          "gate_ids": ["bounds_abuse", "recovery", "rollout_canaries"],
-          "summary": "Execute the fenced complete R2 inventory against the exact production authority; bind the exact-reader release, application, and image; prove an empty cohort, zero writers, and zero hazards; fully drain v0.0.254; forbid rollback; retain cutover and forward-fix evidence.",
-          "ref": "docs/billing-transition-rollout.md"
-        },
-        {
           "id": "full-lifecycle-reconciliation",
           "gate_ids": ["behavior", "recovery"],
           "summary": "Complete Enterprise transitions, paid-to-paid execution and compensation (subscription schedules beyond the contact-path guard), automated dunning policy or collection mutations, refund mutations, and restore reconciliation.",
           "ref": "https://github.com/witwave-ai/witself/issues/33"
         },
         {
-          "id": "stripe-sandbox-acceptance",
+          "id": "nonzero-charge-reconciliation",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Return surfaces, portal, webhook endpoint, and CP_STRIPE_* secrets are staged dark; run the keyed cutover (provider/mode/lifecycle keys, allowlist, Stripe Tax) atop the reviewed atomic orchestrator and retain one transition and forward-fix proof; Enterprise, paid-to-paid, and refunds stay excluded.",
+          "summary": "Retain the first nonzero customer-charge reconciliation proof; zero-dollar live Checkout, webhook, invoice, downgrade, Tax activation, and GA cutover are already recorded.",
           "ref": "docs/billing-transition-rollout.md"
         }
       ]
@@ -1240,12 +1255,14 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free usage and audit records exist, and the shared external alert path (PagerDuty + dead-man on the serving cell) is now live and canary-tested; fact-specific SLOs and fact metrics wired to that path are still not retained.",
+          "summary": "Value-free usage/audit records and the accepted serving-cell alert path exist. #357 adds a tested fact DELETE 5xx-ratio rule from HTTP metrics; live loading proof, broader fact-operation instrumentation, and SLOs remain open.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/fact-service.md",
             "docs/launch-readiness.md",
-            "docs/observability-and-operations.md"
+            "docs/observability-and-operations.md",
+            "internal/server/metrics.go"
           ]
         },
         "recovery": {
@@ -1258,9 +1275,12 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Core behavior is in released code, while the guarded permanent-delete path remains disabled in the active managed cohort and lacks current live acceptance evidence.",
+          "summary": "Core behavior is released and permanent fact deletion is enabled on both cells (#312). Retained current-release preview/apply/isolation acceptance remains open.",
           "evidence": [
+            ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
+            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             "docs/fact-service.md",
+            "docs/launch-readiness.md",
             "docs/runbooks.md"
           ]
         },
@@ -1283,13 +1303,13 @@
         {
           "id": "fact-delete-canary",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Enable the guarded path for a selected cohort and retain a current preview/apply/isolation canary.",
+          "summary": "Retain a current-release preview/apply/isolation canary for permanent deletion; #312 already enabled the guarded path on both cells.",
           "ref": "docs/fact-service.md"
         },
         {
           "id": "fact-operations",
           "gate_ids": ["observability"],
-          "summary": "Define fact SLOs and connect value-free metrics to the shared external alert path.",
+          "summary": "Retain live proof for the #357 DELETE failure-ratio rule, define fact SLOs, and instrument remaining fact operations on the shared alert path.",
           "ref": "docs/observability-and-operations.md"
         }
       ]
@@ -1336,12 +1356,14 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "The serving cell runs continuous kube-prometheus-stack scraping with server/worker ServiceMonitors, PVC metrics, 14 alert rules, PagerDuty routing, and a dead-man watchdog, accepted via alert-canary and dead-man lapse proofs; the backup validation cell and any future accepting cell remain outside the monitored plane.",
+          "summary": "Serving-cell scraping, PVC metrics, routing, and PagerDuty/dead-man rollout (#264-#266) was accepted in #267. The chart now has 19 rules, including five product-family rules with promtool tests (#357); their live loading and backup/future-cell monitoring still need retained proof.",
           "evidence": [
             ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/launch-readiness.md",
-            "docs/observability-and-operations.md"
+            "docs/observability-and-operations.md",
+            "https://github.com/witwave-ai/witself/commit/50976cadc1816c1a2f37a92e2a818cb0218a1eac"
           ]
         },
         "recovery": {
@@ -1375,7 +1397,7 @@
         {
           "id": "continuous-platform-alerting",
           "gate_ids": ["observability"],
-          "summary": "Extend continuous monitoring and alert coverage to the backup validation cell and every future accepting cell; the serving-cell metrics, routing, and receiver chain is deployed and accepted.",
+          "summary": "Retain live loading and evaluation evidence for the five #357 rules, and extend monitoring to the backup and future accepting cells; serving-cell scraping, routing, and receiver acceptance are already recorded.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -1526,8 +1548,10 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; ticket retention is defined by the dark closed-account purge, and the dark support@ channel adds sender rate limits, DMARC-matched senders, and bounded fan-out; in-product intake-rate controls, an age-out sweep, and attachment handling are absent.",
+          "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge now enforces ticket deletion after the 30-day closure grace. The parked support@ channel has sender guards; in-product intake-rate controls, ticket age-out, and attachment handling remain absent.",
           "evidence": [
+            ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
+            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             "docs/data-retention-policy.md",
             "docs/security-policy.md",
             "infra/cloudflare/support-email-intake/src/index.js",
@@ -1794,9 +1818,9 @@
       "id": "plan-enforcement",
       "name": "Plans, limits, and account overrides",
       "area": "Commercial",
-      "summary": "A validated catalog defines Personal, Professional, Team, and Enterprise pricing direction, entitlements, limits, and policies; the control plane resolves account snapshots and cells enforce them with audited per-account overrides.",
+      "summary": "Personal, Professional, and Team are available through general self-service billing; Enterprise remains contact-only. The validated plan catalog defines prices, entitlements, limits, and policies; the control plane resolves snapshots and cells enforce them with audited account overrides.",
       "implementation": "implemented",
-      "managed_rollout": "limited",
+      "managed_rollout": "general",
       "docs": [
         "docs/billing-and-limits.md",
         "web/plans/plans.json"
@@ -1844,9 +1868,10 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Personal, Professional, and Team are catalog-available with ratified operator seats (Personal 1, Professional 3, Team 25) and Team's flat $250 monthly price; Enterprise remains unavailable (contact-only), and repository state alone cannot prove each live account override.",
+          "summary": "Professional and Team checkout is generally available (#307/#308); operator seats remain 1/3/25 for Personal/Professional/Team. Enterprise is contact-only. Broader dependent-feature enrollment and current per-account override acceptance remain open.",
           "evidence": [
             "docs/billing-and-limits.md",
+            "docs/launch-readiness.md",
             "web/plans/plans.json"
           ]
         },
@@ -1861,21 +1886,21 @@
       },
       "open_gates": [
         {
+          "id": "enterprise-activation",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Keep Enterprise unavailable until its dependent features and billing transitions meet their gates; Professional and Team customer checkout is already generally available.",
+          "ref": "web/plans/plans.json"
+        },
+        {
           "id": "entitlement-drift-monitoring",
           "gate_ids": ["observability"],
           "summary": "Add a value-free control-plane versus cell snapshot drift view and alert.",
           "ref": "docs/billing-and-limits.md"
         },
         {
-          "id": "professional-purchase-readiness",
+          "id": "paid-plan-feature-acceptance",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Reconcile the Professional and Team catalog-purchasable flags with dark billing, limited inbound email enrollment, and support-policy enforcement before customer checkout opens.",
-          "ref": "web/plans/plans.json"
-        },
-        {
-          "id": "team-enterprise-activation",
-          "gate_ids": ["rollout_canaries"],
-          "summary": "Keep Enterprise unavailable until its dependent features and billing transitions meet this scorecard's gates, and reconcile Team's 2026-08-24 purchasable flip (made after the paid-to-paid guard, seat enforcement, and flat pricing merged) with the still-dark billing cutover.",
+          "summary": "Verify broader paid-plan email enrollment and current per-account overrides against resolved snapshots; checkout availability and support entitlement enforcement are already implemented.",
           "ref": "web/plans/plans.json"
         }
       ]
@@ -2047,11 +2072,13 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free mailbox, rate, retention, claim, and worker metrics are continuously scraped on the serving cell with a tested PagerDuty and dead-man alert path, but no message-specific alert rules or SLO cover mailbox backlog, rates, claims, or retention.",
+          "summary": "The accepted serving-cell alert path covers generic worker health. #357 adds a tested message-retention scan-cap pressure rule. Mailbox depth and claim/lease counters are not exposed; their instrumentation, SLOs, and live rule-loading proof remain open.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/launch-readiness.md",
-            "docs/observability-and-operations.md"
+            "docs/observability-and-operations.md",
+            "internal/worker/metrics.go"
           ]
         },
         "recovery": {
@@ -2084,7 +2111,7 @@
         {
           "id": "continuous-message-alerting",
           "gate_ids": ["observability"],
-          "summary": "Add message-specific alert rules (mailbox backlog, rate, claim, failure, retention) to the live founder-open-plane rule set; the continuous scrape and tested PagerDuty/dead-man receiver already exist.",
+          "summary": "Retain live proof for the #357 retention scan-cap pressure rule; add missing mailbox-depth and claim/lease metrics and message-specific SLO alerts. Generic worker failures already reach the tested receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -2433,12 +2460,15 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Capture, outbox, retention, failure, and worker metrics exist, and the serving cell has continuous scrape, alert routing, and a canary-tested PagerDuty/dead-man receiver whose generic error-ratio rule caught the NUL capture incident; transcript-outbox and retention-backlog alert rules are still not wired.",
+          "summary": "The serving-cell scrape and receiver are accepted. #357 adds tested entries:batch rejection-ratio and retention scan-cap pressure rules. Client-outbox metrics are not exposed; live loading proof, outbox instrumentation, and retention age/throughput SLOs remain open.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/launch-readiness.md",
             "docs/observability-and-operations.md",
-            "docs/transcript-retention.md"
+            "docs/transcript-retention.md",
+            "internal/server/metrics.go",
+            "internal/worker/metrics.go"
           ]
         },
         "recovery": {
@@ -2470,7 +2500,7 @@
         {
           "id": "continuous-retention-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect outbox and retention backlog, failure, age, and throughput metrics to a tested external alert receiver.",
+          "summary": "Retain live proof for the #357 batch-rejection and retention scan-cap pressure rules; add client-outbox instrumentation and define retention age/throughput SLOs on the accepted alert path.",
           "ref": "docs/observability-and-operations.md"
         },
         {
