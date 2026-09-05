@@ -1772,6 +1772,20 @@ test("Worker version verification rejects stamped script and runtime drift", () 
       },
       /runtime contract/,
     ],
+    [
+      // Cloudflare now reports the Worker's own name on the container entry;
+      // any other name is a different Worker's container.
+      (value) => { value.resources.script_runtime.containers[0].name = "stamped-attacker"; },
+      /runtime contract/,
+    ],
+    [
+      (value) => { value.resources.script_runtime.containers[0].instance_type = "basic"; },
+      /runtime contract/,
+    ],
+    [
+      (value) => { value.resources.script_runtime.containers.push({ class_name: "Backend" }); },
+      /runtime contract/,
+    ],
   ]) {
     const candidate = deployedVersion();
     mutate(candidate);
