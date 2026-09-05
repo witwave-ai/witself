@@ -1550,7 +1550,6 @@
           "state": "conditional",
           "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge deletes tickets after the 30-day closure grace. API/CLI ticket creation is rate-limited per account; a default-off bounded worker resolves stale awaiting-customer tickets after a human reply. Attachment handling remains absent.",
           "evidence": [
-            ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
             ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             "docs/data-retention-policy.md",
             "docs/security-policy.md",
