@@ -235,9 +235,9 @@ deployment cells under a thin global control plane.
 
 - [runbooks.md](runbooks.md): hand-testing and operator recipes for the live
   CLI, account lifecycle, integrations, billing, retention, and recovery paths.
-- [workflow-scripts.md](workflow-scripts.md): step-by-step CLI workflow scripts
-  for install, setup, billing, memories, facts, policy, groups, messaging, MCP,
-  self-hosted, and local mode.
+- [workflow-scripts.md](workflow-scripts.md): shipped CLI workflows, with unimplemented targets marked separately
+  for account onboarding, billing, memories, facts, messaging, client-held
+  secrets, MCP, transcripts, the dashboard, and self-hosted bootstrap.
 - [cli-command-surface.md](cli-command-surface.md): human and agent CLI command
   design, including local runtime discovery and bulk integration lifecycle
   operations.

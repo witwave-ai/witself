@@ -5,7 +5,7 @@
       "id": "access-policy-security-groups",
       "name": "Cross-agent access policies and security groups",
       "area": "Authorization",
-      "summary": "Default-deny, realm-local cross-agent memory and fact policy plus group-owned identity are specified in detail, but the policy engine, group lifecycle, enforcement, and operational surfaces are not implemented.",
+      "summary": "Current agent ownership, account operator roles, and curator profiles are reconciled with the wire contracts. Cross-agent memory/fact policy, security groups, and group-owned identity remain targets without an evaluator or lifecycle implementation.",
       "implementation": "specified",
       "managed_rollout": "not_started",
       "docs": [
@@ -16,7 +16,7 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Policy, permission, group, membership, collective-memory, and default-deny behavior are specified but have no store, API, CLI, or MCP implementation.",
+          "summary": "Policy evaluation, permissions, group membership, and collective ownership require final contracts and store/API/CLI/MCP implementation; capabilities report policies and groups as not implemented.",
           "evidence": [
             "docs/access-policy.md",
             "docs/security-groups.md",
@@ -25,14 +25,14 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "The intended realm-local authority and operator override are documented, but no runtime evaluator enforces them.",
+          "summary": "Cross-agent authority and operator permissions remain target decisions; current account roles and agent ownership do not provide a policy evaluator or blanket override.",
           "evidence": [
             "docs/access-policy.md"
           ]
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Default deny, non-nesting, guarded membership, filters, and audit requirements are designed but not executable protections.",
+          "summary": "Membership administration, permission filters, mutation previews, precedence, and audit protections require settled contracts and executable enforcement.",
           "evidence": [
             "docs/access-policy.md",
             "docs/api-contract.md",
@@ -49,7 +49,7 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Membership rollback, policy invalidation, archive/import, and crash recovery remain design requirements rather than tested behavior.",
+          "summary": "Group deletion, ownership recovery, membership rollback, invalidation, archive/import, and crash recovery remain target work without tested behavior.",
           "evidence": [
             "docs/access-policy.md",
             "docs/security-groups.md"
@@ -63,21 +63,19 @@
           ]
         },
         "docs_support": {
-          "state": "conditional",
-          "summary": "The design is extensive, but contracts must be reconciled with the current client-custodied vault, fact deletion, collaboration, and plan surfaces before implementation.",
+          "state": "pass",
+          "summary": "access-policy-contract-reconciliation is complete: docs pin principals, account/realm scoping, credential wire shapes, and agent-owned fact/memory access, and label policy/groups and future authority as targets.",
           "evidence": [
+            "cmd/witself/main.go",
             "docs/access-policy.md",
-            "docs/security-groups.md"
+            "docs/api-contract.md",
+            "docs/security-groups.md",
+            "internal/server/server.go",
+            "internal/store/auth.go"
           ]
         }
       },
       "open_gates": [
-        {
-          "id": "access-policy-contract-reconciliation",
-          "gate_ids": ["docs_support"],
-          "summary": "Reconcile the drafts with current memory, fact, collaboration, vault, and authorization contracts and pin the versioned wire shapes.",
-          "ref": "docs/api-contract.md"
-        },
         {
           "id": "access-policy-core-implementation",
           "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy"],
@@ -1215,7 +1213,7 @@
       "id": "facts",
       "name": "Durable facts",
       "area": "Memory",
-      "summary": "Stable subjects, immutable assertions, candidates, typed values, primary resolution, guarded permanent deletion, archive/import, and per-agent fact limits are implemented; advanced conflict and cross-agent policy remain later work.",
+      "summary": "Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, and per-agent fact limits are implemented. Advanced authority, predicate registries, reminder delivery, and cross-agent facts remain deferred to the access-policy rock.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_feature_keys": [
@@ -1231,10 +1229,13 @@
       "gates": {
         "behavior": {
           "state": "pass",
-          "summary": "Subject resolution, assertions, candidates, review, primary selection, typed values, deletion preview/apply, and archive/import are implemented across store, API, CLI, and MCP.",
+          "summary": "Subject resolution, resolved assertions, candidates, conflict-fenced review, typed values, deletion preview/apply, and archive/import are implemented. Stored primary flags and promotion/demotion are targets.",
           "evidence": [
             "docs/fact-service.md",
-            "docs/facts-model.md"
+            "docs/facts-model.md",
+            "internal/server/fact.go",
+            "internal/store/fact.go",
+            "internal/store/fact_candidate.go"
           ]
         },
         "entitlement_policy": {
@@ -1286,10 +1287,15 @@
         },
         "docs_support": {
           "state": "conditional",
-          "summary": "Core facts and deletion are documented, but advanced conflict authority, predicate registries, reminder delivery, and cross-agent policy remain explicitly unresolved.",
+          "summary": "Core fact contracts are reconciled with store, routes, and CLI/MCP. advanced-fact-policy remains open under the access-policy rock for authority rules, predicate registries, reminder delivery, and cross-agent ownership.",
           "evidence": [
+            "cmd/witself/mcp.go",
             "docs/fact-service.md",
-            "docs/facts-model.md"
+            "docs/facts-model.md",
+            "internal/server/fact.go",
+            "internal/store/fact_candidate.go",
+            "internal/store/fact_temporal.go",
+            "internal/store/fact_value_type.go"
           ]
         }
       },
@@ -1297,7 +1303,7 @@
         {
           "id": "advanced-fact-policy",
           "gate_ids": ["docs_support"],
-          "summary": "Resolve authority/conflict policy, predicate registries, reminder delivery, and cross-agent fact access before declaring the broader model complete.",
+          "summary": "Deferred to the access-policy rock: define authority/conflict policy, governed predicate registries, reminder delivery, and cross-agent/group fact access. Current candidate fences, type validation, and occurrence queries do not implement those policies.",
           "ref": "docs/facts-model.md"
         },
         {
@@ -1727,7 +1733,7 @@
       "id": "operator-authentication",
       "name": "Managed operator authentication",
       "area": "Security",
-      "summary": "Browser PKCE, device-code fallback, secure local session custody, revocation, and managed operator authorization are specified, while the current CLI implements only bootstrap-token-file exchange and agent-token flows.",
+      "summary": "Managed account create/adopt, bootstrap exchange, account roles, and token mint/revoke are implemented. Hosted browser PKCE, device-code sessions, refresh, logout, and OS credential-store custody remain targets.",
       "implementation": "specified",
       "managed_rollout": "not_started",
       "docs": [
@@ -1752,7 +1758,7 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "PKCE, short-lived codes, no-password CLI handling, revocation, and secure local storage are design requirements without executable replay, phishing, callback, or device-code abuse tests.",
+          "summary": "PKCE, short-lived codes, hosted-session revocation, and OS credential-store custody remain targets without executable replay, phishing, callback, or device-code abuse tests; ordinary token revocation already exists.",
           "evidence": [
             "docs/operator-auth.md",
             "docs/threat-model.md"
@@ -1768,7 +1774,7 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Session revocation, credential-store fallback, lost-device recovery, and provider outage behavior are specified but not implemented or drilled.",
+          "summary": "Hosted-session revocation, credential-store fallback, lost-device recovery, and provider outage behavior remain target work requiring contracts, implementation, and drills.",
           "evidence": [
             "docs/operator-auth.md"
           ]
@@ -1781,20 +1787,19 @@
           ]
         },
         "docs_support": {
-          "state": "conditional",
-          "summary": "The target is documented, but policy and security-group dependencies plus the current bootstrap-only command boundary need an implementation-ready contract pass.",
+          "state": "pass",
+          "summary": "operator-auth-contract-reconciliation is complete: onboarding, roles, bootstrap/whoami wire shapes, and current CLI token lifecycle are pinned; hosted sessions and policy/group authority remain explicit targets.",
           "evidence": [
-            "docs/operator-auth.md"
+            "cmd/witself/main.go",
+            "docs/api-contract.md",
+            "docs/operator-auth.md",
+            "internal/server/server.go",
+            "internal/store/auth.go",
+            "internal/store/operator.go"
           ]
         }
       },
       "open_gates": [
-        {
-          "id": "operator-auth-contract-reconciliation",
-          "gate_ids": ["docs_support"],
-          "summary": "Reconcile the target with current account onboarding, implemented roles, unimplemented policies/groups, CLI commands, hosted endpoints, and credential-store support.",
-          "ref": "docs/operator-auth.md"
-        },
         {
           "id": "operator-auth-core-implementation",
           "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy", "recovery"],
