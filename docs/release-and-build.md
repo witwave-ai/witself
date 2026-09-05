@@ -92,6 +92,39 @@ therefore not complete until the replacement pods are Ready and report the
 expected build from `/v1/version`. This startup behavior must be considered
 before any future explicit migration Job is introduced.
 
+### Cloudflare Worker Dependencies
+
+Wrangler is pinned once in
+[`infra/cloudflare/wrangler-version.json`](../infra/cloudflare/wrangler-version.json)
+(currently `4.128.0`). Every Worker's gate checks its installed Wrangler and all
+four exact manifest pins against that file. To bump, update the shared version
+and run `npm install --save-dev --save-exact wrangler@<version>` in each of
+`infra/cloudflare/{control-plane,agent-email,agent-email-send,support-email-intake}`;
+retain all four manifest and lockfile changes. Then run `npm ci`, `npm test`, and
+`npm run bundle:check` in each directory, followed by `make check-infra` for the
+remaining infrastructure gates. Dependabot groups Wrangler updates across these
+four directories into one weekly PR; update the shared version file in that PR
+before merging, because Dependabot does not update this custom JSON file.
+
+Container SDK evaluation (2026-09-05): the control-plane manifest already uses
+`@cloudflare/containers: ^0.3.7`, locked to `0.3.7`, after merged PR #349
+(`e5a86ae`) upgraded it from `^0.0.28`; this Wrangler change leaves it untouched.
+`npm view @cloudflare/containers version` reports `0.3.7` as latest. The
+[upstream changelog](https://github.com/cloudflare/containers/blob/main/CHANGELOG.md)
+highlights bridge-relevant changes since `0.0.28`: port-readiness and concurrent
+cold-start fixes, response-body activity tracking and bodyless-response fixes,
+subclass sleep timeout handling, and startup/stop-state race fixes through
+`0.3.7`. The separate SDK follow-up must retain sandbox deployment evidence for
+the existing upgrade and any later candidate: deploy the exact Worker/container
+build to isolated Cloudflare resources; verify `/v1/version`, concurrent cold
+requests through `getContainer(..., "singleton").fetch()` to port 8080,
+streamed and bodyless responses with preserved status/headers, the ten-minute
+idle sleep and wake cycle, and `destroy()` plus `startAndWaitForPorts()` applying
+fresh allowlisted environment values before lifecycle activation succeeds.
+Exercise startup failure/recovery and rollback to the prior build without
+losing Durable Object state. Local mocked bridge tests and bundle checks do
+not establish this runtime proof; no deployment was performed in this slice.
+
 ## Goals
 
 - Build Witself as a Go project with one shared core, one public CLI/MCP
