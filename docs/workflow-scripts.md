@@ -1,42 +1,29 @@
 # Witself Workflow Scripts
 
-Status: draft. These are script-style product walkthroughs for the most common
-human and agent tasks. They are meant to expose CLI gaps before implementation.
+Status: current CLI walkthroughs, reviewed 2026-09-04 against the
+[command dispatcher](../cmd/witself/main.go), its handlers, and `witself --help`.
+Sections marked **Roadmap** describe unshipped workflows and contain no runnable
+Witself commands. The broader target contract lives in
+[cli-command-surface.md](cli-command-surface.md).
 
-The commands are examples of intended behavior. They should become smoke tests
-or docs tests after the CLI exists.
+Replace example account names, addresses, IDs, file paths, and idempotency keys
+with your own. Reuse a key only when retrying the same logical operation. Put
+flags before positional arguments; several commands use Go's flag parser without
+support for trailing flags.
 
-Narrative-memory amendment (accepted 2026-07-14): these examples use the
-client-side capture/curation workflow in
-[narrative-memory-and-curation.md](narrative-memory-and-curation.md). PostgreSQL
-lexical recall is the baseline, Witself never calls a backend model, optional
-vectors are client-supplied, and provider-native memory is used only when the
-user explicitly selects it.
+Witself's open plane stores facts, narrative memories, transcripts, and messages.
+The sealed plane stores client-encrypted agent secrets. Narrative capture and
+curation are client-authored; PostgreSQL lexical recall is the baseline, optional
+vectors are client-supplied, and the backend performs no model inference. See
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
-Sealed-plane custody amendment (accepted 2026-07-18):
+Sealed-value operations require the agent's client-held vault key as well as its token.
+The backend holds no AVK key material and offers no server-side decrypt path.
+Ordinary secret inventory is redacted; explicit secret reveal and TOTP commands
+return values through the active client. Archives contain encrypted sealed
+values, never AVKs or plaintext secret/TOTP values. See
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
-storage-encryption references are unaffected.
-
-Witself is one product with two data planes. These walkthroughs cover both. The
-**open plane** is the Witself identity payload: adding and recalling memories,
-setting and reading facts, granting cross-agent access through policy, organizing
-agents into security groups, exchanging messages, and exporting a whole-account
-archive. The **sealed plane** is agent credential material: creating and
-revealing secrets, enrolling TOTP and generating codes, generating passwords, and
-injecting secret references into a subprocess at runtime. The platform spine
-(install, auth, setup, token files, MCP, self-host, local dev) is shared by both
-planes.
-
-The sealed-plane carve-outs hold in every script that touches a secret: secret
-values and TOTP seeds are never embedded, never recalled, never in the
-self-digest, never ingested, and never plaintext-exported. Plaintext leaves the
-sealed plane only through the explicit, audited value-returning operations
-(`secret reveal`, `totp code`, value-returning reference resolution, and
-`witself run`). See [secret-model.md](secret-model.md).
+[client-custodied vault contract](client-custodied-agent-vault.md).
 
 ## 1. Install The CLI
 
@@ -70,88 +57,72 @@ the binary installer and the isolated Codex integration contract; that is not
 yet an end-to-end certification of a signed-in Codex model or of every Witself
 provider on Windows.
 
-Optional shell completion:
+Inspect the installed command list:
 
 ```sh
-witself completion zsh --install
+witself --help
 ```
 
-Inspect backend capabilities before doing anything expensive:
+`witself version` and `witself --help` work without authentication. Shell
+completion and a standalone capability-discovery command remain roadmap
+surface; they are not dispatched by this CLI.
+
+## 2. First Managed Account, Realm, And Agents
+
+Read the published terms and privacy policy, then create a managed account:
 
 ```sh
-witself capabilities --json
-```
-
-Expected behavior:
-
-- Install should not require a web dashboard.
-- `witself version` should work without auth.
-- `witself capabilities` should show the default managed Witself Cloud endpoint
-  when no endpoint/profile is configured.
-- `witself capabilities` should report lexical memory recall as available and
-  report optional client-supplied vector-profile support independently. It does
-  not report a backend model or embedding credential because none exists.
-
-## 2. First Managed Account, Realm, Agents, Promo Code, And Checkout
-
-Human operator login:
-
-```sh
-witself auth login
-```
-
-Headless operator login:
-
-```sh
-witself auth login --device-code --no-browser
-```
-
-Create or select the managed account, create the realm, create agents, write
-token files, apply a promo code, and start checkout:
-
-```sh
-mkdir -p ./witself-tokens
-
-witself setup \
-  --account "Acme Agents" \
+witself legal terms
+witself legal privacy
+witself account create \
+  --name acme \
   --email ops@example.com \
-  --billing-email billing@example.com \
-  --realm prod \
-  --agent archivist \
-  --agent coordinator \
-  --token-dir ./witself-tokens \
-  --plan team \
-  --promo-code FOUNDERS25 \
-  --checkout \
-  --open \
-  --json > ./witself-setup.json
+  --display-name "Acme Agents" \
+  --accept-terms
 ```
 
-If the checkout remains pending, inspect or watch the hosted provider session:
+When signup requests a Turnstile challenge, open the URL printed by the CLI,
+complete the check, and rerun the same command with `--challenge TOKEN`.
+Complete email verification and inspect the account status before provisioning
+agents:
 
 ```sh
-witself billing sessions show hps_123 --watch --timeout 10m
+witself account status --account acme --json
 ```
 
-Verify setup:
+Account creation saves the account binding and operator credential locally.
+The managed path uses that binding; `auth login` is the bootstrap-token exchange
+shown in section 17, not a browser or device-code login.
+
+Create the realm and agents, substituting the realm ID returned by creation:
 
 ```sh
-witself whoami --show-permissions
-witself billing show --show-plan --show-payment-method
-witself billing usage --show-limits
-witself agent list
+witself realm create --account acme prod
+witself realm list --account acme --json
+witself agent create --account acme --realm REALM_ID archivist
+witself agent create --account acme --realm REALM_ID coordinator
+witself agent list --account acme --realm REALM_ID --json
 ```
 
-Expected behavior:
+Mint a token for each returned agent ID. With a managed account and no `--out`,
+the CLI writes each full agent token into its canonical local account/realm/agent
+path:
 
-- `witself setup` defaults to managed Witself Cloud.
-- Account, realm, and agent creation are idempotent by name.
-- Token files are owner-only and are not overwritten unless reuse or rotation
-  was explicitly requested.
-- Promo code failure should be a clear billing/setup error, not a partial
-  identity setup failure.
-- Hosted checkout output should include a session ID, URL, expiration, and
-  next command.
+```sh
+witself token create --account acme --agent ARCHIVIST_AGENT_ID
+witself token create --account acme --agent COORDINATOR_AGENT_ID
+```
+
+Use the saved account for the billing and agent examples that follow:
+
+```sh
+export WITSELF_ACCOUNT=acme
+export WITSELF_REALM=prod
+export WITSELF_AGENT=archivist
+```
+
+The combined setup command, setup-time plan/promo flags, and hosted-session
+watch command remain roadmap surface. Use the separate billing commands below.
 
 ## 3. Add Billing Info Later
 
@@ -194,323 +165,141 @@ witself plan upgrade \
   team
 ```
 
-Crypto payment rail example (roadmap only; not implemented):
+Inspect the resulting billing state and effective plan:
 
 ```sh
-witself billing crypto quote \
-  --subscription sub_123 \
-  --asset USDC \
-  --network base \
-  --currency usd \
-  --json
-
-witself billing crypto checkout \
-  --quote cpq_123 \
-  --open \
-  --json
+witself billing show --json
+witself plan status --full --json
 ```
 
-Expected behavior:
+The CLI uses hosted provider flows and does not accept raw payment credentials.
+A plan-upgrade response can include a checkout URL; open the returned URL to
+complete that flow. There is no hosted-session watch subcommand.
 
-- The CLI never accepts raw card numbers, bank credentials, wallet private keys,
-  wallet seed phrases, or raw wallet credentials.
-- Hosted setup returns a provider action when customer input is required;
-  `witself billing show` reports the resulting state.
-- If implemented, crypto payment would be a payment rail, not a Witself
-  utility-token requirement. No current CLI or provider integration implements
-  the example above.
+**Roadmap:** crypto quote/checkout commands and crypto-provider integration are
+not implemented. The contract is described in
+[billing-and-limits.md](billing-and-limits.md).
 
-## 4. Agent Runtime Starts From A Token File
+## 4. Agent Runtime Starts From Saved Credentials Or A Token File
 
-An agent process should be able to start with only a mounted token file:
+Use the managed selectors established in section 2:
 
 ```sh
-export WITSELF_TOKEN_FILE=/run/secrets/witself-agent-token
-export WITSELF_REALM=prod
-
-witself whoami --json
+witself self show --json
 witself memory list --json
 witself secret list --json
 ```
 
-Local file example for development:
+For a mounted token, pass both the endpoint and token file explicitly:
 
 ```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
-witself whoami
+witself self show \
+  --endpoint https://witself.internal.example.com \
+  --token-file /run/secrets/witself-agent-token \
+  --json
 ```
 
-Expected behavior:
+The token determines the authenticated agent. `--agent` selects a local
+credential and, on the self-digest path, checks the token-bound identity; it does
+not grant authority. `WITSELF_TOKEN_FILE` is not read by the CLI's connection
+resolver. Sealed-value operations also require a matching local vault key;
+section 11 covers that custody requirement.
 
-- The token determines the named agent identity.
-- Passing `--agent` is not authentication; the actor is always derived from the
-  token.
-- Ephemeral pods can restart and reuse the same mounted token file.
+## 5. Agent Captures And Recalls Memories
 
-## 5. Agent Adds And Recalls Memories
-
-Add a memory as the token-bound agent:
+Capture client-authored narrative with an explicit evidence status and retry key:
 
 ```sh
-witself memory add \
-  --content "Operator prefers terse status updates, no preamble." \
-  --kind profile \
-  --tag preferences \
-  --tag operator \
+witself memory capture \
+  --content "Completed the Q2 migration runbook on 2026-06-24; the validation step caught a missing index before cutover." \
+  --kind lesson \
+  --tag migration \
   --salience 0.8 \
-  --source self \
+  --occurred-from 2026-06-24T00:00:00Z \
+  --evidence-unavailable-reason manual-entry \
+  --idempotency-key migration-lesson-001 \
   --json
 ```
 
-Add an episodic memory linked to a fact:
+Use unavailable evidence only when no exact source can be supplied. For a
+recorded interaction, use `--evidence-transcript`, `--evidence-from-sequence`,
+and `--evidence-until-sequence` with the actual transcript ID and sequence range.
+
+Recall ranked narrative memory with kind, tag, and event-time filters:
 
 ```sh
-witself memory add \
-  --content "Completed the Q2 migration runbook end to end on 2026-06-24." \
-  --kind episodic \
+witself memory recall \
+  --kind lesson \
   --tag migration \
-  --link witself://fact/home-region \
-  --json
-```
-
-Recall ranked narrative memory (the core Witself differentiator):
-
-```sh
-witself memory recall "what does the operator want from status updates" \
-  --kind profile \
+  --occurred-from 2026-06-01T00:00:00Z \
   --limit 5 \
-  --json
+  --json \
+  "migration validation"
 ```
 
-Recall blended with filters and time:
+Read the returned memory ID and use its current version for an adjustment:
 
 ```sh
-witself memory recall "migration work" \
-  --tag migration \
-  --since 2026-06-01 \
-  --json
-```
-
-Read one memory deterministically by id, then adjust it:
-
-```sh
-witself memory read mem_123 --json
-
-witself memory adjust mem_123 \
-  --content "Operator prefers terse status updates and a one-line TL;DR." \
+witself memory show --json mem_123
+witself memory adjust \
+  --expected-version 1 \
   --salience 0.9 \
-  --json
+  --reason "migration lesson remains useful" \
+  --idempotency-key migration-lesson-adjust-001 \
+  --json \
+  mem_123
 ```
 
 Expected behavior:
 
-- `memory recall` always has a deterministic PostgreSQL lexical baseline using
-  keyword, tag, kind, recency, time, and salience signals.
-- `memory read`/`memory list` work by id/metadata and never require a model.
-- A compatible vector profile may add client-supplied memory and query vectors
-  later. Missing, stale, or incompatible vectors fall back to lexical ranking
-  and report vector coverage; the backend never generates them or silently
-  returns unranked results.
-- `memory adjust` appends a new version to edit history; prior versions are
-  retained for audit and export.
+- Capture requires evidence and an idempotency key; adjustment requires the
+  current version and its own idempotency key.
+- Recall uses a deterministic PostgreSQL lexical baseline. Optional compatible
+  client-supplied vectors can contribute to hybrid ranking; the backend never
+  generates vectors.
+- Show/list retrieve records without a model. Adjustment creates a new version;
+  history remains available through `memory history`.
 
-## 6. Agent Sets Facts And Promotes A Primary
+## 6. Agent Sets And Reads Facts
 
-Set facts (upsert by name within the owning agent):
+Set durable assertions by subject and predicate. The default subject is `self`:
 
 ```sh
-witself fact set display-name "Archivist" --json
-
-witself fact set home-region us-east-1 \
-  --format string \
-  --source self \
-  --json
+witself fact set --json identity/name "Archivist"
+witself fact set --type string --json preferences/home-region us-east-1
+witself fact set --sensitive --json contact/email archivist@example.com
 ```
 
-Set a sensitive fact (redacted by default in list/scan, but an ordinary
-authorized read returns the value — there is no reveal ceremony):
+Read an exact assertion or list redacted inventory:
 
 ```sh
-witself fact set email archivist@example.com \
-  --format email \
-  --sensitive \
-  --json
-```
-
-Promote a fact to primary (atomic; demotes any prior primary of the same logical
-kind):
-
-```sh
-witself fact set email archivist@example.com --primary --json
-```
-
-Read facts deterministically by name:
-
-```sh
-witself fact get email --json
-witself fact get home-region
-```
-
-List facts (primary facts surface first; sensitive values redacted by default):
-
-```sh
+witself fact get --json contact/email
+witself fact get preferences/home-region
 witself fact list --json
-witself fact list --include-sensitive --json
 ```
 
-Expected behavior:
+An intentional exact read can return a sensitive value; broad lists redact it
+unless `--include-sensitive` is explicit. Other subjects use the shipped
+`fact subject` family and the `--subject` flag. See
+[fact-service.md](fact-service.md).
 
-- Lookup is deterministic by name: `fact get email` returns the one true value.
-- Setting `--primary` is an atomic promotion that demotes the prior primary of
-  the same logical kind; at most one primary per logical kind per owner.
-- Primary facts are identity anchors and are surfaced first in `whoami`,
-  profile, and export output.
-- Only `sensitive` facts are redacted by default; reading one is an ordinary
-  authorized read.
+**Roadmap:** the older name/format examples and `fact set --primary` workflow do
+not describe the shipped fact CLI. Its current flags are `--subject`, `--type`,
+and `--cardinality`; it has no primary-promotion flag.
 
-## 7. Operator Grants Cross-Agent Access With Policy
+## 7. Cross-Agent Policy Workflows — Roadmap
 
-List agents:
+**Roadmap:** policy creation, policy testing, and policy-authorized cross-agent
+recall are target contracts. The CLI dispatches no `policy` family, and
+`memory recall` has no owner-agent targeting flag. These are not runnable
+customer workflows. See [access-policy.md](access-policy.md).
 
-```sh
-witself agent list --json
-```
+## 8. Security Groups And Group-Owned Records — Roadmap
 
-Test whether access would be allowed *before* creating a policy (the canonical
-dry-run for access decisions):
-
-```sh
-witself policy test \
-  --subject coordinator \
-  --permission read \
-  --target archivist \
-  --scope memory \
-  --json
-```
-
-Create a default-deny-overriding allow policy: let `coordinator` read
-`archivist`'s memories, filtered to one kind:
-
-```sh
-witself policy create \
-  --subject coordinator \
-  --permission read \
-  --target archivist \
-  --scope memory \
-  --filter-kind profile \
-  --description "coordinator can read archivist profile memories" \
-  --json
-```
-
-Confirm the decision now flips to allow, returning the deciding policy id:
-
-```sh
-witself policy test \
-  --subject coordinator \
-  --permission read \
-  --target archivist \
-  --scope memory \
-  --filter-kind profile \
-  --json
-```
-
-Grant a more dangerous verb with guardrails — `curate` requires a reason and
-supports dry-run:
-
-```sh
-witself policy create \
-  --subject coordinator \
-  --permission curate \
-  --target archivist \
-  --scope memory \
-  --reason "coordinator maintains archivist's shared profile" \
-  --dry-run \
-  --json
-```
-
-Now `coordinator` can recall over `archivist`'s memories (policy-gated, metered
-as a cross-agent access):
-
-```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
-
-witself memory recall "operator preferences" \
-  --owner-agent archivist \
-  --json
-```
-
-Expected behavior:
-
-- Cross-agent access is default-deny; absence of a matching allow policy is a
-  deny, and `policy.access_denied` is audited.
-- `policy test` returns the deciding policy id or a deny reason, via CLI and MCP.
-- `curate` and `forget` across agents require an audit `--reason`, support
-  `--dry-run`, and require confirmation unless `--yes`.
-- Every cross-agent mutation is fully attributed in audit (for example "memory
-  `mem_…` of agent A was curated by agent B under policy `pol_…`").
-
-## 8. Operator Creates A Security Group And Adds Members
-
-Create a group within the realm:
-
-```sh
-witself group create analysts \
-  --description "Agents that share analytical context" \
-  --json
-```
-
-Add members:
-
-```sh
-witself group add-member analysts --agent archivist --json
-witself group add-member analysts --agent coordinator --json
-```
-
-Show the group and its bound policies:
-
-```sh
-witself group show analysts --json
-```
-
-Bind a policy with the group as subject (every member inherits the permission)
-and another with the group as target:
-
-```sh
-witself policy create \
-  --subject analysts \
-  --permission read \
-  --target shared-context \
-  --scope memory \
-  --json
-
-witself policy create \
-  --subject coordinator \
-  --permission contribute \
-  --target analysts \
-  --scope memory \
-  --json
-```
-
-Write a group-scoped shared memory (collective memory owned by the group, not a
-single agent):
-
-```sh
-witself memory add \
-  --group analysts \
-  --content "Shared finding: Q2 latency regressed after the cache change." \
-  --kind semantic \
-  --tag finding \
-  --json
-```
-
-Expected behavior:
-
-- A security group is both a policy subject and a policy target.
-- Membership is managed by operators and by agents holding `group:manage`.
-- As subject, a group grants every member the policy's permission on the target.
-- Group-owned records use the same `mem_`/`fact_` shapes with a group owner, and
-  group-owned destructive actions follow the cross-agent guardrails (`--reason`,
-  `--dry-run`, confirmation, soft-delete by default).
+**Roadmap:** group creation, membership management, group policy subjects, and
+group-owned writes are not exposed by the shipped CLI. There is no `group`
+dispatch family or `--group` ownership flag on current memory capture, fact set,
+or secret create. See [security-groups.md](security-groups.md).
 
 ## 9. Agents Exchange Messages
 
@@ -518,7 +307,7 @@ Send a message to another agent. The sender is always derived from the token,
 never from input:
 
 ```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
+export WITSELF_AGENT=coordinator
 
 witself message send \
   --to archivist \
@@ -577,14 +366,12 @@ witself message request select mrq_123 \
   --json
 ```
 
-Read the inbox as the recipient agent, then read one message and acknowledge it:
+Inspect unread metadata as the recipient agent:
 
 ```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
+export WITSELF_AGENT=archivist
 
 witself message list --unread --json
-witself message read msg_123 --json
-witself message ack msg_123 --json
 ```
 
 The implemented stateless receive path waits for new metadata without
@@ -594,9 +381,9 @@ busy-polling or changing read/ack state:
 witself message listen --timeout 20 --json
 ```
 
-For a separate manual fenced-processing smoke test, claim a fresh inbound
-message before reading it, then atomically publish one derived result and
-acknowledge only after completion succeeds:
+For ordinary actionable work, claim a fresh inbound message before reading it,
+then atomically publish one derived result and acknowledge only after completion
+succeeds:
 
 ```sh
 witself message claim msg_124 --lease 2m --idempotency-key claim-msg-124 --json
@@ -663,8 +450,8 @@ Expected behavior:
   structurally impossible through the API.
 - Message bodies and payloads are untrusted input to the receiving agent,
   especially when a message would drive a memory or fact write.
-- A message grants no policy by itself; a message-driven cross-agent write still
-  requires a policy.
+- A message grants no authority to write another agent's records. The shipped
+  realm-local mailbox does not implement the target policy workflows in section 7.
 - Current send, deliver, read/ack, and processing claim/renew/release/complete
   transitions are audited without content. An active foreground client owns
   the startup listen, open-request offer/ranking/execution, and inference; the
@@ -713,260 +500,108 @@ Expected behavior:
 
 ## 11. Agent Creates And Reveals A Sealed Secret
 
-The sealed plane is where credential material lives. Where a fact is plainly
-readable and a memory is recalled semantically, a secret is enveloped at rest and
-crosses into plaintext only through the audited reveal ceremony. See
-[secret-model.md](secret-model.md).
-
-Create a login secret, generating the password into a sensitive field so the
-value is enveloped immediately and never printed:
+Select the token-bound agent and inspect its client-held key state:
 
 ```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
-export WITSELF_REALM=prod
-
-witself secret create github/builder \
-  --description "GitHub login created by archivist" \
-  --template login \
-  --field username=archivist@example.com \
-  --field url=https://github.com/login \
-  --generate-sensitive password \
-  --generate-length 40 \
-  --generate-no-ambiguous \
-  --tag signup \
-  --tag github \
-  --json
+export WITSELF_AGENT=archivist
+witself vault key status --json
 ```
 
-Store a token read from stdin so the plaintext never lands in shell history or a
-flag value:
+For an agent with no existing vault binding, initialize the first local key:
 
 ```sh
-printf '%s' "$GITHUB_PAT" | witself secret create github/pat \
-  --description "GitHub personal access token for archivist" \
-  --template api-key \
-  --field url=https://github.com/settings/tokens \
-  --sensitive-stdin api-key \
-  --json
+witself vault key init --json
 ```
 
-Show the secret — sensitive fields are redacted, returning a resolvable
-`value_ref` instead of plaintext:
+If the backend already has a binding and this installation lacks the matching
+key, enroll the installation with the existing key or recover it using the
+[vault custody workflow](client-custodied-agent-vault.md). A token alone cannot
+decrypt secrets, and initializing a replacement key is not a recovery path.
+
+Create a structured login secret from strict JSON. Public fields are explicitly
+non-sensitive; the password is generated locally, encrypted, and omitted from
+creation output:
 
 ```sh
-witself secret show github/builder --show-tags --show-access --json
+witself secret create \
+  --stdin \
+  --idempotency-key github-builder-create-001 \
+  --json <<'JSON'
+{
+  "name": "github/builder",
+  "description": "GitHub login created by archivist",
+  "template": "login",
+  "tags": ["github"],
+  "fields": [
+    {"name": "username", "kind": "username", "sensitive": false, "value": "archivist@example.com"},
+    {"name": "url", "kind": "url", "sensitive": false, "value": "https://github.com/login"},
+    {"name": "password", "kind": "password", "sensitive": true, "generate_password": true,
+     "password_policy": {"length": 40, "exclude_ambiguous": true}}
+  ]
+}
+JSON
 ```
 
-Reveal exactly one sensitive field only when the value is actually needed (the
-reveal ceremony; audited as `secret.reveal`, metered as `secret_read`):
+Show redacted field inventory, then explicitly reveal one field when needed:
 
 ```sh
-witself secret reveal github/builder password --reason "fill signup form"
-witself secret reveal github/builder password --json
+witself secret show --json github/builder
+witself secret reveal github/builder password
 ```
 
-Expected behavior:
-
-- `secret show`/`secret list`/`secret scan` never return sensitive values; they
-  return metadata plus `value_ref` placeholders.
-- `secret reveal` returns exactly one named field, requires `secret:reveal` (own
-  secret) or a matching grant/realm role, and is always audited; the plaintext is
-  never written to the audit row, logs, metrics, or errors.
-- Client-side decrypt is the default; managed token-only pods use the
-  capability-gated `server_side_decrypt` path, flagged in the reveal audit record.
-  See [key-hierarchy.md](key-hierarchy.md).
-- Sealed-plane carve-out: secret values are never embedded, never recalled, never
-  in the self-digest, never ingested, and never plaintext-exported. The agent does
-  not need to keep credentials in prompt memory or project files.
+The current create interface takes `--file FILE` or `--stdin` containing the
+whole JSON document. Individual field flags, secret update, inventory scan, and
+cross-agent grants are not shipped CLI operations. Sensitive field access is
+audited without recording plaintext; encryption and decryption happen in the
+client. See [secret-model.md](secret-model.md).
 
 ## 12. Agent Enrolls TOTP And Generates A Code
 
-Witself can act as the authenticator app. The TOTP seed is high-value sealed
-material colocated with a secret; it is never returned by the ordinary agent
-surface. `totp:enroll` (the privileged seed path) and `totp:code` (ordinary login
-use) are distinct scopes. See [totp-2fa.md](totp-2fa.md).
+TOTP enrollment is a `kind: "totp"` field in a secret-create JSON document,
+containing `otpauth_uri` from the service's actual setup flow. For example, have
+an authorized client prepare that document and pipe it into
+`witself secret create --stdin --idempotency-key KEY`. This field is sensitive
+and is encrypted by the client before storage. See [totp-2fa.md](totp-2fa.md).
 
-Enroll TOTP when the service shows an authenticator setup URL or QR code:
-
-```sh
-witself totp enroll github/builder \
-  --otpauth "$GITHUB_OTPAUTH_URL" \
-  --issuer GitHub \
-  --account archivist@example.com \
-  --json
-
-witself totp enroll github/builder --qr ./github-2fa.png --json
-```
-
-Generate a current login code (audited `totp.code`, metered `totp_code`):
+After creating a secret named `github/authenticator` with a TOTP field named
+`two_factor`, inspect seed-free metadata or generate the current code:
 
 ```sh
-witself totp code github/builder --remaining --json
+witself totp show --json github/authenticator two_factor
+witself totp code --json github/authenticator two_factor
 ```
 
-Read the non-sensitive TOTP metadata without touching the seed:
-
-```sh
-witself totp show github/builder --json
-```
-
-Expected behavior:
-
-- `totp code` returns the current generated code only; it never returns the seed
-  and the code is never persisted or audited.
-- The seed is returned only through the guarded, audited
-  `totp show --reveal-seed` break-glass path under `totp:enroll`.
-- Sealed-plane carve-out: the TOTP seed is never embedded, recalled, placed in the
-  self-digest, ingested, or plaintext-exported.
+Both commands require the matching local vault key to read the encrypted
+payload; neither prints the seed. Code output includes its remaining lifetime.
+The current CLI has no TOTP enroll, QR-image input, or reveal-seed command.
 
 ## 13. Generate A Password Without Storing It
 
-`witself password generate` produces credentials with consumer-grade controls and
-does not persist them. Generated values appear only in the command's output, never
-in logs, audit rows, or errors.
+Generate a password locally without creating a sealed-plane record:
 
 ```sh
-witself password generate --length 40 --no-ambiguous --json
-witself password generate --words 5 --json
+witself password generate --length 40 --exclude-ambiguous --json
 ```
 
-A common flow is generate then create/update a sensitive field in one authorized
-step so the value is enveloped immediately rather than round-tripping through the
-shell (the `--generate-sensitive` form in section 11 does exactly this).
+The result is intentionally printed on stdout. To generate and encrypt a
+password without printing it, use `generate_password` in the secret-create JSON
+from section 11. Word-based passphrase generation is not a current CLI option.
 
-Expected behavior:
+## 14. Inject Secret References Into A Subprocess — Roadmap
 
-- The generator runs without writing any sealed-plane record.
-- Where policy allows, the same generator is exposed via MCP as
-  `witself.password.generate`.
-- Generated values follow the same redaction rules as revealed secrets.
+**Roadmap:** the proposed `witself run` command and secret-reference environment
+injection are not dispatched by this CLI. The shipped value-returning interface
+is explicit `secret reveal` or `totp code` in the active client; there is no
+implemented subprocess-injection or output-masking walkthrough here.
 
-## 14. Inject Secret References Into A Subprocess With `witself run`
+## 15. Operator Secret Scans And Cross-Agent Grants — Roadmap
 
-`witself run` resolves `witself://secret/...` references and injects plaintext
-into a child process's environment without printing it to stdout, so an agent uses
-a credential without ever surfacing it in context, memory, or logs. Each injected
-reference is authorized exactly like a reveal and is audited (`secret.reveal`) and
-metered (`secret_read` plus `runtime_injection`).
-
-Inject a single reference for one command (output masking is on by default):
-
-```sh
-witself run \
-  --env GITHUB_TOKEN=witself://secret/github/pat/api-key \
-  --mask-output \
-  -- gh auth status
-```
-
-Use an env file of Witself references — the file is safe to commit because it
-holds references, not plaintext:
-
-```sh
-cat > .env.witself <<'EOF'
-GITHUB_TOKEN=witself://secret/github/pat/api-key
-EOF
-
-witself run --env-file .env.witself -- npm test
-```
-
-Expected behavior:
-
-- Plaintext exists only in the spawned child's environment; it is never written to
-  Witself logs, audit metadata, or the parent's stdout.
-- References that cannot be authorized fail the run deterministically before the
-  child starts.
-- A secret reference is itself safe to store in config and logs because it
-  resolves to plaintext only through value-returning operations like `run`.
-
-## 15. Operator Scans Secrets And Grants Access To Another Agent Or Group
-
-Sealed-plane cross-agent access is grant-based and composes with realm roles; it
-does **not** use the open-plane cross-agent policy engine from section 7. See
-[authorization-and-roles.md](authorization-and-roles.md).
-
-Scan the realm-wide redacted inventory as an operator (no sensitive values are
-ever revealed):
-
-```sh
-witself secret scan \
-  --all-agents \
-  --include-group \
-  --show-sensitive-counts \
-  --show-access \
-  --json
-```
-
-Preview a grant, then grant `coordinator` redacted read, reveal of one field, and
-TOTP code generation on `archivist`'s secret (cross-agent grants require an audit
-reason):
-
-```sh
-witself secret grant github/builder \
-  --owner-agent archivist \
-  --agent coordinator \
-  --read \
-  --reveal password \
-  --totp \
-  --expires-at 2026-09-30T00:00:00Z \
-  --reason "coordinator needs GitHub login for release" \
-  --dry-run \
-  --json
-
-witself secret grant github/builder \
-  --owner-agent archivist \
-  --agent coordinator \
-  --read \
-  --reveal password \
-  --totp \
-  --reason "coordinator needs GitHub login for release" \
-  --json
-```
-
-Grant a group access to a group-owned secret so every member resolves it under
-group authorization (the unified ownership model — the former `shared` scope is
-now a group):
-
-```sh
-witself secret create github/org-readonly-token \
-  --group analysts \
-  --description "Org read-only token shared by the analysts group" \
-  --template api-key \
-  --sensitive-stdin token \
-  --json
-
-witself secret grant github/org-readonly-token \
-  --group analysts \
-  --agent coordinator \
-  --read \
-  --reveal token \
-  --reason "coordinator consumes the shared org token" \
-  --json
-```
-
-Now `coordinator` can reveal the granted field and resolve the group reference:
-
-```sh
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/coordinator.token"
-
-witself secret reveal github/builder password \
-  --owner-agent archivist \
-  --reason "release run"
-
-witself run \
-  --env ORG_TOKEN=witself://group/analysts/secret/github/org-readonly-token/token \
-  -- ./release.sh
-```
-
-Expected behavior:
-
-- `secret scan --all-agents` requires operator/admin permission and never reveals
-  sensitive values.
-- Cross-agent reveal, grant, copy-with-sensitive, and destructive actions require
-  an audit `--reason`, and grant/revoke support `--dry-run`.
-- A grant can be field-scoped (`--reveal FIELD`), can include TOTP (`--totp`), and
-  can expire (`--expires-at`); revoking is `secret revoke … --field`/`--all`.
-- Group-owned secrets replace the old vault-shared concept: ownership is
-  `agent | group` across memories, facts, and secrets alike.
+**Roadmap:** realm-wide secret scans, grants/revocation, group-owned secrets, and
+cross-agent reveal are not implemented CLI operations. Current secret inventory
+and value access are agent-owned and token-bound. See
+[authorization-and-roles.md](authorization-and-roles.md) for the broader target
+contract and [client-custodied-agent-vault.md](client-custodied-agent-vault.md)
+for shipped custody.
 
 ## 16. MCP Stdio For An Agent Runtime
 
@@ -984,13 +619,13 @@ witself install openclaw
 witself install antigravity
 witself install copilot
 witself integrations --verify
-witself install all --agent scott --location home --dry-run
-witself install all --agent scott --location home
-witself install all --agent scott --location home --json
+witself install all --agent archivist --location home --dry-run
+witself install all --agent archivist --location home
+witself install all --agent archivist --location home --json
 ```
 
 The installer reuses an existing binding or the only local agent credential.
-Pass `--agent scott` when multiple agents exist, and add `--location home` only
+Pass `--agent archivist` when multiple agents exist, and add `--location home` only
 when a human location label is useful. The resolved account, realm, and agent
 are pinned explicitly in the hook and MCP commands. A supplied location is
 pinned in both; an omitted location is left out of both commands.
@@ -1074,9 +709,9 @@ Expected behavior:
 - Reinstall replaces only Witself's marker-delimited routing policy without
   duplicating it; uninstall removes that policy and preserves unrelated runtime
   configuration.
-- The implemented slice exposes `witself.self.show`,
-  `witself.transcript.list`, `witself.transcript.get`, and
-  `witself.transcript.tail`; all are reads.
+- The MCP server exposes self/transcript reads as well as implemented fact,
+  memory, messaging, email, avatar, and sealed-plane tools. `--read-only` and
+  `--no-value-tools` restrict the served surface.
 - Hooks, rather than model-invoked MCP writes, append visible prompts, finalized
   responses, and optionally runtime-exposed tool activity.
 - Failed delivery remains in the owner-only local outbox and can be retried with
@@ -1086,8 +721,8 @@ Expected behavior:
   complete, while a foreground `witself transcript flush --runtime grok-build`
   provides a deterministic fence after the final Grok process exits. No
   persistent runner or provider wrapper is involved.
-- The broader open-plane and sealed-plane MCP catalog remains the target
-  contract in [mcp-tools.md](mcp-tools.md).
+- [mcp-tools.md](mcp-tools.md) also contains target contracts; use the server
+  tool list to inspect the surface offered by the installed binary.
 
 ## 17. Self-Hosted Bootstrap
 
@@ -1174,100 +809,30 @@ Expected behavior:
 - The chart owns Kubernetes probes and metrics wiring through values.
 - The self-hosted backend needs PostgreSQL and serves deterministic lexical
   recall without any model credential or model egress. Optional implemented
-  client-supplied vectors use portable JSONB, and capability discovery reports
-  vector-profile support and coverage separately from the lexical baseline.
+  client-supplied vectors use portable JSONB; the customer CLI has no standalone
+  capabilities command.
 - Sealed values remain client-encrypted under the client-custodied AVK; the
   current chart has no backend KMS or sealed-plane-switch settings. See
   [self-hosting.md](self-hosting.md) and
   [client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
-## 18. Local Development Mode
+## 18. Local Development Mode — Roadmap
 
-Initialize a local development realm and store. Local mode exercises the same
-deterministic lexical recall path and does not launch or configure an embedder:
+**Roadmap:** the earlier local setup/store-file workflow is not implemented by
+this CLI. There is no `setup --local` command or offline JSON-store CLI backend.
+For development against the shipped server, follow the PostgreSQL-backed path
+in [self-hosting.md](self-hosting.md) and use explicit endpoint/token flags.
+Client-held vault custody also applies in development; a server-side local KMS
+is not the agent-secret implementation.
 
-```sh
-witself setup --local \
-  --realm dev \
-  --store-file ./witself.store.json \
-  --agent archivist \
-  --token-out archivist=./witself-tokens/archivist.token \
-  --json
-```
+## Remaining Roadmap Workflows
 
-Use it:
-
-```sh
-export WITSELF_STORE_FILE="$PWD/witself.store.json"
-export WITSELF_TOKEN_FILE="$PWD/witself-tokens/archivist.token"
-
-witself memory add \
-  --content "Local development demo memory." \
-  --kind note \
-  --tag demo \
-  --json
-
-witself memory recall "demo" --json
-```
-
-Expected behavior:
-
-- Local mode is labeled development-only and is not a production setup path.
-- Local mode persists the serialized identity store at rest with ordinary
-  data-at-rest protection and atomic writes.
-- Lexical recall runs offline without a model, model secret, or paid provider.
-- A test that exercises optional hybrid vector ranking supplies its own profile and
-  finite vectors; local mode does not synthesize vectors.
-- Local behavior still uses the shared core, JSON, policy, audit, and storage
-  interfaces.
-- Sealed-plane work in local mode uses the `local-dev` KMS provider
-  (`WITSELF_KMS_PROVIDER=local-dev`) so secret create/reveal and TOTP can be
-  exercised offline; it is development-only and not a production key path. See
-  [encryption-model.md](encryption-model.md).
-
-## Gaps Found By The Scripts
-
-These scripts exposed command-surface requirements that should stay in the v0
-spec:
-
-- `memory recall` needs first-class filter flags (`--kind`, `--tag`, `--since`,
-  `--limit`, `--owner-agent`) and must surface degraded-recall state in both
-  human and `--json` output.
-- `policy test` must be runnable before policy creation as the canonical access
-  dry-run, returning either the deciding policy id or a structured deny reason.
-- Cross-agent recall/read/curate/forget need a consistent `--owner-agent` (and
-  `--owner-group`) targeting flag distinct from authentication.
-- `fact set --primary` must be an atomic promotion that demotes the prior
-  primary of the same logical kind, reported as `fact.primary_changed`.
-- Group-scoped writes need a `--group` owner flag shared by `memory add` and
-  `fact set`, and group-owned destructive actions must reuse the cross-agent
-  guardrails.
-- `message send` must derive `from` from the token only, and reject any attempt
-  to set the sender via input.
-- Promo codes need to be first-class on `witself setup`, `witself account
-  create`, and `witself billing subscribe`.
-- Hosted provider flows need `--open`/`--no-open` and a generic `witself billing
-  sessions show` command so the CLI owns browser handoff without a dashboard.
-- Token-file conflicts must remain explicit; setup should not overwrite token
-  files during reruns unless token rotation was chosen.
-- `secret reveal` and `totp code` must be the only value-returning sealed-plane
-  ops besides `witself run` and the value-returning MCP `reference.resolve`, each
-  requiring `secret:reveal`/`totp:code` (or a grant/realm role), an audit
-  `--reason` for cross-agent use, and a `secret.reveal`/`totp.code` audit event.
-- `secret create` needs flag/file/stdin field inputs (`--field`, `--field-file`,
-  `--sensitive-stdin`, `--generate-sensitive`) so plaintext never has to pass
-  through a shell flag, and `--group`/`--owner-agent` for ownership and operator
-  targeting.
-- `secret grant` needs field-scoped reveal (`--reveal FIELD`), `--totp`,
-  `--expires-at`, `--dry-run`, and a required `--reason`, composing with realm
-  roles rather than the open-plane cross-agent policy engine.
-- `mcp serve` needs `--no-value-tools` (distinct from `--read-only`) to disable
-  reveal/`totp code`/value-returning reference resolution while leaving
-  sealed-plane metadata reads available.
-- The sealed-plane carve-outs must hold across every command: secret values and
-  TOTP seeds are never embedded, recalled, in the self-digest, ingested, or
-  plaintext-exported. Current archives carry only client-encrypted sealed
-  values, and the backend has no KMS or decrypt-key dependency.
+The explicitly fenced sections above cover policy testing and grants, security
+groups, crypto billing, subprocess secret injection, and offline local setup.
+Realm import is also roadmap customer surface: the shipped export is
+account-wide, and server account-move import accepts paired evacuation archives,
+not customer self-export artifacts. These targets should not be used as scripts
+until their commands and handlers ship.
 
 ## Related Docs
 

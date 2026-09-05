@@ -1,6 +1,8 @@
 # Witself CLI Command Surface
 
-Status: draft target contract with implemented slices labeled below.
+Status: implemented [command family inventory](#command-family-status) plus
+a target contract with implemented slices labeled below. Family markers do not
+promote target subcommands or flags to shipped behavior.
 
 Sealed-plane implementation amendment (accepted 2026-07-23): the current
 client-custodied vertical implements `vault key init|status`, `vault key enroll
@@ -56,6 +58,98 @@ The implemented CLI command is `witself`. The backend binary stays
 `witself://` reference scheme, `WITSELF_` environment variables, and the
 `witself.*` MCP tool names are unchanged. Every example below uses `witself`;
 `ws` remains available as a permanent alias.
+
+## Command Family Status
+
+Reviewed against the CLI dispatch and merged source history on 2026-09-04.
+`implemented` means the binary dispatches that top-level family; it does not
+mean every proposed subcommand or flag in this design contract is shipped, or
+that every deployment enables its backend feature. `target` means there is no
+dispatch entry: all commands in that family below are roadmap only.
+
+The implemented slices called out below and the current CLI help describe
+shipped syntax. For example, `auth` currently implements only `login`, `mcp`
+only `serve`, and `totp` only `show` and `code`; the other proposed verbs in
+those families remain targets. The global flag, environment, output, and exit
+code sections also retain target contracts unless explicitly identified as
+implemented. Customer examples are in [Workflow Scripts](workflow-scripts.md).
+
+This marker table is checked by `TestCommandSurfaceDispatchMarkers` against
+[the customer dispatch](../cmd/witself/main.go) and
+[the admin dispatch](../cmd/witself-admin/main.go). It includes help/version
+aliases and the internal `_managed-hooks` family so additions and removals
+cannot silently escape the check. `_managed-hooks` is runtime integration
+plumbing, not a customer workflow.
+
+<!-- BEGIN COMMAND FAMILY STATUS -->
+
+| Binary | Family | Marker | Aliases |
+|---|---|---|---|
+| `witself` | `_managed-hooks` | implemented | — |
+| `witself` | `account` | implemented | — |
+| `witself` | `agent` | implemented | — |
+| `witself` | `audit` | target | — |
+| `witself` | `auth` | implemented | — |
+| `witself` | `avatar` | implemented | — |
+| `witself` | `billing` | implemented | — |
+| `witself` | `bootstrap-instructions` | target | — |
+| `witself` | `capabilities` | target | — |
+| `witself` | `completion` | target | — |
+| `witself` | `config` | target | — |
+| `witself` | `dashboard` | implemented | — |
+| `witself` | `digest` | target | — |
+| `witself` | `email` | implemented | — |
+| `witself` | `email-domain` | implemented | — |
+| `witself` | `export` | implemented | — |
+| `witself` | `fact` | implemented | — |
+| `witself` | `federation` | target | — |
+| `witself` | `gen-bootstrap-token` | implemented | — |
+| `witself` | `group` | target | — |
+| `witself` | `help` | implemented | `--help`, `-h` |
+| `witself` | `ingest` | target | — |
+| `witself` | `install` | implemented | — |
+| `witself` | `integrations` | implemented | — |
+| `witself` | `legal` | implemented | — |
+| `witself` | `mcp` | implemented | — |
+| `witself` | `memory` | implemented | — |
+| `witself` | `message` | implemented | — |
+| `witself` | `operator` | implemented | — |
+| `witself` | `password` | implemented | — |
+| `witself` | `plan` | implemented | — |
+| `witself` | `policy` | target | — |
+| `witself` | `realm` | implemented | — |
+| `witself` | `reference` | target | — |
+| `witself` | `remember` | target | — |
+| `witself` | `run` | target | — |
+| `witself` | `secret` | implemented | — |
+| `witself` | `self` | implemented | — |
+| `witself` | `session` | target | — |
+| `witself` | `setup` | target | — |
+| `witself` | `support` | target | — |
+| `witself` | `token` | implemented | — |
+| `witself` | `totp` | implemented | — |
+| `witself` | `transcript` | implemented | — |
+| `witself` | `uninstall` | implemented | — |
+| `witself` | `usage` | implemented | — |
+| `witself` | `vault` | implemented | — |
+| `witself` | `version` | implemented | `--version`, `-v` |
+| `witself` | `whoami` | target | — |
+| `witself-admin` | `account` | implemented | — |
+| `witself-admin` | `admin` | implemented | — |
+| `witself-admin` | `backup-evidence` | implemented | — |
+| `witself-admin` | `cells` | implemented | — |
+| `witself-admin` | `dashboard` | implemented | `tui` |
+| `witself-admin` | `email-alias` | implemented | — |
+| `witself-admin` | `email-domain` | implemented | — |
+| `witself-admin` | `events` | implemented | — |
+| `witself-admin` | `help` | implemented | `--help`, `-h` |
+| `witself-admin` | `invite` | implemented | — |
+| `witself-admin` | `placement` | implemented | — |
+| `witself-admin` | `ticket` | implemented | — |
+| `witself-admin` | `version` | implemented | `--version`, `-v` |
+| `witself-admin` | `whoami` | implemented | — |
+
+<!-- END COMMAND FAMILY STATUS -->
 
 ## Design Goals
 
@@ -442,50 +536,54 @@ an action-filtered page contains that many events.
 
 ## Command Tree
 
+This is the broader target tree, not an installed-command reference. Use the
+[family markers](#command-family-status), implemented slices, and current CLI
+help to distinguish shipped commands from proposed extensions.
+
 ```text
 witself
   version
-  capabilities
-  whoami
+  capabilities  # target; not implemented
+  whoami  # target; not implemented
   auth login|logout|status|whoami
-  setup
+  setup  # target; not implemented
   account create|show|update|members|invite|remove|set-role|close
   operator list|create|delete
   realm create|list|show|use|rename|delete|members|init|status
   realm export|import                     # target; not implemented
   billing show|invoices|payments|portal|setup
-  support create|list|show|comment|close
-  remember
+  support create|list|show|comment|close  # target; not implemented
+  remember  # target; not implemented
   self show|card
   usage
-  session start|end                       # target; not implemented
+  session start|end  # target; not implemented
   memory status|capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
-  digest emit                             # target; not implemented
-  ingest
-  bootstrap-instructions
+  digest emit  # target; not implemented
+  ingest  # target; not implemented
+  bootstrap-instructions  # target; not implemented
   fact status|set|get|list|delete
   password generate
   secret create|status|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
-  run
+  run  # target; not implemented
   totp enroll|code|show|delete
-  policy create|list|show|delete|test
-  group create|list|show|add-member|remove-member|delete
+  policy create|list|show|delete|test  # target; not implemented
+  group create|list|show|add-member|remove-member|delete  # target; not implemented
   integrations
   install RUNTIME[,RUNTIME...]|all
   uninstall RUNTIME[,RUNTIME...]|all
   transcript create|append|list|show|tail|flush
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
-  federation peers|card
-  reference parse|resolve
+  federation peers|card  # target; not implemented
+  reference parse|resolve  # target; not implemented
   agent create|list|peers|show|rename|copy|disable|enable|delete
   token create|list|revoke|rotate
-  audit list|show
+  audit list|show  # target; not implemented
   export
   mcp serve|tools
   dashboard serve|status|stop
-  config get|set|list|unset
-  completion
+  config get|set|list|unset  # target; not implemented
+  completion  # target; not implemented
 ```
 
 ## Current Lifecycle Slice
@@ -552,6 +650,8 @@ Flags:
 
 ## `witself capabilities`
 
+**Family status: target; not implemented.**
+
 Show the active backend kind, version, supported features, unavailable features,
 limits, and endpoint context.
 
@@ -593,6 +693,8 @@ handling and the explicit legacy/manual `memory curate auto` client process do
 not change those server capability flags.
 
 ## `witself whoami`
+
+**Family status: target; not implemented.**
 
 Show the current realm, profile, and principal, with `primary` facts surfaced
 first as identity anchors. This is the top-level convenience alias for
@@ -675,6 +777,8 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. |
 
 ## `witself setup`
+
+**Family status: target; not implemented.**
 
 Create or connect everything needed for agents to start using Witself managed
 service or a self-hosted Witself backend. This is the end-to-end bootstrap path
@@ -1634,6 +1738,8 @@ Flags:
 
 ## `witself support`
 
+**Family status: target; not implemented.**
+
 Create and manage support tickets from the CLI.
 
 Support commands must not attach memory content, fact values, message bodies or
@@ -1708,6 +1814,8 @@ Flags:
 | `--yes` | Skip confirmation. |
 
 ## `witself remember` (deferred)
+
+**Family status: target; not implemented.**
 
 The current CLI does not expose this unified convenience command. Natural-
 language routing is an integration responsibility: an atomic durable assertion
@@ -1861,6 +1969,8 @@ future realm/account billing commands aggregate from the same portable event
 ledger subject to operator permissions.
 
 ## `witself session` (target; not implemented)
+
+**Family status: target; not implemented.**
 
 Bootstrap and flush long-running, multi-session work. `session start` hydrates
 identity, open goals, and last progress in one round-trip; `session end` persists
@@ -2421,6 +2531,8 @@ supersede.
 
 ## `witself digest emit` (target; not implemented)
 
+**Family status: target; not implemented.**
+
 Render the self-digest as a CLAUDE.md / AGENTS.md fragment for file-load agent
 harnesses. This is the outbound half of the two-way file bridge: it makes
 Witself-backed identity available for free to runtimes that auto-load AGENTS.md
@@ -2447,6 +2559,8 @@ Flags:
 | `-o, --out PATH` | Write the fragment to a file instead of stdout. |
 
 ## `witself ingest` (target; not implemented)
+
+**Family status: target; not implemented.**
 
 Ingest existing agent context files into Witself: the inbound half of the file
 bridge. `ingest` parses CLAUDE.md / AGENTS.md / GEMINI.md, routing kv-shaped
@@ -2477,6 +2591,8 @@ in `--read-only` MCP mode.
 <a id="witself-bootstrap-instructions"></a>
 
 ## `witself bootstrap-instructions` (target; not implemented)
+
+**Family status: target; not implemented.**
 
 Print the paste-able teaching stanza that installs the Witself usage habit
 (recall before relevant work, capture after durable learning, and curate through
@@ -3176,6 +3292,8 @@ self-digest, or plaintext-exported.
 
 ## `witself run`
 
+**Family status: target; not implemented.**
+
 Run a subprocess with selected secret references resolved only for that process
 lifetime. This is the safer path when an agent or human needs credentials for a
 CLI tool, test suite, deploy script, or MCP server without printing the values.
@@ -3285,6 +3403,8 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 
 ## `witself policy`
+
+**Family status: target; not implemented.**
 
 Manage cross-agent access policies. Authorization for cross-agent identity
 access is default-deny: with no matching `allow` policy, cross-agent access is
@@ -3419,6 +3539,8 @@ Flags:
 | `--explain` | Include the full evaluation trace, not just the decision. |
 
 ## `witself group`
+
+**Family status: target; not implemented.**
 
 Manage security groups. A security group is a named set of agents within a
 realm. It is both a policy subject and a policy target, and it can own
@@ -4492,6 +4614,8 @@ email runner or wake service.
 
 ## `witself federation`
 
+**Family status: target; not implemented.**
+
 Manage the realm's cross-realm federation: the deny-by-default allow-list of
 peer realms the realm accepts messages from, and the signed realm card the realm
 publishes so peers can discover and verify it. Federation is the trust substrate
@@ -4588,6 +4712,8 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 
 ## `witself reference`
+
+**Family status: target; not implemented.**
 
 Parse and resolve `witself://` identity references. References let memories,
 facts, messages, scripts, config files, and MCP tools point at identity data
@@ -4893,6 +5019,8 @@ Flags:
 
 ## `witself audit`
 
+**Family status: target; not implemented.**
+
 Inspect audit records.
 
 ### `witself audit list`
@@ -5047,6 +5175,8 @@ Flags:
 
 ## `witself config`
 
+**Family status: target; not implemented.**
+
 Manage local CLI configuration.
 
 ### `witself config get KEY`
@@ -5090,6 +5220,8 @@ Flags:
 | `--profile NAME` | Remove the value from a named profile. |
 
 ## `witself completion`
+
+**Family status: target; not implemented.**
 
 Generate shell completion scripts.
 
@@ -5365,6 +5497,10 @@ Flags:
 | `--json` | Print JSON instead of a summary. |
 
 ## First Implementation Slice
+
+This is a target implementation sequence, not a shipped-command checklist.
+The [family markers](#command-family-status) and explicitly implemented slices
+above determine present availability.
 
 The first CLI slice should validate the managed-service command shape while
 using the local mock/development backend only as scaffolding where needed. The
