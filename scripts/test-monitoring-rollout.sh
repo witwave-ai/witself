@@ -7,6 +7,8 @@ apps_chart="$repo_root/.gitops/charts/apps"
 monitoring_values="$platform_chart/ci/monitoring-values.yaml"
 rules="$platform_chart/files/founder-open-plane.rules.yaml"
 rule_tests="$platform_chart/testdata/founder-open-plane.rules.test.yaml"
+postgresql_rules="$platform_chart/files/postgresql.rules.yaml"
+postgresql_rule_tests="$platform_chart/testdata/postgresql.rules.test.yaml"
 chart_version="87.6.0"
 chart_sha256="e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5"
 chart_repo="https://prometheus-community.github.io/helm-charts"
@@ -517,8 +519,49 @@ assert_receiver_combination() {
 assert_receiver_combination webhook witself-deadman-v1
 assert_receiver_combination pagerduty ""
 
+assert_postgresql_rules() {
+  expected="$1"
+  shift
+  helm template witself-platform "$platform_chart" \
+    --values "$monitoring_values" \
+    --set cell.cloud=civo \
+    --set platform.monitoring.postgresql.enabled=true \
+    --set apps.civoPostgres.enabled=true \
+    --set apps.civoPostgres.metrics.enabled=true \
+    "$@" >"$tmp/postgresql-platform.yaml"
+  ruby -ryaml -e '
+    app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+    values = app ? YAML.safe_load(app.dig("spec", "source", "helm", "values")) : {}
+    rules = values.dig("additionalPrometheusRulesMap", "postgresql")
+    abort "unexpected PostgreSQL rule gate result" unless !rules.nil? == (ARGV[0] == "present")
+    if rules
+      abort "PostgreSQL rules differ from their source file" unless rules == YAML.safe_load(File.read(ARGV[1]))
+      File.write(ARGV[2], YAML.dump(values))
+    end
+  ' "$expected" "$postgresql_rules" "$tmp/postgresql-child-values.yaml" <"$tmp/postgresql-platform.yaml"
+}
+
+# Check each independent opt-in, including the default-off PostgreSQL knob.
+assert_postgresql_rules absent --set platform.monitoring.postgresql.enabled=false
+assert_postgresql_rules absent --set apps.civoPostgres.metrics.enabled=false
+assert_postgresql_rules absent --set apps.civoPostgres.enabled=false
+assert_postgresql_rules absent --set cell.cloud=aws
+assert_postgresql_rules absent --set platform.monitoring.alerting.enabled=false
+assert_postgresql_rules absent --set platform.monitoring.enabled=false
+assert_postgresql_rules present
+helm template witself-monitoring "$chart_archive" \
+  --namespace monitoring --values "$tmp/postgresql-child-values.yaml" >"$tmp/postgresql-child.yaml"
+ruby -ryaml -e '
+  docs = YAML.load_stream(STDIN.read).compact
+  rule = docs.find { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-postgresql" } }
+  abort "PostgreSQL PrometheusRule missing from child chart" unless rule
+  abort "PostgreSQL PrometheusRule is not selected by this Prometheus release" unless rule.dig("metadata", "labels", "release") == "witself-monitoring"
+  abort "PostgreSQL rule count changed" unless rule.dig("spec", "groups").flat_map { |group| group["rules"] }.length == 5
+' <"$tmp/postgresql-child.yaml"
 
 "$promtool_bin" check rules "$rules"
 "$promtool_bin" test rules "$rule_tests"
+"$promtool_bin" check rules "$postgresql_rules"
+"$promtool_bin" test rules "$postgresql_rule_tests"
 
 echo "monitoring rollout capability checks passed"

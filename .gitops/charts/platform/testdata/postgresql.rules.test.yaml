@@ -1,0 +1,177 @@
+rule_files:
+  - ../files/postgresql.rules.yaml
+evaluation_interval: 30s
+tests:
+  - name: connection buckets aggregate per exporter without dilution by another database server
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_count{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="witself",state="active",usename="witself",application_name="server",backend_type="client backend",wait_event_type="",wait_event=""}
+        values: 40+0x15
+      - series: pg_stat_activity_count{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="postgres",state="idle",usename="postgres",application_name="worker",backend_type="client backend",wait_event_type="Client",wait_event="ClientRead"}
+        values: 41+0x15
+      - series: pg_settings_max_connections{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics"}
+        values: 100+0x15
+      - series: pg_stat_activity_count{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.2:9187",service="witself-postgresql-metrics",datname="other",state="idle"}
+        values: 0+0x15
+      - series: pg_settings_max_connections{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.2:9187",service="witself-postgresql-metrics"}
+        values: 1000+0x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfPostgreSQLConnectionsHigh
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLConnectionsHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: PostgreSQL connections exceed 80 percent of max_connections.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+  - name: exact warning thresholds and healthy database do not fire
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_count{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="witself",state="active"}
+        values: 80+0x15
+      - series: pg_settings_max_connections{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics"}
+        values: 100+0x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="witself",state="idle in transaction"}
+        values: 300+0x15
+      - series: pg_up{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics"}
+        values: 1+0x15
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfPostgreSQLConnectionsHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfPostgreSQLDown
+        exp_alerts: []
+  - name: oldest transaction persists across activity bucket changes
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="witself",state="active",usename="witself",application_name="server"}
+        values: 301+0x2 0+0x4
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datname="postgres",state="idle in transaction",usename="postgres",application_name="worker"}
+        values: 0+0x2 302+0x4
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+  - name: deadlock counter reset alone is quiet but a subsequent increment alerts immediately
+    interval: 1m
+    input_series:
+      - series: pg_stat_database_deadlocks{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datid="1",datname="witself"}
+        values: 10 10 0 0 1 1
+      - series: pg_stat_database_deadlocks{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",datid="2",datname="postgres"}
+        values: 10+0x5
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WitselfPostgreSQLDeadlocks
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WitselfPostgreSQLDeadlocks
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: PostgreSQL detected a deadlock in the last ten minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+  - name: unrelated exporter cannot hide absent serving database metrics
+    interval: 1m
+    input_series:
+      - series: pg_up{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="unrelated-postgresql-metrics"}
+        values: 1+0x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              severity: critical
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations: &id001
+              summary: PostgreSQL exporter metrics are absent or cannot connect to the database.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLDown
+        exp_alerts: []
+  - name: database connection failure pages before exporter unavailable escalation
+    interval: 1m
+    input_series:
+      - series: pg_up{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics"}
+        values: 0+0x15
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfPostgreSQLDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfPostgreSQLDown
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: critical
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: PostgreSQL exporter cannot connect to the database.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 9m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: critical
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations: *id001
+  - name: brief PostgreSQL restart clears pending availability alerts
+    interval: 1m
+    input_series:
+      - series: pg_up{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics"}
+        values: 0 0 1+0x13
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfPostgreSQLDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts: []

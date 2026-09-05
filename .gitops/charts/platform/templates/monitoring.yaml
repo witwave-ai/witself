@@ -266,7 +266,9 @@ spec:
 {{ if $monitoring.alerting.enabled }}
         additionalPrometheusRulesMap:
           founder-open-plane:
-{{ .Files.Get "files/founder-open-plane.rules.yaml" | nindent 12 }}
+{{ .Files.Get "files/founder-open-plane.rules.yaml" | nindent 12 }}{{ if and $monitoring.postgresql.enabled (eq .Values.cell.cloud "civo") (dig "civoPostgres" "enabled" false (.Values.apps | default dict)) (dig "civoPostgres" "metrics" "enabled" false (.Values.apps | default dict)) }}
+          postgresql:
+{{ .Files.Get "files/postgresql.rules.yaml" | nindent 12 }}{{ end }}
 {{ end }}
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}

@@ -1,0 +1,62 @@
+# Metric contracts audited against postgres_exporter v0.20.1, the version
+# declared by Bitnami PostgreSQL 18.8.0. The chart's exporter image uses :latest;
+# verify its resolved build version and these series during rollout.
+# https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57
+# https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_setting.go#L90-L118
+# https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_database.go#L172-L181
+# https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479
+groups:
+  - name: witself-postgresql
+    interval: 30s
+    rules:
+      # Aggregate every database/state/user/application/wait bucket per exporter
+      # before dividing; the settings gauge has none of those activity labels.
+      - alert: WitselfPostgreSQLConnectionsHigh
+        expr: sum by (namespace, job, instance) (pg_stat_activity_count{namespace="witself",service="witself-postgresql-metrics"}) / max by (namespace, job, instance) (pg_settings_max_connections{namespace="witself",service="witself-postgresql-metrics"}) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL connections exceed 80 percent of max_connections.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLTransactionAgeHigh
+        expr: max by (namespace, job, instance) (pg_stat_activity_max_tx_duration{namespace="witself",service="witself-postgresql-metrics"}) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: The oldest PostgreSQL transaction exceeds five minutes.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLDeadlocks
+        expr: sum by (namespace, job, instance) (increase(pg_stat_database_deadlocks{namespace="witself",service="witself-postgresql-metrics"}[10m])) > 0
+        labels:
+          severity: warning
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL detected a deadlock in the last ten minutes.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLExporterUnavailable
+        expr: absent(pg_up{namespace="witself",service="witself-postgresql-metrics"}) or min by (namespace, job, instance) (pg_up{namespace="witself",service="witself-postgresql-metrics"}) == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL exporter metrics are absent or cannot connect to the database.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLDown
+        expr: min by (namespace, job, instance) (pg_up{namespace="witself",service="witself-postgresql-metrics"}) == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL exporter cannot connect to the database.
+          runbook: docs/observability-and-operations.md#postgresql-alerts

@@ -104,6 +104,9 @@ platform:
     enabled: false
     alerting:
       enabled: false
+    postgresql:
+      # Enable only with the cell's Civo PostgreSQL exporter and alerting.
+      enabled: false
     chartRepoURL: https://prometheus-community.github.io/helm-charts
     chartName: kube-prometheus-stack
     chartVersion: 87.6.0
