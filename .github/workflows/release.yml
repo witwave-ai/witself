@@ -458,6 +458,95 @@ jobs:
           -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
           -count=1
 
+  dashboard-acceptance:
+    name: dashboard release acceptance / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Three OS families cover browser behavior; arm/intel variants are not
+        # needed for this browser-driven Console check.
+        target: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.target }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build native dashboard clients (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          go build -o "$RUNNER_TEMP/witself" ./cmd/witself
+          go build -o "$RUNNER_TEMP/dashboard-stub-cell" ./internal/dashboard/cmd/dashboard-stub-cell
+
+      - name: Build native dashboard clients (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go build -o (Join-Path $env:RUNNER_TEMP 'witself.exe') ./cmd/witself
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o (Join-Path $env:RUNNER_TEMP 'dashboard-stub-cell.exe') ./internal/dashboard/cmd/dashboard-stub-cell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install acceptance dependencies
+        working-directory: scripts/dashboard-acceptance
+        run: npm ci
+
+      - name: Test native dashboard regressions
+        run: go test ./internal/dashboard/... ./cmd/witself/ -run Dashboard -count=1
+
+      - name: Test acceptance helpers
+        working-directory: scripts/dashboard-acceptance
+        run: node --test
+
+      - name: Install Chromium and Linux dependencies
+        if: runner.os == 'Linux'
+        working-directory: scripts/dashboard-acceptance
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        working-directory: scripts/dashboard-acceptance
+        run: npx playwright install chromium
+
+      - name: Run dashboard acceptance (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          node scripts/dashboard-acceptance/run.mjs \
+            --witself "$RUNNER_TEMP/witself" \
+            --stub-cell "$RUNNER_TEMP/dashboard-stub-cell" \
+            --out evidence/dashboard-acceptance
+
+      - name: Run dashboard acceptance (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node scripts/dashboard-acceptance/run.mjs `
+            --witself (Join-Path $env:RUNNER_TEMP 'witself.exe') `
+            --stub-cell (Join-Path $env:RUNNER_TEMP 'dashboard-stub-cell.exe') `
+            --out (Join-Path 'evidence' 'dashboard-acceptance')
+
+      - name: Retain dashboard acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: dashboard-acceptance-${{ matrix.target }}-${{ github.run_id }}
+          path: evidence/dashboard-acceptance/
+          if-no-files-found: error
+          retention-days: 90
+
   # A tag can point at a commit that never went through normal branch CI. Keep
   # the real Homebrew style/audit gate in the release workflow as well.
   # Runs on ubuntu, not macOS: the formula checks (brew style/audit, tap
@@ -549,7 +638,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   goreleaser:
-    needs: [go, verify, provider-integration-verify, homebrew-verify]
+    needs: [go, verify, provider-integration-verify, dashboard-acceptance, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

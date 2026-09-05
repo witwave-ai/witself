@@ -18,6 +18,8 @@ GOLANGCI_LINT_VERSION := v2.12.2
 # pins together so the gate cannot float between runs.
 GOVULNCHECK_VERSION := v1.7.0
 
+DASHBOARD_ACCEPTANCE_OUT ?= evidence/dashboard-acceptance
+
 MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
 MEMORY_LOAD_QUALITY_SEED        ?= 20260717
 MEMORY_LOAD_QUALITY_NOISE       ?= 250
@@ -97,7 +99,7 @@ MEMORY_CONCURRENCY_LOAD_COMMIT                    ?= $(shell git rev-parse HEAD)
 MEMORY_CONCURRENCY_LOAD_PROVIDER                  ?= local
 MEMORY_CONCURRENCY_LOAD_HARDWARE                  ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load feature-status build check check-go-mod-tidy govulncheck check-infra
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load dashboard-acceptance feature-status build check check-go-mod-tidy govulncheck check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -132,6 +134,26 @@ build: ## Build every ./cmd/... binary into ./bin, including the server and work
 
 test: ## Run the Go tests
 	go test ./...
+
+dashboard-acceptance: ## Run the release's headless Agent Console acceptance on this host (Node 22)
+	@set -eu; \
+		dashboard_acceptance_tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/witself-dashboard-acceptance.XXXXXX")"; \
+		trap 'rm -rf "$$dashboard_acceptance_tmp"' EXIT HUP INT TERM; \
+		dashboard_acceptance_exe="$$(go env GOEXE)"; \
+		go build -o "$$dashboard_acceptance_tmp/witself$$dashboard_acceptance_exe" ./cmd/witself; \
+		go build -o "$$dashboard_acceptance_tmp/dashboard-stub-cell$$dashboard_acceptance_exe" ./internal/dashboard/cmd/dashboard-stub-cell; \
+		npm --prefix scripts/dashboard-acceptance ci; \
+		(cd scripts/dashboard-acceptance && node --test && \
+			if [ "$$(go env GOOS)" = linux ]; then \
+				npx playwright install --with-deps chromium; \
+			else \
+				npx playwright install chromium; \
+			fi); \
+		rm -rf evidence/dashboard-acceptance; \
+		node scripts/dashboard-acceptance/run.mjs \
+			--witself "$$dashboard_acceptance_tmp/witself$$dashboard_acceptance_exe" \
+			--stub-cell "$$dashboard_acceptance_tmp/dashboard-stub-cell$$dashboard_acceptance_exe" \
+			--out "$(DASHBOARD_ACCEPTANCE_OUT)"
 
 test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable database
 	@set -eu; \
