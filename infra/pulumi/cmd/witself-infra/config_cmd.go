@@ -49,6 +49,7 @@ cells: {}
   #   role: dev
   #   backend: local
   #   civo_node_size: g4s.kube.medium
+  #   k8s_version: 1.35.0-k3s1 # Optional Civo API version; omit for latest stable.
   #   civo_admin_cidr: 203.0.113.7/32
   #   backup_validation_target: true
   #   argocd: true
