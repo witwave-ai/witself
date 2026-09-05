@@ -33,6 +33,8 @@ var (
 )
 
 // Cell is a fleet registry entry as sent/received over the API.
+// Keep its wire shape in sync with internal/client.FleetCell in the root module;
+// this local copy keeps the Pulumi module independent, as with internal/tokenfile.
 type Cell struct {
 	Name       string  `json:"name"`
 	Endpoint   string  `json:"endpoint"`
@@ -58,6 +60,8 @@ type Cell struct {
 	BackupToken string `json:"backup_token,omitempty"`
 }
 
+// registrationAck mirrors internal/client.FleetCellRegistrationAck in the root
+// module while keeping the provisioner's acknowledgement checks module-local.
 type registrationAck struct {
 	SchemaVersion string `json:"schema_version"`
 	Cell          struct {

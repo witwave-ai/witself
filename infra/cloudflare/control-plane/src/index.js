@@ -1871,6 +1871,24 @@ async function handleCells(request, env, url) {
   }
 
   const m = url.pathname.match(CELL_PATH);
+  if (m && request.method === "PATCH") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return err("invalid JSON body", 400);
+    }
+    if (
+      !body || typeof body !== "object" || Array.isArray(body) ||
+      typeof body.accepting !== "boolean" ||
+      Object.keys(body).some((key) => key !== "accepting")
+    ) {
+      return err("body must contain only accepting as a boolean", 400);
+    }
+    return requestCellCoordinator(env, m[1], "/set-accepting", {
+      accepting: body.accepting,
+    });
+  }
   if (m && request.method === "DELETE") {
     return requestCellCoordinator(env, m[1], "/delete", {
       deletion_id: crypto.randomUUID(),
