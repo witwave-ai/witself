@@ -418,6 +418,163 @@ that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
 
+## K3s minor upgrade (Civo)
+
+Keep the desired K3s version in each cell's `k8s_version` field in the
+operator's `~/.witself/infra.yaml` (inventory `version: 1`), alongside
+`civo_node_size`. It is a cell field, outside the nested Civo credential
+context. A command-line `-k8s-version` overrides the record for that invocation;
+`up` and `preview` do not save that override. An absent cell field can inherit
+`defaults.k8s_version`. If the effective version is empty after merging flags,
+the cell record, and defaults, no `KubernetesVersion` input is sent and Civo
+chooses its default on creation. Once pinned, keep the field in the record for every
+subsequent operation.
+
+The reviewed baseline on 2026-09-04 is kubelet `v1.35.0+k3s1` on both cells.
+Its Civo API pin is **`1.35.0-k3s1`**. The
+[Pulumi Civo v2.4.8 `KubernetesClusterArgs.KubernetesVersion` field](https://github.com/pulumi/pulumi-civo/blob/v2.4.8/sdk/go/civo/kubernetesCluster.go)
+is an optional string input. Civo's
+[versions API](https://www.civo.com/api/kubernetes#list-available-versions)
+distinguishes `version` (`1.20.0+k3s1`), `label` (`v1.20.0+k3s1`), and
+`flat_version` (`1.20.0-k3s1`); its cluster examples use the flattened form for
+`kubernetes_version`. The
+[Civo CLI versions command](https://github.com/civo/cli/blob/master/cmd/kubernetes/kubernetes_list_version.go)
+displays the label as `Name` and the version as `K8s version`, so its display
+can contain `v` and `+` even though the pin uses the flattened API form.
+Recheck `civo kubernetes versions --region REGION` and the existing cluster's
+version in its actual recorded Civo region before choosing a target; the
+legacy cell names do not determine Civo region codes.
+
+Add only these fields to the existing records; this fragment is not a
+replacement inventory:
+
+```yaml
+cells:
+  civo-sandbox-use1-backup:
+    k8s_version: "1.35.0-k3s1"
+  civo-sandbox-usw2-dev:
+    k8s_version: "1.35.0-k3s1"
+```
+
+**First establish the no-op proof.** Use `witself-infra` built from the
+reviewed checkout, with the existing inventory, credentials, backend, and
+`state_dir`. After adding the current-version pins, run:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+```
+
+`preview` runs Pulumi Preview without applying cloud changes. Pinning to the
+**currently running** version must preview as **no changes** for each existing
+stack. Preserve that output in the private change record. A successful exit
+alone is insufficient: any proposed update, create, delete, or replacement
+blocks the no-op claim and must be investigated before `up`. Preview uses the
+stack's recorded state, so compare it with live Civo and node versions;
+suspected stale state must be reconciled separately. A differing pin is an
+upgrade request and must follow the procedure below, even if the application
+release stays the same. A lower version is not a supported upgrade.
+
+Before an upgrade:
+
+- Create fresh encrypted PostgreSQL backups and successful disposable restore
+  evidence for both cells using
+  [Civo PostgreSQL pre-migration backup](backup-and-recovery.md#civo-postgresql-pre-migration-backup).
+  Use each cell's retained application release as the evidence target; this
+  operation changes K3s, not the application/schema release. Verify the
+  artifacts and checksums with `witself-admin backup-evidence verify`, using
+  `--cell CELL --release VERSION --max-age 24h` for each artifact directory.
+  This runbook requires evidence from the current maintenance window and at
+  most 24 hours old; recreate it if the window slips. Retain the exact backup
+  IDs, checksums, age identity access, and a reviewed rebuild/restore plan.
+- Require all nodes Ready, the Argo bootstrap and child Applications
+  `Synced`/`Healthy`, and normal external health and alerts. Record the current
+  `/v1/version` response for each cell and the serving endpoint. No database
+  schema rollout or other application/infra rollout may be in flight; keep
+  those release pins fixed throughout this upgrade.
+- Review the target K3s release notes, removed Kubernetes APIs, and compatibility
+  of Argo CD, CNI, CSI, ingress, and monitoring. Upgrade one minor at a time,
+  using a version available in both cells' actual Civo regions. Schedule a
+  maintenance window that permits a PostgreSQL or application interruption.
+- Review node-pool capacity, pod placement, disruption budgets, and PVC
+  attachment behavior. The current standalone PostgreSQL does not become
+  highly available merely because a pool has two workers.
+
+Upgrade **`civo-sandbox-use1-backup` first**, keeping it
+`backup_validation_target=true`, `accepting=false`, and free of registered
+accounts. Change only its `k8s_version` to the reviewed target, then run:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+# Only after reviewing the expected Kubernetes version update:
+witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+```
+
+Require the preview to show the intended Kubernetes version update with no
+unrelated change or cluster, pool, network, firewall, or storage replacement.
+Civo owns the cluster upgrade and its worker-node rollout; this Pulumi program
+sets a cluster version and does not implement a node-pool rolling controller.
+The public API/CLI contract does not specify a one-node-at-a-time guarantee,
+surge capacity, or automatic drain/PDB handling. Confirm the actual rolling
+behavior for the selected release with Civo before the maintenance window,
+and observe every pool through completion. Do not substitute node recycling:
+[Civo documents that recycling deletes and recreates a node without draining it](https://www.civo.com/docs/kubernetes/advanced/managing-node-pools#recycling-nodes).
+An API acknowledgement or `up` success is not proof that every kubelet and
+workload has converged.
+
+For the backup cell, then again for the serving cell, use its explicit
+owner-only kubeconfig and context to verify:
+
+```sh
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" get nodes -o wide
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" \
+  -n argocd get applications.argoproj.io \
+  -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status
+witself-infra cell-health -config "$HOME/.witself/infra.yaml" -cell "$CELL"
+curl --fail --silent --show-error "https://${CELL_API_HOST}/v1/version"
+```
+
+Set `CELL`, `CELL_KUBECONFIG`, and `CELL_CONTEXT` for the cell under review and
+take `CELL_API_HOST` from that stack's `apiHost` output. Every expected worker
+must be Ready and report the target kubelet version; inspect all pools, not
+just the first node. All Argo Applications must return to `Synced`/`Healthy`.
+`/v1/version` must retain the recorded application release and commit. Its
+`schema_version` is the API envelope version, not the database migration level;
+confirm the database schema still matches the pre-upgrade backup evidence.
+PostgreSQL, PVCs, and application pods must be healthy. `cell-health` includes
+the provider's stored `kubernetesVersion` output; `health --json` is the
+separate endpoint/probe summary. Neither replaces the live node-version check.
+Verify alert silence after any maintenance suppression expires: no new or
+unresolved actionable alerts, working scrapes, and a healthy external probe
+and watchdog. The intentionally firing `WitselfWatchdog` is expected; missing
+monitoring is not successful alert silence. Observe at least 30 minutes of
+healthy service after convergence before advancing.
+
+Only after all backup-cell checks pass, change the serving cell's
+`k8s_version` to the same target and repeat preview, review, apply, and the
+entire verification/observation period:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+# Only after reviewing the expected Kubernetes version update:
+witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+```
+
+Also recheck the public serving `/v1/version` and external availability after
+the serving cell converges. Preserve both preview/apply results and the
+before/after node, Argo, application, and alert evidence.
+
+**Rollback means rebuild from backup evidence. Civo does not downgrade K3s.**
+The [Civo update API](https://www.civo.com/api/kubernetes#updating-a-cluster)
+explicitly excludes downgrades; reverting `k8s_version` and running `up` is
+not recovery. Stop before upgrading the next cell if any gate fails. Recover
+through the separately reviewed procedure: coordinate a serving write freeze,
+provision a new destination at a Civo-supported compatible version, restore
+the verified encrypted database evidence with the matching application/schema,
+validate it, and then coordinate routing/reclassification. Record the possible
+loss of writes since the backup and retain the failed cluster until recovery
+is accepted. The isolated backup cell is not an automatic serving failover.
+
 ## Move and stage the `witmail.net` managed-email domain
 
 This is the retained registrar and edge-foundation procedure, not an email

@@ -167,9 +167,32 @@ install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
 ./bin/witself-infra dashboard
 ```
 
-Omit `-k8s-version` to let Civo choose its latest stable K3s release, or
-provide a Civo version such as `1.35.0-k3s1` to pin it. Civo currently uses an
-explicit local Pulumi backend for these cells; `bootstrap -cell
+Persist the Civo API version in each cell's `k8s_version` field in
+`~/.witself/infra.yaml`, alongside `civo_node_size`, to keep the pin across
+`preview`, `up`, and health reads. For a cluster whose kubelets report
+`v1.35.0+k3s1`, the Civo version name is `1.35.0-k3s1`:
+
+```yaml
+    k8s_version: "1.35.0-k3s1"
+```
+
+The optional field participates in the inventory merge: explicit
+`-k8s-version` > cell record > `defaults:`. With no configured version, Civo's
+`KubernetesVersion` input remains absent and the API chooses its latest stable
+K3s release. A flag override applies only to that invocation; `up` and
+`preview` do not save it to the inventory. `config add-cell -k8s-version ...`
+persists it when creating a new record; edit an existing record to pin it.
+
+Pinning the currently running version must produce **no changes** in
+`witself-infra preview -cell CELL`; stop if it proposes an update or replacement.
+A differing pin is a cluster upgrade and must follow
+[K3s minor upgrade (Civo)](../../docs/runbooks.md#k3s-minor-upgrade-civo),
+which includes version-format sources and the backup-first sequence.
+The Civo stack exports the provider-reported `kubernetesVersion` for
+`cell-health` and the dashboard. The automation `health` command reports probe
+state only; use `kubectl get nodes` to verify actual running kubelet versions.
+
+Civo currently uses an explicit local Pulumi backend for these cells; `bootstrap -cell
 civo-sandbox-use1-dev` initializes that directory locally and performs no
 cloud-side backend work.
 

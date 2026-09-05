@@ -315,8 +315,9 @@ func run(args []string) error {
 	profile := fs.String("profile", "minimal", "resource sizing (functional): minimal|prod")
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
 	// Empty is an internal sentinel for the provider-aware default. AWS and
-	// Azure are pinned below; Civo deliberately leaves the field absent so
-	// its API selects the latest stable K3s release.
+	// Azure are pinned below; Civo leaves the field absent unless a cell's
+	// k8s_version or an explicit flag pins it, preserving the API's latest
+	// stable default.
 	k8sVersion := fs.String("k8s-version", "", "Kubernetes version (default: 1.36 on AWS/Azure; Civo latest stable)")
 	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
