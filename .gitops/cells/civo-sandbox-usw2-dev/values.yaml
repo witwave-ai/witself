@@ -22,6 +22,23 @@ apps:
     # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
     # Micro adds headroom; the other Civo cells inherit nano.
     resourcesPreset: micro
+    # Preserve this cell's running image content; do not align the backup pin.
+    # The tag-to-digest change plus exporter activation causes ONE PostgreSQL
+    # restart. Both server replicas are expected to crash-loop for ~1 minute
+    # while PostgreSQL returns; two replicas/PDBs do not mask this DB outage.
+    image:
+      registry: registry-1.docker.io
+      repository: bitnami/postgresql
+      digest: sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f
+    networkPolicy:
+      enabled: true
+      allowExternal: false
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
   witselfServer:
     enabled: true
     namespace: witself
@@ -33,6 +50,9 @@ apps:
     # Schema-28's compatibility hold expired long ago (cells run schema 94);
     # in-product permanent fact deletion backs the published privacy policy.
     factDeletionEnabled: true
+    # All writers on 0.0.273: config-only rollout; ConfigMap checksum restarts
+    # pods and reruns digest backfill.
+    avatarPayloadCompactionEnabled: true
     billing:
       endpoint: https://self.witwave.ai
     agentEmail:
@@ -61,7 +81,7 @@ apps:
       enabled: true
       validationEnabled: false
       targetName: witself-backup
-    replicaCount: 1
+    replicaCount: 2
     # Phase 2 of the monitoring rollout: expose server metrics to the
     # monitoring-namespace Prometheus only.
     metrics:
@@ -78,8 +98,17 @@ apps:
             matchLabels:
               app.kubernetes.io/name: prometheus
     podDisruptionBudget:
-      enabled: false
-    topologySpreadConstraints: []
+      enabled: true
+      minAvailable: 1
+    # Two nodes in one zone: spread by hostname and allow capacity fallback.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: witself-server
+            app.kubernetes.io/instance: witself-server
     worker:
       enabled: true
       # Preview-first per the chart's own rollout contract: value-free
@@ -104,8 +133,17 @@ apps:
               matchLabels:
                 app.kubernetes.io/name: prometheus
       podDisruptionBudget:
-        enabled: false
-      topologySpreadConstraints: []
+        enabled: true
+        minAvailable: 1
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: witself-worker
+              app.kubernetes.io/instance: witself-server
+              app.kubernetes.io/component: worker
       agentEmailOutbound:
         enabled: true
         dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
@@ -157,6 +195,8 @@ platform:
     enabled: true
     alerting:
       enabled: true
+    postgresql:
+      enabled: true
     receiver:
       kind: pagerduty
       secretName: witself-monitoring-pagerduty-v1
@@ -180,7 +220,6 @@ platform:
     azureVaultURL: ""
   keda:
     enabled: false
-  # This cell currently has no resource Metrics API. Replica counts remain
-  # manual; install metrics-server only through a separately reviewed rollout.
+  # Resource Metrics API; keep server and worker replica counts manual.
   metricsServer:
-    enabled: false
+    enabled: true

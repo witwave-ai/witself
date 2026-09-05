@@ -201,8 +201,9 @@ overrides against PostgreSQL 18.8.0, including rejection without the mirror
 opt-in. The gate fetches the official OCI chart; set
 `WITSELF_TEST_POSTGRESQL_CHART` to an already downloaded 18.8.0 chart to reuse it.
 
-Roll out **`civo-sandbox-use1-backup` first**, retaining its rollback-only role.
-This batch pins its existing PostgreSQL content digest, restricts PostgreSQL
+Batch A landed in `de7423f` (PR #367) and activated
+**`civo-sandbox-use1-backup` first**, retaining its rollback-only role.
+It pins its existing PostgreSQL content digest, restricts PostgreSQL
 ingress, enables config-only avatar compaction after all writers reached
 0.0.273, and installs the resource Metrics API via
 `platform.metricsServer.enabled`. It leaves PostgreSQL metrics disabled because
@@ -214,13 +215,44 @@ The image contents stay the same, but replacing `:latest` with `@sha256:…`
 changes the StatefulSet pod template and can restart PostgreSQL. Compaction
 changes the server ConfigMap checksum, restarts pods, and reruns digest backfill.
 
-Before a separate serving-cell change, verify backup-cell Argo sync/health,
-PostgreSQL identity/readiness, server and worker database connectivity, denial
-from unrelated pods, completion of compaction/backfill, and `kubectl top nodes`
-and `kubectl top pods -n witself`. Then review `civo-sandbox-usw2-dev` separately;
-its image has already drifted to a different digest, so cross-cell image
-alignment requires its own review. Metrics/exporter discovery can be activated
-there with its monitoring stack. Both Applications gain the bootstrap retry
+The operator-reported batch-A result on 2026-09-05 was all Argo Applications
+Synced/Healthy after recovery. The digest reference change restarted PostgreSQL;
+the single server replica crash-looped four times on database connection
+failures for about one minute, then recovered. Workers reconnected without
+restarting, `kubectl top` worked, and node memory usage was 84% on the 2.3-GiB
+node.
+
+Batch B prepares **`civo-sandbox-usw2-dev`**, the two-node serving cell with an
+existing monitoring stack and PagerDuty receiver. Its desired state has two
+server replicas and the existing two workers, each with a `minAvailable: 1`
+PDB and hostname topology spread (`maxSkew: 1`, `ScheduleAnyway`). This avoids
+the chart's zone constraint on the single-zone cell while allowing placement
+when capacity is uneven. Resource Metrics API installation inherits the same
+two Metrics Server replicas as the backup cell, requesting 100m CPU/200Mi each
+with no CPU/memory limits. Avatar compaction is enabled as a config-only change
+after all writers reached 0.0.273.
+
+The serving cell pins its own running PostgreSQL digest from its values file;
+it deliberately does not align with the backup cell's different digest. Strict
+ingress retains the monitoring-namespace Prometheus access to exporter port
+9187. The exporter and its `release: witself-monitoring` ServiceMonitor are
+enabled, together with `platform.monitoring.postgresql.enabled`; the database
+rule group renders only when that default-off switch and PostgreSQL metrics
+are enabled. The exporter inherits Bitnami's `nano` preset: requests of
+100m CPU/128Mi and limits of 150m CPU/192Mi. The new rules use the existing
+incident receiver.
+
+Although the PostgreSQL image content is unchanged, the tag-to-digest reference
+change and exporter sidecar activation change one StatefulSet pod template,
+causing **one PostgreSQL restart**. Both server replicas are expected to
+crash-loop for about one minute while PostgreSQL restarts. Two replicas and
+PDBs do not prevent this shared database outage. These are prepared rollout
+settings, not evidence of a completed serving-cell deployment. After sync,
+verify PostgreSQL identity/readiness, server and worker connectivity, strict
+ingress denial, compaction/backfill, Metrics API readiness, and exporter
+scrape/rule health before accepting the rollout.
+
+Both Applications retain the batch-A bootstrap retry
 policy (20 attempts, 10s backoff, factor 2, maximum 2m) and foreground pruning;
 automated deployment on merge remains in place, without a sync window.
 

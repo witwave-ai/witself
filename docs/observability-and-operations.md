@@ -691,9 +691,11 @@ retained canary artifact. Two receivers are configured independently:
   alerting plane itself. Omitting its Secret omits the route, receiver, and
   mount.
 
-All shipped Witself rules aggregate away pod, instance, route, account, realm,
+The Witself product rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
-worker's existing closed-set job label.
+worker's existing closed-set job label. PostgreSQL rules additionally retain
+the namespace, scrape job, and instance needed to identify the failing exporter
+target, while removing database, user, application, and wait-event labels.
 
 This capability is now live on the serving cell. Shared chart defaults remain
 disabled, and the staged GitOps rollout — stack, then targets, then alerting —
@@ -703,6 +705,34 @@ receiver, accepted 2026-08-26.
 The target-cell ServiceMonitors must be enabled only after the monitoring child
 Application and CRDs are Healthy; Argo sync waves in separate parent
 Applications do not establish that ordering.
+
+<a id="postgresql-alerts"></a>
+
+Deployment-hardening batch B adds the following database rules in
+[`postgresql.rules.yaml`](../.gitops/charts/platform/files/postgresql.rules.yaml)
+for `civo-sandbox-usw2-dev`. They require monitoring, alerting, the default-off
+`platform.monitoring.postgresql.enabled` switch, and an enabled Civo PostgreSQL
+exporter. They select the `witself-postgresql-metrics` service in the `witself`
+namespace. Their fixed `service: witself-postgresql`, severity, and
+`witself_alert: "true"` labels use the existing PagerDuty incident route; the
+PrometheusRule carries `release: witself-monitoring` for discovery.
+
+| Alert | Condition | Severity |
+| --- | --- | --- |
+| `WitselfPostgreSQLConnectionsHigh` | Sum of [`pg_stat_activity_count`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57) across connection states, divided by [`pg_settings_max_connections`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_setting.go#L90-L118), exceeds 0.8 for 10 minutes. | warning |
+| `WitselfPostgreSQLTransactionAgeHigh` | Oldest transaction age, [`pg_stat_activity_max_tx_duration`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57), exceeds 300 seconds for 5 minutes. | warning |
+| `WitselfPostgreSQLDeadlocks` | [`pg_stat_database_deadlocks`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_database.go#L172-L181) increases over 10 minutes. | warning |
+| `WitselfPostgreSQLExporterUnavailable` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is absent or zero for 10 minutes. | critical |
+| `WitselfPostgreSQLDown` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is zero for 5 minutes. | critical |
+
+Connection counts and limits are matched per scrape target before comparison.
+The two critical rules deliberately
+overlap for a database that remains down for 10 minutes; only exporter
+unavailability covers a missing series. The metric links above identify the
+upstream postgres_exporter 0.20.1 definitions declared by Bitnami PostgreSQL chart
+18.8.0. Its exporter image tag is mutable; verify the resolved version and all
+five metric families in a live scrape during activation. Batch B prepares these
+rules; serving-cell scrape and alert delivery acceptance follows deployment.
 
 Initial alert candidates:
 
