@@ -30,7 +30,9 @@ Two traps in this repository produce a green result that proves nothing:
 
 - **PostgreSQL integration tests skip silently** when
   `WITSELF_TEST_DATABASE_URL` is unset. A local `make check` without a
-  database has not exercised the store. Before trusting one, start a
+  database has not exercised the store. Set `WITSELF_TEST_REQUIRE_DATABASE=1`
+  to make an unset DSN fatal; use `WITSELF_TEST_REQUIRE_NODE=1` analogously
+  for a missing Node executable. Before trusting one, start a
   database and export the DSN:
 
   ```

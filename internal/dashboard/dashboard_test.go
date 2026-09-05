@@ -21,6 +21,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 var testIdentity = client.SelfIdentity{
@@ -469,10 +470,7 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 }
 
 func TestDashboardEmailLiveEnableTransition(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/email_transition_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -481,10 +479,7 @@ func TestDashboardEmailLiveEnableTransition(t *testing.T) {
 }
 
 func TestDashboardAgentEmailStorageRendering(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/email_capacity_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -493,10 +488,7 @@ func TestDashboardAgentEmailStorageRendering(t *testing.T) {
 }
 
 func TestDashboardAgentEmailSentRendering(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/email_sent_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -505,10 +497,7 @@ func TestDashboardAgentEmailSentRendering(t *testing.T) {
 }
 
 func TestDashboardMemoryCapacityRendering(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/memory_capacity_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -517,10 +506,7 @@ func TestDashboardMemoryCapacityRendering(t *testing.T) {
 }
 
 func TestDashboardFactCapacityRendering(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/fact_capacity_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -529,10 +515,7 @@ func TestDashboardFactCapacityRendering(t *testing.T) {
 }
 
 func TestDashboardPlanEntitlementsRendering(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not installed")
-	}
+	node := testenv.RequireNode(t)
 	cmd := exec.Command(node, "--test", "testdata/plan_entitlements_test.cjs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {

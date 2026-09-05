@@ -4,20 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestUsagePostgresRoundTrip is opt-in because it needs a disposable real
 // Postgres database. It covers metering, retry idempotency, authorization,
 // rollups, and account archive portability as one lifecycle.
 func TestUsagePostgresRoundTrip(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {

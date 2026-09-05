@@ -3,20 +3,17 @@ package store
 import (
 	"bytes"
 	"context"
-	"os"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMessagePoliciesSurviveAccountArchiveRoundTripPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	source, _ := newMigrationTestStore(t, dsn)

@@ -6,20 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -470,10 +467,7 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 }
 
 func TestAgentEmailRealmAliasMigrationDowngradeWithoutDeliveriesPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -512,10 +506,7 @@ func TestAgentEmailRealmAliasMigrationDowngradeWithoutDeliveriesPostgres(t *test
 }
 
 func TestAgentEmailRealmAliasAppliedReplayRevalidatesLiveRealmPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -570,10 +561,7 @@ func TestAgentEmailRealmAliasAppliedReplayRevalidatesLiveRealmPostgres(t *testin
 }
 
 func TestAgentEmailRealmAliasArchiveRoundTripPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, dsn)
 	destination, _ := newMigrationTestStore(t, dsn)

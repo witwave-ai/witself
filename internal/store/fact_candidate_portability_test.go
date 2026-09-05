@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestValidateAndRecordFactCandidateScope(t *testing.T) {
@@ -221,10 +222,7 @@ func TestValidateImportedFactSubjectContentAndNamespace(t *testing.T) {
 // TestFactCandidateArchiveRoundTrip is opt-in because it needs disposable
 // Postgres. It covers migration 0023 portability across every candidate state.
 func TestFactCandidateArchiveRoundTrip(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {

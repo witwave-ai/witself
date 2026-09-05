@@ -5,17 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMemoryVectorHybridRecallPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -256,10 +254,7 @@ func TestMemoryVectorHybridRecallPostgres(t *testing.T) {
 // 256-row snapshot subset selected on its first page. The omitted tail never
 // enters later pages, and every page keeps the non-exhaustive metadata visible.
 func TestMemoryVectorHybridCursorPinsBoundedUniversePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {

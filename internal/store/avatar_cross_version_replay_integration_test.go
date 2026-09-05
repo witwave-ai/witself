@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestAvatarCrossVersionLegacyReceiptReplayPostgres emulates canonical
@@ -20,10 +20,7 @@ import (
 // an in-place upgrade. Exact retries must replay before perceptual-v1 gates;
 // the same legacy-shaped request under a fresh key must still be rejected.
 func TestAvatarCrossVersionLegacyReceiptReplayPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

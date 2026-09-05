@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/legal"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestProvisionAccountExactCommittedReplayRotatesBootstrapPostgres(
@@ -416,10 +416,7 @@ func TestProvisionReceiptSurvivesFinalizationAndIsNotPortablePostgres(
 }
 
 func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("empty table can downgrade", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)

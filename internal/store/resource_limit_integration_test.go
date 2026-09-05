@@ -4,19 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestRealmPlanLimitBoundaryDeletionUnlimitedAndConcurrentReplicas(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -97,10 +94,7 @@ func TestRealmPlanLimitBoundaryDeletionUnlimitedAndConcurrentReplicas(t *testing
 }
 
 func TestAgentPerRealmPlanLimitAndLegacyCompatibility(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -216,10 +210,7 @@ func TestAgentPerRealmPlanLimitAndLegacyCompatibility(t *testing.T) {
 }
 
 func TestAgentPerRealmPlanLimitConcurrentReplicas(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

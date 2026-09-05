@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestDeleteFactResultIsValueFree(t *testing.T) {
@@ -38,10 +38,7 @@ func TestDeleteFactResultIsValueFree(t *testing.T) {
 }
 
 func TestFactDeletionArchiveRoundTrip(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {
@@ -243,10 +240,7 @@ func TestOrdinarySetFingerprintRemainsSchema26Compatible(t *testing.T) {
 // a permanently deleted fact must be absent from every live retrieval surface,
 // including the usage-free observational variants, not only the metered reads.
 func TestFactDeletionInvisibleToObservationalReads(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {
@@ -564,10 +558,7 @@ func TestHostileArchiveFactMutationTombstoneCompleteness(t *testing.T) {
 // covers preview/apply, concurrent idempotent replay, content erasure,
 // delayed-retry blocking, explicit recreation, zero rank, and audit safety.
 func TestFactDeletionPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {

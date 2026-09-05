@@ -1,15 +1,13 @@
 package store
 
 import (
-	"os"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMigration61AgentEmailRetryCanaryPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	st, isolatedDSN := newMigrationTestStore(t, dsn)
 	migrationTestUpTo(t, isolatedDSN, 60)
 	assertMigrationTestVersion(t, isolatedDSN, 60)

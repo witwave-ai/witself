@@ -7,19 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, dsn)
 	destination, _ := newMigrationTestStore(t, dsn)
@@ -503,10 +500,7 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 }
 
 func TestLegacyAgentEmailArchiveImportScopesReceiveControlSynthesisPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, dsn)
 	destination, _ := newMigrationTestStore(t, dsn)

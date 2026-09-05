@@ -5,14 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAccountEvacuationBeginIsExactIDIdempotentPostgres(t *testing.T) {
@@ -1360,10 +1361,7 @@ func TestAccountEvacuationMigrationCoversCanonicalArchiveTablesPostgres(
 }
 
 func TestAccountEvacuationMigrationDowngradePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("schema 71 empty state can downgrade", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
@@ -1663,10 +1661,7 @@ func TestAccountEvacuationMigrationDowngradePostgres(t *testing.T) {
 
 func openAccountEvacuationTestStore(t *testing.T) (context.Context, *Store) {
 	t.Helper()
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	st, err := Open(ctx, dsn)

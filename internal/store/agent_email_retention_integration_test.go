@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -13,13 +12,11 @@ import (
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailRetentionLifecyclePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -325,10 +322,7 @@ func TestAgentEmailRetentionLifecyclePostgres(t *testing.T) {
 }
 
 func TestMigration69AgentEmailRetentionPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 68)
 	assertMigrationTestVersion(t, dsn, 68)
@@ -391,10 +385,7 @@ func TestMigration69AgentEmailRetentionPostgres(t *testing.T) {
 }
 
 func TestAgentEmailRetentionReplicasUseDifferentLanesPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -530,10 +521,7 @@ func TestAgentEmailRetentionReplicasUseDifferentLanesPostgres(t *testing.T) {
 }
 
 func TestAgentEmailRetentionIndefinitePolicyWinsRacePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -630,10 +618,7 @@ func TestAgentEmailRetentionIndefinitePolicyWinsRacePostgres(t *testing.T) {
 }
 
 func TestAgentEmailRetentionWorkerPreservesLockOnlyLaneMetricsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -679,10 +664,7 @@ func TestAgentEmailRetentionWorkerPreservesLockOnlyLaneMetricsPostgres(t *testin
 }
 
 func TestAgentEmailRetentionWorkerDrainsConsecutiveCappedBatchesPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -740,10 +722,7 @@ func TestAgentEmailRetentionWorkerDrainsConsecutiveCappedBatchesPostgres(t *test
 }
 
 func TestAgentEmailRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
