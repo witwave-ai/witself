@@ -581,6 +581,19 @@ function exactNamedHandlers(namedHandlers) {
   }
 }
 
+// Cloudflare's version resource began returning the Worker's own name inside
+// each runtime container entry (observed 2026-09-05). Accept exactly one
+// container for the Backend class whose optional name, when present, is this
+// Worker's name; any other key, class, or count still fails the contract.
+function exactRuntimeContainers(containers, scriptName) {
+  if (!Array.isArray(containers) || containers.length !== 1) return false;
+  const entry = containers[0];
+  if (!isRecord(entry) || entry.class_name !== "Backend") return false;
+  const keys = Object.keys(entry).sort();
+  if (sameJSON(keys, ["class_name"])) return true;
+  return sameJSON(keys, ["class_name", "name"]) && entry.name === scriptName;
+}
+
 export function verifyWorkerVersion(version, expected, expectedVersionID, {
   allowLegacyEmptyManagedDeliveryCohort = false,
 } = {}) {
@@ -622,7 +635,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
       runtime.migration_tag !== MIGRATION_TAG ||
       runtime.usage_model !== "standard" ||
       !sameJSON(runtime.limits, { cpu_ms: CPU_LIMIT_MS }) ||
-      !sameJSON(runtime.containers, [{ class_name: "Backend" }]) ||
+      !exactRuntimeContainers(runtime.containers, "witself-control-plane") ||
       (Object.hasOwn(runtime, "compatibility_flags") &&
        !sameJSON(runtime.compatibility_flags, []))) {
     throw new Error("deployed Worker version runtime contract did not match");
