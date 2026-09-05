@@ -966,7 +966,7 @@ restore, or capacity gates for any unmonitored accepting cell.
 ## Synthetic uptime probes
 
 The control-plane Worker probes from Cloudflare every five minutes using a
-dedicated `1-59/5 * * * *` Cron Trigger (minutes 1, 6, through 56 UTC).
+dedicated `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` Cron Trigger (minutes 1, 6, through 56 UTC).
 Maintenance retains `*/5 * * * *`. The scheduled handler dispatches by the cron
 expression: the probe trigger runs only the probe scheduler, and the maintenance
 trigger runs only maintenance. Each trigger starts a separate invocation with
@@ -1135,7 +1135,7 @@ and [Container pricing](https://developers.cloudflare.com/containers/platform/pr
 
 The normal control-plane deployment installs the cell probe handler and metrics
 endpoint with the CP target disabled. After deploy, verify that the Worker has
-exactly two Cron Triggers: `*/5 * * * *` for maintenance and `1-59/5 * * * *` for
+exactly two Cron Triggers: `*/5 * * * *` for maintenance and `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` for
 probes. The normal GitOps sync applies the serving cell's scrape job and rules;
 a CP deployment alone
 does not update the cell's monitoring chart. This source change does not claim

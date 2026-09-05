@@ -5033,11 +5033,14 @@ function scheduleUptimeProbes(_event, env, ctx) {
   ctx.waitUntil(runScheduledUptimeProbes(env));
 }
 
+// Cloudflare registers a range-with-step expression ("1-59/5") but never
+// delivers it (observed 2026-09-05 on v0.0.274: only "*/5" fired for six
+// minutes); the probe schedule is therefore an explicit minute list.
 // Each trigger is a separate invocation with its own six-connection budget.
 // Keep the paths separate even when long-running maintenance overlaps probes.
 const SCHEDULED_TASKS = Object.freeze({
   "*/5 * * * *": scheduleMaintenance,
-  "1-59/5 * * * *": scheduleUptimeProbes,
+  "1,6,11,16,21,26,31,36,41,46,51,56 * * * *": scheduleUptimeProbes,
 });
 
 export default {

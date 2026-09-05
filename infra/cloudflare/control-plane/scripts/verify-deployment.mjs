@@ -309,7 +309,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
   if (!sameJSON(config.routes, [{
     pattern: "self.witwave.ai",
     custom_domain: true,
-  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *", "1-59/5 * * * *"] })) {
+  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *", "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"] })) {
     throw new Error("generated config route and schedule contract did not match");
   }
   if (!sameJSON(config.send_email, [{ name: "EMAIL" }])) {

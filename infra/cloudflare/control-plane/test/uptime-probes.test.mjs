@@ -25,7 +25,7 @@ const probeEnv = (directory) => ({
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const MAINTENANCE_CRON = "*/5 * * * *";
-const PROBE_CRON = "1-59/5 * * * *";
+const PROBE_CRON = "1,6,11,16,21,26,31,36,41,46,51,56 * * * *";
 const CP_URL = "https://self.witwave.ai/v1/version";
 const PRIVATE_MARKER = "private-value-must-never-escape";
 const flush = () => new Promise((resolve) => setImmediate(resolve));
