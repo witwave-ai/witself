@@ -100,11 +100,15 @@ apps:
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
-    # Two nodes in one zone: spread by hostname and allow capacity fallback.
+    # Two nodes in one zone: spread by hostname. Hard (DoNotSchedule): with
+    # ScheduleAnyway the scheduler's balance scoring placed both server replicas
+    # on one node (2026-09-05, batch B), defeating the second replica. Two nodes
+    # always satisfy maxSkew 1; a lost node leaves the second replica Pending
+    # while the PDB keeps the first serving.
     topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
+        whenUnsatisfiable: DoNotSchedule
         labelSelector:
           matchLabels:
             app.kubernetes.io/name: witself-server
@@ -138,7 +142,7 @@ apps:
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: witself-worker
