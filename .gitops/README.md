@@ -260,6 +260,39 @@ Server/worker egress allow-list plumbing is deferred: cells consume released
 OCI server charts, so new templates would require a chart release and cell pin
 updates. This batch changes neither server chart versions nor egress behavior.
 
+## Serving-cell monitoring extensions
+
+The platform chart's monitoring extensions are default off and enabled only
+in `civo-sandbox-usw2-dev`. All controls below are under `platform.monitoring`
+and require its `enabled` switch. Alert rules also require `alerting.enabled`.
+
+| Knob | Shared default | Effect |
+| --- | --- | --- |
+| `nodeExporter.enabled` | `false` | Enable the upstream node-exporter DaemonSet and ServiceMonitor. |
+| `nodeExporter.resources` | Requests 20m CPU/32Mi; limits 100m CPU/64Mi | Budget for each node-exporter pod. |
+| `kubelet.cadvisor` | `false` | Enable `/metrics/cadvisor` on the existing kubelet ServiceMonitor; retain upstream probes/resource defaults. |
+| `defaultRules.enabled` | `false` | Enable only the curated `node-exporter`, `kubernetes-apps`, and `kubernetes-resources` groups, the local filesystem replacement, minimal recording prerequisites, and Prometheus PVC alert. Node alerts also require `nodeExporter.enabled`. |
+| `certManager.enabled` | `false` | Scrape the existing cert-manager controller and enable the certificate-expiry alert; requires `platform.certManager.enabled`. |
+| `argocd.enabled` | `false` | Scrape the existing Argo CD controller, repo-server, and server, and enable the application health/sync alert. |
+
+The cert-manager and Argo CD PodMonitors live in `monitoring` and select pods
+in their target namespaces. They retain the existing Prometheus monitor
+namespace admission and release-label selector, and require no new metrics
+Services or exporter workloads. The pinned upstream NetworkPolicies permit
+the scrapes. The only workload addition is one node-exporter pod per node:
+two pods total request 40m CPU/64Mi and are limited to 200m CPU/128Mi.
+
+Both `civo-sandbox-usw2-dev` and `civo-sandbox-use1-backup` now set
+`apps.witselfServer.civoIngress.acme.email: support@witwave.ai`. cert-manager updates or
+re-registers the ACME contact on the next issuance; this config-only change
+does not force issuance. The backup platform render stays byte-identical and
+has no monitoring resources; the backup apps render changes only its ACME
+email line. See the
+[monitoring runbook](../docs/observability-and-operations.md#serving-cell-monitoring-extensions)
+for the exact alert inventory, scrape ports, ACME follow-up, and the narrow
+node-2 capacity fit calculated from the supplied snapshot. These desired-state
+changes do not establish live scrape, alert-delivery, or scheduling acceptance.
+
 ## Notes
 
 - This repo is **public**, and the root app points at the `main` branch, so Argo

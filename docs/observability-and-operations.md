@@ -666,9 +666,10 @@ require those CRDs for a basic install.
 
 The repository now contains a default-off Founder/open-plane monitoring
 capability in the GitOps platform chart. It pins a trimmed
-`kube-prometheus-stack` package, disables Grafana and upstream default rules,
-and enables only Prometheus Operator, one bounded Prometheus, one bounded
-Alertmanager, kubelet/PVC collection, and kube-state-metrics. The application
+`kube-prometheus-stack` package, disables Grafana, and enables Prometheus
+Operator, one bounded Prometheus, one bounded Alertmanager, kubelet/PVC
+collection, and kube-state-metrics. Serving-cell extensions below add gated
+node and platform scrapes and a curated subset of upstream rules. The application
 chart can label the existing server and worker ServiceMonitors for exact
 selection and restrict both metrics ports to the `monitoring` namespace.
 
@@ -733,6 +734,126 @@ upstream postgres_exporter 0.20.1 definitions declared by Bitnami PostgreSQL cha
 18.8.0. Its exporter image tag is mutable; verify the resolved version and all
 five metric families in a live scrape during activation. Batch B prepares these
 rules; serving-cell scrape and alert delivery acceptance follows deployment.
+
+<a id="serving-cell-monitoring-extensions"></a>
+
+The monitoring extensions are enabled in desired state only for
+`civo-sandbox-usw2-dev`. Shared defaults keep
+`platform.monitoring.nodeExporter.enabled`, `.kubelet.cadvisor`,
+`.defaultRules.enabled`, `.certManager.enabled`, and `.argocd.enabled` false.
+The stack's `enabled` switch gates every extension; alert rules additionally
+require `alerting.enabled`. The backup cell keeps monitoring disabled.
+
+| New scrape | Target | Discovery |
+| --- | --- | --- |
+| Node exporter | One existing node per DaemonSet pod, port 9100 | Upstream node-exporter ServiceMonitor; requests 20m CPU/32Mi and limits 100m CPU/64Mi per node. |
+| Kubelet cAdvisor | `/metrics/cadvisor` on each kubelet | Existing kubelet ServiceMonitor with cAdvisor enabled; probes/resource endpoints retain upstream defaults. |
+| cert-manager | Controller in `cert-manager`, `http-metrics` port 9402 | `witself-cert-manager` PodMonitor. |
+| Argo CD application controller | `argocd-application-controller` in `argocd`, `metrics` port 8082 | `witself-argocd-application-controller` PodMonitor. |
+| Argo CD repo-server | `argocd-repo-server` in `argocd`, `metrics` port 8084 | `witself-argocd-repo-server` PodMonitor. |
+| Argo CD server | `argocd-server` in `argocd`, `metrics` port 8083 | `witself-argocd-server` PodMonitor. |
+
+The four platform PodMonitors live in `monitoring` with
+`release: witself-monitoring`; their own namespace selectors target
+`cert-manager` or `argocd`. Prometheus's existing monitor namespace admission
+therefore remains narrow. The pinned cert-manager and Argo CD charts already
+expose these pod metrics ports, so no extra exporter or metrics Service is
+needed. Argo CD 10.0.1's controller/repo-server NetworkPolicies allow their
+metrics port from all namespaces, and its server policy permits ingress.
+cert-manager v1.20.3's NetworkPolicies are disabled; no existing platform policy
+blocks these scrapes or Prometheus egress.
+
+<a id="platform-alerts"></a>
+
+The exact added alert inventory is below. Every alert carries
+`witself_alert: "true"` and warning severity, so it uses the existing PagerDuty
+incident route. Platform rules retain the infrastructure labels needed to
+identify the node, workload, PVC, certificate, or Argo application.
+
+| Source | Enabled alert | Condition |
+| --- | --- | --- |
+| Upstream `node-exporter` | `NodeMemoryHighUtilization` | Host memory utilization exceeds 90% for 15 minutes. |
+| Upstream `node-exporter` | `NodeMemoryMajorPagesFaults` | Major page faults exceed 500/second for 15 minutes. |
+| Upstream `node-exporter` | `NodeClockSkewDetected` | Absolute clock offset exceeds 0.05 seconds and is not converging for 10 minutes. |
+| Upstream `node-exporter` | `NodeClockNotSynchronising` | Clock is unsynchronized with maximum error at least 16 seconds for 10 minutes. |
+| Upstream `kubernetes-apps` | `KubePodCrashLooping` | The five-minute window continues to contain `CrashLoopBackOff` observations for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeDeploymentReplicasMismatch` | Available replicas remain below desired replicas with no updated-replica changes in the ten-minute window, for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeStatefulSetReplicasMismatch` | Ready replicas differ from desired replicas with no updated-replica changes in the ten-minute window, for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeContainerWaiting` | Container remains waiting for a reason other than `CrashLoopBackOff` for 1 hour. |
+| Upstream `kubernetes-apps` | `KubePodNotReady` | Non-Job pod remains Pending, Unknown, or Running but not Ready for 15 minutes. |
+| Upstream `kubernetes-resources` | `KubeMemoryOvercommit` | Pod memory requests exceed the upstream cluster availability threshold. |
+| Upstream `kubernetes-resources` | `KubeCPUOvercommit` | Pod CPU requests exceed the upstream cluster availability threshold. |
+| Local `platform-node` | `NodeFilesystemSpaceFillingUp` | Writable filesystem is over 80% used and its six-hour trend predicts exhaustion within 24 hours, for 1 hour. |
+| Local `platform-storage` | `WitselfPrometheusPVCUsageHigh` | Prometheus PVC usage in `monitoring` exceeds 80% for 15 minutes. |
+| Local `platform-certificates` | `WitselfCertificateExpiringSoon` | Certificate expiration is less than 14 days away for 1 hour. |
+| Local `platform-argocd` | `WitselfArgoApplicationUnhealthy` | `argocd_app_info` reports health other than Healthy or sync other than Synced for 15 minutes. |
+
+[`platform.rules.yaml`](../.gitops/charts/platform/files/platform.rules.yaml)
+supplies the four local alerts. The two upstream
+`NodeFilesystemSpaceFillingUp` variants are disabled and replaced by the local
+rule with the same name because their 85%/90% thresholds cannot be selected as
+80%. Two local recording rules supply only the prerequisites for overcommit:
+`namespace_cpu:kube_pod_container_resource_requests:sum` and
+`namespace_memory:kube_pod_container_resource_requests:sum`. They retain only
+Pending/Running pod requests, deduplicate kube-state-metrics series, and also
+carry `witself_alert: "true"`. This avoids enabling the unrelated upstream
+recording groups.
+
+Only the `defaultRules.rules` keys `nodeExporterAlerting`, `kubernetesApps`, and
+`kubernetesResources` are enabled. The following keys are explicitly false:
+`alertmanager`, `etcd`, `configReloaders`, `general`,
+`k8sContainerCpuUsageSecondsTotal`, `k8sContainerMemoryCache`,
+`k8sContainerMemoryRss`, `k8sContainerMemorySwap`, `k8sContainerResource`,
+`k8sContainerMemoryWorkingSetBytes`, `k8sPodOwner`,
+`kubeApiserverAvailability`, `kubeApiserverBurnrate`, `kubeApiserverHistogram`,
+`kubeApiserverSlos`, `kubeControllerManager`, `kubelet`, `kubeProxy`,
+`kubePrometheusGeneral`, `kubePrometheusNodeRecording`, `kubernetesStorage`,
+`kubernetesSystem`, `kubeSchedulerAlerting`, `kubeSchedulerRecording`,
+`kubeStateMetrics`, `network`, `node`, `nodeExporterRecording`, `prometheus`,
+`prometheusOperator`, and `windows`.
+
+Within those three selected groups, `defaultRules.disabled` explicitly removes:
+
+- Node rules: upstream `NodeFilesystemSpaceFillingUp`,
+  `NodeFilesystemAlmostOutOfSpace`, `NodeFilesystemFilesFillingUp`,
+  `NodeFilesystemAlmostOutOfFiles`, `NodeNetworkReceiveErrs`,
+  `NodeNetworkTransmitErrs`, `NodeHighNumberConntrackEntriesUsed`,
+  `NodeTextFileCollectorScrapeError`, `NodeRAIDDegraded`, `NodeRAIDDiskFailure`,
+  `NodeFileDescriptorLimit`, `NodeCPUHighUsage`, `NodeSystemSaturation`,
+  `NodeDiskIOSaturation`, `NodeSystemdServiceFailed`,
+  `NodeSystemdServiceCrashlooping`, and `NodeBondingDegraded`.
+- App rules: `KubeDeploymentGenerationMismatch`, `KubeDeploymentRolloutStuck`,
+  `KubeStatefulSetGenerationMismatch`, `KubeStatefulSetUpdateNotRolledOut`,
+  `KubeDaemonSetRolloutStuck`, `KubeDaemonSetNotScheduled`,
+  `KubeDaemonSetMisScheduled`, `KubeJobNotCompleted`, `KubeJobFailed`,
+  `KubeHpaReplicasMismatch`, `KubeHpaMaxedOut`, and `KubePdbNotEnoughHealthyPods`.
+- Resource rules: `KubeCPUQuotaOvercommit`, `KubeMemoryQuotaOvercommit`,
+  `KubeQuotaAlmostFull`, `KubeQuotaFullyUsed`, `KubeQuotaExceeded`, and
+  `CPUThrottlingHigh`.
+
+The disabled system group additionally pins `KubeVersionMismatch`,
+`KubeClientErrors`, `KubeAPIDown`, `KubeletDown`, `KubeControllerManagerDown`,
+and `KubeSchedulerDown` as disabled. The two-node single-zone k3s cell does not
+expose the upstream etcd/controller-manager/scheduler scrape endpoints; those
+scrapes and rule groups remain explicitly off. This curated set does not turn
+on any API server, DNS, kube-proxy, Windows, RAID, bonding, or systemd monitoring.
+
+The ACME contact in both Civo cell values is
+`apps.witselfServer.civoIngress.acme.email: support@witwave.ai`, the operator support mailbox
+that routes to the founder. This is a configuration change: cert-manager
+updates/re-registers the ACME account contact on the next issuance. It does not
+force certificate issuance or replace an account key. Verify the configured
+contact and normal certificate renewal after the values reconcile.
+
+Only the node-exporter DaemonSet adds workloads: two pods add requests of
+40m CPU/64Mi and limits of 200m CPU/128Mi in total. Per node, the added request
+is 20m CPU/32Mi (about 1.06% of 1880m CPU and 1.39% of 2308Mi memory), with a
+100m CPU/64Mi limit. Against the supplied approximate node-2 baseline of 97%
+declared memory limits, 3% of 2308Mi leaves about 69Mi; adding 64Mi fits with
+about 5Mi remaining, approximately 99.77% committed. This is a narrow arithmetic
+fit from the supplied capacity snapshot, not live scheduling or runtime
+acceptance. Extra Prometheus scrape/ingestion cost has not been measured;
+cert-manager, Argo CD, cAdvisor, and rules add no resource requests or limits.
 
 Initial alert candidates:
 
