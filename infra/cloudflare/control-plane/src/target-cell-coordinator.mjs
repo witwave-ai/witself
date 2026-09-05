@@ -154,6 +154,8 @@ export class DurableTargetCellCoordinator {
       switch (url.pathname) {
         case "/register":
           return await this.register(input);
+        case "/set-accepting":
+          return await this.setAccepting(input);
         case "/reserve":
           return await this.reserve(input);
         case "/release":
@@ -373,6 +375,53 @@ export class DurableTargetCellCoordinator {
       cell: publicCell({ name: this.cellName, ...cell }),
       created: !existing,
     }, existing ? 200 : 201);
+  }
+
+  async setAccepting(input) {
+    if (
+      typeof input.accepting !== "boolean" ||
+      Object.keys(input).some((key) =>
+        key !== "cell_name" && key !== "accepting"
+      )
+    ) {
+      fail("body must contain only accepting as a boolean", 400);
+    }
+    await this.recoverExpiredDeleteFence();
+    if (await this.storage.get(DELETE_FENCE_KEY)) {
+      fail("cell deletion is in progress", 409);
+    }
+    const existing = await this.authoritativeCell();
+    if (!existing) {
+      fail("unknown cell", 404);
+    }
+    if (input.accepting && existing.backup_validation_target === true) {
+      fail("cell is reserved for backup validation", 409);
+    }
+    const backupsEnabled = accountBackupSchedulingEnabled(this.env);
+    if (
+      input.accepting &&
+      !cellHasDestinationCredentials(existing, { backupsEnabled })
+    ) {
+      fail(
+        backupsEnabled
+          ? "accepting cells require distinct nonempty provision_token and backup_token while account backups are enabled"
+          : "accepting cells require a nonempty provision_token",
+        400,
+      );
+    }
+    // Keep the mutation inside the coordinator's serial queue and derive it
+    // solely from its authority. Replaying a KV snapshot through /register
+    // could clear newer isolation markers, credentials, or placement metadata.
+    const cell = { ...existing, accepting: input.accepting };
+    await this.storage.put(CELL_STATE_KEY, cell);
+    await this.env.DIRECTORY.put(
+      `cell:${this.cellName}`,
+      JSON.stringify(cell),
+    );
+    return json({
+      schema_version: "witself.v0",
+      cell: publicCell({ name: this.cellName, ...cell }),
+    });
   }
 
   async reserve(input) {

@@ -325,6 +325,43 @@ Rules:
 - AI-assisted account management must use the same commands and credentials as
   human operators; it should not require a separate AI-only backend.
 
+### Operator cell registry repair (implemented)
+
+The implemented `witself-admin cells` surface inspects and repairs existing
+control-plane registrations. The complete operator command reference is
+[witself-admin.md](witself-admin.md).
+
+```sh
+witself-admin cells list                                      # implemented
+witself-admin cells show CELL                                 # implemented
+witself-admin cells register CELL --cell-endpoint HTTPS_URL    # implemented
+witself-admin cells drain CELL                                # implemented
+witself-admin cells undrain CELL                              # implemented
+witself-admin cells deregister CELL --yes --yes-cell CELL      # implemented
+```
+
+`list` uses the admin-token view at `GET /v1/admin/cells`. The other verbs use
+the fleet token (`--fleet-token`, its `--token` alias, `--token-file`,
+`WITSELF_FLEET_TOKEN`, or managed `fleet.token`), and support `--endpoint` and
+`--json`. `show` finds the exact registration in `GET /v1/cells`; `register`
+upserts through `POST /v1/cells`. `drain` and `undrain` send only
+`accepting=false` or `accepting=true` through `PATCH /v1/cells/{name}`. The
+coordinator changes its authoritative accepting field without replaying
+registry metadata. Draining stops new placements and retains existing
+accounts. Backup validation targets cannot be undrained. Older control planes
+that lack PATCH are refused without an upsert fallback. Repair endpoints
+must be HTTP or HTTPS origins without a base path, credentials, query, or
+fragment, whether supplied by flag or environment.
+
+`register` defaults to `accepting=false`, keeping the entry drained until an
+explicit `--accepting=true` registration or `undrain`.
+
+`deregister` requires `--yes` plus an exact typed cell name at the terminal or
+`--yes-cell CELL` for unattended use. It sends only safe
+`DELETE /v1/cells/{name}`. The control plane refuses deletion until the cell
+is drained and has no remaining account directory entries; the CLI preserves
+the refusal text. These repair verbs expose neither `--force` nor a purge path.
+
 ### Operator-only signup invite administration
 
 The implemented `witself-admin invite` surface manages signup invite codes

@@ -241,6 +241,9 @@ deployment cells under a thin global control plane.
 - [cli-command-surface.md](cli-command-surface.md): human and agent CLI command
   design, including local runtime discovery and bulk integration lifecycle
   operations.
+- [witself-admin.md](witself-admin.md): implemented operator CLI reference for
+  the dashboard, cell registry repairs, fleet events, placement, backup evidence,
+  invites, support tickets, account policies, and email administration.
 - [mcp-tools.md](mcp-tools.md): MCP tool surface and safety posture.
 - [json-contracts.md](json-contracts.md): shared machine-readable response
   shapes, `witself://` references, and resource contracts for CLI, MCP, managed
