@@ -190,14 +190,15 @@ draining (`~/.witself/capture/outbox/<runtime>/`) makes every
 transcript-based case fail at once even though the sessions behaved
 correctly. Check the outbox before a certification window.
 
-When the stages are driven headlessly, always run
-`witself transcript flush --runtime <runtime>` in the foreground immediately
-before `verify`: a headless session (`claude -p`, `codex exec`) exits right
-after its `Stop` hook and takes the detached flush it spawned down with it, so
-its transcript stays local unless a longer-lived session on the same binding
-happens to flush later. In one autonomous window every stage behaved
-correctly, verification failed all six transcript-based cases, and a single
-foreground flush followed by `verify` alone turned the same run into a pass.
+For headless stages, Stop and SessionEnd hooks now attempt a best-effort
+foreground flush for up to three seconds, then start a detached flusher in its
+own session on macOS and Linux so it survives `claude -p` or `codex exec`
+exiting ([#339](https://github.com/witwave-ai/witself/issues/339)). Once the
+hooked binary includes this fix, a manual foreground flush is no longer
+required to work around parent exit. Running
+`witself transcript flush --runtime <runtime>` immediately before `verify`
+remains useful belt-and-braces: it drains currently uploadable events and
+reports delivery errors. Older hooked binaries still need this workaround.
 
 ### Older Codex hook binaries require fresh subjects
 

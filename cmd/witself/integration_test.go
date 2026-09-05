@@ -1877,6 +1877,145 @@ func TestCaptureFlushBadRequestIsolatesRejectedMiddleEvent(t *testing.T) {
 	}
 }
 
+func TestCaptureFlushFencedCodexTurnRetriesAfterPartialBadRequest(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+	var toolEventID string
+	var requests [][]string
+	var uploaded []string
+	rejectTool := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/self/activity":
+			_, _ = w.Write([]byte(`{"activity":{"last_activity_at":"2026-09-01T12:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts":
+			_, _ = w.Write([]byte(`{"transcript":{"id":"trn_1","metadata":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/transcripts/trn_1/entries:batch":
+			var body struct {
+				Entries []struct {
+					ExternalID string `json:"external_id"`
+				} `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode append: %v", err)
+				http.Error(w, "bad append", http.StatusBadRequest)
+				return
+			}
+			ids := make([]string, len(body.Entries))
+			rejected := false
+			for index, entry := range body.Entries {
+				ids[index] = entry.ExternalID
+				if rejectTool && strings.HasPrefix(entry.ExternalID, toolEventID+":") {
+					rejected = true
+				}
+			}
+			requests = append(requests, ids)
+			if rejected {
+				http.Error(w, "rejected tool event", http.StatusBadRequest)
+				return
+			}
+			uploaded = append(uploaded, ids...)
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	configureCaptureFlushTest(t, transcriptcapture.RuntimeCodex, srv.URL)
+
+	var events []transcriptcapture.Event
+	for _, input := range []map[string]any{
+		{"hook_event_name": "UserPromptSubmit", "prompt": "A"},
+		{"hook_event_name": "PreToolUse", "tool_name": "ordinary_tool", "tool_use_id": "tool-1"},
+	} {
+		input["session_id"] = "s"
+		input["transcript_path"] = "/tmp/codex-partial-fence.jsonl"
+		raw, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		event, err := transcriptcapture.EnqueueHook(transcriptcapture.RuntimeCodex, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	prompt, tool := events[0], events[1]
+	toolEventID = tool.ID
+	if prompt.RunID != tool.RunID || prompt.TurnID != tool.TurnID {
+		t.Fatal("prompt and tool must belong to the same run and turn")
+	}
+	fenceArgs := []string{"fence", "--runtime", "codex", "--session", "s", "--run", prompt.RunID, "--turn", prompt.TurnID}
+	if code := transcriptCmd(fenceArgs); code != 0 {
+		t.Fatalf("initial fence exit = %d", code)
+	}
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("fenced pending events = %#v, %v", pending, err)
+	}
+	fence := pending[2].Event
+	if fence.Kind != "turn.completed" || fence.RunID != prompt.RunID || fence.TurnID != prompt.TurnID {
+		t.Fatalf("fence event = %#v", fence)
+	}
+
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex}); code != 1 {
+		t.Fatalf("partial upload flush exit = %d, want 1", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeCodex, tool.ID)
+	wantRequests := [][]string{
+		{prompt.ID + ":0", tool.ID + ":0", fence.ID + ":0"},
+		{prompt.ID + ":0"},
+		{tool.ID + ":0"},
+		{fence.ID + ":0"},
+	}
+	if len(requests) != len(wantRequests) {
+		t.Fatalf("partial upload requests = %#v, want %#v", requests, wantRequests)
+	}
+	for index := range wantRequests {
+		if !slices.Equal(requests[index], wantRequests[index]) {
+			t.Fatalf("partial upload request %d = %v, want %v", index, requests[index], wantRequests[index])
+		}
+	}
+	if want := []string{prompt.ID + ":0", fence.ID + ":0"}; !slices.Equal(uploaded, want) {
+		t.Fatalf("partial upload successes = %v, want %v", uploaded, want)
+	}
+	pending, err = transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedPath := pending[0].Path
+	retainedRaw, err := os.ReadFile(retainedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rejectTool = false
+	if code := transcriptCmd(fenceArgs); code != 0 {
+		t.Fatalf("identical fence retry exit = %d", code)
+	}
+	assertOnlyCaptureEventPending(t, transcriptcapture.RuntimeCodex, tool.ID)
+	retriedRaw, err := os.ReadFile(retainedPath)
+	if err != nil || !slices.Equal(retriedRaw, retainedRaw) {
+		t.Fatalf("fence retry changed the retained tool event: %v", err)
+	}
+	if len(requests) != len(wantRequests) {
+		t.Fatalf("fence retry made append requests: %#v", requests)
+	}
+	if code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex}); code != 0 {
+		t.Fatalf("accepted tool retry flush exit = %d", code)
+	}
+	pending, err = transcriptcapture.Pending(transcriptcapture.RuntimeCodex)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("accepted tool retry pending events = %#v, %v", pending, err)
+	}
+	if len(requests) != 5 || !slices.Equal(requests[4], []string{tool.ID + ":0"}) {
+		t.Fatalf("accepted tool retry requests = %#v", requests)
+	}
+	if want := []string{prompt.ID + ":0", fence.ID + ":0", tool.ID + ":0"}; !slices.Equal(uploaded, want) {
+		t.Fatalf("completed upload successes = %v, want %v", uploaded, want)
+	}
+}
+
 func TestCaptureFlushRejectedFirstEventDoesNotSkipLaterSameTranscriptEvents(t *testing.T) {
 	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
 	var rejectedEventID string
