@@ -73,7 +73,7 @@ func (s *Store) SuspendAccountOwner(ctx context.Context, accountID, operatorID, 
 	if reason != "" {
 		eventMeta["reason"] = reason
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
 		Verb: VerbAccountSuspendedByMe, Metadata: eventMeta,
 	}); err != nil {
@@ -139,7 +139,7 @@ func (s *Store) SuspendAccountSystem(ctx context.Context, accountID, category, r
 	if reason != "" {
 		eventMeta["reason"] = reason
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountSuspendedBySystem, Metadata: eventMeta,
 	}); err != nil {
@@ -194,7 +194,7 @@ func (s *Store) ResumeAccountSystem(ctx context.Context, accountID, category str
 		 WHERE id = $1`, accountID); err != nil {
 		return fmt.Errorf("system resume account: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountResumedBySystem, Metadata: map[string]any{"category": category},
 	}); err != nil {
@@ -244,7 +244,7 @@ func (s *Store) ResumeAccountOwner(ctx context.Context, accountID, operatorID st
 		 WHERE id = $1`, accountID); err != nil {
 		return fmt.Errorf("resume account: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
 		Verb: VerbAccountResumedByMe, Metadata: map[string]any{},
 	}); err != nil {

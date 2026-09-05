@@ -208,7 +208,7 @@ func (s *Store) DeleteFact(ctx context.Context, p Principal, in DeleteFactInput)
 	if err := adjustActiveFactCountTx(ctx, tx, p, -1); err != nil {
 		return DeleteFactResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID,
 		ActorKind: ActorAgent,
 		ActorID:   p.ID,

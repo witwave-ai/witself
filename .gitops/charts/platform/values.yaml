@@ -104,6 +104,10 @@ platform:
     enabled: false
     alerting:
       enabled: false
+    collectorAlerts:
+      # Enable after the server exposes healthy identity-capacity metrics and
+      # both server and worker expose healthy audit-append metrics.
+      enabled: false
     postgresql:
       # Enable only with the cell's Civo PostgreSQL exporter and alerting.
       enabled: false

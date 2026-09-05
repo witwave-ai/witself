@@ -87,7 +87,7 @@ func (s *Store) RecoverAccount(ctx context.Context, accountID string, bootstrapT
 	// stays the same (recovery is credential rotation, not identity
 	// replacement) but the audit trail records the new bootstrap's
 	// operator_id so the owner can trace the recovery back.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb:     VerbRecoveryCompleted,
 		Metadata: map[string]any{"new_operator_id": rootID},

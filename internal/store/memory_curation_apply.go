@@ -179,7 +179,7 @@ func (s *Store) ApplyCuration(
 	if err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	expired, err := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 	if err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
@@ -242,7 +242,7 @@ func (s *Store) ApplyCuration(
 	if err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
-	actionResults, cursorIntervals, applyErr := applyMemoryCurationPlanTx(
+	actionResults, cursorIntervals, applyErr := s.applyMemoryCurationPlanTx(
 		ctx, work, p, run, stored,
 	)
 	if applyErr != nil {
@@ -254,7 +254,7 @@ func (s *Store) ApplyCuration(
 			!errors.Is(applyErr, ErrFactDeleted) {
 			return ApplyMemoryCurationResult{}, applyErr
 		}
-		if err := markMemoryCurationApplyConflictTx(ctx, tx, p, &lane, run, request,
+		if err := s.markMemoryCurationApplyConflictTx(ctx, tx, p, &lane, run, request,
 			in, requestHash, in.IdempotencyKey, "snapshot_stale"); err != nil {
 			return ApplyMemoryCurationResult{}, err
 		}
@@ -313,7 +313,7 @@ func (s *Store) ApplyCuration(
 	if err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationApplied,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationApplied,
 		run.RequestID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		MemoryCurationRunApplied); err != nil {
 		return ApplyMemoryCurationResult{}, err
@@ -366,7 +366,7 @@ type memoryCurationLockedHead struct {
 	Current        Memory
 }
 
-func applyMemoryCurationPlanTx(
+func (s *Store) applyMemoryCurationPlanTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -468,7 +468,7 @@ func applyMemoryCurationPlanTx(
 	}
 	results := make([]MemoryCurationActionApplyResult, 0, len(stored.Actions))
 	for _, row := range stored.Actions {
-		result, err := applyMemoryCurationActionTx(ctx, tx, p, run, row)
+		result, err := s.applyMemoryCurationActionTx(ctx, tx, p, run, row)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -500,7 +500,7 @@ func applyMemoryCurationPlanTx(
 	return results, intervals, nil
 }
 
-func applyMemoryCurationActionTx(
+func (s *Store) applyMemoryCurationActionTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -516,11 +516,11 @@ func applyMemoryCurationActionTx(
 	}
 	switch row.Action.Operation {
 	case MemoryCurationOperationCreate:
-		return applyMemoryCurationCreateTx(ctx, tx, p, run, row, result)
+		return s.applyMemoryCurationCreateTx(ctx, tx, p, run, row, result)
 	case MemoryCurationOperationReplace:
-		return applyMemoryCurationReplaceTx(ctx, tx, p, run, row, result)
+		return s.applyMemoryCurationReplaceTx(ctx, tx, p, run, row, result)
 	case MemoryCurationOperationSupersede:
-		return applyMemoryCurationSupersedeTx(ctx, tx, p, run, row, result)
+		return s.applyMemoryCurationSupersedeTx(ctx, tx, p, run, row, result)
 	case MemoryCurationOperationRelate:
 		return applyMemoryCurationRelateTx(ctx, tx, p, run, row, result)
 	case MemoryCurationOperationProposeFact:
@@ -530,7 +530,7 @@ func applyMemoryCurationActionTx(
 	}
 }
 
-func applyMemoryCurationCreateTx(
+func (s *Store) applyMemoryCurationCreateTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -582,13 +582,13 @@ func applyMemoryCurationCreateTx(
 		}
 		result.RelationIDs = append(result.RelationIDs, relationID)
 	}
-	if err := logMemoryVersionEventTx(ctx, tx, p, memory); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, memory); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
-func applyMemoryCurationReplaceTx(
+func (s *Store) applyMemoryCurationReplaceTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -636,13 +636,13 @@ func applyMemoryCurationReplaceTx(
 	result.BeforeHeads = append(result.BeforeHeads, MemoryVersionReference{MemoryID: current.ID, Version: current.Version})
 	result.AfterHeads = append(result.AfterHeads, MemoryVersionReference{MemoryID: current.ID, Version: next.Version})
 	result.EvidenceIDs = append(result.EvidenceIDs, evidenceIDs...)
-	if err := logMemoryVersionEventTx(ctx, tx, p, next); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, next); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
-func applyMemoryCurationSupersedeTx(
+func (s *Store) applyMemoryCurationSupersedeTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -732,7 +732,7 @@ func applyMemoryCurationSupersedeTx(
 	result.SupersessionSetID = setID
 	result.SupersessionSetRevision = setRevision
 	result.SupersessionReplacementIDs = replacements
-	if err := logMemoryVersionEventTx(ctx, tx, p, next); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, next); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -1150,7 +1150,7 @@ func fulfillMemoryCurationGenerationTx(
 	return request, &followUp, nil
 }
 
-func markMemoryCurationApplyConflictTx(
+func (s *Store) markMemoryCurationApplyConflictTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -1213,7 +1213,7 @@ func markMemoryCurationApplyConflictTx(
 	}); err != nil {
 		return err
 	}
-	return logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationConflicted,
+	return s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationConflicted,
 		run.RequestID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		MemoryCurationRunConflict)
 }

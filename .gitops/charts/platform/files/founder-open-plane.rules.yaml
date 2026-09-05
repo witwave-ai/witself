@@ -217,3 +217,55 @@ groups:
           summary: Clients are reporting a sustained avatar generation-failure rate.
           description: Successful avatar generation-failure reports have exceeded 0.003 per second for 10 minutes; inspect renderer compatibility, proposal validation, and client failure reason classes.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: witself-collectors
+    interval: 30s
+    rules:
+      - alert: WitselfIdentityCapacityMetricsUnavailable
+        expr: absent(witself_identity_capacity_metrics_up) or max(witself_identity_capacity_metrics_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: identity
+          witself_alert: "true"
+        annotations:
+          summary: Identity-capacity metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfIdentityCapacityAtLimit
+        expr: max(witself_identity_capacity_accounts_at_limit) > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: identity
+          witself_alert: "true"
+        annotations:
+          summary: Accounts are blocked from creating identities by a finite capacity limit.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAuditAppendMetricsUnavailable
+        expr: absent(witself_audit_append_metrics_up{container="witself-server"}) or absent(witself_audit_append_metrics_up{container="witself-worker"}) or min(witself_audit_append_metrics_up) < 1 or count((witself_up or witself_worker_up) unless on (namespace, pod, container) witself_audit_append_metrics_up) > 0
+        for: 3m
+        labels:
+          severity: critical
+          service: audit
+          witself_alert: "true"
+        annotations:
+          summary: Audit-append metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAuditAppendFailures
+        # A new process can fail before its first scrape. Include its nonzero
+        # counters until that same series has a ten-minute-old observation;
+        # compare before summing so another replica cannot hide the new one.
+        expr: >-
+          sum(increase(witself_audit_append_total{result="error",reason="error"}[10m])) > 0
+          or sum(increase(witself_audit_append_tx_failures_total[10m])) > 0
+          or sum(witself_audit_append_total{result="error",reason="error"}
+            unless witself_audit_append_total{result="error",reason="error"} offset 10m) > 0
+          or sum(witself_audit_append_tx_failures_total
+            unless witself_audit_append_tx_failures_total offset 10m) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: audit
+          witself_alert: "true"
+        annotations:
+          summary: Audit appends report a database or unexpected failure.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring

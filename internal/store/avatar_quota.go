@@ -950,7 +950,7 @@ func validateAvatarPrunedContinuityBoundariesTx(ctx context.Context, tx pgx.Tx,
 	}
 }
 
-func logAvatarPayloadCompactionTx(ctx context.Context, tx pgx.Tx,
+func (s *Store) logAvatarPayloadCompactionTx(ctx context.Context, tx pgx.Tx,
 	target avatarTarget, compaction avatarPayloadCompactionPlan,
 	countLimit int, byteLimit int64) error {
 	if compaction.count == 0 {
@@ -960,7 +960,7 @@ func logAvatarPayloadCompactionTx(ctx context.Context, tx pgx.Tx,
 	for i, version := range compaction.versions {
 		versions[i] = strconv.FormatInt(version, 10)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: target.accountID, ActorKind: ActorSystem,
 		Verb: VerbAvatarPayloadCompacted,
 		Metadata: map[string]any{
@@ -1117,11 +1117,11 @@ func (s *Store) SetAvatarQuota(ctx context.Context, p Principal, agentID string,
 	if err != nil {
 		return AvatarMutationResult{}, err
 	}
-	if err := logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
+	if err := s.logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
 		in.RetainedPayloadCountLimit, in.RetainedPayloadByteLimit); err != nil {
 		return AvatarMutationResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: target.accountID, ActorKind: ActorOperator, ActorID: p.ID,
 		Verb: VerbAvatarQuotaChanged,
 		Metadata: map[string]any{

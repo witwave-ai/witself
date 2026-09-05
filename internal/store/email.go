@@ -50,7 +50,7 @@ func (s *Store) UndoAccountEmail(ctx context.Context, accountID, expectedCurrent
 	// old-inbox link), so the actor is control_plane. Only the restored
 	// address goes on the record — the "current" was already logged when
 	// the forward change happened.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb:     VerbAccountEmailUndone,
 		Metadata: map[string]any{"restored_masked": MaskEmail(newEmail)},
@@ -105,7 +105,7 @@ func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operato
 		`UPDATE accounts SET display_name = $2 WHERE id = $1`, accountID, displayName); err != nil {
 		return fmt.Errorf("rename account: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
 		Verb:     VerbAccountRenamed,
 		Metadata: map[string]any{"display_name": displayName},
@@ -166,7 +166,7 @@ func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, e
 	} else {
 		oldMasked = "***" // seeded default account starts with null email
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountEmailChanged,
 		Metadata: map[string]any{

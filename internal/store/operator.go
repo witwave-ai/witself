@@ -199,7 +199,7 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, actorOperatorID, 
 	if displayName != "" {
 		createdMeta["display_name"] = displayName
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbOperatorCreated, Metadata: createdMeta,
 	}); err != nil {
@@ -215,7 +215,7 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, actorOperatorID, 
 	if expiresAt != nil {
 		mintedMeta["expires_at"] = expiresAt.Format(time.RFC3339)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbOperatorTokenMinted, Metadata: mintedMeta,
 	}); err != nil {
@@ -282,7 +282,7 @@ func (s *Store) DeleteOperator(ctx context.Context, accountID, actorOperatorID, 
 		accountID, targetOperatorID); err != nil {
 		return fmt.Errorf("delete operator: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbOperatorDeleted, Metadata: map[string]any{"operator_id": targetOperatorID},
 	}); err != nil {

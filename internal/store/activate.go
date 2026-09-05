@@ -50,7 +50,7 @@ func (s *Store) ActivateAccount(ctx context.Context, accountID string) (activate
 	}
 	// The idempotent short-circuit above returned before touching state,
 	// so we only fire the event on a genuine pending→active transition.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountActivated, Metadata: map[string]any{},
 	}); err != nil {

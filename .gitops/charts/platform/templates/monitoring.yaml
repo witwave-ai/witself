@@ -376,7 +376,13 @@ spec:
 {{ if $monitoring.alerting.enabled }}
         additionalPrometheusRulesMap:
           founder-open-plane:
-{{ .Files.Get "files/founder-open-plane.rules.yaml" | nindent 12 }}{{ if and $monitoring.postgresql.enabled (eq .Values.cell.cloud "civo") (dig "civoPostgres" "enabled" false (.Values.apps | default dict)) (dig "civoPostgres" "metrics" "enabled" false (.Values.apps | default dict)) }}
+{{- $founderGroups := list }}
+{{- range $group := (fromYaml (.Files.Get "files/founder-open-plane.rules.yaml")).groups }}
+{{- if or (ne $group.name "witself-collectors") $monitoring.collectorAlerts.enabled }}
+{{- $founderGroups = append $founderGroups $group }}
+{{- end }}
+{{- end }}
+{{ toYaml (dict "groups" $founderGroups) | nindent 12 }}{{ if and $monitoring.postgresql.enabled (eq .Values.cell.cloud "civo") (dig "civoPostgres" "enabled" false (.Values.apps | default dict)) (dig "civoPostgres" "metrics" "enabled" false (.Values.apps | default dict)) }}
           postgresql:
 {{ .Files.Get "files/postgresql.rules.yaml" | nindent 12 }}{{ end }}
 {{- $groups := list }}

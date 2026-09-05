@@ -3058,7 +3058,7 @@ in one parent commit.
    In the third GitOps change, set the immutable Secret names/keys and enable
    `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
    `witself_alert=true` incident route, the `witself_watchdog=true` dead-man
-   route, and the thirteen bounded rules to converge.
+   route, and the committed bounded rules to converge.
    Confirm zero
    `prometheus_rule_evaluation_failures_total`, the schema-91 logical storage
    gauges are present, and PostgreSQL PVC capacity/available metrics match the
@@ -3090,6 +3090,21 @@ in one parent commit.
    is alive is not a dead-man.
 6. Observe normal rules and storage growth for the declared acceptance window.
    Update the canonical feature-status catalog only in a later evidence PR.
+
+The four identity-capacity and audit-append alerts default
+off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
+until compatible server and worker binaries are deployed, then verify the
+metrics on both scrape targets before enabling it in a separate rollout.
+Existing alert routing and other rules are independent of this gate.
+
+First diagnostics once these collector alerts are enabled:
+
+| Alert | First diagnostic step |
+| --- | --- |
+| `WitselfIdentityCapacityMetricsUnavailable` | Check the server scrape target and `witself_identity_capacity_metrics_up`; if the target is healthy but the collector is 0, inspect database reachability and the read-only query's two-second timeout. Error text is intentionally absent from metrics. |
+| `WitselfIdentityCapacityAtLimit` | Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify whether realms, agents per realm, or operator seats block creation. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
+| `WitselfAuditAppendMetricsUnavailable` | Every server and worker replica must expose a healthy collector: compare `witself_up` and `witself_worker_up` with `witself_audit_append_metrics_up` on `namespace`, `pod`, and `container`. A missing collector from any replica, absence of either role's collectors, or any collector value below 1 fires the alert. Verify each process-local audit failure reader is wired and succeeding. |
+| `WitselfAuditAppendFailures` | Compare ten-minute increases in the server's `witself_audit_append_total{result="error",reason="error"}` and both server and worker `witself_audit_append_tx_failures_total` series, then inspect database insert failures in protected process logs. Nonzero counters without the same series in the ten-minutes-ago view also alert, covering startup failures before the first scrape; this can conservatively repeat an alert after a scrape gap. Both counters reset on process restart; a standalone insert failure can affect both, while input-validation errors are excluded from the transaction counter. A successful worker batch can still contain an earlier rolled-back audit failure, so its generic job-failure counter alone is insufficient. |
 
 Rollback alert routing first by setting `platform.monitoring.alerting.enabled`
 false, then roll back the ServiceMonitor/NetworkPolicy change. After the child

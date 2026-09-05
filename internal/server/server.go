@@ -42,6 +42,10 @@ type Config struct {
 	// ReadSupportSLOMetrics supplies the value-free support first-response
 	// posture for /metrics; nil skips the gauges entirely.
 	ReadSupportSLOMetrics func(context.Context) (SupportSLOMetrics, error)
+	// These readers expose value-free cell aggregates through independent 2 s
+	// sequential reads on /metrics. Nil readers omit their metric families.
+	ReadIdentityCapacityMetrics func(context.Context) (IdentityCapacityMetrics, error)
+	ReadAuditAppendMetrics      func(context.Context) (AuditAppendMetrics, error)
 
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
@@ -2257,7 +2261,8 @@ func Run(ctx context.Context, cfg Config) error {
 		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMuxFor(
-			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics)},
+			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics,
+			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics)},
 	}
 
 	type running struct {
@@ -6957,13 +6962,15 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics(), nil, nil)
+	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil)
 }
 
 func metricsMuxFor(
 	metrics *runtimeMetrics,
 	readAgentEmailCellStorage func(context.Context) (AgentEmailCellStorageMetrics, error),
 	readSupportSLO func(context.Context) (SupportSLOMetrics, error),
+	readIdentityCapacity func(context.Context) (IdentityCapacityMetrics, error),
+	readAuditAppend func(context.Context) (AuditAppendMetrics, error),
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -6973,6 +6980,8 @@ func metricsMuxFor(
 			r.Context(), w, readAgentEmailCellStorage,
 		)
 		writeSupportSLOPrometheus(r.Context(), w, readSupportSLO)
+		writeIdentityCapacityPrometheus(r.Context(), w, readIdentityCapacity)
+		writeAuditAppendPrometheus(r.Context(), w, readAuditAppend)
 	})
 	return securityResponseHeaders(mux)
 }

@@ -86,6 +86,7 @@ fi
 
 helm lint "$platform_chart" --values "$monitoring_values" >/dev/null
 helm lint "$apps_chart" >/dev/null
+ruby "$repo_root/scripts/testdata/test-monitoring-collector-alerts.rb" "$repo_root"
 
 default_render="$tmp/platform-default.yaml"
 enabled_render="$tmp/platform-enabled.yaml"

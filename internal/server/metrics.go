@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -41,6 +42,7 @@ type runtimeMetrics struct {
 	messageRateRejects    map[messageRateMetricLabels]uint64
 	agentEmailIngests     map[string]uint64
 	agentEmailRateRejects map[agentEmailRateMetricLabels]uint64
+	auditAppends          map[auditAppendMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -83,6 +85,10 @@ type messageRateMetricLabels struct {
 	LimitDimension, Scope, Operation string
 }
 
+type auditAppendMetricLabels struct {
+	Result, Reason string
+}
+
 type agentEmailRateMetricLabels struct {
 	LimitDimension, Scope, Source string
 }
@@ -100,7 +106,29 @@ type AgentEmailCellStorageMetrics struct {
 	HardCountedRows   int64
 }
 
+// IdentityCapacityDimensionMetrics aggregates accounts for one bounded identity
+// dimension. Unlimited accounts do not contribute to measured counts or ratios.
+type IdentityCapacityDimensionMetrics struct {
+	AccountsMeasured  int64
+	AccountsNearLimit int64
+	AccountsAtLimit   int64
+	AccountsUnlimited int64
+	MinHeadroomRatio  float64
+}
+
+// IdentityCapacityMetrics contains only cell aggregates and a fixed dimension set.
+type IdentityCapacityMetrics struct {
+	Realms, AgentsPerRealm, OperatorSeats IdentityCapacityDimensionMetrics
+}
+
+// AuditAppendMetrics counts database insert failures in this store process.
+// The counter resets when the process restarts.
+type AuditAppendMetrics struct {
+	TxFailures uint64
+}
+
 const agentEmailCellStorageMetricsTimeout = 2 * time.Second
+const capacityMetricsTimeout = 2 * time.Second
 
 type metricHistogram struct {
 	Buckets []uint64
@@ -129,6 +157,14 @@ func newRuntimeMetrics() *runtimeMetrics {
 		messageRateRejects:    make(map[messageRateMetricLabels]uint64),
 		agentEmailIngests:     make(map[string]uint64),
 		agentEmailRateRejects: make(map[agentEmailRateMetricLabels]uint64),
+		// Keep all bounded series present before the first failure so Prometheus
+		// can observe its initial increase.
+		auditAppends: map[auditAppendMetricLabels]uint64{
+			{Result: "success", Reason: "none"}:    0,
+			{Result: "error", Reason: "not_found"}: 0,
+			{Result: "error", Reason: "bad_input"}: 0,
+			{Result: "error", Reason: "error"}:     0,
+		},
 	}
 }
 
@@ -197,6 +233,31 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 			result, err := operation(ctx, accountID, realmID, in)
 			m.observePlanLimitRejection(err, "agents_per_realm")
 			return result, err
+		}
+	}
+	if operation := cfg.CreateOperator; operation != nil {
+		cfg.CreateOperator = func(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+			result, token, expiresAt, err := operation(ctx, accountID, actorOperatorID, displayName, tokenDisplayName, ttl)
+			m.observePlanLimitRejection(err, "operator_seats")
+			return result, token, expiresAt, err
+		}
+	}
+	if operation := cfg.LogAccountEvent; operation != nil {
+		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
+			err := operation(ctx, accountID, verb, actorKind, metadata)
+			reason := "none"
+			switch {
+			case errors.Is(err, ErrNotFound):
+				reason = "not_found"
+			case errors.Is(err, ErrBadInput):
+				reason = "bad_input"
+			case err != nil:
+				reason = "error"
+			}
+			m.mu.Lock()
+			m.auditAppends[auditAppendMetricLabels{Result: metricResult(err == nil), Reason: reason}]++
+			m.mu.Unlock()
+			return err
 		}
 	}
 	if operation := cfg.SendMessage; operation != nil {
@@ -420,7 +481,7 @@ func (m *runtimeMetrics) observePlanLimitRejection(err error, fallbackDimension 
 		dimension = detail.Dimension
 	}
 	switch dimension {
-	case "realms", "agents", "agents_per_realm":
+	case "realms", "agents", "agents_per_realm", "operator_seats":
 	default:
 		dimension = "unknown"
 	}
@@ -672,6 +733,84 @@ func writeSupportSLOPrometheus(
 	writeIntGauge(w, "witself_support_oldest_unanswered_seconds", "Age of the oldest ticket awaiting its first response.", status.OldestUnansweredSeconds)
 }
 
+// Each live collector uses its own bounded read and omits measurements on
+// failure, so an unavailable projection cannot appear as a healthy zero.
+func writeIdentityCapacityPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (IdentityCapacityMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, capacityMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || !validIdentityCapacityDimensionMetrics(status.Realms) ||
+		!validIdentityCapacityDimensionMetrics(status.AgentsPerRealm) ||
+		!validIdentityCapacityDimensionMetrics(status.OperatorSeats) {
+		writeIntGauge(w, "witself_identity_capacity_metrics_up", "1 when cell identity capacity was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_identity_capacity_metrics_up", "1 when cell identity capacity was read successfully.", 1)
+	dimensions := []struct {
+		name    string
+		metrics IdentityCapacityDimensionMetrics
+	}{
+		{"realms", status.Realms},
+		{"agents_per_realm", status.AgentsPerRealm},
+		{"operator_seats", status.OperatorSeats},
+	}
+	for _, metric := range []struct {
+		name, help string
+		value      func(IdentityCapacityDimensionMetrics) int64
+	}{
+		{"witself_identity_capacity_accounts_measured", "Live accounts with a finite identity limit in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsMeasured }},
+		{"witself_identity_capacity_accounts_near_limit", "Live finite-limit accounts using at least 80 percent of identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsNearLimit }},
+		{"witself_identity_capacity_accounts_at_limit", "Live finite-limit accounts at or above identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsAtLimit }},
+		{"witself_identity_capacity_accounts_unlimited", "Live accounts with unlimited or absent identity limits in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsUnlimited }},
+	} {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
+		for _, dimension := range dimensions {
+			_, _ = fmt.Fprintf(w, "%s%s %d\n", metric.name, labels("dimension", dimension.name), metric.value(dimension.metrics))
+		}
+	}
+	_, _ = fmt.Fprintln(w, "# HELP witself_identity_capacity_min_headroom_ratio Minimum finite-account identity headroom in this cell, clamped to [0,1]; 1 when none is finite.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_identity_capacity_min_headroom_ratio gauge")
+	for _, dimension := range dimensions {
+		_, _ = fmt.Fprintf(w, "witself_identity_capacity_min_headroom_ratio%s %s\n", labels("dimension", dimension.name), strconv.FormatFloat(dimension.metrics.MinHeadroomRatio, 'g', -1, 64))
+	}
+}
+
+func validIdentityCapacityDimensionMetrics(m IdentityCapacityDimensionMetrics) bool {
+	return m.AccountsMeasured >= 0 && m.AccountsUnlimited >= 0 &&
+		m.AccountsAtLimit >= 0 && m.AccountsAtLimit <= m.AccountsNearLimit &&
+		m.AccountsNearLimit <= m.AccountsMeasured &&
+		!math.IsNaN(m.MinHeadroomRatio) && m.MinHeadroomRatio >= 0 && m.MinHeadroomRatio <= 1 &&
+		(m.AccountsMeasured > 0 || m.MinHeadroomRatio == 1)
+}
+
+func writeAuditAppendPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (AuditAppendMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, capacityMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil {
+		writeIntGauge(w, "witself_audit_append_metrics_up", "1 when the process audit append counter was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_audit_append_metrics_up", "1 when the process audit append counter was read successfully.", 1)
+	_, _ = fmt.Fprintln(w, "# HELP witself_audit_append_tx_failures_total Audit database insert failures in this process; resets on process restart.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_audit_append_tx_failures_total counter")
+	_, _ = fmt.Fprintf(w, "witself_audit_append_tx_failures_total %d\n", status.TxFailures)
+}
+
 func validAgentEmailCellStorageMetrics(status AgentEmailCellStorageMetrics) bool {
 	return status.RetainedBytes >= 0 &&
 		status.RootRows >= 0 &&
@@ -707,6 +846,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		messageRateRejects:    maps.Clone(m.messageRateRejects),
 		agentEmailIngests:     maps.Clone(m.agentEmailIngests),
 		agentEmailRateRejects: maps.Clone(m.agentEmailRateRejects),
+		auditAppends:          maps.Clone(m.auditAppends),
 	}
 }
 
@@ -760,7 +900,7 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	writeCounterMap(w, "witself_memory_curation_operations_total", "Completed memory-curation domain calls by operation and result; idempotent replays are counted as calls.", m.curationOperations, func(k operationMetricLabels) string {
 		return labels("operation", k.Operation, "result", k.Result)
 	})
-	writeCounterMap(w, "witself_plan_limit_rejections_total", "Realm and agent create refusals by bounded plan-limit dimension and operation.", m.planLimitRejects, func(key limitMetricLabels) string {
+	writeCounterMap(w, "witself_plan_limit_rejections_total", "Identity create refusals by bounded plan-limit dimension and operation.", m.planLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key limitMetricLabels) string {
@@ -780,6 +920,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_agent_email_rate_limit_rejections_total", "Signed inbound agent-email safety refusals by bounded dimension, scope, and source.", m.agentEmailRateRejects, func(key agentEmailRateMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "source", key.Source)
+	})
+	writeCounterMap(w, "witself_audit_append_total", "Standalone audit append calls by bounded result and reason; resets on process restart.", m.auditAppends, func(key auditAppendMetricLabels) string {
+		return labels("result", key.Result, "reason", key.Reason)
 	})
 }
 

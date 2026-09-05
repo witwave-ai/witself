@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +18,14 @@ type Store struct {
 	dsn                            string
 	avatarPayloadCompactionEnabled bool
 	supportTicketRateLimit         SupportTicketRateLimitConfig
+	auditAppendFailures            atomic.Uint64
+}
+
+// AuditAppendFailures returns failed account_events INSERT attempts made by
+// this Store. Caller-input validation and earlier transaction failures do not
+// increment it. The counter is process-local and resets on process restart.
+func (s *Store) AuditAppendFailures() uint64 {
+	return s.auditAppendFailures.Load()
 }
 
 // Option applies process-lifetime store behavior selected before the server

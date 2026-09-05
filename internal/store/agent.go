@@ -40,7 +40,7 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		return Agent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	agent, err := createAgentTx(ctx, tx, accountID, realmID, agentID, name)
+	agent, err := s.createAgentTx(ctx, tx, accountID, realmID, agentID, name)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -82,11 +82,11 @@ func (s *Store) CreateAgentWithEmailMailbox(
 		return Agent{}, AgentEmailAddress{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	agent, err := createAgentTx(ctx, tx, accountID, realmID, agentID, name)
+	agent, err := s.createAgentTx(ctx, tx, accountID, realmID, agentID, name)
 	if err != nil {
 		return Agent{}, AgentEmailAddress{}, err
 	}
-	address, err := ensureAgentEmailMailboxTx(
+	address, err := s.ensureAgentEmailMailboxTx(
 		ctx, tx, scope, accountID, realmID, agent.ID, explicitSegment,
 	)
 	if err != nil {
@@ -98,7 +98,7 @@ func (s *Store) CreateAgentWithEmailMailbox(
 	return agent, address, nil
 }
 
-func createAgentTx(
+func (s *Store) createAgentTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID, realmID, agentID, name string,
@@ -183,7 +183,7 @@ func createAgentTx(
 		}
 		return Agent{}, fmt.Errorf("create agent: %w", err)
 	}
-	if err := createAgentAvatarProfileTx(ctx, tx, accountID, realmID, agentID); err != nil {
+	if err := s.createAgentAvatarProfileTx(ctx, tx, accountID, realmID, agentID); err != nil {
 		return Agent{}, err
 	}
 	return Agent{ID: agentID, Name: name}, nil
@@ -239,7 +239,7 @@ func (s *Store) DeleteAgent(ctx context.Context, accountID, realmID, agentID str
 	if err != nil {
 		return fmt.Errorf("verify agent: %w", err)
 	}
-	if err := cancelMessageRequestsForDeletedAgentTx(ctx, tx, accountID, realmID, agentID); err != nil {
+	if err := s.cancelMessageRequestsForDeletedAgentTx(ctx, tx, accountID, realmID, agentID); err != nil {
 		return err
 	}
 	// Deletion revokes the last credentials capable of completing or cancelling

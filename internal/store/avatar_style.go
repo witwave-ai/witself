@@ -163,7 +163,7 @@ func (s *Store) SetRealmAvatarStyle(ctx context.Context, p Principal, realmID st
 		return AvatarStyleMutationResult{}, fmt.Errorf("lock prior avatar style rollout: %w", err)
 	}
 	if err == nil {
-		if err := supersedeAvatarStyleRolloutJobTx(ctx, tx, p.AccountID, realmID,
+		if err := s.supersedeAvatarStyleRolloutJobTx(ctx, tx, p.AccountID, realmID,
 			oldRolloutRevision, oldRolloutPackID, oldRolloutPackVersion,
 			"newer_style_selected", in.ExpectedStyleRevision+1); err != nil {
 			return AvatarStyleMutationResult{}, err
@@ -277,7 +277,7 @@ func (s *Store) SetRealmAvatarStyle(ctx context.Context, p Principal, realmID st
 	if err != nil {
 		return AvatarStyleMutationResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorOperator, ActorID: p.ID,
 		Verb: VerbAvatarStyleChanged,
 		Metadata: map[string]any{

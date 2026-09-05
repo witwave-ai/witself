@@ -184,6 +184,23 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: agent-email cell storage: %v\n", err)
 			return 1
 		}
+		cfg.ReadIdentityCapacityMetrics = func(ctx context.Context) (server.IdentityCapacityMetrics, error) {
+			m, err := st.ReadIdentityCapacityMetrics(ctx)
+			if err != nil {
+				return server.IdentityCapacityMetrics{}, err
+			}
+			return server.IdentityCapacityMetrics{
+				Realms:         server.IdentityCapacityDimensionMetrics(m.Realms),
+				AgentsPerRealm: server.IdentityCapacityDimensionMetrics(m.AgentsPerRealm),
+				OperatorSeats:  server.IdentityCapacityDimensionMetrics(m.OperatorSeats),
+			}, nil
+		}
+		cfg.ReadAuditAppendMetrics = func(ctx context.Context) (server.AuditAppendMetrics, error) {
+			if err := ctx.Err(); err != nil {
+				return server.AuditAppendMetrics{}, err
+			}
+			return server.AuditAppendMetrics{TxFailures: st.AuditAppendFailures()}, nil
+		}
 		cfg.ReadSupportSLOMetrics = func(
 			ctx context.Context,
 		) (server.SupportSLOMetrics, error) {

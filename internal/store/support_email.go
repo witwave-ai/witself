@@ -202,7 +202,7 @@ func (s *Store) OpenTicketFromEmail(ctx context.Context, in OpenTicketFromEmailI
 		return Ticket{}, TicketMessage{}, fmt.Errorf("insert email support message: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: MessageAuthorOwner,
 		ActorID:   authority.ownerID.String,
@@ -326,7 +326,7 @@ func (s *Store) ReplyToTicketFromEmail(ctx context.Context, in ReplyToTicketFrom
 		return TicketMessage{}, fmt.Errorf("advance ticket state after email reply: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: MessageAuthorOwner,
 		ActorID:   authority.ownerID.String,

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -104,7 +106,7 @@ func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			metricsMuxFor(newRuntimeMetrics(), test.read, nil).ServeHTTP(
+			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil).ServeHTTP(
 				response,
 				httptest.NewRequest(http.MethodGet, "/metrics", nil),
 			)
@@ -526,6 +528,11 @@ func TestRuntimeMetricsObserveFactLimitRejectionsWithBoundedLabels(t *testing.T)
 func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	cfg := metrics.instrumentConfig(Config{
+		CreateOperator: func(context.Context, string, string, string, string, *time.Duration) (Operator, string, *time.Time, error) {
+			return Operator{}, "", nil, &PlanLimitError{
+				Dimension: "operator_seats", Used: 10, Max: 10, Plan: "plan_private_name",
+			}
+		},
 		CreateRealm: func(context.Context, string, string) (Realm, error) {
 			return Realm{}, &PlanLimitError{
 				Dimension: "realms", Used: 1, Max: 1, Plan: "free",
@@ -541,6 +548,7 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 			}
 		},
 	})
+	_, _, _, _ = cfg.CreateOperator(context.Background(), "account_private_identifier", "operator_private_identifier", "operator_private_name", "token_private_name", nil)
 	_, _ = cfg.CreateRealm(context.Background(), "account_private_identifier", "realm_private_name")
 	_, _ = cfg.CreateAgent(
 		context.Background(),
@@ -560,6 +568,7 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 	text := output.String()
 	for _, want := range []string{
 		`witself_plan_limit_rejections_total{limit_dimension="realms",operation="create"} 1`,
+		`witself_plan_limit_rejections_total{limit_dimension="operator_seats",operation="create"} 1`,
 		`witself_plan_limit_rejections_total{limit_dimension="agents",operation="create"} 1`,
 		`witself_plan_limit_rejections_total{limit_dimension="agents_per_realm",operation="create"} 1`,
 	} {
@@ -568,6 +577,10 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 		}
 	}
 	for _, forbidden := range []string{
+		"operator_private_identifier",
+		"operator_private_name",
+		"token_private_name",
+		"plan_private_name",
 		"account_private_identifier",
 		"realm_private_identifier",
 		"realm_private_name",
@@ -663,7 +676,7 @@ func metricsMuxForCellStorageTest(
 	metrics *runtimeMetrics,
 	read func(context.Context) (AgentEmailCellStorageMetrics, error),
 ) http.Handler {
-	return metricsMuxFor(metrics, read, nil)
+	return metricsMuxFor(metrics, read, nil, nil, nil)
 }
 
 // The SLO gauges must separate "nothing waiting" from "read failed": a broken
@@ -672,7 +685,7 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	ok := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 90061}, nil
-	}).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := ok.Body.String()
 	for _, want := range []string{
 		"witself_support_slo_metrics_up 1",
@@ -686,11 +699,218 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	broken := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{}, errors.New("db down with tenant detail")
-	}).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	b := broken.Body.String()
 	if !strings.Contains(b, "witself_support_slo_metrics_up 0") ||
 		strings.Contains(b, "witself_support_unanswered_tickets") ||
 		strings.Contains(b, "db down") {
 		t.Fatalf("failed read leaked or rendered gauges:\n%s", b)
+	}
+}
+
+var capacityMetricsForbidden = []string{
+	"account_capacity_private", "realm_capacity_private", "agent_capacity_private",
+	"operator_capacity_private", "plan_capacity_private", "plan_capacity_unlimited_private",
+}
+
+func assertCapacityMetricsValueFree(t *testing.T, output string) {
+	t.Helper()
+	for _, forbidden := range capacityMetricsForbidden {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("metrics exposed %q: %s", forbidden, output)
+		}
+	}
+}
+
+func assertCapacityMetricsDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
+		t.Fatal("collector must supply a live deadline no more than two seconds away")
+	}
+}
+
+func capacityMetricsRequest() *http.Request {
+	return httptest.NewRequest(http.MethodGet, "/metrics?account=account_capacity_private&realm=realm_capacity_private&agent=agent_capacity_private&operator=operator_capacity_private&plan=plan_capacity_private", nil)
+}
+
+func TestIdentityCapacityMetricsAreValueFreeAndBounded(t *testing.T) {
+	reads := 0
+	response := httptest.NewRecorder()
+	metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
+		reads++
+		assertCapacityMetricsDeadline(t, ctx)
+		return IdentityCapacityMetrics{
+			Realms:         IdentityCapacityDimensionMetrics{AccountsMeasured: 3, AccountsNearLimit: 2, AccountsAtLimit: 1, AccountsUnlimited: 4, MinHeadroomRatio: 0},
+			AgentsPerRealm: IdentityCapacityDimensionMetrics{AccountsMeasured: 5, AccountsNearLimit: 1, AccountsAtLimit: 0, AccountsUnlimited: 2, MinHeadroomRatio: 0.1},
+			OperatorSeats:  IdentityCapacityDimensionMetrics{AccountsMeasured: 0, AccountsUnlimited: 7, MinHeadroomRatio: 1},
+		}, nil
+	}, nil).ServeHTTP(response, capacityMetricsRequest())
+	if response.Code != http.StatusOK || reads != 1 {
+		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
+	}
+	output := response.Body.String()
+	want := map[string]string{"witself_identity_capacity_metrics_up": "1"}
+	for _, dimension := range []struct {
+		name   string
+		values []string
+	}{
+		{"realms", []string{"3", "2", "1", "4", "0"}},
+		{"agents_per_realm", []string{"5", "1", "0", "2", "0.1"}},
+		{"operator_seats", []string{"0", "0", "0", "7", "1"}},
+	} {
+		for i, metric := range []string{"accounts_measured", "accounts_near_limit", "accounts_at_limit", "accounts_unlimited", "min_headroom_ratio"} {
+			want["witself_identity_capacity_"+metric+`{dimension="`+dimension.name+`"}`] = dimension.values[i]
+		}
+	}
+	assertMetricSamples(t, output, "witself_identity_capacity_", want)
+	assertCapacityMetricsValueFree(t, output)
+}
+
+func TestIdentityCapacityMetricsFailClosedWithoutErrorText(t *testing.T) {
+	valid := IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: 1}
+	for _, test := range []struct {
+		name   string
+		status IdentityCapacityDimensionMetrics
+		err    error
+	}{
+		{"read error", valid, errors.New("database_capacity_error_canary account_capacity_private")},
+		{"negative count", IdentityCapacityDimensionMetrics{AccountsMeasured: -1, MinHeadroomRatio: 1}, nil},
+		{"impossible counts", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, AccountsNearLimit: 2, MinHeadroomRatio: 0.1}, nil},
+		{"not a number", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: math.NaN()}, nil},
+		{"out of range", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: 2}, nil},
+		{"empty finite set", IdentityCapacityDimensionMetrics{MinHeadroomRatio: 0}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
+				assertCapacityMetricsDeadline(t, ctx)
+				return IdentityCapacityMetrics{Realms: valid, AgentsPerRealm: valid, OperatorSeats: test.status}, test.err
+			}, nil).ServeHTTP(response, capacityMetricsRequest())
+			assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_identity_capacity_")
+		})
+	}
+}
+
+func TestAuditAppendMetricsAreValueFreeAndBounded(t *testing.T) {
+	reads := 0
+	response := httptest.NewRecorder()
+	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
+		reads++
+		assertCapacityMetricsDeadline(t, ctx)
+		return AuditAppendMetrics{TxFailures: 7}, nil
+	}).ServeHTTP(response, capacityMetricsRequest())
+	if response.Code != http.StatusOK || reads != 1 {
+		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
+	}
+	output := response.Body.String()
+	assertMetricSamples(t, output, "witself_audit_append_", map[string]string{
+		"witself_audit_append_metrics_up":                               "1",
+		"witself_audit_append_tx_failures_total":                        "7",
+		`witself_audit_append_total{result="success",reason="none"}`:    "0",
+		`witself_audit_append_total{result="error",reason="not_found"}`: "0",
+		`witself_audit_append_total{result="error",reason="bad_input"}`: "0",
+		`witself_audit_append_total{result="error",reason="error"}`:     "0",
+	})
+	if !strings.Contains(output, "# TYPE witself_audit_append_tx_failures_total counter\n") {
+		t.Fatal("audit failures must be a counter")
+	}
+	assertCapacityMetricsValueFree(t, output)
+}
+
+func TestAuditAppendMetricsFailClosedWithoutErrorText(t *testing.T) {
+	response := httptest.NewRecorder()
+	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
+		assertCapacityMetricsDeadline(t, ctx)
+		return AuditAppendMetrics{TxFailures: 7}, errors.New("database_capacity_error_canary account_capacity_private")
+	}).ServeHTTP(response, capacityMetricsRequest())
+	assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_audit_append_")
+}
+
+func assertMetricSamples(t *testing.T, output, prefix string, want map[string]string) {
+	t.Helper()
+	remaining := make(map[string]string, len(want))
+	for k, v := range want {
+		remaining[k] = v
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("malformed metric sample %q", line)
+		}
+		value, ok := remaining[fields[0]]
+		if !ok || value != fields[1] {
+			t.Fatalf("unexpected or duplicate metric sample %q", line)
+		}
+		delete(remaining, fields[0])
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("missing metric samples: %v\n%s", remaining, output)
+	}
+}
+
+func assertCapacityMetricsFailClosed(t *testing.T, output, prefix string) {
+	t.Helper()
+	want := map[string]string{prefix + "metrics_up": "0"}
+	if prefix == "witself_audit_append_" {
+		for _, sample := range []string{
+			`witself_audit_append_total{result="success",reason="none"}`,
+			`witself_audit_append_total{result="error",reason="not_found"}`,
+			`witself_audit_append_total{result="error",reason="bad_input"}`,
+			`witself_audit_append_total{result="error",reason="error"}`,
+		} {
+			want[sample] = "0"
+		}
+	}
+	assertMetricSamples(t, output, prefix, want)
+	if strings.Contains(output, "database_capacity_error_canary") {
+		t.Fatalf("collector exposed error text: %s", output)
+	}
+	assertCapacityMetricsValueFree(t, output)
+}
+
+func TestRuntimeMetricsAuditAppendReasonsAreBounded(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	var nextErr error
+	calls := 0
+	cfg := metrics.instrumentConfig(Config{
+		LogAccountEvent: func(_ context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
+			calls++
+			if accountID != "account_capacity_private" || verb != "private_audit_verb" || actorKind != "private_actor_kind" || metadata["private_key"] != "private_value" {
+				t.Fatal("audit wrapper changed arguments")
+			}
+			return nextErr
+		},
+	})
+	for _, err := range []error{
+		nil,
+		fmt.Errorf("account_capacity_private: %w", ErrNotFound),
+		fmt.Errorf("plan_capacity_private: %w", ErrBadInput),
+		errors.New("database_capacity_error_canary"),
+	} {
+		nextErr = err
+		if got := cfg.LogAccountEvent(context.Background(), "account_capacity_private", "private_audit_verb", "private_actor_kind", map[string]any{"private_key": "private_value"}); got != err {
+			t.Fatalf("audit wrapper changed error: %v != %v", got, err)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("audit calls=%d, want 4", calls)
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	assertMetricSamples(t, output.String(), "witself_audit_append_", map[string]string{
+		`witself_audit_append_total{result="success",reason="none"}`:    "1",
+		`witself_audit_append_total{result="error",reason="not_found"}`: "1",
+		`witself_audit_append_total{result="error",reason="bad_input"}`: "1",
+		`witself_audit_append_total{result="error",reason="error"}`:     "1",
+	})
+	assertCapacityMetricsValueFree(t, output.String())
+	for _, forbidden := range []string{"private_audit_verb", "private_actor_kind", "private_key", "private_value", "database_capacity_error_canary"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("audit metrics exposed %q", forbidden)
+		}
 	}
 }
