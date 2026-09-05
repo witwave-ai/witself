@@ -74,6 +74,11 @@ those families remain targets. The global flag, environment, output, and exit
 code sections also retain target contracts unless explicitly identified as
 implemented. Customer examples are in [Workflow Scripts](workflow-scripts.md).
 
+Each command-family section repeats its marker as `Family status`; nested
+command headings inherit that family status. An implemented family does not
+mark its proposed verbs or flags implemented. The test checks those section
+markers and requires a section for every dispatched customer family.
+
 This marker table is checked by `TestCommandSurfaceDispatchMarkers` against
 [the customer dispatch](../cmd/witself/main.go) and
 [the admin dispatch](../cmd/witself-admin/main.go). It includes help/version
@@ -106,6 +111,7 @@ plumbing, not a customer workflow.
 | `witself` | `gen-bootstrap-token` | implemented | — |
 | `witself` | `group` | target | — |
 | `witself` | `help` | implemented | `--help`, `-h` |
+| `witself` | `import` | target | — |
 | `witself` | `ingest` | target | — |
 | `witself` | `install` | implemented | — |
 | `witself` | `integrations` | implemented | — |
@@ -586,7 +592,9 @@ witself
   completion  # target; not implemented
 ```
 
-## Current Lifecycle Slice
+## `witself operator`
+
+**Family status: implemented.**
 
 The current self-hosted implementation includes the first operator lifecycle
 commands:
@@ -633,7 +641,27 @@ witself token revoke --endpoint URL --token-file OPERATOR_TOKEN --token TOKEN_ID
 The create/delete/revoke policy for currently implemented resources is tracked
 in [resource-lifecycle.md](resource-lifecycle.md).
 
+## `witself help`
+
+**Family status: implemented.**
+
+Print the top-level command help. `--help` and `-h` are aliases.
+
+## `witself gen-bootstrap-token`
+
+**Family status: implemented.**
+
+Generate an operator bootstrap token locally for a server's initial setup.
+
+## `witself legal`
+
+**Family status: implemented.**
+
+List published legal documents and versions, or read one selected document.
+
 ## `witself version`
+
+**Family status: implemented.**
 
 Print the CLI version and build metadata.
 
@@ -708,6 +736,8 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. Default: true for agent tokens. |
 
 ## `witself auth`
+
+**Family status: implemented.**
 
 Manage authentication to the managed service or active local profile.
 
@@ -906,6 +936,8 @@ plus the hosted provider session result from
 
 ## `witself account`
 
+**Family status: implemented.**
+
 Manage the Witself managed-service customer account from the CLI. The CLI is the
 primary control plane for customer account details, human operators/admins,
 billing ownership, support identity, and account exports.
@@ -1055,6 +1087,8 @@ Flags:
 | `--yes` | Skip confirmation. |
 
 ## `witself realm`
+
+**Family status: implemented.**
 
 Manage realms. A realm is the operator-owned container for a group of named
 agents. It holds agents, agent-owned and group-owned memories and facts,
@@ -1263,7 +1297,9 @@ Flags:
 | `--yes` | Skip confirmation for replacement. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself plan` (implemented)
+## `witself plan`
+
+**Family status: implemented.**
 
 Inspect the managed-service plan catalog and the current account's effective
 plan policy. These commands talk to the control plane. They report catalog
@@ -1328,7 +1364,9 @@ usage/limit aggregation, payment-method CRUD, hosted-session inspection, and
 crypto payments remain the target billing contract. Crypto payment rails are
 roadmap-only and are not implemented.
 
-## `witself billing` (partially implemented)
+## `witself billing`
+
+**Family status: implemented.**
 
 Manage managed-service billing, usage, plans, payment methods, and invoices from
 the CLI. Billing attaches at the account level, and usage rolls up by realm. The
@@ -1813,7 +1851,7 @@ Flags:
 | `--dry-run` | Show planned close action without closing the ticket. |
 | `--yes` | Skip confirmation. |
 
-## `witself remember` (deferred)
+## `witself remember`
 
 **Family status: target; not implemented.**
 
@@ -1828,6 +1866,8 @@ Witself operations and must not move classification or inference into the
 backend. See [Agent Memory Routing](agent-memory-routing.md).
 
 ## `witself self show`
+
+**Family status: implemented.**
 
 Show the always-loaded self-digest: a bounded view of who the agent is plus an
 authenticated, value-free `memory_checkpoint` and content-free
@@ -1882,6 +1922,8 @@ Flags:
 | `--json` | Emit `{ identity, primary_facts[], salient_memories[], memory_checkpoint, message_checkpoint, index, elided }`. |
 
 ## `witself self card`
+
+**Family status: implemented.**
 
 Show a presentation-only identity card for the token-bound agent. This command
 does not widen either backend contract: it composes an identity-only
@@ -1938,6 +1980,8 @@ Flags:
 
 ## `witself usage`
 
+**Family status: implemented.**
+
 Show fast hourly or daily product-usage totals for the authenticated agent. V0
 is deliberately self-scoped: an agent token cannot select another agent, and
 an operator token cannot use this command for account-wide aggregation.
@@ -1968,7 +2012,7 @@ Initial transcript dimensions are `transcript_created`,
 future realm/account billing commands aggregate from the same portable event
 ledger subject to operator permissions.
 
-## `witself session` (target; not implemented)
+## `witself session`
 
 **Family status: target; not implemented.**
 
@@ -2017,6 +2061,8 @@ Flags:
 `session.ended`.
 
 ## `witself memory`
+
+**Family status: implemented.**
 
 Manage memories. A memory is free-form self-content owned by an agent (or, in
 the group case, by a security group). It is one of the two first-class identity
@@ -2529,7 +2575,7 @@ an exact client-authored plan; see
 validates and applies the plan but does not decide what to merge, split, or
 supersede.
 
-## `witself digest emit` (target; not implemented)
+## `witself digest emit`
 
 **Family status: target; not implemented.**
 
@@ -2558,7 +2604,7 @@ Flags:
 | `--max-bytes N` | Hard cap on the emitted fragment size. |
 | `-o, --out PATH` | Write the fragment to a file instead of stdout. |
 
-## `witself ingest` (target; not implemented)
+## `witself ingest`
 
 **Family status: target; not implemented.**
 
@@ -2590,7 +2636,7 @@ in `--read-only` MCP mode.
 
 <a id="witself-bootstrap-instructions"></a>
 
-## `witself bootstrap-instructions` (target; not implemented)
+## `witself bootstrap-instructions`
 
 **Family status: target; not implemented.**
 
@@ -2619,6 +2665,8 @@ To install the stanza directly into a project's AGENTS.md as part of bootstrap,
 [`witself setup`](#witself-setup)).
 
 ## `witself fact`
+
+**Family status: implemented.**
 
 Manage facts. A fact is a name→value pair: the canonical, queryable identity
 card for an agent (or, in the group case, a security group). Facts are deterministic
@@ -2781,7 +2829,9 @@ direct-write/proposal retry keys cannot resurrect deleted content. `fact set
 address; it requires a fresh mutation key and does not inherit the old usage
 rank.
 
-## `witself vault key` (implemented)
+## `witself vault key`
+
+**Family status: implemented.**
 
 The key lifecycle remains a local-client ceremony. It is intentionally CLI-only
 and is not exposed over MCP. Pairing secrets and recovery passphrases use the
@@ -2880,6 +2930,8 @@ suspended account. Realm deletion already requires its agents to be removed.
 
 ## `witself password generate`
 
+**Family status: implemented.**
+
 Generate a password or passphrase. This is a sealed-plane utility used most often
 to populate a sensitive secret field (see `secret create --generate-sensitive`),
 but it also works standalone. Generated values are returned to the caller and are
@@ -2910,6 +2962,8 @@ Flags:
 | `--count N` | Generate N values. Default: `1`. |
 
 ## `witself secret`
+
+**Family status: implemented.**
 
 Manage stored secrets: the sealed plane of Witself. A secret can be a login, API
 key, token, private key, certificate bundle, connection string, or arbitrary
@@ -3317,6 +3371,8 @@ Flags:
 
 ## `witself totp`
 
+**Family status: implemented.**
+
 Make Witself the authenticator application for accounts that use TOTP 2FA. A TOTP
 enrollment stores its seed as high-value sealed material in the same plane as
 secrets: the seed is never embedded, recalled, placed in the self-digest, or
@@ -3633,6 +3689,8 @@ Flags:
 
 ## `witself transcript`
 
+**Family status: implemented.**
+
 Record the visible interaction between a user and an AI system. A transcript is
 an append-only enterprise ledger, not an addressed A2A mailbox. The agent token
 is the token-derived recorder; `role` is recorded data. Account operator tokens
@@ -3721,6 +3779,8 @@ bytes; no other runtime uses this normalization.
 
 ## `witself integrations`
 
+**Family status: implemented.**
+
 List the agent runtimes supported by this Witself build and report local
 detection separately from Witself installation state:
 
@@ -3762,6 +3822,8 @@ integration. Copilot is included in both the detected target set for `install
 all` and the installed target set for `uninstall all`.
 
 ## `witself install`
+
+**Family status: implemented.**
 
 Install MCP access and managed memory routing for a supported local agent
 runtime. Codex, Claude Code, Grok Build, and Cursor also install transcript
@@ -4053,6 +4115,12 @@ unrelated hooks are not disabled. On macOS and Linux, pass `--user-hooks` to
 use Codex or Claude user settings instead; Codex asks for one-time approval
 through `/hooks` in that mode.
 
+## `witself uninstall`
+
+**Family status: implemented.**
+
+Remove installed runtime integrations while preserving user data.
+
 ```sh
 witself uninstall codex
 witself uninstall claude
@@ -4128,7 +4196,16 @@ deleting uncertain user-owned state. The value-free `0600`
 `.witself-copilot-operation.lock` remains under `COPILOT_HOME` as the stable
 cross-process fence for future install, uninstall, and routing-only operations.
 
+## `witself _managed-hooks`
+
+**Family status: implemented.**
+
+Internal helper for administrator-managed runtime hook installation and
+removal, invoked by the integration commands.
+
 ## `witself message`
+
+**Family status: implemented.**
 
 Exchange durable messages with other agents and groups. Messaging is fully in
 scope for v0: a mailbox/queue model with at-least-once delivery, per-recipient
@@ -4522,6 +4599,8 @@ historical offers. There is no first-offer or first-eligible fallback.
 
 ## `witself email`
 
+**Family status: implemented.**
+
 External email for an agent, with receive and send independently gated.
 Catalog entitlement, effective account policy, cell enrollment, edge routing,
 and outbound dispatch are separate facts; an enabled plan alone proves neither
@@ -4634,6 +4713,13 @@ separate transitions. Message projections also carry the value-free
 installed foreground policy handles at most one
 pending Witself messaging-or-email lane per turn after user work; there is no
 email runner or wake service.
+
+## `witself email-domain`
+
+**Family status: implemented.**
+
+Request an organization-owned inbound email domain with `request`, or inspect
+the account's domain requests with `list`.
 
 ## `witself federation`
 
@@ -4804,6 +4890,8 @@ Flags:
 
 ## `witself agent`
 
+**Family status: implemented.**
+
 Manage agent principals. Billing rolls up to the realm, but identity and
 permissions are per agent. Operators can manage the full lifecycle of named
 agents inside a realm. Ordinary agents cannot run lifecycle operations unless
@@ -4958,6 +5046,8 @@ Flags:
 
 ## `witself token`
 
+**Family status: implemented.**
+
 Manage agent or operator tokens.
 
 V0 agent tokens are durable by default. They do not expire unless `--ttl` or
@@ -5079,6 +5169,8 @@ Flags:
 
 ## `witself export`
 
+**Family status: implemented.**
+
 Download a whole-account logical archive from the account's current cell. The
 command authenticates with the selected managed account's operator credential,
 calls `GET /v1/export`, and verifies the `self` manifest plus every trailing
@@ -5109,11 +5201,17 @@ Flags:
 | `--out FILE` | Write the verified `.tar.gz` archive to this file. |
 | `--force` | Replace an existing output file after verification. |
 
+## `witself import`
+
+**Family status: target; not implemented.**
+
 There is no customer `witself import` command. The server-side archive import is
 a provision-token-authorized account-evacuation primitive for operators moving
-accounts between cells; it is not a customer CLI counterpart to this command.
+accounts between cells; it is not a customer CLI counterpart to `witself export`.
 
 ## `witself mcp`
+
+**Family status: implemented.**
 
 Expose Witself to MCP-compatible agent runtimes.
 
@@ -5263,6 +5361,8 @@ Flags:
 
 ## `witself avatar`
 
+**Family status: implemented.**
+
 The avatar CLI mirrors the self and account-operator lifecycle without putting
 SVG or structured visual specifications in shell arguments:
 
@@ -5363,6 +5463,8 @@ under `agent_self_managed`; otherwise an account operator uses `avatar operator
 reset`. It is not a permanent purge command.
 
 ## `witself dashboard`
+
+**Family status: implemented.**
 
 Serve the local, content-read-only Agent Console over the agent's own `/v1`
 read surface. The command remains `witself dashboard`; the presentation

@@ -56,6 +56,13 @@ func TestCommandSurfaceDispatchMarkerDrift(t *testing.T) {
 		{"target marked implemented", "| `witself` | `policy` | target |", "| `witself` | `policy` | implemented |"},
 		{"implemented marked target", "| `witself` | `export` | implemented |", "| `witself` | `export` | target |"},
 		{"undocumented family section", "## Design Goals", "## `witself surface-regression`\n\n## Design Goals"},
+		{"undocumented nested family", "## Design Goals", "### `witself surface-regression`\n\n## Design Goals"},
+		{"target section marked implemented", "## `witself policy`\n\n**Family status: target; not implemented.**", "## `witself policy`\n\n**Family status: implemented.**"},
+		{"implemented section marked target", "## `witself export`\n\n**Family status: implemented.**", "## `witself export`\n\n**Family status: target; not implemented.**"},
+		{"missing section marker", "## `witself export`\n\n**Family status: implemented.**", "## `witself export`"},
+		{"missing dispatched section", "## `witself export`", "## Account archive"},
+		{"fenced dispatched section", "## `witself export`", "```markdown\n## `witself export`\n```"},
+		{"nested family marker disagrees", "### `witself policy create`", "### `witself policy create`\n\n**Family status: implemented.**"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			changed := strings.Replace(doc, mutation.before, mutation.after, 1)
@@ -64,6 +71,18 @@ func TestCommandSurfaceDispatchMarkerDrift(t *testing.T) {
 			}
 			if err := checkCommandSurfaceMarkers(changed, sources); err == nil {
 				t.Fatal("documentation drift was accepted")
+			}
+		})
+	}
+}
+
+func TestCommandSurfaceIgnoresFencedHeadings(t *testing.T) {
+	doc, sources := commandSurfaceInputs(t)
+	for _, fence := range []string{"```", "~~~~"} {
+		t.Run(fence, func(t *testing.T) {
+			example := fence + "markdown\n## `witself surface-regression`\n\n**Family status: implemented.**\n" + fence + "\n"
+			if err := checkCommandSurfaceMarkers(doc+"\n"+example, sources); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -103,8 +122,10 @@ func checkCommandSurfaceMarkers(doc string, sources map[string]string) error {
 	}
 	// Map every spelling (including aliases) to the family's marker.
 	markers := make(map[string]map[string]string)
+	families := make(map[string]map[string]string)
 	for binary := range sources {
 		markers[binary] = make(map[string]string)
+		families[binary] = make(map[string]string)
 	}
 	for _, line := range lines[2:] {
 		cells := strings.Split(line, "|")
@@ -119,6 +140,7 @@ func checkCommandSurfaceMarkers(doc string, sources map[string]string) error {
 		if markers[binary] == nil || (marker != "implemented" && marker != "target") || family == "" || strings.ContainsAny(family, " `\t") {
 			return fmt.Errorf("%s: invalid binary, family or marker in %q", commandSurfaceDoc, line)
 		}
+		families[binary][family] = marker
 		names := []string{family}
 		if cells[4] != "—" {
 			if marker == "target" {
@@ -156,18 +178,88 @@ func checkCommandSurfaceMarkers(doc string, sources map[string]string) error {
 			}
 		}
 	}
-	// A new family section also needs an explicit marker, even if target-only.
-	headings := regexp.MustCompile("(?m)^## `(?P<binary>witself(?:-admin)?) (?P<family>[a-z_][a-z0-9_-]*)(?:[ `])")
-	for _, match := range headings.FindAllStringSubmatch(doc, -1) {
-		if markers[match[1]][match[2]] == "" {
-			problems = append(problems, fmt.Sprintf("%s %s section has no family marker", match[1], match[2]))
-		}
-	}
+	problems = append(problems, commandSurfaceHeadingProblems(doc, families)...)
 	if len(problems) > 0 {
 		slices.Sort(problems)
 		return fmt.Errorf("%s dispatch markers have drifted:\n%s", commandSurfaceDoc, strings.Join(problems, "\n"))
 	}
 	return nil
+}
+
+// The family status line applies to a section and its nested command headings;
+// it does not claim that every proposed verb/flag in a dispatched family ships.
+func commandSurfaceHeadingProblems(doc string, families map[string]map[string]string) []string {
+	lines := strings.Split(doc, "\n")
+	// Fenced examples are not documentation sections. Keep line positions so a
+	// missing real heading cannot be satisfied by a heading inside an example.
+	fencePattern := regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
+	fence := ""
+	for i, line := range lines {
+		match := fencePattern.FindStringSubmatch(line)
+		if fence != "" {
+			if match != nil && match[1][0] == fence[0] && len(match[1]) >= len(fence) && strings.TrimSpace(match[2]) == "" {
+				fence = ""
+			}
+			lines[i] = ""
+		} else if match != nil {
+			fence = match[1]
+			lines[i] = ""
+		}
+	}
+	headingPattern := regexp.MustCompile("^ {0,3}(#{2,6}) `(?P<binary>witself(?:-admin)?) (?P<family>[a-z_][a-z0-9_-]*)(?:[ `])")
+	sectionMarkers := make(map[string]string)
+	var problems []string
+	parent := ""
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "## ") {
+			parent = ""
+		}
+		match := headingPattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		binary, family := match[2], match[3]
+		name := binary + " " + family
+		expected := families[binary][family]
+		if expected == "" {
+			problems = append(problems, name+" section has no family marker")
+			continue
+		}
+		marker := ""
+		for _, following := range lines[i+1:] {
+			if strings.TrimSpace(following) == "" {
+				continue
+			}
+			switch following {
+			case "**Family status: implemented.**":
+				marker = "implemented"
+			case "**Family status: target; not implemented.**":
+				marker = "target"
+			default:
+				if strings.HasPrefix(following, "**Family status:") {
+					problems = append(problems, fmt.Sprintf("%s section has invalid family status %q", name, following))
+				}
+			}
+			break
+		}
+		if len(match[1]) == 2 {
+			parent = name
+			sectionMarkers[name] = marker
+		} else if marker == "" && parent == name {
+			marker = sectionMarkers[parent]
+		}
+		if marker != expected {
+			problems = append(problems, fmt.Sprintf("%s heading at line %d has family status %q, want %q", name, i+1, marker, expected))
+		}
+	}
+	// Aliases share their primary family section. Admin commands retain their
+	// inventory in the table; the detailed sections document the customer CLI.
+	for family, marker := range families["witself"] {
+		if marker == "implemented" && sectionMarkers["witself "+family] == "" {
+			problems = append(problems, "witself "+family+" is dispatched but has no documented command section")
+		}
+	}
+	return problems
 }
 
 // Read only run's switch args[0], not nested verb switches, help strings or
