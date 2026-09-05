@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,8 +17,8 @@ import (
 	"github.com/witwave-ai/witself/internal/id"
 )
 
-// Initial product-usage dimensions. Additional features can add dimensions
-// without changing the ledger schema.
+// Product-usage dimensions. Additional features must explicitly extend the
+// accepted vocabulary below; adding one does not require a ledger migration.
 const (
 	UsageDimensionTranscriptCreated    = "transcript_created"
 	UsageDimensionTranscriptEntryWrite = "transcript_entry_write"
@@ -34,7 +35,37 @@ const (
 	UsageUnitByte       = "byte"
 	UsageUnitMessage    = "message"
 	UsageUnitDelivery   = "delivery"
+
+	// UsageReportPointLimit bounds returned points and their in-memory totals,
+	// including when legacy archives contain unexpectedly high cardinality.
+	UsageReportPointLimit = 10000
 )
+
+// usageDimensions is the closed vocabulary shared by queries and new event
+// writes. Archive imports retain the historical syntactic validation rule.
+// Include reserved dimensions as well as emitted ones.
+var usageDimensions = [...]string{
+	UsageDimensionTranscriptCreated,
+	UsageDimensionTranscriptEntryWrite,
+	UsageDimensionTranscriptEntryRead,
+	UsageDimensionTranscriptStorage,
+	UsageDimensionMessageSent,
+	UsageDimensionMessageDelivered,
+	UsageDimensionFactReturned,
+	UsageDimensionEmailReceived,
+	UsageDimensionEmailSent,
+	UsageDimensionEmailAddress,
+	UsageDimensionEmailStorage,
+	UsageDimensionStoredSecret,
+	UsageDimensionSecretRead,
+	UsageDimensionEncryptedStorage,
+	UsageDimensionTOTPCode,
+	UsageDimensionRuntimeInjection,
+}
+
+func validUsageDimension(dimension string) bool {
+	return slices.Contains(usageDimensions[:], dimension)
+}
 
 var (
 	usageDimensionPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -46,14 +77,17 @@ var (
 	ErrUsageForbidden = errors.New("usage access forbidden")
 	// ErrUsageInputInvalid reports an invalid usage query.
 	ErrUsageInputInvalid = errors.New("invalid usage query")
+	// ErrUsageQueryTooLarge refuses partial totals unless explicitly requested.
+	ErrUsageQueryTooLarge = errors.New("usage query too large")
 )
 
 // UsageQuery selects transactionally maintained per-agent rollups.
 type UsageQuery struct {
-	Since      time.Time
-	Until      time.Time
-	Bucket     string
-	Dimensions []string
+	Since           time.Time
+	Until           time.Time
+	Bucket          string
+	Dimensions      []string
+	AllowTruncation bool
 }
 
 // UsagePoint is one dimension total in an hourly or daily UTC bucket.
@@ -65,7 +99,8 @@ type UsagePoint struct {
 	EventCount  int64     `json:"event_count"`
 }
 
-// UsageTotal is a dimension total across the report window.
+// UsageTotal is a dimension total across returned points. When Truncated is
+// true it is a partial total, not a total across the entire requested window.
 type UsageTotal struct {
 	Dimension  string `json:"dimension"`
 	Unit       string `json:"unit"`
@@ -85,6 +120,7 @@ type UsageReport struct {
 	Bucket    string       `json:"bucket"`
 	Points    []UsagePoint `json:"points"`
 	Totals    []UsageTotal `json:"totals"`
+	Truncated bool         `json:"truncated"`
 }
 
 type usageEventInput struct {
@@ -112,17 +148,16 @@ func (s *Store) GetAgentUsage(ctx context.Context, p Principal, query UsageQuery
 		return UsageReport{}, err
 	}
 
-	args := []any{p.AccountID, p.RealmID, p.ID, query.Bucket, query.Since, query.Until}
+	args := []any{p.AccountID, p.RealmID, p.ID, query.Bucket, query.Since, query.Until,
+		query.Dimensions, UsageReportPointLimit + 1}
 	sql := `
 		SELECT dimension, unit, bucket_start, quantity, event_count
 		FROM usage_rollups
 		WHERE account_id = $1 AND realm_id = $2 AND agent_id = $3
-		  AND bucket = $4 AND bucket_start >= $5 AND bucket_start < $6`
-	if len(query.Dimensions) > 0 {
-		sql += ` AND dimension = ANY($7)`
-		args = append(args, query.Dimensions)
-	}
-	sql += ` ORDER BY bucket_start, dimension, unit`
+		  AND bucket = $4 AND bucket_start >= $5 AND bucket_start < $6
+		  AND dimension = ANY($7)
+		ORDER BY bucket_start, dimension, unit
+		LIMIT $8`
 
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -138,6 +173,13 @@ func (s *Store) GetAgentUsage(ctx context.Context, p Principal, query UsageQuery
 	}
 	totals := map[string]*UsageTotal{}
 	for rows.Next() {
+		if len(report.Points) == UsageReportPointLimit {
+			if !query.AllowTruncation {
+				return UsageReport{}, ErrUsageQueryTooLarge
+			}
+			report.Truncated = true
+			break
+		}
 		var point UsagePoint
 		if err := rows.Scan(&point.Dimension, &point.Unit, &point.BucketStart, &point.Quantity, &point.EventCount); err != nil {
 			return UsageReport{}, err
@@ -192,15 +234,20 @@ func normalizeUsageQuery(query UsageQuery) (UsageQuery, error) {
 		return UsageQuery{}, fmt.Errorf("%w: daily reports are limited to 5 years", ErrUsageInputInvalid)
 	}
 	seen := map[string]bool{}
-	dimensions := make([]string, 0, len(query.Dimensions))
+	dimensions := make([]string, 0, min(len(query.Dimensions), len(usageDimensions)))
 	for _, dimension := range query.Dimensions {
-		if !usageDimensionPattern.MatchString(dimension) {
-			return UsageQuery{}, fmt.Errorf("%w: invalid dimension %q", ErrUsageInputInvalid, dimension)
+		if !validUsageDimension(dimension) {
+			return UsageQuery{}, fmt.Errorf("%w: unknown dimension", ErrUsageInputInvalid)
 		}
 		if !seen[dimension] {
 			dimensions = append(dimensions, dimension)
 			seen[dimension] = true
 		}
+	}
+	if len(dimensions) == 0 {
+		// An unfiltered report still excludes unknown dimensions from legacy
+		// imports; the response vocabulary never depends on stored input.
+		dimensions = append(dimensions, usageDimensions[:]...)
 	}
 	sort.Strings(dimensions)
 	query.Dimensions = dimensions
@@ -299,7 +346,7 @@ func validateUsageEventInput(in *usageEventInput) error {
 	if in.AccountID == "" || in.RealmID == "" || in.AgentID == "" {
 		return fmt.Errorf("usage event scope is required")
 	}
-	if !usageDimensionPattern.MatchString(in.Dimension) || !usageShortNamePattern.MatchString(in.Unit) ||
+	if !validUsageDimension(in.Dimension) || !usageShortNamePattern.MatchString(in.Unit) ||
 		!usageShortNamePattern.MatchString(in.SubjectType) {
 		return fmt.Errorf("invalid usage event dimension, unit, or subject type")
 	}

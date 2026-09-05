@@ -156,9 +156,15 @@ func serve() int {
 		return 1
 	}
 	cfg.BackupToken = backupToken
+	supportTicketRateLimit, err := supportTicketRateLimitFromEnv(os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
-			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
+			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled),
+			store.WithSupportTicketRateLimit(supportTicketRateLimit))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
@@ -376,8 +382,11 @@ func serve() int {
 		cfg.GetUsage = func(ctx context.Context, p server.DomainPrincipal, query server.UsageQuery) (server.UsageReport, error) {
 			report, err := st.GetAgentUsage(ctx, toStorePrincipal(p), store.UsageQuery{
 				Since: query.Since, Until: query.Until, Bucket: query.Bucket, Dimensions: query.Dimensions,
+				AllowTruncation: query.AllowTruncation,
 			})
 			switch {
+			case errors.Is(err, store.ErrUsageQueryTooLarge):
+				return server.UsageReport{}, &server.UsageQueryTooLargeError{MaxRows: store.UsageReportPointLimit}
 			case errors.Is(err, store.ErrUsageInputInvalid):
 				return server.UsageReport{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
 			case errors.Is(err, store.ErrUsageForbidden):
@@ -2237,9 +2246,17 @@ func usage(w io.Writer) {
 // the server package's sentinels so the HTTP layer can pick the right
 // status code without importing the store package.
 func mapSupportError(err error) error {
+	var rateErr *store.SupportRateLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &rateErr):
+		return &server.SupportRateLimitError{
+			Limit: rateErr.Limit, WindowSeconds: rateErr.WindowSeconds,
+			RetryAfterSeconds: rateErr.RetryAfterSeconds,
+		}
+	case errors.Is(err, store.ErrSupportRateLimited):
+		return server.ErrSupportRateLimited
 	case errors.Is(err, store.ErrSupportDisabled):
 		return wrapAsSentinel(server.ErrSupportDisabled, store.ErrSupportDisabled, err)
 	case errors.Is(err, store.ErrSupportNotIncluded):
@@ -2759,6 +2776,6 @@ func toServerUsageReport(report store.UsageReport) server.UsageReport {
 		AccountID: report.AccountID, RealmID: report.RealmID, RealmName: report.RealmName,
 		AgentID: report.AgentID, AgentName: report.AgentName,
 		Since: report.Since, Until: report.Until, Bucket: report.Bucket,
-		Points: points, Totals: totals,
+		Points: points, Totals: totals, Truncated: report.Truncated,
 	}
 }

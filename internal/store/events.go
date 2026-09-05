@@ -739,8 +739,8 @@ var verbMetadataSchema = map[string]verbSpec{
 	},
 	VerbSupportTicketStateChanged: {
 		requiredKeys:  []string{"ticket_id", "state_from", "state_to"},
-		allowedKeys:   []string{"ticket_id", "state_from", "state_to", "admin_handle"},
-		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
+		allowedKeys:   []string{"ticket_id", "state_from", "state_to", "admin_handle", "reason"},
+		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane, ActorSystem},
 	},
 	VerbSupportTicketClosed: {
 		requiredKeys:  []string{"ticket_id"},

@@ -100,6 +100,8 @@ type jobConfig struct {
 	agentEmailRetention                store.AgentEmailRetentionWorkerConfig
 	accountPurgeEnabled                bool
 	accountPurge                       store.AccountPurgeWorkerConfig
+	supportTicketAgeOutEnabled         bool
+	supportTicketAgeOut                store.SupportTicketAgeOutWorkerConfig
 }
 
 func main() {
@@ -182,6 +184,10 @@ func serve() int {
 		fmt.Fprintf(os.Stderr,
 			"witself-worker: avatar style rollout enabled (batch %d, interval %s, timeout %s)\n",
 			cfg.BatchSize, cfg.Interval, cfg.BatchTimeout)
+	}
+	if err := registerSupportTicketAgeOut(registry, st, jobs); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-worker: register support ticket age-out: %v\n", err)
+		return 1
 	}
 	if jobs.messageRateBucketCleanupEnabled {
 		cfg := jobs.messageRateBucketCleanup
@@ -874,6 +880,10 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 			err,
 		)
 	}
+	supportTicketAgeOutEnabled, supportTicketAgeOut, err := supportTicketAgeOutFromEnv(lookup)
+	if err != nil {
+		return jobConfig{}, err
+	}
 	return jobConfig{
 		avatarEnabled:                      avatarEnabled,
 		avatar:                             avatar,
@@ -892,6 +902,8 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		agentEmailRetention:                agentEmailRetention,
 		accountPurgeEnabled:                accountPurgeEnabled,
 		accountPurge:                       accountPurge,
+		supportTicketAgeOutEnabled:         supportTicketAgeOutEnabled,
+		supportTicketAgeOut:                supportTicketAgeOut,
 	}, nil
 }
 

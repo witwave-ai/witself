@@ -159,6 +159,14 @@ Freeze moves while any possible destination is older than schema 91. A physical
 whole-database restore does preserve the singleton and triggers; verify its
 three measured counters against the five counted tables before reopening mail.
 
+Migration `0095_add_support_ticket_admission_index.sql` participates as an
+index-only schema change: it adds `support_tickets_by_account_opened` on
+`support_tickets (account_id, opened_at DESC)` for the admission window. It
+adds no account archive stream or row transformation; logical restore rebuilds
+the index from imported tickets, and Down removes only the index. The release
+must follow the schema-change backup and migration procedure and cannot use a
+`--no-schema-change` attestation.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -408,6 +416,14 @@ operator credential. There is no customer `witself import` command. A separate
 archive from the paired evacuation-export route is consumed by the
 provision-token-authorized operator import for account moves; the customer
 `purpose=self` artifact is not accepted there.
+
+Usage archive recovery preserves the historical dimension syntax
+`^[a-z][a-z0-9_]{0,63}$` for both events and hourly/daily rollups, including
+dimensions such as `legacy_custom` that are outside the current ingestion
+vocabulary. Import validates syntax, scope, and matching rollups without
+renaming or discarding those dimensions; later exports preserve them unchanged.
+The closed dimension vocabulary applies to new usage-event ingestion, so older
+account archives remain restorable and portable without a data migration.
 
 **Sealed-plane carve-out.** The whole-account archive includes portable
 client-encrypted secret/TOTP state, public AVK bindings, and value-free lifecycle

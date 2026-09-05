@@ -467,6 +467,11 @@ Migration requirements:
   constraints before the metadata swap. Its down migration refuses to proceed
   while any delete receipt exists; rollback across that boundary is
   backup-required because durable retry/audit evidence must not be discarded.
+- Migration `0095_add_support_ticket_admission_index.sql` adds the covering
+  `support_tickets_by_account_opened` index on `(account_id, opened_at DESC)`.
+  The admission query reads the newest tickets in its bounded window while
+  holding the account lock. This index-only migration preserves account rows;
+  its reversible down migration drops only the index.
 
 The public customer/operator CLI should not manage database migrations.
 Migration commands belong to the separate `witself-server` binary; see

@@ -4360,6 +4360,14 @@ func (ic *importCtx) validateImportedMemoryEvidence(
 }
 
 func (ic *importCtx) validateUsageScope(obj map[string]any, badf func(string, ...any) error, table string) error {
+	// Recovery preserves dimensions accepted by earlier releases. Their write
+	// validator and usage-table CHECKs used ^[a-z][a-z0-9_]{0,63}$; keep that
+	// exact syntax here, while the closed vocabulary governs new ingestion.
+	// Unknown historical dimensions must survive import and later export.
+	dimension, err := requireStringField(obj, "dimension")
+	if err != nil || !usageDimensionPattern.MatchString(dimension) {
+		return badf("%s row has invalid usage dimension", table)
+	}
 	realmID, err := requireStringField(obj, "realm_id")
 	if err != nil || !ic.realms[realmID] {
 		return badf("%s row references realm %q not present in this archive", table, realmID)

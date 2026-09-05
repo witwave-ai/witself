@@ -2962,6 +2962,7 @@ func usageCmd(args []string) int {
 	sinceRaw := fs.String("since", "30d", "report start (RFC3339 or duration such as 30d or 24h)")
 	untilRaw := fs.String("until", "", "report end (RFC3339; default: now)")
 	groupBy := fs.String("group-by", "day", "time bucket: hour or day")
+	allowTruncation := fs.Bool("allow-truncation", false, "allow partial usage results when the server row cap is exceeded")
 	var dimensions csvListFlag
 	fs.Var(&dimensions, "dimension", "usage dimension (repeatable or comma-separated)")
 	jsonOut := jsonFlag(fs)
@@ -2999,6 +3000,7 @@ func usageCmd(args []string) int {
 	}
 	report, err := client.GetUsage(ctx, conn.Endpoint, conn.Token, client.UsageQuery{
 		Since: since, Until: until, Bucket: *groupBy, Dimensions: dimensions,
+		AllowTruncation: *allowTruncation,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -3016,6 +3018,9 @@ func usageCmd(args []string) int {
 	if conn.AgentName != "" && report.AgentName != "" && report.AgentName != conn.AgentName {
 		fmt.Fprintf(os.Stderr, "witself: agent token belongs to agent %q, not %q\n", report.AgentName, conn.AgentName)
 		return 1
+	}
+	if report.Truncated {
+		fmt.Fprintln(os.Stderr, "WARNING: truncated: true; usage totals cover returned points only; narrow --since/--until, use a coarser --group-by, or filter --dimension")
 	}
 	if *jsonOut {
 		return printJSON(report)

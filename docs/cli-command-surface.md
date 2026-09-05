@@ -1960,7 +1960,18 @@ witself usage --account default --agent scott \
 | `--until TIMESTAMP` | RFC3339 window end. Default: now. |
 | `--dimension DIMENSION` | Filter a usage dimension. Repeatable; comma-separated values also work. |
 | `--group-by hour\|day` | UTC rollup size. Default: `day`. |
-| `--json` | Emit identity scope, window, points, and whole-window totals. |
+| `--allow-truncation` | Opt in to partial results above the 10,000-point cap. Default: disabled. |
+| `--json` | Emit identity scope, window, points, totals for returned points, and `truncated`. |
+
+Reports return at most 10,000 points. Without `--allow-truncation`, a query
+exceeding that cap fails with HTTP 422 (`usage_query_too_large`), and the CLI
+prints the server's message: narrow `--since`/`--until`, use a coarser
+`--group-by`, or opt in. Only `--allow-truncation` sends `allow_truncation=1`.
+When an opted-in report is partial, both text and JSON modes prominently warn
+`truncated: true` on stderr; JSON also includes `"truncated": true`. Totals then
+cover only the returned points.
+See the [usage report contract](json-contracts.md#usage-report) for the closed
+dimension vocabulary and query bounds.
 
 Initial transcript dimensions are `transcript_created`,
 `transcript_entry_write`, `transcript_entry_read`, and

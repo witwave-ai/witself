@@ -16,6 +16,7 @@ type Store struct {
 	pool                           *pgxpool.Pool
 	dsn                            string
 	avatarPayloadCompactionEnabled bool
+	supportTicketRateLimit         SupportTicketRateLimitConfig
 }
 
 // Option applies process-lifetime store behavior selected before the server
@@ -38,7 +39,7 @@ func Open(ctx context.Context, dsn string, options ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	store := &Store{pool: pool, dsn: dsn}
+	store := &Store{pool: pool, dsn: dsn, supportTicketRateLimit: DefaultSupportTicketRateLimitConfig()}
 	for _, option := range options {
 		if option != nil {
 			option(store)

@@ -371,7 +371,7 @@ func TestSecretLimitRefusalHasStableMachineCode(t *testing.T) {
 	}
 }
 
-func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
+func TestSecretCapabilityReportsRegisteredSurface(t *testing.T) {
 	auth := secretTestAuth
 	complete := Config{
 		AuthenticatePrincipal: auth,
@@ -406,7 +406,7 @@ func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
 		name      string
 		cfg       Config
 		supported bool
-	}{{name: "complete", cfg: complete, supported: true}, {name: "partial", cfg: Config{AuthenticatePrincipal: auth, GetSecret: complete.GetSecret}}} {
+	}{{name: "complete", cfg: complete, supported: true}, {name: "partial", cfg: Config{AuthenticatePrincipal: auth, GetSecret: complete.GetSecret}, supported: true}} {
 		t.Run(test.name, func(t *testing.T) {
 			srv := httptest.NewServer(apiMux(test.cfg))
 			defer srv.Close()
