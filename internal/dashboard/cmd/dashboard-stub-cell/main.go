@@ -58,7 +58,10 @@ func run() error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Fprintln(os.Stdout, "stub-cell: http://"+listener.Addr().String())
+	if _, err := fmt.Fprintln(os.Stdout, "stub-cell: http://"+listener.Addr().String()); err != nil {
+		fmt.Fprintf(os.Stderr, "stub-cell: announce listener: %v\n", err)
+		os.Exit(1)
+	}
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return errors.New("HTTP server failed")
 	}
