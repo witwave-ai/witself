@@ -367,6 +367,35 @@ witself account status --account <name>          # says "archived — awaiting p
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
+## PostgreSQL image pin: how to re-pin
+
+Read the running PostgreSQL container's image ID using the reviewed cell's
+explicit kubeconfig/context:
+
+```sh
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n witself \
+  get pod witself-postgresql-0 \
+  -o jsonpath='{.spec.containers[?(@.name=="postgresql")].image}{"\n"}{.status.containerStatuses[?(@.name=="postgresql")].imageID}{"\n"}'
+```
+
+Copy the `sha256:…` suffix from that container's `imageID` into
+`apps.civoPostgres.image.digest` in `.gitops/cells/<cell>/values.yaml`; omit any
+runtime prefix or repository before `@`. Keep `image.registry` and
+`image.repository` matched to the running image (currently
+`registry-1.docker.io` and `bitnami/postgresql`). Render the apps chart with that
+cell file and review the nested PostgreSQL image values before merging.
+Update the reviewed digest expectation in `scripts/test-helm-rollout.sh` and
+run that rendering gate with the new pin.
+An empty digest returns to tag-based resolution; it is not a rollback pin.
+
+A pin of the current image preserves content, but the changed image reference
+updates the StatefulSet pod template and can roll PostgreSQL. Verify readiness
+and the resulting image ID after sync. Re-pin the rollback-only
+`civo-sandbox-use1-backup` first, verify it, and review the serving
+`civo-sandbox-usw2-dev` separately. Their current digests differ; copying one
+cell's digest to the other is a separate image-alignment change, not merely
+recording its current image.
+
 ## Back up both reviewed Civo databases before a migration
 
 Before running `scripts/roll-cell.sh` for a release that can advance the

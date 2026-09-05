@@ -1845,4 +1845,108 @@ if [[ -z "$default_server_checksum" || -z "$email_server_checksum" ||
   exit 1
 fi
 
+# PostgreSQL hardening must preserve serving-cell defaults while the backup
+# cell exercises the pinned image and restricted policy. Inspect child values
+# structurally without fetching the upstream chart during this offline gate.
+ruby -ryaml -ropen3 - "$apps_chart" "$civo_cell" "$civo_backup_cell" \
+  "$civo_apps_render" "$civo_backup_apps_render" <<'RUBY'
+chart, serving_cell, backup_cell, serving_render, backup_render = ARGV
+def check(message, condition)
+  abort message unless condition
+end
+def application(documents, name)
+  documents.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == name } || abort("missing Application/#{name}")
+end
+def child_values(documents, name = "witself-postgresql")
+  YAML.safe_load(application(documents, name).dig("spec", "source", "helm", "values"), aliases: false)
+end
+def render(chart, cell, *overrides)
+  args = ["helm", "template", "witself-apps", chart, "--values", cell]
+  overrides.each { |override| args.concat(["--set", override]) }
+  output, errors, status = Open3.capture3(*args)
+  abort errors unless status.success?
+  YAML.load_stream(output).compact
+end
+
+serving = YAML.load_stream(File.read(serving_render)).compact
+backup = YAML.load_stream(File.read(backup_render)).compact
+defaults = YAML.safe_load(File.read(File.join(chart, "values.yaml")), aliases: false).dig("apps", "civoPostgres")
+check("PostgreSQL image defaults must inherit upstream values", defaults["image"].values.all? { |value| value == "" })
+check("PostgreSQL mirror opt-in must default false", defaults["allowInsecureImages"] == false)
+check("PostgreSQL metrics must default off", defaults.dig("metrics", "enabled") == false && defaults.dig("metrics", "serviceMonitor", "enabled") == false)
+check("PostgreSQL policy defaults must retain upstream behavior", defaults["networkPolicy"] == {"enabled" => true, "allowExternal" => true})
+
+[serving, backup].each do |documents|
+  ["witself-server", "witself-postgresql"].each do |name|
+    sync = application(documents, name).dig("spec", "syncPolicy")
+    check("#{name}: retry/backoff contract changed", sync["retry"] == {"limit" => 20, "backoff" => {"duration" => "10s", "factor" => 2, "maxDuration" => "2m"}})
+    check("#{name}: automated sync changed", sync["automated"] == {"prune" => true, "selfHeal" => true})
+    check("#{name}: namespace/foreground sync options missing", sync["syncOptions"] == ["CreateNamespace=true", "PrunePropagationPolicy=foreground"])
+  end
+end
+
+pg = child_values(serving)
+check("serving PostgreSQL image must remain unpinned", !pg.key?("image"))
+check("serving PostgreSQL must retain upstream image validation", !pg.key?("global"))
+check("serving PostgreSQL metrics must remain disabled", pg["metrics"] == {"enabled" => false})
+check("serving PostgreSQL policy must inherit upstream defaults", !pg.fetch("primary").key?("networkPolicy") && !pg.key?("extraDeploy"))
+check("serving compaction must remain disabled", child_values(serving, "witself-server").dig("avatar", "payloadCompaction", "enabled") == false)
+
+pg = child_values(backup)
+check("backup PostgreSQL pin changed", pg["image"] == {"registry" => "registry-1.docker.io", "repository" => "bitnami/postgresql", "digest" => "sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049"})
+check("backup PostgreSQL must retain upstream image validation", !pg.key?("global"))
+check("backup has no monitoring stack", pg["metrics"] == {"enabled" => false})
+check("backup compaction must be enabled", child_values(backup, "witself-server").dig("avatar", "payloadCompaction", "enabled") == true)
+backup_config = YAML.safe_load(File.read(backup_cell), aliases: false)
+serving_config = YAML.safe_load(File.read(serving_cell), aliases: false)
+check("backup-only Metrics Server activation changed", backup_config.dig("platform", "metricsServer", "enabled") == true && serving_config.dig("platform", "metricsServer", "enabled") == false)
+server_config = backup_config.dig("apps", "witselfServer")
+check("backup replica/PDB/topology must stay unchanged", server_config["replicaCount"] == 1 && server_config.dig("podDisruptionBudget", "enabled") == false && server_config["topologySpreadConstraints"] == [] && server_config.dig("worker", "replicaCount") == 2 && server_config.dig("worker", "podDisruptionBudget", "enabled") == false && server_config.dig("worker", "topologySpreadConstraints") == [])
+
+check("strict policy must disable the broader upstream policy", pg.dig("primary", "networkPolicy", "enabled") == false)
+policies = pg.fetch("extraDeploy")
+check("strict policy must create exactly one NetworkPolicy", policies.length == 1 && policies[0]["kind"] == "NetworkPolicy")
+policy = policies[0]
+check("strict policy must replace the upstream policy identity", policy["metadata"] == {"name" => "witself-postgresql", "namespace" => "witself"})
+check("strict policy must target only this PostgreSQL primary", policy.dig("spec", "podSelector", "matchLabels") == {"app.kubernetes.io/name" => "postgresql", "app.kubernetes.io/instance" => "witself-postgresql", "app.kubernetes.io/component" => "primary"})
+check("strict policy must retain open egress", policy.dig("spec", "policyTypes") == ["Ingress", "Egress"] && policy.dig("spec", "egress") == [{}])
+ingress = policy.dig("spec", "ingress")
+check("backup must expose only PostgreSQL through its policy", ingress.length == 1 && ingress[0]["ports"] == [{"protocol" => "TCP", "port" => 5432}])
+peers = ingress[0].fetch("from")
+expected = [
+  ["witself", {"app.kubernetes.io/name" => "witself-server", "app.kubernetes.io/instance" => "witself-server", "app.kubernetes.io/component" => "server"}],
+  ["witself", {"app.kubernetes.io/name" => "witself-worker", "app.kubernetes.io/instance" => "witself-server", "app.kubernetes.io/component" => "worker"}],
+  ["monitoring", {"app.kubernetes.io/name" => "prometheus"}]
+].map { |namespace, labels| {"namespaceSelector" => {"matchLabels" => {"kubernetes.io/metadata.name" => namespace}}, "podSelector" => {"matchLabels" => labels}} }
+expected.concat([
+  {"namespaceSelector" => {"matchLabels" => {"kubernetes.io/metadata.name" => "witself"}},
+   "podSelector" => {"matchLabels" => {"app.kubernetes.io/name" => "witself-agent-email-operation", "app.kubernetes.io/component" => "one-shot"},
+     "matchExpressions" => [{"key" => "witself.io/agent-email-operation", "operator" => "In", "values" => ["backfill", "canary-manifest"]}]}},
+  {"namespaceSelector" => {"matchLabels" => {"kubernetes.io/metadata.name" => "witself"}},
+   "podSelector" => {"matchLabels" => {"app.kubernetes.io/name" => "witself-agent-email-receipt-proof", "app.kubernetes.io/component" => "operator-proof",
+     "app.kubernetes.io/managed-by" => "witself-operator", "witself.io/cell" => backup_config.dig("cell", "name")}}}
+])
+check("strict policy must admit only server, worker, monitoring scraper, and authorized email Jobs; generic client peers are forbidden", peers == expected)
+
+pinned = child_values(render(chart, serving_cell,
+  "apps.civoPostgres.image.registry=registry.example.com", "apps.civoPostgres.image.repository=mirror/postgresql",
+  "apps.civoPostgres.image.tag=18.8.0", "apps.civoPostgres.image.digest=sha256:#{'a' * 64}"))
+check("image fields must all forward exactly", pinned["image"] == {"registry" => "registry.example.com", "repository" => "mirror/postgresql", "tag" => "18.8.0", "digest" => "sha256:#{'a' * 64}"})
+tagged = child_values(render(chart, serving_cell, "apps.civoPostgres.image.tag=18.8.0"))
+check("empty image digest must be omitted", tagged["image"] == {"tag" => "18.8.0"})
+monitored = child_values(render(chart, backup_cell, "apps.civoPostgres.metrics.enabled=true",
+  "apps.civoPostgres.metrics.serviceMonitor.enabled=true", "apps.civoPostgres.metrics.serviceMonitor.interval=45s",
+  "apps.civoPostgres.metrics.serviceMonitor.labels.team=platform"))
+check("metrics and ServiceMonitor values must forward exactly", monitored["metrics"] == {"enabled" => true, "serviceMonitor" => {"enabled" => true, "namespace" => "witself", "interval" => "45s", "labels" => {"release" => "witself-monitoring", "team" => "platform"}}})
+metrics_ingress = monitored.fetch("extraDeploy")[0].dig("spec", "ingress")
+check("strict exporter ingress must admit only the metrics scraper", metrics_ingress.length == 2 && metrics_ingress[1] == {"ports" => [{"protocol" => "TCP", "port" => 9187}], "from" => [expected[2]]})
+exporter_only = child_values(render(chart, serving_cell, "apps.civoPostgres.metrics.enabled=true"))
+check("ServiceMonitor must stay disabled when only exporter is enabled", exporter_only.dig("metrics", "serviceMonitor", "enabled") == false)
+disabled = child_values(render(chart, backup_cell, "apps.civoPostgres.networkPolicy.enabled=false"))
+check("disabling networkPolicy must not leave restrictive extraDeploy policy", disabled.dig("primary", "networkPolicy", "enabled") == false && !disabled.key?("extraDeploy"))
+_, errors, status = Open3.capture3("helm", "template", "witself-apps", chart, "--values", serving_cell, "--set", "apps.civoPostgres.metrics.serviceMonitor.enabled=true")
+check("ServiceMonitor without exporter must be rejected", !status.success? && errors.include?("apps.civoPostgres.metrics.serviceMonitor.enabled requires apps.civoPostgres.metrics.enabled"))
+puts "PostgreSQL deployment hardening rendering checks passed"
+RUBY
+
 echo "Helm rollout rendering checks passed"
