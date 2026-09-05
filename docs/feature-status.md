@@ -19,7 +19,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 
 | Feature | Area | Implementation | Managed rollout | Readiness | Gates | Open gates |
 |---|---|---|---|---|---:|---:|
-| [Cross-agent access policies and security groups](#access-policy-security-groups) | Authorization | `specified` | `not started` | **not ready** | 0/7 pass | 4 |
+| [Cross-agent access policies and security groups](#access-policy-security-groups) | Authorization | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
 | [Account lifecycle and movement](#account-lifecycle) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 2 |
 | [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `general` | **conditional** | 5/7 pass | 2 |
 | [Agent avatars](#agent-avatars) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
@@ -36,7 +36,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
-| [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 0/7 pass | 4 |
+| [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
 | [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `general` | **conditional** | 5/7 pass | 3 |
 | [Realm email aliases](#realm-email-aliases) | Email | `implemented` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Realm-local messaging](#realm-messaging) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -52,7 +52,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 
 ### Cross-agent access policies and security groups
 
-Default-deny, realm-local cross-agent memory and fact policy plus group-owned identity are specified in detail, but the policy engine, group lifecycle, enforcement, and operational surfaces are not implemented.
+Current agent ownership, account operator roles, and curator profiles are reconciled with the wire contracts. Cross-agent memory/fact policy, security groups, and group-owned identity remain targets without an evaluator or lifecycle implementation.
 
 - Implementation: `specified`
 - Managed rollout: `not started`
@@ -61,17 +61,16 @@ Default-deny, realm-local cross-agent memory and fact policy plus group-owned id
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **CONDITIONAL** | Policy, permission, group, membership, collective-memory, and default-deny behavior are specified but have no store, API, CLI, or MCP implementation. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go) |
-| Entitlement / policy | **CONDITIONAL** | The intended realm-local authority and operator override are documented, but no runtime evaluator enforces them. [access-policy.md](../docs/access-policy.md) |
-| Bounds / abuse | **CONDITIONAL** | Default deny, non-nesting, guarded membership, filters, and audit requirements are designed but not executable protections. [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md) |
+| Behavior | **CONDITIONAL** | Policy evaluation, permissions, group membership, and collective ownership require final contracts and store/API/CLI/MCP implementation; capabilities report policies and groups as not implemented. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go) |
+| Entitlement / policy | **CONDITIONAL** | Cross-agent authority and operator permissions remain target decisions; current account roles and agent ownership do not provide a policy evaluator or blanket override. [access-policy.md](../docs/access-policy.md) |
+| Bounds / abuse | **CONDITIONAL** | Membership administration, permission filters, mutation previews, precedence, and audit protections require settled contracts and executable enforcement. [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md) |
 | Observability | **CONDITIONAL** | Planned value-free decision and membership audit signals have no metrics, dashboards, SLOs, or alert path. [access-policy.md](../docs/access-policy.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
-| Recovery | **CONDITIONAL** | Membership rollback, policy invalidation, archive/import, and crash recovery remain design requirements rather than tested behavior. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
+| Recovery | **CONDITIONAL** | Group deletion, ownership recovery, membership rollback, invalidation, archive/import, and crash recovery remain target work without tested behavior. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
 | Rollout / canaries | **CONDITIONAL** | No managed cohort, dark gate, migration, or release canary exists for this specified feature. [access-policy.md](../docs/access-policy.md) |
-| Docs / support | **CONDITIONAL** | The design is extensive, but contracts must be reconciled with the current client-custodied vault, fact deletion, collaboration, and plan surfaces before implementation. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
+| Docs / support | **PASS** | access-policy-contract-reconciliation is complete: docs pin principals, account/realm scoping, credential wire shapes, and agent-owned fact/memory access, and label policy/groups and future authority as targets. [main.go](../cmd/witself/main.go), [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go), [auth.go](../internal/store/auth.go) |
 
 Open gates:
 
-- `access-policy-contract-reconciliation` (docs / support): Reconcile the drafts with current memory, fact, collaboration, vault, and authorization contracts and pin the versioned wire shapes. ([tracking/evidence](../docs/api-contract.md))
 - `access-policy-core-implementation` (behavior, bounds / abuse, entitlement / policy): Implement the policy evaluator, security-group lifecycle, transactional membership, collective ownership, authorization hooks, audit, API, CLI, MCP, and hostile-input tests. ([tracking/evidence](../docs/security-groups.md))
 - `access-policy-operations` (observability, recovery): Add bounded decision metrics, invalidation and backlog alerts, archive/import, rollback, and crash-recovery drills without exposing identity content. ([tracking/evidence](../docs/observability-and-operations.md))
 - `access-policy-release-canary` (rollout / canaries): Ship behind a dark account cohort and retain allow, deny, membership-revocation, rollback, and cross-agent isolation canaries before widening. ([tracking/evidence](../docs/access-policy.md))
@@ -390,7 +389,7 @@ Open gates:
 
 ### Durable facts
 
-Stable subjects, immutable assertions, candidates, typed values, primary resolution, guarded permanent deletion, archive/import, and per-agent fact limits are implemented; advanced conflict and cross-agent policy remain later work.
+Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, and per-agent fact limits are implemented. Advanced authority, predicate registries, reminder delivery, and cross-agent facts remain deferred to the access-policy rock.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
@@ -401,17 +400,17 @@ Stable subjects, immutable assertions, candidates, typed values, primary resolut
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **PASS** | Subject resolution, assertions, candidates, review, primary selection, typed values, deletion preview/apply, and archive/import are implemented across store, API, CLI, and MCP. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
+| Behavior | **PASS** | Subject resolution, resolved assertions, candidates, conflict-fenced review, typed values, deletion preview/apply, and archive/import are implemented. Stored primary flags and promotion/demotion are targets. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact.go](../internal/store/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go) |
 | Entitlement / policy | **PASS** | Per-agent stored_fact limits and owner-authorized sensitive reveal and permanent deletion boundaries are enforced. [billing-and-limits.md](../docs/billing-and-limits.md), [fact-service.md](../docs/fact-service.md) |
 | Bounds / abuse | **PASS** | Typed-value validation, stable addresses, active-fact counting, revision fences, candidate bounds, and value-safe usage records bound the service. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
 | Observability | **CONDITIONAL** | Value-free usage/audit records and the accepted serving-cell alert path exist. #357 adds a tested fact DELETE 5xx-ratio rule from HTTP metrics; live loading proof, broader fact-operation instrumentation, and SLOs remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [metrics.go](../internal/server/metrics.go) |
 | Recovery | **PASS** | Immutable assertion history, candidate review, reversible changes, archive/import, and explicit permanent-delete fencing provide recovery semantics. [backup-and-recovery.md](../docs/backup-and-recovery.md), [fact-service.md](../docs/fact-service.md) |
 | Rollout / canaries | **CONDITIONAL** | Core behavior is released and permanent fact deletion is enabled on both cells (#312). Retained current-release preview/apply/isolation acceptance remains open. [values.yaml](../.gitops/cells/civo-sandbox-use1-backup/values.yaml), [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [runbooks.md](../docs/runbooks.md) |
-| Docs / support | **CONDITIONAL** | Core facts and deletion are documented, but advanced conflict authority, predicate registries, reminder delivery, and cross-agent policy remain explicitly unresolved. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
+| Docs / support | **CONDITIONAL** | Core fact contracts are reconciled with store, routes, and CLI/MCP. advanced-fact-policy remains open under the access-policy rock for authority rules, predicate registries, reminder delivery, and cross-agent ownership. [mcp.go](../cmd/witself/mcp.go), [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go), [fact_temporal.go](../internal/store/fact_temporal.go), [fact_value_type.go](../internal/store/fact_value_type.go) |
 
 Open gates:
 
-- `advanced-fact-policy` (docs / support): Resolve authority/conflict policy, predicate registries, reminder delivery, and cross-agent fact access before declaring the broader model complete. ([tracking/evidence](../docs/facts-model.md))
+- `advanced-fact-policy` (docs / support): Deferred to the access-policy rock: define authority/conflict policy, governed predicate registries, reminder delivery, and cross-agent/group fact access. Current candidate fences, type validation, and occurrence queries do not implement those policies. ([tracking/evidence](../docs/facts-model.md))
 - `fact-delete-canary` (rollout / canaries): Retain a current-release preview/apply/isolation canary for permanent deletion; #312 already enabled the guarded path on both cells. ([tracking/evidence](../docs/fact-service.md))
 - `fact-operations` (observability): Retain live proof for the #357 DELETE failure-ratio rule, define fact SLOs, and instrument remaining fact operations on the shared alert path. ([tracking/evidence](../docs/observability-and-operations.md))
 
@@ -532,7 +531,7 @@ Open gates:
 
 ### Managed operator authentication
 
-Browser PKCE, device-code fallback, secure local session custody, revocation, and managed operator authorization are specified, while the current CLI implements only bootstrap-token-file exchange and agent-token flows.
+Managed account create/adopt, bootstrap exchange, account roles, and token mint/revoke are implemented. Hosted browser PKCE, device-code sessions, refresh, logout, and OS credential-store custody remain targets.
 
 - Implementation: `specified`
 - Managed rollout: `not started`
@@ -543,15 +542,14 @@ Browser PKCE, device-code fallback, secure local session custody, revocation, an
 |---|---|---|
 | Behavior | **CONDITIONAL** | The hosted browser, callback, device-code, status, refresh, logout, and revocation flows are specified but not implemented in the CLI or control plane. [main.go](../cmd/witself/main.go), [operator-auth.md](../docs/operator-auth.md) |
 | Entitlement / policy | **CONDITIONAL** | Operator roles and scopes are documented, but a managed human session does not yet carry and refresh that authorization contract. [authorization-and-roles.md](../docs/authorization-and-roles.md), [operator-auth.md](../docs/operator-auth.md) |
-| Bounds / abuse | **CONDITIONAL** | PKCE, short-lived codes, no-password CLI handling, revocation, and secure local storage are design requirements without executable replay, phishing, callback, or device-code abuse tests. [operator-auth.md](../docs/operator-auth.md), [threat-model.md](../docs/threat-model.md) |
+| Bounds / abuse | **CONDITIONAL** | PKCE, short-lived codes, hosted-session revocation, and OS credential-store custody remain targets without executable replay, phishing, callback, or device-code abuse tests; ordinary token revocation already exists. [operator-auth.md](../docs/operator-auth.md), [threat-model.md](../docs/threat-model.md) |
 | Observability | **CONDITIONAL** | No value-free login, refresh, revocation, callback, device-code, or abuse metrics and alert path exist for the target managed flow. [observability-and-operations.md](../docs/observability-and-operations.md), [operator-auth.md](../docs/operator-auth.md) |
-| Recovery | **CONDITIONAL** | Session revocation, credential-store fallback, lost-device recovery, and provider outage behavior are specified but not implemented or drilled. [operator-auth.md](../docs/operator-auth.md) |
+| Recovery | **CONDITIONAL** | Hosted-session revocation, credential-store fallback, lost-device recovery, and provider outage behavior remain target work requiring contracts, implementation, and drills. [operator-auth.md](../docs/operator-auth.md) |
 | Rollout / canaries | **CONDITIONAL** | No dark managed cohort, hosted callback, device-code, multi-platform credential-store, or revocation canary exists. [operator-auth.md](../docs/operator-auth.md) |
-| Docs / support | **CONDITIONAL** | The target is documented, but policy and security-group dependencies plus the current bootstrap-only command boundary need an implementation-ready contract pass. [operator-auth.md](../docs/operator-auth.md) |
+| Docs / support | **PASS** | operator-auth-contract-reconciliation is complete: onboarding, roles, bootstrap/whoami wire shapes, and current CLI token lifecycle are pinned; hosted sessions and policy/group authority remain explicit targets. [main.go](../cmd/witself/main.go), [api-contract.md](../docs/api-contract.md), [operator-auth.md](../docs/operator-auth.md), [server.go](../internal/server/server.go), [auth.go](../internal/store/auth.go), [operator.go](../internal/store/operator.go) |
 
 Open gates:
 
-- `operator-auth-contract-reconciliation` (docs / support): Reconcile the target with current account onboarding, implemented roles, unimplemented policies/groups, CLI commands, hosted endpoints, and credential-store support. ([tracking/evidence](../docs/operator-auth.md))
 - `operator-auth-core-implementation` (behavior, bounds / abuse, entitlement / policy, recovery): Implement hosted PKCE and device-code sessions, refresh, revocation, secure local custody, lost-device recovery, authorization propagation, and hostile-flow tests. ([tracking/evidence](../docs/operator-auth.md))
 - `operator-auth-operations` (observability): Add value-free login, callback, device-code, refresh, revocation, failure, and abuse metrics with SLOs and a tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
 - `operator-auth-release-canary` (rollout / canaries): Ship behind a dark operator cohort and retain browser, headless, refresh, revoke, lost-device, and cross-platform credential-store acceptance. ([tracking/evidence](../docs/operator-auth.md))

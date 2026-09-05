@@ -1,357 +1,232 @@
 # Witself Facts Model
 
-Status: implementation in progress. Last reviewed 2026-07-12.
+Status: core service implemented; advanced policy deferred. Reconciled with the
+CLI, fact routes, and store on 2026-09-04. The access-policy rock retains the open
+gate `advanced-fact-policy`; see [Resolve advanced fact policy](#resolve-advanced-fact-policy).
 
-> **Current implementation contract:** the first service slice replaces the
-> original owner/name-only draft with subject + namespaced predicate identity,
-> typed JSON values, immutable source assertions, temporal validity, and
-> resolved values. See [fact-service.md](fact-service.md). Sections below that
-> still describe `name`, `primary`, group ownership, or consolidation
-> are forward-looking until reconciled with the subject/assertion model.
+A current fact is one resolved assertion at a stable subject/predicate address
+inside the authenticated agent's account and realm. Exact lookup returns that
+assertion; a write appends assertion history and changes the resolved pointer.
+This replaces the former owner/name-only draft. The implementation is in
+[the fact store](../internal/store/fact.go) and
+[the public fact types and handlers](../internal/server/fact.go).
 
-Narrative-boundary amendment (accepted 2026-07-14): facts remain canonical
-atomic assertions. Portable narratives now belong in Witself narrative memory,
-not native-only memory; curators may propose but never auto-confirm facts. See
-[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
-
-A fact is a `name`→`value` identity attribute: the canonical, queryable identity
-card for an agent. Facts are the deterministic counterpart to memories. Where a
-[memory](memory-model.md) is free-form self-content addressed by `id` and
-recalled semantically, a fact is a named, single-valued attribute addressed by
-name and resolved exactly. `fact get email` returns the one true value, every
-time, with no ranking and no embedding provider involved.
-
-Facts are one of the two first-class identity payload types in Witself, and they
-live entirely in the **open plane** alongside [memories](memory-model.md):
-plaintext at rest, recallable, and plaintext-exportable. They are not the sealed
-plane. A true credential — a password, API key, token, or TOTP seed — belongs in
-the sealed plane as a [secret](secret-model.md), never as a fact. See
-[Sensitivity and Redaction](#sensitivity-and-redaction) for the boundary.
-
-This document pins their shape, lookup rules, the `primary` flag and its promotion
-semantics, sensitivity/redaction posture, and v0 size and count limits. JSON
-shapes are normative in [json-contracts.md](json-contracts.md); cross-agent
-access is governed by [access-policy.md](access-policy.md).
-
-## Goals
-
-- Give agents a deterministic, name-addressed identity card distinct from
-  semantic memory recall.
-- Make exactly one value answer each `name` for a given owner (deterministic
-  lookup, name-unique per owner).
-- Let an agent declare its identity anchors through a `primary` flag, with safe,
-  atomic promotion and at-most-one-primary-per-kind uniqueness.
-- Keep facts plainly readable identity data by default, redacting only those
-  marked `sensitive`, with no secret-style reveal ceremony.
-- Bound storage with simple per-fact and per-owner limits enforced with
-  deterministic errors.
+The MCP contract uses `witself.fact.set` for an explicitly requested atomic
+assertion and `witself.fact.propose` for an observation awaiting review.
+Narrative context uses `witself.memory.capture`. Credentials do not belong in
+facts, and private personal values belong in sensitive facts, never subject
+metadata. These are client routing requirements in
+[the MCP tool descriptions](../cmd/witself/mcp.go) and
+[the narrative capture description](../cmd/witself/mcp_memory.go), not a backend
+inference or authority-ranking engine.
 
 ## Fact Shape
 
-A fact has:
+The implemented public `Fact` representation contains:
 
-- `id`: a stable identifier with the `fact_` prefix. Identity is by `id`;
-  `name` is the addressing key.
-- `owner`: the owning agent (`agent_…`) or, for group-scoped facts, the owning
-  security group (`grp_…`). See [Security Groups](security-groups.md).
-- `realm`: the enclosing realm (`realm_…`).
-- `name`: the attribute name. **Unique per owner**, optionally namespaced (for
-  example `aws/account-id`). See [Naming and Uniqueness](#naming-and-uniqueness).
-- `value`: the fact's value, stored as text. Interpretation is guided by
-  `format`.
-- `primary`: boolean. Marks the canonical, identity-defining value of its
-  logical kind. See [Primary Flag](#primary-flag).
-- `sensitive`: boolean. Marks PII redacted by default in `list`/`scan`/`show`
-  output. A display/PII flag, not an encryption boundary. See
-  [Sensitivity and Redaction](#sensitivity-and-redaction).
-- `format`: an optional type hint such as `string`, `email`, `url`, `date`, or
-  `number`, used for validation and display. `format` is advisory; unknown
-  formats are allowed and treated as `string`.
-- `source`: provenance for the fact, one of `self` (the owning agent authored
-  it), `agent:<name>` (a cross-agent contribution), `operator`, or
-  `import:<file>` (ingested from a file). Lets the digest and
-  [consolidate](memory-model.md) distinguish human-, agent-, and import-authored
-  records and never silently overwrite them.
-- `created_at`, `updated_at`: timestamps.
-- Versioned edit history (see [Edit History](#edit-history)).
+- `id`, `subject_id`, `subject`, and `predicate` for identity and addressing.
+- `cardinality` and `sensitive` on the fact.
+- `resolved_assertion_id`, `value_type`, and a typed JSON `value` from the
+  current assertion.
+- Provenance and temporal fields: `source_kind`, optional `source_ref`,
+  `confidence`, `observed_at`, optional `confirmed_at`, `valid_from`,
+  `valid_until`, and `recurrence`.
+- `created_at`, `updated_at`, `usage_count`, and optional `last_used_at`.
 
-Example fact (illustrative; normative shape lives in
-[json-contracts.md](json-contracts.md)):
+Account, realm, and owner-agent scope come from the principal and store query;
+there is no caller-selectable `owner` field in the fact request. The public
+shape has no fact `name`, `format`, `primary`, tags, links, or embedding field.
+See [Fact and SetFactRequest](../internal/server/fact.go) and
+[the scoped lookup](../internal/store/fact.go).
+
+For example, this is an implemented `POST /v1/facts` request body:
 
 ```json
 {
-  "id": "fact_7b3c9a1e",
-  "owner": "agent_archivist",
-  "realm": "realm_acme",
-  "name": "email",
-  "value": "archivist@acme.example",
-  "primary": true,
-  "sensitive": false,
-  "format": "email",
-  "source": "self",
-  "created_at": "2026-06-26T00:00:00Z",
-  "updated_at": "2026-06-26T00:00:00Z"
+  "subject": "self",
+  "predicate": "preferences/editor",
+  "value_type": "string",
+  "value": "vim",
+  "cardinality": "one",
+  "sensitive": false
 }
 ```
 
-Facts deliberately have **no** `tags[]`, `salience`, `links[]`, or embedding
-vector. Those belong to memories, which are filtered and ranked; facts are
-resolved by name. A fact may be referenced from a memory's `links[]` via a
-`witself://fact/<name>` reference (see [References](#references)), but a fact
-does not itself carry links.
-
 ## Naming and Uniqueness
 
-- A fact `name` is unique within its owner. One owner cannot hold two facts with
-  the same `name`; a second write to the same `name` upserts the existing fact
-  (see [Lookup and Lifecycle](#lookup-and-lifecycle)).
-- Names may be namespaced with `/`, for example `aws/account-id` or
-  `contact/email`. The namespace is part of the name for uniqueness and lookup;
-  it is not a separate field.
-- Different owners may reuse the same `name`. Ownership disambiguates: agent
-  `archivist` and agent `analyst` may each hold their own `email` fact, and a
-  group may hold a group-scoped `email` distinct from any member's.
-- Name constraints (v0): a name is a non-empty string of lowercase letters,
-  digits, `-`, `_`, `.`, and `/`, must not begin or end with `/`, and must not
-  contain empty path segments (`//`). Names are matched case-sensitively but
-  callers are encouraged to use lowercase. The final path component is the leaf.
-- Memory names, by contrast, are **not** unique; memories are addressed by `id`
-  and recalled semantically. See [memory-model.md](memory-model.md).
+A live address is unique by owner agent, subject, and predicate. Repeated writes
+to that address preserve its fact id and append a new assertion. Permanent
+deletion and explicit recreation are the exception described below.
+[Store evidence](../internal/store/fact.go).
+
+Subjects have a canonical key, display name, and aliases. The default subject is
+`self`; `me`, `myself`, and `user` normalize to it. The CLI exposes
+`witself fact subject set|list|alias` for stable subject management, and aliases
+resolve to the canonical subject instead of creating another fact collection.
+[Subject wire shape](../internal/server/fact_subject.go),
+[normalization](../internal/store/fact.go), and
+[CLI dispatch](../cmd/witself/main.go).
+
+Predicates are case-sensitive lowercase identifiers, optionally namespaced with
+`/`, for example `preferences/editor`. They start with a letter, use lowercase
+letters, digits, `_`, `-`, and `.`, allow at most eight non-empty path segments,
+and occupy at most 255 bytes. This is syntax validation, not a registry of
+approved predicate meanings. [Predicate validation](../internal/store/fact.go).
+
+`value_type` has built-in validation for `string`, `number`, `boolean`, `list`,
+`object`, `json`, `date`, `datetime`, `url`, `email`, `address`, and `location`.
+An unknown syntactically valid type keeps its JSON value; it is not coerced to a
+string. Omitted types are inferred from JSON shape. A `cardinality` of `one`,
+`many`, or `one_at_a_time` is accepted, but current writes still resolve one
+assertion at the address; there is no automatic multi-value merge or
+validity-based assertion selection.
+[Value validation](../internal/store/fact_value_type.go) and
+[normalization and resolution](../internal/store/fact.go).
 
 ## Lookup and Lifecycle
 
-Lookup is **deterministic by name**. There is no ranking, scoring, or
-fuzzy-matching step.
+The shipped CLI dispatches
+`witself fact status|set|get|list|history|delete|propose|review|candidate|confirm|reject|upcoming|subject`.
+Flags precede positional arguments, for example:
 
-- `fact get NAME` returns the single fact named `NAME` for the caller's
-  identity, or `not_found` if no such fact exists. Reading a `sensitive` fact's
-  value is an ordinary authorized read (see
-  [Sensitivity and Redaction](#sensitivity-and-redaction)).
-- `fact set NAME VALUE` creates or updates a fact (upsert by `name` within the
-  owner). Optional flags set `--primary`, `--sensitive`, `--format`, and
-  `--source`. Setting `NAME` when it already exists updates `value` and the
-  named fields and appends to edit history; it never creates a duplicate.
-- Natural-language `remember` routing is provider-aware at the agent boundary.
-  Atomic durable assertions use the fact upsert path; free-form narrative uses
-  portable Witself narrative memory by default through `memory capture`.
-  Runtime-native memory is used only when explicitly named, and a request for
-  both performs separate writes. The current CLI does not expose a unified
-  `remember` command. See [Agent Memory Routing](agent-memory-routing.md).
-- `fact list` enumerates the caller's facts with metadata and filters (by
-  `name` prefix/namespace, `primary`, `sensitive`, `format`, `source`), with
-  cursor pagination. `sensitive` values are redacted in list output by default.
-- The implemented `fact delete --subject SUBJECT PREDICATE` permanently removes
-  the current value, all assertions/history/evidence, and every candidate at
-  that canonical address. It requires confirmation unless `--yes`, supports a
-  value-free `--dry-run`, uses expected-assertion and candidate-set-revision
-  concurrency guards, and is audited as `fact.deleted`. The subject, immutable usage history, and a
-  non-restorable value-free tombstone remain. Explicit recreation gets a new
-  fact id and never auto-promotes or resurrects an older assertion. See
-  [fact-service.md](fact-service.md#permanent-deletion).
-- `ingest` upserts `name`→`value` lines parsed from CLAUDE.md/AGENTS.md-style
-  files as facts, tagging each with `source=import:<file>`. Upsert by `name`
-  prevents re-import from creating duplicates. See
-  [context-hydration.md](context-hydration.md).
-- Client-run curation may SURFACE conflicting fact candidates (for
-  example two imports that disagree on one predicate), but it may only propose
-  them for review. It never auto-picks a canonical assertion or silently
-  overwrites user-authorized truth. See [memory-model.md](memory-model.md).
+```sh
+witself fact set --subject self preferences/editor vim
+witself fact get --subject self preferences/editor
+witself fact list --subject self --limit 100
+```
 
-Cross-agent and group-owned facts follow the same surface with an explicit
-owner. Reading another owner's fact requires a `read` policy; contributing,
-curating, or deleting another owner's fact requires the matching policy verb and
-the cross-agent guardrails (`--reason`, `--dry-run`, confirmation, audit). See
-[access-policy.md](access-policy.md).
+`fact set` takes a string value unless `--json-value` is supplied. It supports
+`--type`, `--cardinality`, `--sensitive`, provenance/validity flags, recurrence,
+and retry keys; it does not expose the draft `--primary`, `--kind`, `--format`,
+or `--source` flags. [CLI dispatch and flags](../cmd/witself/main.go).
 
-The CLI noun is `fact` (`status`/`set`/`get`/`list`/`delete`, with
-`--primary`). The MCP tools include
-`witself.fact.status/set/get/list/delete`. The API resource is `/v1/facts`,
-with `GET /v1/facts:status` for value-free current capacity and the colon
-action `/v1/facts/{fact_id}:primary` for promotion. Scopes are `fact:create`,
-`fact:read`, `fact:update`, `fact:delete`, and `fact:primary`.
+The implemented HTTP surfaces are:
 
-## Primary Flag
+| Operation | Route |
+| --- | --- |
+| Value-free capacity | `GET /v1/facts:status` |
+| Set | `POST /v1/facts` |
+| Exact get | `GET /v1/facts?subject=SUBJECT&predicate=PREDICATE` |
+| Bounded list | `GET /v1/facts` with optional `subject`, `predicate_prefix`, `limit`, `sort=usage`, `unused`, and `include_sensitive` |
+| Assertion history | `GET /v1/facts/{fact}/history` |
+| Deletion preview/apply | `DELETE /v1/facts` or `DELETE /v1/facts/{fact}` |
+| Propose/list candidates | `POST /v1/fact-candidates`, `GET /v1/fact-candidates` |
+| Exact candidate detail | `GET /v1/fact-candidates/{candidate}` |
+| Confirm/reject candidate | `POST /v1/fact-candidates/{candidate}:confirm` or `:reject` |
+| Temporal projection | `GET /v1/fact-occurrences` |
+| Subject set/list/alias | `PUT /v1/fact-subjects/{subject}`, `GET /v1/fact-subjects`, `POST /v1/fact-subjects/{subject}/aliases` |
 
-The `primary` flag marks the canonical, identity-defining value of a fact's
-**logical kind**.
+[Route registration](../internal/server/server.go) and
+[query/action handling](../internal/server/fact.go) define these implemented
+routes. Fact lists return `{schema_version,facts}` with a bounded `limit`, not
+the generic `items`/`next_cursor` pagination target elsewhere in
+[api-contract.md](api-contract.md).
 
-- A logical kind is the fact's base name by default. The base name is the leaf
-  path component with any trailing numeric or disambiguating suffix removed by
-  convention, so `email`, `email-work`, and `contact/email` may be intended as
-  the same kind. To keep v0 unambiguous, the logical kind is the **leaf name**
-  (`email`) unless an explicit `--kind` is supplied at set time. An explicit
-  `--kind` overrides the derived kind and is recorded with the fact.
-- At most one fact may be `primary` per logical kind per owner. This is the
-  uniqueness invariant the engine enforces.
-- Primary facts are the agent's **identity anchors**. They are surfaced first in
-  `whoami`, in profile output, and in [identity export](backup-and-recovery.md),
-  ahead of non-primary facts.
-
-### Promotion and demotion
-
-- Setting a fact `--primary` is an **atomic promotion**. In one transaction it
-  marks the target fact `primary: true` and demotes any prior primary of the
-  same logical kind for the same owner to `primary: false`.
-- Promotion never deletes or merges the demoted fact; it only flips its flag.
-  Both facts continue to exist and remain readable by name.
-- Promotion across owners (promoting another agent's or a group's fact) is a
-  `curate`-class action: it requires a `curate` policy, an audit `--reason`,
-  supports `--dry-run`, and requires confirmation unless `--yes`. See
-  [access-policy.md](access-policy.md).
-- Promotion is exposed as the colon action `/v1/facts/{fact_id}:primary`, the
-  `--primary` flag on `fact set`, and is gated by the `fact:primary` scope.
-- Every promotion writes a `fact.primary_changed` audit event recording the
-  promoted fact, the demoted fact (if any), the logical kind, and the actor
-  derived from the token. See [audit-retention.md](audit-retention.md).
-
-### Worked example
-
-1. `fact set email a@acme.example` → creates `email`, not primary.
-2. `fact set email a@acme.example --primary` → `email` becomes primary (no prior
-   primary of kind `email`, so nothing is demoted).
-3. `fact set email-2 b@acme.example --primary --kind email` → `email-2` becomes
-   primary of kind `email`; `email` is atomically demoted to `primary: false`.
-   Both facts persist.
+Permanent deletion uses a value-free preview, then the preview's resolved
+assertion id and candidate-set revision plus `Idempotency-Key` for apply. It
+removes values, assertion/evidence history, and candidates at the address;
+a non-restorable value-free tombstone and immutable usage events remain.
+The CLI requires `--yes` to apply; `--dry-run` only previews. An ordinary set
+cannot resurrect a deleted fact. Explicit `--recreate-deleted` creates a new
+fact id with a retry key. The MCP deletion/recreation tools additionally fence
+client authorization to the current user's direct request.
+[Deletion wire contract](api-contract.md#dry-runs),
+[CLI deletion and recreation](../cmd/witself/main.go),
+[store recreation](../internal/store/fact.go), and
+[MCP boundaries](../cmd/witself/mcp.go).
 
 ## Sensitivity and Redaction
 
-Facts are **ordinary readable identity data** in the open plane. The `sensitive`
-flag provides **lightweight redaction**, not the sealed plane's reveal ceremony:
-there is no reveal ceremony, no separate sensitive value-size budget, and no
-value-redaction state machine. A `sensitive` fact is still plaintext at rest,
-still recallable, and still in the plaintext export — it is merely masked in
-bulk output to avoid shoulder-surfing.
+Facts store JSON values in the open plane. `sensitive` controls response
+redaction; it does not turn a fact into a sealed secret. Broad fact lists redact
+both `value` (JSON `null`) and `source_ref` unless `include_sensitive` is
+explicitly selected. An authorized exact fact get returns its value, and
+assertion history is an authorized detail read. Broad candidate review always
+redacts sensitive values; one exact candidate can be read for review.
+[Fact storage and detail reads](../internal/store/fact.go),
+[list redaction](../internal/store/fact_usage.go),
+[candidate reads](../internal/store/fact_candidate.go), and
+[open-plane contract](api-contract.md#pagination-and-filtering).
 
-This is deliberately distinct from a [secret](secret-model.md). If you need a
-credential — a password, API key, SSH key, certificate, or TOTP seed — store it
-as a secret in the sealed plane, **not** as a sensitive fact. Secrets are
-KMS-backed envelope-encrypted, reveal-gated, and never embedded, never returned
-by broad memory recall, never in the self-digest, and never in the plaintext export
-(see [secret-model.md](secret-model.md)). The `sensitive` flag is a display/PII
-guard for identity attributes that happen to be personal; it is not a
-confidentiality boundary and must not be used as a substitute for a secret.
-
-- Non-sensitive facts are returned in full in `show`/`get`/`list` by default.
-- Facts marked `sensitive` have their `value` redacted in `list`/`scan` output
-  by default. An authorized `fact get NAME` of a single sensitive fact returns
-  the value — this is an ordinary authorized read, not a reveal.
-- `sensitive` is a display/PII flag, not an encryption boundary. Optional
-  field-level encryption of `sensitive` fact values is a capability an operator
-  may enable, not the default; see [storage.md](storage.md).
-- Sensitive fact values must never appear in errors, logs, audit records, or
-  metrics. Audit may record the fact `name`, `id`, owner, and decision outcome,
-  but never the value. See [audit-retention.md](audit-retention.md).
-- Exporting `sensitive` facts is supported (Witself embraces plaintext export)
-  but warned-on and requires an audit `--reason`; operators may scope exports to
-  non-sensitive facts. See [backup-and-recovery.md](backup-and-recovery.md).
+Sensitivity is sticky on an existing address: set and candidate confirmation
+combine the existing and incoming flags with logical OR. Recreation also
+inherits a sensitive tombstone's flag.
+[Set/recreation](../internal/store/fact.go) and
+[candidate confirmation](../internal/store/fact_candidate.go).
 
 ## Edit History
 
-Every `fact set` that changes a stored fact records a new version. History uses
-the same shape as memory edit history (see [memory-model.md](memory-model.md)).
-
-- Each version records a monotonically increasing version number, the actor
-  (derived from the token, never from input), a timestamp, and the changed
-  fields.
-- History is retained for audit, conflict detection, safe operator recovery, and
-  export, and is included in [identity export](backup-and-recovery.md).
-- History entries inherit the fact's `sensitive` posture; redacted in list/scan,
-  readable on an authorized single read.
-- `primary` flips are recorded both in history and as a `fact.primary_changed`
-  audit event.
+Set appends an assertion identified by `fas_…`, links the prior assertion with
+`supersedes_id`, and atomically changes `resolved_assertion_id`. History follows
+that chain newest first and includes value, provenance, confidence, observation,
+confirmation, and validity fields. It is assertion history, not numbered
+field-diff versions or primary-flag change events.
+[Assertion writes and history](../internal/store/fact.go).
 
 ## Size and Count Limits
 
-The current service enforces the following per-record and request-shape
-protections:
+The implemented limits are 65,536 bytes for the input and normalized JSON value,
+255 bytes for a predicate, eight predicate segments, 64 characters for a type
+identifier, and 1,024 bytes for `source_ref`. Confidence must be between zero
+and one. Fact lists default to 100 results and accept limits from 1 through 500.
+[Input validation](../internal/store/fact.go) and
+[list bounds](../internal/store/fact_usage.go).
 
-- Maximum fact `value` size: 64 KiB before storage overhead. (Facts are
-  attribute-sized; large free-form content belongs in a
-  [memory](memory-model.md).)
-- Maximum fact `name` length: 255 characters, including namespace segments.
-- Maximum namespace depth: 8 path segments.
-- Maximum `source` length: 1 KiB.
-- Maximum `format` length: 64 characters.
+The account's applied `stored_fact` limit governs each agent's resolved,
+non-deleted current facts across subjects. Assertions, candidates, aliases,
+history, and tombstones do not consume additional fact slots. An update to an
+existing current address is allowed at the cap; a growing set, recreation, or
+candidate confirmation is refused with `stored_fact_limit_reached` when it
+would exceed the limit. Capacity exposes `used`, nullable `max` and `remaining`,
+`unlimited`, `near_limit`, `at_limit`, and `over_limit`; the finite warning starts
+at 90 percent. [Capacity wire contract](api-contract.md#action-and-colon-routes),
+[limit enforcement](../internal/store/fact_limit.go),
+[set accounting](../internal/store/fact.go), and
+[candidate accounting](../internal/store/fact_candidate.go).
 
-Phase A implements the `stored_fact` inventory dimension's counter and
-enforcement contract. `used` is the token-bound owner agent's resolved,
-non-deleted current fact count across every subject. Assertion versions,
-candidates, aliases, evidence, usage events, tombstones, and deleted facts do
-not consume another slot. An update at an already-current subject/predicate
-address is allowed at the cap; a create, explicit recreation, or candidate
-confirmation into a new address is refused with
-`stored_fact_limit_reached`. Reads, history, export, and separately authorized
-permanent deletion remain available.
+## Resolve advanced fact policy
 
-The same value-free capacity projection is exposed by
-`GET /v1/facts:status`, `witself fact status`, `witself.fact.status`,
-`self.show.fact_capacity`, hook hydration, and the local dashboard. A finite
-warning starts at 90 percent. Status never exposes ids, subjects, predicates,
-values, or history and never authorizes deletion merely to make room.
+The following boundaries are reconciled; the unimplemented policies remain
+**explicitly deferred to the [access-policy rock](access-policy.md)** under
+**`advanced-fact-policy`**. This gate remains open and does not define a new
+permission or grant access.
 
-The Phase B catalog supplies Personal `1,000`, Professional `10,000`, Team
-`50,000`, and Enterprise `250,000` current facts per agent. Those finite
-defaults and finite overrides may be promoted only after migration 0078 has
-reconciled every target cell, all old writers are gone, and the Founder's
-explicit-unlimited override is verified. Fact assertion history remains durable
-rather than being pruned to a fixed version count.
+| Topic | Implemented today | Deferred target under `advanced-fact-policy` |
+| --- | --- | --- |
+| Conflict authority | Direct set resolves the new assertion. Proposal stores a separate `pending` or `conflict` candidate; explicit confirmation refuses if the resolved assertion changed since proposal. HTTP set rejects caller-claimed non-agent `source_kind`. | An authority hierarchy across self, operator, imports, inference, or competing agents; automatic conflict arbitration. Source and confidence metadata do not implement such a hierarchy. |
+| Predicate registries | Predicate syntax and built-in value-type validation; callers may use custom predicate names and valid custom type identifiers. | A governed registry assigning predicate meanings, ownership, cardinality rules, or authority. The built-in type table is not that registry. |
+| Reminders | `fact upcoming` / `witself.fact.upcoming` project resolved dates and datetimes in a bounded window. Annual recurrence must be explicit and only applies to dates; February 29 is skipped in non-leap years. Sensitive occurrences are omitted unless requested. | Reminder scheduling, notification delivery, or waking an agent. The temporal projection does not provide those workflows. |
+| Cross-agent facts | Fact, subject, candidate, and occurrence operations require an agent principal and are bound to its account, realm, and owner-agent id. A subject describing another agent is still owned by the caller. | Reading, contributing to, curating, or deleting another agent's collection; group-owned facts and the draft per-verb access rules. No `owner` argument or policy grant enables those operations today. |
 
-Stored facts are a metered billing dimension; fact reads and writes roll up into
-the memory/fact operation meters. See [billing-and-limits.md](billing-and-limits.md).
+Evidence: [direct set and scoped reads](../internal/store/fact.go),
+[candidate conflict fencing](../internal/store/fact_candidate.go),
+[agent-only HTTP handlers](../internal/server/fact.go),
+[subject handlers](../internal/server/fact_subject.go),
+[value types](../internal/store/fact_value_type.go),
+[temporal projection](../internal/store/fact_temporal.go), and
+[MCP fact descriptions](../cmd/witself/mcp.go).
 
-## References
+## Primary Flag
 
-A fact is referenceable through the `witself://` scheme so memories, messages,
-config, scripts, and MCP tools can point at it without copying the value.
+The former per-kind `primary` flag, atomic promotion/demotion rules,
+`fact:primary` scope, and `/v1/facts/{fact_id}:primary` action are **deferred
+targets**, not current fact CRUD. The fact request/response and CLI set flags
+have no such field, and the server registers no promotion route. The self-digest
+still calls its projection `primary_facts` and marks projected entries
+`primary: true`; that response label is not a stored promotion contract.
+[Fact shape](../internal/server/fact.go), [CLI](../cmd/witself/main.go), and
+[routes and self-digest](../internal/server/server.go).
 
-- Current agent's fact by name: `witself://fact/<name>`
-- A specific agent's fact (cross-agent, policy-gated):
-  `witself://agent/<agent>/fact/<name>`
-- Group-scoped fact: `witself://group/<group>/fact/<name>`
-
-The final path component is the leaf name; URL-encode if a name contains
-reserved characters. Namespaced names keep their `/` separators inside the leaf
-position (for example `witself://fact/aws/account-id`).
-
-Reference rules:
-
-- A reference resolves only through authorized commands or MCP tools, enforcing
-  the same authorization as a direct `fact get`. A cross-agent or cross-group
-  reference resolves only when policy permits.
-- References used in a memory's `links[]` are validated at write time and
-  re-checked at resolve time; dangling references are reported, not silently
-  dropped.
-- `witself reference parse` and `witself reference resolve` (CLI and MCP) handle
-  references deterministically. Parsing and resolution are tracked in
-  [json-contracts.md](json-contracts.md).
-
-## Facts vs Memories
-
-| Aspect        | Fact                          | Memory                              |
-| ------------- | ----------------------------- | ----------------------------------- |
-| Id prefix     | `fact_`                       | `mem_`                              |
-| Addressing    | by `name` (unique per owner)  | by `id`                             |
-| Lookup        | deterministic, exact          | lexical/structured recall + filters |
-| Value         | single attribute value        | free-form `content`                 |
-| Vector index  | none                          | optional client vector (JSONB)      |
-| Anchors       | `primary` flag per kind       | `salience`, `kind`, `tags`          |
-| Size budget   | 64 KiB value                  | 256 KiB content                     |
-
-The memory side of this split is documented in
-[memory-model.md](memory-model.md).
+The earlier group/cross-agent `witself://fact/...` reference-resolution promises
+and automatic file-ingest workflow are also removed from the implemented model.
+They do not appear in the shipped fact dispatch or routes. Any future policy for
+these targets belongs to the access-policy rock and `advanced-fact-policy`.
 
 ## Related Docs
 
-- [requirements.md](requirements.md)
-- [memory-model.md](memory-model.md)
-- [secret-model.md](secret-model.md)
+- [fact-service.md](fact-service.md)
 - [access-policy.md](access-policy.md)
 - [security-groups.md](security-groups.md)
-- [json-contracts.md](json-contracts.md)
-- [cli-command-surface.md](cli-command-surface.md)
-- [mcp-tools.md](mcp-tools.md)
 - [api-contract.md](api-contract.md)
-- [storage.md](storage.md)
-- [audit-retention.md](audit-retention.md)
-- [backup-and-recovery.md](backup-and-recovery.md)
+- [agent-memory-routing.md](agent-memory-routing.md)
 - [billing-and-limits.md](billing-and-limits.md)

@@ -959,7 +959,7 @@ edge services, Helm chart, GitOps tree, release workflows, and Pulumi-based
 - [Agent Avatars](docs/agent-avatars.md)
 - [Operator Authentication](docs/operator-auth.md)
 - [Token Lifecycle](docs/token-lifecycle.md)
-- [Workflow Scripts](docs/workflow-scripts.md)
+- [Implemented CLI workflows](docs/workflow-scripts.md)
 - [CLI Command Surface](docs/cli-command-surface.md)
 - [Server Command Surface](docs/server-command-surface.md)
 - [API Contract](docs/api-contract.md)
