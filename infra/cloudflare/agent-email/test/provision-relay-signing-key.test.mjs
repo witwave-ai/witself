@@ -297,6 +297,7 @@ function cpVersion(id = cpVersionID, { releaseVersion = release.version } = {}) 
         plain("CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"),
         plain("CP_SIGNUP_OPEN", "true"),
         plain("CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"),
+        plain("CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"),
         secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
         secret("SUPPORT_EMAIL_INTAKE_TOKEN"),
