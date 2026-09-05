@@ -447,6 +447,113 @@ that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
 
+## Two-wave roll (automated)
+
+Run `scripts/roll-train.sh` from a local operator checkout with access to both
+cells. It rolls `civo-sandbox-use1-backup` first, verifies that wave, then rolls
+the serving cell `civo-sandbox-usw2-dev`. The operator's kube contexts must be
+named `witself-<full-cell-directory-name>`. This runs locally because verifying
+Argo CD convergence requires those kube contexts; no GitHub Actions cell
+kubeconfig or new secret is needed.
+
+```text
+scripts/roll-train.sh VERSION
+  [--no-schema-change | --backup-evidence DIR [--backup-evidence DIR]]
+  [--cells BACKUP,SERVING] [--serving-url URL] [--workdir DIR]
+  [--ci-timeout SECONDS] [--argo-timeout SECONDS]
+  [--poll-interval SECONDS] [--dry-run]
+scripts/roll-train.sh --help
+```
+
+Use a numeric `VERSION` such as `0.0.300`, without the release tag's `v` prefix.
+Review the local plan first; dry-run performs local reads only, creates no
+files, and makes no network requests:
+
+```sh
+scripts/roll-train.sh "$VERSION" --dry-run
+```
+
+For a release that cannot advance the database schema, supply the explicit
+attestation. Set `SERVING_URL` to the serving cell's live HTTPS base URL:
+
+```sh
+scripts/roll-train.sh "$VERSION" --no-schema-change \
+  --serving-url "$SERVING_URL"
+```
+
+For a schema-changing release, complete the two-database backup procedure
+above, then pass both verified artifact directories. The existing
+`roll-cell.sh` backup-evidence gate runs for each wave:
+
+```sh
+scripts/roll-train.sh "$VERSION" \
+  --backup-evidence "$BACKUP_CELL_EVIDENCE_DIR" \
+  --backup-evidence "$SERVING_CELL_EVIDENCE_DIR" \
+  --serving-url "$SERVING_URL"
+```
+
+The host needs Bash, Git, authenticated `gh`, `jq`, Mike Farah's `yq`,
+`kubectl`, and `curl`, plus a configured Git author for signed-off commits.
+The backup-evidence route also requires the verifier described above and
+accepts only the default ordered cell pair: the verifier checks
+those two databases. Custom `--cells` pairs require `--no-schema-change`.
+The script checks `gh auth status`, namespace access to `argocd` in each context
+with a 20-second request timeout, a published `v<VERSION>` release, and a
+successful latest `release.yml` run on that tag. Before starting the train,
+the serving `/v1/version` must be strictly lower than `VERSION`. Its URL
+defaults to the serving cell values' `apiHost`; pass `--serving-url` when the
+live host differs, as it can for Civo values overridden by infrastructure.
+
+Each wave starts a separate worktree from an exact fetched `origin/main` commit.
+Before editing, both desired `chartVersion` and `imageTag` must be strictly
+lower than the target. The cell's live Argo revision, deployment image tags,
+pod image tags, and running container image tags must be valid numeric versions
+no newer than the target. Already or partly pinned cells require manual
+inspection; the train does not resume them automatically.
+Verification covers the server deployment and, when enabled, the worker
+deployment, and the version guard refuses a downgrade of either.
+It then runs `roll-cell.sh`,
+commits and pushes a branch, and creates a PR recording the wave and schema
+attestation or evidence gate. It waits for all required PR checks to pass,
+verifies the head OID and `main` base, re-fetches the selected cell's values to
+reject concurrent changes, and repeats the live version checks before
+squash-merging with `--match-head-commit`. Both pin lines must change under
+standard text-merge semantics, so a newer pin arriving after the final read
+conflicts at merge. It then requires successful `ci.yml` on that exact
+merge commit. Argo Application `witself-server` in namespace `argocd` must
+report `Synced`, `Healthy`, and sync revision `VERSION`; the selected
+server/worker pod list must be nonempty, with Running, Ready, nonterminating
+pods and ready running containers whose desired and reported images end in
+`:<VERSION>`. Deployments must have observed their current generation and all
+desired replicas updated, ready, and available; the live pod count must match
+those replicas. Only after these checks does it remove that wave's worktree
+and branch and proceed to the next wave.
+
+The default cells are
+`--cells civo-sandbox-use1-backup,civo-sandbox-usw2-dev`, in that order.
+`--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
+with a unique directory per run; the primary checkout need not be clean.
+Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
+1,200 seconds for Argo convergence, polling every 15 seconds. Any failed
+step stops the train and preserves the current wave's worktree for inspection
+(a cleanup failure may leave it detached after branch deletion). There is no
+automatic resume or rollback; inspect the PR,
+GitOps pins, CI, and live state before continuing manually. The script never
+force-pushes. After the serving wave, it prints and verifies the serving
+`/v1/version`, then prints `witself-infra health --json` if that binary is
+available.
+
+The manual rollout remains the fallback: use `scripts/roll-cell.sh` with the
+same attestation or backup evidence, create and merge a reviewed PR for the
+backup cell, verify post-merge CI and Argo/pod convergence, then repeat those
+steps for the serving cell. Keep the backup gate and wave order when
+recovering from a partially completed train.
+
+Every live read binds to the Argo Application's `witself.io/cell` label: an
+aliased or misconfigured kube context that returns another cell's Application
+stops the train with an "unexpected cell identity" diagnostic instead of
+certifying that cell's workloads.
+
 ## K3s minor upgrade (Civo)
 
 Keep the desired K3s version in each cell's `k8s_version` field in the
