@@ -43,9 +43,18 @@ func captureFlushHelperExecutable(t *testing.T) string {
 	return directory
 }
 
+// captureFlushHelperFileWait bounds how long a test waits for the re-executed
+// helper process to write its observation file. The helper is a fresh test
+// binary that must be scheduled, start, and flush; on a loaded host that took
+// more than the previous 5 s bound (2026-09-05 gate flake:
+// "timed out waiting for helper file detached-observed" at 8 s). The bound is
+// generous because it only guards against a hung helper — the assertions on the
+// file's contents and ordering are unchanged.
+const captureFlushHelperFileWait = 60 * time.Second
+
 func readCaptureFlushTestFile(t *testing.T, path string) []byte {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(captureFlushHelperFileWait)
 	for time.Now().Before(deadline) {
 		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
 			return raw
