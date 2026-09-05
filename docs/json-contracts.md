@@ -439,10 +439,12 @@ no current server or CLI implements that rail.
       "reason": "not_implemented"
     },
     "policies": {
-      "supported": true
+      "supported": false,
+      "reason": "not_implemented"
     },
     "groups": {
-      "supported": true
+      "supported": false,
+      "reason": "not_implemented"
     },
     "messaging": {
       "supported": true
@@ -546,6 +548,10 @@ Rules:
   report the implemented optional client-vector/hybrid surface. No capability
   field names an active backend embedding provider because none exists; profile
   identity is caller-authored data returned only from the profile surface.
+- `facts` reports the registered fact service (set, get, list, propose, confirm,
+  history, and permanent deletion). Route-backed family flags reflect the
+  enabled routes; they do not grant account or agent authorization. Individual
+  operations still enforce their own policy and entitlement gates.
 - `field_level_encryption` reflects optional encryption of `sensitive` fact
   values; it is a capability, not the default (see [storage.md](storage.md)).
 - `secrets` and `totp` advertise the **sealed plane** (secrets, TOTP). It is a
@@ -575,14 +581,78 @@ Rules:
   [deployment-cells.md](deployment-cells.md). A deployment that does not offer
   one of these reports `supported: false` with a stable `reason`.
 - `features` values must include at least `supported`.
-- Unsupported features should include a stable `reason` when known. In v0.0.x the
-  `features` are reported as `{"supported": false, "reason": "not_implemented"}`
-  until each subsystem ships.
+- Unsupported features should include a stable `reason` when known. Unbuilt or
+  unwired subsystems report `{"supported": false, "reason": "not_implemented"}`;
+  implemented, registered families such as facts report `supported: true`.
 - Capability responses must not include memory content, fact values, message
   bodies/payloads, embedding vectors, raw tokens, provider secrets, payment
   credentials, wallet credentials, or private infrastructure credentials.
 - Clients should use capability data to present clear unsupported-operation
   errors instead of probing routes blindly.
+
+## Usage Report
+
+`GET /v1/usage` and `witself usage --json` return the authenticated agent's
+product usage. The HTTP response wraps the report in `usage`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "usage": {
+    "account_id": "acc_123",
+    "realm_id": "rlm_123",
+    "agent_id": "agent_123",
+    "since": "2026-07-01T00:00:00Z",
+    "until": "2026-07-02T00:00:00Z",
+    "bucket": "day",
+    "points": [{
+      "dimension": "transcript_created", "unit": "transcript",
+      "bucket_start": "2026-07-01T00:00:00Z",
+      "quantity": 1, "event_count": 1
+    }],
+    "totals": [{
+      "dimension": "transcript_created", "unit": "transcript",
+      "quantity": 1, "event_count": 1
+    }],
+    "truncated": false
+  }
+}
+```
+
+`since` and `until` accept RFC3339 timestamps. `group_by` accepts `hour` or
+`day` (default); the default window is 30 days. `since` is rounded down to its
+UTC bucket before validating the window. The upper bound is exclusive. Hourly
+reports allow at most 90 days; daily reports allow 1,830 days. Invalid windows
+and unknown dimensions return HTTP 400.
+
+Repeated `dimension` query parameters select this closed vocabulary:
+
+| Family | Accepted dimensions |
+|---|---|
+| Transcripts | `transcript_created`, `transcript_entry_write`, `transcript_entry_read`, `transcript_storage_byte` |
+| Messaging | `message_sent`, `message_delivered` |
+| Facts | `fact_returned` |
+| Secrets | `stored_secret`, `secret_read`, `encrypted_storage_byte`, `totp_code`, `runtime_injection` |
+| Email | `email_received`, `email_sent`, `email_address`, `email_storage_byte` |
+
+Vocabulary membership does not imply that a dimension currently emits events.
+Unknown dimensions are rejected on new event input and usage queries and
+excluded from report reads of existing legacy rows. Archive import preserves
+any historical dimension matching `^[a-z][a-z0-9_]{0,63}$`, including dimensions
+outside this vocabulary; later exports retain those rows unchanged.
+
+`points` contains at most 10,000 rows ordered by `bucket_start`, `dimension`,
+and `unit`. `totals` groups only those returned points by dimension and unit,
+so it also contains at most 10,000 rows. The always-present boolean `truncated`
+is true if more points matched than could be returned. Partial results require
+`allow_truncation=1` (CLI `--allow-truncation`); otherwise an oversized query
+returns HTTP 422 with flat `code: usage_query_too_large`, `error` containing the
+cap and remedies, and `max_rows: 10000`, without `usage`. The matched row count
+is omitted because the query reads only cap+1 rows. When `truncated` is true,
+totals are partial and the CLI warns on stderr, including in JSON mode. Narrow
+`--since`/`--until`, use a coarser `--group-by`, or explicitly accept partial
+totals. The route has no cursor pagination. Optional `realm_name` and
+`agent_name` provide display names; neither changes the token-derived scope.
 
 ## Memory Summary
 

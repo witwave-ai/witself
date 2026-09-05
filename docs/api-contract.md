@@ -149,11 +149,38 @@ HTTP status codes should align with the structured error:
 | `404` | `not_found` | Resource not found or not visible to the caller. |
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
 | `422` | `usage_error` | Valid JSON with semantically invalid input. |
+| `422` | `usage_query_too_large` | Agent usage exceeds the 10,000-row cap without explicit truncation opt-in. |
 | `429` | `rate_limited` | Transient service-protection or throttle limit; `retryable: true`. |
 | `403` | `limit_exceeded` | Plan, quota, or structurally impossible rate debit; `retryable: false`. |
 | `500` | `internal_error` | Unexpected server failure. |
 | `503` | `backend_unavailable` | Backend dependency unavailable. |
 | `501` | `unsupported_operation` | Current backend does not support the operation. |
+
+`GET /v1/usage` returns only the active bearer-token agent's hourly or daily
+product usage, in `{schema_version, usage}`. It accepts RFC3339 `since` and
+`until`, `group_by=hour|day` (default `day`), and repeated `dimension` filters.
+The default window is 30 days; hourly windows are limited to 90 days and daily
+windows to 1,830 days. The report is limited to 10,000 points. If another point
+matches, callers without `allow_truncation=1` receive HTTP 422 and no usage
+report, using this flat error shape:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "usage_query_too_large",
+  "error": "usage query exceeds the 10000-row cap; narrow --since/--until, use a coarser --group-by, or opt in with --allow-truncation (allow_truncation=1)",
+  "max_rows": 10000
+}
+```
+
+`matched_rows` is omitted because the bounded query reads only cap+1 rows,
+without counting all matches. Partial success requires `allow_truncation=1`;
+`allow_truncation=0` retains the default refusal, and other or repeated values
+return HTTP 400. An opted-in HTTP 200 report always includes `truncated`, true
+when points were omitted, with totals covering only returned points. The CLI
+sends opt-in only for `witself usage --allow-truncation`, warns prominently on
+stderr in both output modes, and retains `truncated: true` in JSON. Otherwise
+it surfaces the server's 422 message verbatim. There is no cursor pagination.
 
 Clients must distinguish limit conditions by `error.code` and the `retryable`
 flag rather than treating every limit response or CLI exit `7` as retryable:

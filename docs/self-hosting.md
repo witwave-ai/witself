@@ -102,6 +102,7 @@ local mock/development mode and is not a production setup path.
 Self-hosted deployments should expose `/v1/capabilities` so clients can see
 which managed-service features are available, disabled, or replaced by
 operator-owned integrations. The capabilities contract reports the active
+fact service through `features.facts.supported`, and reports the active
 retrieval mode and optional client-vector profile support independently; it
 never reports a backend model/provider because none exists. When the sealed
 plane is enabled it reports the client-custodied vault contract and

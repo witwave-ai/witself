@@ -1144,7 +1144,7 @@ billing adapter may consume it without becoming its source of truth.
 | `account_id` | `text NOT NULL` FK -> `accounts(id)` | archive boundary |
 | `realm_id` | `text NOT NULL` FK -> `realms(id)` | token-derived scope |
 | `agent_id` | `text NOT NULL` FK -> `agents(id)` | token-derived subject |
-| `dimension` | `text NOT NULL` | extensible snake-case metric name |
+| `dimension` | `text NOT NULL` | closed [product-usage vocabulary](json-contracts.md#usage-report) for new ingestion; archive import preserves historical `^[a-z][a-z0-9_]{0,63}$` dimensions |
 | `quantity` | `bigint NOT NULL` | positive increment |
 | `unit` | `text NOT NULL` | `transcript`, `entry`, `byte`, or a future dimension unit |
 | `subject_type` / `subject_id` | `text NOT NULL` | resource that caused the usage |

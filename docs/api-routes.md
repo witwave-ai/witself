@@ -674,6 +674,11 @@ PATCH /v1/admin/accounts/{account_id}/tickets/{ticket_id}/retriage
 This sketch is allowed to evolve during implementation, but the style should
 remain stable.
 
+`GET /v1/capabilities` reports registered route families, including
+`features.facts.supported: true` when the fact service is wired. Discovery is
+public and value-free; supported routes still enforce authentication,
+authorization, and operation-specific policy gates.
+
 `GET /v1/transcripts/{transcript_id}` accepts either forward paging with
 `after_sequence` and `limit` or a bounded newest-page read with `tail=true` and
 `limit`. Results remain ordered oldest-first and return `next_after_sequence`
@@ -689,8 +694,37 @@ the same batch.
 expand it into another agent's view. `since` and `until` are RFC3339, repeated
 `dimension` parameters filter dimensions, and `group_by` is `hour` or `day`
 (default `day`). The default window is 30 days. Hourly windows are capped at 90
-days and daily windows at five years. Results contain time-bucket points and
-whole-window totals, each with `quantity`, `unit`, and source `event_count`.
+days and daily windows at 1,830 days (five 366-day years). Unknown dimensions
+are rejected with HTTP 400; the closed vocabulary is listed in
+[Usage Report](json-contracts.md#usage-report).
+Results contain at most 10,000 time-bucket `points`, ordered by bucket start,
+dimension, and unit, and at most 10,000 `totals` grouped from those points.
+Both arrays include `quantity`, `unit`, and source `event_count`. The always
+present boolean `truncated` is true when additional points were omitted; totals
+then describe only the returned points. Partial results require explicit
+`allow_truncation=1` (CLI `--allow-truncation`); otherwise exceeding the cap
+returns HTTP 422 with `code: usage_query_too_large`, an `error` message stating
+the cap and remedies, and `max_rows: 10000`, without a usage report. The matched
+row count is omitted because only cap+1 rows are read. There is no cursor.
+Narrow `--since`/`--until`, choose a coarser `--group-by`, or opt in explicitly.
+
+`POST /v1/support/tickets` admits at most 10 new tickets per account in a
+rolling 60-second window by default, shared across the account's operators and
+API/CLI calls. `WITSELF_SUPPORT_TICKET_RATE_LIMIT` (1–1,000) and
+`WITSELF_SUPPORT_TICKET_RATE_WINDOW` (whole seconds, 1 second–24 hours) configure
+this bound.
+The defaults match the parked support-email channel's 10-per-60-second shape.
+Refusal returns HTTP 429 with `code: rate_limited`, `retryable: true`,
+`retry_after` in seconds, and a `Retry-After` header. The `details` object
+contains `scope: account`, `limit`, `window_seconds`, and `retry_after`. Reads
+and customer replies do not consume this new-ticket allowance.
+
+The optional `witself-worker` support age-out job defaults off. When enabled,
+it resolves stale `awaiting_customer` tickets on active accounts only after a
+human administrator has replied. Threads are retained and a customer reply
+can reopen a resolved ticket. See the [Helm configuration](helm-chart.md) for
+bounded age and batch controls. This does not change the published promise of
+a human first response within 1 business day.
 
 `/metrics` is intentionally outside `/v1` because it is an operational
 Prometheus scrape endpoint, not a product API resource. It should be served on

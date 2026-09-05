@@ -397,7 +397,7 @@ type Config struct {
 	// Authenticate), enable /v1/support/tickets. Any operator on the
 	// account may open, list, read, reply, and transition; the account
 	// owner's audit trail (via ListAccountEvents) shows who did what.
-	// ErrSupportDisabled -> 409, ErrTicketNotFound -> 404,
+	// ErrSupportDisabled -> 409, ErrSupportRateLimited -> 429, ErrTicketNotFound -> 404,
 	// ErrTicketStateInvalid -> 409, ErrTicketInputInvalid -> 400.
 	OpenSupportTicket        func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)
 	ListSupportTickets       func(ctx context.Context, accountID, operatorID string) ([]SupportTicket, error)
@@ -1489,10 +1489,21 @@ type TranscriptPage struct {
 
 // UsageQuery selects the authenticated agent's hourly or daily usage rollups.
 type UsageQuery struct {
-	Since      time.Time
-	Until      time.Time
-	Bucket     string
-	Dimensions []string
+	Since           time.Time
+	Until           time.Time
+	Bucket          string
+	Dimensions      []string
+	AllowTruncation bool
+}
+
+// UsageQueryTooLargeError refuses an unnegotiated partial usage report.
+// Matched rows are not counted: the store reads only MaxRows+1 rows.
+type UsageQueryTooLargeError struct {
+	MaxRows int
+}
+
+func (e *UsageQueryTooLargeError) Error() string {
+	return fmt.Sprintf("usage query exceeds the %d-row cap; narrow --since/--until, use a coarser --group-by, or opt in with --allow-truncation (allow_truncation=1)", e.MaxRows)
 }
 
 // UsagePoint is one dimension total in a UTC time bucket.
@@ -1504,7 +1515,8 @@ type UsagePoint struct {
 	EventCount  int64     `json:"event_count"`
 }
 
-// UsageTotal is a dimension total across the report window.
+// UsageTotal is a dimension total across returned points; it is partial when
+// UsageReport.Truncated is true.
 type UsageTotal struct {
 	Dimension  string `json:"dimension"`
 	Unit       string `json:"unit"`
@@ -1524,6 +1536,7 @@ type UsageReport struct {
 	Bucket    string       `json:"bucket"`
 	Points    []UsagePoint `json:"points"`
 	Totals    []UsageTotal `json:"totals"`
+	Truncated bool         `json:"truncated"`
 }
 
 // Message is one durable realm-local direct message and the recipient's
@@ -2354,37 +2367,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.ApplyAgentEmailOutboundProviderEvent,
 		)
 	}
-	selfDigestSupported := cfg.AuthenticatePrincipal != nil
-	transcriptsSupported := selfDigestSupported &&
-		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
-		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
-	messagingSupported := selfDigestSupported && cfg.SendMessage != nil &&
-		cfg.ListMessages != nil && cfg.ReadMessage != nil && cfg.AckMessage != nil
-	messageListenSupported := selfDigestSupported && cfg.ListMessages != nil
-	messageReplySupported := selfDigestSupported && cfg.ReplyMessage != nil
-	messageProcessingSupported := selfDigestSupported &&
-		cfg.ClaimMessage != nil && cfg.RenewMessageClaim != nil &&
-		cfg.ReleaseMessageClaim != nil && cfg.CompleteMessage != nil
-	messageRequestsSupported := selfDigestSupported &&
-		cfg.CreateMessageRequest != nil && cfg.ListMessageRequests != nil &&
-		cfg.GetMessageRequest != nil && cfg.OfferMessageRequest != nil &&
-		cfg.DeclineMessageRequest != nil && cfg.SelectMessageRequest != nil &&
-		cfg.CancelMessageRequest != nil && cfg.ClaimMessageRequest != nil &&
-		cfg.RenewMessageRequest != nil && cfg.ReleaseMessageRequest != nil &&
-		cfg.CompleteMessageRequest != nil
-	memoriesSupported := selfDigestSupported && cfg.CaptureMemory != nil &&
-		cfg.GetMemory != nil && cfg.ListMemories != nil && cfg.RecallMemories != nil &&
-		cfg.GetMemoryHistory != nil && cfg.AdjustMemory != nil &&
-		cfg.SupersedeMemory != nil &&
-		cfg.ForgetMemory != nil && cfg.RestoreMemory != nil &&
-		cfg.ReactivateMemory != nil && cfg.ResolveMemoryEvidence != nil &&
-		cfg.DeleteMemory != nil
-	memoryRecallSupported := selfDigestSupported && cfg.RecallMemories != nil
-	memorySupersedeSupported := selfDigestSupported && cfg.SupersedeMemory != nil
-	memoryDeleteSupported := selfDigestSupported && cfg.DeleteMemory != nil
-	memoryVectorsSupported := selfDigestSupported && cfg.CreateMemoryVectorProfile != nil &&
-		cfg.ListMemoryVectorProfiles != nil && cfg.PutMemoryVector != nil
-	memoryCurationSupported := selfDigestSupported &&
+	memoryCurationSupported := cfg.AuthenticatePrincipal != nil &&
 		cfg.RequestMemoryCuration != nil && cfg.ListMemoryCurationRequests != nil &&
 		cfg.GetMemoryCurationRequest != nil && cfg.StartMemoryCuration != nil &&
 		cfg.GetMemoryCurationRun != nil && cfg.GetMemoryCurationRunInputs != nil &&
@@ -2393,30 +2376,7 @@ func apiMux(cfg Config) http.Handler {
 		cfg.ApplyMemoryCuration != nil && cfg.CancelMemoryCuration != nil &&
 		cfg.AbandonMemoryCuration != nil && cfg.RollbackMemoryCuration != nil &&
 		cfg.GetMemoryCurationStatus != nil
-	avatarsSupported := cfg.AuthenticatePrincipal != nil &&
-		cfg.GetSelfAvatar != nil && cfg.GetSelfAvatarHistory != nil && cfg.GetSelfAvatarVersion != nil &&
-		cfg.GetSelfAvatarStyle != nil && cfg.ProposeSelfAvatar != nil &&
-		cfg.ActivateSelfAvatar != nil && cfg.RollbackSelfAvatar != nil &&
-		cfg.ResetSelfAvatar != nil &&
-		cfg.ReportSelfAvatarGenerationFailure != nil
-	secretsSupported := cfg.AuthenticatePrincipal != nil &&
-		cfg.GetCurrentVaultKey != nil && cfg.RegisterVaultKey != nil &&
-		cfg.CreateSecret != nil && cfg.GetSecretLimitStatus != nil &&
-		cfg.ListSecrets != nil && cfg.GetSecret != nil &&
-		cfg.ArchiveSecret != nil && cfg.RestoreSecret != nil &&
-		cfg.DeleteSecret != nil && cfg.AccessSecretField != nil
-	agentEmailSendSupported := selfDigestSupported && cfg.QueueAgentEmail != nil
-	agentEmailReplySupported := selfDigestSupported && cfg.ReplyAgentEmail != nil
-	agentEmailSentHistorySupported := selfDigestSupported &&
-		cfg.ListAgentEmailOutbox != nil && cfg.GetAgentEmailOutbound != nil
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
-		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
-		messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported,
-		messageRequestsSupported,
-		memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
-		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported,
-		avatarsSupported, secretsSupported,
-		agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported))
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -3208,7 +3168,8 @@ func billingCapabilityURLHasUnsafeRune(raw string) bool {
 	return false
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported, agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported bool) http.HandlerFunc {
+func capabilitiesHandler(cfg Config) http.HandlerFunc {
+	features := configuredCapabilities(cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -3230,55 +3191,19 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				Version:    version.Version,
 				APIVersion: "v1",
 			},
-			Features: map[string]feature{
-				"memories":                 featureState(memoriesSupported),
-				"memory_recall":            featureState(memoryRecallSupported),
-				"memory_supersede":         featureState(memorySupersedeSupported),
-				"memory_permanent_delete":  featureState(memoryDeleteSupported),
-				"memory_vector_profiles":   featureState(memoryVectorsSupported),
-				"client_vector_recall":     featureState(memoryVectorsSupported && memoryRecallSupported),
-				"automatic_capture":        notImpl,
-				"opportunistic_curation":   featureState(memoryCurationSupported),
-				"scheduled_curation":       notImpl,
-				"transcript_capture":       featureState(transcriptsSupported),
-				"facts":                    notImpl,
-				"self_digest":              {Supported: selfDigestSupported},
-				"semantic_recall":          featureState(memoryVectorsSupported && memoryRecallSupported),
-				"policies":                 notImpl,
-				"groups":                   notImpl,
-				"avatars":                  featureState(avatarsSupported),
-				"secrets":                  featureState(secretsSupported),
-				"messaging":                {Supported: messagingSupported},
-				"message_listen":           featureState(messageListenSupported),
-				"message_reply":            featureState(messageReplySupported),
-				"message_processing":       featureState(messageProcessingSupported),
-				"message_requests":         featureState(messageRequestsSupported),
-				"agent_email_send":         featureState(agentEmailSendSupported),
-				"agent_email_reply":        featureState(agentEmailReplySupported),
-				"agent_email_sent_history": featureState(agentEmailSentHistorySupported),
-				"transcripts":              {Supported: transcriptsSupported},
-				"audit":                    notImpl,
-			},
-			Limits:  map[string]any{},
-			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
+			Features: map[string]feature{},
+			Limits:   map[string]any{},
+			Billing:  billingInfo{Supported: false, Reason: "self_hosted"},
 		}
 		if ep := envconfig.RawOr(os.LookupEnv, "WITSELF_BILLING_ENDPOINT", ""); validBillingCapabilityEndpoint(ep) {
 			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
 		} else if ep != "" {
 			caps.Billing = billingInfo{Supported: false, Reason: "invalid_configuration"}
 		}
-		if !transcriptsSupported {
-			caps.Features["transcripts"] = notImpl
+		for name, supported := range features {
+			caps.Features[name] = featureState(supported)
 		}
-		if !selfDigestSupported {
-			caps.Features["self_digest"] = notImpl
-		}
-		if !messagingSupported {
-			caps.Features["messaging"] = notImpl
-		}
-		if !memoriesSupported {
-			caps.Features["memories"] = notImpl
-		}
+		accountID, planInfo := cfg.AccountID, cfg.PlanInfo
 		if accountID != "" && backendKind != "managed" {
 			caps.Account = &accountInfo{ID: accountID}
 		}
@@ -3787,6 +3712,13 @@ func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrinci
 		}
 		q := r.URL.Query()
 		query := UsageQuery{Bucket: strings.TrimSpace(q.Get("group_by"))}
+		if values, ok := q["allow_truncation"]; ok {
+			if len(values) != 1 || (values[0] != "0" && values[0] != "1") {
+				writeJSONError(w, http.StatusBadRequest, "allow_truncation must be 0 or 1")
+				return
+			}
+			query.AllowTruncation = values[0] == "1"
+		}
 		if raw := strings.TrimSpace(q.Get("since")); raw != "" {
 			since, err := time.Parse(time.RFC3339, raw)
 			if err != nil {
@@ -3811,7 +3743,23 @@ func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrinci
 			}
 		}
 		report, err := get(r.Context(), p, query)
+		// Enforce negotiation at the HTTP boundary even if a callback returns
+		// an already-truncated report instead of a typed refusal.
+		if err == nil && report.Truncated && !query.AllowTruncation {
+			err = &UsageQueryTooLargeError{MaxRows: len(report.Points)}
+		}
+		var tooLarge *UsageQueryTooLargeError
 		switch {
+		case errors.As(err, &tooLarge):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"code":           "usage_query_too_large",
+				"error":          tooLarge.Error(),
+				"max_rows":       tooLarge.MaxRows,
+			})
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -6806,6 +6754,9 @@ func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in O
 			Body:       req.Body,
 		})
 		switch {
+		case errors.Is(err, ErrSupportRateLimited):
+			writeSupportRateLimitError(w, err)
+			return
 		case errors.Is(err, ErrTicketInputInvalid):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return

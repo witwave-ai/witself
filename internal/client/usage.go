@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -10,10 +11,11 @@ import (
 
 // UsageQuery selects the authenticated agent's usage rollups.
 type UsageQuery struct {
-	Since      time.Time
-	Until      time.Time
-	Bucket     string
-	Dimensions []string
+	Since           time.Time
+	Until           time.Time
+	Bucket          string
+	Dimensions      []string
+	AllowTruncation bool
 }
 
 // UsagePoint is one dimension total in a UTC time bucket.
@@ -25,7 +27,8 @@ type UsagePoint struct {
 	EventCount  int64     `json:"event_count"`
 }
 
-// UsageTotal is a dimension total across the report window.
+// UsageTotal is a dimension total across returned points; it is partial when
+// UsageReport.Truncated is true.
 type UsageTotal struct {
 	Dimension  string `json:"dimension"`
 	Unit       string `json:"unit"`
@@ -45,6 +48,7 @@ type UsageReport struct {
 	Bucket    string       `json:"bucket"`
 	Points    []UsagePoint `json:"points"`
 	Totals    []UsageTotal `json:"totals"`
+	Truncated bool         `json:"truncated"`
 }
 
 // GetUsage returns hourly or daily rollups for the bearer-token agent.
@@ -62,6 +66,9 @@ func GetUsage(ctx context.Context, endpoint, token string, query UsageQuery) (Us
 	for _, dimension := range query.Dimensions {
 		params.Add("dimension", dimension)
 	}
+	if query.AllowTruncation {
+		params.Set("allow_truncation", "1")
+	}
 	url := strings.TrimRight(endpoint, "/") + "/v1/usage"
 	if encoded := params.Encode(); encoded != "" {
 		url += "?" + encoded
@@ -71,6 +78,9 @@ func GetUsage(ctx context.Context, endpoint, token string, query UsageQuery) (Us
 	}
 	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
 		return UsageReport{}, err
+	}
+	if out.Usage.Truncated && !query.AllowTruncation {
+		return UsageReport{}, errors.New("usage report is truncated; narrow --since/--until, use a coarser --group-by, or opt in with --allow-truncation")
 	}
 	return out.Usage, nil
 }

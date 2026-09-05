@@ -1512,7 +1512,7 @@
       "id": "managed-support",
       "name": "Managed support",
       "area": "Commercial",
-      "summary": "Support tickets, messages, transitions, tenant and fleet-admin surfaces, audit, and archive/import ship with a published policy, plan-entitlement admission enforcement, and a live first-response breach alert; the AI responder and support@ intake stay dark; intake-rate controls and a rollout canary stay limited.",
+      "summary": "Support tickets, audit, archive/import, plan-entitlement admission, per-account creation limits, and first-response breach alerts are implemented. Awaiting-customer age-out defaults off; the AI responder and support@ intake stay dark, and a rollout canary remains open.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_feature_keys": [
@@ -1548,7 +1548,7 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge now enforces ticket deletion after the 30-day closure grace. The parked support@ channel has sender guards; in-product intake-rate controls, ticket age-out, and attachment handling remain absent.",
+          "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge deletes tickets after the 30-day closure grace. API/CLI ticket creation is rate-limited per account; a default-off bounded worker resolves stale awaiting-customer tickets after a human reply. Attachment handling remains absent.",
           "evidence": [
             ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
             ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
@@ -1556,7 +1556,9 @@
             "docs/security-policy.md",
             "infra/cloudflare/support-email-intake/src/index.js",
             "internal/store/support.go",
-            "internal/store/support_email.go"
+            "internal/store/support_age_out_test.go",
+            "internal/store/support_email.go",
+            "internal/store/support_limits_test.go"
           ]
         },
         "observability": {
@@ -1601,7 +1603,7 @@
         {
           "id": "support-abuse-retention",
           "gate_ids": ["bounds_abuse"],
-          "summary": "Add in-product ticket-creation intake-rate controls, any bounded ticket age-out sweep, and bounded evidence-attachment handling; the email channel's dark rate limiting and the purge-path retention landed.",
+          "summary": "Retain PostgreSQL admission and age-out validation and add bounded evidence-attachment handling; per-account API/CLI rate limiting and a default-off bounded awaiting-customer age-out worker are implemented.",
           "ref": "internal/store/support.go"
         },
         {
@@ -2335,11 +2337,12 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "Backend-kind and capability contracts distinguish managed-only dependencies, but the current capabilities response marks implemented facts unsupported and omits documented optional-feature flags.",
+          "summary": "Backend-kind and capability contracts distinguish managed-only dependencies. Facts and other payload families are checked against registered routes, including partial wiring and authentication prerequisites. Reconciliation of additional documented optional-feature flags remains open.",
           "evidence": [
             "charts/witself-server/values.yaml",
             "docs/api-contract.md",
             "docs/self-hosting.md",
+            "internal/server/capabilities_test.go",
             "internal/server/server.go"
           ]
         },
@@ -2388,7 +2391,7 @@
         {
           "id": "self-host-capability-reconciliation",
           "gate_ids": ["entitlement_policy"],
-          "summary": "Make the capabilities response accurately describe implemented facts and every supported optional feature, then pin it against server routes and Helm values.",
+          "summary": "Reconcile additional documented optional-feature flags with implemented support. Facts and existing payload families now match registered routes; the Helm chart has no separate product capability list.",
           "ref": "internal/server/server.go"
         },
         {
@@ -2547,7 +2550,7 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Events are value-free and query windows and groups are validated, but usage dimensions are extensible and the current report query has no result-row cap or pagination.",
+          "summary": "Events are value-free; query windows, groups, and a closed dimension vocabulary are validated. Reports return at most 10,000 points with explicit truncation and totals over returned points. Boundary, hostile-import, and high-cardinality tests are present; PostgreSQL validation remains open.",
           "evidence": [
             "docs/transcript-ledger.md",
             "internal/store/usage_integration_test.go"
@@ -2596,7 +2599,7 @@
         {
           "id": "usage-query-bounds",
           "gate_ids": ["bounds_abuse"],
-          "summary": "Define the accepted dimension vocabulary and add a hard returned-row cap or cursor pagination with boundary, hostile-import, and high-cardinality tests.",
+          "summary": "Retain passing PostgreSQL boundary, hostile-import, and high-cardinality evidence for the implemented closed dimension vocabulary, 10,000-point cap, and explicit truncation contract.",
           "ref": "internal/store/usage.go"
         },
         {

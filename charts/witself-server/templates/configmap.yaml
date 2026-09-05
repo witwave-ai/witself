@@ -163,6 +163,8 @@ data:
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
   WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
   WITSELF_CELL_NAME: {{ .Values.cell.name | quote }}
+  WITSELF_SUPPORT_TICKET_RATE_LIMIT: {{ .Values.support.ticketRateLimit | quote }}
+  WITSELF_SUPPORT_TICKET_RATE_WINDOW: {{ .Values.support.ticketRateWindow | quote }}
 {{- if $billingEndpoint }}
   WITSELF_BILLING_ENDPOINT: {{ $billingEndpoint | quote }}
 {{- end }}
