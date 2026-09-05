@@ -79,7 +79,7 @@ func TestProviderCLICommandsUseIsolatedWorkingDirectories(t *testing.T) {
 		configRoot := filepath.Join(t.TempDir(), "copilot")
 		t.Setenv("COPILOT_HOME", configRoot)
 		t.Setenv("COPILOT_CLI_PATH", provider.Path)
-		if _, err := runCopilotCLICommand(provider.Path, configRoot, time.Second, "--version"); err != nil {
+		if _, err := runCopilotCLICommand(provider.Path, configRoot, copilotCLITestTimeout, "--version"); err != nil {
 			t.Fatalf("run Copilot CLI: %v", err)
 		}
 		if version := detectRuntimeVersion(transcriptcapture.RuntimeCopilot, provider.Path); version != "1.0.73" {

@@ -18,6 +18,11 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
+// copilotCLITestTimeout bounds each real GitHub Copilot CLI invocation in tests.
+// The tests assert workspace isolation, not latency; a loaded host has taken
+// more than five seconds just to start the CLI, so the bound is generous.
+const copilotCLITestTimeout = 60 * time.Second
+
 func TestConfigureCopilotBindingPinsRootsAndEnvironment(t *testing.T) {
 	base := t.TempDir()
 	copilotHome := filepath.Join(base, "copilot")
@@ -402,7 +407,7 @@ fi
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chdir(original) }()
-	raw, err := runCopilotCLICommand(cli, filepath.Join(t.TempDir(), "copilot-home"), 5*time.Second, "mcp", "list", "--json")
+	raw, err := runCopilotCLICommand(cli, filepath.Join(t.TempDir(), "copilot-home"), copilotCLITestTimeout, "mcp", "list", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
