@@ -22,64 +22,48 @@ permissions:
   packages: write # push container images to GHCR
 
 jobs:
-  # Re-run CI's Go and Helm gates on the tagged commit before anything publishes.
-  # ci.yml only fires on PRs and pushes to main — a tag push skips it —
-  # so without this gate a commit that never went green (or went red)
-  # can ship as a release. That happened three times on 2026-07-04
-  # (v0.0.91–v0.0.93 shipped from gofmt/lint-red commits); this job is
-  # the structural fix. Mirror of ci.yml's Go and Helm jobs; keep them in sync.
-  verify:
+  # Re-run CI's gates on the tagged commit before anything publishes.
+  # ci.yml only fires on PRs and pushes to main, so tag releases must run
+  # the same parallel Go gates here. Keep them in sync with ci.yml.
+  go:
+    name: go
+    if: ${{ always() }}
+    needs: [go-rest, go-store, go-infra]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
+    steps:
+      - name: Require all Go gates
         env:
-          POSTGRES_USER: witself
-          POSTGRES_PASSWORD: witself
-          POSTGRES_DB: witself
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U witself -d witself"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-    env:
-      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+          GO_REST_RESULT: ${{ needs.go-rest.result }}
+          GO_STORE_RESULT: ${{ needs.go-store.result }}
+          GO_INFRA_RESULT: ${{ needs.go-infra.result }}
+        run: |
+          for result in "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "A required Go gate did not succeed: $result" >&2
+              exit 1
+            fi
+          done
+
+  go-rest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: |
-            go.sum
-            infra/pulumi/go.sum
+          cache-dependency-path: go.sum
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
-        with:
-          version: v3.16.4
-
-      - name: install kubeconform
-        env:
-          KUBECONFORM_VERSION: v0.8.0
-          KUBECONFORM_LINUX_AMD64_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
-        run: |
-          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          echo "${KUBECONFORM_LINUX_AMD64_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
-          tar -xzf kubeconform-linux-amd64.tar.gz
-          sudo install kubeconform /usr/local/bin/
-
       - name: go mod tidy
-        run: |
-          go mod tidy -diff
-          (cd infra/pulumi && go mod tidy -diff)
+        run: go mod tidy -diff
 
       - name: gofmt
         run: |
@@ -88,52 +72,41 @@ jobs:
             echo "gofmt needs to run on:"; echo "$unformatted"; exit 1
           fi
 
-      - name: Pin and run ShellCheck and actionlint
-        run: bash scripts/test-ci-static-analysis.sh
-
       - name: go vet
         run: go vet ./...
 
       - name: build
         run: go build ./...
 
-      - name: test
-        # The PostgreSQL integration suite deliberately serializes schema
-        # migrations behind one advisory lock. Keep the same bounded margin as
-        # ordinary CI for the hosted-runner lock queue.
+      - name: test non-store
+        shell: bash
         env:
           WITSELF_TEST_REQUIRE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_NODE: "1"
         run: |
-          go test ./... \
+          # Keep package discovery in a checked pipeline: a failed go list
+          # must fail this gate, not leave a partial package list to test.
+          go list ./... | grep -vE '/internal/store(/|$)' > "$RUNNER_TEMP/go-test-packages.txt"
+          mapfile -t packages < "$RUNNER_TEMP/go-test-packages.txt"
+          go test "${packages[@]}" \
             -race \
             -shuffle=on \
             -timeout=30m \
             -covermode=atomic \
-            -coverprofile="$RUNNER_TEMP/go-coverage.out"
-          go tool cover -func="$RUNNER_TEMP/go-coverage.out"
+            -coverprofile="$RUNNER_TEMP/go-coverage-rest.out"
+          go tool cover -func="$RUNNER_TEMP/go-coverage-rest.out"
 
-      - name: Upload Go coverage
+      - name: Upload Go non-store coverage
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
-          name: go-coverage
-          path: ${{ runner.temp }}/go-coverage.out
+          name: go-coverage-rest
+          path: ${{ runner.temp }}/go-coverage-rest.out
           if-no-files-found: error
 
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          golangci-lint run ./...
-
-      # infra/pulumi is a NESTED module: ./... from the repo root never
-      # descends into it, so without this step its tests run nowhere.
-      - name: infra module gates
-        run: |
-          cd infra/pulumi
-          go vet ./...
-          go build ./...
-          go test ./...
           golangci-lint run ./...
 
       - name: Cloudflare agent-email Worker gates
@@ -164,6 +137,133 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
+
+  go-store:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: witself
+          POSTGRES_PASSWORD: witself
+          POSTGRES_DB: witself
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U witself -d witself"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Keep the production-backed store tests in the normal CI gate. Without
+      # this DSN they intentionally skip, which can hide PostgreSQL semantics.
+      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: test store
+        # The PostgreSQL integration suite deliberately serializes schema
+        # migrations behind one advisory lock. Keep a bounded margin for
+        # the lock queue even though this suite now has its own runner.
+        env:
+          WITSELF_TEST_REQUIRE_DATABASE: "1"
+          WITSELF_TEST_REQUIRE_NODE: "1"
+        run: |
+          go test ./internal/store/... \
+            -race \
+            -shuffle=on \
+            -timeout=30m \
+            -covermode=atomic \
+            -coverprofile="$RUNNER_TEMP/go-coverage-store.out"
+          go tool cover -func="$RUNNER_TEMP/go-coverage-store.out"
+
+      - name: Upload Go store coverage
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: go-coverage-store
+          path: ${{ runner.temp }}/go-coverage-store.out
+          if-no-files-found: error
+
+  go-infra:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: infra/pulumi/go.mod
+          cache: true
+          cache-dependency-path: infra/pulumi/go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: go mod tidy
+        run: cd infra/pulumi && go mod tidy -diff
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+
+      # infra/pulumi is a NESTED module: ./... from the repo root never
+      # descends into it, so without this step its tests run nowhere.
+      - name: infra module gates
+        run: |
+          cd infra/pulumi
+          go vet ./...
+          go build ./...
+          go test ./...
+          golangci-lint run ./...
+
+  # The remaining Helm, static-analysis and release contract gates also
+  # block publication through goreleaser.needs.
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            infra/pulumi/go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.16.4
+
+      - name: install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.8.0
+          KUBECONFORM_LINUX_AMD64_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+        run: |
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_LINUX_AMD64_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz
+          sudo install kubeconform /usr/local/bin/
+
+      - name: Pin and run ShellCheck and actionlint
+        run: bash scripts/test-ci-static-analysis.sh
 
       - name: helm lint
         run: |
@@ -449,7 +549,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   goreleaser:
-    needs: [verify, provider-integration-verify, homebrew-verify]
+    needs: [go, verify, provider-integration-verify, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
