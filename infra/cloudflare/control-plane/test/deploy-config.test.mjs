@@ -821,14 +821,14 @@ test("release renderer injects matching immutable container and Worker identity"
       "release config must explicitly pin the container-reaching probe off",
     );
   }
-  assert.match(config, /"crons"\s*:\s*\["\*\/5 \* \* \* \*", "1-59\/5 \* \* \* \*"\]/);
+  assert.match(config, /"crons"\s*:\s*\["\*\/5 \* \* \* \*", "1,6,11,16,21,26,31,36,41,46,51,56 \* \* \* \*"\]/);
   for (const crons of [
     [],
     ["*/5 * * * *"],
-    ["1-59/5 * * * *"],
+    ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *"],
     ["*/5 * * * *", "*/5 * * * *"],
     ["*/5 * * * *", "*/10 * * * *"],
-    ["*/5 * * * *", "1-59/5 * * * *", "*/10 * * * *"],
+    ["*/5 * * * *", "1,6,11,16,21,26,31,36,41,46,51,56 * * * *", "*/10 * * * *"],
   ]) {
     assert.throws(
       () => expectedBuildMetadata(config.replace(

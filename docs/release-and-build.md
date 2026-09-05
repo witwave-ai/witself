@@ -71,11 +71,11 @@ activation ordering remain separate rollout gates; transcript retention's
 disabled-to-preview sequence is in
 [Transcript Retention](transcript-retention.md#control-plane-lifecycle-rollout).
 
-Synthetic uptime probes use a dedicated `1-59/5 * * * *` Cron Trigger and the
+Synthetic uptime probes use a dedicated `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` Cron Trigger and the
 existing `DIRECTORY` KV binding. The ordinary CP deploy installs this trigger,
 the scheduled cell probe handler, and the public, uncached `/metrics/probes`
 endpoint. After deploy, verify that the Worker has exactly two Cron Triggers:
-`*/5 * * * *` for maintenance and `1-59/5 * * * *` for probes (minutes 1, 6,
+`*/5 * * * *` for maintenance and `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` for probes (minutes 1, 6,
 through 56 UTC). The deployment verifier pins both expressions. The handler
 dispatches each cron to its own work; separate invocations give probes their
 own six-connection budget, even if cron timings overlap. The four-worker probe
