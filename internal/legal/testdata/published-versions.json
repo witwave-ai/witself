@@ -1,0 +1,34 @@
+{
+  "privacy": {
+    "file": "privacy-policy.md",
+    "versions": {
+      "2026-08-31": "36eef7e0669f19006783fc77fadd4b3f920e1f2bc860ad0aa6729f6789027c2f",
+      "2026-09-04": "5f7a13203d0cf8fd19f2cd54ccf8481e22e92c7b7f92008449a9f0debb2e7f0b"
+    }
+  },
+  "dpa": {
+    "file": "data-processing-addendum.md",
+    "versions": {
+      "2026-08-31": "750d16d7d0c6237b1a20348f939d07f115c8df2f7f4ed8a4b3723e22873a8fad",
+      "2026-09-04": "e25c002903bc18dd8dc591a6c00725abf6b1121dc8b4189b0b740d737257b355"
+    }
+  },
+  "terms": {
+    "file": "terms-of-service.md",
+    "versions": {
+      "2026-08-31": "ac80eb5a6a49203e343b46da8d04dea9ea2f657bf5eb8624cc74599b8bfe1721"
+    }
+  },
+  "acceptable-use": {
+    "file": "acceptable-use.md",
+    "versions": {
+      "2026-08-31": "a69e37d5d0c68536ef505962fa48b57ece6f17d240e3f91812f7c64899d4fd24"
+    }
+  },
+  "refunds": {
+    "file": "refund-cancellation.md",
+    "versions": {
+      "2026-08-31": "19fcd1dd6e57ebfc5d11759bfede3ea762d499d7441abd4b3b2ccefd98078868"
+    }
+  }
+}
