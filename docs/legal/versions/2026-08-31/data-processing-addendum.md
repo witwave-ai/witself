@@ -1,6 +1,6 @@
 # Witself Data Processing Addendum
 
-**Version 2026-09-04 · Effective 2026-09-04**
+**Version 2026-08-31 · Effective 2026-08-31**
 
 This DPA applies where Witwave LLC processes personal data in your content
 on your behalf. It is incorporated into the
@@ -21,10 +21,7 @@ contact legal@witwave.ai.
   account/operator contact data.
 - **Security measures**: sealed-plane content is client-encrypted (we hold
   ciphertext only and cannot decrypt); all traffic is encrypted in transit;
-  account backup and evacuation archives are stored in Cloudflare R2 with
-  provider-managed encryption at rest; sealed-plane secrets inside them remain
-  client-encrypted. Civo pre-migration database dumps are separately encrypted
-  with age using operator-held keys. Access is
+  backups are encrypted with keys held offline by the operator; access is
   audited in an append-style audit ledger with access controls. Open-plane
   content is stored on managed provider infrastructure.
 - **Deletion on termination**: on account closure, stored content is
@@ -46,7 +43,7 @@ tenant content is added here, with notice, before use.
 
 | Subprocessor | Entity / region | Role |
 |---|---|---|
-| Cloudflare, Inc. | US (global network) | Control plane (Workers/KV/R2/Durable Objects), account metadata, account backup and evacuation archives (R2; provider-managed encryption at rest), inbound/outbound agent-email edge, signup Turnstile |
+| Cloudflare, Inc. | US (global network) | Control plane (Workers/KV/R2/Durable Objects), account metadata, encrypted backups and archives, inbound/outbound agent-email edge, signup Turnstile |
 | Civo Ltd | US regions (Phoenix, AZ; New York, NY) | Current deployment-cell infrastructure: compute and in-cell PostgreSQL holding agent content |
 | Stripe, Inc. | US | Billing and payments (card data goes directly to Stripe) |
 | GitHub, Inc. | US | Source hosting, CI, and public incident-comms issues (no tenant content) |
