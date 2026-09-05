@@ -114,7 +114,7 @@ func TestUsageTruncationContract(t *testing.T) {
 }
 
 func TestUsageRequiresTruncationOptIn(t *testing.T) {
-	const cap = store.UsageReportPointLimit
+	const pointLimit = store.UsageReportPointLimit
 	for _, tc := range []struct {
 		name                   string
 		query                  string
@@ -122,11 +122,11 @@ func TestUsageRequiresTruncationOptIn(t *testing.T) {
 		wantStatus             int
 		callbackReturnsPartial bool
 	}{
-		{name: "exact_cap", matched: cap, wantStatus: http.StatusOK},
-		{name: "old_client_cap_plus_one", matched: cap + 1, wantStatus: http.StatusUnprocessableEntity},
-		{name: "explicit_opt_out", query: "?allow_truncation=0", matched: cap + 1, wantStatus: http.StatusUnprocessableEntity},
-		{name: "opt_in", query: "?allow_truncation=1", matched: cap + 1, wantStatus: http.StatusOK},
-		{name: "unnegotiated_callback_partial", matched: cap + 1, wantStatus: http.StatusUnprocessableEntity, callbackReturnsPartial: true},
+		{name: "exact_cap", matched: pointLimit, wantStatus: http.StatusOK},
+		{name: "old_client_cap_plus_one", matched: pointLimit + 1, wantStatus: http.StatusUnprocessableEntity},
+		{name: "explicit_opt_out", query: "?allow_truncation=0", matched: pointLimit + 1, wantStatus: http.StatusUnprocessableEntity},
+		{name: "opt_in", query: "?allow_truncation=1", matched: pointLimit + 1, wantStatus: http.StatusOK},
+		{name: "unnegotiated_callback_partial", matched: pointLimit + 1, wantStatus: http.StatusUnprocessableEntity, callbackReturnsPartial: true},
 		{name: "invalid_opt_in", query: "?allow_truncation=true", wantStatus: http.StatusBadRequest},
 		{name: "ambiguous_opt_in", query: "?allow_truncation=0&allow_truncation=1", wantStatus: http.StatusBadRequest},
 	} {
@@ -139,13 +139,13 @@ func TestUsageRequiresTruncationOptIn(t *testing.T) {
 					if tc.wantStatus == http.StatusBadRequest {
 						t.Fatal("invalid opt-in reached usage callback")
 					}
-					if tc.matched > cap && !query.AllowTruncation && !tc.callbackReturnsPartial {
-						return UsageReport{}, fmt.Errorf("wrapped: %w", &UsageQueryTooLargeError{MaxRows: cap})
+					if tc.matched > pointLimit && !query.AllowTruncation && !tc.callbackReturnsPartial {
+						return UsageReport{}, fmt.Errorf("wrapped: %w", &UsageQueryTooLargeError{MaxRows: pointLimit})
 					}
 					return UsageReport{
-						Points:    make([]UsagePoint, min(tc.matched, cap)),
-						Totals:    []UsageTotal{{Dimension: "transcript_created", Quantity: int64(min(tc.matched, cap))}},
-						Truncated: tc.matched > cap,
+						Points:    make([]UsagePoint, min(tc.matched, pointLimit)),
+						Totals:    []UsageTotal{{Dimension: "transcript_created", Quantity: int64(min(tc.matched, pointLimit))}},
+						Truncated: tc.matched > pointLimit,
 					}, nil
 				},
 			})
@@ -167,12 +167,12 @@ func TestUsageRequiresTruncationOptIn(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.wantStatus == http.StatusUnprocessableEntity {
-				wantMessage := (&UsageQueryTooLargeError{MaxRows: cap}).Error()
-				if body.Code != "usage_query_too_large" || body.Error != wantMessage || body.MaxRows != cap || body.MatchedRows != nil || body.Usage != nil {
-					t.Fatalf("refusal must include cap/remedies and no partial usage: %s", res.Body.String())
+				wantMessage := (&UsageQueryTooLargeError{MaxRows: pointLimit}).Error()
+				if body.Code != "usage_query_too_large" || body.Error != wantMessage || body.MaxRows != pointLimit || body.MatchedRows != nil || body.Usage != nil {
+					t.Fatalf("refusal must include pointLimit/remedies and no partial usage: %s", res.Body.String())
 				}
 			}
-			if tc.wantStatus == http.StatusOK && (body.Usage == nil || len(body.Usage.Points) != min(tc.matched, cap) || body.Usage.Truncated != (tc.matched > cap)) {
+			if tc.wantStatus == http.StatusOK && (body.Usage == nil || len(body.Usage.Points) != min(tc.matched, pointLimit) || body.Usage.Truncated != (tc.matched > pointLimit)) {
 				t.Fatal("success did not preserve negotiated truncation")
 			}
 		})
