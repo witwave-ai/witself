@@ -19,6 +19,17 @@ apps:
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
     storage: 8Gi
+    # Cells have drifted to different latest digests. Preserve this cell's
+    # running image content; cross-cell alignment is a separate reviewed change.
+    # A tag-to-digest reference change can still roll the StatefulSet pod.
+    image:
+      registry: registry-1.docker.io
+      repository: bitnami/postgresql
+      digest: sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049
+    networkPolicy:
+      enabled: true
+      allowExternal: false
+    # No monitoring stack on this cell; PostgreSQL metrics stay disabled.
   witselfServer:
     enabled: true
     namespace: witself
@@ -30,12 +41,17 @@ apps:
     # Schema-28's compatibility hold expired long ago (cells run schema 94);
     # in-product permanent fact deletion backs the published privacy policy.
     factDeletionEnabled: true
+    # All writers on 0.0.273: config-only rollout; ConfigMap checksum restarts
+    # pods and reruns digest backfill.
+    avatarPayloadCompactionEnabled: true
     billing:
       endpoint: https://self.witwave.ai
     backup:
       enabled: true
       validationEnabled: true
       targetName: witself-backup
+    # Keep replicas/PDB/topology unchanged on this single-node cell: a PDB
+    # minAvailable of 1 with 1 server replica would block node drains.
     replicaCount: 1
     podDisruptionBudget:
       enabled: false
@@ -96,7 +112,6 @@ platform:
     azureVaultURL: ""
   keda:
     enabled: false
-  # This cell currently has no resource Metrics API. Replica counts remain
-  # manual; install metrics-server only through a separately reviewed rollout.
+  # Resource Metrics API only; keep replica counts manual on this single node.
   metricsServer:
-    enabled: false
+    enabled: true

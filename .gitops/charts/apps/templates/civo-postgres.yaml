@@ -1,5 +1,8 @@
 {{- $pg := .Values.apps.civoPostgres -}}
 {{- if and $pg.enabled (eq .Values.cell.cloud "civo") }}
+{{- if and $pg.metrics.serviceMonitor.enabled (not $pg.metrics.enabled) -}}
+{{- fail "apps.civoPostgres.metrics.serviceMonitor.enabled requires apps.civoPostgres.metrics.enabled" -}}
+{{- end }}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -20,6 +23,26 @@ spec:
     helm:
       releaseName: witself-postgresql
       values: |
+        {{- if $pg.allowInsecureImages }}
+        global:
+          security:
+            allowInsecureImages: true
+        {{- end }}
+        {{- if or $pg.image.registry $pg.image.repository $pg.image.tag $pg.image.digest }}
+        image:
+          {{- with $pg.image.registry }}
+          registry: {{ . | quote }}
+          {{- end }}
+          {{- with $pg.image.repository }}
+          repository: {{ . | quote }}
+          {{- end }}
+          {{- with $pg.image.tag }}
+          tag: {{ . | quote }}
+          {{- end }}
+          {{- with $pg.image.digest }}
+          digest: {{ . | quote }}
+          {{- end }}
+        {{- end }}
         auth:
           username: witself
           database: witself
@@ -33,10 +56,106 @@ spec:
             enabled: true
             size: {{ $pg.storage | quote }}
           resourcesPreset: {{ default "nano" $pg.resourcesPreset }}
+          {{- if or (not $pg.networkPolicy.enabled) (not $pg.networkPolicy.allowExternal) }}
+          networkPolicy:
+            # The upstream restrictive policy retains generic client peers.
+            # Disable it; strict mode supplies the same resource via extraDeploy.
+            enabled: false
+            allowExternal: {{ $pg.networkPolicy.allowExternal }}
+          {{- end }}
         readReplicas:
           replicaCount: 0
         metrics:
-          enabled: false
+          enabled: {{ $pg.metrics.enabled }}
+          {{- if $pg.metrics.enabled }}
+          serviceMonitor:
+            enabled: {{ $pg.metrics.serviceMonitor.enabled }}
+            namespace: {{ $pg.namespace | quote }}
+            interval: {{ $pg.metrics.serviceMonitor.interval | quote }}
+            labels:
+              {{- toYaml $pg.metrics.serviceMonitor.labels | nindent 14 }}
+          {{- end }}
+        {{- if and $pg.networkPolicy.enabled (not $pg.networkPolicy.allowExternal) }}
+        # Reuse the upstream policy's identity so Argo updates it in place.
+        extraDeploy:
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: witself-postgresql
+              namespace: {{ $pg.namespace | quote }}
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: postgresql
+                  app.kubernetes.io/instance: witself-postgresql
+                  app.kubernetes.io/component: primary
+              policyTypes:
+                - Ingress
+                - Egress
+              egress:
+                - {}
+              ingress:
+                - ports:
+                    - protocol: TCP
+                      port: 5432
+                  from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: {{ .Values.apps.witselfServer.namespace | quote }}
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: witself-server
+                          app.kubernetes.io/instance: witself-server
+                          app.kubernetes.io/component: server
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: {{ .Values.apps.witselfServer.namespace | quote }}
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: witself-worker
+                          app.kubernetes.io/instance: witself-server
+                          app.kubernetes.io/component: worker
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: monitoring
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: prometheus
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: {{ .Values.apps.witselfServer.namespace | quote }}
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: witself-agent-email-operation
+                          app.kubernetes.io/component: one-shot
+                        matchExpressions:
+                          - key: witself.io/agent-email-operation
+                            operator: In
+                            values:
+                              - backfill
+                              - canary-manifest
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: {{ .Values.apps.witselfServer.namespace | quote }}
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: witself-agent-email-receipt-proof
+                          app.kubernetes.io/component: operator-proof
+                          app.kubernetes.io/managed-by: witself-operator
+                          witself.io/cell: {{ .Values.cell.name | quote }}
+                {{- if $pg.metrics.enabled }}
+                - ports:
+                    - protocol: TCP
+                      port: 9187
+                  from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: monitoring
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: prometheus
+                {{- end }}
+        {{- end }}
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}
     namespace: {{ $pg.namespace | quote }}
@@ -44,6 +163,13 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
     syncOptions:
       - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
 {{- end }}
