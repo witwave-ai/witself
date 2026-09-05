@@ -336,7 +336,7 @@ func (s *Store) PlanCuration(
 	if err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	expired, err := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 	if err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
@@ -439,7 +439,7 @@ func (s *Store) PlanCuration(
 	if err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationPlanned,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationPlanned,
 		run.RequestID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		run.State); err != nil {
 		return PlanMemoryCurationResult{}, err

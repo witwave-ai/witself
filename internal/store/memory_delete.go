@@ -205,7 +205,7 @@ func (s *Store) DeleteMemory(ctx context.Context, p Principal, in DeleteMemoryIn
 	out.ReceiptID = receiptID
 	out.DeletedAt = &deletedAt
 	out.Applied = true
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbMemoryDeleted,
 		Metadata: map[string]any{

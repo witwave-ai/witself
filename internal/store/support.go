@@ -316,7 +316,7 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	// Audit trail: the opener's row in account_events. Subject travels
 	// on the event so an owner's audit view has meaningful text
 	// without pulling the ticket body.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: openedByKind, ActorID: in.OperatorID,
 		Verb: VerbSupportTicketOpened,
@@ -547,7 +547,7 @@ func (s *Store) ReplyToTicket(ctx context.Context, accountID, operatorID, ticket
 		return TicketMessage{}, fmt.Errorf("advance ticket state: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID,
 		ActorKind: authorKind, ActorID: operatorID,
 		Verb: VerbSupportTicketReplied,
@@ -676,7 +676,7 @@ func (s *Store) ChangeTicketState(ctx context.Context, in ChangeTicketStateInput
 		meta["state_from"] = currentState
 		meta["state_to"] = in.NewState
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: actorKind, ActorID: in.OperatorID,
 		Verb: verb, Metadata: meta,
@@ -929,7 +929,7 @@ func (s *Store) ReplyAdminTicket(ctx context.Context, in ReplyAdminInput) (Ticke
 		return TicketMessage{}, fmt.Errorf("advance ticket state (admin reply): %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbSupportTicketReplied,
@@ -1037,7 +1037,7 @@ func (s *Store) ChangeAdminTicketState(ctx context.Context, in ChangeAdminStateI
 		meta["state_from"] = currentState
 		meta["state_to"] = in.NewState
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      verb,
@@ -1261,7 +1261,7 @@ func (s *Store) RetriageTicketAdmin(
 		// A no-op re-triage (same values) skips both write and event —
 		// idempotent, and re-triage never bumps last_activity_at either way
 		// (it is not customer-visible activity).
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: in.AccountID,
 			ActorKind: ActorControlPlane,
 			Verb:      VerbSupportTicketRetriaged,
@@ -1390,7 +1390,7 @@ func (s *Store) SetSupportPolicyAdmin(ctx context.Context, in SetSupportPolicyAd
 		return SetSupportPolicyAdminResult{}, fmt.Errorf("update support_policy: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbAccountSupportPolicyChanged,

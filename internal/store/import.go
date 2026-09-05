@@ -6971,7 +6971,7 @@ func (s *Store) importAccount(
 	// cell. The state transition, active-fence cancellation, and value-free
 	// system audit share this import transaction and are exactly-once because
 	// only state=open rows can transition.
-	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
+	if _, _, err := s.drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("reconcile imported message requests: %w", err)
 	}
 

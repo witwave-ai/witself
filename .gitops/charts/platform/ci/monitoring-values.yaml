@@ -17,6 +17,8 @@ platform:
     enabled: true
     alerting:
       enabled: true
+    collectorAlerts:
+      enabled: true
     receiver:
       secretName: witself-alert-receiver-v1
       secretKey: url

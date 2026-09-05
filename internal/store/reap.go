@@ -44,7 +44,7 @@ func (s *Store) ReapPendingAccount(ctx context.Context, accountID, reason string
 			 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 			return false, fmt.Errorf("revoke reaped account tokens: %w", err)
 		}
-		if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
+		if err := s.supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
 			return false, err
 		}
 		return false, tx.Commit(ctx)
@@ -66,7 +66,7 @@ func (s *Store) ReapPendingAccount(ctx context.Context, accountID, reason string
 		 WHERE account_id = $1 AND consumed_at IS NULL`, accountID); err != nil {
 		return false, fmt.Errorf("revoke reaped account tokens: %w", err)
 	}
-	if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
+	if err := s.supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_reaped"); err != nil {
 		return false, err
 	}
 	// Only fired on a genuine pending→closed transition — the
@@ -75,7 +75,7 @@ func (s *Store) ReapPendingAccount(ctx context.Context, accountID, reason string
 	if reason != "" {
 		eventMeta["reason"] = reason
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountReaped, Metadata: eventMeta,
 	}); err != nil {

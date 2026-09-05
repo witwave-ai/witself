@@ -984,7 +984,7 @@ func (s *Store) LogEvent(ctx context.Context, in EventInput) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := logEventTx(ctx, tx, in); err != nil {
+	if err := s.logEventTx(ctx, tx, in); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -994,7 +994,7 @@ func (s *Store) LogEvent(ctx context.Context, in EventInput) error {
 // by every mutation that wants an audit entry alongside its state change
 // so an event never lands without its cause. Callers wrap their own
 // transaction; if the mutation aborts, the event aborts with it.
-func logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
+func (s *Store) logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
 	if err := checkEventShape(in); err != nil {
 		return err
 	}
@@ -1060,6 +1060,7 @@ func logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
 		`INSERT INTO account_events (id, account_id, actor_kind, actor_id, verb, metadata)
 		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
 		eventID, in.AccountID, in.ActorKind, actorID, in.Verb, metaJSON); err != nil {
+		s.auditAppendFailures.Add(1)
 		// FK violation on account_id means the account doesn't exist.
 		// Distinguish from a generic DB error so the server layer can
 		// return 404 instead of 500 — critical for out-of-tx callers

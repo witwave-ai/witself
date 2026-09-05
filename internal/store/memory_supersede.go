@@ -103,7 +103,7 @@ func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMe
 	if replay, ok, err := memorySupersessionReplay(ctx, tx, p, in.IdempotencyKey, requestHash); err != nil || ok {
 		return replay, err
 	}
-	if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+	if err := s.markMemoryCurationDueTx(ctx, tx, p, &lane,
 		"memory_changed", MemoryCurationSourceMemory, in.IdempotencyKey); err != nil {
 		return SupersedeMemoryResult{}, err
 	}
@@ -264,11 +264,11 @@ func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMe
 	if err != nil {
 		return SupersedeMemoryResult{}, err
 	}
-	if err := logMemoryVersionEventTx(ctx, tx, p, out.Source); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, out.Source); err != nil {
 		return SupersedeMemoryResult{}, err
 	}
 	for i := range out.Replacements {
-		if err := logMemoryVersionEventTx(ctx, tx, p, out.Replacements[i]); err != nil {
+		if err := s.logMemoryVersionEventTx(ctx, tx, p, out.Replacements[i]); err != nil {
 			return SupersedeMemoryResult{}, err
 		}
 	}

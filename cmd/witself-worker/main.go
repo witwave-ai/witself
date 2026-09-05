@@ -167,6 +167,7 @@ func serve() int {
 
 	registry := worker.NewRegistry()
 	metrics := registry.Metrics()
+	metrics.SetAuditAppendFailuresReader(st.AuditAppendFailures)
 	if jobs.avatarEnabled {
 		cfg := jobs.avatar
 		if err := registry.Register(worker.Job{

@@ -93,7 +93,7 @@ func (s *Store) ResolveStaleSupportTickets(ctx context.Context, now time.Time, c
 			WHERE account_id = $1 AND id = $2`, t.accountID, t.ticketID, now); err != nil {
 			return 0, fmt.Errorf("resolve stale support ticket: %w", err)
 		}
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: t.accountID, ActorKind: MessageAuthorSystem,
 			Verb: VerbSupportTicketStateChanged,
 			Metadata: map[string]any{

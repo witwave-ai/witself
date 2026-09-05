@@ -214,7 +214,7 @@ func (s *Store) BeginAccountEvacuation(
 		if reason != "" {
 			eventMeta["reason"] = reason
 		}
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorControlPlane,
 			Verb: VerbAccountSuspendedBySystem, Metadata: eventMeta,
 		}); err != nil {
@@ -347,7 +347,7 @@ func (s *Store) CompleteAccountEvacuation(
 		return AccountEvacuation{}, fmt.Errorf("complete account evacuation: %w", err)
 	}
 	if resumed {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorControlPlane,
 			Verb:     VerbAccountResumedBySystem,
 			Metadata: map[string]any{"category": "evacuation"},
@@ -361,7 +361,7 @@ func (s *Store) CompleteAccountEvacuation(
 	// retain only its single value-free account.purged erasure record; the
 	// last_evacuation_* receipt above remains its value-free move evidence.
 	if !purged {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorSystem,
 			Verb: VerbAccountRestored, Metadata: map[string]any{},
 		}); err != nil {
@@ -477,7 +477,7 @@ func (s *Store) AbortAccountEvacuation(
 		return AccountEvacuation{}, fmt.Errorf("abort account evacuation: %w", err)
 	}
 	if resumed {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorControlPlane,
 			Verb:     VerbAccountResumedBySystem,
 			Metadata: map[string]any{"category": "evacuation"},

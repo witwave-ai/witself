@@ -96,7 +96,7 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 	// Closed accounts are intentionally excluded from rollout discovery. Make
 	// every durable open job terminal in this same account-locked transaction
 	// so shutdown does not strand work or permanently block a safe schema down.
-	if err := supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_closed"); err != nil {
+	if err := s.supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_closed"); err != nil {
 		return err
 	}
 	// Only record the audit event if this call was the one that actually
@@ -107,7 +107,7 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 		if reason != "" {
 			eventMeta["reason"] = reason
 		}
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorOwner, ActorID: operatorID,
 			Verb: VerbAccountClosed, Metadata: eventMeta,
 		}); err != nil {

@@ -265,6 +265,15 @@ Initial metric families should include:
 | `witself_cell_placements_total` | Tenant placement decisions by `placement_reason` (`residency`, `capacity`, `wave`, `manual`) and result. Mirrors the `tenant.placed` audit event; it never carries a realm/account id or a cell id (see [deployment-cells.md](deployment-cells.md)). |
 | `witself_cell_migrations_total` | Tenant migrations between cells by `migration_phase` (`started`, `completed`, `failed`) and `plane` (`open`, `sealed`). Mirrors the `tenant.migration_started` / `tenant.migration_completed` / `tenant.migration_failed` audit events; it never carries a realm/account id or a source/destination cell id. |
 | `witself_cell_migration_duration_seconds` | Tenant migration latency histogram by `plane` (`open`, `sealed`). |
+| `witself_identity_capacity_accounts_measured` | Value-free per-cell count of live accounts with a finite limit, by the closed `dimension` set `realms`, `agents_per_realm`, `operator_seats`. |
+| `witself_identity_capacity_accounts_near_limit` | Value-free per-cell count of finite-limit live accounts with usage at least 80% of the limit, by the same closed `dimension` set. |
+| `witself_identity_capacity_accounts_at_limit` | Value-free per-cell count of finite-limit live accounts with usage at or above the limit, by the same closed `dimension` set. |
+| `witself_identity_capacity_accounts_unlimited` | Value-free per-cell count of live accounts with an unlimited or absent limit, by the same closed `dimension` set; these accounts are excluded from finite-limit counts and ratios. |
+| `witself_identity_capacity_min_headroom_ratio` | Value-free per-cell minimum `(limit - used) / limit`, clamped to `[0,1]`, by the same closed `dimension` set; 1 when no finite-limit account exists. For `agents_per_realm`, each account contributes its worst live realm. |
+| `witself_identity_capacity_metrics_up` | Unlabeled value-free collector health: 1 after a successful read-only capacity snapshot, 0 on failure with all capacity values omitted. |
+| `witself_audit_append_total` | Value-free standalone audit append calls, with only `result` (`success`, `error`) and `reason` (`none`, `not_found`, `bad_input`, `error`). Counter is per-process and resets on restart. |
+| `witself_audit_append_tx_failures_total` | Unlabeled value-free count of audit database-insert failures inside transactions, exported separately by the server and worker from each process's Store; caller-input validation failures do not increment it. Counter is per-process and resets on restart. |
+| `witself_audit_append_metrics_up` | Unlabeled value-free collector health: 1 after a successful transaction-failure counter read. The server emits 0 on reader failure with the counter omitted; the worker omits both series when its in-memory reader is not configured. |
 | `witself_audit_events_total` | Audit events emitted by type, result, and backend. |
 | `witself_audit_write_failures_total` | Audit sink write failures. |
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
@@ -276,6 +285,25 @@ Initial metric families should include:
 | `witself_object_store_operations_total` | Object/blob storage operations when configured. |
 | `witself_migration_version` | Applied migration version. |
 | `witself_migration_pending` | Pending migration count when known. |
+
+The identity-capacity and audit-append collectors export no
+account, realm, agent, operator, or plan identifiers in labels or values and
+never export database error text. Each server reader has a two-second timeout; the
+two run sequentially in the server scrape flow, adding at most four seconds
+of reader deadlines. The worker reads its own in-memory audit failure counter
+on each scrape, including failures followed by a successful job in the same
+batch. Identity capacity uses one read-only transaction with a
+statement timeout and the same live-identity predicates as plan enforcement.
+Audit counters measure append attempts: a standalone database failure can
+contribute to both audit counters, so their sum is not a unique failure count.
+Use counter increases to detect failures across process restarts. Known limitation: a container that restarts inside the same pod and fails an audit insert before its first scrape presents the same labels and an equal counter value as the previous process, so that single failure is not distinguishable from the old series and is not alerted; a process-start signal is the tracked follow-up.
+
+The four identity-capacity and audit-append alerts are gated by
+`platform.monitoring.collectorAlerts.enabled`, which defaults to false. Keep
+the gate off until compatible server and worker binaries are deployed and
+their scrape metrics verified. Audit collector availability requires both the
+server and worker collectors to be present and healthy; identity capacity is
+collected only by the server.
 
 The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to

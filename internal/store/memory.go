@@ -383,7 +383,7 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 	if replay, ok, err := memoryMutationReplay(ctx, tx, p, in.IdempotencyKey, requestHash, "added"); err != nil || ok {
 		return replay, err
 	}
-	if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+	if err := s.markMemoryCurationDueTx(ctx, tx, p, &lane,
 		"memory_changed", MemoryCurationSourceMemory, in.IdempotencyKey); err != nil {
 		return MemoryMutationResult{}, err
 	}
@@ -447,7 +447,7 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 	if err != nil {
 		return MemoryMutationResult{}, err
 	}
-	if err := logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
 		return MemoryMutationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -818,7 +818,7 @@ func (s *Store) mutateMemory(
 	if replay, ok, err := memoryMutationReplay(ctx, tx, p, idempotencyKey, requestHash, operation); err != nil || ok {
 		return replay, err
 	}
-	if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+	if err := s.markMemoryCurationDueTx(ctx, tx, p, &lane,
 		"memory_changed", MemoryCurationSourceMemory, idempotencyKey); err != nil {
 		return MemoryMutationResult{}, err
 	}
@@ -975,7 +975,7 @@ func (s *Store) mutateMemory(
 	if err != nil {
 		return MemoryMutationResult{}, err
 	}
-	if err := logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
+	if err := s.logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
 		return MemoryMutationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1036,7 +1036,7 @@ func (s *Store) ResolveMemoryEvidence(ctx context.Context, p Principal, pendingI
 	if replay, ok, err := memoryEvidenceReplay(ctx, tx, p, in.IdempotencyKey, hash); err != nil || ok {
 		return replay, err
 	}
-	if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+	if err := s.markMemoryCurationDueTx(ctx, tx, p, &lane,
 		"evidence_resolved", MemoryCurationSourceEvidence, in.IdempotencyKey); err != nil {
 		return MemoryEvidence{}, err
 	}
@@ -1109,7 +1109,7 @@ func (s *Store) ResolveMemoryEvidence(ctx context.Context, p Principal, pendingI
 	if _, err := tx.Exec(ctx, `UPDATE memories SET updated_at=$2 WHERE id=$1`, memoryID, out.CreatedAt); err != nil {
 		return MemoryEvidence{}, fmt.Errorf("touch memory after evidence resolution: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbMemoryEvidenceResolved,
 		Metadata: map[string]any{
@@ -1656,7 +1656,7 @@ func memoryMutationResult(memory Memory) MemoryMutationResult {
 	}
 }
 
-func logMemoryVersionEventTx(ctx context.Context, tx pgx.Tx, p Principal, memory Memory) error {
+func (s *Store) logMemoryVersionEventTx(ctx context.Context, tx pgx.Tx, p Principal, memory Memory) error {
 	verb := map[string]string{
 		"added":       VerbMemoryAdded,
 		"adjusted":    VerbMemoryAdjusted,
@@ -1668,7 +1668,7 @@ func logMemoryVersionEventTx(ctx context.Context, tx pgx.Tx, p Principal, memory
 	if verb == "" {
 		return fmt.Errorf("unregistered memory audit operation %q", memory.Operation)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID, Verb: verb,
 		Metadata: map[string]any{
 			"memory_id": memory.ID, "version": strconv.FormatInt(memory.Version, 10),

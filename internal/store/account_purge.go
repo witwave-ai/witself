@@ -647,7 +647,7 @@ func (s *Store) processAccountPurgeCandidateOnce(
 		return result,
 			errors.New("anonymize purged account lost its eligibility fence")
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID:              accountID,
 		ActorKind:              ActorSystem,
 		Verb:                   VerbAccountPurged,

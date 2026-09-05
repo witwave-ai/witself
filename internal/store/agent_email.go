@@ -563,7 +563,7 @@ func (s *Store) EnsureAgentEmailMailbox(
 	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
 		return AgentEmailAddress{}, err
 	}
-	address, err := ensureAgentEmailMailboxTx(
+	address, err := s.ensureAgentEmailMailboxTx(
 		ctx, tx, scope, accountID, realmID, agentID, explicitSegment,
 	)
 	if err != nil {
@@ -578,7 +578,7 @@ func (s *Store) EnsureAgentEmailMailbox(
 // ensureAgentEmailMailboxTx assumes the caller already holds the account
 // lifecycle/plan lock. It never commits, allowing agent creation and mailbox
 // provisioning to share one atomic transaction.
-func ensureAgentEmailMailboxTx(
+func (s *Store) ensureAgentEmailMailboxTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	scope AgentEmailPilotScope,
@@ -680,7 +680,7 @@ func ensureAgentEmailMailboxTx(
 		}
 		return AgentEmailAddress{}, fmt.Errorf("provision agent-email mailbox: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorSystem,
 		Verb: VerbAgentEmailAddressProvisioned,
 		Metadata: map[string]any{
@@ -830,7 +830,7 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 		if err != nil {
 			return AgentEmailRealmAlias{}, err
 		}
-		if err := logAgentEmailRealmAliasProjectionTx(ctx, tx, existing); err != nil {
+		if err := s.logAgentEmailRealmAliasProjectionTx(ctx, tx, existing); err != nil {
 			return AgentEmailRealmAlias{}, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -854,7 +854,7 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 		}
 		return AgentEmailRealmAlias{}, err
 	}
-	if err := logAgentEmailRealmAliasProjectionTx(ctx, tx, created); err != nil {
+	if err := s.logAgentEmailRealmAliasProjectionTx(ctx, tx, created); err != nil {
 		return AgentEmailRealmAlias{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1225,7 +1225,7 @@ func (s *Store) SetAgentEmailReceiveControl(
 	}
 	address.AgentReceiveState = desiredState
 	address.ReceiveState = agentEmailEffectiveReceiveState(desiredState, address.RealmReceiveState)
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
 		Verb: VerbAgentEmailAgentReceiveChanged,
 		Metadata: map[string]any{
@@ -1325,7 +1325,7 @@ func (s *Store) SetRealmAgentEmailReceiveControl(
 		accountID, realmID).Scan(&updated.MailboxCount); err != nil {
 		return AgentEmailRealmReceiveControl{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
 		Verb: VerbAgentEmailRealmReceiveChanged,
 		Metadata: map[string]any{
@@ -1720,7 +1720,7 @@ func (s *Store) IngestAgentEmailPilot(
 		Processing:           AgentEmailProcessing{State: AgentEmailProcessingAvailable},
 		duplicateGroupSHA256: duplicateGroup,
 	}
-	if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailReceived, ActorSystem, "", msg, false); err != nil {
+	if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailReceived, ActorSystem, "", msg, false); err != nil {
 		return AgentEmailMessage{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2020,7 +2020,7 @@ func (s *Store) ClaimAgentEmail(
 		LeaseExpiresAt: &leaseExpiresAt,
 	}
 	msg.Processing = processing
-	if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingClaimed, ActorAgent, p.ID, msg, true); err != nil {
+	if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingClaimed, ActorAgent, p.ID, msg, true); err != nil {
 		return AgentEmailProcessing{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2073,7 +2073,7 @@ func (s *Store) RenewAgentEmailClaim(
 			return AgentEmailProcessing{}, fmt.Errorf("renew agent-email claim: %w", err)
 		}
 		locked.Processing.LeaseExpiresAt = &expires
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingRenewed, ActorAgent, p.ID, locked, true); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingRenewed, ActorAgent, p.ID, locked, true); err != nil {
 			return AgentEmailProcessing{}, err
 		}
 		return locked.Processing, nil
@@ -2129,7 +2129,7 @@ func (s *Store) ReleaseAgentEmailClaim(
 			FailureCount: failureCount,
 		}
 		locked.Processing = processing
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingReleased, ActorAgent, p.ID, locked, true); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingReleased, ActorAgent, p.ID, locked, true); err != nil {
 			return AgentEmailProcessing{}, err
 		}
 		return processing, nil
@@ -2196,7 +2196,7 @@ func (s *Store) CompleteAgentEmail(
 			CompletedAt: &completedAt,
 		}
 		locked.Processing = processing
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingCompleted, ActorAgent, p.ID, locked, true); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailProcessingCompleted, ActorAgent, p.ID, locked, true); err != nil {
 			return AgentEmailProcessing{}, err
 		}
 		return processing, nil
@@ -2342,17 +2342,17 @@ func (s *Store) transitionAgentEmail(
 	}
 	msg.ReadState.State = agentEmailReadState(msg.ReadState.ReadAt, msg.ReadState.AckedAt)
 	if wasUnread {
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailRead, ActorAgent, p.ID, msg, false); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailRead, ActorAgent, p.ID, msg, false); err != nil {
 			return AgentEmailMessage{}, err
 		}
 	}
 	if ack && wasUnacked {
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailAcked, ActorAgent, p.ID, msg, false); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailAcked, ActorAgent, p.ID, msg, false); err != nil {
 			return AgentEmailMessage{}, err
 		}
 	}
 	if consumeCode {
-		if err := logAgentEmailEvent(ctx, tx, VerbAgentEmailCodeConsumed, ActorAgent, p.ID, msg, false); err != nil {
+		if err := s.logAgentEmailEvent(ctx, tx, VerbAgentEmailCodeConsumed, ActorAgent, p.ID, msg, false); err != nil {
 			return AgentEmailMessage{}, err
 		}
 	}
@@ -2692,12 +2692,12 @@ func updateAgentEmailRealmAliasTx(
 	return alias, nil
 }
 
-func logAgentEmailRealmAliasProjectionTx(
+func (s *Store) logAgentEmailRealmAliasProjectionTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	alias AgentEmailRealmAlias,
 ) error {
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: alias.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbAgentEmailRealmAliasProjected,
@@ -3724,7 +3724,7 @@ func mapAgentEmailPrincipalError(err error) error {
 	return err
 }
 
-func logAgentEmailEvent(
+func (s *Store) logAgentEmailEvent(
 	ctx context.Context,
 	tx pgx.Tx,
 	verb, actorKind, actorID string,
@@ -3746,7 +3746,7 @@ func logAgentEmailEvent(
 		metadata["processing_generation"] = strconv.FormatInt(msg.Processing.Generation, 10)
 		metadata["failure_count"] = strconv.FormatInt(msg.Processing.FailureCount, 10)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: msg.AccountID, ActorKind: actorKind, ActorID: actorID,
 		Verb: verb, Metadata: metadata,
 	})

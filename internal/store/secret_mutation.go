@@ -107,7 +107,7 @@ func (s *Store) RegisterVaultKey(ctx context.Context, p Principal, in RegisterVa
 		return VaultKeyBinding{}, SecretMutationReceipt{}, err
 	}
 	if inserted {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 			Verb: VerbVaultKeyRegistered,
 			Metadata: map[string]any{
@@ -231,7 +231,7 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 	if err != nil {
 		return SecretMutationResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbSecretCreated,
 		Metadata: map[string]any{
@@ -485,7 +485,7 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 	case "secret_delete":
 		verb = VerbSecretDeleted
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: verb,
 		Metadata: map[string]any{

@@ -84,7 +84,7 @@ func (s *Store) ProvisionAccount(
 	// schema-72 receipt table. Migration and downgrade rehearsals deliberately
 	// exercise older schemas, while every production request that can cross an
 	// ambiguous HTTP boundary uses ProvisionAccountExact below.
-	return createProvisionedAccountTx(
+	return s.createProvisionedAccountTx(
 		ctx, tx, "", "", email, displayName, "", "", bootstrapTTL, false,
 	)
 }
@@ -160,7 +160,7 @@ func (s *Store) ProvisionAccountExact(
 	)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return createProvisionedAccountTx(
+		return s.createProvisionedAccountTx(
 			ctx, tx, provisionID, requestFingerprint,
 			email, displayName,
 			consentTermsVersion, consentPrivacyVersion,
@@ -261,7 +261,7 @@ func normalizeProvisionRequest(
 	return email, displayName, nil
 }
 
-func createProvisionedAccountTx(
+func (s *Store) createProvisionedAccountTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	provisionID, requestFingerprint, email, displayName string,
@@ -343,7 +343,7 @@ func createProvisionedAccountTx(
 
 	// The signup that just created this account is the first entry in its
 	// audit trail. Email is masked; plaintext never lands in the ledger.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: acctID, ActorKind: ActorControlPlane,
 		Verb: VerbAccountProvisioned,
 		Metadata: map[string]any{
@@ -356,7 +356,7 @@ func createProvisionedAccountTx(
 	// Consent, when present, gets its own value-free audit entry beside the
 	// provisioning event: version labels only, never PII.
 	if consentTermsVersion != "" {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: acctID, ActorKind: ActorControlPlane,
 			Verb: VerbAccountConsentRecorded,
 			Metadata: map[string]any{

@@ -379,7 +379,7 @@ func (s *Store) AccessSecretField(ctx context.Context, p Principal, secretID, fi
 		return SecretMaterial{}, err
 	}
 	if !replayed {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 			Verb: VerbSecretMaterialDelivered,
 			Metadata: map[string]any{

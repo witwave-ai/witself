@@ -600,7 +600,7 @@ func (s *Store) OpenMessageRequest(ctx context.Context, p Principal, in OpenMess
 			return OpenMessageRequestResult{}, fmt.Errorf("insert message request candidate: %w", err)
 		}
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestOpened, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestOpened, map[string]any{
 		"request_id": requestID, "opening_message_id": opening.ID,
 		"coordinator_agent_id": p.ID, "max_assignees": strconv.Itoa(normalized.MaxAssignees),
 	}); err != nil {
@@ -666,7 +666,7 @@ func (s *Store) ListMessageRequests(ctx context.Context, p Principal, filter Mes
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
 		return MessageRequestPage{}, err
 	}
-	if _, _, _, err := reconcileMessageRequestBatchTx(
+	if _, _, _, err := s.reconcileMessageRequestBatchTx(
 		ctx, tx, p.AccountID, p.RealmID, maxMessageRequestReconcileBatch,
 	); err != nil {
 		return MessageRequestPage{}, err
@@ -764,7 +764,7 @@ func (s *Store) GetMessageRequest(ctx context.Context, p Principal, requestID st
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
 		return MessageRequestDetail{}, err
 	}
-	if _, _, err := reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID); err != nil {
+	if _, _, err := s.reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID); err != nil {
 		return MessageRequestDetail{}, err
 	}
 	detail, err := loadMessageRequestDetailTx(ctx, tx, p, requestID)
@@ -1024,7 +1024,7 @@ func lockMessageRequestCandidateTx(ctx context.Context, tx pgx.Tx, p Principal, 
 // target one request or every due request in a realm. Expiry and active-fence
 // cancellation are committed by the caller in the same transaction, making
 // the terminal state durable without any backend worker.
-func expireDueMessageRequestsTx(
+func (s *Store) expireDueMessageRequestsTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID string,
@@ -1077,7 +1077,7 @@ func expireDueMessageRequestsTx(
 		return 0, fmt.Errorf("cancel expired message request claims: %w", err)
 	}
 	for _, record := range expired {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorSystem, Verb: VerbMessageRequestExpired,
 			Metadata: map[string]any{
 				"request_id": record.requestID, "opening_message_id": record.openingMessageID,
@@ -1178,14 +1178,14 @@ func settleMessageRequestClaimsTx(
 	return completedCount, nil
 }
 
-func reconcileMessageRequestsTx(
+func (s *Store) reconcileMessageRequestsTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID string,
 	realmID string,
 	requestID string,
 ) (int64, int64, error) {
-	expired, err := expireDueMessageRequestsTx(ctx, tx, accountID, realmID, requestID)
+	expired, err := s.expireDueMessageRequestsTx(ctx, tx, accountID, realmID, requestID)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1200,7 +1200,7 @@ func reconcileMessageRequestsTx(
 // one stable request-id batch and skips rows another transaction is already
 // reconciling; every selected request is then passed through the exact
 // per-request expiry/settlement path, preserving audit and fence semantics.
-func reconcileMessageRequestBatchTx(
+func (s *Store) reconcileMessageRequestBatchTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID string,
@@ -1256,7 +1256,7 @@ func reconcileMessageRequestBatchTx(
 
 	var expired, completed int64
 	for _, requestID := range requestIDs {
-		requestExpired, requestCompleted, err := reconcileMessageRequestsTx(
+		requestExpired, requestCompleted, err := s.reconcileMessageRequestsTx(
 			ctx, tx, accountID, realmID, requestID,
 		)
 		if err != nil {
@@ -1268,14 +1268,14 @@ func reconcileMessageRequestBatchTx(
 	return len(requestIDs), expired, completed, nil
 }
 
-func drainMessageRequestReconciliationTx(
+func (s *Store) drainMessageRequestReconciliationTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID string,
 ) (int64, int64, error) {
 	var expired, completed int64
 	for {
-		processed, batchExpired, batchCompleted, err := reconcileMessageRequestBatchTx(
+		processed, batchExpired, batchCompleted, err := s.reconcileMessageRequestBatchTx(
 			ctx, tx, accountID, "", maxMessageRequestReconcileBatch,
 		)
 		if err != nil {
@@ -1293,7 +1293,7 @@ func drainMessageRequestReconciliationTx(
 // the authorized request row and also settles a successful batch whose final
 // sibling lease disappeared. Callers return their operation-specific conflict
 // only after this transaction has committed the terminal state.
-func commitDueMessageRequestExpiryTx(
+func (s *Store) commitDueMessageRequestExpiryTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -1305,7 +1305,7 @@ func commitDueMessageRequestExpiryTx(
 	if state != MessageRequestStateOpen {
 		return false, nil
 	}
-	expired, completed, err := reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID)
+	expired, completed, err := s.reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID)
 	if err != nil {
 		return false, err
 	}
@@ -1318,13 +1318,13 @@ func commitDueMessageRequestExpiryTx(
 	return true, nil
 }
 
-func commitLostMessageRequestFenceTx(
+func (s *Store) commitLostMessageRequestFenceTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
 	requestID string,
 ) error {
-	if _, _, err := reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID); err != nil {
+	if _, _, err := s.reconcileMessageRequestsTx(ctx, tx, p.AccountID, p.RealmID, requestID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1333,7 +1333,7 @@ func commitLostMessageRequestFenceTx(
 // cancelMessageRequestsForDeletedAgentTx removes every open-request authority
 // that depends on an agent being live. The caller must hold that agent row in
 // the account -> agent -> request lock order used by DeleteAgent.
-func cancelMessageRequestsForDeletedAgentTx(
+func (s *Store) cancelMessageRequestsForDeletedAgentTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID string,
@@ -1375,7 +1375,7 @@ func cancelMessageRequestsForDeletedAgentTx(
 	rows.Close()
 
 	for _, requestID := range affectedRequestIDs {
-		if _, err := expireDueMessageRequestsTx(ctx, tx, accountID, realmID, requestID); err != nil {
+		if _, err := s.expireDueMessageRequestsTx(ctx, tx, accountID, realmID, requestID); err != nil {
 			return err
 		}
 	}
@@ -1447,7 +1447,7 @@ func cancelMessageRequestsForDeletedAgentTx(
 	}
 	rows.Close()
 	for _, record := range cancelled {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: accountID, ActorKind: ActorSystem, Verb: VerbMessageRequestCancelledSystem,
 			Metadata: map[string]any{
 				"request_id": record.requestID, "opening_message_id": record.openingMessageID,
@@ -1547,7 +1547,7 @@ func (s *Store) OfferMessageRequest(ctx context.Context, p Principal, requestID 
 	if locked.state != MessageRequestStateOpen {
 		return OfferMessageRequestResult{}, ErrMessageRequestConflict
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.state, locked.expiresAt, locked.now,
 	); err != nil {
 		return OfferMessageRequestResult{}, err
@@ -1588,7 +1588,7 @@ func (s *Store) OfferMessageRequest(ctx context.Context, p Principal, requestID 
 		if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT message_request_offer`); rollbackErr != nil {
 			return OfferMessageRequestResult{}, fmt.Errorf("rollback stale message request offer: %w", rollbackErr)
 		}
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return OfferMessageRequestResult{}, err
 		}
 		return OfferMessageRequestResult{}, ErrMessageRequestConflict
@@ -1596,7 +1596,7 @@ func (s *Store) OfferMessageRequest(ctx context.Context, p Principal, requestID 
 	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT message_request_offer`); err != nil {
 		return OfferMessageRequestResult{}, fmt.Errorf("release message request offer point: %w", err)
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestOffered, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestOffered, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 	}); err != nil {
@@ -1644,7 +1644,7 @@ func (s *Store) DeclineMessageRequest(ctx context.Context, p Principal, requestI
 		return MessageRequest{}, ErrMessageRequestConflict
 	}
 	if locked.responseState == MessageRequestCandidatePending {
-		if expired, err := commitDueMessageRequestExpiryTx(
+		if expired, err := s.commitDueMessageRequestExpiryTx(
 			ctx, tx, p, requestID, locked.state, locked.expiresAt, locked.now,
 		); err != nil {
 			return MessageRequest{}, err
@@ -1667,12 +1667,12 @@ func (s *Store) DeclineMessageRequest(ctx context.Context, p Principal, requestI
 			return MessageRequest{}, fmt.Errorf("decline message request: %w", err)
 		}
 		if declined.RowsAffected() != 1 {
-			if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+			if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 				return MessageRequest{}, err
 			}
 			return MessageRequest{}, ErrMessageRequestConflict
 		}
-		if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestDeclined, map[string]any{
+		if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestDeclined, map[string]any{
 			"request_id": requestID, "opening_message_id": locked.openingMessageID,
 			"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 		}); err != nil {
@@ -1854,7 +1854,7 @@ func (s *Store) SelectMessageRequest(ctx context.Context, p Principal, requestID
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return SelectMessageRequestResult{}, fmt.Errorf("find message request selection replay: %w", err)
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.state, locked.expiresAt, locked.now,
 	); err != nil {
 		return SelectMessageRequestResult{}, err
@@ -1941,7 +1941,7 @@ func (s *Store) SelectMessageRequest(ctx context.Context, p Principal, requestID
 			p.AccountID, p.RealmID, agentID, int64(reservation/time.Second)); err != nil {
 			return SelectMessageRequestResult{}, fmt.Errorf("reserve message request claim: %w", err)
 		}
-		if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestSelected, map[string]any{
+		if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestSelected, map[string]any{
 			"request_id": requestID, "opening_message_id": locked.openingMessageID,
 			"coordinator_agent_id": locked.coordinator.ID, "agent_id": agentID,
 			"selection_id": selectionID, "generation": strconv.FormatInt(generation, 10),
@@ -1969,7 +1969,7 @@ func (s *Store) SelectMessageRequest(ctx context.Context, p Principal, requestID
 		if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT message_request_selection`); rollbackErr != nil {
 			return SelectMessageRequestResult{}, fmt.Errorf("rollback stale message request selection: %w", rollbackErr)
 		}
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return SelectMessageRequestResult{}, err
 		}
 		return SelectMessageRequestResult{}, ErrMessageRequestConflict
@@ -2031,7 +2031,7 @@ func (s *Store) CancelMessageRequest(ctx context.Context, p Principal, requestID
 		}
 		return request, nil
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.state, locked.expiresAt, locked.now,
 	); err != nil {
 		return MessageRequest{}, err
@@ -2064,7 +2064,7 @@ func (s *Store) CancelMessageRequest(ctx context.Context, p Principal, requestID
 		if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT message_request_cancellation`); rollbackErr != nil {
 			return MessageRequest{}, fmt.Errorf("rollback stale message request cancellation: %w", rollbackErr)
 		}
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return MessageRequest{}, err
 		}
 		return MessageRequest{}, ErrMessageRequestConflict
@@ -2072,7 +2072,7 @@ func (s *Store) CancelMessageRequest(ctx context.Context, p Principal, requestID
 	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT message_request_cancellation`); err != nil {
 		return MessageRequest{}, fmt.Errorf("release message request cancellation point: %w", err)
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestCancelled, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestCancelled, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "max_assignees": strconv.Itoa(locked.maxAssignees),
 	}); err != nil {
@@ -2221,7 +2221,7 @@ func (s *Store) ClaimMessageRequest(ctx context.Context, p Principal, requestID 
 	if err != nil {
 		return MessageRequestClaim{}, err
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.requestState, locked.expiresAt, locked.now,
 	); err != nil {
 		return MessageRequestClaim{}, err
@@ -2264,12 +2264,12 @@ func (s *Store) ClaimMessageRequest(ctx context.Context, p Principal, requestID 
 		return MessageRequestClaim{}, fmt.Errorf("claim message request: %w", err)
 	}
 	if claimed.RowsAffected() != 1 {
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return MessageRequestClaim{}, err
 		}
 		return MessageRequestClaim{}, ErrMessageRequestClaimLost
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestClaimed, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestClaimed, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 		"selection_id": locked.claim.SelectionID, "generation": "1",
@@ -2320,7 +2320,7 @@ func (s *Store) RenewMessageRequest(ctx context.Context, p Principal, requestID 
 	if err != nil {
 		return MessageRequestClaim{}, err
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.requestState, locked.expiresAt, locked.now,
 	); err != nil {
 		return MessageRequestClaim{}, err
@@ -2350,12 +2350,12 @@ func (s *Store) RenewMessageRequest(ctx context.Context, p Principal, requestID 
 		return MessageRequestClaim{}, fmt.Errorf("renew message request claim: %w", err)
 	}
 	if renewed.RowsAffected() != 1 {
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return MessageRequestClaim{}, err
 		}
 		return MessageRequestClaim{}, ErrMessageRequestClaimLost
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestRenewed, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestRenewed, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 		"selection_id": locked.claim.SelectionID, "generation": strconv.FormatInt(generation, 10),
@@ -2403,7 +2403,7 @@ func (s *Store) ReleaseMessageRequest(ctx context.Context, p Principal, requestI
 	if err != nil {
 		return MessageRequestClaim{}, err
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.requestState, locked.expiresAt, locked.now,
 	); err != nil {
 		return MessageRequestClaim{}, err
@@ -2437,12 +2437,12 @@ func (s *Store) ReleaseMessageRequest(ctx context.Context, p Principal, requestI
 		return MessageRequestClaim{}, fmt.Errorf("release message request claim: %w", err)
 	}
 	if released.RowsAffected() != 1 {
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return MessageRequestClaim{}, err
 		}
 		return MessageRequestClaim{}, ErrMessageRequestClaimLost
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestReleased, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestReleased, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 		"selection_id": locked.claim.SelectionID, "generation": strconv.FormatInt(generation, 10),
@@ -2536,7 +2536,7 @@ func (s *Store) CompleteMessageRequest(ctx context.Context, p Principal, request
 		}
 		return CompleteMessageRequestResult{Request: request, Claim: locked.claim, Message: redactMessageProcessingFence(message)}, nil
 	}
-	if expired, err := commitDueMessageRequestExpiryTx(
+	if expired, err := s.commitDueMessageRequestExpiryTx(
 		ctx, tx, p, requestID, locked.requestState, locked.expiresAt, locked.now,
 	); err != nil {
 		return CompleteMessageRequestResult{}, err
@@ -2578,7 +2578,7 @@ func (s *Store) CompleteMessageRequest(ctx context.Context, p Principal, request
 		if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT message_request_completion`); rollbackErr != nil {
 			return CompleteMessageRequestResult{}, fmt.Errorf("rollback stale message request completion: %w", rollbackErr)
 		}
-		if err := commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
+		if err := s.commitLostMessageRequestFenceTx(ctx, tx, p, requestID); err != nil {
 			return CompleteMessageRequestResult{}, err
 		}
 		return CompleteMessageRequestResult{}, ErrMessageRequestClaimLost
@@ -2589,7 +2589,7 @@ func (s *Store) CompleteMessageRequest(ctx context.Context, p Principal, request
 	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT message_request_completion`); err != nil {
 		return CompleteMessageRequestResult{}, fmt.Errorf("release message request completion point: %w", err)
 	}
-	if err := logMessageRequestAudit(ctx, tx, p, VerbMessageRequestCompleted, map[string]any{
+	if err := s.logMessageRequestAudit(ctx, tx, p, VerbMessageRequestCompleted, map[string]any{
 		"request_id": requestID, "opening_message_id": locked.openingMessageID,
 		"coordinator_agent_id": locked.coordinator.ID, "agent_id": p.ID,
 		"selection_id": locked.claim.SelectionID, "generation": strconv.FormatInt(generation, 10),
@@ -2637,8 +2637,8 @@ func (s *Store) CompleteMessageRequest(ctx context.Context, p Principal, request
 	return CompleteMessageRequestResult{Request: request, Claim: claim, Message: redactMessageProcessingFence(message)}, nil
 }
 
-func logMessageRequestAudit(ctx context.Context, tx pgx.Tx, p Principal, verb string, metadata map[string]any) error {
-	if err := logEventTx(ctx, tx, EventInput{
+func (s *Store) logMessageRequestAudit(ctx context.Context, tx pgx.Tx, p Principal, verb string, metadata map[string]any) error {
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: verb, Metadata: metadata,
 	}); err != nil {

@@ -47,7 +47,7 @@ func lockMemoryCurationSourceLaneTx(
 // in this transaction. sourceKey is an opaque retry identity, never content;
 // only its digest is retained. Curation apply deliberately does not call this
 // helper, preventing curator output from feeding its own next run.
-func markMemoryCurationDueTx(
+func (s *Store) markMemoryCurationDueTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	p Principal,
@@ -163,7 +163,7 @@ func markMemoryCurationDueTx(
 	if err != nil {
 		return err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRequested,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRequested,
 		requestID, "", receipt.RequestGeneration, 0, receipt.ResultState); err != nil {
 		return err
 	}

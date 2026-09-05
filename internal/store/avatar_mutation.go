@@ -275,14 +275,14 @@ func (s *Store) proposeAvatar(ctx context.Context, p Principal, target avatarTar
 	if err != nil {
 		return AvatarMutationResult{}, err
 	}
-	if err := logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
+	if err := s.logAvatarPayloadCompactionTx(ctx, tx, target, compaction,
 		profile.retainedPayloadCountLimit, profile.retainedPayloadByteLimit); err != nil {
 		return AvatarMutationResult{}, err
 	}
 	metadata := avatarVersionEventMetadata(target.agentID, version,
 		in.ParentVersion, 0, stylePackID, in.StylePackVersion,
 		string(avatardomain.StatusProposed))
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: target.accountID, ActorKind: avatarAuditActor(p), ActorID: p.ID,
 		Verb: VerbAvatarProposed, Metadata: metadata,
 	}); err != nil {
@@ -404,13 +404,13 @@ func (s *Store) activateAvatar(ctx context.Context, p Principal, target avatarTa
 	metadata := avatarVersionEventMetadata(target.agentID, in.Version,
 		versionInfo.parentVersion, priorNumber, versionInfo.stylePackID,
 		versionInfo.stylePackVersion, string(avatardomain.StatusActive))
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: avatarAuditActor(p), ActorID: p.ID,
 		Verb: VerbAvatarActivated, Metadata: metadata}); err != nil {
 		return AvatarMutationResult{}, err
 	}
 	if versionInfo.parentVersion > 0 {
-		if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+		if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 			ActorKind: avatarAuditActor(p), ActorID: p.ID,
 			Verb: VerbAvatarEvolved, Metadata: metadata}); err != nil {
 			return AvatarMutationResult{}, err
@@ -549,7 +549,7 @@ func (s *Store) rollbackAvatar(ctx context.Context, p Principal, target avatarTa
 	metadata := avatarVersionEventMetadata(target.agentID, in.Version,
 		versionInfo.parentVersion, prior, versionInfo.stylePackID,
 		versionInfo.stylePackVersion, string(resultStatus))
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: avatarAuditActor(p), ActorID: p.ID,
 		Verb: VerbAvatarRolledBack, Metadata: metadata}); err != nil {
 		return AvatarMutationResult{}, err
@@ -712,7 +712,7 @@ func (s *Store) resetAvatar(ctx context.Context, p Principal, target avatarTarge
 	if reasonCode != "" {
 		metadata["reason_code"] = reasonCode
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: avatarAuditActor(p), ActorID: p.ID,
 		Verb: VerbAvatarReset, Metadata: metadata}); err != nil {
 		return AvatarMutationResult{}, err
@@ -839,7 +839,7 @@ func (s *Store) RejectAgentAvatar(ctx context.Context, p Principal, agentID stri
 	if reasonCode != "" {
 		metadata["reason_code"] = reasonCode
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: ActorOperator, ActorID: p.ID,
 		Verb: VerbAvatarRejected, Metadata: metadata}); err != nil {
 		return AvatarMutationResult{}, err
@@ -957,7 +957,7 @@ func (s *Store) ReportAvatarGenerationFailure(ctx context.Context, p Principal, 
 	if err != nil {
 		return AvatarMutationResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: ActorAgent, ActorID: p.ID, Verb: VerbAvatarGenerationFailed,
 		Metadata: map[string]any{
 			"agent_id":      target.agentID,
@@ -1043,7 +1043,7 @@ func (s *Store) SetAvatarPolicy(ctx context.Context, p Principal, agentID string
 	if err != nil {
 		return AvatarMutationResult{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: target.accountID,
 		ActorKind: ActorOperator, ActorID: p.ID, Verb: VerbAvatarPolicyChanged,
 		Metadata: map[string]any{
 			"agent_id": target.agentID, "policy_from": string(profile.policy),
