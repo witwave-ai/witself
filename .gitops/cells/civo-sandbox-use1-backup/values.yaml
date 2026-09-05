@@ -29,7 +29,7 @@ apps:
     networkPolicy:
       enabled: true
       allowExternal: false
-    # No monitoring stack on this cell; PostgreSQL metrics stay disabled.
+      # No monitoring stack on this cell; PostgreSQL metrics stay disabled.
   witselfServer:
     enabled: true
     namespace: witself
