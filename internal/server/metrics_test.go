@@ -722,7 +722,7 @@ func assertCapacityMetricsValueFree(t *testing.T, output string) {
 	}
 }
 
-func assertCapacityMetricsDeadline(t *testing.T, ctx context.Context) {
+func assertCapacityMetricsDeadline(ctx context.Context, t *testing.T) {
 	t.Helper()
 	deadline, ok := ctx.Deadline()
 	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
@@ -739,7 +739,7 @@ func TestIdentityCapacityMetricsAreValueFreeAndBounded(t *testing.T) {
 	response := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
 		reads++
-		assertCapacityMetricsDeadline(t, ctx)
+		assertCapacityMetricsDeadline(ctx, t)
 		return IdentityCapacityMetrics{
 			Realms:         IdentityCapacityDimensionMetrics{AccountsMeasured: 3, AccountsNearLimit: 2, AccountsAtLimit: 1, AccountsUnlimited: 4, MinHeadroomRatio: 0},
 			AgentsPerRealm: IdentityCapacityDimensionMetrics{AccountsMeasured: 5, AccountsNearLimit: 1, AccountsAtLimit: 0, AccountsUnlimited: 2, MinHeadroomRatio: 0.1},
@@ -784,7 +784,7 @@ func TestIdentityCapacityMetricsFailClosedWithoutErrorText(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
-				assertCapacityMetricsDeadline(t, ctx)
+				assertCapacityMetricsDeadline(ctx, t)
 				return IdentityCapacityMetrics{Realms: valid, AgentsPerRealm: valid, OperatorSeats: test.status}, test.err
 			}, nil).ServeHTTP(response, capacityMetricsRequest())
 			assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_identity_capacity_")
@@ -797,7 +797,7 @@ func TestAuditAppendMetricsAreValueFreeAndBounded(t *testing.T) {
 	response := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
 		reads++
-		assertCapacityMetricsDeadline(t, ctx)
+		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, nil
 	}).ServeHTTP(response, capacityMetricsRequest())
 	if response.Code != http.StatusOK || reads != 1 {
@@ -821,7 +821,7 @@ func TestAuditAppendMetricsAreValueFreeAndBounded(t *testing.T) {
 func TestAuditAppendMetricsFailClosedWithoutErrorText(t *testing.T) {
 	response := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
-		assertCapacityMetricsDeadline(t, ctx)
+		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, errors.New("database_capacity_error_canary account_capacity_private")
 	}).ServeHTTP(response, capacityMetricsRequest())
 	assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_audit_append_")

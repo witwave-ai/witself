@@ -19,7 +19,7 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	empty := IdentityCapacityDimensionMetrics{MinHeadroomRatio: 1}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: empty, AgentsPerRealm: empty, OperatorSeats: empty,
 	})
 
@@ -97,7 +97,7 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		AccountsMeasured: 3, AccountsNearLimit: 2, AccountsAtLimit: 1,
 		AccountsUnlimited: 1, MinHeadroomRatio: 0,
 	}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: want, AgentsPerRealm: want, OperatorSeats: want,
 	})
 
@@ -110,7 +110,7 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		AccountsMeasured: 2, AccountsNearLimit: 1, AccountsUnlimited: 2,
 		MinHeadroomRatio: 0.2,
 	}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: want, AgentsPerRealm: want, OperatorSeats: want,
 	})
 
@@ -121,7 +121,7 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		 WHERE id='capacity-below-account-canary'`); err != nil {
 		t.Fatal(err)
 	}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: IdentityCapacityDimensionMetrics{
 			AccountsMeasured: 2, AccountsNearLimit: 2, AccountsAtLimit: 1, AccountsUnlimited: 2,
 		},
@@ -152,19 +152,19 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		AccountsMeasured: 4, AccountsNearLimit: 3, AccountsAtLimit: 2,
 		AccountsUnlimited: 1, MinHeadroomRatio: 0,
 	}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: want, AgentsPerRealm: want, OperatorSeats: want,
 	})
 	if _, err := st.pool.Exec(ctx, `UPDATE accounts SET plan_limits='{}'`); err != nil {
 		t.Fatal(err)
 	}
 	unlimited := IdentityCapacityDimensionMetrics{AccountsUnlimited: 5, MinHeadroomRatio: 1}
-	assertIdentityCapacityMetrics(t, st, ctx, IdentityCapacityMetrics{
+	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: unlimited, AgentsPerRealm: unlimited, OperatorSeats: unlimited,
 	})
 }
 
-func assertIdentityCapacityMetrics(t *testing.T, st *Store, ctx context.Context, want IdentityCapacityMetrics) {
+func assertIdentityCapacityMetrics(ctx context.Context, t *testing.T, st *Store, want IdentityCapacityMetrics) {
 	t.Helper()
 	got, err := st.ReadIdentityCapacityMetrics(ctx)
 	if err != nil {
