@@ -20,6 +20,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/dashboard"
+	"github.com/witwave-ai/witself/internal/dashboard/stubcell"
 )
 
 var dashboardBannerPattern = regexp.MustCompile(
@@ -37,10 +38,8 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 		t.Fatalf("write token file: %v", err)
 	}
 
-	identity := client.SelfIdentity{
-		AccountID: "acc_1", AgentID: "agt_dash", AgentName: "dash",
-		RealmID: "rlm_1", RealmName: "default",
-	}
+	identity := stubcell.Identity("dash")
+	fixture := stubcell.New(stubcell.Config{BearerToken: "witself_agt_dash", Identity: identity, MinimalSelf: true})
 	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_dash" {
 			t.Errorf("Authorization = %q", got)
@@ -50,12 +49,7 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(client.SelfDigest{
-			SchemaVersion: "witself.v0", Identity: identity,
-		}); err != nil {
-			t.Errorf("encode self digest: %v", err)
-		}
+		fixture.ServeHTTP(w, r)
 	}))
 	defer cell.Close()
 
@@ -367,7 +361,7 @@ func TestDashboardStatusJSON(t *testing.T) {
 func stubDashboardSignal(t *testing.T, fn func(pid int) error) {
 	t.Helper()
 	previous := signalDashboard
-	signalDashboard = fn
+	signalDashboard = func(entry dashboard.RegistryEntry) error { return fn(entry.PID) }
 	t.Cleanup(func() { signalDashboard = previous })
 }
 

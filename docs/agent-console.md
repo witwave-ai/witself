@@ -105,6 +105,18 @@ row.
 
 ## Release Acceptance
 
+The `dashboard-acceptance` job in `release.yml` builds native clients and runs
+headless Chromium on Linux, macOS, and Windows against a shared stub cell,
+checking browser authentication, fixture rows in all seven panels, redaction,
+and `status`/`stop`. It retains each panel's screenshot, accessibility snapshot,
+DOM snapshots, and visible text plus `summary.json` as
+`dashboard-acceptance-${{ matrix.target }}-${{ github.run_id }}` for 90 days,
+including failure evidence. With Go and Node 22 installed, run
+`make dashboard-acceptance` locally; it installs the pinned browser dependencies,
+builds temporary clients, and writes evidence to `evidence/dashboard-acceptance`
+(use a fresh directory on reruns with `DASHBOARD_ACCEPTANCE_OUT`). The `dashboard-release-acceptance`
+catalog gate flips only once a real release has retained the artifact.
+
 Current release acceptance must retain macOS, Linux, and Windows evidence for:
 
 - `serve`, browser authentication, all seven panels, live refresh, `status`,

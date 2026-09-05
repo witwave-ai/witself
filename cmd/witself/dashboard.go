@@ -119,21 +119,15 @@ var (
 	dashboardStopPoll = 100 * time.Millisecond
 )
 
-// signalDashboard delivers SIGINT to a PID the caller has just proven to be
+// signalDashboard requests shutdown of a process the caller has just proven to be
 // a live dashboard via dashboard.EntryLive's marker-header probe and the
 // owner of its registry entry via dashboard.EntryOwned's access-token probe.
 // A var only so tests can stub delivery instead of interrupting themselves.
-var signalDashboard = func(pid int) error {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return process.Signal(syscall.SIGINT)
-}
+var signalDashboard = signalDashboardProcess
 
 // dashboardStop gracefully stops registered dashboards. Like status it is
 // purely local — a registry scan plus the same liveness verdict serve uses —
-// and it signals SIGINT only after dashboard.EntryLive confirms both the PID
+// and it requests shutdown only after dashboard.EntryLive confirms both the PID
 // and the marker-header probe of the recorded port AND dashboard.EntryOwned
 // proves the answering dashboard minted this entry's access token. The
 // marker alone proves only "some dashboard": after a crash, another agent's
@@ -213,7 +207,7 @@ func dashboardStop(args []string) int {
 // entry (serve releases just before process exit), so a reported stop means
 // the slot is genuinely free for the next serve.
 func stopDashboardEntry(entry dashboard.RegistryEntry) error {
-	if err := signalDashboard(entry.PID); err != nil {
+	if err := signalDashboard(entry); err != nil {
 		return fmt.Errorf("signal dashboard pid %d: %w", entry.PID, err)
 	}
 	deadline := time.Now().Add(dashboardStopWait)
@@ -222,8 +216,8 @@ func stopDashboardEntry(entry dashboard.RegistryEntry) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("dashboard for agent %q (pid %d) is still serving %s after SIGINT",
-				entry.AgentName, entry.PID, dashboardStopWait)
+			return fmt.Errorf("dashboard for agent %q (pid %d) is still serving %s after %s",
+				entry.AgentName, entry.PID, dashboardStopWait, dashboardStopRequestName)
 		}
 		time.Sleep(dashboardStopPoll)
 	}
@@ -341,6 +335,16 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 	entry.URL = fmt.Sprintf("http://127.0.0.1:%d/", port)
 	entry.AccessURL = fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, cfg.AccessToken)
 	entry.StartedAt = time.Now().UTC()
+
+	// Windows has no Process.Signal(SIGINT). Register its private shutdown
+	// event before publishing the registry entry; Unix retains signal shutdown.
+	ctx, releaseStop, err := registerDashboardStop(ctx, entry)
+	if err != nil {
+		_ = listener.Close()
+		fmt.Fprintf(os.Stderr, "witself: register dashboard shutdown: %v\n", err)
+		return 1
+	}
+	defer releaseStop()
 
 	mux := http.NewServeMux()
 	if err := dashboard.Register(mux, cfg); err != nil {

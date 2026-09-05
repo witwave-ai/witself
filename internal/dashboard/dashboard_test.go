@@ -21,16 +21,11 @@ import (
 
 	"github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/dashboard/stubcell"
 	"github.com/witwave-ai/witself/internal/testenv"
 )
 
-var testIdentity = client.SelfIdentity{
-	AccountID: "acc_1",
-	AgentID:   "agt_dash",
-	AgentName: "dash",
-	RealmID:   "rlm_1",
-	RealmName: "default",
-}
+var testIdentity = stubcell.Identity("dash")
 
 const testBearer = "witself_agt_dash"
 
@@ -43,7 +38,7 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
 }
 
 func testSelfDigest() client.SelfDigest {
-	return client.SelfDigest{SchemaVersion: "witself.v0", Identity: testIdentity}
+	return stubcell.SelfDigest(testIdentity)
 }
 
 // newDashboard mounts Register onto an httptest server backed by the given
@@ -123,13 +118,14 @@ func authedGet(t *testing.T, srv *httptest.Server, cfg Config, path string) *htt
 }
 
 func selfBackend(t *testing.T) http.HandlerFunc {
+	fixture := stubcell.New(stubcell.Config{Identity: testIdentity, MinimalSelf: true})
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method+" "+r.URL.Path != "GET /v1/self" {
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
 		}
-		writeTestJSON(t, w, testSelfDigest())
+		fixture.ServeHTTP(w, r)
 	}
 }
 
@@ -856,7 +852,7 @@ func TestTranscriptProxyUsesObservationalReads(t *testing.T) {
 	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/transcripts" && r.Method == http.MethodGet:
-			writeTestJSON(t, w, map[string]any{"transcripts": []client.Transcript{{ID: "tr_1"}}})
+			writeTestJSON(t, w, stubcell.Transcripts())
 		case r.URL.Path == "/v1/transcripts/tr_1" && r.Method == http.MethodGet:
 			query := r.URL.Query()
 			if query.Get("observational") != "true" {
@@ -865,7 +861,7 @@ func TestTranscriptProxyUsesObservationalReads(t *testing.T) {
 			if query.Get("after_sequence") != "5" || query.Get("limit") != "10" {
 				t.Errorf("unexpected query %s", r.URL.RawQuery)
 			}
-			writeTestJSON(t, w, client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}})
+			writeTestJSON(t, w, stubcell.TranscriptDetail())
 		default:
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -909,11 +905,11 @@ func TestMemoriesProxyNeverRequestsSensitiveValues(t *testing.T) {
 			if tags := query["tag"]; len(tags) != 2 || tags[0] != "a" || tags[1] != "b" {
 				t.Errorf("tags = %v", query["tag"])
 			}
-			writeTestJSON(t, w, client.MemoryPage{Items: []client.Memory{{ID: "mem_1"}}})
+			writeTestJSON(t, w, stubcell.Memories())
 		case "/v1/memories/mem_1":
-			writeTestJSON(t, w, map[string]any{"memory": client.Memory{ID: "mem_1"}})
+			writeTestJSON(t, w, stubcell.MemoryDetail())
 		case "/v1/memories/mem_1/history":
-			writeTestJSON(t, w, client.MemoryHistoryPage{})
+			writeTestJSON(t, w, stubcell.MemoryHistory())
 		default:
 			t.Errorf("unexpected backend path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -948,12 +944,7 @@ func TestMessagesProxyOnlyTouchesPassiveList(t *testing.T) {
 		}
 		// A misbehaving cell that leaks bodies from the passive list: the
 		// proxy must strip them rather than trust server-side redaction.
-		writeTestJSON(t, w, client.MessagePage{Messages: []client.Message{{
-			ID:      "msg_1",
-			Subject: "greetings",
-			Body:    "leaked-body-text",
-			Payload: json.RawMessage(`{"leaked":"payload"}`),
-		}}})
+		writeTestJSON(t, w, stubcell.Messages())
 	}, nil)
 	resp := authedGet(t, srv, cfg, "/api/messages?direction=inbox&limit=3")
 	defer func() { _ = resp.Body.Close() }()
@@ -977,8 +968,6 @@ func TestMessagesProxyOnlyTouchesPassiveList(t *testing.T) {
 // even a misbehaving cell cannot leak content, raw MIME/header data,
 // attachment detail, row identifiers, or a processing claim fence.
 func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
-	now := time.Date(2026, 7, 21, 20, 1, 2, 0, time.UTC)
-	lease := now.Add(time.Minute)
 	backend := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet ||
 			(strings.Contains(r.URL.Path, ":") && r.URL.Path != "/v1/email:status") {
@@ -988,59 +977,19 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/v1/email/address":
-			writeTestJSON(t, w, map[string]any{"address": client.AgentEmailAddress{
-				ID: "private-address-id", MailboxID: "private-mailbox-id", OwnerAgentID: "private-owner-id",
-				Address: "dash@agents.example", Domain: "private-domain", LocalPart: "private-local-part",
-				AgentSegment: "private-agent-segment", RealmLabel: "private-realm-label",
-				ProvisioningKind: "pilot", ReceiveState: "disabled",
-				AgentReceiveState: "enabled", RealmReceiveState: "disabled",
-				CreatedAt: now, UpdatedAt: now,
-			}})
+			writeTestJSON(t, w, stubcell.EmailAddress())
 		case "/v1/email:status":
 			if r.URL.RawQuery != "" {
 				t.Errorf("unexpected email status query %s", r.URL.RawQuery)
 			}
-			writeTestJSON(t, w, map[string]any{
-				"schema_version":    "witself.v0",
-				"maximum_raw_bytes": 25 * 1024 * 1024,
-				"attachment_capacity": map[string]any{
-					"used": 4096, "max": 8192, "remaining": 4096,
-					"unlimited": false, "near_limit": false,
-					"at_limit": false, "over_limit": false,
-					"private_account_id": "leaked-status-account",
-				},
-				"private_policy_revision": "leaked-policy-revision",
-			})
+			writeTestJSON(t, w, stubcell.EmailStatus())
 		case "/v1/email":
 			query := r.URL.Query()
 			if query.Get("unread") != "true" || query.Get("unacked") != "true" ||
 				query.Get("limit") != "7" || query.Get("cursor") != "" {
 				t.Errorf("unexpected email query %s", r.URL.RawQuery)
 			}
-			writeTestJSON(t, w, client.AgentEmailPage{
-				Messages: []client.AgentEmailMessage{{
-					ID: "claimable-message-id", MailboxID: "private-mailbox-id", OwnerAgentID: "private-owner-id",
-					AddressID: "private-address-id", Provider: "cloudflare", EnvelopeSender: "sender@example.net",
-					EnvelopeRecipient: "private-recipient", AgentSegment: "private-agent-segment",
-					RealmLabel: "private-realm-label", SubaddressTag: "private-subaddress",
-					RawSizeBytes: 2048, ParseState: "parsed", HeaderFrom: "leaked-header-from",
-					HeaderTo: "leaked-header-to", Subject: "safe subject", MIMEMessageID: "leaked-mime-id",
-					MessageDate: &now, AttachmentCount: 2,
-					AttachmentStorageBytes: 1536, RetainedAttachmentStorageBytes: 0,
-					PayloadRetentionState: "omitted_capacity",
-					SPFResult:             "pass", DKIMResult: "pass",
-					DMARCResult: "pass", SpamVerdict: "none", SenderVerificationState: "unverified",
-					PossibleDuplicate: true, PossibleDuplicateOfMessage: "leaked-duplicate-id",
-					ReceivedAt: now, Folder: "inbox", DeliveredAt: now,
-					ReadState: client.AgentEmailReadState{State: "unread"},
-					Processing: client.AgentEmailProcessing{
-						State: "claimed", Generation: 9, FailureCount: 2,
-						ClaimID: "leaked-claim-id", LeaseExpiresAt: &lease,
-					},
-					Text: "leaked decoded body", TextKind: "plain",
-				}},
-				NextCursor: "cursor-2",
-			})
+			writeTestJSON(t, w, stubcell.Emails())
 		default:
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -1244,10 +1193,6 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 }
 
 func TestAgentEmailSentProxyUsesOnlyPassiveGETAndAllowListsMetadata(t *testing.T) {
-	now := time.Date(2026, 8, 17, 14, 15, 16, 0, time.UTC)
-	providerStarted := now.Add(time.Second)
-	accepted := now.Add(2 * time.Second)
-	delivered := now.Add(3 * time.Second)
 	backend := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method+" "+r.URL.Path != "GET /v1/email/sent" {
 			t.Errorf("sent-email dashboard touched non-list route %s %s", r.Method, r.URL.Path)
@@ -1258,23 +1203,7 @@ func TestAgentEmailSentProxyUsesOnlyPassiveGETAndAllowListsMetadata(t *testing.T
 		if query.Get("limit") != "7" || query.Get("cursor") != "" || query.Get("state") != "" || len(query) != 1 {
 			t.Errorf("unexpected sent-email query %s", r.URL.RawQuery)
 		}
-		writeTestJSON(t, w, map[string]any{
-			"messages": []map[string]any{{
-				"id": "leaked-sent-message-id", "account_id": "leaked-account-id",
-				"realm_id": "leaked-realm-id", "owner_agent_id": "leaked-owner-id",
-				"from": "dash@witmail.net", "reply_to": "reply@witmail.net",
-				"to": "person@example.net", "subject": "safe sent subject",
-				"state": "delivered", "provider_state": "delivered",
-				"provider": "leaked-provider-name", "provider_message_id": "leaked-provider-message-id",
-				"error_code": "provider_timeout", "request_kind": "send", "attempt_count": 2,
-				"reply_to_inbound_message_id": "leaked-inbound-reply-target",
-				"thread_key":                  "leaked-thread-key", "text": "leaked submitted body",
-				"future_private_field": "leaked-future-field",
-				"queued_at":            now, "created_at": now, "updated_at": delivered,
-				"provider_started_at": providerStarted, "accepted_at": accepted, "delivered_at": delivered,
-			}},
-			"next_cursor": "leaked-sent-cursor",
-		})
+		writeTestJSON(t, w, stubcell.SentEmails())
 	}
 	srv, cfg := newDashboard(t, backend, nil)
 
@@ -2439,11 +2368,7 @@ func TestFactsProxyListsObservationalAndRedacts(t *testing.T) {
 		}
 		// A misbehaving cell that leaks a sensitive value from the broad
 		// list: the proxy must strip it rather than trust upstream redaction.
-		writeTestJSON(t, w, map[string]any{"facts": []client.Fact{
-			{ID: "fact_1", Subject: "self", Predicate: "identity/name", Value: json.RawMessage(`"Scott"`)},
-			{ID: "fact_2", Subject: "self", Predicate: "identity/ssn", Sensitive: true,
-				Value: json.RawMessage(`"leaked-fact-value"`), SourceRef: "leaked-source-ref"},
-		}})
+		writeTestJSON(t, w, stubcell.Facts())
 	}, nil)
 
 	resp := authedGet(t, srv, cfg, "/api/facts?subject=self&predicate_prefix=identity&limit=25")
@@ -2864,30 +2789,7 @@ func rejectSecretMutations(t *testing.T, r *http.Request) {
 // list and get payloads, including a public value on a field flagged
 // sensitive. None of these strings may reach the browser.
 func leakySecretJSON() map[string]any {
-	return map[string]any{
-		"id": "sec_1", "name": "prod-db", "template": "credential",
-		"tags": []string{"prod"}, "lifecycle": "active",
-		"sensitive_field_count": 1,
-		"created_at":            "2026-07-01T00:00:00Z",
-		"updated_at":            "2026-07-02T00:00:00Z",
-		"ciphertext":            "leaked-ciphertext",
-		"plaintext":             "leaked-plaintext",
-		"wrapped_dek":           "leaked-wrapped-dek",
-		"fields": []map[string]any{
-			{
-				"id": "fld_1", "name": "password", "kind": "password", "sensitive": true,
-				"public_value": "leaked-public-value",
-				"sealed": map[string]any{
-					"ciphertext": "leaked-ciphertext",
-					"aad":        "leaked-aad",
-					"nonce":      "leaked-nonce",
-					"dek":        map[string]any{"wrapped_dek": "leaked-wrapped-dek", "key_material": "leaked-key-material"},
-				},
-			},
-			{"id": "fld_2", "name": "username", "kind": "text", "sensitive": false,
-				"public_value": "leaked-public-value"},
-		},
-	}
+	return stubcell.LeakySecret()
 }
 
 // TestSecretsProxyListsMetadataOnly proves the secrets list proxy touches

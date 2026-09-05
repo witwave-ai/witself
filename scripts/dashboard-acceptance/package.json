@@ -1,0 +1,8 @@
+{
+  "name": "witself-dashboard-acceptance",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": { "test": "node --test", "acceptance": "node run.mjs" },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}
