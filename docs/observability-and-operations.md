@@ -692,11 +692,18 @@ retained canary artifact. Two receivers are configured independently:
   alerting plane itself. Omitting its Secret omits the route, receiver, and
   mount.
 
+<<<<<<< HEAD
 The Witself product rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
 worker's existing closed-set job label. PostgreSQL rules additionally retain
 the namespace, scrape job, and instance needed to identify the failing exporter
 target, while removing database, user, application, and wait-event labels.
+=======
+The application rules aggregate away pod, instance, route, account, realm,
+and agent identity. They expose only fixed service/severity labels and the
+worker's existing closed-set job label. Synthetic uptime rules additionally
+retain the public directory cell name in a `target` label.
+>>>>>>> 8f97689 (Synthetic uptime probes: control-plane cron scheduler, cell-scraped metrics, and alert rules)
 
 This capability is now live on the serving cell. Shared chart defaults remain
 disabled, and the staged GitOps rollout — stack, then targets, then alerting —
@@ -927,6 +934,184 @@ Founder email storage path. Cloudflare email edge/Queue outcomes live in
 Analytics Engine rather than Prometheus and require a separate bounded bridge
 or alerting path. One monitored cell also does not close fleet-wide placement,
 restore, or capacity gates for any unmonitored accepting cell.
+
+## Synthetic uptime probes
+
+The control-plane Worker probes from Cloudflare every five minutes using a
+dedicated `1-59/5 * * * *` Cron Trigger (minutes 1, 6, through 56 UTC).
+Maintenance retains `*/5 * * * *`. The scheduled handler dispatches by the cron
+expression: the probe trigger runs only the probe scheduler, and the maintenance
+trigger runs only maintenance. Each trigger starts a separate invocation with
+its own six-connection budget, even if cron timings overlap, so slow maintenance
+requests cannot occupy probe connection slots. The probe scheduler reads the
+`cell:` registry in the existing `DIRECTORY` KV binding, the cell directory used
+by `/v1/directory`, and requests each registered cell's `<api endpoint>/v1/version`.
+The fixed `control_plane` target at `https://self.witwave.ai/v1/version` is probed only
+when `CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED` is exactly `"true"`; its reviewed
+deployment value is `"false"` so ordinary deployment preserves container idle
+shutdown. While disabled, this target is omitted from results and metrics.
+Probes use a pool of four workers, leaving connection headroom for KV reads and
+writes. Each request's full ten-second timeout starts when its worker dispatches
+the fetch. The 25-second total budget covers directory
+reads, probes, and persistence, with the final five seconds reserved for one KV
+write. A worker dispatches only when all ten seconds fit within the remaining
+probe budget; otherwise the target is recorded as `skipped`. Waiting for a pool
+slot never shortens the request timeout. The optional control-plane self-probe
+runs first, followed by cells skipped on the previous run, then targets whose
+last completed observation was `ok`, then the remaining targets. Skipped cells
+are ordered never-checked first, then oldest completed check; target-name order
+breaks ties and orders the other groups. This gives skipped cells a turn on later
+runs even when earlier cells keep timing out.
+
+The scheduled probe handler contains failures; a directory read failure sets
+`directory_ok` to false while preserving previous valid cell results and their
+original check times. Cell targets retire only after successful discovery, so
+an intermittent directory failure cannot reset an ongoing cell-outage alert.
+If reading the previous snapshot fails or times out, the handler preserves the entire
+run document when discovery fails or any target is skipped. Previous
+observations and the scheduler timestamp remain unchanged and continue aging
+toward staleness. A malformed stored run document is replaced on the next run; only a readable one is preserved across skipped targets.
+
+Each run persists one JSON document at `DIRECTORY` key `config:uptime_probe_run`
+with shape `{ "scheduler": { "last_run_at": "...", "duration_ms": 0,
+"target_count": 0, "directory_ok": true }, "targets": [...] }` in a single
+KV put without a TTL. The heartbeat can advance only together with the results;
+a failed write leaves both unchanged, so scheduler-stale alerts can fire even
+when no target results have ever been saved. For one release, reads fall back to
+the legacy `config:uptime_probes` target snapshot and
+`config:uptime_probe_scheduler` record only when the new key is absent. New runs
+write only `config:uptime_probe_run`; a present but invalid document never falls
+back to legacy records. A replacement run records `recovered_from_malformed: true`
+without retaining any malformed values; subsequent normal runs omit the flag.
+
+Target rows store only names, state (`ok`, `down`, or `skipped`), HTTP status class, latency in
+milliseconds, and check time. A skipped target's optional `last_observation`
+retains the most recent completed check's state, HTTP status class, latency, and
+check time. Only a completed check refreshes that observation; repeated skips
+preserve it so an existing outage or stale-check alert can continue. A target
+skipped before its first check has no observation. The same document's
+`scheduler` includes runs with an empty directory or a directory read failure
+when the prior snapshot is valid, absent, or malformed and KV reads succeed. The scheduler target count counts discovered cells, excluding
+the optional control-plane target; a directory failure retains the previous
+cell count, or records zero when that count is unknown.
+
+Cell target names come from directory cell keys; the document and metrics
+contain no endpoints, account data, tokens, response bodies, or error text.
+Probes send no authentication or cell credentials. Public, unauthenticated
+`GET https://self.witwave.ai/metrics/probes` reads the persisted run without entering
+account/auth paths and returns Prometheus text with `Cache-Control: no-store`
+and the Worker's normal security headers. A missing or malformed run document
+(including unparseable JSON) produces zero-valued scheduler and snapshot gauges
+and no target series when KV reads succeed; the scrape still succeeds so
+scheduler-stale alerts can fire. Legacy reads preserve a valid scheduler without
+a snapshot, or valid target rows without a scheduler, but expose
+`witself_probe_last_write_ok 0` for either incomplete pair. KV read failures or
+timeouts return HTTP 503 so a failed scrape can alert.
+
+Every successful scrape includes six scheduler and snapshot gauges:
+
+| Metric | Meaning |
+| --- | --- |
+| `witself_probe_scheduler_last_run_timestamp_seconds` | Last scheduler run as Unix seconds; `0` before any recorded run. |
+| `witself_probe_scheduler_target_count` | Discovered cell count, excluding the optional control-plane target; retained count on directory failure, or `0` when unknown. |
+| `witself_probe_directory_ok` | `1` when the last run read the directory successfully, otherwise `0`, including before any recorded run. |
+| `witself_probe_snapshot_target_count` | Number of target rows in persisted results, including skipped targets and the optional control-plane target; `0` when absent or invalid. |
+| `witself_probe_last_write_ok` | `1` if a structurally valid run document (or complete legacy pair) was read; `0` if missing or invalid while KV is readable. This checks stored structure, not the latest write attempt or freshness: a failed write that leaves an older valid document still exposes `1`, while its scheduler timestamp ages. |
+| `witself_probe_document_was_malformed` | `1` when the last persisted run replaced malformed stored data; `0` otherwise, including before any recorded run. |
+
+Per-target gauges distinguish failed requests from skipped work. For skipped
+targets with a previous observation, the four measured gauges retain that
+observation and its original timestamp alongside `witself_probe_skipped 1`.
+Targets skipped before their first check emit only `witself_probe_skipped 1`:
+
+| Metric | Meaning |
+| --- | --- |
+| `witself_probe_up{target="<name>"}` | Last completed check: `1` for `ok` (a successful 2xx response), `0` for `down`; omitted without an observation. |
+| `witself_probe_skipped{target="<name>"}` | `1` when the run could not dispatch a full ten-second check; omitted for `ok` and `down`. |
+| `witself_probe_latency_seconds{target="<name>"}` | Last completed probe's elapsed time in seconds; omitted without an observation. |
+| `witself_probe_last_check_timestamp_seconds{target="<name>"}` | Last completed check time as Unix seconds; unchanged by skips and omitted without an observation. |
+| `witself_probe_http_status{target="<name>"}` | Last completed probe's HTTP status **class** (`1`–`5`); `0` when no HTTP response was available; omitted without an observation. |
+
+The platform chart gates the `witself-probes` scrape job and its rules behind
+`platform.monitoring.uptimeProbes.enabled`, which defaults to `false` and is
+enabled only in `civo-sandbox-usw2-dev`. That serving cell's Prometheus scrapes
+the HTTPS endpoint every 60 seconds. The rules in
+[uptime-probes.rules.yaml](../.gitops/charts/platform/files/uptime-probes.rules.yaml)
+cover target failures and the scheduler itself:
+
+- `WitselfProbeTargetDown`: `last_over_time(witself_probe_up[5m]) == 0` for ten
+  minutes, critical. The five-minute lookback bridges brief scrape failures;
+  a healthy observation clears the condition immediately.
+- `WitselfProbeStale`: a last-check age above 900 seconds for ten minutes,
+  warning, evaluated over a five-minute `last_over_time` lookback so a frozen
+  timestamp keeps ageing through brief scrape failures instead of resetting the
+  pending alert. Investigate a stopped cron or failed result persistence.
+- `WitselfProbeScrapeDown`: `up{job="witself-probes"} == 0` for 15 minutes,
+  critical. Investigate control-plane reachability from the cell or unavailable
+  probe results.
+- `WitselfProbeSchedulerStale`:
+  `time() - last_over_time(witself_probe_scheduler_last_run_timestamp_seconds[5m]) > 900`
+  for ten minutes, critical; the same bounded lookback means intermittent scrape
+  failures cannot hide a stopped scheduler. This also detects a scheduler that never ran, even without
+  any per-target series, a malformed document, or failed document writes.
+- `WitselfProbeResultsMissing`: a positive scheduler target count with zero
+  persisted target rows or no `witself_probe_up` samples for 15 minutes, critical.
+  The scheduler reports registered targets but no probe results are exposed
+  (persistence failure or stalled writes). The `absent()` branch explicitly
+  matches without labels so Prometheus's `job` and `instance` labels cannot hide
+  missing samples.
+- `WitselfProbeDirectoryUnavailable`: `witself_probe_directory_ok == 0` for
+  15 minutes, warning. Investigate registry reads and the scheduler's access to
+  `DIRECTORY`.
+- `WitselfProbeNoTargets`: `witself_probe_scheduler_target_count == 0` for
+  30 minutes, warning. The production directory should never be empty; check
+  cell registration and discovery.
+- `WitselfProbeBudgetExhausted`: `sum(witself_probe_skipped) > 0` for 15 minutes,
+  warning. Investigate slow targets and the number of targets sharing the run
+  budget. Skips retain previous observations without creating a new failure or
+  resetting an existing target-down or stale-check alert. A successful completed
+  check replaces the observation and clears the target's skipped metric.
+
+These alerts use the existing Alertmanager incident route and PagerDuty
+receiver. No PagerDuty key is copied into the control plane; alerting stays in
+Alertmanager. The existing external dead-man heartbeat covers loss of
+Prometheus/Alertmanager itself. For a target failure, check its public version
+endpoint; for staleness, check the control-plane cron and KV write outcomes;
+for scrape failure, check reachability and the metrics response from the
+serving cell.
+
+A five-minute GitHub Actions schedule with a one-minute job would consume about
+8,600 Actions minutes per 30-day month where billed minutes apply; standard
+public-repository runners have no billable minutes. The chosen design reuses
+the CP's existing Workers plan with a separate probe trigger: roughly 17,000
+additional monthly probe cron and optional self-probe invocations as a
+conservative estimate, plus about 43,000 requests for the 60-second scrape,
+are small against the plan's included requests. Cron
+uses the existing Workers allowance, and no monitor subscription, KV namespace,
+or secret is added. See [GitHub's minute accounting](https://docs.github.com/en/actions/how-tos/monitor-workflows/view-job-execution-time)
+and [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+
+CP `/v1/version` currently reaches the backend container, whose
+`sleepAfter` is ten minutes. A successful check every five minutes resets that
+idle timer and can keep an otherwise sleeping container running. Container
+memory, disk, and active CPU have separate usage allowances and charges, so the
+Workers request allowance alone does not prove zero additional cost. The
+container-reaching probe therefore defaults off; cell probes and the public
+metrics endpoint remain active. Enabling it requires a reviewed resolution of
+that cost conflict, then a coordinated source change setting the template's
+plain `CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED` variable and both generated-config
+and deployed-version verifier pins to `"true"`, followed by the normal CP deploy.
+Do not activate it with a secret or an out-of-band dashboard edit. See
+[Container inactivity](https://developers.cloudflare.com/containers/faq/)
+and [Container pricing](https://developers.cloudflare.com/containers/platform/pricing/).
+
+The normal control-plane deployment installs the cell probe handler and metrics
+endpoint with the CP target disabled. After deploy, verify that the Worker has
+exactly two Cron Triggers: `*/5 * * * *` for maintenance and `1-59/5 * * * *` for
+probes. The normal GitOps sync applies the serving cell's scrape job and rules;
+a CP deployment alone
+does not update the cell's monitoring chart. This source change does not claim
+that either deployment has occurred.
 
 ## CI And Release Checks
 

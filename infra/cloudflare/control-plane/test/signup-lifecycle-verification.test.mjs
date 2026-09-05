@@ -168,7 +168,7 @@ async function run(env, path, init = {}) {
 
 async function runScheduled(env) {
   const waits = [];
-  await worker.scheduled({ scheduledTime: Date.now() }, env, {
+  await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, env, {
     waitUntil: (p) => waits.push(p),
   });
   return Promise.allSettled(waits);

@@ -211,6 +211,8 @@ platform:
       enabled: true
     argocd:
       enabled: true
+    uptimeProbes:
+      enabled: true
     receiver:
       kind: pagerduty
       secretName: witself-monitoring-pagerduty-v1

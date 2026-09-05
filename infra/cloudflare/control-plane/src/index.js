@@ -84,6 +84,11 @@
 // counters at the same time.
 import { Container, getContainer } from "@cloudflare/containers";
 import {
+  runScheduledUptimeProbes,
+  uptimeProbeMetricsResponse,
+  UPTIME_PROBES_PATH,
+} from "./uptime-probes.mjs";
+import {
   containerEnvVars,
   forwardAdminPolicyRequest,
   handleInternalBridgeRequest,
@@ -4618,6 +4623,12 @@ function isProtectedWorkerRoute(pathname) {
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Public metrics terminate before rate limiting, account lookups, auth or
+    // container dispatch. The outer security-header wrapper still applies.
+    if (url.pathname === UPTIME_PROBES_PATH) {
+      return uptimeProbeMetricsResponse(request, env);
+    }
+
     // Machine lifecycle callbacks carry their own bridge authority, and the
     // support-email intake has both a bearer and dedicated limiters. Limiting
     // either here would turn an edge throttle into a protocol failure.
@@ -5005,6 +5016,30 @@ async function handleFetch(request, env, ctx) {
     return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
 }
 
+// Keep scheduling helpers private: named exports are Worker entrypoints.
+function scheduleMaintenance(event, env, ctx) {
+  ctx.waitUntil(reapExpiredPendings(env));
+  ctx.waitUntil(runScheduledPlacementRunner(env));
+  ctx.waitUntil(runScheduledAccountBackups(env, event?.scheduledTime));
+  ctx.waitUntil(runScheduledCanonicalRealmRouteInventory(env));
+  ctx.waitUntil(runScheduledAgentEmailDomainVerification(env));
+  ctx.waitUntil(runScheduledPlanLifecycle(
+    env,
+    (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),
+  ));
+}
+
+function scheduleUptimeProbes(_event, env, ctx) {
+  ctx.waitUntil(runScheduledUptimeProbes(env));
+}
+
+// Each trigger is a separate invocation with its own six-connection budget.
+// Keep the paths separate even when long-running maintenance overlaps probes.
+const SCHEDULED_TASKS = Object.freeze({
+  "*/5 * * * *": scheduleMaintenance,
+  "1-59/5 * * * *": scheduleUptimeProbes,
+});
+
 export default {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname;
@@ -5014,16 +5049,9 @@ export default {
     );
   },
 
-  // Cron: pending-account expiry plus opt-in placement restore/rebalance.
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil(reapExpiredPendings(env));
-    ctx.waitUntil(runScheduledPlacementRunner(env));
-    ctx.waitUntil(runScheduledAccountBackups(env, _event?.scheduledTime));
-    ctx.waitUntil(runScheduledCanonicalRealmRouteInventory(env));
-    ctx.waitUntil(runScheduledAgentEmailDomainVerification(env));
-    ctx.waitUntil(runScheduledPlanLifecycle(
-      env,
-      (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),
-    ));
+  async scheduled(event, env, ctx) {
+    if (Object.hasOwn(SCHEDULED_TASKS, event?.cron)) {
+      SCHEDULED_TASKS[event.cron](event, env, ctx);
+    }
   },
 };

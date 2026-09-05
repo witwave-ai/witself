@@ -9,6 +9,8 @@ rules="$platform_chart/files/founder-open-plane.rules.yaml"
 rule_tests="$platform_chart/testdata/founder-open-plane.rules.test.yaml"
 postgresql_rules="$platform_chart/files/postgresql.rules.yaml"
 postgresql_rule_tests="$platform_chart/testdata/postgresql.rules.test.yaml"
+probe_rules="$platform_chart/files/uptime-probes.rules.yaml"
+probe_rule_tests="$platform_chart/testdata/uptime-probes.rules.test.yaml"
 chart_version="87.6.0"
 chart_sha256="e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5"
 chart_repo="https://prometheus-community.github.io/helm-charts"
@@ -147,6 +149,42 @@ chart_archive="$tmp/${chart_name}-${chart_version}.tgz"
 }
 helm template witself-monitoring "$chart_archive" \
   --namespace monitoring --include-crds --values "$child_values" >"$child_render"
+
+# Probe scraping and its rules stay default-off, even when alerting is enabled.
+# The serving cell opts in without adding any receiver credentials.
+ruby -ryaml -e '
+  values = YAML.load_file(ARGV[0])
+  abort "probe scrape enabled by default" if values.dig("prometheus", "prometheusSpec", "additionalScrapeConfigs")
+  abort "probe rules enabled by default" if values.dig("additionalPrometheusRulesMap", "uptime-probes")
+' "$child_values"
+helm template witself-platform "$platform_chart" \
+  --values "$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml" >"$tmp/probes-platform.yaml"
+ruby -ryaml -e '
+  app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+  abort "serving-cell monitoring Application missing" unless app
+  print app.dig("spec", "source", "helm", "values")
+' <"$tmp/probes-platform.yaml" >"$tmp/probes-values.yaml"
+helm template witself-monitoring "$chart_archive" \
+  --namespace monitoring --values "$tmp/probes-values.yaml" >"$tmp/probes-child.yaml"
+ruby -ryaml -rbase64 -e '
+  docs = YAML.load_stream(File.read(ARGV[0])).compact
+  prometheus = docs.find { |doc| doc["kind"] == "Prometheus" }
+  source = prometheus&.dig("spec", "additionalScrapeConfigs")
+  abort "probe scrape reference missing" unless source
+  secret = docs.find { |doc| doc["kind"] == "Secret" && doc.dig("metadata", "name") == source["name"] }
+  config = secret&.dig("data", source["key"])
+  abort "probe scrape configuration missing" unless config
+  jobs = YAML.safe_load(Base64.strict_decode64(config), aliases: false)
+  expected = [{"job_name" => "witself-probes", "scheme" => "https", "metrics_path" => "/metrics/probes", "scrape_interval" => "60s", "static_configs" => [{"targets" => ["self.witwave.ai:443"]}]}]
+  abort "probe scrape is not the exact public unauthenticated job" unless jobs == expected
+  rules = docs.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-uptime-probes" } }
+  abort "probe rules missing or duplicated" unless rules.length == 1
+  abort "probe rules are outside Prometheus selection" unless rules[0].dig("metadata", "namespace") == "monitoring" && rules[0].dig("metadata", "labels", "release") == "witself-monitoring"
+  actual_rules = rules[0].dig("spec", "groups", 0, "rules")
+  abort "probe rules differ from their tested source" unless actual_rules == YAML.load_file(ARGV[1]).dig("groups", 0, "rules")
+  alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
+  abort "probe rollout changed receiver mounts" unless alertmanager.dig("spec", "secrets").sort == %w[witself-monitoring-deadman-v1 witself-monitoring-pagerduty-v1]
+' "$tmp/probes-child.yaml" "$probe_rules"
 
 helm template witself-platform "$platform_chart" \
   --set cell.name=monitoring-ci \
@@ -572,5 +610,7 @@ ruby -ryaml -e '
 ruby "$repo_root/scripts/testdata/monitoring-extensions.rb" "$repo_root" "$tmp" "$chart_archive"
 ruby "$repo_root/scripts/testdata/test-monitoring-platform-rules.rb" \
   "$tmp/monitoring-extensions-child.yaml" "$promtool_bin" "$tmp"
+"$promtool_bin" check rules "$probe_rules"
+"$promtool_bin" test rules "$probe_rule_tests"
 
 echo "monitoring rollout capability checks passed"
