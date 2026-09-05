@@ -12,10 +12,13 @@ export function resetContainerCalls() {
   containerCalls.length = 0;
 }
 
-export function getContainer() {
+export function getContainer(binding) {
   return {
     async fetch(request) {
       containerCalls.push(`${request.method} ${new URL(request.url).pathname}`);
+      if (typeof binding?.fetch === "function") {
+        return binding.fetch(request);
+      }
       return new Response(
         JSON.stringify({ schema_version: "witself.v0", error: "cold path stub" }),
         { status: 599, headers: { "Content-Type": "application/json" } },

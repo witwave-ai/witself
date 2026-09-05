@@ -2292,6 +2292,38 @@ func Run(ctx context.Context, cfg Config) error {
 	return runErr
 }
 
+const (
+	strictTransportSecurityHeaderName  = "Strict-Transport-Security"
+	strictTransportSecurityHeaderValue = "max-age=31536000; includeSubDomains"
+	contentTypeOptionsHeaderName       = "X-Content-Type-Options"
+	contentTypeOptionsHeaderValue      = "nosniff"
+	referrerPolicyHeaderName           = "Referrer-Policy"
+	referrerPolicyHeaderValue          = "no-referrer"
+	cacheControlHeaderName             = "Cache-Control"
+	authenticatedCacheControlValue     = "no-store"
+)
+
+// securityResponseHeaders applies the API's transport and content-handling
+// policy without wrapping ResponseWriter, so streaming, flushing, and optional
+// response-writer interfaces remain untouched.
+func securityResponseHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(strictTransportSecurityHeaderName, strictTransportSecurityHeaderValue)
+		w.Header().Set(contentTypeOptionsHeaderName, contentTypeOptionsHeaderValue)
+		w.Header().Set(referrerPolicyHeaderName, referrerPolicyHeaderValue)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// setAuthenticatedNoStoreDefault supplies the authenticated-response default.
+// It deliberately runs before the route handler so an endpoint that sets an
+// explicit Cache-Control policy later keeps that value.
+func setAuthenticatedNoStoreDefault(w http.ResponseWriter) {
+	if _, exists := w.Header()[http.CanonicalHeaderKey(cacheControlHeaderName)]; !exists {
+		w.Header().Set(cacheControlHeaderName, authenticatedCacheControlValue)
+	}
+}
+
 func apiMux(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
@@ -3039,13 +3071,14 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))
+	return securityResponseHeaders(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux)))))
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
 // for an operator token, shown once.
 func bootstrapLoginHandler(login LoginFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		var req struct {
 			BootstrapToken string `json:"bootstrap_token"`
 		}
@@ -3303,6 +3336,7 @@ func requireOperator(auth AuthFunc, h func(http.ResponseWriter, *http.Request, p
 // continuing to reject enable/mint behavior.
 func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
@@ -3342,6 +3376,7 @@ func requireDomainPrincipal(auth PrincipalAuthFunc, h func(http.ResponseWriter, 
 // access-profile decision before invoking the domain handler.
 func requireDomainPrincipalAnyProfile(auth PrincipalAuthFunc, h func(http.ResponseWriter, *http.Request, DomainPrincipal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
@@ -4081,6 +4116,7 @@ func legacyProvisionAccountHandler(
 	) (ProvisionedAccount, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare(
 			[]byte(tok), []byte(provisionToken),
@@ -4138,6 +4174,7 @@ func provisionAccountHandler(
 	) (ProvisionedAccount, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -4225,6 +4262,7 @@ func validConsentVersion(version string) bool {
 
 func accountSystemGetHandler(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.ProvisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -4431,6 +4469,7 @@ func accountPlacementPolicySystemSetHandler(
 	set func(ctx context.Context, accountID, evacuationID string, policy placement.Policy) (placement.Policy, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -4503,6 +4542,7 @@ func accountPlacementPolicySystemSetHandler(
 // live root credential; 409 unless the account is active.
 func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.ProvisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -5565,6 +5605,7 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 // routine committed restore endpoint cannot appear by configuration drift.
 func accountBackupHandler(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		exportAccountID, exportBackup := pathActionID(
 			r.URL.Path, "/v1/accounts/", "export-backup",
 		)
@@ -5673,6 +5714,7 @@ func accountBackupHandler(cfg Config) http.HandlerFunc {
 // (since, until, verb, limit) and a page_token cursor.
 func eventsAdminCellHandler(provisionToken string, list func(ctx context.Context, filter EventFilter) (EventPage, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -5763,6 +5805,7 @@ func validateAdminHandle(s string) error {
 // pagination.
 func supportAdminCellHandler(provisionToken string, list func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -5825,6 +5868,7 @@ func supportAdminCellHandler(provisionToken string, list func(ctx context.Contex
 // cell-wide contact-email lookup used by support-email intake fan-out.
 func supportContactMatchAdminHandler(provisionToken string, match func(ctx context.Context, email string) ([]SupportContactMatch, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setAuthenticatedNoStoreDefault(w)
 		token, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
@@ -6958,7 +7002,7 @@ func healthMux(ready func(context.Context) error) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	return mux
+	return securityResponseHeaders(mux)
 }
 
 func metricsMux() http.Handler {
@@ -6979,5 +7023,5 @@ func metricsMuxFor(
 		)
 		writeSupportSLOPrometheus(r.Context(), w, readSupportSLO)
 	})
-	return mux
+	return securityResponseHeaders(mux)
 }

@@ -12,6 +12,119 @@ import (
 	"testing"
 )
 
+// TestSecurityHeaderWireStrings pins the exact names and values shared with
+// the control-plane Worker. These are wire policy, not presentation strings.
+func TestSecurityHeaderWireStrings(t *testing.T) {
+	tests := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"HSTS name", strictTransportSecurityHeaderName, "Strict-Transport-Security"},
+		{"HSTS value", strictTransportSecurityHeaderValue, "max-age=31536000; includeSubDomains"},
+		{"content type options name", contentTypeOptionsHeaderName, "X-Content-Type-Options"},
+		{"content type options value", contentTypeOptionsHeaderValue, "nosniff"},
+		{"referrer policy name", referrerPolicyHeaderName, "Referrer-Policy"},
+		{"referrer policy value", referrerPolicyHeaderValue, "no-referrer"},
+		{"cache control name", cacheControlHeaderName, "Cache-Control"},
+		{"authenticated cache control value", authenticatedCacheControlValue, "no-store"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.label, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Fatalf("wire string = %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSecurityHeadersByRouteAuthentication(t *testing.T) {
+	auth := func(_ context.Context, token string) (string, string, string, bool, error) {
+		if token == "operator-token" {
+			return "operator_1", "account_1", "active", true, nil
+		}
+		return "", "", "", false, nil
+	}
+
+	t.Run("authenticated JSON route", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/v1/whoami", nil)
+		request.Header.Set("Authorization", "Bearer operator-token")
+		apiMux(Config{Authenticate: auth}).ServeHTTP(recorder, request)
+		response := recorder.Result()
+		defer func() { _ = response.Body.Close() }()
+
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+		}
+		assertSecurityHeaders(t, response.Header)
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
+		}
+	})
+
+	publicRoutes := []struct {
+		name    string
+		handler http.Handler
+		path    string
+	}{
+		{"API version", apiMux(Config{}), "/v1/version"},
+		{"health", healthMux(nil), "/healthz"},
+		{"metrics", metricsMux(), "/metrics"},
+	}
+	for _, tc := range publicRoutes {
+		t.Run("public "+tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			tc.handler.ServeHTTP(recorder, request)
+			response := recorder.Result()
+			defer func() { _ = response.Body.Close() }()
+
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+			}
+			assertSecurityHeaders(t, response.Header)
+			if values := response.Header.Values("Cache-Control"); len(values) != 0 {
+				t.Fatalf("Cache-Control = %q, want header absent", values)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedNoStoreDefaultPreservesExplicitCacheControl(t *testing.T) {
+	auth := func(context.Context, string) (string, string, string, bool, error) {
+		return "operator_1", "account_1", "active", true, nil
+	}
+	handler := securityResponseHeaders(requireOperator(auth, func(w http.ResponseWriter, _ *http.Request, _ principal) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/authenticated", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	defer func() { _ = response.Body.Close() }()
+
+	if got := response.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control = %q, want explicit route value", got)
+	}
+}
+
+func assertSecurityHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+		"X-Content-Type-Options":    "nosniff",
+		"Referrer-Policy":           "no-referrer",
+	} {
+		if got := header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 // TestWireStringsThatTheWorkerGreps pins the exact 409 response bodies the
 // Cloudflare Worker's restore/evacuate code classifies. If any of these
 // strings drift — a rename, a punctuation edit, even a stylistic tweak —
