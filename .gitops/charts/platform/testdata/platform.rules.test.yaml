@@ -1,0 +1,252 @@
+# Run through scripts/test-monitoring-rollout.sh; the runner binds rule_files to
+# the actual rendered child chart, including the checksum-pinned upstream rules.
+rule_files:
+- platform-rendered.rules.yaml
+evaluation_interval: 30s
+tests:
+- name: only writable filesystems above eighty percent projected to fill fire
+  interval: 1m
+  input_series:
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="filling:9100"}
+    values: 190-0.2x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="filling:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="filling:9100"}
+    values: 0+0x480
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 100+0x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 0+0x480
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="roomy:9100"}
+    values: 500-0.2x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="roomy:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="roomy:9100"}
+    values: 0+0x480
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="readonly:9100"}
+    values: 190-0.2x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="readonly:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="readonly:9100"}
+    values: 1+0x480
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="NodeFilesystemSpaceFillingUp",alertstate="firing"})
+    eval_time: 59m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeFilesystemSpaceFillingUp",alertstate="firing"})
+    eval_time: 7h
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: healthy stable or recovering filesystem capacity stays silent
+  interval: 1m
+  input_series:
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="threshold:9100"}
+    values: 200+0x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="threshold:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="threshold:9100"}
+    values: 0+0x480
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="recovering:9100"}
+    values: 100+0.1x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="recovering:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="recovering:9100"}
+    values: 0+0x480
+  - series: node_filesystem_avail_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 100+0x480
+  - series: node_filesystem_size_bytes{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 1000+0x480
+  - series: node_filesystem_readonly{job="node-exporter",device="/dev/vda1",fstype="ext4",mountpoint="/",instance="stable:9100"}
+    values: 0+0x480
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="NodeFilesystemSpaceFillingUp",alertstate="firing"})
+    eval_time: 7h
+    exp_samples: []
+- name: only the monitoring Prometheus PVC fires above eighty percent after fifteen minutes
+  interval: 1m
+  input_series:
+  - series: kubelet_volume_stats_used_bytes{namespace="monitoring",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 81+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  - series: kubelet_volume_stats_used_bytes{namespace="witself",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 99+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  - series: kubelet_volume_stats_used_bytes{namespace="monitoring",persistentvolumeclaim="alertmanager-db",instance="node1:10250",job="kubelet"}
+    values: 99+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim="alertmanager-db",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPrometheusPVCUsageHigh",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPrometheusPVCUsageHigh",alertstate="firing"})
+    eval_time: 15m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: exact PVC threshold and unrelated high usage claims stay silent
+  interval: 1m
+  input_series:
+  - series: kubelet_volume_stats_used_bytes{namespace="monitoring",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 80+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  - series: kubelet_volume_stats_used_bytes{namespace="witself",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 99+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="prometheus-witself-monitoring-kube-pr-prometheus-db-prometheus-witself-monitoring-kube-pr-prometheus-0",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  - series: kubelet_volume_stats_used_bytes{namespace="monitoring",persistentvolumeclaim="alertmanager-db",instance="node1:10250",job="kubelet"}
+    values: 99+0x30
+  - series: kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim="alertmanager-db",instance="node1:10250",job="kubelet"}
+    values: 100+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPrometheusPVCUsageHigh",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []
+- name: certificate inside fourteen days fires after one hour
+  interval: 1m
+  input_series:
+  - series: certmanager_certificate_expiration_timestamp_seconds{namespace="witself",name="witself-server-tls",job="cert-manager"}
+    values: 1200000+0x90
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfCertificateExpiringSoon",alertstate="firing"})
+    eval_time: 59m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfCertificateExpiringSoon",alertstate="firing"})
+    eval_time: 60m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: certificate at exactly fourteen days remains silent
+  interval: 1m
+  input_series:
+  - series: certmanager_certificate_expiration_timestamp_seconds{namespace="witself",name="witself-server-tls",job="cert-manager"}
+    values: 1209600+60x90
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfCertificateExpiringSoon",alertstate="firing"})
+    eval_time: 90m
+    exp_samples: []
+- name: Argo Degraded and Synced fires independently after fifteen minutes
+  interval: 1m
+  input_series:
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Degraded",sync_status="Synced"}
+    values: 1+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 15m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: Argo Healthy and OutOfSync fires independently after fifteen minutes
+  interval: 1m
+  input_series:
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Healthy",sync_status="OutOfSync"}
+    values: 1+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 15m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: Argo continuous degradation keeps its hold across sync transitions and resets on recovery
+  interval: 1m
+  input_series:
+  # Replace the old status series with a stale marker at every transition.
+  # Degradation lasts from 0m to 30m, recovers, then starts again at 40m.
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Degraded",sync_status="Synced"}
+    values: 1+0x9 stale _x9 1+0x9 stale _x9 1+0x20
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Degraded",sync_status="OutOfSync"}
+    values: _x10 1+0x9 stale
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Healthy",sync_status="Synced"}
+    values: _x30 1+0x9 stale
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"}
+    eval_time: 15m
+    exp_samples:
+    - labels: 'ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing",namespace="argocd",name="witself-server",severity="warning",service="platform",witself_alert="true"}'
+      value: 1
+  - expr: ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"}
+    eval_time: 20m
+    exp_samples:
+    - labels: 'ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing",namespace="argocd",name="witself-server",severity="warning",service="platform",witself_alert="true"}'
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 29m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 54m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 55m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: Argo continuous OutOfSync keeps its hold across health transitions
+  interval: 1m
+  input_series:
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Healthy",sync_status="OutOfSync"}
+    values: 1+0x9 stale
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Degraded",sync_status="OutOfSync"}
+    values: _x10 1+0x10
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"}
+    eval_time: 15m
+    exp_samples:
+    - labels: 'ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing",namespace="argocd",name="witself-server",severity="warning",service="platform",witself_alert="true"}'
+      value: 1
+- name: Argo application identities keep independent holds
+  interval: 1m
+  input_series:
+  # A different application becomes unhealthy as the previous one disappears.
+  # No individual application has been unhealthy for fifteen minutes.
+  - series: argocd_app_info{namespace="argocd",exported_namespace="team-a",name="witself-server",health_status="Degraded",sync_status="Synced"}
+    values: 1+0x9 stale
+  - series: argocd_app_info{namespace="argocd",exported_namespace="team-b",name="witself-server",health_status="Degraded",sync_status="Synced"}
+    values: _x10 1+0x9 stale
+  - series: argocd_app_info{namespace="argocd",exported_namespace="team-b",name="witself-other",health_status="Degraded",sync_status="Synced"}
+    values: _x20 1+0x9 stale
+  - series: argocd_app_info{namespace="other-argocd",exported_namespace="team-b",name="witself-other",health_status="Degraded",sync_status="Synced"}
+    values: _x30 1+0x10
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 19m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 29m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 39m
+    exp_samples: []
+- name: Argo healthy synced and zero valued unhealthy info remain silent
+  interval: 1m
+  input_series:
+  - series: argocd_app_info{namespace="argocd",name="witself-server",health_status="Healthy",sync_status="Synced"}
+    values: 1+0x30
+  - series: argocd_app_info{namespace="argocd",name="zero-series",health_status="Degraded",sync_status="OutOfSync"}
+    values: 0+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []

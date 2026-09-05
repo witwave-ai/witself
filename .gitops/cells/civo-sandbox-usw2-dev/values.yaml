@@ -172,7 +172,7 @@ apps:
       clusterIssuer: letsencrypt-prod
       tlsSecretName: witself-api-tls
       acme:
-        email: ""
+        email: support@witwave.ai
         server: https://acme-v02.api.letsencrypt.org/directory
         privateKeySecretName: letsencrypt-prod-private-key
     secrets:
@@ -200,6 +200,16 @@ platform:
     alerting:
       enabled: true
     postgresql:
+      enabled: true
+    nodeExporter:
+      enabled: true
+    kubelet:
+      cadvisor: true
+    defaultRules:
+      enabled: true
+    certManager:
+      enabled: true
+    argocd:
       enabled: true
     receiver:
       kind: pagerduty

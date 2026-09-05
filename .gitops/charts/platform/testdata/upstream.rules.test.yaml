@@ -1,0 +1,357 @@
+# Run through scripts/test-monitoring-rollout.sh; the runner binds rule_files to
+# the actual rendered child chart, including the checksum-pinned upstream rules.
+rule_files:
+- upstream-rendered.rules.yaml
+evaluation_interval: 30s
+tests:
+- name: node pressure and clock problems remain pending then fire
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",instance="node1:9100"}
+    values: 1000+0x70
+  - series: node_memory_MemAvailable_bytes{job="node-exporter",instance="node1:9100"}
+    values: 50+0x70
+  - series: node_vmstat_pgmajfault{job="node-exporter",instance="node1:9100"}
+    values: 0+36000x70
+  - series: node_timex_offset_seconds{job="node-exporter",instance="node1:9100"}
+    values: 0.06+0x70
+  - series: node_timex_sync_status{job="node-exporter",instance="node1:9100"}
+    values: 0+0x70
+  - series: node_timex_maxerror_seconds{job="node-exporter",instance="node1:9100"}
+    values: 16+0x70
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="NodeMemoryHighUtilization",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeMemoryMajorPagesFaults",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeClockSkewDetected",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeClockNotSynchronising",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeMemoryHighUtilization",alertstate="firing"})
+    eval_time: 20m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="NodeMemoryMajorPagesFaults",alertstate="firing"})
+    eval_time: 20m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="NodeClockSkewDetected",alertstate="firing"})
+    eval_time: 20m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="NodeClockNotSynchronising",alertstate="firing"})
+    eval_time: 20m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: node pressure thresholds and synchronised clocks stay silent
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",instance="node1:9100"}
+    values: 1000+0x70
+  - series: node_memory_MemAvailable_bytes{job="node-exporter",instance="node1:9100"}
+    values: 100+0x70
+  - series: node_vmstat_pgmajfault{job="node-exporter",instance="node1:9100"}
+    values: 0+29940x70
+  - series: node_timex_offset_seconds{job="node-exporter",instance="node1:9100"}
+    values: 0.05+0x70
+  - series: node_timex_sync_status{job="node-exporter",instance="node1:9100"}
+    values: 1+0x70
+  - series: node_timex_maxerror_seconds{job="node-exporter",instance="node1:9100"}
+    values: 16+0x70
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="NodeMemoryHighUtilization",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeMemoryMajorPagesFaults",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeClockSkewDetected",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="NodeClockNotSynchronising",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+- name: stalled application workloads respect their hold periods
+  interval: 1m
+  input_series:
+  - series: kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="witself",cluster="serving",pod="crasher",container="server",reason="CrashLoopBackOff"}
+    values: 1+0x70
+  - series: kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="witself",cluster="serving",pod="waiting",container="server",reason="ImagePullBackOff"}
+    values: 1+0x70
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",phase="Running"}
+    values: 1+0x70
+  - series: kube_pod_status_ready{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",condition="true"}
+    values: 0+0x70
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",owner_kind="ReplicaSet"}
+    values: 1+0x70
+  - series: kube_deployment_spec_replicas{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 2+0x70
+  - series: kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 1+0x70
+  - series: kube_deployment_status_replicas_updated{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 2+0x70
+  - series: kube_statefulset_replicas{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 1+0x70
+  - series: kube_statefulset_status_replicas_ready{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 0+0x70
+  - series: kube_statefulset_status_replicas_updated{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 1+0x70
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="KubePodCrashLooping",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeDeploymentReplicasMismatch",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeStatefulSetReplicasMismatch",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeContainerWaiting",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubePodCrashLooping",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="KubeDeploymentReplicasMismatch",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="KubeStatefulSetReplicasMismatch",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="KubeContainerWaiting",alertstate="firing"})
+    eval_time: 59m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeContainerWaiting",alertstate="firing"})
+    eval_time: 60m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: ready workloads and matched replicas stay silent
+  interval: 1m
+  input_series:
+  - series: kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="witself",cluster="serving",pod="crasher",container="server",reason="CrashLoopBackOff"}
+    values: 0+0x70
+  - series: kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="witself",cluster="serving",pod="waiting",container="server",reason="ImagePullBackOff"}
+    values: 0+0x70
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",phase="Running"}
+    values: 1+0x70
+  - series: kube_pod_status_ready{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",condition="true"}
+    values: 1+0x70
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="witself",cluster="serving",pod="not-ready",owner_kind="ReplicaSet"}
+    values: 1+0x70
+  - series: kube_deployment_spec_replicas{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 2+0x70
+  - series: kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 2+0x70
+  - series: kube_deployment_status_replicas_updated{job="kube-state-metrics",namespace="witself",cluster="serving",deployment="witself-server"}
+    values: 2+0x70
+  - series: kube_statefulset_replicas{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 1+0x70
+  - series: kube_statefulset_status_replicas_ready{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 1+0x70
+  - series: kube_statefulset_status_replicas_updated{job="kube-state-metrics",namespace="witself",cluster="serving",statefulset="postgresql"}
+    values: 1+0x70
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="KubePodCrashLooping",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeDeploymentReplicasMismatch",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeStatefulSetReplicasMismatch",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeContainerWaiting",alertstate="firing"})
+    eval_time: 65m
+    exp_samples: []
+- name: pending Job pods do not trigger the long lived workload alert
+  interval: 1m
+  input_series:
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending-job",phase="Pending"}
+    values: 1+0x30
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending-job",owner_kind="Job"}
+    values: 1+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []
+- name: pending non Job pods fire after fifteen minutes
+  interval: 1m
+  input_series:
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",phase="Pending"}
+    values: 1+0x30
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",owner_kind="ReplicaSet"}
+    values: 1+0x30
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubePodNotReady",alertstate="firing"})
+    eval_time: 15m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: raw requests deduplicate active pods and fire both overcommit alerts
+  interval: 1m
+  input_series:
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node1",resource="cpu"}
+    values: 2+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node2",resource="cpu"}
+    values: 2+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="cpu",instance="ksm-a"}
+    values: 3+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="cpu",instance="ksm-b"}
+    values: 3+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="cpu",instance="ksm-a"}
+    values: 3+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="cpu",instance="ksm-b"}
+    values: 3+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="cpu"}
+    values: 10000+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node1",resource="memory"}
+    values: 100+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node2",resource="memory"}
+    values: 100+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="memory",instance="ksm-a"}
+    values: 150+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="memory",instance="ksm-b"}
+    values: 150+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="memory",instance="ksm-a"}
+    values: 150+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="memory",instance="ksm-b"}
+    values: 150+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="memory"}
+    values: 10000+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",phase="Running"}
+    values: 1+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",phase="Pending"}
+    values: 1+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",phase="Succeeded"}
+    values: 1+0x20
+  - series: kube_node_role{job="kube-state-metrics",cluster="serving",node="node1",role="control-plane"}
+    values: 1+0x20
+  promql_expr_test:
+  - expr: namespace_cpu:kube_pod_container_resource_requests:sum
+    eval_time: 1m
+    exp_samples:
+    - labels: namespace_cpu:kube_pod_container_resource_requests:sum{cluster="serving",namespace="witself",witself_alert="true"}
+      value: 6
+  - expr: namespace_memory:kube_pod_container_resource_requests:sum
+    eval_time: 1m
+    exp_samples:
+    - labels: namespace_memory:kube_pod_container_resource_requests:sum{cluster="serving",namespace="witself",witself_alert="true"}
+      value: 300
+  - expr: count(ALERTS{alertname="KubeCPUOvercommit",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeMemoryOvercommit",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeCPUOvercommit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+  - expr: count(ALERTS{alertname="KubeMemoryOvercommit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: '{}'
+      value: 1
+- name: completed pods are excluded and requests below one node remain safe
+  interval: 1m
+  input_series:
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node1",resource="cpu"}
+    values: 2+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node2",resource="cpu"}
+    values: 2+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="cpu",instance="ksm-a"}
+    values: 0.5+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="cpu",instance="ksm-b"}
+    values: 0.5+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="cpu",instance="ksm-a"}
+    values: 0.5+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="cpu",instance="ksm-b"}
+    values: 0.5+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="cpu"}
+    values: 10000+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node1",resource="memory"}
+    values: 100+0x20
+  - series: kube_node_status_allocatable{job="kube-state-metrics",cluster="serving",node="node2",resource="memory"}
+    values: 100+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="memory",instance="ksm-a"}
+    values: 25+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",container="app",resource="memory",instance="ksm-b"}
+    values: 25+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="memory",instance="ksm-a"}
+    values: 25+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",container="app",resource="memory",instance="ksm-b"}
+    values: 25+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="memory"}
+    values: 10000+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="running",phase="Running"}
+    values: 1+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="pending",phase="Pending"}
+    values: 1+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",phase="Succeeded"}
+    values: 1+0x20
+  - series: kube_node_role{job="kube-state-metrics",cluster="serving",node="node1",role="control-plane"}
+    values: 1+0x20
+  promql_expr_test:
+  - expr: namespace_cpu:kube_pod_container_resource_requests:sum
+    eval_time: 1m
+    exp_samples:
+    - labels: namespace_cpu:kube_pod_container_resource_requests:sum{cluster="serving",namespace="witself",witself_alert="true"}
+      value: 1
+  - expr: namespace_memory:kube_pod_container_resource_requests:sum
+    eval_time: 1m
+    exp_samples:
+    - labels: namespace_memory:kube_pod_container_resource_requests:sum{cluster="serving",namespace="witself",witself_alert="true"}
+      value: 50
+  - expr: count(ALERTS{alertname="KubeCPUOvercommit",alertstate="firing"})
+    eval_time: 20m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="KubeMemoryOvercommit",alertstate="firing"})
+    eval_time: 20m
+    exp_samples: []
+- name: resource recordings are absent when there are no active pods
+  interval: 1m
+  input_series:
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="cpu"}
+    values: 10000+0x20
+  - series: kube_pod_container_resource_requests{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",container="app",resource="memory"}
+    values: 10000+0x20
+  - series: kube_pod_status_phase{job="kube-state-metrics",namespace="witself",cluster="serving",pod="completed",phase="Succeeded"}
+    values: 1+0x20
+  promql_expr_test:
+  - expr: namespace_cpu:kube_pod_container_resource_requests:sum
+    eval_time: 20m
+    exp_samples: []
+  - expr: namespace_memory:kube_pod_container_resource_requests:sum
+    eval_time: 20m
+    exp_samples: []

@@ -2,6 +2,7 @@
 {{- $monitoring := .Values.platform.monitoring -}}
 {{- $receiver := $monitoring.receiver -}}
 {{- $deadman := $monitoring.receiverDeadman -}}
+{{- $platformRules := and $monitoring.alerting.enabled $monitoring.defaultRules.enabled -}}
 {{- if $monitoring.alerting.enabled }}
 {{- if or (gt (len $receiver.secretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $receiver.secretName)) -}}
 {{- fail "platform.monitoring.receiver.secretName must be a valid Kubernetes Secret name when alerting is enabled; the referenced Secret must be immutable" -}}
@@ -55,12 +56,107 @@ spec:
       values: |
         commonLabels:
           witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+        # Only the reviewed groups below. k3s does not expose etcd,
+        # controller-manager, scheduler or kube-proxy scrape endpoints here.
+        # No version/zone, Windows, quota, HPA or generic upstream alert suite.
         defaultRules:
-          create: false
+          create: {{ $platformRules }}
+          additionalRuleLabels:
+            witself_alert: "true"
+          rules:
+            alertmanager: false
+            etcd: false
+            configReloaders: false
+            general: false
+            k8sContainerCpuUsageSecondsTotal: false
+            k8sContainerMemoryCache: false
+            k8sContainerMemoryRss: false
+            k8sContainerMemorySwap: false
+            k8sContainerResource: false
+            k8sContainerMemoryWorkingSetBytes: false
+            k8sPodOwner: false
+            kubeApiserverAvailability: false
+            kubeApiserverBurnrate: false
+            kubeApiserverHistogram: false
+            kubeApiserverSlos: false
+            kubeControllerManager: false
+            kubelet: false
+            kubeProxy: false
+            kubePrometheusGeneral: false
+            kubePrometheusNodeRecording: false
+            kubernetesApps: {{ $platformRules }}
+            kubernetesResources: {{ $platformRules }}
+            kubernetesStorage: false
+            kubernetesSystem: false
+            kubeSchedulerAlerting: false
+            kubeSchedulerRecording: false
+            kubeStateMetrics: false
+            network: false
+            node: false
+            nodeExporterAlerting: {{ and $platformRules $monitoring.nodeExporter.enabled }}
+            nodeExporterRecording: false
+            prometheus: false
+            prometheusOperator: false
+            windows: false
+          disabled:
+            # kubernetesSystem is off; also pin these exclusions explicitly.
+            KubeVersionMismatch: true
+            KubeClientErrors: true
+            KubeAPIDown: true
+            KubeletDown: true
+            KubeControllerManagerDown: true
+            KubeSchedulerDown: true
+            # Replace the upstream 85%/90% variants with the requested
+            # >80%, 24-hour forecast in files/platform.rules.yaml.
+            NodeFilesystemSpaceFillingUp: true
+            # No RAID, bonding, systemd collectors or unrelated node alerts.
+            NodeFilesystemAlmostOutOfSpace: true
+            NodeFilesystemFilesFillingUp: true
+            NodeFilesystemAlmostOutOfFiles: true
+            NodeNetworkReceiveErrs: true
+            NodeNetworkTransmitErrs: true
+            NodeHighNumberConntrackEntriesUsed: true
+            NodeTextFileCollectorScrapeError: true
+            NodeRAIDDegraded: true
+            NodeRAIDDiskFailure: true
+            NodeFileDescriptorLimit: true
+            NodeCPUHighUsage: true
+            NodeSystemSaturation: true
+            NodeDiskIOSaturation: true
+            NodeSystemdServiceFailed: true
+            NodeSystemdServiceCrashlooping: true
+            NodeBondingDegraded: true
+            # Only the five reviewed pod/deployment/statefulset alerts.
+            KubeDeploymentGenerationMismatch: true
+            KubeDeploymentRolloutStuck: true
+            KubeStatefulSetGenerationMismatch: true
+            KubeStatefulSetUpdateNotRolledOut: true
+            KubeDaemonSetRolloutStuck: true
+            KubeDaemonSetNotScheduled: true
+            KubeDaemonSetMisScheduled: true
+            KubeJobNotCompleted: true
+            KubeJobFailed: true
+            KubeHpaReplicasMismatch: true
+            KubeHpaMaxedOut: true
+            KubePdbNotEnoughHealthyPods: true
+            # No quotas or throttling alert; retain only CPU/memory overcommit.
+            KubeCPUQuotaOvercommit: true
+            KubeMemoryQuotaOvercommit: true
+            KubeQuotaAlmostFull: true
+            KubeQuotaFullyUsed: true
+            KubeQuotaExceeded: true
+            CPUThrottlingHigh: true
         grafana:
           enabled: false
         nodeExporter:
-          enabled: false
+          enabled: {{ $monitoring.nodeExporter.enabled }}
+{{ if $monitoring.nodeExporter.enabled }}
+        prometheus-node-exporter:
+          image:
+            digest: {{ printf "sha256:%s" $monitoring.images.nodeExporter | quote }}
+          resources:
+            {{- toYaml $monitoring.nodeExporter.resources | nindent 12 }}
+{{ end }}
         kubeApiServer:
           enabled: false
         kubeControllerManager:
@@ -78,9 +174,13 @@ spec:
         kubelet:
           enabled: true
           serviceMonitor:
-            cAdvisor: false
+            cAdvisor: {{ $monitoring.kubelet.cadvisor }}
+{{ if not $monitoring.kubelet.cadvisor }}
+            # Preserve the original trimmed stack when this extension is off.
             probes: false
             resource: false
+{{ end }}
+            # With cAdvisor enabled, probes/resource inherit upstream defaults.
         kubeStateMetrics:
           enabled: true
         kube-state-metrics:
@@ -269,6 +369,16 @@ spec:
 {{ .Files.Get "files/founder-open-plane.rules.yaml" | nindent 12 }}{{ if and $monitoring.postgresql.enabled (eq .Values.cell.cloud "civo") (dig "civoPostgres" "enabled" false (.Values.apps | default dict)) (dig "civoPostgres" "metrics" "enabled" false (.Values.apps | default dict)) }}
           postgresql:
 {{ .Files.Get "files/postgresql.rules.yaml" | nindent 12 }}{{ end }}
+{{- $groups := list }}
+{{- range $group := (fromYaml (.Files.Get "files/platform.rules.yaml")).groups }}
+{{- if or (and $platformRules (has $group.name (list "platform-resources" "platform-storage"))) (and $platformRules $monitoring.nodeExporter.enabled (eq $group.name "platform-node")) (and $monitoring.certManager.enabled $.Values.platform.certManager.enabled (eq $group.name "platform-certificates")) (and $monitoring.argocd.enabled (eq $group.name "platform-argocd")) }}
+{{- $groups = append $groups $group }}
+{{- end }}
+{{- end }}
+{{- if $groups }}
+          platform:
+{{ toYaml (dict "groups" $groups) | nindent 12 }}
+{{- end }}
 {{ end }}
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}

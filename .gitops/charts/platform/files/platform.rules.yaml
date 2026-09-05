@@ -1,0 +1,104 @@
+# Minimal additions to the checksum-pinned kube-prometheus-stack 87.6.0 rules.
+# The template selects each group only with its corresponding monitoring gate.
+groups:
+  - name: platform-resources
+    rules:
+      # Only the two prerequisites used by KubeCPUOvercommit/KubeMemoryOvercommit.
+      # Keep pending/running pods and deduplicate KSM series as upstream does;
+      # do not enable the rest of k8sContainerResource for these two recordings.
+      - record: namespace_cpu:kube_pod_container_resource_requests:sum
+        expr: |
+          sum by (namespace, cluster) (
+            sum by (namespace, pod, cluster) (
+              max by (namespace, pod, container, cluster) (
+                kube_pod_container_resource_requests{resource="cpu",job="kube-state-metrics"}
+              ) * on (namespace, pod, cluster) group_left() max by (namespace, pod, cluster) (
+                kube_pod_status_phase{phase=~"Pending|Running"} == 1
+              )
+            )
+          )
+        labels:
+          witself_alert: "true"
+      - record: namespace_memory:kube_pod_container_resource_requests:sum
+        expr: |
+          sum by (namespace, cluster) (
+            sum by (namespace, pod, cluster) (
+              max by (namespace, pod, container, cluster) (
+                kube_pod_container_resource_requests{resource="memory",job="kube-state-metrics"}
+              ) * on (namespace, pod, cluster) group_left() max by (namespace, pod, cluster) (
+                kube_pod_status_phase{phase=~"Pending|Running"} == 1
+              )
+            )
+          )
+        labels:
+          witself_alert: "true"
+  - name: platform-node
+    rules:
+      # Upstream variants are disabled: the chart cannot override their 85/90%
+      # thresholds. Retain the warning name and 24-hour forecast at >80% used.
+      - alert: NodeFilesystemSpaceFillingUp
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="node-exporter",fstype!="",mountpoint!=""}
+            / node_filesystem_size_bytes{job="node-exporter",fstype!="",mountpoint!=""} < 0.20
+          )
+          and
+          predict_linear(node_filesystem_avail_bytes{job="node-exporter",fstype!="",mountpoint!=""}[6h], 24*60*60) < 0
+          and
+          node_filesystem_readonly{job="node-exporter",fstype!="",mountpoint!=""} == 0
+        for: 1h
+        labels:
+          severity: warning
+          service: platform
+          witself_alert: "true"
+        annotations:
+          summary: Node filesystem is over 80 percent used and predicted to fill within 24 hours.
+          runbook: docs/observability-and-operations.md#platform-alerts
+  - name: platform-storage
+    rules:
+      # kubernetesStorage stays off: only Prometheus claims in the monitoring
+      # namespace need this 80% warning, not every workload PVC or inode alert.
+      - alert: WitselfPrometheusPVCUsageHigh
+        expr: |
+          (
+            kubelet_volume_stats_used_bytes{namespace="monitoring",persistentvolumeclaim=~"prometheus-.*"}
+            / kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim=~"prometheus-.*"}
+          ) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+          service: platform
+          witself_alert: "true"
+        annotations:
+          summary: Prometheus PVC usage exceeds 80 percent.
+          runbook: docs/observability-and-operations.md#platform-alerts
+  - name: platform-certificates
+    rules:
+      - alert: WitselfCertificateExpiringSoon
+        expr: certmanager_certificate_expiration_timestamp_seconds - time() < 14*24*3600
+        for: 1h
+        labels:
+          severity: warning
+          service: platform
+          witself_alert: "true"
+        annotations:
+          summary: A cert-manager certificate expires in less than 14 days.
+          runbook: docs/observability-and-operations.md#platform-alerts
+  - name: platform-argocd
+    rules:
+      - alert: WitselfArgoApplicationUnhealthy
+        # Keep the hold tied to application identity when status or scrape labels
+        # change. PodMonitor scrapes may rename the app namespace to exported_namespace.
+        expr: |
+          max by (namespace, exported_namespace, name) (
+            argocd_app_info{health_status!="Healthy"} == 1
+            or argocd_app_info{sync_status!="Synced"} == 1
+          )
+        for: 15m
+        labels:
+          severity: warning
+          service: platform
+          witself_alert: "true"
+        annotations:
+          summary: An Argo CD application is unhealthy or out of sync.
+          runbook: docs/observability-and-operations.md#platform-alerts

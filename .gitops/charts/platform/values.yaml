@@ -107,6 +107,27 @@ platform:
     postgresql:
       # Enable only with the cell's Civo PostgreSQL exporter and alerting.
       enabled: false
+    nodeExporter:
+      enabled: false
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+    kubelet:
+      cadvisor: false
+    defaultRules:
+      # Curated node/app/resource alerts and their minimal recording rules.
+      # Alerting must also be enabled; node rules require nodeExporter.
+      enabled: false
+    certManager:
+      # Scrape existing controller pods; no new exporter workload.
+      enabled: false
+    argocd:
+      # Scrape existing controller, repo-server and server pods.
+      enabled: false
     chartRepoURL: https://prometheus-community.github.io/helm-charts
     chartName: kube-prometheus-stack
     chartVersion: 87.6.0
@@ -123,6 +144,7 @@ platform:
       configReloader: 74550ba3e8bf93f47bc574231090d340ae9c01d25cd11ff74799e65f9fdb9a48
       admissionWebhookPatch: 76a2170cd0c9a7758c4ac8ac5bbe9b6f73e869a15ffb77d9f684664f7d7b96b1
       kubeStateMetrics: 85108987d044b18a098126732f98602df408888c0f7d456241f5abefb9744bc1
+      nodeExporter: 0f422f62c15f154af8d8572b23d623aebfb10cec73a5c654d18f911f3f9df241
     receiver:
       # Required only when alerting.enabled is true. This immutable Secret
       # contains one HTTPS webhook URL. The URL value never enters Git or Argo

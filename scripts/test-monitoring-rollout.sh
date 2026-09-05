@@ -40,6 +40,11 @@ esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# Keep downloaded chart metadata inside this run, including in restricted
+# worktrees whose normal Helm cache/config directories are read-only.
+export HELM_CACHE_HOME="$tmp/helm-cache"
+export HELM_REPOSITORY_CACHE="$tmp/helm-cache/repository"
+export HELM_REPOSITORY_CONFIG="$tmp/helm-repositories.yaml"
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -563,5 +568,9 @@ ruby -ryaml -e '
 "$promtool_bin" test rules "$rule_tests"
 "$promtool_bin" check rules "$postgresql_rules"
 "$promtool_bin" test rules "$postgresql_rule_tests"
+
+ruby "$repo_root/scripts/testdata/monitoring-extensions.rb" "$repo_root" "$tmp" "$chart_archive"
+ruby "$repo_root/scripts/testdata/test-monitoring-platform-rules.rb" \
+  "$tmp/monitoring-extensions-child.yaml" "$promtool_bin" "$tmp"
 
 echo "monitoring rollout capability checks passed"
