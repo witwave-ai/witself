@@ -316,5 +316,8 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-agent-email-cell-smoke.sh
 	npm --prefix infra/cloudflare/control-plane test
 	npm --prefix infra/cloudflare/control-plane run bundle:check
+	bash scripts/test-helm-rollout.sh
+	bash scripts/test-roll-cell-gate.sh
+	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-monitoring-rollout.sh
 	@echo "check-infra: infra gates green"
