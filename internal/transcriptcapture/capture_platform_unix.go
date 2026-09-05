@@ -7,6 +7,10 @@ import (
 	"syscall"
 )
 
+func lockSessionFile(file *os.File) error {
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+}
+
 // trustedPathIdentity preserves the Unix owner-only path contract used for
 // native transcript reads and pending-event rewrites.
 func trustedPathIdentity(path string, info os.FileInfo) bool {

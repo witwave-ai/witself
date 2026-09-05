@@ -231,13 +231,23 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
 ### Known capture limitations
 
-- [Issue #339](https://github.com/witwave-ai/witself/issues/339): a headless
-  session can exit with the detached flush it spawned, leaving its durable
-  events local. Run `witself transcript flush --runtime <runtime>` in the
-  foreground before verifying delivery.
+- [Issue #339](https://github.com/witwave-ai/witself/issues/339): Stop and
+  SessionEnd hooks now attempt a best-effort foreground flush with a maximum
+  three-second budget before spawning the normal detached flusher. On macOS
+  and Linux the detached flusher starts in its own session and process group,
+  with detached standard streams and no controlling terminal, so it survives
+  the headless client exiting. Flush failures never fail the hook; undelivered
+  events remain in the durable outbox. Once the hooked binary includes this
+  fix, an explicit foreground flush is optional belt-and-braces before
+  verifying delivery.
 - [Issue #335](https://github.com/witwave-ai/witself/issues/335): Codex
   app-server delegated sessions end without a terminal fence, so their final
-  turn remains in the local outbox.
+  turn remains in the local outbox until a companion emits
+  `witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id>`
+  after the job completes, using the captured run and turn IDs pinned when
+  that job starts. This implements the companion-emitted fence option; the
+  operator-purge and liveness options remain undecided. The delegation
+  orchestrator must wire this call into job completion.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
   persistence-boundary exclusion was merged on `main` by
   [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
@@ -256,6 +266,25 @@ currently uploadable event until the outbox is empty or a concrete delivery
 error occurs. Individual network requests remain time-bounded. Detached
 hook-triggered flushers are deliberately short-lived; if one reaches its work
 window, the next hook retries the durable remainder.
+
+`witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id> [--reason job-completed]`
+appends a synthetic `turn.completed` system event
+with body `delegation job completed`, `synthetic_fence: true`, and the reason
+in its data, then starts the normal flush. It requires an existing local Codex
+session with a matching open run and turn and uses the same hook enqueue and
+turn bookkeeping as a real Stop. The orchestrator must pin the captured run
+and turn IDs when the delegated job starts and reuse those exact IDs for every
+completion retry; it must not read the current IDs when completion arrives.
+A session-only fence is refused. Repeating the most recent synthetic completion
+in the current run is a no-op, including after its events have flushed or
+subsequent prompts have opened newer turns. Once a later fence completes or a
+new run starts, older completions are rejected as stale. Other mismatched
+identities are refused without changing the current turn. Unknown sessions and
+sessions with no open turn are refused unless they are an idempotent repeat. Sensitive turns
+retain the sealed-tool suppression: pending content is redacted through the
+same path as Stop before the fence can release the turn. The synthetic marker
+is retained, but a sensitive turn's caller-provided reason is omitted. The
+command does not capture ephemeral sessions or recover missing assistant text.
 
 Cursor's `beforeSubmitPrompt` hook wraps the visible prompt in one provider
 timestamp and `user_query` envelope. Witself removes that transport-only

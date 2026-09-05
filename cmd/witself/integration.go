@@ -24,14 +24,15 @@ import (
 )
 
 const (
-	maxHookInputBytes             = 16 * 1024 * 1024
-	captureDetachedFlushEnv       = "WITSELF_CAPTURE_DETACHED_FLUSH"
-	detachedFlushMaxDuration      = 2 * time.Minute
-	foregroundFlushLockMaxWait    = detachedFlushMaxDuration + 30*time.Second
-	foregroundFlushLockPollPeriod = 50 * time.Millisecond
-	maxCaptureAppendRequestBytes  = 7 * 1024 * 1024
-	maxCaptureAppendBatchEntries  = 100
-	maxCaptureFlushSliceEvents    = 256
+	maxHookInputBytes              = 16 * 1024 * 1024
+	captureDetachedFlushEnv        = "WITSELF_CAPTURE_DETACHED_FLUSH"
+	detachedFlushMaxDuration       = 2 * time.Minute
+	hookForegroundFlushMaxDuration = 3 * time.Second
+	foregroundFlushLockMaxWait     = detachedFlushMaxDuration + 30*time.Second
+	foregroundFlushLockPollPeriod  = 50 * time.Millisecond
+	maxCaptureAppendRequestBytes   = 7 * 1024 * 1024
+	maxCaptureAppendBatchEntries   = 100
+	maxCaptureFlushSliceEvents     = 256
 )
 
 // GUI-backed runtime CLIs can take several seconds to cold-start before their
@@ -2001,6 +2002,12 @@ func transcriptHook(args []string) int {
 		return 0
 	}
 	if os.Getenv("WITSELF_CAPTURE_NO_FLUSH") == "" {
+		if event.HookEvent == "Stop" || event.HookEvent == "SessionEnd" {
+			// A one-shot runtime can exit immediately after its terminal hook.
+			// Deliver the common case before returning, then leave any retry or
+			// longer drain to a flusher independent of the runtime's lifetime.
+			_ = runHookForegroundFlush(*runtime)
+		}
 		if err := startBackgroundFlush(*runtime); err != nil {
 			fmt.Fprintf(os.Stderr, "witself capture: queued locally; background flush did not start: %v\n", err)
 		}
@@ -2567,6 +2574,8 @@ func prepareTranscriptFlushEvents(
 		if !readiness.UploadReady(pendingEvent) {
 			// A prompt and its turn stay local until a terminal fence reveals
 			// whether a later sealed tool requires synchronous suppression.
+			// Durable completion keeps partially rejected turns ready after the
+			// terminal file is acknowledged, but holds stale unredacted snapshots.
 			// A later hook creates a new outbox path and reopens this retryable
 			// transcript through the normal background-flush logic.
 			blocked[transcriptID] = nil
@@ -2590,31 +2599,7 @@ func prepareTranscriptFlushEvents(
 }
 
 func captureEventBindingError(event transcriptcapture.Event, cfg transcriptcapture.Config) error {
-	legacyEventContext := event.AccountID == "" && event.RealmID == "" &&
-		event.AgentID != "" && event.AgentID == cfg.AgentID &&
-		event.Location.ID != "" && event.Location.ID == cfg.Location.ID
-	accountMatches := stableCaptureIdentityMatches(event.AccountID, cfg.AccountID, event.Account, cfg.Account, legacyEventContext)
-	realmMatches := stableCaptureIdentityMatches(event.RealmID, cfg.RealmID, event.Realm, cfg.Realm, legacyEventContext)
-	agentMatches := stableCaptureIdentityMatches(event.AgentID, cfg.AgentID,
-		event.Agent+"\x00"+event.AgentName, cfg.Agent+"\x00"+cfg.AgentName, false)
-	if event.Runtime != cfg.Runtime || !accountMatches || !realmMatches || !agentMatches ||
-		event.Location.ID != cfg.Location.ID {
-		return errors.New("queued transcript identity does not match the installed runtime binding")
-	}
-	return nil
-}
-
-func stableCaptureIdentityMatches(eventID, configID, eventName, configName string, allowLegacyEvent bool) bool {
-	if eventID != "" && configID != "" {
-		return eventID == configID
-	}
-	if eventID == "" && configID == "" {
-		return eventName == configName
-	}
-	if eventID == "" && configID != "" && allowLegacyEvent {
-		return eventName == configName
-	}
-	return false
+	return transcriptcapture.EventBindingError(event, cfg)
 }
 
 func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked, held map[string]error) bool {
@@ -2886,15 +2871,34 @@ func transcriptTail(args []string) int {
 	return 0
 }
 
+// runHookForegroundFlush bounds the entire optional delivery attempt, including
+// lock acquisition and native transcript finalization. Running the existing
+// flush command keeps its delivery and redaction rules identical; an explicit
+// manual foreground flush retains its full, unbounded drain semantics.
+func runHookForegroundFlush(runtime string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), hookForegroundFlushMaxDuration)
+	defer cancel()
+	executable, err := currentExecutablePath()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, executable, "transcript", "flush", "--runtime", runtime)
+	// Nil standard streams connect directly to os.DevNull, with no parent-owned
+	// pipes or copy goroutines. Clear an inherited detached flag so this attempt
+	// uses the normal foreground drain while its outer deadline bounds it.
+	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=")
+	return cmd.Run()
+}
+
 func startBackgroundFlush(runtime string) error {
 	executable, err := currentExecutablePath()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(executable, "transcript", "flush", "--runtime", runtime)
-	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	// Nil standard streams use os.DevNull directly. io.Discard would create
+	// pipes whose readers disappear as soon as the hook process exits.
+	detachCaptureFlush(cmd)
 	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=1")
 	if err := cmd.Start(); err != nil {
 		return err

@@ -3656,6 +3656,8 @@ witself transcript list --account default
 witself transcript show trn_123 --account default --json
 witself transcript tail trn_123 --account default --agent scott --limit 20
 witself transcript flush --runtime codex
+witself transcript fence --runtime codex --session delegated-session-id \
+  --run captured-run-id --turn captured-turn-id --reason job-completed
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
@@ -3672,6 +3674,27 @@ integration. The foreground command drains all currently uploadable events or
 returns a concrete delivery error; it does not stop merely because a large
 valid backlog takes longer than the detached hook flusher's bounded work
 window.
+
+`fence` is the companion completion command for a delegated Codex job whose
+runtime emits no terminal hook. It requires `--runtime codex`, `--session`,
+`--run`, and `--turn`; `--reason` defaults to `job-completed`. The orchestrator
+must pin the captured run and turn IDs when the job starts and reuse those
+exact IDs for every completion retry. Reading the current IDs when completion
+arrives can select a resumed job's turn and is unsafe; a session-only fence
+is refused. It appends a synthetic `turn.completed` system event with body
+`delegation job completed` and data
+containing `synthetic_fence: true` and the reason, through the normal hook
+enqueue path, then starts the normal flush. An existing local session and
+matching open run and turn are required. A repeat for the most recent synthetic
+completion in the current run is a no-op even after upload or subsequent
+prompts. Once a later fence completes or a new run starts, older completions
+are rejected as stale. Other mismatched identities, sessions without an open
+turn, and unknown sessions are refused without changing the current turn.
+Sensitive-turn redaction runs
+exactly as for Stop before the turn becomes upload-ready, retaining the
+synthetic marker while omitting the caller-provided reason. Ephemeral Codex
+sessions remain excluded. This command does not recover missing assistant text
+or install an orchestrator callback.
 
 For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
 native session file. Grok writes the final assistant response only after its

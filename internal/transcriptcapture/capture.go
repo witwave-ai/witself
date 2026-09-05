@@ -144,6 +144,7 @@ type ReadinessIndex struct {
 	sessionEnds     map[readinessSessionKey]time.Time
 	terminals       map[readinessTurnKey]time.Time
 	promptTimelines map[readinessSessionKey]readinessPromptTimeline
+	completedFences map[readinessFenceKey]completedFence
 }
 
 type readinessSessionKey struct {
@@ -219,19 +220,22 @@ type hookInput struct {
 	NativeHookEvent      string          `json:"-"`
 	SensitiveToolEvent   bool            `json:"-"`
 	SensitiveTurnContent bool            `json:"-"`
+	SyntheticFence       bool            `json:"-"`
 }
 
 type sessionState struct {
-	RunID                string          `json:"run_id"`
-	RuntimeVersion       string          `json:"runtime_version,omitempty"`
-	RuntimeVersionSource string          `json:"runtime_version_source,omitempty"`
-	TurnID               string          `json:"turn_id,omitempty"`
-	PromptEventID        string          `json:"prompt_event_id,omitempty"`
-	PromptCaptured       bool            `json:"prompt_captured,omitempty"`
-	ResponseCaptured     bool            `json:"response_captured,omitempty"`
-	SensitiveToolUseIDs  map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
-	RedactAllToolPayload bool            `json:"redact_all_tool_payload,omitempty"`
-	SensitiveTurn        bool            `json:"sensitive_turn,omitempty"`
+	RunID                 string          `json:"run_id"`
+	RuntimeVersion        string          `json:"runtime_version,omitempty"`
+	RuntimeVersionSource  string          `json:"runtime_version_source,omitempty"`
+	TurnID                string          `json:"turn_id,omitempty"`
+	PromptEventID         string          `json:"prompt_event_id,omitempty"`
+	PromptCaptured        bool            `json:"prompt_captured,omitempty"`
+	ResponseCaptured      bool            `json:"response_captured,omitempty"`
+	SensitiveToolUseIDs   map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
+	RedactAllToolPayload  bool            `json:"redact_all_tool_payload,omitempty"`
+	SensitiveTurn         bool            `json:"sensitive_turn,omitempty"`
+	SyntheticFencedTurnID string          `json:"synthetic_fenced_turn_id,omitempty"`
+	PendingFence          *Event          `json:"pending_fence,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -299,12 +303,28 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		return Event{}, ErrEphemeralSessionSkipped
 	}
 
+	if cfg.Runtime == RuntimeCodex {
+		release, err := acquireSessionStateLock(cfg.Runtime, input.SessionID)
+		if err != nil {
+			return Event{}, err
+		}
+		defer release()
+	}
+	return enqueueHook(cfg, input, raw)
+}
+
+// enqueueHook is the common hook and companion-fence path. Codex callers hold
+// the session lock across validation, sealed-turn redaction, and persistence.
+func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	eventID, err := id.New("evt")
 	if err != nil {
 		return Event{}, err
 	}
 	state, err := loadSessionState(cfg.Runtime, input.SessionID)
 	if err != nil {
+		return Event{}, err
+	}
+	if err := finishPendingFence(cfg.Runtime, input.SessionID, &state); err != nil {
 		return Event{}, err
 	}
 	if input.HookEventName == "SessionStart" || state.RunID == "" {
@@ -321,6 +341,7 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		state.SensitiveToolUseIDs = nil
 		state.RedactAllToolPayload = false
 		state.SensitiveTurn = false
+		state.SyntheticFencedTurnID = ""
 	}
 	// A new real user prompt is the only reliable cross-provider fence for a
 	// new turn. Clear the prior turn's sealed-content suppression before any
@@ -430,8 +451,20 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		state.TurnID = ""
 		state.PromptEventID = ""
 	}
+	if input.SyntheticFence {
+		// Persist the exact event before closing the turn. A failed outbox write
+		// can then be retried with the same event identity and timestamp.
+		state.PendingFence = &event
+		state.SyntheticFencedTurnID = turnID
+	}
 	if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
 		return Event{}, err
+	}
+	if input.SyntheticFence {
+		if err := finishPendingFence(cfg.Runtime, input.SessionID, &state); err != nil {
+			return Event{}, err
+		}
+		return event, nil
 	}
 	if cfg.CaptureMode == ModeMessages && isToolHookEvent(input.HookEventName) {
 		// Messages capture observes tool hooks only to maintain the sealed-turn
@@ -1715,7 +1748,9 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 			event.Body = input.LastAssistantMessage
 		}
 	case "Stop":
-		if input.LastAssistantMessage != "" {
+		if input.SyntheticFence {
+			event.Kind, event.Role, event.Body = "turn.completed", "system", "delegation job completed"
+		} else if input.LastAssistantMessage != "" {
 			event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
 		} else {
 			event.Kind, event.Role, event.Body = "turn.completed", "system", firstNonempty(input.Status, input.Reason, "turn completed")
@@ -1760,7 +1795,7 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 		return
 	}
 	event.Data = structuredEventData(input)
-	if event.CaptureMode == ModeRaw && !input.SensitiveToolEvent && !input.SensitiveTurnContent {
+	if event.CaptureMode == ModeRaw && !input.SyntheticFence && !input.SensitiveToolEvent && !input.SensitiveTurnContent {
 		event.Raw = append(json.RawMessage(nil), raw...)
 	}
 }
@@ -1768,6 +1803,9 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 func structuredEventData(input hookInput) json.RawMessage {
 	if input.SensitiveTurnContent {
 		data := map[string]any{"sealed_content_omitted": true}
+		if input.SyntheticFence {
+			data["synthetic_fence"] = true
+		}
 		if status := valueFreeToolStatus(input.Status); status != "" {
 			data["status"] = status
 		}
@@ -1787,6 +1825,9 @@ func structuredEventData(input hookInput) json.RawMessage {
 		return raw
 	}
 	data := map[string]any{}
+	if input.SyntheticFence {
+		data["synthetic_fence"] = true
+	}
 	if input.PromptID != "" {
 		data["prompt_id"] = input.PromptID
 	}
@@ -2264,12 +2305,15 @@ func RedactPendingTurn(runtime, sessionID, turnID string) error {
 }
 
 // NewReadinessIndex builds the per-flush lookup used by UploadReady. Building
-// it scans the pending slice once, then sorts each session's prompt timeline.
+// it scans the pending slice once, loads each turn's durable fence once, then
+// sorts each session's prompt timeline. Missing or unreadable markers grant no
+// additional readiness.
 func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
 	index := &ReadinessIndex{
 		sessionEnds:     make(map[readinessSessionKey]time.Time),
 		terminals:       make(map[readinessTurnKey]time.Time),
 		promptTimelines: make(map[readinessSessionKey]readinessPromptTimeline),
+		completedFences: make(map[readinessFenceKey]completedFence),
 	}
 	promptsBySession := make(map[readinessSessionKey][]readinessPrompt)
 	for _, pending := range all {
@@ -2277,6 +2321,10 @@ func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
 		session := readinessSessionKey{
 			transcriptID: event.TranscriptExternalID(),
 			sessionID:    event.SessionID,
+		}
+		fenceKey := readinessFenceKey{session: session, runID: event.RunID, turnID: event.TurnID}
+		if _, loaded := index.completedFences[fenceKey]; !loaded {
+			index.completedFences[fenceKey] = loadCompletedFence(event)
 		}
 		switch event.HookEvent {
 		case "SessionEnd":
@@ -2329,6 +2377,14 @@ func (index *ReadinessIndex) UploadReady(current PendingEvent) bool {
 	session := readinessSessionKey{
 		transcriptID: event.TranscriptExternalID(),
 		sessionID:    event.SessionID,
+	}
+	fence := index.completedFences[readinessFenceKey{session: session, runID: event.RunID, turnID: event.TurnID}]
+	if !fence.OccurredAt.IsZero() && !fence.OccurredAt.Before(event.OccurredAt) {
+		// Pending may have read this snapshot before a sealed hook rewrote the
+		// outbox, while the marker became visible afterward. Only the redacted
+		// snapshot may use sealed completion; a fresh flush rereads the file.
+		return !fence.SealedContentOmitted ||
+			(eventSealedContentOmitted(event.Data) && len(event.Raw) == 0 && len(event.RecoveredMessages) == 0)
 	}
 	if endedAt, exists := index.sessionEnds[session]; exists && !endedAt.Before(event.OccurredAt) {
 		return true
