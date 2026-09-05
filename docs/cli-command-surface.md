@@ -571,7 +571,7 @@ witself
   integrations
   install RUNTIME[,RUNTIME...]|all
   uninstall RUNTIME[,RUNTIME...]|all
-  transcript create|append|list|show|tail|flush
+  transcript create|append|list|show|tail|flush|fence|release
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
   federation peers|card  # target; not implemented
@@ -3658,6 +3658,9 @@ witself transcript tail trn_123 --account default --agent scott --limit 20
 witself transcript flush --runtime codex
 witself transcript fence --runtime codex --session delegated-session-id \
   --run captured-run-id --turn captured-turn-id --reason job-completed
+witself transcript release --runtime codex --dry-run
+witself transcript release --runtime codex --session abandoned-session-id \
+  --older-than 24h --yes
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
@@ -3695,6 +3698,39 @@ exactly as for Stop before the turn becomes upload-ready, retaining the
 synthetic marker while omitting the caller-provided reason. Ephemeral Codex
 sessions remain excluded. This command does not recover missing assistant text
 or install an orchestrator callback.
+
+`release` is implemented for fence-gated local capture residue:
+
+```text
+witself transcript release --runtime RUNTIME [--session SESSION_ID | --all] [--older-than DURATION] [--dry-run] [--yes] [--force]
+```
+
+It accepts the same four runtimes as `flush`. By default it only prints a
+per-session table of queued residue event counts, first/last event times, and
+whether any `tool.result` payload exists. With no selector it previews all
+residue sessions for the runtime. Applying requires `--yes` and either
+`--session` or `--all`; explicit `--dry-run` wins over `--yes`. The
+`--older-than` guard defaults to `24h` and refuses newer turns based on their
+last event unless `--force` is given. `--all` applies to eligible residue
+across the runtime; already-fenced turns remain unchanged.
+
+Release writes a distinct synthetic system `operator_release` fence. Before the
+turn becomes upload-ready, the shared sealed-tool suppression machinery
+replaces every `tool.result` payload with
+`{"redacted":"released_without_fence","original_bytes":N,"sha256":"HEX"}`,
+in the result body and `data.tool.output`. `N` and `HEX` describe the original
+queued result payload before bounded metadata projection. Prompts, assistant
+messages, and tool call names remain; raw hook envelopes and tool arguments
+are cleared. Each released event carries `data.operator_release: true`.
+Release never deletes anything and
+does not start a flush; a subsequent normal `flush` uploads the released
+events. Every apply prints:
+
+> released turns were not sealed by the runtime; every tool result in them has been redacted to a placeholder; prompts and assistant messages are uploaded as captured
+
+Any release failure produces a nonzero exit status. See
+[Operator release of fence-gated residue](transcript-ledger.md#operator-release-of-fence-gated-residue)
+for the privacy rule; age alone never triggers an automatic release.
 
 For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
 native session file. Grok writes the final assistant response only after its

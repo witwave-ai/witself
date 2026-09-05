@@ -3939,7 +3939,7 @@ func factUpcoming(args []string) int {
 
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail|hook|flush|fence ...")
+		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail|hook|flush|fence|release ...")
 		return 2
 	}
 	switch args[0] {
@@ -3959,6 +3959,8 @@ func transcriptCmd(args []string) int {
 		return transcriptFlush(args[1:])
 	case "fence":
 		return transcriptFence(args[1:])
+	case "release":
+		return transcriptRelease(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself transcript: unknown subcommand %q\n", args[0])
 		return 2
@@ -4218,6 +4220,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself memory capture|show|list|recall|history|adjust|forget|restore|reactivate|evidence|curate  Manage narrative memories")
 	cliout.Line(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")
 	cliout.Line(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
+	cliout.Line(w, "  witself transcript hook|flush|fence|release  Capture, deliver, and release local transcript events")
 	cliout.Line(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	cliout.Line(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
 	cliout.Line(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")

@@ -2123,6 +2123,9 @@ func transcriptFlush(args []string) int {
 			release()
 		}
 	}()
+	if err := transcriptcapture.SweepOrphanSubmissions(runtimeName); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: clean orphaned capture submissions: %v\n", err)
+	}
 	pending, err := transcriptcapture.Pending(runtimeName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
@@ -2255,6 +2258,12 @@ func transcriptFlush(args []string) int {
 					if len(batch.events) == 1 {
 						if _, rejected := rejectedPaths[batch.events[0].Path]; rejected {
 							continue
+						}
+					}
+					for _, pendingEvent := range batch.events {
+						if err := transcriptcapture.MarkPendingSubmitted(pendingEvent); err != nil {
+							fmt.Fprintf(os.Stderr, "witself: persist capture submission: %v\n", err)
+							return 1
 						}
 					}
 					if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, batch.inputs); err != nil {
@@ -2660,7 +2669,7 @@ func capturePendingAppendBatches(
 	}
 	for _, pendingEvent := range pending {
 		remainingBatches[pendingEvent.Path] = 0
-		eventBatches, err := captureAppendBatches(pendingEvent.Event.Entries())
+		eventBatches, err := captureAppendBatches(pendingEvent.Entries())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2729,8 +2738,11 @@ func appendSingleCaptureEvent(
 	transcriptID string,
 	pending transcriptcapture.PendingEvent,
 ) (bool, error) {
-	batches, err := captureAppendBatches(pending.Event.Entries())
+	batches, err := captureAppendBatches(pending.Entries())
 	if err != nil {
+		return false, err
+	}
+	if err := transcriptcapture.MarkPendingSubmitted(pending); err != nil {
 		return false, err
 	}
 	for _, inputs := range batches {

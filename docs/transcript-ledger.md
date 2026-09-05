@@ -245,9 +245,10 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
   turn remains in the local outbox until a companion emits
   `witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id>`
   after the job completes, using the captured run and turn IDs pinned when
-  that job starts. This implements the companion-emitted fence option; the
-  operator-purge and liveness options remain undecided. The delegation
-  orchestrator must wire this call into job completion.
+  that job starts. The delegation orchestrator must wire this call into job
+  completion. Older or crashed turns with no fence can be explicitly
+  [operator-released](#operator-release-of-fence-gated-residue), with every
+  tool result redacted; age alone never releases them automatically.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
   persistence-boundary exclusion was merged on `main` by
   [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
@@ -359,6 +360,124 @@ Cursor thought summaries where the runtime exposes them. Missing provider
 events are never fabricated, and a thought summary is not treated as hidden
 chain-of-thought.
 
+### Operator release of fence-gated residue
+
+Turns that never received a runtime fence remain in the local outbox: their
+sealed-tool suppression decisions are unknown. The implemented operator
+command previews this residue and can explicitly release selected turns with
+every `tool.result` payload redacted before they become upload-ready:
+
+```text
+witself transcript release --runtime RUNTIME [--session SESSION_ID | --all] [--older-than DURATION] [--dry-run] [--yes] [--force]
+```
+
+`RUNTIME` is `codex`, `claude-code`, `grok-build`, or `cursor`. The default is a
+dry run: it prints one row per session with the queued residue event count,
+first and last event times, and whether any queued `tool.result` payload
+exists, then exits successfully without changing release state. Preview still
+finishes interrupted acknowledgements and cleans orphaned submission snapshots
+whose outbox event is absent. With no
+selector, the preview covers the runtime's residue sessions. `--dry-run` also
+takes precedence over `--yes`.
+
+Applying requires `--yes` and either `--session SESSION_ID` or `--all`.
+`--older-than` defaults to `24h`; each turn's last event must be at least that
+old. A newer turn is refused unless `--force` is supplied. `--all` releases
+eligible residue turns across the runtime. This age check is an operator
+safety guard, never an automatic release policy. Turns that already have a
+fence are left unchanged.
+
+Apply also checks the executable pinned by each installed integration in the
+same Witself home and verifies its hook binding. A hooked registration with any
+empty `mcp_command`, `hook_config_path`, or `hook_runner_path` is refused,
+including the legacy installation schema. The executable must report this
+release's exact `--version` and advertise release support. The typed refusal
+instructs the operator to run `witself install --runtime RUNTIME` to re-register
+hooks with the current binary, then retry. `--force` never bypasses verification.
+The current user-hook schema forbids `hook_runner_path`, so user-hook releases
+are also refused; reinstalling in user mode cannot satisfy this strict check.
+A complete managed-hook registration can satisfy it.
+Dry runs do not probe executables or change integration files.
+
+Release writes a synthetic system fence with kind `operator_release` and uses
+the same suppression machinery as sealed-tool handling. Every `tool.result`
+payload in the released turn becomes a value-free placeholder in the result
+body and `data.tool.output`:
+
+```json
+{"redacted":"released_without_fence","original_bytes":123,"sha256":"<sha256 of original payload>"}
+```
+
+`original_bytes` is the original queued result payload's byte length and
+`sha256` is its SHA-256 digest, before bounded metadata projection. Release
+refuses when a turn marked sensitive still contains unsuppressed messages or
+other content that release would preserve. Retry the sealed hook or runtime
+fence to finish suppression. Otherwise, prompts, assistant messages, and tool
+call names remain as captured; raw hook envelopes are cleared and tool inputs
+also become value-free placeholders with their original byte length and SHA-256
+digest. Permission-denial reasons,
+errors, and other non-message system bodies receive digest placeholders too.
+Each released event carries
+`data.operator_release: true`; the system fence also carries
+`synthetic_fence: true` and `fence_kind: "operator_release"` in its data.
+Released events remain queued for upload; run the normal
+`witself transcript flush --runtime RUNTIME` to deliver the released turn.
+If any release fails, the command exits nonzero.
+
+Release suppression is session-scoped as well as turn-scoped. Before rewriting
+any queued event, a separate `capture/operator-releases/RUNTIME/` record persists
+the session's `operator_release` state with
+`status` (`pending` or `completed`), `released_turn_ids`, and `since`. While
+that release is active, every event with an empty turn ID is redacted through
+the release path, including PermissionRequest inputs and results arriving
+after Stop. Stop transitions the turn without removing this record; session
+end or restart also preserves it. Upload readiness holds any such event that
+has not passed release redaction, even if its turn ID is empty. Older hooks
+rewriting or deleting ordinary session state cannot erase this separate hold.
+
+Before its first append attempt, the uploader persists an immutable event and
+entry projection under the outbox's `.submissions/` directory. Release leaves
+these attempted entries unchanged: an activity failure or lost acknowledgement
+may have left their original external IDs committed on the server. Retries use
+the stored projection, and acknowledgement removes both local records.
+Queued provenance never proves non-submission: an older in-flight uploader
+may have committed an event and lost its acknowledgement while leaving its
+sidecar queued. Every release rewrite of such an event uses fresh external IDs
+derived from the original event IDs and the durable release ID. The sidecar
+records the original external IDs as superseded before the rewrite. Retries
+retain that replacement identity; server de-duplication of the original stands.
+Each event stores replacement mappings only for its own reply targets,
+including replies from recovered messages.
+
+The upgrade barrier refuses release while a live process holds the runtime's
+flush lock, regardless of its age. An unknown lock owner is also refused. Any
+outbox event without a submission sidecar blocks release for the entire runtime,
+including other sessions and already-redacted events. These errors instruct the
+operator to let `witself transcript flush --runtime RUNTIME` finish in the
+foreground and retry. `--force` does not bypass this barrier. Legacy residue
+that remains gated cannot be safely released offline.
+
+Acknowledgement writes a value-free cleanup marker before removing the
+submission snapshot, then the event, then the marker. Every flush and release
+resumes marked acknowledgements before loading pending events and sweeps
+orphaned submission snapshots whose event is absent. Cleanup continues
+best-effort and logs one failure without aborting the command.
+Value-free queued publication records are preserved so cleanup cannot race
+capture's sidecar-before-event publication. A failed snapshot unlink leaves the
+event available for the next acknowledgement, and an orphan from older cleanup
+or an interrupted unlink is retried on the next sweep.
+
+Only a genuine Stop for a fresh, prompt-created turn outside
+`released_turn_ids` ends active session suppression. A new prompt alone does
+not end it. The durable record retains `fenced_at` so older queued events and
+stale snapshots still require redaction, while subsequent turn-less hooks and
+the fresh fenced turn upload normally. An interrupted release retains its
+pending hold and can be completed by retrying the release command.
+
+Every apply prints this privacy caveat:
+
+> released turns were not sealed by the runtime; every tool result in them has been redacted to a placeholder; prompts and assistant messages are uploaded as captured
+
 ## Reasoning And Execution Traces
 
 Witself does not request, expose, or store raw hidden chain-of-thought. When an
@@ -445,6 +564,7 @@ witself transcript list
 witself transcript show TRANSCRIPT_ID
 witself transcript tail TRANSCRIPT_ID --limit 20
 witself transcript flush --runtime codex|claude-code|grok-build|cursor
+witself transcript release --runtime RUNTIME [--session SESSION_ID | --all] [--older-than DURATION] [--dry-run] [--yes] [--force]
 ```
 
 The installed stdio MCP server exposes read-only transcript tools through

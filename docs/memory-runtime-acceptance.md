@@ -200,6 +200,18 @@ required to work around parent exit. Running
 remains useful belt-and-braces: it drains currently uploadable events and
 reports delivery errors. Older hooked binaries still need this workaround.
 
+If a turn never received its terminal fence, normal flushing continues to
+hold it locally. For historical or crashed-session residue, first inspect
+`witself transcript release --runtime <runtime> --dry-run`; then an explicit
+`--session <session_id> --yes` (or `--all --yes`) can release eligible turns
+before the normal flush. The default `--older-than 24h` guard rejects fresh
+turns unless `--force` is supplied. Every tool result in an operator-released
+turn is replaced with a value-free placeholder, while prompts and assistant
+messages remain as captured; the uploaded turn carries an `operator_release`
+marker. Treat that marker as evidence of operator recovery when reviewing a
+run. See [Operator release of fence-gated residue](transcript-ledger.md#operator-release-of-fence-gated-residue)
+for the exact privacy caveat and command behavior.
+
 ### Older Codex hook binaries require fresh subjects
 
 The [#336](https://github.com/witwave-ai/witself/issues/336) capture exclusion

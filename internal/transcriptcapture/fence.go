@@ -13,6 +13,7 @@ import (
 type completedFence struct {
 	OccurredAt           time.Time `json:"occurred_at"`
 	SealedContentOmitted bool      `json:"sealed_content_omitted,omitempty"`
+	Kind                 string    `json:"kind,omitempty"`
 }
 
 type readinessFenceKey struct {
@@ -66,6 +67,15 @@ func EnqueueFence(runtime, sessionID, expectedRunID, expectedTurnID, reason stri
 	if state.RunID != expectedRunID {
 		return Event{}, false, errors.New("transcript fence does not match the current run")
 	}
+	if state.OperatorRelease.releasesTurn(expectedTurnID) {
+		marker := loadCompletedFence(Event{
+			Runtime: runtime, SessionID: sessionID, RunID: expectedRunID, TurnID: expectedTurnID,
+			Location: cfg.Location,
+		})
+		if marker.Kind != OperatorReleaseKind {
+			return Event{}, false, errors.New("transcript fence turn has a pending operator release; retry transcript release to finish it")
+		}
+	}
 	if state.PendingFence != nil {
 		event := *state.PendingFence
 		if event.RunID != expectedRunID || event.TurnID != expectedTurnID {
@@ -105,6 +115,12 @@ func EnqueueFence(runtime, sessionID, expectedRunID, expectedTurnID, reason stri
 		}
 		if err := EventBindingError(event, cfg); err != nil {
 			return Event{}, false, err
+		}
+		if event.Kind == OperatorReleaseKind {
+			// A release interrupted before saving session state still owns this
+			// turn. A normal completion would replace its hold with the wrong
+			// fence kind and strand the unfinished suppression permanently.
+			return Event{}, false, errors.New("transcript fence turn has a pending operator release; retry transcript release to finish it")
 		}
 		switch event.HookEvent {
 		case "AgentResponse", "Stop", "StopFailure", "SessionEnd":
@@ -165,7 +181,7 @@ func completedFencePath(event Event) (string, error) {
 }
 
 func loadCompletedFence(event Event) completedFence {
-	if event.Runtime != RuntimeCodex || event.SessionID == "" || event.RunID == "" || event.TurnID == "" {
+	if event.SessionID == "" || event.RunID == "" || event.TurnID == "" {
 		return completedFence{}
 	}
 	path, err := completedFencePath(event)

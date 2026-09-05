@@ -48,40 +48,42 @@ var ErrEphemeralSessionSkipped = errors.New("codex ephemeral session is not capt
 
 // Event is one durable, provider-neutral hook event in the local outbox.
 type Event struct {
-	SchemaVersion        string             `json:"schema_version"`
-	ID                   string             `json:"id"`
-	Runtime              string             `json:"runtime"`
-	RuntimeVersion       string             `json:"runtime_version,omitempty"`
-	RuntimeVersionSource string             `json:"runtime_version_source,omitempty"`
-	CaptureMode          string             `json:"capture_mode"`
-	Account              string             `json:"account"`
-	AccountID            string             `json:"account_id,omitempty"`
-	Realm                string             `json:"realm"`
-	RealmID              string             `json:"realm_id,omitempty"`
-	Agent                string             `json:"agent"`
-	AgentID              string             `json:"agent_id"`
-	AgentName            string             `json:"agent_name"`
-	Location             Location           `json:"location"`
-	SessionID            string             `json:"session_id"`
-	RunID                string             `json:"run_id"`
-	TurnID               string             `json:"turn_id,omitempty"`
-	HookEvent            string             `json:"hook_event"`
-	NativeHookEvent      string             `json:"native_hook_event"`
-	Kind                 string             `json:"kind"`
-	Role                 string             `json:"role"`
-	Body                 string             `json:"body,omitempty"`
-	Data                 json.RawMessage    `json:"data,omitempty"`
-	Model                string             `json:"model,omitempty"`
-	ModelSource          string             `json:"model_source,omitempty"`
-	ModelProvider        string             `json:"model_provider,omitempty"`
-	ModelProviderSource  string             `json:"model_provider_source,omitempty"`
-	CWD                  string             `json:"cwd,omitempty"`
-	SourceTranscriptPath string             `json:"source_transcript_path,omitempty"`
-	ReplyToEventID       string             `json:"reply_to_event_id,omitempty"`
-	OccurredAt           time.Time          `json:"occurred_at"`
-	Raw                  json.RawMessage    `json:"raw,omitempty"`
-	RecoveredMessages    []RecoveredMessage `json:"recovered_messages,omitempty"`
-	NativeTurnFinalized  bool               `json:"native_turn_finalized,omitempty"`
+	SchemaVersion           string             `json:"schema_version"`
+	ID                      string             `json:"id"`
+	SubmissionReleaseID     string             `json:"submission_release_id,omitempty"`
+	SubmissionReplyEventIDs map[string]string  `json:"submission_reply_event_ids,omitempty"`
+	Runtime                 string             `json:"runtime"`
+	RuntimeVersion          string             `json:"runtime_version,omitempty"`
+	RuntimeVersionSource    string             `json:"runtime_version_source,omitempty"`
+	CaptureMode             string             `json:"capture_mode"`
+	Account                 string             `json:"account"`
+	AccountID               string             `json:"account_id,omitempty"`
+	Realm                   string             `json:"realm"`
+	RealmID                 string             `json:"realm_id,omitempty"`
+	Agent                   string             `json:"agent"`
+	AgentID                 string             `json:"agent_id"`
+	AgentName               string             `json:"agent_name"`
+	Location                Location           `json:"location"`
+	SessionID               string             `json:"session_id"`
+	RunID                   string             `json:"run_id"`
+	TurnID                  string             `json:"turn_id,omitempty"`
+	HookEvent               string             `json:"hook_event"`
+	NativeHookEvent         string             `json:"native_hook_event"`
+	Kind                    string             `json:"kind"`
+	Role                    string             `json:"role"`
+	Body                    string             `json:"body,omitempty"`
+	Data                    json.RawMessage    `json:"data,omitempty"`
+	Model                   string             `json:"model,omitempty"`
+	ModelSource             string             `json:"model_source,omitempty"`
+	ModelProvider           string             `json:"model_provider,omitempty"`
+	ModelProviderSource     string             `json:"model_provider_source,omitempty"`
+	CWD                     string             `json:"cwd,omitempty"`
+	SourceTranscriptPath    string             `json:"source_transcript_path,omitempty"`
+	ReplyToEventID          string             `json:"reply_to_event_id,omitempty"`
+	OccurredAt              time.Time          `json:"occurred_at"`
+	Raw                     json.RawMessage    `json:"raw,omitempty"`
+	RecoveredMessages       []RecoveredMessage `json:"recovered_messages,omitempty"`
+	NativeTurnFinalized     bool               `json:"native_turn_finalized,omitempty"`
 }
 
 // RecoveredMessage is a visible user or assistant message atomically attached
@@ -134,17 +136,22 @@ type Entry struct {
 
 // PendingEvent ties an event to its outbox file.
 type PendingEvent struct {
-	Path  string
-	Event Event
+	Path             string
+	Event            Event
+	tracked          bool
+	submission       *pendingSubmission
+	queuedSubmission *pendingSubmission
 }
 
 // ReadinessIndex answers pending-event upload gates without rescanning the
 // complete outbox for every event.
 type ReadinessIndex struct {
-	sessionEnds     map[readinessSessionKey]time.Time
-	terminals       map[readinessTurnKey]time.Time
-	promptTimelines map[readinessSessionKey]readinessPromptTimeline
-	completedFences map[readinessFenceKey]completedFence
+	sessionEnds      map[readinessSessionKey]time.Time
+	terminals        map[readinessTurnKey]time.Time
+	promptTimelines  map[readinessSessionKey]readinessPromptTimeline
+	completedFences  map[readinessFenceKey]completedFence
+	operatorReleases map[readinessFenceKey]bool
+	operatorSessions map[readinessSessionKey]operatorReleaseReadiness
 }
 
 type readinessSessionKey struct {
@@ -224,18 +231,19 @@ type hookInput struct {
 }
 
 type sessionState struct {
-	RunID                 string          `json:"run_id"`
-	RuntimeVersion        string          `json:"runtime_version,omitempty"`
-	RuntimeVersionSource  string          `json:"runtime_version_source,omitempty"`
-	TurnID                string          `json:"turn_id,omitempty"`
-	PromptEventID         string          `json:"prompt_event_id,omitempty"`
-	PromptCaptured        bool            `json:"prompt_captured,omitempty"`
-	ResponseCaptured      bool            `json:"response_captured,omitempty"`
-	SensitiveToolUseIDs   map[string]bool `json:"sensitive_tool_use_ids,omitempty"`
-	RedactAllToolPayload  bool            `json:"redact_all_tool_payload,omitempty"`
-	SensitiveTurn         bool            `json:"sensitive_turn,omitempty"`
-	SyntheticFencedTurnID string          `json:"synthetic_fenced_turn_id,omitempty"`
-	PendingFence          *Event          `json:"pending_fence,omitempty"`
+	RunID                 string                `json:"run_id"`
+	RuntimeVersion        string                `json:"runtime_version,omitempty"`
+	RuntimeVersionSource  string                `json:"runtime_version_source,omitempty"`
+	TurnID                string                `json:"turn_id,omitempty"`
+	PromptEventID         string                `json:"prompt_event_id,omitempty"`
+	PromptCaptured        bool                  `json:"prompt_captured,omitempty"`
+	ResponseCaptured      bool                  `json:"response_captured,omitempty"`
+	SensitiveToolUseIDs   map[string]bool       `json:"sensitive_tool_use_ids,omitempty"`
+	RedactAllToolPayload  bool                  `json:"redact_all_tool_payload,omitempty"`
+	SensitiveTurn         bool                  `json:"sensitive_turn,omitempty"`
+	SyntheticFencedTurnID string                `json:"synthetic_fenced_turn_id,omitempty"`
+	PendingFence          *Event                `json:"pending_fence,omitempty"`
+	OperatorRelease       *operatorReleaseState `json:"operator_release,omitempty"`
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -303,17 +311,15 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		return Event{}, ErrEphemeralSessionSkipped
 	}
 
-	if cfg.Runtime == RuntimeCodex {
-		release, err := acquireSessionStateLock(cfg.Runtime, input.SessionID)
-		if err != nil {
-			return Event{}, err
-		}
-		defer release()
+	release, err := acquireSessionStateLock(cfg.Runtime, input.SessionID)
+	if err != nil {
+		return Event{}, err
 	}
+	defer release()
 	return enqueueHook(cfg, input, raw)
 }
 
-// enqueueHook is the common hook and companion-fence path. Codex callers hold
+// enqueueHook is the common hook and companion-fence path. All callers hold
 // the session lock across validation, sealed-turn redaction, and persistence.
 func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	eventID, err := id.New("evt")
@@ -446,6 +452,48 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	if input.HookEventName == "AgentResponse" {
 		event.ReplyToEventID = state.PromptEventID
 	}
+	operatorFence := loadCompletedFence(event)
+	if state.OperatorRelease.suppresses(event) || operatorFence.Kind == OperatorReleaseKind {
+		event = redactOperatorReleasedEvent(event)
+	}
+	if operatorFence.Kind == OperatorReleaseKind {
+		// A forced release can be followed by more hooks from the live turn.
+		// Retain the same suppression policy for every such event, including
+		// results arriving after the original completion timestamp.
+		if event.OccurredAt.After(operatorFence.OccurredAt) {
+			operatorFence.OccurredAt = event.OccurredAt
+		}
+		path, err := completedFencePath(event)
+		if err != nil {
+			return Event{}, err
+		}
+		if err := writeJSONAtomic(path, operatorFence); err != nil {
+			return Event{}, err
+		}
+	}
+	// Only a genuine Stop for a fresh prompt-created turn ends the session
+	// policy. Keep its history so stale turn-less snapshots still fail closed.
+	endOperatorRelease := state.OperatorRelease.active() && input.HookEventName == "Stop" &&
+		!input.SyntheticFence && event.TurnID != "" && event.TurnID == state.TurnID &&
+		state.PromptEventID != "" && !state.OperatorRelease.releasesTurn(event.TurnID)
+	if endOperatorRelease {
+		pending, err := Pending(cfg.Runtime)
+		if err != nil {
+			return Event{}, err
+		}
+		for _, item := range pending {
+			if item.Event.SessionID == event.SessionID && strings.TrimSpace(item.Event.TurnID) == "" {
+				if err := EventBindingError(item.Event, cfg); err != nil {
+					return Event{}, err
+				}
+			}
+		}
+		if err := redactPendingEvents(pending, func(queued Event) bool {
+			return queued.SessionID == event.SessionID && strings.TrimSpace(queued.TurnID) == ""
+		}, OperatorReleaseKind, event.ID); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.HookEventName == "Stop" || input.HookEventName == "StopFailure" {
 		event.ReplyToEventID = state.PromptEventID
 		state.TurnID = ""
@@ -457,8 +505,10 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 		state.PendingFence = &event
 		state.SyntheticFencedTurnID = turnID
 	}
-	if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
-		return Event{}, err
+	if !endOperatorRelease {
+		if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
+			return Event{}, err
+		}
 	}
 	if input.SyntheticFence {
 		if err := finishPendingFence(cfg.Runtime, input.SessionID, &state); err != nil {
@@ -475,7 +525,15 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	if err := writeOutboxEvent(event); err != nil {
 		return Event{}, err
 	}
-	if input.HookEventName == "SessionEnd" {
+	if endOperatorRelease {
+		// Publish the genuine fence before ending suppression or clearing the
+		// persisted turn identity, so either failed write leaves a safe retry.
+		state.OperatorRelease.FencedAt = event.OccurredAt
+		if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.HookEventName == "SessionEnd" && state.OperatorRelease == nil {
 		_ = removeSessionState(cfg.Runtime, input.SessionID)
 	}
 	return event, nil
@@ -2058,6 +2116,7 @@ func (e Event) TranscriptMetadata() json.RawMessage {
 // a visible body. Raw hook JSON is embedded only while it fits the bounded
 // payload; larger raw envelopes retain a digest and byte count.
 func (e Event) Entries() []Entry {
+	e = e.submissionProjection()
 	if len(e.RecoveredMessages) == 0 {
 		return e.entriesWithoutRecovered()
 	}
@@ -2233,7 +2292,11 @@ func writeOutboxEvent(event Event) error {
 		return err
 	}
 	name := fmt.Sprintf("%020d-%s.json", event.OccurredAt.UnixNano(), event.ID)
-	return writeJSONAtomic(filepath.Join(dir, name), event)
+	path := filepath.Join(dir, name)
+	if err := registerPendingQueued(path, event); err != nil {
+		return err
+	}
+	return writeJSONAtomic(path, event)
 }
 
 // Pending returns queued events in capture order.
@@ -2257,7 +2320,11 @@ func Pending(runtime string) ([]PendingEvent, error) {
 		if err := json.Unmarshal(raw, &event); err != nil {
 			return nil, fmt.Errorf("parse outbox event %s: %w", path, err)
 		}
-		out = append(out, PendingEvent{Path: path, Event: event})
+		pending, err := loadPendingSubmission(PendingEvent{Path: path, Event: event})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pending)
 	}
 	return out, nil
 }
@@ -2274,30 +2341,69 @@ func RedactPendingTurn(runtime, sessionID, turnID string) error {
 	if err != nil {
 		return err
 	}
+	return redactPendingEvents(pending, func(event Event) bool {
+		return event.Runtime == runtime && event.SessionID == sessionID && event.TurnID == turnID
+	}, "", "")
+}
+
+// Both runtime-sealed suppression and operator release rewrite through this
+// path before publishing a fence. The policy controls which captured content
+// must be suppressed, while atomic persistence and validation stay shared.
+func redactPendingEvents(pending []PendingEvent, matches func(Event) bool, fenceKind, releaseID string) error {
 	for _, item := range pending {
 		event := item.Event
-		if event.Runtime != runtime || event.SessionID != sessionID || event.TurnID != turnID {
+		if !matches(event) {
 			continue
 		}
-		switch event.Kind {
-		case "message.user":
-			event.Body = "prompt omitted from portable transcript because this turn used sealed secrets"
-		case "message.assistant":
-			event.Body = "response omitted from portable transcript because this turn used sealed secrets"
-		case "agent.thought":
-			event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
-		case "tool.call", "tool.result", "tool.error":
-			event.Body = "tool payload omitted from portable transcript because this turn used sealed secrets"
-		default:
-			event.Body = "event content omitted from portable transcript because this turn used sealed secrets"
+		if item.submission != nil {
+			// An unsuccessful append may already have committed this event.
+			// Retrying its immutable envelope must never conflict at the server.
+			continue
 		}
-		event.Raw = nil
-		event.RecoveredMessages = nil
-		event.Data = json.RawMessage(`{"sealed_content_omitted":true}`)
+		if operatorReleasedEventSafe(event) {
+			// Operator release accepts these captured prompts and messages.
+			// Their final, upload-ready bytes must remain stable even if a late
+			// sealed hook or a release retry arrives after a partial upload.
+			continue
+		}
+		if fenceKind == OperatorReleaseKind {
+			if err := operatorReleaseRewriteAllowed(item); err != nil {
+				return err
+			}
+			var err error
+			event, err = prepareOperatorReleaseSubmission(item, pending, matches, releaseID)
+			if err != nil {
+				return err
+			}
+			event = redactOperatorReleasedEvent(event)
+		} else {
+			wasReleased := eventOperatorReleased(event.Data)
+			switch event.Kind {
+			case "message.user":
+				event.Body = "prompt omitted from portable transcript because this turn used sealed secrets"
+			case "message.assistant":
+				event.Body = "response omitted from portable transcript because this turn used sealed secrets"
+			case "agent.thought":
+				event.Body = "thought omitted from portable transcript because this turn used sealed secrets"
+			case "tool.call", "tool.result", "tool.error":
+				event.Body = "tool payload omitted from portable transcript because this turn used sealed secrets"
+			default:
+				event.Body = "event content omitted from portable transcript because this turn used sealed secrets"
+			}
+			event.Raw = nil
+			event.RecoveredMessages = nil
+			event.Data = json.RawMessage(`{"sealed_content_omitted":true}`)
+			if wasReleased {
+				event = redactOperatorReleasedEvent(event)
+			}
+		}
 		if err := validatePendingRewritePath(item.Path, event); err != nil {
 			return err
 		}
 		if err := writeJSONAtomic(item.Path, event); err != nil {
+			if fenceKind == OperatorReleaseKind {
+				return fmt.Errorf("redact pending operator-released transcript turn: %w", err)
+			}
 			return fmt.Errorf("redact pending sealed transcript turn: %w", err)
 		}
 	}
@@ -2310,10 +2416,12 @@ func RedactPendingTurn(runtime, sessionID, turnID string) error {
 // additional readiness.
 func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
 	index := &ReadinessIndex{
-		sessionEnds:     make(map[readinessSessionKey]time.Time),
-		terminals:       make(map[readinessTurnKey]time.Time),
-		promptTimelines: make(map[readinessSessionKey]readinessPromptTimeline),
-		completedFences: make(map[readinessFenceKey]completedFence),
+		sessionEnds:      make(map[readinessSessionKey]time.Time),
+		terminals:        make(map[readinessTurnKey]time.Time),
+		promptTimelines:  make(map[readinessSessionKey]readinessPromptTimeline),
+		completedFences:  make(map[readinessFenceKey]completedFence),
+		operatorReleases: make(map[readinessFenceKey]bool),
+		operatorSessions: make(map[readinessSessionKey]operatorReleaseReadiness),
 	}
 	promptsBySession := make(map[readinessSessionKey][]readinessPrompt)
 	for _, pending := range all {
@@ -2325,6 +2433,10 @@ func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
 		fenceKey := readinessFenceKey{session: session, runID: event.RunID, turnID: event.TurnID}
 		if _, loaded := index.completedFences[fenceKey]; !loaded {
 			index.completedFences[fenceKey] = loadCompletedFence(event)
+		}
+		release := index.operatorSession(event)
+		if event.Kind == OperatorReleaseKind || release.state.releasesTurn(event.TurnID) {
+			index.operatorReleases[fenceKey] = true
 		}
 		switch event.HookEvent {
 		case "SessionEnd":
@@ -2371,14 +2483,32 @@ func NewReadinessIndex(all []PendingEvent) *ReadinessIndex {
 // This closes the prompt-enqueue versus later secret-tool race.
 func (index *ReadinessIndex) UploadReady(current PendingEvent) bool {
 	event := current.Event
-	if strings.TrimSpace(event.TurnID) == "" {
+	if current.submission != nil {
+		// Only the persisted attempted envelope may bypass a later hold.
+		// New events still pass through every release and runtime fence gate.
 		return true
+	}
+	release := index.operatorSession(event)
+	if release.failed {
+		return false
+	}
+	if strings.TrimSpace(event.TurnID) == "" {
+		// Empty IDs normally bypass turn gates. A session release may admit
+		// them only after the complete release redaction path has run.
+		return !release.state.suppresses(event) || operatorReleasedEventSafe(event)
 	}
 	session := readinessSessionKey{
 		transcriptID: event.TranscriptExternalID(),
 		sessionID:    event.SessionID,
 	}
-	fence := index.completedFences[readinessFenceKey{session: session, runID: event.RunID, turnID: event.TurnID}]
+	fenceKey := readinessFenceKey{session: session, runID: event.RunID, turnID: event.TurnID}
+	fence := index.completedFences[fenceKey]
+	if fence.Kind == OperatorReleaseKind || index.operatorReleases[fenceKey] || release.state.releasesTurn(event.TurnID) {
+		// A pending release is also a hold fence: interrupted rewriting must
+		// not become ready through a later runtime terminal or new prompt.
+		return fence.Kind == OperatorReleaseKind && !fence.OccurredAt.Before(event.OccurredAt) &&
+			operatorReleasedEventSafe(event)
+	}
 	if !fence.OccurredAt.IsZero() && !fence.OccurredAt.Before(event.OccurredAt) {
 		// Pending may have read this snapshot before a sealed hook rewrote the
 		// outbox, while the marker became visible afterward. Only the redacted
@@ -2434,6 +2564,9 @@ func finalizePendingWithin(
 	pending PendingEvent,
 	maxWait, pollInterval time.Duration,
 ) (finalized PendingEvent, ready bool, err error) {
+	if pending.submission != nil {
+		return pending, true, nil
+	}
 	event := pending.Event
 	if event.Runtime != RuntimeGrokBuild || event.HookEvent != "Stop" ||
 		event.Kind != "turn.completed" || event.Role != "system" {
@@ -2442,10 +2575,10 @@ func finalizePendingWithin(
 	if event.NativeTurnFinalized {
 		return pending, true, nil
 	}
-	if eventSealedContentOmitted(event.Data) {
-		// Never rehydrate a sealed turn from Grok's native transcript: its final
-		// assistant chunk may contain the authorized revealed value that the
-		// value-free Stop hook deliberately suppressed.
+	if eventSealedContentOmitted(event.Data) || eventOperatorReleased(event.Data) {
+		// Never rehydrate sealed or operator-released turns from Grok's native
+		// transcript. Suppression removes the durable prompt ID, and native
+		// content could reintroduce values excluded from the captured event.
 		event.NativeTurnFinalized = true
 		if err := validatePendingRewritePath(pending.Path, event); err != nil {
 			return pending, false, err
@@ -2453,7 +2586,8 @@ func finalizePendingWithin(
 		if err := writeJSONAtomic(pending.Path, event); err != nil {
 			return pending, false, fmt.Errorf("persist suppressed grok Stop event: %w", err)
 		}
-		return PendingEvent{Path: pending.Path, Event: event}, true, nil
+		pending.Event = event
+		return pending, true, nil
 	}
 	if strings.TrimSpace(event.SourceTranscriptPath) == "" {
 		return pending, false, errors.New("unresolved grok Stop event has no native transcript path")
@@ -2487,7 +2621,8 @@ func finalizePendingWithin(
 		if err := writeJSONAtomic(pending.Path, event); err != nil {
 			return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
 		}
-		return PendingEvent{Path: pending.Path, Event: event}, true, nil
+		pending.Event = event
+		return pending, true, nil
 	}
 
 	event.Kind = "message.assistant"
@@ -2503,7 +2638,8 @@ func finalizePendingWithin(
 	if err := writeJSONAtomic(pending.Path, event); err != nil {
 		return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
 	}
-	return PendingEvent{Path: pending.Path, Event: event}, true, nil
+	pending.Event = event
+	return pending, true, nil
 }
 
 func eventSealedContentOmitted(raw json.RawMessage) bool {
@@ -2544,7 +2680,9 @@ func validatePendingRewritePath(path string, event Event) error {
 
 // RemovePending acknowledges one uploaded event.
 func RemovePending(path string) error {
-	return os.Remove(path)
+	// Preserve value-free acknowledgement before removing the attempted
+	// snapshot, including when an active release kept the original event.
+	return removePendingWithAcknowledgement(path)
 }
 
 // AcquireFlushLock keeps background flushers from uploading the same files.
@@ -2625,6 +2763,23 @@ func sessionHash(sessionID string) string {
 }
 
 func loadSessionState(runtime, sessionID string) (sessionState, error) {
+	state, err := loadMutableSessionState(runtime, sessionID)
+	if err != nil {
+		return sessionState{}, err
+	}
+	release, err := loadOperatorReleaseState(runtime, sessionID)
+	if err != nil {
+		return sessionState{}, err
+	}
+	if release != nil {
+		// Hooks from an older executable overwrite or remove the ordinary
+		// session file. Only the separate release record is authoritative.
+		state.OperatorRelease = release
+	}
+	return state, nil
+}
+
+func loadMutableSessionState(runtime, sessionID string) (sessionState, error) {
 	path, err := sessionStatePath(runtime, sessionID)
 	if err != nil {
 		return sessionState{}, err
@@ -2659,6 +2814,13 @@ func saveSessionState(runtime, sessionID string, state sessionState) error {
 	path, err := sessionStatePath(runtime, sessionID)
 	if err != nil {
 		return err
+	}
+	if state.OperatorRelease != nil {
+		// Publish the privacy hold before mutable session state or outbox
+		// changes. Legacy writers do not know this path and cannot erase it.
+		if err := saveOperatorReleaseState(runtime, sessionID, state.OperatorRelease); err != nil {
+			return err
+		}
 	}
 	return writeJSONAtomic(path, state)
 }
