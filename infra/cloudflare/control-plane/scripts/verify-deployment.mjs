@@ -265,6 +265,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
+    "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "WITSELF_EDGE_RELEASE_COMMIT",
@@ -284,7 +285,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
       config.vars.CP_SIGNUP_DAILY_LIMIT_PER_IP !== "10" ||
       config.vars.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== "500" ||
       config.vars.CP_SIGNUP_OPEN !== "true" ||
-      config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false") {
+      config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false" ||
+      config.vars.CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED !== "false") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
   parseManagedDeliveryAccountAllowlist(
@@ -307,7 +309,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
   if (!sameJSON(config.routes, [{
     pattern: "self.witwave.ai",
     custom_domain: true,
-  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *"] })) {
+  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *", "1-59/5 * * * *"] })) {
     throw new Error("generated config route and schedule contract did not match");
   }
   if (!sameJSON(config.send_email, [{ name: "EMAIL" }])) {
@@ -640,6 +642,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
+    "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
@@ -707,6 +710,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
     ["CP_SIGNUP_OPEN", "true"],
     ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
+    ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
   ]) {
     exactPlainBinding(bindings, name, value);
   }

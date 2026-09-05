@@ -811,6 +811,34 @@ test("release renderer injects matching immutable container and Worker identity"
     /Worker vars/,
     "release identity stamps must not hide a silently closed signup gate",
   );
+  for (const replacement of ["", '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "true",',
+    '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": false,']) {
+    assert.throws(
+      () => expectedBuildMetadata(config.replace(
+        '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "false",', replacement,
+      )),
+      /Worker vars/,
+      "release config must explicitly pin the container-reaching probe off",
+    );
+  }
+  assert.match(config, /"crons"\s*:\s*\["\*\/5 \* \* \* \*", "1-59\/5 \* \* \* \*"\]/);
+  for (const crons of [
+    [],
+    ["*/5 * * * *"],
+    ["1-59/5 * * * *"],
+    ["*/5 * * * *", "*/5 * * * *"],
+    ["*/5 * * * *", "*/10 * * * *"],
+    ["*/5 * * * *", "1-59/5 * * * *", "*/10 * * * *"],
+  ]) {
+    assert.throws(
+      () => expectedBuildMetadata(config.replace(
+        /"crons"\s*:\s*\[[^\]]*\]/,
+        `"crons": ${JSON.stringify(crons)}`,
+      )),
+      /route and schedule contract/,
+      "release config must pin distinct maintenance and probe cron triggers",
+    );
+  }
   assert.throws(
     () => expectedBuildMetadata(config.replace(
       '"namespace_id": "1002"',
@@ -947,6 +975,11 @@ test("release renderer injects matching immutable container and Worker identity"
     config,
     /"CP_SUPPORT_EMAIL_INTAKE_ENABLED"\s*:\s*"false"/,
     "release config must keep support email intake dark by default",
+  );
+  assert.match(
+    config,
+    /"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED"\s*:\s*"false"/,
+    "release config must keep the container-reaching uptime probe off by default",
   );
   assert.match(
     config,
@@ -1285,6 +1318,7 @@ function deployedVersion(overrides = {}) {
           ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
           ["CP_SIGNUP_OPEN", "true"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
+          ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
           name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
@@ -1679,6 +1713,26 @@ test("Worker version verification checks annotations, bindings, and script etag"
     () => verifyWorkerVersion(wrongDirectory, expected, versionID),
     /wrong AGENT_EMAIL_DIRECTORY KV binding/,
   );
+});
+
+test("Worker version verification pins the container-reaching uptime probe off as a plain variable", () => {
+  const name = "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED";
+  for (const replacement of [
+    null,
+    { name, type: "plain_text", text: "true" },
+    { name, type: "plain_text", text: false },
+    { name, type: "secret_text" },
+  ]) {
+    const candidate = deployedVersion();
+    candidate.resources.bindings = candidate.resources.bindings.filter((binding) =>
+      binding.name !== name);
+    if (replacement) candidate.resources.bindings.push(replacement);
+    assert.throws(
+      () => verifyWorkerVersion(candidate, expectedIdentity(), versionID),
+      /wrong CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED binding/,
+      "ordinary deployment must reject an absent, enabled, mistyped, or secret probe gate",
+    );
+  }
 });
 
 test("Worker version verification rejects stamped script and runtime drift", () => {

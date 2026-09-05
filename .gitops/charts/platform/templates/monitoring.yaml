@@ -211,6 +211,16 @@ spec:
             type: ClusterIP
           prometheusSpec:
             replicas: 1
+{{ if $monitoring.uptimeProbes.enabled }}
+            additionalScrapeConfigs:
+              - job_name: witself-probes
+                scheme: https
+                metrics_path: /metrics/probes
+                scrape_interval: 60s
+                static_configs:
+                  - targets:
+                      - self.witwave.ai:443
+{{ end }}
             retention: {{ $monitoring.prometheus.retention | quote }}
             retentionSize: {{ $monitoring.prometheus.retentionSize | quote }}
             resources:
@@ -379,6 +389,10 @@ spec:
           platform:
 {{ toYaml (dict "groups" $groups) | nindent 12 }}
 {{- end }}
+{{ if $monitoring.uptimeProbes.enabled }}
+          uptime-probes:
+{{ .Files.Get "files/uptime-probes.rules.yaml" | nindent 12 }}
+{{ end }}
 {{ end }}
   destination:
     server: {{ .Values.gitops.destinationServer | quote }}

@@ -50,7 +50,7 @@ cell_renders = {}
   abort "#{cell} ACME support contact missing" unless issuer&.dig("spec", "acme", "email") == "support@witwave.ai"
 end
 
-existing_group_names = %w[founder-open-plane postgresql].flat_map do |file|
+existing_group_names = %w[founder-open-plane postgresql uptime-probes].flat_map do |file|
   YAML.safe_load(File.read(File.join(platform_chart, "files", "#{file}.rules.yaml")), aliases: false).fetch("groups").map { |group| group.fetch("name") }
 end
 

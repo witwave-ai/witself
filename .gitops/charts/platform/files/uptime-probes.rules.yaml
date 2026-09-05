@@ -1,0 +1,88 @@
+groups:
+  - name: witself-uptime-probes
+    interval: 30s
+    rules:
+      - alert: WitselfProbeTargetDown
+        # Bridge brief scrape gaps without retaining observations beyond five minutes.
+        expr: last_over_time(witself_probe_up[5m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: 'Synthetic uptime probe failed for {{ $labels.target }}.'
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeStale
+        # Bridge brief scrape gaps: a frozen timestamp must keep ageing, not reset the pending alert.
+        expr: time() - last_over_time(witself_probe_last_check_timestamp_seconds[5m]) > 900
+        for: 10m
+        labels:
+          severity: warning
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: 'Synthetic uptime probe has no recent check for {{ $labels.target }}.'
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeScrapeDown
+        expr: up{job="witself-probes"} == 0
+        for: 15m
+        labels:
+          severity: critical
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: The control-plane synthetic uptime metrics endpoint is unreachable from the cell.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeSchedulerStale
+        # Same bounded lookback so intermittent scrape failures cannot hide a stopped scheduler.
+        expr: time() - last_over_time(witself_probe_scheduler_last_run_timestamp_seconds[5m]) > 900
+        for: 10m
+        labels:
+          severity: critical
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: The synthetic uptime probe scheduler has no recent run.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeDirectoryUnavailable
+        expr: witself_probe_directory_ok == 0
+        for: 15m
+        labels:
+          severity: warning
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: The synthetic uptime probe scheduler cannot read the cell directory.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeResultsMissing
+        # absent() has no scrape labels; match it explicitly to the scheduler.
+        expr: (witself_probe_scheduler_target_count > 0 and witself_probe_snapshot_target_count == 0) or (witself_probe_scheduler_target_count > 0 and on() absent(witself_probe_up))
+        for: 15m
+        labels:
+          severity: critical
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: The scheduler reports registered targets but no probe results are exposed (persistence failure or stalled writes).
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeNoTargets
+        expr: witself_probe_scheduler_target_count == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: The synthetic uptime probe scheduler has no cell targets.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfProbeBudgetExhausted
+        expr: sum(witself_probe_skipped) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: synthetic-probes
+          witself_alert: "true"
+        annotations:
+          summary: Synthetic uptime probes are being skipped because the run budget is exhausted.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes

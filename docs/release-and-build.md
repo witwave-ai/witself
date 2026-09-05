@@ -71,6 +71,30 @@ activation ordering remain separate rollout gates; transcript retention's
 disabled-to-preview sequence is in
 [Transcript Retention](transcript-retention.md#control-plane-lifecycle-rollout).
 
+Synthetic uptime probes use a dedicated `1-59/5 * * * *` Cron Trigger and the
+existing `DIRECTORY` KV binding. The ordinary CP deploy installs this trigger,
+the scheduled cell probe handler, and the public, uncached `/metrics/probes`
+endpoint. After deploy, verify that the Worker has exactly two Cron Triggers:
+`*/5 * * * *` for maintenance and `1-59/5 * * * *` for probes (minutes 1, 6,
+through 56 UTC). The deployment verifier pins both expressions. The handler
+dispatches each cron to its own work; separate invocations give probes their
+own six-connection budget, even if cron timings overlap. The four-worker probe
+pool leaves headroom for KV operations. No new namespace or secret needs
+operator setup. The container-reaching CP `/v1/version` probe is disabled by the plain variable
+`CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED: "false"`, pinned in the template and
+both generated-config and deployed-version verification. It is omitted from
+results and metrics while disabled. The serving cell's scrape job and alert
+rules arrive through its
+normal GitOps sync, with `platform.monitoring.uptimeProbes.enabled` default off
+and enabled only in `civo-sandbox-usw2-dev`. No probe-specific `deploy:plans`
+step is needed. See [Synthetic uptime probes](observability-and-operations.md#synthetic-uptime-probes)
+for targets, result fields, alert routing, and the existing-plan cost rationale.
+Cell probes remain active without warming the CP container. Future CP-target
+activation requires a reviewed cost decision because the five-minute probe
+would prevent the container's ten-minute idle shutdown. Flip the template's
+plain variable and both verifier pins together in source, then use the normal
+CP deploy; do not add a secret or change the gate out of band.
+
 The managed outbound agent-email sending adapter is a third, separately gated
 Cloudflare deployment. The tag workflow validates its committed lockfile,
 tests, and Worker bundle but intentionally does not provision its Email Sending

@@ -111,6 +111,10 @@
     // The support@ bridge remains undiscoverable until its independently
     // provisioned bearer and every cell-side route are ready.
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED": "false",
+    // CP /v1/version renews the backend container's idle timer. Keep its
+    // five-minute probe off until a reviewed cost decision flips this plain
+    // variable and both deployment verifier pins together; no secret is used.
+    "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "false",
     // Open self-service signup is ACTIVE (ratified 2026-08-29 per the keyed
     // procedure in docs/signup-abuse-hardening.md). Invite-less signups
     // require Turnstile plus the daily quotas below; setting this back to
@@ -175,8 +179,18 @@
   // keep their own opt-in gates. Plan lifecycle also no-ops unless its explicit
   // runtime gate and private bridge credential are configured; when enabled it
   // wakes the scale-to-zero Go container for one bounded, KV-cursor-backed page.
+  // A separate trigger runs ONLY public uptime probes (four fetches at a time,
+  // 10s per request after dispatch, 25s total with 5s for persistence). Dispatch
+  // requires the full 10s to fit; skipped targets retain their last completed
+  // observation without refreshing its timestamp. DIRECTORY stores value-free
+  // target results and a scheduler record even for empty/failed discovery.
+  // Maintenance runs at minutes 0,5,...55 UTC; probes at 1,6,...56 UTC. Separate
+  // invocations have independent six-connection budgets, even if work overlaps
+  // or future cron schedules coincide. Keep the handler paths distinct.
+  // Cell probes reuse DIRECTORY and need no secret; the CP probe stays gated
+  // off above. Alertmanager retains all alert delivery keys.
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["*/5 * * * *", "1-59/5 * * * *"]
   },
   // Periodic account backups are an additive opt-in. The binding is
   // intentionally absent from the committed deployment config, which the
