@@ -24,7 +24,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `general` | **conditional** | 5/7 pass | 2 |
 | [Agent avatars](#agent-avatars) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
 | [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
-| [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **conditional** | 5/6 pass | 1 |
+| [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **accepted** | 6/6 pass | 0 |
 | [Agent email receive](#agent-email-receive) | Email | `implemented` | `limited` | **conditional** | 4/7 pass | 4 |
 | [Agent email send](#agent-email-send) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 4 |
 | [Agent self, context, and foreground hydration](#agent-self-context) | Agent experience | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -190,7 +190,8 @@ The loopback-only per-agent Agent Console is `witself dashboard`, with passive o
 
 - Implementation: `implemented`
 - Managed rollout: `not applicable`
-- Readiness: **conditional**
+- Readiness: **accepted**
+- Retained release/cohort evidence: `v0.0.275` — Release run 33999426386: dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (stub cell, headless Chromium, seven panels, redaction canary), retained 90 days.
 - Detailed docs: [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [api-routes.md](../docs/api-routes.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md)
 
 | Gate | State | Current evidence and conclusion |
@@ -200,12 +201,10 @@ The loopback-only per-agent Agent Console is `witself dashboard`, with passive o
 | Bounds / abuse | **PASS** | Loopback binding, host checks, process-local credentials, method/body caps, CSP, bounded pages, sanitized SVG, a double allow-listed entitlement projection, and strict email projections that remove ids, bodies, provider payloads, billing fields, and action targets constrain the browser boundary. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go), [self_test.go](../internal/server/self_test.go) |
 | Observability | **N/A** | This is an operator-started local foreground process, not an always-on managed service; status, startup errors, and foreground logs are its explicit operator surface. |
 | Recovery | **PASS** | Per-process registry claims, stale-process detection, conservative stop behavior, transactional preference persistence, and process-local credentials make crash and restart recovery bounded. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [registry_test.go](../internal/dashboard/registry_test.go), [dashboard_preferences_integration_test.go](../internal/store/dashboard_preferences_integration_test.go) |
-| Rollout / canaries | **CONDITIONAL** | The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for all seven panels, cell-applied entitlement states, both email directions, and disabled or unavailable states. [release.yml](../.github/workflows/release.yml), [agent-console.md](../docs/agent-console.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
+| Rollout / canaries | **PASS** | Release v0.0.275 retained dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (run 33999426386, 90 days): headless Chromium proved the bare-URL 401, token-to-cookie handoff, all seven panels, no console or request errors, an absent redaction canary, then status and stop. [release.yml](../.github/workflows/release.yml), [agent-console.md](../docs/agent-console.md), [run.mjs](../scripts/dashboard-acceptance/run.mjs) |
 | Docs / support | **PASS** | The command, presentation matrix, cell-applied entitlement schema and compatibility states, domain-ownership boundary, local lifecycle, received/sent email projections, and distinction from the fleet-admin TUI and any future hosted console are documented. [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
 
-Open gates:
-
-- `dashboard-release-acceptance` (rollout / canaries): Retain current cross-platform release acceptance for serve, status, stop, browser authentication, all seven panels, cell-applied entitlement states, independent received/sent email metadata, live updates, strict redaction, and graceful disabled or unavailable states. ([tracking/evidence](../docs/agent-console.md))
+Open gates: none.
 
 <a id="agent-email-receive"></a>
 
