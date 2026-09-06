@@ -747,6 +747,182 @@ guarantees concern durable state and fencing, not model action.
 - The backend can pass every test without any provider credential or model
   network call.
 
+### Retained canary
+
+Backlog #342 gate `current-live-request-canary` requires a retained live record
+from two agents in the Founder realm. The executable workflow is
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh).
+It takes two explicit endpoint/token-file bindings and checks each authenticated
+agent against its expected agent name, then derives the immutable IDs and checks
+that both agents are distinct and in the same account and realm. It uses only
+these supplied bindings; it does not discover or reveal another agent's secrets.
+
+Claude runs the live canary separately with the real Founder-realm bindings and
+replaces the pending block below with the value-free record. The offline shim
+suite validates the script, but does not satisfy the live gate.
+
+```sh
+bash scripts/run-collaboration-canary.sh \
+  --coordinator-endpoint "$COORDINATOR_ENDPOINT" \
+  --coordinator-token-file "$COORDINATOR_TOKEN_FILE" \
+  --coordinator-agent "$COORDINATOR_AGENT_NAME" \
+  --worker-endpoint "$WORKER_ENDPOINT" \
+  --worker-token-file "$WORKER_TOKEN_FILE" \
+  --worker-agent "$WORKER_AGENT_NAME" \
+  --realm "$REALM_NAME" \
+  --out ./collaboration-canary.json \
+  --timeout-seconds 30 \
+  --redact-check
+```
+
+`--realm` supplies the installed realm name (default `default`); the Founder
+realm's actual name must come from the bindings rather than its descriptive
+label. The output destination must not already exist. `--timeout-seconds` sets
+each ordinary polling deadline (1–120 seconds; default 30); proportional backoff
+is capped by the remaining polling budget. The offer window reserves five such
+budgets plus 65 seconds for opening recovery, paginated discovery, marker lookup,
+and offering: 70–665 seconds, within the backend's 15-minute limit. Selection
+has a separate bounded wait covering that window plus one ordinary budget and
+15 seconds, because other realm candidates may remain pending until offers close.
+A CLI HTTP call has its own 15-second timeout
+and may finish after the polling deadline, so this is not a whole-command wall
+clock limit. Leases reserve five ordinary polling budgets including their final
+HTTP calls, plus 30 seconds: 110–705 seconds across the supported input range.
+The first attempt renews once before its failed result. The retry renews once
+after the coordinator's answer, keeping both halves of that conversation within
+the lease budget and verifying the same claim fence with a later expiry.
+Request lifetime separately reserves the offer window, the selection wait,
+fifteen ordinary polls including their final HTTP calls, and 60 seconds
+(456–3,550 seconds), so
+the request expiry does not clip those leases. Each request has one assignee. A deviation or
+timeout exits non-zero and identifies the failed leg. On errors and handled
+`INT`/`TERM` signals, the coordinator attempts to cancel its still-open request
+to invalidate reservations and claims and releases any outstanding ordinary
+question claim. The script does not cancel requests that the protocol has
+already closed; failed cleanup is reported as a failure rather than evidence
+that a lease was removed.
+
+| Leg | Required observed transition |
+|---|---|
+| a | The coordinator opens a `client_ranked` realm request with `max_assignees=1`, bounded expiry, and a body containing the fixed `WITSELF_COLLABORATION_CANARY_V1` prefix plus a unique run nonce and attempt number. |
+| b | The worker lists open candidate requests, identifies this request and marker, and submits an offer. |
+| c | The coordinator observes the offer and selects the worker after selection becomes available. |
+| d | The worker claims the assignment, renews once with the same claim and generation, verifies the request/selection/worker identities and a strictly later valid UTC lease expiry, and completes with an intentionally failed result. |
+| e | The coordinator reads the failed result and observes the completed request and claim failure accounting; it opens a second request, and the worker offers, is selected, and claims this retry. |
+| f | The worker escalates a question requiring new scope as an ordinary `question` reply to the retry opening message, addressed back to the coordinator. |
+| g | The coordinator claims and reads that question, then completes it with an answer drawn from the original context: new scope is denied and the original bounded canary may proceed. The worker renews the retry claim once with its existing fence. The coordinator acknowledges the completed question. |
+| h | The worker reads and acknowledges the answer, resumes the original scope, and completes the second request successfully. |
+| i | The coordinator reads and acknowledges the terminal result and verifies that the retry request is closed. |
+
+The backend does not interpret a result body as success or failure. Completing
+the sole claim closes the first request even when the client reports failure;
+therefore this canary uses a second request for its retry. It records both IDs
+and the actual `failure_count`, which remains zero on this completion path.
+`message request release --deterministic-failure` is the separate mechanism that
+increments durable failure accounting; a failure word in a result does not.
+The escalation exercises an authority boundary without granting new authority:
+the coordinator's scripted answer refuses the expansion and permits only the
+original canary context.
+
+The JSON record schema is `witself.collaboration-canary.v1`:
+
+| Field | Retained evidence |
+|---|---|
+| `schema`, `release_version` | Schema discriminator and the semantic version (or `dev`) parsed from `witself --version`; the full version-output line is not retained. |
+| `realm_id`, `coordinator_agent_id`, `worker_agent_id` | Authenticated realm and immutable participant IDs. |
+| `request_id`, `retry_request_id` | Original and second-attempt request IDs. |
+| `started_at`, `finished_at`, `pass` | UTC run bounds and aggregate verdict. |
+| `legs` | Nine ordered `{leg, pass}` verdicts, including false for unfinished legs. |
+| `transitions` | Ordered objects with UTC `at`, `leg`, `attempt`, `event`, and observation `polls`; nested `request`, `claims`, `message`, and `processing` contain only available allowlisted IDs, states, counters, fences, and timestamps. Failure/cleanup events contain only applicable metadata. |
+| `cleanup` | `not_needed`, `already_terminal`, `cancelled`, or `failed`. |
+| `redaction_checked` | `true` only in a record that passed the self-scan before publication. |
+
+Request counters include `max_assignees`, `candidate_count`, `offer_count`, and
+`selection_generation`. Claim and processing records preserve `generation`,
+`failure_count`, and lease/result metadata. Message records preserve
+`causal_depth`, the parent and thread IDs, read/processing states, and actual
+failure accounting. An early failure can leave not-yet-observed top-level IDs or
+the release version empty; unfinished legs remain false.
+
+Initial opening responses, exact-key recovery, and worker discovery must match
+the full opening body for this run and attempt. Another active canary's shared
+marker and agent identities do not establish ownership or permit cancellation.
+
+Transitions retain only allowlisted metadata. The record contains no message
+bodies, run nonces, tokens, endpoint URLs, or local/home paths. The redaction self-scan runs
+before retaining a record; `--redact-check` explicitly requests the same check.
+Finding a canary body or either supplied token in the record fails the run.
+An existing record can also be scanned offline, without invoking `witself` or
+changing that record:
+
+```sh
+bash scripts/run-collaboration-canary.sh --redact-check \
+  --out ./collaboration-canary.json \
+  --coordinator-token-file "$COORDINATOR_TOKEN_FILE" \
+  --worker-token-file "$WORKER_TOKEN_FILE"
+```
+
+#### CLI implementation references
+
+The script uses the verbs and flags below. Every bound command also receives
+`--realm`, `--agent`, `--endpoint`, and `--token-file`, defined at
+[message.go:61–64](../cmd/witself/message.go#L61), in that order;
+`self show` defines the same flags at
+[main.go:2807–2810](../cmd/witself/main.go#L2807). All bound commands also receive
+the shared [`--json` flag at main.go:409](../cmd/witself/main.go#L409).
+Body text is passed through stdin. The HTTP call timeout is defined at
+[client.go:359](../internal/client/client.go#L359).
+
+| Used verb | Additional arguments/flags | CLI definition |
+|---|---|---|
+| `witself --version` | None; no binding flags. | [main.go:127](../cmd/witself/main.go#L127) |
+| `self show` | `--no-facts`, `--no-salient` | [main.go:2811–2812](../cmd/witself/main.go#L2811) |
+| `message request open` | `--body-stdin`, `--selection-policy client_ranked`, `--max-assignees 1`, `--offer-window DURATION`, `--expires-in DURATION`, `--idempotency-key KEY` | Body: [message_request.go:68](../cmd/witself/message_request.go#L68); policy through key: [70–74](../cmd/witself/message_request.go#L70). |
+| `message request list` | `--state open`, `--role candidate`, `--limit 100`, `--cursor CURSOR` | State: [message_request.go:126](../cmd/witself/message_request.go#L126); role through cursor: [128–130](../cmd/witself/message_request.go#L128). |
+| `message request show` | `MRQ_ID` | [message_request.go:167](../cmd/witself/message_request.go#L167) |
+| `message request offer` | `MRQ_ID`, `--body-stdin`, `--idempotency-key KEY` | Body: [message_request.go:210](../cmd/witself/message_request.go#L210); key: [212](../cmd/witself/message_request.go#L212). |
+| `message request select` | `MRQ_ID`, `--selected-agent AGENT_ID`, `--reservation DURATION`, `--idempotency-key KEY` | [message_request.go:294–296](../cmd/witself/message_request.go#L294) |
+| `message request claim` | `MRQ_ID`, `--lease DURATION`, `--idempotency-key KEY` | [message_request.go:362–363](../cmd/witself/message_request.go#L362) |
+| `message request renew` | `MRQ_ID`, `--claim CLAIM_ID`, `--generation N`, `--lease DURATION` | [message_request.go:395–397](../cmd/witself/message_request.go#L395) |
+| `message request complete` | `MRQ_ID`, `--claim CLAIM_ID`, `--generation N`, `--body-stdin`, `--idempotency-key KEY` | Fence: [message_request.go:463–464](../cmd/witself/message_request.go#L463); body: [468](../cmd/witself/message_request.go#L468); key: [470](../cmd/witself/message_request.go#L470). |
+| `message request cancel` (abort) | `MRQ_ID` | [message_request.go:327](../cmd/witself/message_request.go#L327) |
+| `message reply` | `MSG_ID`, `--kind question`, `--body-stdin`, `--idempotency-key KEY` | Kind: [message.go:203](../cmd/witself/message.go#L203); body: [206](../cmd/witself/message.go#L206); key: [208](../cmd/witself/message.go#L208). |
+| `message claim` | `MSG_ID`, `--lease DURATION`, `--idempotency-key KEY` | [message.go:460–461](../cmd/witself/message.go#L460) |
+| `message read`, `message ack` | `MSG_ID` | [message.go:368](../cmd/witself/message.go#L368), [message.go:413](../cmd/witself/message.go#L413) |
+| `message complete` | `MSG_ID`, `--claim CLAIM_ID`, `--generation N`, `--kind answer`, `--body-stdin`, `--idempotency-key KEY` | Fence: [message.go:570–571](../cmd/witself/message.go#L570); kind: [573](../cmd/witself/message.go#L573); body: [576](../cmd/witself/message.go#L576); key: [578](../cmd/witself/message.go#L578). |
+| `message release` (abort) | `MSG_ID`, `--claim CLAIM_ID`, `--generation N` | [message.go:533–534](../cmd/witself/message.go#L533) |
+
+The complete [request dispatch at message_request.go:27](../cmd/witself/message_request.go#L27)
+is `open`, `list`, `show`, `offer`, `decline`, `select`, `cancel`, `claim`,
+`renew`, `release`, and `complete`. This canary does not invoke request `decline`
+or request `release --deterministic-failure`. The ordinary
+[message dispatch at message.go:14](../cmd/witself/message.go#L14) also exposes
+`send`; escalation here uses the documented `reply --kind question` path,
+not a separate escalation verb or a new direct send.
+
+Offline verification uses a `PATH`-shimmed `witself` state machine with the CLI's
+JSON response shapes; it makes no server calls:
+
+```sh
+bash -n scripts/run-collaboration-canary.sh scripts/test-collaboration-canary.sh
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck scripts/run-collaboration-canary.sh scripts/test-collaboration-canary.sh
+fi
+bash scripts/test-collaboration-canary.sh
+```
+
+The suite enforces offer deadlines and covers delayed opening/discovery, lost
+opening responses, waiting for other pending candidates, and preservation of
+another active canary. Claim and request deadlines are enforced by the shim;
+six-second-call scenarios cover retry lease maintenance and request-expiry
+headroom after a full offer-window wait. It also covers all nine legs; separate discovery and offer
+timeouts with cancellation; missing retry; unanswered escalation; missing, unchanged, or
+incorrect-identity renewal responses; record-body redaction; and help/usage
+validation. Cleanup cases also verify that a terminal response for a different
+request or question cannot suppress cancellation or claim release.
+
+<!-- canary-record: pending live run -->
+
 ## Deferred Extensions And Tunables
 
 - Default short reply wait, offer window, request expiry, lease duration, and
