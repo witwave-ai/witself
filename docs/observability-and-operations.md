@@ -720,18 +720,13 @@ retained canary artifact. Two receivers are configured independently:
   alerting plane itself. Omitting its Secret omits the route, receiver, and
   mount.
 
-<<<<<<< HEAD
 The Witself product rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
 worker's existing closed-set job label. PostgreSQL rules additionally retain
 the namespace, scrape job, and instance needed to identify the failing exporter
 target, while removing database, user, application, and wait-event labels.
-=======
-The application rules aggregate away pod, instance, route, account, realm,
-and agent identity. They expose only fixed service/severity labels and the
-worker's existing closed-set job label. Synthetic uptime rules additionally
-retain the public directory cell name in a `target` label.
->>>>>>> 8f97689 (Synthetic uptime probes: control-plane cron scheduler, cell-scraped metrics, and alert rules)
+Synthetic uptime rules additionally retain the public directory cell name in a
+`target` label.
 
 This capability is now live on the serving cell. Shared chart defaults remain
 disabled, and the staged GitOps rollout — stack, then targets, then alerting —
