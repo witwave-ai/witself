@@ -850,6 +850,25 @@ in [self-hosting.md](self-hosting.md) and use explicit endpoint/token flags.
 Client-held vault custody also applies in development; a server-side local KMS
 is not the agent-secret implementation.
 
+## Avatar Lifecycle Acceptance
+
+[`scripts/run-avatar-acceptance.sh`](../scripts/run-avatar-acceptance.sh) checks
+a fresh synthetic agent's lifecycle, payload compaction, paginated history,
+whole-account self export, and an operator rollback-only backup restore drill.
+The [live acceptance procedure and record](agent-avatars.md#live-acceptance-record)
+define the private workspace, release matching, backup-write authorization, and
+value-free evidence requirements. This is an operator-run live workflow;
+`--rehearsal` still performs its mutations.
+
+Run its isolated contract gate without a server or credentials:
+
+```sh
+bash scripts/test-avatar-acceptance.sh
+```
+
+The gate substitutes `witself` and `curl` on `PATH`; both `make check-infra` and
+the CI `helm` job run it.
+
 ## Remaining Roadmap Workflows
 
 The explicitly fenced sections above cover policy testing and grants, security

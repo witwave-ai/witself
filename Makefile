@@ -342,4 +342,5 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-roll-cell-gate.sh
 	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-monitoring-rollout.sh
+	bash scripts/test-avatar-acceptance.sh
 	@echo "check-infra: infra gates green"
