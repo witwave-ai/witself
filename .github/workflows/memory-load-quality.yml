@@ -1,0 +1,268 @@
+name: memory load quality
+
+on:
+  workflow_dispatch:
+    inputs:
+      postgres_image:
+        description: Hosted PostgreSQL reference tier
+        type: choice
+        default: pgvector/pgvector:pg16
+        options:
+          - pgvector/pgvector:pg16
+          - pgvector/pgvector:pg17
+          - pgvector/pgvector:pg18
+      slices:
+        description: Harness slices (all retains the complete five-slice evidence)
+        type: choice
+        default: all
+        options:
+          - all
+          - lexical
+          - curation
+          - recall
+          - archive
+          - concurrency
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-load-quality
+  cancel-in-progress: false
+
+jobs:
+  validate-ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.ref.outputs.release }}
+      postgres_image_label: ${{ steps.ref.outputs.postgres_image_label }}
+    steps:
+      - name: Require main or an exact semantic-version tag
+        id: ref
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          POSTGRES_IMAGE: ${{ inputs.postgres_image }}
+        run: |
+          core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          pre='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          build='[0-9A-Za-z-]+'
+          semver_tag="^refs/tags/v${core}(-${pre}(\.${pre})*)?(\+${build}(\.${build})*)?$"
+          if [[ "$RELEASE_REF" == refs/heads/main ]]; then
+            release="main-${COMMIT:0:7}"
+          elif [[ "$RELEASE_REF" =~ $semver_tag ]]; then
+            release="${RELEASE_REF#refs/tags/}"
+          else
+            echo "::error::memory load quality must be dispatched from main or an exact semantic-version tag"
+            exit 1
+          fi
+          if (( ${#release} > 128 )); then
+            echo "::error::release label exceeds the sanitized metadata limit"
+            exit 1
+          fi
+          case "$POSTGRES_IMAGE" in
+            pgvector/pgvector:pg16|pgvector/pgvector:pg17|pgvector/pgvector:pg18) ;;
+            *) echo "::error::unsupported PostgreSQL reference tier"; exit 1 ;;
+          esac
+          printf 'release=%s\npostgres_image_label=%s\n' "$release" "${POSTGRES_IMAGE##*:}" >> "$GITHUB_OUTPUT"
+
+  measure:
+    needs: validate-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_REQUIRE_DATABASE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Build before any logs exist, so compilation cannot prevent redaction.
+      - name: Build evidence reporter
+        run: go build -o "$RUNNER_TEMP/memory-load-quality-manifest" ./internal/cmd/memory-load-quality-manifest
+
+      - name: Start PostgreSQL
+        id: postgres
+        env:
+          POSTGRES_IMAGE: ${{ inputs.postgres_image }}
+        run: |
+          docker run -d --name memory-load-quality-postgres -p 5432:5432 \
+            -e POSTGRES_USER=witself -e POSTGRES_PASSWORD=witself -e POSTGRES_DB=witself \
+            "$POSTGRES_IMAGE"
+          for _attempt in {1..60}; do
+            if docker exec memory-load-quality-postgres pg_isready -h 127.0.0.1 -U witself -d witself; then
+              version=$(docker exec memory-load-quality-postgres psql -U witself -d witself -Atc 'SHOW server_version_num')
+              printf 'server_version_num=%s\n' "$version" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::PostgreSQL reference tier did not become ready"
+          exit 1
+
+      - name: Measure lexical
+        id: lexical
+        if: always() && steps.postgres.outcome == 'success' && (inputs.slices == 'all' || inputs.slices == 'lexical')
+        env:
+          WITSELF_MEMORY_LOAD_QUALITY: "1"
+          WITSELF_MEMORY_LOAD_QUALITY_RESULTS: ${{ github.workspace }}/evidence/memory-lexical.json
+          WITSELF_MEMORY_LOAD_QUALITY_SEED: "20260717"
+          WITSELF_MEMORY_LOAD_QUALITY_NOISE_MEMORIES: "250"
+          WITSELF_MEMORY_LOAD_QUALITY_QUERY_ITERATIONS: "25"
+          WITSELF_MEMORY_LOAD_QUALITY_CONCURRENCY: "4"
+          WITSELF_MEMORY_LOAD_QUALITY_RELEASE: ${{ needs.validate-ref.outputs.release }}
+          WITSELF_MEMORY_LOAD_QUALITY_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_LOAD_QUALITY_PROVIDER: github-hosted
+          WITSELF_MEMORY_LOAD_QUALITY_HARDWARE_TIER: ubuntu-latest-${{ needs.validate-ref.outputs.postgres_image_label }}
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryLoadQualityPostgres$' \
+            -count=1 -v -timeout 30m 2>&1 | tee evidence/test-lexical.log
+
+      - name: Measure curation
+        id: curation
+        if: always() && steps.postgres.outcome == 'success' && (inputs.slices == 'all' || inputs.slices == 'curation')
+        env:
+          WITSELF_MEMORY_CURATION_LOAD: "1"
+          WITSELF_MEMORY_CURATION_LOAD_RESULTS: ${{ github.workspace }}/evidence/memory-curation.json
+          WITSELF_MEMORY_CURATION_LOAD_SEED: "20260831"
+          WITSELF_MEMORY_CURATION_LOAD_COALESCING_REQUESTS: "24"
+          WITSELF_MEMORY_CURATION_LOAD_CLAIM_REQUESTS: "6"
+          WITSELF_MEMORY_CURATION_LOAD_CLAIM_WORKERS: "4"
+          WITSELF_MEMORY_CURATION_LOAD_PAGING_CARDINALITIES: "4,16,64"
+          WITSELF_MEMORY_CURATION_LOAD_PAGE_SIZE: "8"
+          WITSELF_MEMORY_CURATION_LOAD_CHAIN_BACKLOG: "24"
+          WITSELF_MEMORY_CURATION_LOAD_CHAIN_CAP: "6"
+          WITSELF_MEMORY_CURATION_LOAD_LEASE_CYCLES: "3"
+          WITSELF_MEMORY_CURATION_LOAD_MAX_ATTEMPTS: "3"
+          WITSELF_MEMORY_CURATION_LOAD_RELEASE: ${{ needs.validate-ref.outputs.release }}
+          WITSELF_MEMORY_CURATION_LOAD_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_CURATION_LOAD_PROVIDER: github-hosted
+          WITSELF_MEMORY_CURATION_LOAD_HARDWARE_TIER: ubuntu-latest-${{ needs.validate-ref.outputs.postgres_image_label }}
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryCurationLoadPostgres$' \
+            -count=1 -v -timeout 12m 2>&1 | tee evidence/test-curation.log
+
+      - name: Measure recall
+        id: recall
+        if: always() && steps.postgres.outcome == 'success' && (inputs.slices == 'all' || inputs.slices == 'recall')
+        env:
+          WITSELF_MEMORY_RECALL_LOAD: "1"
+          WITSELF_MEMORY_RECALL_LOAD_RESULTS: ${{ github.workspace }}/evidence/memory-recall.json
+          WITSELF_MEMORY_RECALL_LOAD_SEED: "20260831"
+          WITSELF_MEMORY_RECALL_LOAD_CARDINALITIES: "100,500,2000"
+          WITSELF_MEMORY_RECALL_LOAD_QUERY_ITERATIONS: "10"
+          WITSELF_MEMORY_RECALL_LOAD_CONCURRENCY: "4"
+          WITSELF_MEMORY_RECALL_LOAD_VECTOR_DIMENSIONS: "32"
+          WITSELF_MEMORY_RECALL_LOAD_VECTOR_COVERAGE_PERCENTAGES: "100,50"
+          WITSELF_MEMORY_RECALL_LOAD_PAGINATION_LIMIT: "64"
+          WITSELF_MEMORY_RECALL_LOAD_RESULT_BUDGET: "256"
+          WITSELF_MEMORY_RECALL_LOAD_RELEASE: ${{ needs.validate-ref.outputs.release }}
+          WITSELF_MEMORY_RECALL_LOAD_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_RECALL_LOAD_PROVIDER: github-hosted
+          WITSELF_MEMORY_RECALL_LOAD_HARDWARE_TIER: ubuntu-latest-${{ needs.validate-ref.outputs.postgres_image_label }}
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryRecallLoadPostgres$' \
+            -count=1 -v -timeout 12m 2>&1 | tee evidence/test-recall.log
+
+      - name: Measure archive
+        id: archive
+        if: always() && steps.postgres.outcome == 'success' && (inputs.slices == 'all' || inputs.slices == 'archive')
+        env:
+          WITSELF_MEMORY_ARCHIVE_LOAD: "1"
+          WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS: ${{ github.workspace }}/evidence/memory-archive.json
+          WITSELF_MEMORY_ARCHIVE_LOAD_SEED: "20260831"
+          WITSELF_MEMORY_ARCHIVE_LOAD_CARDINALITIES: "100,500,2000"
+          WITSELF_MEMORY_ARCHIVE_LOAD_VERSIONS_PER_MEMORY: "2"
+          WITSELF_MEMORY_ARCHIVE_LOAD_EVIDENCE_PER_MEMORY: "2"
+          WITSELF_MEMORY_ARCHIVE_LOAD_RELATIONS_PER_MEMORY: "1"
+          WITSELF_MEMORY_ARCHIVE_LOAD_TAGS_PER_VERSION: "3"
+          WITSELF_MEMORY_ARCHIVE_LOAD_TRANSCRIPT_SHARE_PERCENT: "25"
+          WITSELF_MEMORY_ARCHIVE_LOAD_TRANSCRIPT_ENTRIES_PER_SELECTED_MEMORY: "2"
+          WITSELF_MEMORY_ARCHIVE_LOAD_VECTOR_DIMENSIONS: "32"
+          WITSELF_MEMORY_ARCHIVE_LOAD_RELEASE: ${{ needs.validate-ref.outputs.release }}
+          WITSELF_MEMORY_ARCHIVE_LOAD_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_ARCHIVE_LOAD_PROVIDER: github-hosted
+          WITSELF_MEMORY_ARCHIVE_LOAD_HARDWARE_TIER: ubuntu-latest-${{ needs.validate-ref.outputs.postgres_image_label }}
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryArchiveLoadPostgres$' \
+            -count=1 -v -timeout 15m 2>&1 | tee evidence/test-archive.log
+
+      - name: Measure concurrency
+        id: concurrency
+        if: always() && steps.postgres.outcome == 'success' && (inputs.slices == 'all' || inputs.slices == 'concurrency')
+        env:
+          WITSELF_MEMORY_CONCURRENCY_LOAD: "1"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_RESULTS: ${{ github.workspace }}/evidence/memory-concurrency.json
+          WITSELF_MEMORY_CONCURRENCY_LOAD_SEED: "20260901"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_ACCOUNTS: "4"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_REALMS_PER_ACCOUNT: "2"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_AGENTS_PER_REALM: "4"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_SEED_MEMORIES_PER_AGENT: "4"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_WORKERS_PER_AGENT: "2"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_OPERATIONS_PER_WORKER: "2"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_ISOLATION_ITERATIONS: "2"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_CLAIM_WORKERS: "4"
+          WITSELF_MEMORY_CONCURRENCY_LOAD_RELEASE: ${{ needs.validate-ref.outputs.release }}
+          WITSELF_MEMORY_CONCURRENCY_LOAD_COMMIT: ${{ github.sha }}
+          WITSELF_MEMORY_CONCURRENCY_LOAD_PROVIDER: github-hosted
+          WITSELF_MEMORY_CONCURRENCY_LOAD_HARDWARE_TIER: ubuntu-latest-${{ needs.validate-ref.outputs.postgres_image_label }}
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          go test ./internal/store \
+            -run '^TestNarrativeMemoryConcurrencyLoadPostgres$' \
+            -count=1 -v -timeout 60m 2>&1 | tee evidence/test-concurrency.log
+
+      - name: Write manifest
+        id: manifest
+        if: always()
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_REF: ${{ github.ref }}
+          RELEASE: ${{ needs.validate-ref.outputs.release }}
+          COMMIT: ${{ github.sha }}
+          POSTGRES_IMAGE_LABEL: ${{ needs.validate-ref.outputs.postgres_image_label }}
+          POSTGRES_SERVER_VERSION_NUM: ${{ steps.postgres.outputs.server_version_num }}
+          SLICES: ${{ inputs.slices }}
+          LEXICAL_OUTCOME: ${{ steps.lexical.outcome }}
+          CURATION_OUTCOME: ${{ steps.curation.outcome }}
+          RECALL_OUTCOME: ${{ steps.recall.outcome }}
+          ARCHIVE_OUTCOME: ${{ steps.archive.outcome }}
+          CONCURRENCY_OUTCOME: ${{ steps.concurrency.outcome }}
+        run: |
+          mkdir -p evidence
+          "$RUNNER_TEMP/memory-load-quality-manifest" --evidence evidence --out evidence/workflow-manifest.json
+
+      - name: Retain sanitized reference evidence
+        # A failed reporter must never permit raw logs to bypass sanitization.
+        if: always() && steps.manifest.outputs.safe_to_upload == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: memory-load-quality-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90

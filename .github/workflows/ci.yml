@@ -478,6 +478,9 @@ jobs:
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh
 
+      - name: memory load quality workflow contract checks
+        run: bash scripts/test-memory-load-quality-workflow.sh
+
       - name: monitoring rollout capability checks
         run: |
           bash scripts/test-monitoring-rollout.sh

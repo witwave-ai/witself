@@ -170,9 +170,10 @@ deployment cells under a thin global control plane.
   through OpenAI's official Codex plugin — read-only review lanes, a
   workspace-write task lane that Claude runs only inside its own worktree,
   and the verification and merge ownership Claude keeps.
-- [memory-load-quality.md](memory-load-quality.md): the deterministic
-  PostgreSQL load/quality harness, current exploratory baseline, evidence
-  schema, and remaining production workload/SLO work.
+- [memory-load-quality.md](memory-load-quality.md): the five deterministic
+  PostgreSQL load/quality slices, manual GitHub-hosted reference workflow and
+  sanitized run manifest, exploratory baselines, and remaining managed-cloud
+  workload/SLO work.
 - [deployment-cells.md](deployment-cells.md): the multi-cloud deployment
   topology — a fleet of independent cells, each authoritative for its own
   tenants, under a thin global control plane that does placement and routing

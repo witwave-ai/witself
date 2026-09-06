@@ -1675,6 +1675,11 @@ after a live, version-gated conformance test passes.
   redaction, isolation, latency, throughput, and sanitized evidence slice in
   [memory-load-quality.md](memory-load-quality.md); the first local PostgreSQL
   result is exploratory, not a production SLO.
+- [x] Implement the manual, ref-gated GitHub-hosted five-slice workflow and
+  sanitized 90-day run manifest in
+  [memory-load-quality.md](memory-load-quality.md#protected-repeatable-workflow).
+  The first hosted artifact still needs post-merge verification; managed-cloud
+  baselines and their protected environment remain separate follow-up work.
 - [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
   load-test queue claims and fencing, bounded curation plans, lexical/vector
   indexes, archive rebuild, high-cardinality accounts, and concurrent agents.
