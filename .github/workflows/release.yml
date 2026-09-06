@@ -353,7 +353,11 @@ jobs:
         run: go env GOOS GOARCH
 
       - name: Build native Witself client
-        run: go build ./cmd/witself
+        shell: bash
+        run: |
+          executable_suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi
+          go build -o "$RUNNER_TEMP/witself-native-smoke$executable_suffix" ./cmd/witself
 
       - name: Install GoReleaser for exact client artifact gate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3

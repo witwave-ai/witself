@@ -40,6 +40,11 @@ def check(text, workflow):
                  "PowerShell static analysis", "Native platform safety primitives",
                  "Managed instruction platform primitives", "Codex Windows hook contract"):
         step(native, name)
+    build = step(native, "Build native Witself client")
+    require("shell: bash" in build and
+            'if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi' in build and
+            'go build -o "$RUNNER_TEMP/witself-native-smoke$executable_suffix" ./cmd/witself' in build,
+            "preliminary native build must leave the checkout clean on Windows")
     runner = step(native, "Run provider contracts and retain sanitized outcomes")
     require("shell: bash" in runner, "portable runner shell")
     require('"$reporter" run' in runner and 'go build -o "$reporter" ./tools/provider-contract-evidence' in runner,
@@ -133,6 +138,8 @@ try:
     canaries = [
         ("matrix omission", "- target: linux-arm64", "- target: unsupported"),
         ("missing neighbor", "name: Codex Windows hook contract", "name: Removed hook gate"),
+        ("checkout build output", 'go build -o "$RUNNER_TEMP/witself-native-smoke$executable_suffix" ./cmd/witself',
+         'go build ./cmd/witself'),
         ("wrong archive input", '--dist dist', '--dist unrelated'),
         ("lost exit", '"$reporter" run', '"$reporter" obsolete'),
         ("failed upload skipped", "if: always()", "if: success()"),
