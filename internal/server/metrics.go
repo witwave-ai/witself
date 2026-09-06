@@ -28,6 +28,10 @@ type runtimeMetrics struct {
 	httpRequests map[httpMetricLabels]uint64
 	httpLatency  map[httpDurationLabels]*metricHistogram
 
+	selfDigestReads   map[selfDigestLabels]uint64
+	selfDigestLatency map[string]*metricHistogram
+	selfDigestElided  map[string]*metricHistogram
+
 	memoryOperations      map[memoryOperationMetricLabels]uint64
 	memoryRecalls         map[recallMetricLabels]uint64
 	memoryRecallTime      map[recallDurationLabels]*metricHistogram
@@ -51,6 +55,10 @@ type httpMetricLabels struct {
 
 type httpDurationLabels struct {
 	Method, Route string
+}
+
+type selfDigestLabels struct {
+	Surface, Elided, Result string
 }
 
 type operationMetricLabels struct {
@@ -137,12 +145,20 @@ type metricHistogram struct {
 }
 
 var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// Keep the hydration alert's 1.5-second threshold on an exact bucket boundary:
+// interpolation across 1..2.5 seconds otherwise reports healthy reads as slow.
+// Other metric families retain their existing bucket contracts.
+var selfDigestLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 5, 10}
 var hitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100}
 
 func newRuntimeMetrics() *runtimeMetrics {
-	return &runtimeMetrics{
+	metrics := &runtimeMetrics{
 		httpRequests:          make(map[httpMetricLabels]uint64),
 		httpLatency:           make(map[httpDurationLabels]*metricHistogram),
+		selfDigestReads:       make(map[selfDigestLabels]uint64),
+		selfDigestLatency:     make(map[string]*metricHistogram),
+		selfDigestElided:      make(map[string]*metricHistogram),
 		memoryOperations:      make(map[memoryOperationMetricLabels]uint64),
 		memoryRecalls:         make(map[recallMetricLabels]uint64),
 		memoryRecallTime:      make(map[recallDurationLabels]*metricHistogram),
@@ -166,6 +182,18 @@ func newRuntimeMetrics() *runtimeMetrics {
 			{Result: "error", Reason: "error"}:     0,
 		},
 	}
+	// Seed the complete closed set so the first request or error has an
+	// observable increase even when a serving cell has little hydration traffic.
+	for _, surface := range []string{"session_hook", "prompt_hook", "other"} {
+		for _, elided := range []string{"false", "true"} {
+			for _, result := range []string{"success", "error"} {
+				metrics.selfDigestReads[selfDigestLabels{Surface: surface, Elided: elided, Result: result}] = 0
+			}
+		}
+		metrics.selfDigestLatency[surface] = &metricHistogram{Buckets: make([]uint64, len(selfDigestLatencyBuckets))}
+		metrics.selfDigestElided[surface] = &metricHistogram{Buckets: make([]uint64, len(hitBuckets))}
+	}
+	return metrics
 }
 
 func (m *runtimeMetrics) instrument(next http.Handler) http.Handler {
@@ -207,6 +235,7 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 }
 
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
+	cfg.metrics = m
 	if operation := cfg.IngestAgentEmailPilot; operation != nil {
 		cfg.IngestAgentEmailPilot = func(
 			ctx context.Context,
@@ -624,6 +653,17 @@ func (m *runtimeMetrics) observeCurationOperation(operation string, err error) {
 	m.curationOperations[operationMetricLabels{Operation: operation, Result: metricResult(err == nil)}]++
 }
 
+// observeSelfDigest accepts only the raw hydration header as its surface input;
+// metricSurface maps it to server-owned labels before anything is retained.
+func (m *runtimeMetrics) observeSelfDigest(surface string, elided bool, dropped int, err error, elapsed time.Duration) {
+	surface = metricSurface(surface)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.selfDigestReads[selfDigestLabels{Surface: surface, Elided: strconv.FormatBool(elided), Result: metricResult(err == nil)}]++
+	observeHistogram(m.selfDigestLatency, surface, elapsed.Seconds(), selfDigestLatencyBuckets)
+	observeHistogram(m.selfDigestElided, surface, float64(max(0, dropped)), hitBuckets)
+}
+
 func (m *runtimeMetrics) observeRecall(principalKind string, request MemoryRecallRequest, page MemoryRecallPage, err error, elapsed time.Duration) {
 	principalKind = metricPrincipalKind(principalKind)
 	mode := metricRecallMode(page.RetrievalMode)
@@ -832,6 +872,9 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		httpInFlight:          m.httpInFlight,
 		httpRequests:          maps.Clone(m.httpRequests),
 		httpLatency:           cloneHistogramMap(m.httpLatency),
+		selfDigestReads:       maps.Clone(m.selfDigestReads),
+		selfDigestLatency:     cloneHistogramMap(m.selfDigestLatency),
+		selfDigestElided:      cloneHistogramMap(m.selfDigestElided),
 		memoryOperations:      maps.Clone(m.memoryOperations),
 		memoryRecalls:         maps.Clone(m.memoryRecalls),
 		memoryRecallTime:      cloneHistogramMap(m.memoryRecallTime),
@@ -878,6 +921,15 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeHistogramMap(w, "witself_http_request_duration_seconds", "API request duration by bounded route template and method.", m.httpLatency, latencyBuckets, func(k httpDurationLabels) string {
 		return labels("method", k.Method, "route", k.Route)
+	})
+	writeCounterMap(w, "witself_self_digest_reads_total", "Self-digest reads by bounded hydration surface, elision, and result.", m.selfDigestReads, func(k selfDigestLabels) string {
+		return labels("surface", k.Surface, "elided", k.Elided, "result", k.Result)
+	})
+	writeHistogramMap(w, "witself_self_digest_read_duration_seconds", "Self-digest handler duration including authentication by bounded hydration surface.", m.selfDigestLatency, selfDigestLatencyBuckets, func(surface string) string {
+		return labels("surface", surface)
+	})
+	writeHistogramMap(w, "witself_self_digest_elided_entries", "Known omitted self-digest entries by bounded hydration surface: encoded byte-budget trimming plus exact store selection counts when requested; excludes unknown pagination overflow when counts are disabled.", m.selfDigestElided, hitBuckets, func(surface string) string {
+		return labels("surface", surface)
 	})
 	writeCounterMap(w, "witself_memory_operations_total", "Narrative-memory domain operations by operation, principal kind, and result.", m.memoryOperations, func(k memoryOperationMetricLabels) string {
 		return labels("operation", k.Operation, "principal_kind", k.PrincipalKind, "result", k.Result)
@@ -979,6 +1031,17 @@ func escapeMetricLabel(value string) string {
 	value = strings.ReplaceAll(value, "\\", "\\\\")
 	value = strings.ReplaceAll(value, "\n", "\\n")
 	return strings.ReplaceAll(value, "\"", "\\\"")
+}
+
+func metricSurface(header string) string {
+	switch header {
+	case "session":
+		return "session_hook"
+	case "prompt":
+		return "prompt_hook"
+	default:
+		return "other"
+	}
 }
 
 func metricMethod(method string) string {

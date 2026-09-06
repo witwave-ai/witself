@@ -844,3 +844,219 @@ tests:
       - eval_time: 10m
         alertname: WitselfAuditAppendFailures
         exp_alerts: []
+  - name: self digest errors require ten sustained minutes and remove source labels
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="false",result="error",pod="private-pod"}
+      values: 0+6x20
+    - series: witself_self_digest_reads_total{surface="prompt_hook",elided="false",result="success",pod="private-pod"}
+      values: 0+94x20
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts: []
+    - eval_time: 11m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest reads exceed the bounded error ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: self digest errors stay silent below and at the traffic floor then fire above it
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="false",result="error",pod="private-pod"}
+      values: 0+1x16 19+3x16 73+6x20
+    alert_rule_test:
+    - eval_time: 15m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts: &id001 []
+    - eval_time: 31m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts: *id001
+    - eval_time: 49m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest reads exceed the bounded error ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: self digest errors stay silent at five percent and fire above it
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="false",result="error",pod="private-pod"}
+      values: 0+3x16 54+6x20
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="false",result="success",pod="private-pod"}
+      values: 0+57x16 966+54x20
+    alert_rule_test:
+    - eval_time: 15m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts: []
+    - eval_time: 31m
+      alertname: WitselfSelfDigestErrorRatioHigh
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest reads exceed the bounded error ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: self digest latency is silent at p95 1.4 seconds then fires and recovers
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1",pod="private-pod"}
+      values: 0+410x16 6912+352x20 14362+410x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1.5",pod="private-pod"}
+      values: 0+420x16 7120+400x20 15540+420x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="2.5",pod="private-pod"}
+      values: 0+440x57
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="+Inf",pod="private-pod"}
+      values: 0+440x57
+    alert_rule_test:
+    - eval_time: 15m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+    - eval_time: 31m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest read p95 latency exceeds 1.5 seconds.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+    - eval_time: 52m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+  - name: self digest latency requires ten sustained minutes
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1",pod="private-pod"}
+      values: 0+350x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1.5",pod="private-pod"}
+      values: 0+360x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="2.5",pod="private-pod"}
+      values: 0+400x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="+Inf",pod="private-pod"}
+      values: 0+400x20
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+    - eval_time: 11m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest read p95 latency exceeds 1.5 seconds.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+  # The server exposition regression observes actual 1.1s and 1.4s reads and
+  # checks their membership in this dedicated 1.5s bucket. Both uniform streams
+  # have the same histogram shape; the prior 1..2.5s gap falsely estimated 2.425s.
+  - name: self digest uniform 1.1 second reads stay below the latency threshold
+    interval: 1m
+    input_series: &hydration_uniform_below_threshold
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1",pod="private-pod"}
+      values: 0+0x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1.5",pod="private-pod"}
+      values: 0+60x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="2.5",pod="private-pod"}
+      values: 0+60x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="+Inf",pod="private-pod"}
+      values: 0+60x20
+    alert_rule_test:
+    - eval_time: 15m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+  - name: self digest uniform 1.4 second reads stay below the latency threshold
+    interval: 1m
+    input_series: *hydration_uniform_below_threshold
+    alert_rule_test:
+    - eval_time: 15m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+  - name: self digest latency recovers to uniform 1.1 second reads
+    interval: 1m
+    input_series: &hydration_recovery_below_threshold
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1",pod="private-pod"}
+      values: 0+0x41
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1.5",pod="private-pod"}
+      values: 0+0x20 60+60x20
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="2.5",pod="private-pod"}
+      values: 0+60x41
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="+Inf",pod="private-pod"}
+      values: 0+60x41
+    alert_rule_test: &hydration_recovery_expectations
+    - eval_time: 15m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: Self-digest read p95 latency exceeds 1.5 seconds.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+    - eval_time: 27m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+  - name: self digest latency recovers to uniform 1.4 second reads
+    interval: 1m
+    input_series: *hydration_recovery_below_threshold
+    alert_rule_test: *hydration_recovery_expectations
+  - name: self digest elision fires at exactly half after thirty minutes and recovers
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="true",result="success",pod="private-pod"}
+      values: 0+30x36 1080+0x20
+    - series: witself_self_digest_reads_total{surface="prompt_hook",elided="false",result="success",pod="private-pod"}
+      values: 0+30x36 1140+60x20
+    alert_rule_test:
+    - eval_time: 30m
+      alertname: WitselfSelfDigestElisionRatioHigh
+      exp_alerts: []
+    - eval_time: 31m
+      alertname: WitselfSelfDigestElisionRatioHigh
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: At least half of self-digest reads elide entries.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+    - eval_time: 46m
+      alertname: WitselfSelfDigestElisionRatioHigh
+      exp_alerts: []
+  - name: self digest elision is silent below half and fires above half
+    interval: 1m
+    input_series:
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="true",result="success",pod="private-pod"}
+      values: 0+29x36 1075+31x45
+    - series: witself_self_digest_reads_total{surface="other",elided="false",result="success",pod="private-pod"}
+      values: 0+31x36 1145+29x45
+    alert_rule_test:
+    - eval_time: 35m
+      alertname: WitselfSelfDigestElisionRatioHigh
+      exp_alerts: []
+    - eval_time: 76m
+      alertname: WitselfSelfDigestElisionRatioHigh
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: witself-server
+          witself_alert: 'true'
+        exp_annotations:
+          summary: At least half of self-digest reads elide entries.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring

@@ -3170,6 +3170,13 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/v1/self":
+					wantSurface := "session"
+					if test.event == memoryhydration.EventUserPromptSubmit {
+						wantSurface = "prompt"
+					}
+					if got := r.Header.Get("X-Witself-Hydration"); got != wantSurface {
+						t.Errorf("hydration surface = %q, want %q", got, wantSurface)
+					}
 					if r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "true" ||
 						r.URL.Query().Get("include_message_checkpoint") != "true" ||
 						r.URL.Query().Get("include_email_checkpoint") != "true" ||

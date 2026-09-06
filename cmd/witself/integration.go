@@ -2027,8 +2027,9 @@ func transcriptHook(args []string) int {
 }
 
 type installedHydrationSource struct {
-	cfg  transcriptcapture.Config
-	conn *agentConnection
+	cfg     transcriptcapture.Config
+	conn    *agentConnection
+	surface string
 }
 
 func (s *installedHydrationSource) connect(ctx context.Context) (agentConnection, error) {
@@ -2048,6 +2049,7 @@ func (s *installedHydrationSource) Self(ctx context.Context, opts client.SelfOpt
 	if err != nil {
 		return client.SelfDigest{}, err
 	}
+	opts.HydrationSurface = s.surface
 	return client.GetSelf(ctx, conn.Endpoint, conn.Token, opts)
 }
 
@@ -2071,12 +2073,16 @@ func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) 
 	if err != nil {
 		return nil, err
 	}
+	surface := "session"
+	if event.HookEvent == memoryhydration.EventUserPromptSubmit {
+		surface = "prompt"
+	}
 	result, err := memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
 		AccountID: cfg.AccountID, RealmID: cfg.RealmID, RealmName: cfg.Realm,
 		AgentID: cfg.AgentID, AgentName: cfg.AgentName,
 	}, memoryhydration.Request{
 		Runtime: event.Runtime, Event: event.HookEvent, Prompt: event.Body,
-	}, &installedHydrationSource{cfg: cfg})
+	}, &installedHydrationSource{cfg: cfg, surface: surface})
 	if err != nil || !result.Injected {
 		return nil, err
 	}

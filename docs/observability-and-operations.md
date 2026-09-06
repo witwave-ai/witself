@@ -233,9 +233,9 @@ Initial metric families should include:
 | `witself_memory_vector_fallbacks_total` | Hybrid requests that used lexical-only ranking because vectors were missing, stale, or incompatible. This is coverage, not provider health. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
 | `witself_remember_total` | Deferred metric for a future explicit Witself `remember` action, by `routed_kind` (`fact`, `memory`), owner kind, and result. It never carries captured text. |
-| `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
-| `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path performs no model call. |
-| `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
+| `witself_self_digest_reads_total` | Completed `GET /v1/self` reads, including failures, by closed `surface` (`session_hook`, `prompt_hook`, `other`), `elided` (`true`, `false`), and `result` (`success`, `error`). |
+| `witself_self_digest_read_duration_seconds` | Server-side self-digest request latency histogram by the same closed `surface`. The digest path performs no model call. |
+| `witself_self_digest_elided_entries` | Histogram of known omitted fact and memory entries per self read, by the same closed `surface`. Includes encoded byte-budget trimming and, only with `include_counts=true`, exact store selection omissions. With counts disabled, pagination overflow is unknown and excluded from this histogram; it still sets `elided=true` on `witself_self_digest_reads_total`. A zero observation therefore does not imply a complete digest. |
 | `witself_memory_curation_operations_total` | Completed curation domain calls by operation (`start`, `renew`, `plan`, `apply`, `cancel`, `abandon`, `rollback`) and result. Successful idempotent replays count as calls, not as proven state transitions. |
 | `witself_memory_curation_requests` | Due curation requests by bounded state/priority class. No transcript or memory content is exposed. |
 | `witself_memory_curation_runs_total` | Client-run curation transitions by state (`started`, `planned`, `applied`, `conflict`, `abandoned`, `interrupted`, `rolled_back`) and result. |
@@ -440,6 +440,16 @@ metrics on the thin global control plane that owns those decisions (a separate
 surface from any per-cell `/v1` route).
 
 ## Label And Privacy Rules
+
+Self-digest instrumentation maps the request header `X-Witself-Hydration`
+values `session` and `prompt` to `session_hook` and `prompt_hook`; absent or
+unrecognized values map to `other`. This hint is not authenticated runtime
+provenance. The raw header, account/agent ids, tokens, content, byte counts,
+and error text never become labels. Numeric elision counts are histogram
+observations. Errors still contribute latency and an elided-entry observation
+(zero when no digest could be assembled); optional checkpoint unavailability
+remains a successful read under the existing HTTP 200 contract. Server metrics cannot observe client DNS/TLS/deadline failures,
+renderer envelope elision, or Claude Code hook-output rejection.
 
 Metrics are operational metadata, not an escape hatch around the security
 model. They must never expose identity material, secret material, or
@@ -736,6 +746,25 @@ receiver, accepted 2026-08-26.
 The target-cell ServiceMonitors must be enabled only after the monitoring child
 Application and CRDs are Healthy; Argo sync waves in separate parent
 Applications do not establish that ordering.
+
+The self-digest rules in `founder-open-plane.rules.yaml` add recurring
+server evidence with promtool-tested firing, quiet, threshold, and recovery
+cases:
+
+- `WitselfSelfDigestErrorRatioHigh`: more than 5% errored reads over five
+  minutes, with more than 0.05 reads/second, sustained for ten minutes.
+- `WitselfSelfDigestSlow`: five-minute histogram p95 above 1.5 seconds,
+  sustained for ten minutes.
+- `WitselfSelfDigestElisionRatioHigh`: at least half of reads report
+  `elided=true` over five minutes, sustained for thirty minutes.
+
+All three are warnings with only `severity`, `service=witself-server`, and
+`witself_alert=true` rule labels. Thresholds are provisional; low traffic can
+keep the error-ratio alert quiet. No hydration metric-absence rule is added.
+The server/client release must reach the cell before the separate cell-GitOps
+rule rollout. Live hydration alert delivery and recovery acceptance remain
+pending; the prior monitoring acceptance above does not cover these rules.
+See the [Founder runbook](runbooks.md#founder-open-plane-monitoring).
 
 <a id="postgresql-alerts"></a>
 

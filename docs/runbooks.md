@@ -3091,6 +3091,24 @@ in one parent commit.
 6. Observe normal rules and storage growth for the declared acceptance window.
    Update the canonical feature-status catalog only in a later evidence PR.
 
+The hydration rules ship with the platform chart's existing alerting gate.
+First roll the server/client release and confirm self-digest counters and
+histograms on the serving cell after authenticated reads; then roll the rules
+through a separate cell-GitOps PR. No hydration metric-absence rule is present.
+The error threshold (>5% over five minutes, >0.05 reads/second, for ten minutes),
+latency threshold (five-minute p95 >1.5 seconds for ten minutes), and elision
+threshold (at least 50% over five minutes for thirty minutes) are provisional
+and need a serving-cell baseline. The traffic floor may suppress error alerts
+on a quiet cell. Retain separate firing/resolved receiver evidence before
+closing live hydration alert acceptance; local promtool success alone does
+not provide that evidence.
+
+| Hydration alert | First diagnostic step |
+| --- | --- |
+| `WitselfSelfDigestErrorRatioHigh` | Compare `witself_self_digest_reads_total` rates by closed `surface` and `result`; check authentication/refusal behavior and self-loader/database health. Failures include 4xx and 5xx; metrics contain no error text or tenant identity. |
+| `WitselfSelfDigestSlow` | Inspect `witself_self_digest_read_duration_seconds_bucket` by surface and compare server/database latency. The histogram ends at the server and cannot measure client network or hook deadlines. |
+| `WitselfSelfDigestElisionRatioHigh` | Compare the elided read share and `witself_self_digest_elided_entries` histogram. It counts digest byte trimming plus exact store-selection omissions only when `include_counts=true`. Count-disabled pagination hints still set `elided=true`, but their unknown omitted-entry counts are excluded from the histogram; zero does not prove a complete digest. Elision is a bounded-context signal, not proof of failed injection. |
+
 The four identity-capacity and audit-append alerts default
 off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
 until compatible server and worker binaries are deployed, then verify the

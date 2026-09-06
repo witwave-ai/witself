@@ -43,6 +43,113 @@ func TestRuntimeMetricsUseBoundedRouteTemplates(t *testing.T) {
 	}
 }
 
+func TestSelfDigestMetricsAreValueFreeAndBounded(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	handler := apiMux(metrics.instrumentConfig(Config{
+		AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "account_private", RealmID: "realm_private", AccountStatus: "active"}, true, nil
+		},
+	}))
+	for _, header := range []string{"session", "prompt", "", "session_hook", "SESSION", " session", "token_private", strings.Repeat("private_header", 1024)} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/self", nil)
+		request.Header.Set("Authorization", "Bearer token_private")
+		if header != "" {
+			request.Header.Set("X-Witself-Hydration", header)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("self status = %d", response.Code)
+		}
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for surface, count := range map[string]int{"session_hook": 1, "prompt_hook": 1, "other": 6} {
+		for _, want := range []string{
+			fmt.Sprintf(`witself_self_digest_reads_total{surface="%s",elided="false",result="success"} %d`, surface, count),
+			fmt.Sprintf(`witself_self_digest_read_duration_seconds_count{surface="%s"} %d`, surface, count),
+			fmt.Sprintf(`witself_self_digest_elided_entries_count{surface="%s"} %d`, surface, count),
+			fmt.Sprintf(`witself_self_digest_elided_entries_sum{surface="%s"} 0`, surface),
+		} {
+			if !strings.Contains(text, want+"\n") {
+				t.Errorf("metrics missing %q", want)
+			}
+		}
+		prefix := fmt.Sprintf(`witself_self_digest_read_duration_seconds_sum{surface="%s"} `, surface)
+		if _, rest, ok := strings.Cut(text, prefix); ok {
+			value, _, _ := strings.Cut(rest, "\n")
+			elapsed, err := strconv.ParseFloat(value, 64)
+			if err != nil || elapsed <= 0 {
+				t.Errorf("invalid observed latency %q", value)
+			}
+		} else {
+			t.Errorf("missing latency for %s", surface)
+		}
+	}
+	for _, forbidden := range []string{"token_private", "account_private", "agent_private", "realm_private", "private_header", `bytes=`, `account=`, `agent_id=`} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("metrics exposed %q", forbidden)
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "witself_self_digest_") {
+			continue
+		}
+		_, suffix, ok := strings.Cut(line, "{")
+		if !ok {
+			t.Fatalf("missing labels: %s", line)
+		}
+		labelText, _, _ := strings.Cut(suffix, "}")
+		for _, label := range strings.Split(labelText, ",") {
+			key, value, _ := strings.Cut(label, "=")
+			valid := false
+			switch key {
+			case "surface":
+				valid = value == `"session_hook"` || value == `"prompt_hook"` || value == `"other"`
+			case "elided":
+				valid = value == `"true"` || value == `"false"`
+			case "result":
+				valid = value == `"success"` || value == `"error"`
+			case "le":
+				valid = strings.Contains(line, "_bucket{")
+			}
+			if !valid {
+				t.Errorf("unexpected metric label %s", label)
+			}
+		}
+	}
+}
+
+func TestSelfDigestLatencyHistogramHasAlertBoundary(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	for _, elapsed := range []time.Duration{1100 * time.Millisecond, 1400 * time.Millisecond, 1500 * time.Millisecond, 1600 * time.Millisecond} {
+		metrics.observeSelfDigest("prompt", false, 0, nil, elapsed)
+		metrics.observeHTTP(http.MethodGet, "GET /v1/self", http.StatusOK, elapsed)
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for _, want := range []string{
+		`witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1"} 0`,
+		`witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="1.5"} 3`,
+		`witself_self_digest_read_duration_seconds_bucket{surface="prompt_hook",le="2.5"} 4`,
+		`witself_self_digest_read_duration_seconds_count{surface="prompt_hook"} 4`,
+		`witself_http_request_duration_seconds_bucket{method="GET",route="/v1/self",le="1"} 0`,
+		`witself_http_request_duration_seconds_bucket{method="GET",route="/v1/self",le="2.5"} 4`,
+	} {
+		if !strings.Contains(text, want+"\n") {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	// The hydration alert boundary must not change unrelated histogram contracts.
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "witself_http_request_duration_seconds_bucket{") && strings.Contains(line, `le="1.5"`) {
+			t.Errorf("self-digest boundary leaked into HTTP histogram: %s", line)
+		}
+	}
+}
+
 func TestAgentEmailCellStorageMetricsAreValueFreeAndBounded(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	reads := 0
