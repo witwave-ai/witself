@@ -248,7 +248,7 @@ evidence documents that name the same Witself release and commit.
 
 ## What Verification Checks
 
-The verifier combines two independent evidence sources:
+The verifier combines two independent acceptance evidence sources:
 
 - visible transcript entries prove the real runtime and observed client
   version, exact prompt boundaries, six distinct sessions, identity response,
@@ -265,6 +265,17 @@ The verifier combines two independent evidence sources:
   prove the sensitive fact is clear on exact read and redacted in a broad list,
   the peer can read its own fixture, and the subject cannot read the peer
   fixture through its default owner scope.
+
+When a local hydration ledger is available, verification also summarizes
+observations for the selected runtime from `prepared_at` through `verified_at`.
+This optional telemetry records hook attempts, injections, failures, elision,
+output rejection, and maximum latency. It does not bind an observation to a
+particular acceptance stage or prove that the model received the context.
+Delivery detail says `observed` only when the run window has hook attempts;
+otherwise it says `capability-only`, including guided fallbacks and missing
+ledgers. History-dependent recall still requires the narrative marker in the
+assistant answer. These local scripts do not become an unattended regression
+job merely by retaining hydration observations.
 
 The harness does not accept a self-reported provider response as the only
 proof. It also does not infer a successful memory write merely because a
@@ -303,9 +314,27 @@ The retained schema is
   },
   "identity": {},
   "peer_identity": {},
+  "hydration": {
+    "attempts": 4,
+    "injected": 3,
+    "failures": 0,
+    "elided_count": 1,
+    "hook_output_rejected": 0,
+    "max_latency_ms": 120
+  },
   "cases": []
 }
 ```
+
+The top-level `hydration` block is optional and additive within schema v1;
+older states and reports, absent ledgers, and guided-fallback runs remain
+valid. Its six numeric fields are value-free counts and milliseconds, not
+prompt, query, context, identity, or raw error data. `attempts` can exceed
+`injected + failures` because an ordinary prompt can validly need no context.
+Degraded recall can count as both an injection and a failure; the counters
+are not disjoint. The ledger is local and bounded, so missing observations
+are unknown and do not establish hydration success or failure. Marker rejection
+still applies to the entire serialized report, including this block.
 
 Every report contains exactly seven named cases:
 

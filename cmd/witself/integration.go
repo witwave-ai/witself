@@ -1936,6 +1936,7 @@ func runtimeTargets(value string) ([]string, error) {
 }
 
 func transcriptHook(args []string) int {
+	started := time.Now()
 	// Curator processes intentionally inherit provider/runtime credentials so
 	// they can run local inference, but their own hooks must not feed the
 	// resulting synthesis conversation back into the transcript ledger. That
@@ -1955,6 +1956,11 @@ func transcriptHook(args []string) int {
 		return 0
 	}
 	if foreignGrokCompatibilityHook(*runtime, os.Getenv(grokHookEventEnv)) {
+		return 0
+	}
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
+	if err != nil || len(raw) > maxHookInputBytes {
+		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
 		return 0
 	}
 	if strings.TrimSpace(*witselfHome) != "" {
@@ -1980,6 +1986,7 @@ func transcriptHook(args []string) int {
 		}()
 		installed, loadErr := transcriptcapture.LoadConfig(*runtime)
 		if loadErr != nil {
+			recordHydrationSetupFailure(*runtime, raw, *account, *realm, *agent, *location, started)
 			fmt.Fprintf(os.Stderr, "witself capture: verify WITSELF_HOME binding: %v\n", loadErr)
 			return 0
 		}
@@ -1988,16 +1995,12 @@ func transcriptHook(args []string) int {
 			return 0
 		}
 	}
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
-	if err != nil || len(raw) > maxHookInputBytes {
-		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
-		return 0
-	}
 	event, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw)
 	if errors.Is(err, transcriptcapture.ErrEphemeralSessionSkipped) {
 		return 0
 	}
 	if err != nil {
+		recordHydrationSetupFailure(*runtime, raw, *account, *realm, *agent, *location, started)
 		fmt.Fprintf(os.Stderr, "witself capture: %v\n", err)
 		return 0
 	}
@@ -2024,6 +2027,43 @@ func transcriptHook(args []string) int {
 		_, _ = fmt.Fprintln(os.Stdout, string(output))
 	}
 	return 0
+}
+
+// recordHydrationSetupFailure covers failures before capture can return a
+// normalized event. Only native automatic lifecycle names are eligible; raw
+// input and binding selectors never enter the observation.
+func recordHydrationSetupFailure(runtime string, raw []byte, account, realm, agent, location string, started time.Time) {
+	runtimeName, err := transcriptcapture.NormalizeRuntime(runtime)
+	if err != nil {
+		return
+	}
+	var input struct {
+		HookEventName  string `json:"hook_event_name"`
+		SessionID      string `json:"session_id"`
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if json.Unmarshal(raw, &input) != nil || input.SessionID == "" ||
+		(runtimeName == transcriptcapture.RuntimeCodex && strings.TrimSpace(input.TranscriptPath) == "") {
+		return
+	}
+	capability := memoryhydration.CapabilityFor(runtimeName)
+	eligible := (input.HookEventName == memoryhydration.EventSessionStart && capability.SessionHydration.Automatic) ||
+		(input.HookEventName == memoryhydration.EventUserPromptSubmit && capability.TaskRecall.Automatic)
+	if !eligible {
+		return
+	}
+	outcome := memoryhydration.OutcomeConfigError
+	if cfg, err := transcriptcapture.LoadConfig(runtimeName); err == nil {
+		for _, pair := range [][2]string{{account, cfg.Account}, {realm, cfg.Realm}, {agent, cfg.Agent}, {location, cfg.Location.Name}} {
+			if expected := strings.TrimSpace(pair[0]); expected != "" && expected != pair[1] {
+				outcome = memoryhydration.OutcomeBindingMismatch
+				break
+			}
+		}
+	}
+	_ = memoryhydration.AppendObservation(runtimeName, memoryhydration.NewObservation(memoryhydration.Result{
+		Outcome: outcome, Elapsed: time.Since(started),
+	}))
 }
 
 type installedHydrationSource struct {
@@ -2068,7 +2108,20 @@ func (s *installedHydrationSource) Recall(ctx context.Context, in client.MemoryR
 // automaticHydrationHook uses the exact installed identity and emits context
 // only for runtime/event pairs with a documented model-visible hook channel.
 // Execute owns the short deadline and the renderer's byte/sensitivity bounds.
-func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) ([]byte, error) {
+func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) (output []byte, err error) {
+	started := time.Now()
+	capability := memoryhydration.CapabilityFor(event.Runtime)
+	eligible := (event.HookEvent == memoryhydration.EventSessionStart && capability.SessionHydration.Automatic) ||
+		(event.HookEvent == memoryhydration.EventUserPromptSubmit && capability.TaskRecall.Automatic)
+	result := memoryhydration.Result{Outcome: memoryhydration.OutcomeConfigError}
+	defer func() {
+		if eligible {
+			result.Elapsed = time.Since(started)
+			// Observation persistence is best effort and must never interfere
+			// with output delivery or the hook's fail-open exit contract.
+			_ = memoryhydration.AppendObservation(event.Runtime, memoryhydration.NewObservation(result))
+		}
+	}()
 	cfg, err := transcriptcapture.LoadConfig(event.Runtime)
 	if err != nil {
 		return nil, err
@@ -2077,7 +2130,7 @@ func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) 
 	if event.HookEvent == memoryhydration.EventUserPromptSubmit {
 		surface = "prompt"
 	}
-	result, err := memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
+	result, err = memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
 		AccountID: cfg.AccountID, RealmID: cfg.RealmID, RealmName: cfg.Realm,
 		AgentID: cfg.AgentID, AgentName: cfg.AgentName,
 	}, memoryhydration.Request{
@@ -2086,7 +2139,52 @@ func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) 
 	if err != nil || !result.Injected {
 		return nil, err
 	}
-	return memoryhydration.HookOutput(event.Runtime, event.HookEvent, result.Context)
+	return hydrationHookOutput(event.Runtime, event.HookEvent, &result)
+}
+
+func hydrationHookOutput(runtime, event string, result *memoryhydration.Result) ([]byte, error) {
+	output, err := memoryhydration.HookOutput(runtime, event, result.Context)
+	if err != nil {
+		result.Outcome = memoryhydration.OutcomeOutputRejected
+		result.Injected = false
+	}
+	return output, err
+}
+
+func integrationCmd(args []string) int {
+	if len(args) == 0 || args[0] != "status" {
+		fmt.Fprintln(os.Stderr, "usage: witself integration status --runtime RUNTIME")
+		if commandHelpRequested(args) {
+			return 0
+		}
+		return 2
+	}
+	fs := flag.NewFlagSet("integration status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself integration status --runtime RUNTIME")
+	runtime := fs.String("runtime", "", "installed runtime name")
+	if parsed, code := parseCommandFlags(fs, args[1:]); !parsed {
+		return code
+	}
+	runtimeName, err := transcriptcapture.NormalizeRuntime(*runtime)
+	if err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself integration status --runtime RUNTIME")
+		return 2
+	}
+	now := time.Now().UTC()
+	observations, err := memoryhydration.ReadObservations(runtimeName, now.Add(-24*time.Hour), now)
+	if err != nil {
+		fmt.Println("memory hydration: local ledger unavailable")
+		return 0
+	}
+	summary := memoryhydration.SummarizeObservations(observations)
+	if summary.Attempts == 0 {
+		fmt.Println("memory hydration: no recent hydration (last 24h)")
+		return 0
+	}
+	fmt.Printf("memory hydration (last 24h): attempts=%d injected=%d failures=%d p95_latency_ms=%.1f elided_count=%d\n",
+		summary.Attempts, summary.Injected, summary.Failures, summary.P95LatencyMS, summary.ElidedCount)
+	return 0
 }
 
 func transcriptFlush(args []string) int {

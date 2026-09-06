@@ -177,6 +177,8 @@ func run(args []string) int {
 		return emailDomainCmd(args[1:])
 	case "integrations":
 		return integrationsCmd(args[1:])
+	case "integration":
+		return integrationCmd(args[1:])
 	case "install":
 		return installCmd(args[1:])
 	case "uninstall":
@@ -4226,6 +4228,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	cliout.Line(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
 	cliout.Line(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
+	cliout.Line(w, "  witself integration status --runtime RUNTIME  Show recent local hydration evidence")
 	cliout.Line(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
 	cliout.Line(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
 	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")

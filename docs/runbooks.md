@@ -3109,6 +3109,20 @@ not provide that evidence.
 | `WitselfSelfDigestSlow` | Inspect `witself_self_digest_read_duration_seconds_bucket` by surface and compare server/database latency. The histogram ends at the server and cannot measure client network or hook deadlines. |
 | `WitselfSelfDigestElisionRatioHigh` | Compare the elided read share and `witself_self_digest_elided_entries` histogram. It counts digest byte trimming plus exact store-selection omissions only when `include_counts=true`. Count-disabled pagination hints still set `elided=true`, but their unknown omitted-entry counts are excluded from the histogram; zero does not prove a complete digest. Elision is a bounded-context signal, not proof of failed injection. |
 
+For client-only failures, run `witself integration status --runtime codex` or
+`--runtime claude-code` on the affected machine. Its recent value-free ledger
+summary covers attempts, injections, failures, p95 latency, and elision; no
+recent ledger is unknown rather than healthy. Optional runtime-acceptance
+`hydration` evidence covers only `prepared_at..verified_at`, with maximum
+latency and output-rejection counts. Inspect `timeout`, `self_error`,
+`binding_mismatch`, `recall_degraded`, `output_rejected`, and `config_error`
+outcomes without copying prompts, contexts, tokens, or error text. The ledger
+is not scraped and does not establish which acceptance stage received
+context. Scheduling the authenticated `~/.witself/mra-claude-code.sh` and
+`~/.witself/mra-codex.sh` legs remains Claude-driven operator work; no cron,
+launchd, or CI job is added here. Cursor and Grok legs remain Scott's runtimes.
+Freshness/staleness alerts and live provider regression evidence remain open.
+
 The four identity-capacity and audit-append alerts default
 off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
 until compatible server and worker binaries are deployed, then verify the

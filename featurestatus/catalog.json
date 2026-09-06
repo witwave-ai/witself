@@ -834,7 +834,7 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Integration verification and value-free hook state exist without recurring hydration-success, latency, staleness, truncation, or provider-regression alerts.",
+          "summary": "Server self-digest success, latency, and elision metrics plus tested alert rules exist; local hook ledgers and optional acceptance evidence cover client outcomes. Live alert acceptance, staleness alerts, and scheduled signed-in provider regression remain pending.",
           "evidence": [
             "docs/observability-and-operations.md",
             "docs/provider-integration-certification.md"
@@ -869,7 +869,7 @@
         {
           "id": "self-hydration-operations",
           "gate_ids": ["observability"],
-          "summary": "Add recurring value-free hydration success, latency, staleness, truncation, and provider-regression evidence with a tested alert path.",
+          "summary": "Server hydration evidence and tested alert rules exist; local ledgers and optional acceptance evidence record client outcomes. Retain live alert acceptance, add staleness alerts, and schedule signed-in Claude/Codex regression; Cursor/Grok remain operator-run.",
           "ref": "docs/observability-and-operations.md"
         },
         {

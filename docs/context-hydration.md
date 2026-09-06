@@ -245,15 +245,46 @@ model-visible output contract:
 5. Every checkpoint projection is additive. If one projection is unhealthy,
    `/v1/self` still returns the identity and requested recall content with
    that checkpoint's `unavailable:true` marker rather than failing the digest.
-6. Any configuration, credential, identity, network, timeout, or rendering
-   failure returns success to the runtime with no context. Transcript capture
-   remains queued and the user's prompt proceeds.
+6. Configuration, credential, identity, self-read, or rendering failures return
+   success to the runtime with no context. Optional recall failures may still
+   emit a bounded degradation envelope. Transcript capture remains queued and
+   the user's prompt proceeds.
 
 The executor defaults to a two-second deadline, an 8 KiB context envelope,
 eight salient self memories, and six recall hits. Its intrinsic ceilings are
 five seconds, 16 KiB, and 20 candidates; a caller cannot raise them. The lexical
 keyword-OR query is capped at 12 distinct terms and 768 bytes. No prompt, query,
-digest, memory value, or token is persisted in local hydration state.
+digest, memory value, or token is persisted in the local hydration ledger.
+
+Each supported session/prompt hook records one value-free JSON observation in
+`~/.witself/capture/hydration/<runtime>.jsonl` (or beneath `WITSELF_HOME`). The
+ledger uses mode `0600`; at 512 KiB it compacts to the newest complete lines
+within 256 KiB before appending the incoming observation, without a backup file.
+Observations contain only a timestamp, attempted/injected booleans, elapsed
+milliseconds, context byte count, elision flag, and a closed outcome:
+`injected`, `no_context`, `timeout`, `self_error`, `binding_mismatch`,
+`recall_degraded`, `output_rejected`, or `config_error`. They contain no prompt,
+query, context, token, identity, or free-form error/reason text. Writes are
+best-effort: a ledger failure preserves hook output and the runtime's success
+exit code. An ordinary prompt can validly produce `no_context`. Optional recall
+failures can still inject a degradation envelope: `recall_degraded` or `timeout` may
+therefore have `injected=true` while counting as failures.
+
+The measured duration covers the local hook hydration and output work.
+`context_bytes` measures the context envelope, and `elided` preserves either
+server digest or
+renderer envelope elision. Claude Code's rejection of hook output above
+10,000 characters records `output_rejected` and no injection. These local
+signals complement server metrics, which see the self request (including
+authentication failures) and its own selection/byte-budget trimming.
+
+`witself integration status --runtime codex` (or `claude-code`) prints the
+last 24 hours' attempts, injections, failures, p95 latency, and elision count,
+or `no recent hydration` when no recent observations exist. The ledger is
+per-machine and bounded; it is neither a complete audit log nor a scraped
+metric. Runtime acceptance may include its observations during the prepared
+run window; see [the evidence schema](memory-runtime-acceptance.md#sanitized-evidence-schema).
+No scheduler or background runtime is installed by recording these events.
 
 Current conformance is deliberately asymmetric:
 

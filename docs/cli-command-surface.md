@@ -115,6 +115,7 @@ plumbing, not a customer workflow.
 | `witself` | `ingest` | target | — |
 | `witself` | `install` | implemented | — |
 | `witself` | `integrations` | implemented | — |
+| `witself` | `integration` | implemented | — |
 | `witself` | `legal` | implemented | — |
 | `witself` | `mcp` | implemented | — |
 | `witself` | `memory` | implemented | — |
@@ -3824,6 +3825,24 @@ provider payload is retained; an oversized envelope retains only `raw_omitted`,
 raw prompt payloads for recovered messages. Witself preserves the body
 unchanged when that envelope is malformed, nested, repeated, or has any extra
 bytes; no other runtime uses this normalization.
+
+## `witself integration`
+
+**Family status: implemented.**
+
+Inspect value-free hydration evidence from this machine's local ledger:
+
+```sh
+witself integration status --runtime codex
+witself integration status --runtime claude-code
+```
+
+The summary covers the last 24 hours: attempts, injections, failures, p95
+latency in milliseconds, and elision count. Missing recent observations report
+`no recent hydration`; an unreadable ledger reports `local ledger unavailable`.
+This command reads local state only. It does not contact a server, change an
+installation, or prove that a runtime consumed the prepared context. See
+[Context Hydration](context-hydration.md) for the bounded ledger contract.
 
 ## `witself integrations`
 
