@@ -11,7 +11,7 @@ import (
 )
 
 // Message is one durable direct message. Body and Payload are absent from list
-// results and present after send/read.
+// results and present after send/read/peek.
 type Message struct {
 	ID               string            `json:"id"`
 	AccountID        string            `json:"account_id"`
@@ -397,6 +397,17 @@ func messageListenTransportTimeout(opts MessageListenOptions) time.Duration {
 		timeout = candidate
 	}
 	return timeout
+}
+
+// PeekMessage returns recipient-visible content without changing mailbox state.
+func PeekMessage(ctx context.Context, endpoint, token, messageID string) (Message, error) {
+	var out struct {
+		Message Message `json:"message"`
+	}
+	if err := doJSON(ctx, http.MethodGet, messageActionURL(endpoint, messageID, "peek"), token, nil, &out); err != nil {
+		return Message{}, err
+	}
+	return out.Message, nil
 }
 
 // ReadMessage returns recipient-visible content and marks the message read.

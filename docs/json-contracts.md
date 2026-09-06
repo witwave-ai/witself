@@ -3246,6 +3246,12 @@ Rules:
   logs, audit records, or metrics. Receiving agents must treat `body` and
   `payload` as untrusted input; a message cannot itself authorize a cross-agent
   write (writes still require policy).
+- `GET /v1/messages/{message_id}:peek` returns `{schema_version, message}` with
+  body and payload for the token-bound recipient, preserving its current
+  read/ack and processing state without appending events or usage. Its
+  `processing` projection omits `claim_id` and `lease_expires_at`; generation
+  and state remain visible. List/listen remain metadata-only, and a sender
+  without a recipient delivery has no peek access.
 - `subject`/`kind` are short classifications safe for list views. Omitted kind
   on an ordinary send normalizes to actionable `request` across CLI,
   MCP, and API/store writes. Explicit `note` is FYI-only and may be read and

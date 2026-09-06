@@ -138,7 +138,7 @@ type MessageProcessing struct {
 }
 
 // Message is one direct realm-local agent message plus the recipient's state.
-// Body and Payload are empty on list results and populated only by send/read.
+// Body and Payload are empty on list results and populated only by send/read/peek.
 type Message struct {
 	ID                  string            `json:"id"`
 	AccountID           string            `json:"account_id"`
@@ -1175,6 +1175,41 @@ func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFil
 		return MessagePage{}, fmt.Errorf("commit message mailbox snapshot: %w", err)
 	}
 	return MessagePage{Messages: out, NextCursor: next}, nil
+}
+
+// PeekMessage returns recipient-visible content without changing delivery,
+// processing, audit, or usage state. It revalidates and locks the live caller
+// scope just like the other messaging reads, but never transitions the delivery.
+func (s *Store) PeekMessage(ctx context.Context, p Principal, messageID string) (Message, error) {
+	if p.Kind != PrincipalAgent {
+		return Message{}, ErrMessageForbidden
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return Message{}, fmt.Errorf("%w: message id is required", ErrMessageInputInvalid)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Message{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
+		return Message{}, err
+	}
+	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
+		return Message{}, err
+	}
+	msg, err := messageDeliveryByScopedID(ctx, tx, p.AccountID, p.RealmID, p.ID, messageID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("peek message delivery: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Message{}, err
+	}
+	return redactMessageProcessingFence(msg), nil
 }
 
 // ReadMessage returns content to the recipient and idempotently marks it read.

@@ -130,6 +130,10 @@ func TestMessagingFeatureGateCoversMailboxAndRequestOperationsPostgres(t *testin
 			_, err := st.ReadMessage(ctx, principal, messageID)
 			return err
 		}},
+		{"peek", func() error {
+			_, err := st.PeekMessage(ctx, principal, messageID)
+			return err
+		}},
 		{"ack", func() error {
 			_, err := st.AckMessage(ctx, principal, messageID)
 			return err

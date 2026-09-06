@@ -387,6 +387,11 @@ Rules:
 - `message list` shows metadata and does **not** change read state.
 - `message read <id>` returns `body` + `payload` and transitions `unread` → `read`
   (idempotent; reading an already-read message is a no-op on state).
+- The public API's `GET /v1/messages/{message_id}:peek` returns that recipient's
+  body and payload without changing delivery, processing, read/ack state,
+  audit, or usage. It omits claim ids and lease expiry, including on claimed
+  messages. A sender with no recipient delivery cannot use it to read content.
+  This API prerequisite has no new CLI/MCP verb or Console body display.
 - `message ack <id>` transitions to `acked` (idempotent). Ack is the recipient's
   durable signal that the message was handled, distinct from merely having read
   it.
@@ -516,6 +521,9 @@ acknowledgement are explicit operations.
   carries content; the server validates the inbound parent and derives
   recipient, thread, and `reply_to_message_id`.
 - `POST /v1/messages/{message_id}:read` — mark read (recipient only).
+- `GET /v1/messages/{message_id}:peek` — observational body read (recipient only).
+  GET is required; HEAD does not dispatch a body read. Responses are private,
+  no-store, including refusals.
 - `POST /v1/messages/{message_id}:ack` — acknowledge (recipient only); its
   response is metadata-only and never contains the body or payload.
 - `POST /v1/messages/{message_id}:claim` — acquire or idempotently replay a
@@ -531,8 +539,8 @@ acknowledgement are explicit operations.
   — advance the client-ranked request state machine under token-derived actor
   identity and exact claim fences.
 
-All action subroutes use `POST`, never `GET`. Responses use the shared envelope
-`{schema_version, ok, data, warnings}` and the error-code↔HTTP↔exit-code table.
+Mutating action subroutes use `POST`; observational `:peek` uses `GET` and
+returns the existing `{schema_version, message}` content envelope.
 Route style is pinned in [api-routes.md](api-routes.md) and the contract in
 [api-contract.md](api-contract.md).
 

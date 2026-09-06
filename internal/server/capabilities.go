@@ -45,7 +45,7 @@ func configuredCapabilities(cfg Config) map[string]bool {
 		"transcripts":        transcripts,
 		"transcript_capture": transcripts,
 		"messaging": principal && (cfg.SendMessage != nil || cfg.ListMessages != nil ||
-			cfg.ReadMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil || processing),
+			cfg.ReadMessage != nil || cfg.PeekMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil || processing),
 		"message_listen":     principal && cfg.ListMessages != nil,
 		"message_reply":      principal && cfg.ReplyMessage != nil,
 		"message_processing": processing,

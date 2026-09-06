@@ -44,8 +44,8 @@ func TestCapabilitiesMatchRegisteredRoutes(t *testing.T) {
 			[]string{"POST /v1/transcripts", "GET /v1/transcripts", "GET /v1/transcripts/transcript_1", "POST /v1/transcripts/transcript_1/entries", "POST /v1/transcripts/transcript_1/entries:batch"},
 		},
 		"messaging": {
-			"SendMessage ListMessages ReadMessage AckMessage ReplyMessage ClaimMessage RenewMessageClaim ReleaseMessageClaim CompleteMessage",
-			[]string{"POST /v1/messages", "GET /v1/messages", "POST /v1/messages:listen", "POST /v1/messages/message_1:read", "POST /v1/messages/message_1:ack", "POST /v1/messages/message_1:reply", "POST /v1/messages/message_1:claim", "POST /v1/messages/message_1:renew", "POST /v1/messages/message_1:release", "POST /v1/messages/message_1:complete"},
+			"SendMessage ListMessages ReadMessage PeekMessage AckMessage ReplyMessage ClaimMessage RenewMessageClaim ReleaseMessageClaim CompleteMessage",
+			[]string{"POST /v1/messages", "GET /v1/messages", "POST /v1/messages:listen", "POST /v1/messages/message_1:read", "GET /v1/messages/message_1:peek", "POST /v1/messages/message_1:ack", "POST /v1/messages/message_1:reply", "POST /v1/messages/message_1:claim", "POST /v1/messages/message_1:renew", "POST /v1/messages/message_1:release", "POST /v1/messages/message_1:complete"},
 		},
 		"message_listen": {"ListMessages", []string{"POST /v1/messages:listen"}},
 		"message_reply":  {"ReplyMessage", []string{"POST /v1/messages/message_1:reply"}},
@@ -88,6 +88,7 @@ func TestCapabilitiesMatchRegisteredRoutes(t *testing.T) {
 		"disabled":             {},
 		"authentication_only":  capabilityTestConfig(t, nil),
 		"all_routes":           capabilityTestConfig(t, all),
+		"message_peek_only":    capabilityTestConfig(t, []string{"PeekMessage"}),
 		"fact_read_pair":       capabilityTestConfig(t, []string{"GetFact", "ListFacts"}),
 		"fact_candidate_pair":  capabilityTestConfig(t, []string{"ConfirmFactCandidate", "RejectFactCandidate"}),
 		"vector_recall_routes": capabilityTestConfig(t, []string{"RecallMemories", "PutMemoryVector"}),
