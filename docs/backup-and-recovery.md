@@ -723,6 +723,27 @@ disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine
 drill endpoint into an account-import escape hatch.
 
+The [avatar live acceptance record](agent-avatars.md#live-acceptance-record)
+combines the shipped `witself export` self archive with a separate committed
+backup generation and this rollback-only validation path. It checks a synthetic
+agent's activated, rolled-back, rejected, reset, and compacted avatar lineage.
+The result can attest **validated by rollback-only restore drill**; it cannot
+claim a committed restore of the self export. There is no customer `witself
+import` command, and an active account's non-backup archive is rejected by the
+store's committed import path.
+
+That harness's manual `POST /v1/backups:run` writes another R2 object and is a
+billing-bearing operation requiring operator authorization before the live run.
+An operator may instead wait for the next scheduled generation taken after the
+synthetic lifecycle completes and run the drill against that exact generation.
+A generation predating the synthetic agent cannot prove its avatar lineage.
+This scheduled alternative uses the separate operator procedure; the harness
+itself requests a new backup. It fences the returned minute-slot ID against a
+post-lifecycle observation of the durable current job and catalog, refuses
+explicit existing-object recovery, and requires the matching committed current
+job before drilling. A later `exported_at` alone cannot prove a fresh database
+snapshot.
+
 ### Realm email alias authority recovery
 
 Realm email alias claims, permanent tombstones, reserved-name versions,
