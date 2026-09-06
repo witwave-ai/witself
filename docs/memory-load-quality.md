@@ -1122,6 +1122,81 @@ scale, which is what the slice certifies.
 Cross-release comparisons must follow the Evidence Checklist rules above:
 same seed, same complete workload shape, one dimension changed at a time.
 
+## Protected Repeatable Workflow
+
+[`.github/workflows/memory-load-quality.yml`](../.github/workflows/memory-load-quality.yml)
+provides a manual, secret-free GitHub-hosted reference tier for all five slices.
+Its ref gate accepts only `main` or an exact `v<semver>` tag, including valid
+prerelease/build suffixes. Tags retain their exact name; `main` is labeled
+`main-<sha7>`. Every result also records the full source commit. This workflow
+uses read-only repository permissions and a serialized concurrency group. It
+does not depend on a protected GitHub environment or private runners.
+
+After the workflow is merged, dispatch it from the Actions UI or run:
+
+```sh
+gh workflow run memory-load-quality.yml --ref main \
+  -f postgres_image=pgvector/pgvector:pg16 -f slices=all
+```
+
+Choose `pgvector/pgvector:pg16` (default), `pgvector/pgvector:pg17`, or
+`pgvector/pgvector:pg18`. The job starts a disposable PostgreSQL container on
+`ubuntu-latest`; it uses only the container's throwaway local test credential.
+Result metadata records provider `github-hosted` and hardware tier
+`ubuntu-latest-pg16`, `ubuntu-latest-pg17`, or `ubuntu-latest-pg18`. These labels
+identify the requested image tier; the exact PostgreSQL version remains in each
+slice result, and `SHOW server_version_num` supplies the manifest's numeric
+version. Hosted runner resources can vary between runs; these measurements are
+reference evidence, not production SLOs or a reason to change defaults.
+
+`slices=all` retains lexical, curation, recall, archive, and concurrency results.
+A single named slice is also available for investigation; a passing single-slice
+manifest certifies only that selected slice and is not five-slice evidence.
+Workload values match the Make targets' defaults, including the concurrency
+slice's 32 principals (`4` accounts × `2` realms × `4` agents). Measurements use
+`-count=1` without `-race`. The concurrency test is capped at 60 minutes and the
+whole measurement job at 90 minutes.
+
+The 90-day artifact is named `memory-load-quality-<run_id>` and contains the
+contents of `evidence/`:
+
+- `memory-lexical.json`, `memory-curation.json`, `memory-recall.json`,
+  `memory-archive.json`, and `memory-concurrency.json` for completed selected
+  slices, using the existing versioned result schemas;
+- `test-<slice>.log` for selected tests when the log passes the redaction scan;
+  an offending log is replaced by a value-free `.redacted` marker; and
+- `workflow-manifest.json`, a separate
+  `witself.memory-load-quality-manifest.v1` document with generation time, run
+  URL and attempt, release/commit, sanitized runner name/OS/architecture/environment,
+  PostgreSQL image label and numeric version, each selected slice's schema,
+  artifact path, SHA-256 digest and outcome, and the combined outcome.
+
+The reporter validates each present slice with `internal/loadquality`'s existing
+result validators. It checks file digests and agreement with release, commit,
+and hosted tier metadata. It scans evidence for the test DSN and its topology,
+user, password, and database components without printing those values. A failed
+test, missing result, invalid result, or redaction forces a failed manifest;
+GitHub step outcomes prevent a previously written passing JSON file from hiding
+a test failure. Other selected slices continue after a slice fails.
+
+The reporter is built before measurements and runs even after a failed step.
+Artifact upload also runs after failures, but requires the reporter's
+`safe_to_upload=true` output, emitted only after sanitization and manifest
+validation. If the reporter cannot safely finish, upload is withheld. This
+avoids exposing raw logs when reporting fails. Cancellation or the job timeout
+can prevent finalization; a missing artifact is never a passing result.
+
+The offline contract gate,
+`bash scripts/test-memory-load-quality-workflow.sh`, runs in `make check-infra`
+and CI's Helm job. CI's static-analysis job additionally checks the workflow
+with pinned actionlint. The first dispatch from `main` and review of its retained
+five-slice artifact remain a post-merge verification step.
+
+Managed-cloud measurements remain a separate, Scott-keyed follow-up: they need
+a protected GitHub environment, a DSN secret, reviewed networking/private runner
+access as needed, and approval for any cloud spend. This hosted workflow adds
+none of those settings or resources and does not complete item 8 below.
+
 ## What Still Remains For Issue #46
 
 These five slices intentionally do **not** claim production readiness. Issue #46
@@ -1157,10 +1232,11 @@ still requires:
    client inference and remain outside this model-free store harness.
 8. Managed-cloud baselines on representative hardware, documented production
    SLOs/alerts/safe limits, degraded-mode drills, and measured default tuning.
-9. A protected repeatable workflow that uploads these sanitized results and
-   identifies the release, PostgreSQL tier, and runner without exposing
-   credentials.
+9. Hosted-tier implementation complete: the ref-gated manual workflow above
+   retains all five sanitized results and identifies release, PostgreSQL tier,
+   and runner. The first retained hosted artifact still needs post-merge
+   verification; a protected managed-cloud tier remains a follow-up.
 
-No production default should be changed from any local result. Production
+No production default should be changed from any local or GitHub-hosted result. Production
 defaults and thresholds require repeated GCP/AWS/Azure measurements and an
 explicit review of the retained evidence.
