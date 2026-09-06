@@ -35,6 +35,8 @@ type Config struct {
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
 	MetricsAddr string // Prometheus metrics
 
+	metrics *runtimeMetrics // installed by instrumentConfig for handler-level observations
+
 	// ReadAgentEmailCellStorageMetrics supplies one value-free schema-91
 	// cell-storage snapshot per Prometheus scrape. It is never called by API or
 	// health traffic; nil omits this database-backed metric family.
@@ -2648,6 +2650,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
 			cfg.GetSelfPlanEntitlements,
+			cfg.metrics,
 		))
 		if cfg.ListSelfPeers != nil {
 			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
@@ -3356,8 +3359,9 @@ func selfHandler(
 	getEmailCheckpoint func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 	getAvatarCheckpoint func(context.Context, DomainPrincipal) (*SelfAvatarCheckpoint, error),
 	getPlanEntitlements func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error),
+	metrics *runtimeMetrics,
 ) http.HandlerFunc {
-	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	render := func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) (elided bool, dropped int, resultErr error) {
 		// Self digests can contain durable personal context and must never be
 		// retained by shared or private HTTP caches.
 		w.Header().Set("Cache-Control", "private, no-store")
@@ -3662,14 +3666,45 @@ func selfHandler(
 			Elided: (includeFacts && factCount > len(facts)) ||
 				(includeSalient && memoryCount > len(memories)),
 		}
-		encoded, err := marshalBoundedSelfDigest(digest, maximumBytes)
+		// Count-disabled loaders return pagination hints, not exact totals.
+		// Keep those hints in Elided, but observe only known omitted entries.
+		if includeCounts && includeFacts {
+			dropped += max(0, factCount-len(facts))
+		}
+		if includeCounts && includeSalient {
+			dropped += max(0, memoryCount-len(memories))
+		}
+		encoded, trimmed, err := marshalBoundedSelfDigest(digest, maximumBytes)
+		dropped += trimmed
+		elided = digest.Elided || trimmed > 0
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "could not render self digest")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(encoded)
-	})
+		_, resultErr = w.Write(encoded)
+		return
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		recorder := &metricsResponseWriter{ResponseWriter: w}
+		elided, dropped := false, 0
+		completed := false
+		var resultErr error
+		defer func() {
+			if metrics == nil {
+				return
+			}
+			if !completed || recorder.status >= http.StatusBadRequest {
+				resultErr = errors.New("self digest read failed")
+			}
+			metrics.observeSelfDigest(r.Header.Get("X-Witself-Hydration"), elided, dropped, resultErr, time.Since(started))
+		}()
+		requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+			elided, dropped, resultErr = render(w, r, p)
+		})(recorder, r)
+		completed = true
+	}
 }
 
 func sortedSelfIndexKeys(values map[string]struct{}) []string {
@@ -3684,15 +3719,17 @@ func sortedSelfIndexKeys(values map[string]struct{}) []string {
 // marshalBoundedSelfDigest applies the wire-size budget to the encoded JSON,
 // preserving identity and the index while dropping the least essential
 // hydrated entries from the end. A selected section that was already bounded
-// by its store query must set Elided before calling this helper.
-func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, error) {
+// by its store query must set Elided before calling this helper. The returned
+// count includes only entries removed here, including on a render failure.
+func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, int, error) {
+	dropped := 0
 	for {
 		encoded, err := json.Marshal(digest)
 		if err != nil {
-			return nil, err
+			return nil, dropped, err
 		}
 		if len(encoded) <= maximumBytes {
-			return encoded, nil
+			return encoded, dropped, nil
 		}
 		if !digest.Elided {
 			digest.Elided = true
@@ -3704,8 +3741,9 @@ func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, erro
 		case len(digest.PrimaryFacts) > 0:
 			digest.PrimaryFacts = digest.PrimaryFacts[:len(digest.PrimaryFacts)-1]
 		default:
-			return nil, fmt.Errorf("self digest identity and index exceed %d bytes", maximumBytes)
+			return nil, dropped, fmt.Errorf("self digest identity and index exceed %d bytes", maximumBytes)
 		}
+		dropped++
 	}
 }
 

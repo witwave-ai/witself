@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -605,7 +607,8 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 			return DomainPrincipal{}, false, nil
 		}
 	}
-	srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: auth}))
+	metrics := newRuntimeMetrics()
+	srv := httptest.NewServer(apiMux(metrics.instrumentConfig(Config{AuthenticatePrincipal: auth})))
 	defer srv.Close()
 
 	cases := []struct {
@@ -638,6 +641,16 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
 			}
 		})
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	for _, want := range []string{
+		fmt.Sprintf(`witself_self_digest_reads_total{surface="other",elided="false",result="error"} %d`, len(cases)),
+		fmt.Sprintf(`witself_self_digest_read_duration_seconds_count{surface="other"} %d`, len(cases)),
+	} {
+		if !strings.Contains(output.String(), want+"\n") {
+			t.Errorf("metrics missing %q", want)
+		}
 	}
 }
 
@@ -984,7 +997,8 @@ func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
 	for i := range facts {
 		facts[i] = SelfFact{ID: "fact_" + strings.Repeat("x", 20), Name: "profile/description", Value: strings.Repeat("v", 300)}
 	}
-	srv := httptest.NewServer(apiMux(Config{
+	metrics := newRuntimeMetrics()
+	srv := httptest.NewServer(apiMux(metrics.instrumentConfig(Config{
 		AuthenticatePrincipal: auth,
 		GetSelfFacts: func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error) {
 			return facts, len(facts), nil
@@ -995,7 +1009,7 @@ func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
 		GetSelfMessageCheckpoint: func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error) {
 			return &SelfMessageCheckpoint{Pending: true, MailboxPending: true}, nil
 		},
-	}))
+	})))
 	defer srv.Close()
 
 	resp := selfRequest(t, srv.URL+"/v1/self?max_bytes=1024", "token")
@@ -1019,6 +1033,17 @@ func TestSelfDigestEnforcesEncodedByteBudget(t *testing.T) {
 	}
 	if digest.MessageCheckpoint == nil || !digest.MessageCheckpoint.MailboxPending {
 		t.Fatalf("bounded digest dropped message checkpoint = %+v", digest.MessageCheckpoint)
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	for _, want := range []string{
+		`witself_self_digest_reads_total{surface="other",elided="true",result="success"} 1`,
+		`witself_self_digest_elided_entries_count{surface="other"} 1`,
+		fmt.Sprintf(`witself_self_digest_elided_entries_sum{surface="other"} %d`, len(facts)-len(digest.PrimaryFacts)),
+	} {
+		if !strings.Contains(output.String(), want+"\n") {
+			t.Errorf("metrics missing %q", want)
+		}
 	}
 }
 
@@ -1219,4 +1244,210 @@ func selfRequest(t *testing.T, url, token string) *http.Response {
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func TestSelfDigestMetricsCountStoreElision(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		query       string
+		wantDropped int
+		wantElided  bool
+	}{
+		{name: "included sections", wantDropped: 6, wantElided: true},
+		{name: "facts excluded", query: "?include_facts=false", wantDropped: 4, wantElided: true},
+		{name: "memories excluded", query: "?include_salient=false", wantDropped: 2, wantElided: true},
+		{name: "both excluded", query: "?include_facts=false&include_salient=false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metrics := newRuntimeMetrics()
+			handler := apiMux(metrics.instrumentConfig(Config{
+				AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+					return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "account_private", AccountStatus: "active"}, true, nil
+				},
+				GetSelfFacts: func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error) {
+					return []SelfFact{{ID: "fact_private", Value: "value_private"}}, 3, nil
+				},
+				GetSelfMemories: func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error) {
+					return []SelfMemory{{ID: "memory_private", Snippet: "snippet_private"}}, 5, nil
+				},
+			}))
+			request := httptest.NewRequest(http.MethodGet, "/v1/self"+test.query, nil)
+			request.Header.Set("Authorization", "Bearer token_private")
+			request.Header.Set("X-Witself-Hydration", "prompt")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("self status = %d", response.Code)
+			}
+			var digest SelfDigest
+			if err := json.Unmarshal(response.Body.Bytes(), &digest); err != nil {
+				t.Fatal(err)
+			}
+			if digest.Elided != test.wantElided {
+				t.Fatalf("elided = %t, want %t", digest.Elided, test.wantElided)
+			}
+			var output bytes.Buffer
+			metrics.writePrometheus(&output)
+			for _, want := range []string{
+				fmt.Sprintf(`witself_self_digest_reads_total{surface="prompt_hook",elided="%t",result="success"} 1`, test.wantElided),
+				fmt.Sprintf(`witself_self_digest_elided_entries_sum{surface="prompt_hook"} %d`, test.wantDropped),
+				`witself_self_digest_elided_entries_count{surface="prompt_hook"} 1`,
+			} {
+				if !strings.Contains(output.String(), want+"\n") {
+					t.Errorf("metrics missing %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestSelfDigestMetricsIgnoreCountDisabledPaginationHints(t *testing.T) {
+	for _, section := range []string{"memories", "facts", "both"} {
+		for _, includeCounts := range []bool{false, true} {
+			for _, maximumBytes := range []int{65536, 1024} {
+				name := fmt.Sprintf("%s/counts=%t/bytes=%d", section, includeCounts, maximumBytes)
+				t.Run(name, func(t *testing.T) {
+					includeFacts := section != "memories"
+					includeMemories := section != "facts"
+					metrics := newRuntimeMetrics()
+					loaded, knownStoreOmissions := 0, 0
+					handler := apiMux(metrics.instrumentConfig(Config{
+						AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+							return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "account_private", AccountStatus: "active"}, true, nil
+						},
+						CountSelfFacts: func(context.Context, DomainPrincipal) (int, error) {
+							if !includeCounts || includeFacts {
+								t.Fatal("unexpected fact count query")
+							}
+							return 50, nil
+						},
+						CountSelfMemories: func(context.Context, DomainPrincipal) (int, error) {
+							if !includeCounts || includeMemories {
+								t.Fatal("unexpected memory count query")
+							}
+							return 100, nil
+						},
+						GetSelfFacts: func(_ context.Context, _ DomainPrincipal, limit int, includeCount bool) ([]SelfFact, int, error) {
+							if !includeFacts || limit != 50 || includeCount != includeCounts {
+								t.Fatalf("unexpected fact load: limit=%d, includeCount=%t", limit, includeCount)
+							}
+							facts := make([]SelfFact, 50)
+							for i := range facts {
+								facts[i] = SelfFact{ID: fmt.Sprintf("fact_%d", i), Value: "small fact"}
+							}
+							loaded += len(facts)
+							total := len(facts)
+							if !includeCount {
+								// Match the production fact adapter: a full page gets a
+								// conservative overflow hint even if all 50 facts fit.
+								total++
+							}
+							return facts, total, nil
+						},
+						GetSelfMemories: func(_ context.Context, _ DomainPrincipal, limit int, includeCount bool) ([]SelfMemory, int, error) {
+							if !includeMemories || limit != 8 || includeCount != includeCounts {
+								t.Fatalf("unexpected memory load: limit=%d, includeCount=%t", limit, includeCount)
+							}
+							memories := make([]SelfMemory, limit)
+							for i := range memories {
+								memories[i] = SelfMemory{ID: fmt.Sprintf("memory_%d", i), Snippet: strings.Repeat("small memory", 5)}
+							}
+							loaded += len(memories)
+							total := 100
+							if includeCount {
+								knownStoreOmissions = 92
+							} else {
+								// Match cmd/witself-server/memory.go: ListMemories has
+								// NextCursor, so total is page length + 1, not 100.
+								total = len(memories) + 1
+							}
+							return memories, total, nil
+						},
+					}))
+					query := fmt.Sprintf("/v1/self?include_counts=%t&include_facts=%t&include_salient=%t&salient_limit=8&max_bytes=%d", includeCounts, includeFacts, includeMemories, maximumBytes)
+					request := httptest.NewRequest(http.MethodGet, query, nil)
+					request.Header.Set("Authorization", "Bearer token_private")
+					request.Header.Set("X-Witself-Hydration", "prompt")
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					if response.Code != http.StatusOK {
+						t.Fatalf("self status = %d: %s", response.Code, response.Body.String())
+					}
+					var digest SelfDigest
+					if err := json.Unmarshal(response.Body.Bytes(), &digest); err != nil {
+						t.Fatal(err)
+					}
+					trimmed := loaded - len(digest.PrimaryFacts) - len(digest.SalientMemories)
+					if (trimmed > 0) != (maximumBytes == 1024) || response.Body.Len() > maximumBytes {
+						t.Fatalf("byte budget: trimmed=%d, bytes=%d, maximum=%d", trimmed, response.Body.Len(), maximumBytes)
+					}
+					wantElided := includeMemories || !includeCounts || trimmed > 0
+					if digest.Elided != wantElided {
+						t.Fatalf("elided = %t, want %t", digest.Elided, wantElided)
+					}
+					if !includeCounts && len(digest.Index.Counts) != 0 {
+						t.Fatalf("count-disabled digest exposed inventory counts: %+v", digest.Index.Counts)
+					}
+					var output bytes.Buffer
+					metrics.writePrometheus(&output)
+					for _, want := range []string{
+						fmt.Sprintf(`witself_self_digest_reads_total{surface="prompt_hook",elided="%t",result="success"} 1`, wantElided),
+						fmt.Sprintf(`witself_self_digest_elided_entries_sum{surface="prompt_hook"} %d`, knownStoreOmissions+trimmed),
+						`witself_self_digest_elided_entries_count{surface="prompt_hook"} 1`,
+					} {
+						if !strings.Contains(output.String(), want+"\n") {
+							t.Errorf("metrics missing %q", want)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSelfDigestLoaderErrorMetricsAreValueFree(t *testing.T) {
+	for _, source := range []string{"facts", "memories"} {
+		t.Run(source, func(t *testing.T) {
+			metrics := newRuntimeMetrics()
+			cfg := Config{
+				AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+					return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "account_private", AccountStatus: "active"}, true, nil
+				},
+			}
+			if source == "facts" {
+				cfg.GetSelfFacts = func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error) {
+					return nil, 0, errors.New("database_private token_private")
+				}
+			} else {
+				cfg.GetSelfMemories = func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error) {
+					return nil, 0, errors.New("database_private token_private")
+				}
+			}
+			handler := apiMux(metrics.instrumentConfig(cfg))
+			request := httptest.NewRequest(http.MethodGet, "/v1/self", nil)
+			request.Header.Set("Authorization", "Bearer token_private")
+			request.Header.Set("X-Witself-Hydration", "session")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("self status = %d", response.Code)
+			}
+			metricResponse := httptest.NewRecorder()
+			metricsMuxFor(metrics, nil, nil, nil, nil).ServeHTTP(metricResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			text := metricResponse.Body.String()
+			for _, want := range []string{
+				`witself_self_digest_reads_total{surface="session_hook",elided="false",result="error"} 1`,
+				`witself_self_digest_read_duration_seconds_count{surface="session_hook"} 1`,
+			} {
+				if !strings.Contains(text, want+"\n") {
+					t.Errorf("metrics missing %q", want)
+				}
+			}
+			for _, forbidden := range []string{"database_private", "token_private", "account_private", "agent_private"} {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("metrics exposed %q", forbidden)
+				}
+			}
+		})
+	}
 }

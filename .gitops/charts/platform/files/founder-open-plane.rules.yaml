@@ -32,6 +32,36 @@ groups:
         annotations:
           summary: Witself server responses exceed the bounded 5xx ratio.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestErrorRatioHigh
+        expr: (sum(rate(witself_self_digest_reads_total{result="error"}[5m])) / clamp_min(sum(rate(witself_self_digest_reads_total[5m])), 0.001)) > 0.05 and sum(rate(witself_self_digest_reads_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Self-digest reads exceed the bounded error ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(witself_self_digest_read_duration_seconds_bucket[5m]))) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Self-digest read p95 latency exceeds 1.5 seconds.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestElisionRatioHigh
+        expr: (sum(rate(witself_self_digest_reads_total{elided="true"}[5m])) / sum(rate(witself_self_digest_reads_total[5m]))) >= 0.5
+        for: 30m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: At least half of self-digest reads elide entries.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
       - alert: WitselfWorkerJobStopped
         expr: max by (job) (witself_worker_job_running) < 1
         for: 5m

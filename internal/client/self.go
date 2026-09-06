@@ -316,8 +316,11 @@ func (d *SelfDigest) UnmarshalJSON(data []byte) error {
 // SelfOptions controls bounded digest sections. The identity block is always
 // returned and always comes from the authenticated agent token.
 type SelfOptions struct {
-	IncludeFacts   bool
-	IncludeSalient bool
+	// HydrationSurface identifies an automatic session or prompt hook. Only
+	// these two values are sent; the server independently bounds its labels.
+	HydrationSurface string
+	IncludeFacts     bool
+	IncludeSalient   bool
 	// IncludeCounts requests inventory totals in the self index. Identity and
 	// checkpoint-only callers should leave this false to avoid count queries.
 	IncludeCounts bool
@@ -390,8 +393,12 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 		params.Set("max_bytes", strconv.Itoa(opts.MaximumByteSize))
 	}
 	url := strings.TrimRight(endpoint, "/") + "/v1/self?" + params.Encode()
+	var headers map[string]string
+	if opts.HydrationSurface == "session" || opts.HydrationSurface == "prompt" {
+		headers = map[string]string{"X-Witself-Hydration": opts.HydrationSurface}
+	}
 	var out SelfDigest
-	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+	if err := doJSONWithHeaders(ctx, http.MethodGet, url, token, headers, nil, &out); err != nil {
 		return SelfDigest{}, err
 	}
 	return out, nil
