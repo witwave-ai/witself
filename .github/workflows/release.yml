@@ -294,6 +294,9 @@ jobs:
       - name: release artifact count contract checks
         run: bash scripts/test-release-artifact-contract.sh
 
+      - name: Test provider evidence workflow contract
+        run: bash scripts/test-provider-contract-workflow.sh
+
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh
 
@@ -428,35 +431,82 @@ jobs:
           -run '^TestCodexHooksWindows'
           -count=1
 
-      - name: Codex provider installation contract
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodex|TestProviderIntegrationContractCodexRollbackRestoresPriorInstall)$'
-          -count=1
-
-      - name: Credential-free provider lifecycle contracts
-        run: >-
-          go test ./cmd/witself
-          -run '^TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot)$'
-          -count=1
-
-      - name: Installed release binary provider acceptance
-        if: runner.os != 'Windows'
+      - name: Run provider contracts and retain sanitized outcomes
+        shell: bash
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}/witself-installed
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          PROVIDER_TARGET: ${{ matrix.target }}
+        run: |
+          executable_suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi
+          reporter="$RUNNER_TEMP/provider-contract-evidence$executable_suffix"
+          go build -o "$reporter" ./tools/provider-contract-evidence
+          release_tag=""
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then release_tag="$GITHUB_REF_NAME"; fi
+          "$reporter" run \
+            --output "$RUNNER_TEMP/provider-contract-$PROVIDER_TARGET.json" \
+            --target "$PROVIDER_TARGET" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow release \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag" \
+            --binary "$RUNNER_TEMP/witself-installed$executable_suffix" --dist dist
 
-      - name: Installed release binary provider acceptance
-        if: runner.os == 'Windows'
+      - name: Upload sanitized provider cell
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-cell-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  provider-contract-evidence:
+    needs: [provider-integration-verify]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require every native provider job
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}\witself-installed.exe
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          NATIVE_RESULT: ${{ needs.provider-integration-verify.result }}
+        run: test "$NATIVE_RESULT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download this attempt's provider cells
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: provider-contract-cell-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-cells
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Validate complete provider matrix
+        run: |
+          release_tag=""
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then release_tag="$GITHUB_REF_NAME"; fi
+          go run ./tools/provider-contract-evidence aggregate \
+            --input-dir "$RUNNER_TEMP/provider-contract-cells" \
+            --output "$RUNNER_TEMP/provider-contract-evidence.json" \
+            --markdown "$RUNNER_TEMP/provider-contract-evidence.md" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow release \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag"
+          cat "$RUNNER_TEMP/provider-contract-evidence.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload validated provider matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   dashboard-acceptance:
     name: dashboard release acceptance / ${{ matrix.target }}
@@ -638,7 +688,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   goreleaser:
-    needs: [go, verify, provider-integration-verify, dashboard-acceptance, homebrew-verify]
+    needs: [go, verify, provider-integration-verify, provider-contract-evidence, dashboard-acceptance, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -710,6 +760,25 @@ jobs:
           version: v2.17.0
           install-only: true
 
+      - name: Download validated provider release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: provider-contract-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-release
+          digest-mismatch: error
+
+      - name: Stage exact tagged provider evidence before signing
+        if: github.event_name == 'push'
+        run: |
+          report="$RUNNER_TEMP/provider-contract-release/provider-contract-evidence.json"
+          go run ./tools/provider-contract-evidence validate-release \
+            --input "$report" --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+          mkdir -p evidence/provider-contract-release
+          cp "$report" evidence/provider-contract-release/provider-contract-evidence.json
+          cmp "$report" evidence/provider-contract-release/provider-contract-evidence.json
+
       - name: Validate GoReleaser configuration
         run: goreleaser check
 
@@ -745,6 +814,14 @@ jobs:
 
           date +%s > "$release_end"
           exit "$status"
+
+      # GoReleaser hashes/uploads extra_files from their staged path; it does
+      # not copy them into dist. Preserve those exact bytes for both verifiers.
+      - name: Preserve signed provider evidence in local artifact set
+        if: github.event_name == 'push'
+        run: |
+          cp evidence/provider-contract-release/provider-contract-evidence.json dist/provider-contract-evidence.json
+          cmp evidence/provider-contract-release/provider-contract-evidence.json dist/provider-contract-evidence.json
 
       - name: Verify signed release artifact contract
         if: github.event_name == 'push'

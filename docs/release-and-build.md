@@ -321,6 +321,9 @@ The implemented release action owns:
   `witself-infra`, and the operator-only `witself-control-plane` evidence
   binary.
 - Generating SHA256 checksums.
+- Retaining the five native provider fixture reports and their validated
+  aggregate, and including `provider-contract-evidence.json` in tagged release
+  assets and the signed checksum manifest.
 - Signing the checksum manifest into a keyless Sigstore bundle, while retaining
   the detached `.sig` and `.pem` assets required by older updaters.
 - Generating archive SBOMs and container SBOM attestations.
@@ -353,6 +356,13 @@ credential-free installer-to-provider contract evidence, not real-client or
 authenticated model acceptance. Smoke tests against artifacts from an actual
 published GitHub Release remain a separate post-publication check. See
 [provider-integration-certification.md](provider-integration-certification.md).
+
+Provider reports and aggregation are bound to one workflow run and attempt.
+After a failure, rerun the entire workflow so all five reports belong to the
+new attempt. The tagged JSON describes tested snapshot inputs and records the
+publishing tag separately; it does not claim real-vendor/model acceptance or
+execution of the final public archive bytes. Snapshot packaging omits the JSON
+asset, while manual dispatch retains the aggregate as an Actions artifact.
 
 Required workflow permissions:
 
@@ -413,13 +423,17 @@ Current release artifacts include:
   plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
   assets for older `witself-admin` updaters.
 - Per-archive SBOMs.
+- `provider-contract-evidence.json`, containing the validated native fixture
+  matrix for the tagged release workflow.
 - Build-provenance attestations for release archives.
 
 The stable release inventory is fail-closed at exactly 25 executable archives,
-25 per-archive SPDX SBOMs, and four checksum/signing assets (`checksums.txt`,
-its Sigstore bundle, compatibility certificate, and detached signature): 54
-nonempty GitHub Release assets total. `checksums.txt` binds all 50 archive and
-SBOM payloads, and GitHub build provenance covers all 25 archives. The
+25 per-archive SPDX SBOMs, one provider contract JSON and four checksum/signing
+assets (`checksums.txt`, its Sigstore bundle, compatibility certificate, and
+detached signature): 55 nonempty GitHub Release assets total. `checksums.txt`
+binds all 51 archive, SBOM and provider evidence payloads, and GitHub build
+provenance continues to cover the 25 archives. The JSON is covered by the
+checksum signature, not by an archive provenance attestation. The
 `witself-control-plane` executable is the only command stamped with the full
 40-hex release commit because billing inventory capture compares that exact
 identity; the other commands retain their historical short-commit output.

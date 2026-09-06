@@ -18,7 +18,7 @@ jobs:
   go:
     name: go
     if: ${{ always() }}
-    needs: [go-rest, go-store, go-infra]
+    needs: [go-rest, go-store, go-infra, provider-contract-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,8 +28,9 @@ jobs:
           GO_REST_RESULT: ${{ needs.go-rest.result }}
           GO_STORE_RESULT: ${{ needs.go-store.result }}
           GO_INFRA_RESULT: ${{ needs.go-infra.result }}
+          PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}
         run: |
-          for result in "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT"; do
+          for result in "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
             if [ "$result" != success ]; then
               echo "A required Go gate did not succeed: $result" >&2
               exit 1
@@ -253,6 +254,9 @@ jobs:
       - name: Test complete release asset-count contract
         run: bash scripts/test-release-artifact-contract.sh
 
+      - name: Test provider evidence workflow contract
+        run: bash scripts/test-provider-contract-workflow.sh
+
       - name: Test Homebrew tap publisher
         run: bash scripts/test-publish-homebrew-formulas.sh
 
@@ -281,8 +285,8 @@ jobs:
   # Prove the provider installation transaction on every native platform we
   # advertise. These tests use a portable fake runtime and disposable homes;
   # they need no vendor account and never touch a developer's real profile.
-  # Real-client/model acceptance is a separate scheduled or manual release
-  # gate documented in docs/provider-integration-certification.md.
+  # Retained fixture evidence does not establish real-client/model acceptance;
+  # those separate gates are documented in provider-integration-certification.
   provider-integration-contract:
     name: provider integration / ${{ matrix.target }}
     strategy:
@@ -392,35 +396,80 @@ jobs:
           -run '^TestCodexHooksWindows'
           -count=1
 
-      - name: Codex provider installation contract
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodex|TestProviderIntegrationContractCodexRollbackRestoresPriorInstall)$'
-          -count=1
-
-      - name: Credential-free provider lifecycle contracts
-        run: >-
-          go test ./cmd/witself
-          -run '^TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot)$'
-          -count=1
-
-      - name: Installed release binary provider acceptance
-        if: runner.os != 'Windows'
+      - name: Run provider contracts and retain sanitized outcomes
+        shell: bash
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}/witself-installed
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          PROVIDER_TARGET: ${{ matrix.target }}
+        run: |
+          executable_suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi
+          reporter="$RUNNER_TEMP/provider-contract-evidence$executable_suffix"
+          go build -o "$reporter" ./tools/provider-contract-evidence
+          release_tag=""
+          "$reporter" run \
+            --output "$RUNNER_TEMP/provider-contract-$PROVIDER_TARGET.json" \
+            --target "$PROVIDER_TARGET" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow ci \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag" \
+            --binary "$RUNNER_TEMP/witself-installed$executable_suffix" --dist dist
 
-      - name: Installed release binary provider acceptance
-        if: runner.os == 'Windows'
+      - name: Upload sanitized provider cell
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-cell-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  provider-contract-evidence:
+    needs: [provider-integration-contract]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require every native provider job
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}\witself-installed.exe
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          NATIVE_RESULT: ${{ needs.provider-integration-contract.result }}
+        run: test "$NATIVE_RESULT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download this attempt's provider cells
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: provider-contract-cell-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-cells
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Validate complete provider matrix
+        run: |
+          release_tag=""
+          go run ./tools/provider-contract-evidence aggregate \
+            --input-dir "$RUNNER_TEMP/provider-contract-cells" \
+            --output "$RUNNER_TEMP/provider-contract-evidence.json" \
+            --markdown "$RUNNER_TEMP/provider-contract-evidence.md" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow ci \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag"
+          cat "$RUNNER_TEMP/provider-contract-evidence.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload validated provider matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   avatar-renderer-portability:
     strategy:
