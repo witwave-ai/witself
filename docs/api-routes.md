@@ -200,6 +200,7 @@ POST /v1/policies:test
 POST /v1/messages:listen
 POST /v1/messages/{message_id}:reply
 POST /v1/messages/{message_id}:read
+GET  /v1/messages/{message_id}:peek
 POST /v1/messages/{message_id}:ack
 POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
@@ -552,6 +553,7 @@ POST /v1/messages
 POST /v1/messages:listen        # metadata-only, oldest-unacked long poll
 POST /v1/messages/{message_id}:reply
 POST /v1/messages/{message_id}:read
+GET  /v1/messages/{message_id}:peek
 POST /v1/messages/{message_id}:ack
 POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
@@ -915,6 +917,14 @@ audit events; read-only recall does neither:
   caller received the parent, then derives the recipient from the parent sender
   and derives the thread, `reply_to_message_id`, and `causal_depth` (parent plus
   one). Caller-supplied routing, identity, or depth fields are rejected.
+- `GET /v1/messages/{message_id}:peek` returns the existing
+  `{schema_version, message}` envelope with body and payload for the
+  authenticated recipient. It preserves delivery, processing, read/ack state,
+  audit events, and usage. A sender without a recipient delivery cannot read
+  through this route. Messaging entitlement and live account/realm/agent
+  checks are the same as `:read`; claim ids and lease expiry are redacted.
+  The endpoint requires GET (HEAD is refused) and uses
+  `Cache-Control: private, no-store`. Console body display remains separate.
 - `POST /v1/messages/{message_id}:read` returns content and records only the
   recipient read transition; `POST /v1/messages/{message_id}:ack` separately
   records per-recipient acknowledgement and returns metadata only, never the

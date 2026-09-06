@@ -780,7 +780,7 @@ Initial route groups:
 | `/v1/policies` | Target, not implemented: cross-agent policy create/list/show/delete/test. |
 | `/v1/groups` | Target, not implemented: security group lifecycle and membership. |
 | `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
-| `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
+| `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; observational recipient body peek; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
 | `/v1/message-requests` | Implemented message-backed realm open jobs: create/list/detail plus candidate offer/decline, coordinator client-ranked select/cancel, and selected-agent claim/renew/release/atomic-complete actions. |
 | `/v1/conversations` | Target: cross-realm conversation/task resource. |
 | `/v1/federation/peers` | Target: accepted peer-realm registry for cross-realm collaboration. |
@@ -990,6 +990,7 @@ POST /v1/policies:test # target; not implemented
 POST /v1/messages:listen
 POST /v1/messages/{message_id}:reply
 POST /v1/messages/{message_id}:read
+GET  /v1/messages/{message_id}:peek
 POST /v1/messages/{message_id}:ack
 POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
@@ -1141,6 +1142,14 @@ Notes on specific actions and workflows:
   derives the recipient from the parent sender and derives the thread and
   `reply_to_message_id`; it derives `causal_depth` as parent plus one. Supplying
   routing, identity, or depth fields is rejected.
+- `GET /v1/messages/{message_id}:peek` returns the existing
+  `{schema_version, message}` envelope with body and payload for the
+  authenticated recipient. It preserves delivery, processing, read/ack state,
+  audit events, and usage. A sender without a recipient delivery cannot read
+  through this route. Messaging entitlement and live account/realm/agent
+  checks are the same as `:read`; claim ids and lease expiry are redacted.
+  The endpoint requires GET (HEAD is refused) and uses
+  `Cache-Control: private, no-store`. Console body display remains separate.
 - `:read` returns content and records only the recipient read transition.
   `:ack` separately records per-recipient acknowledgement; the acting agent is
   derived from the token for both operations. The ack response is metadata-only

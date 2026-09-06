@@ -600,11 +600,13 @@ type Config struct {
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
-	// request body. List is metadata-only; Read is the content boundary.
+	// request body. List is metadata-only; Read and observational Peek return
+	// recipient content, with only Read advancing the delivery's read state.
 	SendMessage  func(ctx context.Context, p DomainPrincipal, in SendMessageRequest) (Message, error)
 	ReplyMessage func(ctx context.Context, p DomainPrincipal, parentMessageID string, in ReplyMessageRequest) (Message, error)
 	ListMessages func(ctx context.Context, p DomainPrincipal, opts MessageListOptions) (MessagePage, error)
 	ReadMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
+	PeekMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 	AckMessage   func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 
 	// Message processing is a recipient-only fenced lease. The claim id and
@@ -2923,6 +2925,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ListMessages != nil {
 			mux.HandleFunc("GET /v1/messages", listMessagesHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
 			mux.HandleFunc("POST /v1/messages:listen", messageListenHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
+		}
+		if cfg.PeekMessage != nil {
+			mux.HandleFunc("GET /v1/messages/{action}", peekMessageHandler(cfg.AuthenticatePrincipal, cfg.PeekMessage))
 		}
 		if cfg.ReadMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil ||
 			cfg.ClaimMessage != nil || cfg.RenewMessageClaim != nil ||

@@ -266,6 +266,50 @@ func writeMessageListenResult(w http.ResponseWriter, result MessageListenResult)
 	})
 }
 
+func peekMessageHandler(auth PrincipalAuthFunc, peek func(context.Context, DomainPrincipal, string) (Message, error)) http.HandlerFunc {
+	return messageNoStore(requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		// ServeMux also matches HEAD to GET patterns. Keep this content boundary
+		// explicitly GET-only, without dispatching a body read for another method.
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONError(w, http.StatusMethodNotAllowed, "message peek requires GET")
+			return
+		}
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may peek at a message")
+			return
+		}
+		messageID, operation, ok := strings.Cut(r.PathValue("action"), ":")
+		if !ok || messageID == "" || operation != "peek" {
+			writeJSONError(w, http.StatusNotFound, "message read not found")
+			return
+		}
+		msg, err := peek(r.Context(), p, messageID)
+		switch {
+		case errors.Is(err, ErrFeatureNotEnabled):
+			writeFeatureNotEnabledError(w, err)
+			return
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "message not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, "message access forbidden")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not peek at message")
+			return
+		}
+		msg = redactMessageProcessingFence(msg)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "message": msg,
+		})
+	}))
+}
+
 func messageActionHandler(
 	auth PrincipalAuthFunc,
 	read func(context.Context, DomainPrincipal, string) (Message, error),

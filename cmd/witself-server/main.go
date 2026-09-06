@@ -863,6 +863,13 @@ func serve() int {
 				Message:    toServerAgentMessage(result.ResultMessage),
 			}, nil
 		}
+		cfg.PeekMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
+			msg, err := st.PeekMessage(ctx, toStorePrincipal(p), messageID)
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
+		}
 		cfg.ReadMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
 			msg, err := st.ReadMessage(ctx, toStorePrincipal(p), messageID)
 			if err != nil {
