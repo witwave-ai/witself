@@ -489,6 +489,8 @@
       "summary": "The loopback-only per-agent Agent Console is `witself dashboard`, with passive or observational projections for identity, cell-applied plan entitlements, transcripts, memories, facts, messaging, received/sent email metadata, email capacity, secrets metadata, and local preferences.",
       "implementation": "implemented",
       "managed_rollout": "not_applicable",
+      "evidence_release": "v0.0.275",
+      "evidence_scope": "Release run 33999426386: dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (stub cell, headless Chromium, seven panels, redaction canary), retained 90 days.",
       "docs": [
         "README.md",
         "docs/agent-console.md",
@@ -540,12 +542,12 @@
           ]
         },
         "rollout_canaries": {
-          "state": "conditional",
-          "summary": "The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for all seven panels, cell-applied entitlement states, both email directions, and disabled or unavailable states.",
+          "state": "pass",
+          "summary": "Release v0.0.275 retained dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (run 33999426386, 90 days): headless Chromium proved the bare-URL 401, token-to-cookie handoff, all seven panels, no console or request errors, an absent redaction canary, then status and stop.",
           "evidence": [
             ".github/workflows/release.yml",
             "docs/agent-console.md",
-            "docs/decisions/0004-local-agent-dashboard.md"
+            "scripts/dashboard-acceptance/run.mjs"
           ]
         },
         "docs_support": {
@@ -558,15 +560,7 @@
             "docs/decisions/0004-local-agent-dashboard.md"
           ]
         }
-      },
-      "open_gates": [
-        {
-          "id": "dashboard-release-acceptance",
-          "gate_ids": ["rollout_canaries"],
-          "summary": "Retain current cross-platform release acceptance for serve, status, stop, browser authentication, all seven panels, cell-applied entitlement states, independent received/sent email metadata, live updates, strict redaction, and graceful disabled or unavailable states.",
-          "ref": "docs/agent-console.md"
-        }
-      ]
+      }
     },
     {
       "id": "agent-email-receive",
