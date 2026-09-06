@@ -170,12 +170,16 @@ type Request struct {
 // Query is returned for diagnostics/tests only and is never persisted by this
 // package; callers must not log it because it contains user prompt material.
 type Result struct {
-	Attempted bool
-	Injected  bool
-	Delivery  string
-	Context   string
-	Query     string
-	Reason    string
+	Attempted    bool
+	Injected     bool
+	Delivery     string
+	Context      string
+	Query        string
+	Reason       string
+	Elapsed      time.Duration
+	ContextBytes int
+	Elided       bool
+	Outcome      Outcome
 }
 
 var historyDependentPattern = regexp.MustCompile(`(?i)(` +
@@ -261,11 +265,40 @@ func FocusedQuery(prompt string) (string, bool) {
 // hooks can fail open. A focused recall outage is the exception: it emits an
 // explicit, value-free degradation envelope rather than pretending no memory
 // matched or hiding an already authenticated lifecycle checkpoint.
-func Execute(ctx context.Context, cfg Config, binding Binding, request Request, source Source) (Result, error) {
+func Execute(ctx context.Context, cfg Config, binding Binding, request Request, source Source) (result Result, err error) {
+	started := time.Now()
+	var serverElided bool
+	defer func() {
+		result.Elapsed = time.Since(started)
+		result.ContextBytes = len(result.Context)
+		result.Elided = result.Elided || serverElided
+		// Read only the renderer's elision flag; rendered values never enter
+		// the observation or its outcome classification.
+		if _, raw, ok := strings.Cut(result.Context, "\n"); ok {
+			var envelope struct {
+				Elided bool `json:"elided"`
+			}
+			if json.Unmarshal([]byte(raw), &envelope) == nil {
+				result.Elided = result.Elided || envelope.Elided
+			}
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Outcome = OutcomeTimeout
+		}
+		if result.Outcome == "" {
+			switch {
+			case err != nil:
+				result.Outcome = OutcomeConfigError
+			case result.Injected:
+				result.Outcome = OutcomeInjected
+			default:
+				result.Outcome = OutcomeNoContext
+			}
+		}
+	}()
 	if source == nil {
 		return Result{}, errors.New("memory hydration source is required")
 	}
-	var err error
 	cfg, err = validatedConfig(cfg)
 	if err != nil {
 		return Result{}, err
@@ -291,7 +324,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 	}
 
 	if err := validateBinding(binding); err != nil {
-		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, err
+		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeBindingMismatch}, err
 	}
 	hydrationCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
@@ -315,16 +348,17 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 	}
 	digest, err := source.Self(hydrationCtx, selfOptions)
 	if err != nil {
-		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, fmt.Errorf("read self digest: %w", err)
+		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeSelfError}, fmt.Errorf("read self digest: %w", err)
 	}
 	if err := verifyBinding(binding, digest.Identity); err != nil {
-		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, err
+		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeBindingMismatch}, err
 	}
+	serverElided = digest.Elided
 
 	if request.Event == EventSessionStart {
 		contextText, err := renderSelf(digest, cfg.MaximumBytes)
 		if err != nil {
-			return Result{Attempted: true, Delivery: feature.Delivery}, err
+			return Result{Attempted: true, Delivery: feature.Delivery, Outcome: OutcomeOutputRejected}, err
 		}
 		return Result{Attempted: true, Injected: contextText != "", Delivery: feature.Delivery, Context: contextText}, nil
 	}
@@ -334,7 +368,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 			digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes,
 		)
 		if err != nil {
-			return Result{Attempted: true, Delivery: feature.Delivery}, err
+			return Result{Attempted: true, Delivery: feature.Delivery, Outcome: OutcomeOutputRejected}, err
 		}
 		return Result{
 			Attempted: true, Injected: contextText != "", Delivery: feature.Delivery,
@@ -352,6 +386,10 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 		Query: query, IncludeSensitive: true, Limit: cfg.RecallLimit,
 	})
 	if err != nil {
+		outcome := OutcomeRecallDegraded
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = OutcomeTimeout
+		}
 		// A focused recall outage must be model-visible and must not hide durable
 		// lifecycle work already authenticated through self.show. Emit a static
 		// degradation marker plus the value-free checkpoint, when one is pending,
@@ -362,22 +400,22 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 			DegradedReason: "recall_unavailable",
 		}, digest.MemoryCapacity, digest.FactCapacity, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes)
 		if checkpointErr != nil {
-			return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, checkpointErr
+			return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeOutputRejected}, checkpointErr
 		}
 		if contextText != "" {
 			return Result{
 				Attempted: true, Injected: true, Delivery: feature.Delivery,
 				Context: contextText, Query: query,
-				Reason: "memory recall unavailable; injected degradation notice",
+				Reason: "memory recall unavailable; injected degradation notice", Outcome: outcome,
 			}, nil
 		}
-		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, fmt.Errorf("recall memories: %w", err)
+		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: outcome}, fmt.Errorf("recall memories: %w", err)
 	}
 	for _, hit := range page.Hits {
 		memory := hit.Memory
 		if memory.AccountID != binding.AccountID || memory.RealmID != binding.RealmID ||
 			memory.Owner.AgentID != binding.AgentID {
-			return Result{Attempted: true, Delivery: feature.Delivery, Query: query},
+			return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeBindingMismatch},
 				errors.New("memory recall returned an item outside the installed identity binding")
 		}
 	}
@@ -385,11 +423,15 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 		page, digest.MemoryCapacity, digest.FactCapacity, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes,
 	)
 	if err != nil {
-		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, err
+		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeOutputRejected}, err
+	}
+	outcome := Outcome("")
+	if page.Degraded {
+		outcome = OutcomeRecallDegraded
 	}
 	return Result{
 		Attempted: true, Injected: contextText != "", Delivery: feature.Delivery,
-		Context: contextText, Query: query,
+		Context: contextText, Query: query, Outcome: outcome,
 	}, nil
 }
 
@@ -579,6 +621,9 @@ func renderSelf(digest client.SelfDigest, maximumBytes int) (string, error) {
 			envelope.Elided = true
 			continue
 		}
+		if len(memory.Snippet) > maximumRecordTextBytes || len(memory.Tags) > maximumRenderedTagCount {
+			envelope.Elided = true
+		}
 		envelope.NarrativeMemories = append(envelope.NarrativeMemories, contextMemory{
 			ID: memory.ID, Kind: memory.Kind, Text: truncateUTF8(memory.Snippet, maximumRecordTextBytes),
 			Tags: boundedTags(memory.Tags), Salience: memory.Salience, Sensitive: memory.Sensitive, Source: memory.Source,
@@ -621,6 +666,9 @@ func renderRecall(
 			(memory.ContentEncoding != "" && memory.ContentEncoding != "plain") {
 			envelope.Elided = true
 			continue
+		}
+		if len(memory.Content) > maximumRecordTextBytes || len(memory.Tags) > maximumRenderedTagCount {
+			envelope.Elided = true
 		}
 		envelope.NarrativeMemories = append(envelope.NarrativeMemories, contextMemory{
 			ID: memory.ID, Kind: memory.Kind, Text: truncateUTF8(memory.Content, maximumRecordTextBytes),

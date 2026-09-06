@@ -174,9 +174,10 @@ type BackendObservation struct {
 
 // VerificationInput combines live observations for deterministic reduction.
 type VerificationInput struct {
-	VerifiedAt  time.Time               `json:"verified_at"`
-	Backend     BackendObservation      `json:"backend"`
-	Transcripts []TranscriptObservation `json:"transcripts"`
+	VerifiedAt  time.Time                     `json:"verified_at"`
+	Backend     BackendObservation            `json:"backend"`
+	Transcripts []TranscriptObservation       `json:"transcripts"`
+	Hydration   []memoryhydration.Observation `json:"hydration,omitempty"`
 }
 
 // ResourceEvidence contains only value-free ids and counts.
@@ -207,21 +208,33 @@ type RuntimeEvidence struct {
 	ObservedVersions  []string `json:"observed_versions"`
 }
 
+// HydrationEvidence summarizes local hook events during this run. It does not
+// attribute an assistant answer to a particular hook or expose context values.
+type HydrationEvidence struct {
+	Attempts           int     `json:"attempts"`
+	Injected           int     `json:"injected"`
+	Failures           int     `json:"failures"`
+	ElidedCount        int     `json:"elided_count"`
+	HookOutputRejected int     `json:"hook_output_rejected"`
+	MaxLatencyMS       float64 `json:"max_latency_ms"`
+}
+
 // Evidence is the sanitized retained report for one runtime.
 type Evidence struct {
-	SchemaVersion         string          `json:"schema_version"`
-	SuiteVersion          string          `json:"suite_version"`
-	RunID                 string          `json:"run_id"`
-	Status                string          `json:"status"`
-	CertificationEligible bool            `json:"certification_eligible"`
-	PreparedAt            time.Time       `json:"prepared_at"`
-	VerifiedAt            time.Time       `json:"verified_at"`
-	Runtime               RuntimeEvidence `json:"runtime"`
-	Witself               Build           `json:"witself"`
-	Identity              Identity        `json:"identity"`
-	PeerIdentity          Identity        `json:"peer_identity"`
-	Cases                 []CaseEvidence  `json:"cases"`
-	Warnings              []string        `json:"warnings,omitempty"`
+	SchemaVersion         string             `json:"schema_version"`
+	SuiteVersion          string             `json:"suite_version"`
+	RunID                 string             `json:"run_id"`
+	Status                string             `json:"status"`
+	CertificationEligible bool               `json:"certification_eligible"`
+	PreparedAt            time.Time          `json:"prepared_at"`
+	VerifiedAt            time.Time          `json:"verified_at"`
+	Runtime               RuntimeEvidence    `json:"runtime"`
+	Witself               Build              `json:"witself"`
+	Identity              Identity           `json:"identity"`
+	PeerIdentity          Identity           `json:"peer_identity"`
+	Cases                 []CaseEvidence     `json:"cases"`
+	Warnings              []string           `json:"warnings,omitempty"`
+	Hydration             *HydrationEvidence `json:"hydration,omitempty"`
 }
 
 // NewState builds one private, replayable manifest. Resource creation remains
@@ -500,6 +513,21 @@ func Evaluate(state RunState, input VerificationInput) (Evidence, error) {
 	if input.VerifiedAt.IsZero() {
 		input.VerifiedAt = time.Now().UTC()
 	}
+	var observations []memoryhydration.Observation
+	for _, observation := range input.Hydration {
+		if !observation.Timestamp.Before(state.PreparedAt) && !observation.Timestamp.After(input.VerifiedAt) {
+			observations = append(observations, observation)
+		}
+	}
+	summary := memoryhydration.SummarizeObservations(observations)
+	var hydration *HydrationEvidence
+	if summary.Attempts > 0 {
+		hydration = &HydrationEvidence{
+			Attempts: summary.Attempts, Injected: summary.Injected, Failures: summary.Failures,
+			ElidedCount: summary.ElidedCount, HookOutputRejected: summary.HookOutputRejected,
+			MaxLatencyMS: summary.MaxLatencyMS,
+		}
+	}
 	stageResults := map[string]stageResult{}
 	for _, prompt := range state.Prompts {
 		stageResults[prompt.Stage] = findStage(prompt, input.Transcripts, state.Runtime, state.RuntimeVersion)
@@ -552,7 +580,7 @@ func Evaluate(state RunState, input VerificationInput) (Evidence, error) {
 	cases := []CaseEvidence{
 		caseResult("identity_binding", identityPass, "evaluates authenticated identity, installed integration, observed client version and per-stage provenance, distinct client sessions, server build, and CLI harness build", identityStage),
 		caseResult("explicit_narrative_capture", explicitPass, "the real client created a durable Witself narrative memory", captureStage, input.Backend.ExplicitMemoryIDs...),
-		caseResult("history_dependent_recall", historyPass, deliveryDetail(state.Delivery), historyStage),
+		caseResult("history_dependent_recall", historyPass, deliveryDetail(state.Delivery, hydration), historyStage),
 		{
 			Name: "applied_empty_curation_checkpoint", Passed: curationPass,
 			Detail: "the exact synthetic checkpoint reached a canonical applied empty plan by verification; no transcript or stage causality is claimed",
@@ -599,7 +627,7 @@ func Evaluate(state RunState, input VerificationInput) (Evidence, error) {
 			ObservedVersions: observedVersions,
 		},
 		Witself: state.Witself, Identity: state.Identity, PeerIdentity: state.PeerIdentity,
-		Cases: cases, Warnings: warnings,
+		Cases: cases, Warnings: warnings, Hydration: hydration,
 	}
 	if err := evidence.ValidateSanitized(state.Markers); err != nil {
 		return Evidence{}, err
@@ -659,11 +687,14 @@ func caseResult(name string, passed bool, detail string, stage stageResult, memo
 		Resources: ResourceEvidence{TranscriptIDs: compactStrings(stage.TranscriptID), MemoryIDs: sortedUnique(memoryIDs)}}
 }
 
-func deliveryDetail(delivery Delivery) string {
-	if delivery.RecallAutomatic {
-		return "history-dependent context arrived through verified automatic hook hydration without a user search instruction"
+func deliveryDetail(delivery Delivery, hydration *HydrationEvidence) string {
+	if hydration != nil && hydration.Attempts > 0 {
+		return "observed local hook attempts in the run window; history marker checked separately in the answer, without attributing it to a specific hook"
 	}
-	return "managed runtime guidance caused the active client to use self.show and memory.recall without a user search instruction"
+	if delivery.RecallAutomatic {
+		return "capability-only automatic hook hydration; history marker checked separately in the answer, without local hook evidence"
+	}
+	return "capability-only managed self.show and memory.recall guidance; history marker checked separately in the answer, without local hook delivery evidence"
 }
 
 func hasAssistantResponse(stage stageResult) bool {

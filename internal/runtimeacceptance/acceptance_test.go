@@ -449,3 +449,76 @@ func passingInput(state RunState) VerificationInput {
 		Transcripts: transcripts,
 	}
 }
+
+func TestEvaluateHydrationEvidenceUsesOnlyRunWindow(t *testing.T) {
+	for _, observed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "capability_only", true: "observed"}[observed], func(t *testing.T) {
+			state := testState(t, transcriptcapture.RuntimeCodex, true)
+			state.Phase = PhaseReady
+			state.Fixtures = FixtureState{BaselineMemoryID: "mem_baseline", SensitiveFactID: "fact_private", PeerMemoryID: "mem_peer", CurationRequestID: "mcrq_test"}
+			input := passingInput(state)
+			if observed {
+				// JSON keeps this regression executable against the pre-change
+				// VerificationInput, where hydration was silently discarded.
+				observation := func(at time.Time, injected, elided bool, outcome string, elapsed int) map[string]any {
+					return map[string]any{"timestamp": at, "attempted": true, "injected": injected, "elided": elided, "outcome": outcome, "elapsed_ms": elapsed}
+				}
+				raw, err := json.Marshal(map[string]any{"hydration": []any{
+					observation(state.PreparedAt.Add(-time.Second), false, false, "timeout", 9000),
+					observation(state.PreparedAt, true, true, "injected", 100),
+					observation(input.VerifiedAt, false, false, "output_rejected", 200),
+					observation(input.VerifiedAt.Add(time.Second), false, false, "timeout", 9000),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(raw, &input); err != nil {
+					t.Fatal(err)
+				}
+			}
+			evidence, err := Evaluate(state, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report map[string]any
+			if err := json.Unmarshal(raw, &report); err != nil {
+				t.Fatal(err)
+			}
+			wantDetail := "capability-only"
+			if observed {
+				wantDetail = "observed"
+				hydration, ok := report["hydration"].(map[string]any)
+				if !ok {
+					t.Fatalf("missing hydration block: %s", raw)
+				}
+				want := map[string]float64{"attempts": 2, "injected": 1, "failures": 1, "elided_count": 1, "max_latency_ms": 200, "hook_output_rejected": 1}
+				if len(hydration) != len(want) {
+					t.Fatalf("unexpected hydration fields: %v", hydration)
+				}
+				for key, value := range want {
+					if hydration[key] != value {
+						t.Errorf("hydration %s=%v, want %v", key, hydration[key], value)
+					}
+				}
+			} else if _, ok := report["hydration"]; ok {
+				t.Fatalf("missing ledger must omit optional block: %s", raw)
+			}
+			for _, item := range evidence.Cases {
+				if item.Name == "history_dependent_recall" && !strings.Contains(item.Detail, wantDetail) {
+					t.Errorf("delivery detail = %q, want %q", item.Detail, wantDetail)
+				}
+			}
+			if evidence.Status != "pass" {
+				t.Fatalf("optional hydration changed acceptance status: %s", evidence.Status)
+			}
+			evidence.Warnings = append(evidence.Warnings, state.Markers.Narrative)
+			if err := evidence.ValidateSanitized(state.Markers); err == nil {
+				t.Fatal("sanitization accepted a private marker")
+			}
+		})
+	}
+}

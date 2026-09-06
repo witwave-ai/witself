@@ -3331,6 +3331,137 @@ func TestTranscriptHookHydrationFailsOpenOnIdentityMismatch(t *testing.T) {
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("durable capture after hydration failure = %d / %v", len(pending), err)
 	}
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("WITSELF_HOME"), "capture", "hydration", "codex.jsonl"))
+	if err != nil || !strings.Contains(string(raw), `"outcome":"binding_mismatch"`) {
+		t.Fatalf("missing binding mismatch observation: %s / %v", raw, err)
+	}
+}
+
+func TestTranscriptHookHydrationRecordsValueFreeOutcome(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("self_error_%t", failed), func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), ".witself")
+			t.Setenv("WITSELF_HOME", home)
+			t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if failed {
+					http.Error(w, "private-error-canary", http.StatusInternalServerError)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(client.SelfDigest{Identity: client.SelfIdentity{
+					AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default", AgentID: "agt_1", AgentName: "atlas",
+				}})
+			}))
+			defer server.Close()
+			tokenPath := filepath.Join(t.TempDir(), "agent.token")
+			if err := os.WriteFile(tokenPath, []byte("hydration-secret-canary\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			location, err := transcriptcapture.EnsureLocation("home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := transcriptcapture.SaveConfig(transcriptcapture.Config{
+				Runtime: "codex", CaptureMode: transcriptcapture.ModeMessages, HookMode: transcriptcapture.HookModeUser,
+				Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "rlm_1",
+				Agent: "atlas", AgentID: "agt_1", AgentName: "atlas", Location: location,
+				Endpoint: server.URL, TokenFile: tokenPath,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			input, err := os.CreateTemp(t.TempDir(), "hook-*.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = input.Close() }()
+			if _, err := input.WriteString(`{"session_id":"session-1","hook_event_name":"SessionStart","cwd":"/src/witself","transcript_path":"/tmp/.codex/sessions/session-1/rollout.jsonl"}`); err != nil {
+				t.Fatal(err)
+			}
+			previousStdin := os.Stdin
+			os.Stdin = input
+			t.Cleanup(func() { os.Stdin = previousStdin })
+			invoke := func() (string, string, int) {
+				if _, err := input.Seek(0, 0); err != nil {
+					t.Fatal(err)
+				}
+				return captureFactDeleteCLI(t, func() int {
+					return transcriptHook([]string{"--runtime", "codex", "--account", "default", "--realm", "default", "--agent", "atlas", "--location", "home"})
+				})
+			}
+			stdout, _, code := invoke()
+			if code != 0 || (failed && stdout != "") || (!failed && !strings.Contains(stdout, "WITSELF_AUTOMATIC_CONTEXT_V1")) {
+				t.Fatalf("hook code=%d output=%q", code, stdout)
+			}
+			path := filepath.Join(home, "capture", "hydration", "codex.jsonl")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("hook did not append observation: %v", err)
+			}
+			var observation map[string]any
+			if err := json.Unmarshal(raw, &observation); err != nil || strings.Count(string(raw), "\n") != 1 {
+				t.Fatalf("expected one JSON line: %s / %v", raw, err)
+			}
+			wantOutcome := "injected"
+			if failed {
+				wantOutcome = "self_error"
+			}
+			if observation["outcome"] != wantOutcome || observation["injected"] != !failed {
+				t.Fatalf("observation = %s", raw)
+			}
+			for _, private := range []string{"private-error-canary", "hydration-secret-canary", "acc_1", "agt_1", "atlas", "Context", "Query"} {
+				if strings.Contains(string(raw), private) {
+					t.Fatalf("ledger contains private material: %s", raw)
+				}
+			}
+			// A broken ledger must not suppress otherwise valid hook output or
+			// change the runtime's fail-open exit code.
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			second, _, secondCode := invoke()
+			if secondCode != 0 || second != stdout {
+				t.Fatalf("ledger failure changed hook: code=%d output=%q", secondCode, second)
+			}
+		})
+	}
+}
+
+func TestIntegrationStatusSummarizesRecentHydration(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ledger_%t", present), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("WITSELF_HOME", home)
+			if present {
+				dir := filepath.Join(home, "capture", "hydration")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now().UTC()
+				line := func(at time.Time, injected, elided bool, outcome string, elapsed int) string {
+					return fmt.Sprintf("{\"timestamp\":%q,\"attempted\":true,\"injected\":%t,\"elapsed_ms\":%d,\"context_bytes\":100,\"elided\":%t,\"outcome\":%q}\n", at.Format(time.RFC3339Nano), injected, elapsed, elided, outcome)
+				}
+				raw := line(now.Add(-48*time.Hour), false, false, "timeout", 2000) +
+					line(now.Add(-time.Minute), true, true, "injected", 125) + line(now.Add(-time.Second), false, false, "self_error", 250)
+				if err := os.WriteFile(filepath.Join(dir, "codex.jsonl"), []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run([]string{"integration", "status", "--runtime", "codex"}) })
+			if code != 0 {
+				t.Fatalf("status code=%d stderr=%q", code, stderr)
+			}
+			want := "no recent hydration"
+			if present {
+				want = "attempts=2 injected=1 failures=1 p95_latency_ms=250.0 elided_count=1"
+			}
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("status = %q, want %q", stdout, want)
+			}
+		})
+	}
 }
 
 func TestLegacyAutomaticCuratorContinuationExposesNoCredential(t *testing.T) {
@@ -3385,5 +3516,68 @@ func TestLegacyAutomaticCuratorContinuationExposesNoCredential(t *testing.T) {
 	}
 	if strings.Contains(args, binding.TokenFile) || strings.Contains(args, "claude") && strings.Contains(args, "--provider") {
 		t.Fatalf("background argv exposed credential/provider configuration: %q", args)
+	}
+}
+
+func TestHydrationHookOutputRecordsRejection(t *testing.T) {
+	result := memoryhydration.Result{Attempted: true, Injected: true, Outcome: memoryhydration.OutcomeInjected, Context: strings.Repeat("x", 10001), ContextBytes: 10001}
+	output, err := hydrationHookOutput("claude-code", memoryhydration.EventSessionStart, &result)
+	if err == nil || len(output) != 0 || result.Injected || result.Outcome != memoryhydration.OutcomeOutputRejected {
+		t.Fatalf("rejected output=%d err=%v injected=%t outcome=%s", len(output), err, result.Injected, result.Outcome)
+	}
+	observation := memoryhydration.NewObservation(result)
+	if observation.Injected || observation.Outcome != memoryhydration.OutcomeOutputRejected || observation.ContextBytes != 10001 {
+		t.Fatalf("rejection observation = %#v", observation)
+	}
+}
+
+func TestTranscriptHookHydrationRecordsSetupFailure(t *testing.T) {
+	for _, name := range []string{"missing_config", "home_missing_config", "binding_mismatch"} {
+		t.Run(name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("WITSELF_HOME", home)
+			t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
+			want := "config_error"
+			if name == "binding_mismatch" {
+				location, err := transcriptcapture.EnsureLocation("home")
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = transcriptcapture.SaveConfig(transcriptcapture.Config{Runtime: "codex", CaptureMode: transcriptcapture.ModeMessages, HookMode: transcriptcapture.HookModeUser, Account: "default", AccountID: "acc_1", Realm: "default", RealmID: "rlm_1", Agent: "atlas", AgentID: "agt_1", AgentName: "atlas", Location: location, Endpoint: "http://127.0.0.1:1", TokenFile: filepath.Join(home, "unused.token")})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = "binding_mismatch"
+			}
+			input, err := os.CreateTemp(t.TempDir(), "hook-*.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = input.Close() }()
+			if _, err := input.WriteString(`{"session_id":"setup-1","hook_event_name":"SessionStart","transcript_path":"/tmp/.codex/sessions/setup-1/rollout.jsonl"}`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := input.Seek(0, 0); err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdin
+			os.Stdin = input
+			t.Cleanup(func() { os.Stdin = old })
+			args := []string{"--runtime", "codex", "--agent", "other"}
+			if name == "home_missing_config" {
+				args = append(args, "--witself-home", home)
+			}
+			stdout, stderr, code := captureFactDeleteCLI(t, func() int { return transcriptHook(args) })
+			if code != 0 || stdout != "" {
+				t.Fatalf("hook=%d %q", code, stdout)
+			}
+			raw, err := os.ReadFile(filepath.Join(home, "capture", "hydration", "codex.jsonl"))
+			if err != nil || !strings.Contains(string(raw), `"outcome":"`+want+`"`) || strings.Count(string(raw), "\n") != 1 {
+				t.Fatalf("setup observation=%s / %v; stderr=%q", raw, err, stderr)
+			}
+		})
 	}
 }

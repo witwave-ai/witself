@@ -18,6 +18,7 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/local"
+	"github.com/witwave-ai/witself/internal/memoryhydration"
 	"github.com/witwave-ai/witself/internal/runtimeacceptance"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
@@ -547,8 +548,15 @@ func collectAcceptanceEvidence(ctx context.Context, state runtimeacceptance.RunS
 		}
 	}
 
+	verifiedAt := time.Now().UTC()
+	// Local telemetry is additive: older installations, guided runtimes and
+	// rehearsals may have no readable ledger. Never fail acceptance for that.
+	hydration, hydrationErr := memoryhydration.ReadObservations(state.Runtime, state.PreparedAt, verifiedAt)
+	if hydrationErr != nil {
+		hydration = nil
+	}
 	return runtimeacceptance.Evaluate(state, runtimeacceptance.VerificationInput{
-		VerifiedAt: time.Now().UTC(), Backend: backend, Transcripts: transcripts,
+		VerifiedAt: verifiedAt, Backend: backend, Transcripts: transcripts, Hydration: hydration,
 	})
 }
 

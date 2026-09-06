@@ -766,6 +766,17 @@ rule rollout. Live hydration alert delivery and recovery acceptance remain
 pending; the prior monitoring acceptance above does not cover these rules.
 See the [Founder runbook](runbooks.md#founder-open-plane-monitoring).
 
+Client observations stay in the local value-free hydration ledger and are
+not scraped. `witself integration status --runtime codex` (or `claude-code`)
+reports the last 24 hours' attempts, injections, failures, p95 latency, and
+elision count; absent history reports `no recent hydration`. Runtime acceptance
+can add run-window counts and maximum latency to its optional `hydration`
+evidence block. These observations do not prove model-visible delivery or
+create a recurring authenticated runtime job. Scheduling the existing local
+Claude Code/Codex acceptance legs remains operator work; Cursor/Grok remain
+Scott-operated runtimes. Client freshness/staleness alerts and signed-in
+provider regression acceptance are still open.
+
 <a id="postgresql-alerts"></a>
 
 Deployment-hardening batch B adds the following database rules in
