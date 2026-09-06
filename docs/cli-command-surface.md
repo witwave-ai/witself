@@ -73,6 +73,10 @@ only `serve`, and `totp` only `show` and `code`; the other proposed verbs in
 those families remain targets. The global flag, environment, output, and exit
 code sections also retain target contracts unless explicitly identified as
 implemented. Customer examples are in [Workflow Scripts](workflow-scripts.md).
+The retained collaboration workflow is
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh),
+with the binding interface, nine legs, and value-free record contract in
+[Retained canary](autonomous-realm-messaging.md#retained-canary).
 
 Each command-family section repeats its marker as `Family status`; nested
 command headings inherit that family status. An implemented family does not
@@ -4644,6 +4648,14 @@ awaiting its decision until it expires or is cancelled; deleting the coordinator
 agent system-cancels its open requests and live claims. Deleting a candidate
 declines a pending response and cancels that agent's live claims while retaining
 historical offers. There is no first-offer or first-eligible fallback.
+
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh)
+composes these request verbs and ordinary question/result delivery into the
+offer, assignment, failed-result retry, escalation, and acknowledgement workflow.
+See [Retained canary](autonomous-realm-messaging.md#retained-canary) for its
+explicit two-agent binding interface, `witself.collaboration-canary.v1` evidence,
+and pending Founder-realm live record. Its offline companion is
+[`scripts/test-collaboration-canary.sh`](../scripts/test-collaboration-canary.sh).
 
 ## `witself email`
 

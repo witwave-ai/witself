@@ -460,6 +460,31 @@ Expected behavior:
   responsibility-aware eligibility, and granular policy-scope enforcement
   remain later slices.
 
+### Retained collaboration canary
+
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh)
+drives a bounded two-agent offer/selection/claim/result workflow, retries a
+client-reported failed result through a second request, and exchanges an
+authority question and answer before final completion and acknowledgement.
+Supply each agent's explicit endpoint, token file, and expected agent
+name using `--coordinator-endpoint`, `--coordinator-token-file`,
+`--coordinator-agent`, and the corresponding `--worker-*` flags; `--out FILE`
+selects a previously absent record path. `--realm NAME` supplies their realm
+name (default `default`); `--timeout-seconds` accepts 1–120
+seconds (default 30); `--redact-check` explicitly requests the record self-scan
+that is also applied automatically. The script verifies both token-bound
+identities and their shared account and realm, derives immutable IDs, and
+retains only value-free evidence.
+
+The [Retained canary acceptance contract](autonomous-realm-messaging.md#retained-canary)
+documents all nine legs, the `witself.collaboration-canary.v1` schema, the
+invocation, and the pending Founder-realm record for backlog #342 gate
+`current-live-request-canary`. Claude performs that live run separately with
+real bindings. The offline test is
+`bash scripts/test-collaboration-canary.sh`; its `PATH`-shimmed CLI exercises
+success, timeout/cancellation, retry/escalation failures, redaction, and usage
+without contacting a server. An offline pass does not close the live gate.
+
 ## 10. Export A Whole Account
 
 Export all portable state for the selected managed account to a verified logical
