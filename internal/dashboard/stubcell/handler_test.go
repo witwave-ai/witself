@@ -93,6 +93,13 @@ func TestDashboardStubCellRejectsUnauthorizedAndMutatingRequests(t *testing.T) {
 		{http.MethodGet, "/v1/self", "", http.StatusUnauthorized},
 		{http.MethodGet, "/v1/self", "wrong", http.StatusUnauthorized},
 		{http.MethodPost, "/v1/messages", "fixture-token", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/messages/msg_1:peek", "", http.StatusUnauthorized},
+		{http.MethodGet, "/v1/messages/msg_1:peek", "wrong", http.StatusUnauthorized},
+		{http.MethodHead, "/v1/messages/msg_1:peek", "fixture-token", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/messages/msg_1:peek", "fixture-token", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/messages/msg_1:read", "fixture-token", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/messages/msg_1:read", "fixture-token", http.StatusNotFound},
+		{http.MethodGet, "/v1/messages/sent_only:peek", "fixture-token", http.StatusNotFound},
 		{http.MethodGet, "/v1/secrets/sec_1/fields/fld_1:access", "fixture-token", http.StatusNotFound},
 		{http.MethodGet, "/v1/facts?observational=invalid-probe", "fixture-token", http.StatusBadRequest},
 	} {
@@ -106,5 +113,47 @@ func TestDashboardStubCellRejectsUnauthorizedAndMutatingRequests(t *testing.T) {
 		if strings.Contains(response.Body.String(), stubcell.SecretCanary) {
 			t.Fatal("error exposed secret canary")
 		}
+	}
+}
+
+func TestDashboardStubCellPeekPreservesPassiveFixtures(t *testing.T) {
+	handler := stubcell.New(stubcell.Config{BearerToken: "fixture-token"})
+	get := func(path string) []byte {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer fixture-token")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("fixture request failed: %d", response.Code)
+		}
+		return append([]byte(nil), response.Body.Bytes()...)
+	}
+	inbox := get("/v1/messages?direction=inbox")
+	outbox := get("/v1/messages?direction=outbox")
+	for _, passive := range [][]byte{inbox, outbox} {
+		if !bytes.Contains(passive, []byte("leaked-body-text")) ||
+			!bytes.Contains(passive, []byte(`"leaked":"payload"`)) ||
+			bytes.Contains(passive, []byte("Received body preview.")) {
+			t.Fatal("passive redaction fixture changed or received preview content")
+		}
+	}
+	for range 2 {
+		var response struct {
+			Message map[string]string `json:"message"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(get("/v1/messages/msg_1:peek")))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Message) != 2 || response.Message["id"] != "msg_1" ||
+			response.Message["body"] != "Received body preview.\nLiteral text: <em>not markup</em>" {
+			t.Fatal("peek response differs from the bounded literal fixture")
+		}
+	}
+	if !bytes.Equal(inbox, get("/v1/messages?direction=inbox")) ||
+		!bytes.Equal(outbox, get("/v1/messages?direction=outbox")) {
+		t.Fatal("observational preview changed passive message state")
 	}
 }

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
-import { CHECKS, PANELS, SCHEMA, STREAM_CLOSE_MARKER, browserDeadline, containsCanary, createSummary, observeStreamClosures, parseDashboardBanner, safeCapture, trackPageRequests, validateSummary } from './run.mjs';
+import { CHECKS, PANELS, SCHEMA, STREAM_CLOSE_MARKER, browserDeadline, containsCanary, createSummary, observeStreamClosures, parseDashboardBanner, safeCapture, trackMessageDetailRequests, trackPageRequests, validateSummary } from './run.mjs';
 
 const token = '0123456789abcdef0123456789abcdef';
 const url = `http://127.0.0.1:43210/?token=${token}`;
@@ -231,6 +231,31 @@ test('capture privacy checks also match JSON-escaped Windows paths and token val
   }
   assert.throws(() => safeCapture('STUB_SECRET_CANARY', []));
   assert.doesNotThrow(() => safeCapture(['safe synthetic fixture'], ['C:\\Users\\acceptance']));
+});
+
+test('message detail tracking retains exact methods and queries without counting passive list reads', () => {
+  const page = new EventEmitter();
+  const requests = trackMessageDetailRequests(page);
+  const emit = (method, path) => page.emit('request', {
+    method: () => method, url: () => `http://127.0.0.1:43210${path}`,
+  });
+  emit('GET', '/api/messages?direction=inbox');
+  emit('GET', '/api/messages?direction=outbox');
+  emit('GET', '/api/events?messages=true');
+  emit('GET', '/v1/messages');
+  assert.deepEqual(requests, []);
+  emit('GET', '/api/messages/msg_1/body');
+  emit('GET', '/api/messages/msg_1/body');
+  emit('POST', '/api/messages/msg_1/body');
+  emit('GET', '/api/messages/msg_1/body?read=true');
+  emit('POST', '/v1/messages/msg_1:read');
+  assert.deepEqual(requests, [
+    { method: 'GET', path: '/api/messages/msg_1/body' },
+    { method: 'GET', path: '/api/messages/msg_1/body' },
+    { method: 'POST', path: '/api/messages/msg_1/body' },
+    { method: 'GET', path: '/api/messages/msg_1/body?read=true' },
+    { method: 'POST', path: '/v1/messages/msg_1:read' },
+  ]);
 });
 
 test('browser deadline closes and drains timed-out work before returning', async () => {

@@ -49,14 +49,16 @@ metadata-only list (never `:read`), broad memory reads stay redacted by
 default, and the avatar SVG is re-run through the canonical sanitizer with its
 hash verified before it is served — the same gate `witself self card` applies.
 Inter-agent chat renders as thread-grouped conversation views built from that
-same passive list; message bodies stay absent by construction, and the proxy
-additionally zeroes any body or payload field before a page reaches the browser.
-This preserves the metadata-only guarantee even against a cell that returns
-content. Showing
-bodies remains a deliberate Console follow-up. Its public API prerequisite,
-`GET /v1/messages/{message_id}:peek`, now returns body and payload to an existing
-recipient without changing read/ack state, processing, audit, or usage. It
-does not grant sender-only access, and the Console does not call it yet.
+same passive list; the proxy zeroes any body or payload field before a page or
+live update reaches the browser, even against a cell that returns content.
+An explicit Show body action on a received message separately calls
+`GET /v1/messages/{message_id}:peek` with the same agent token. This existing
+recipient-only API changes no read/ack state, processing, audit, or usage and
+grants no sender-only access. The local response contains only bounded body
+text, rendered literally with whitespace preserved. Hide body or navigation
+clears the preview, and delayed responses cannot restore it. Bodies never enter
+the passive metadata cache. Older or unavailable backends produce a per-message
+unavailable state without automatic retries or a state-changing fallback.
 Agent email is one metadata-only panel with independent Received and Sent
 projections. Received uses exactly `GET /v1/email/address`, `GET
 /v1/email:status`, and `GET /v1/email`; Sent uses only the bounded owner outbox

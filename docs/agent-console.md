@@ -33,7 +33,7 @@ too. Its sole write is its own size-capped, validated theme preference.
 | Transcripts | Observational transcript inventory and entries | Append, retention-policy changes, and evidence mutation |
 | Facts | Observational redacted inventory and history; one explicit exact reveal where authorized | Set, propose, confirm, reject, or delete |
 | Memories | Redacted inventory, detail, version history, and evidence | Create, adjust, curate, supersede, forget, restore, or delete |
-| Conversations | Passive message/thread metadata | Message bodies or payloads and listen/read/claim/acknowledge/send/reply actions |
+| Conversations | Passive message/thread metadata and an explicit Show body / Hide body preview for received messages | Payloads, sender-only body access, and listen/read/claim/acknowledge/send/reply actions |
 | Email: Received | Managed address and receive state, account-wide storage capacity, sender and subject, receive/read/acknowledgement/processing state, raw-message size, attachment count, aggregate attachment-storage and retained-byte totals, retention warning, duplicate warning, and provider-supplied authentication/spam signals | Email ids, account/realm/owner/mailbox ids, decoded body, raw MIME or headers, per-attachment names, media types, or content bytes, cursors, claim fences, and read/listen/acknowledge/claim/complete/reply actions |
 | Email: Sent | From, Reply-To, recipient, subject, request kind, durable outbox state, provider-neutral status/error metadata, and lifecycle timestamps | Send ids, account/realm/owner ids, reply-parent ids, submitted body, idempotency material, worker claims, provider ids or payloads, cursors, and send/reply/retry/cancel actions |
 | Secrets | Names, field names and sensitivity flags, lifecycle, timestamps, counts, and public vault-binding metadata | Ciphertext, wrapped keys, field values, reveal, TOTP, lifecycle actions, and runtime injection |
@@ -42,6 +42,15 @@ Received senders, subjects, provider-supplied authentication/spam results, and
 provider-neutral outbound error codes remain untrusted external data. The proxy
 rebuilds both email projections through narrow allow lists and the browser
 renders them only as text.
+
+Conversations fetches a received message's body only when Show body is selected,
+using the existing recipient-only observational peek API. The local proxy
+returns only the body text; list and live-refresh responses remain stripped of
+bodies and payloads. The preview preserves whitespace, renders untrusted content
+as plain text, and clears on Hide body or navigation. It changes no read,
+acknowledgement, or processing state. A compatible backend is required; missing,
+disabled, forbidden, or unavailable previews show a per-message unavailable
+state without calling another endpoint or retrying automatically.
 
 The sent lifecycle vocabulary is `queued`, `claimed`, `provider_started`,
 `accepted`, `delivered`, `deferred`, `bounced`, `rejected`, `failed`,

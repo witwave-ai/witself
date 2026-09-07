@@ -106,6 +106,8 @@ func New(cfg Config) http.Handler {
 			response = MemoryHistory()
 		case "/v1/messages":
 			response = Messages()
+		case "/v1/messages/msg_1:peek":
+			response = PeekMessage()
 		case "/v1/email/address":
 			response = EmailAddress()
 		case "/v1/email:status":
