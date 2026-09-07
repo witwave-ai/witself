@@ -20,6 +20,10 @@ GOVULNCHECK_VERSION := v1.7.0
 
 DASHBOARD_ACCEPTANCE_OUT ?= evidence/dashboard-acceptance
 
+# Operators may override the timeout for store integration tests and the full
+# root-module test run, where Go applies the limit to every package.
+STORE_TEST_TIMEOUT ?= 30m
+
 MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
 MEMORY_LOAD_QUALITY_SEED        ?= 20260717
 MEMORY_LOAD_QUALITY_NOISE       ?= 250
@@ -172,7 +176,7 @@ test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable
 		trap cleanup_integration_db EXIT HUP INT TERM; \
 		docker compose exec -T postgres createdb -U witself "$$integration_db"; \
 		WITSELF_TEST_DATABASE_URL="postgres://witself:witself@localhost:5432/$$integration_db?sslmode=disable" \
-			go test ./internal/store -count=1 -timeout=30m
+			go test ./internal/store -count=1 -timeout=$(STORE_TEST_TIMEOUT)
 
 test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
 	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \
@@ -337,7 +341,7 @@ check: ## Run CI's exact local gate set — run before every push
 	fi
 	go vet ./...
 	go build ./...
-	go test ./... -race -shuffle=on -timeout=30m
+	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra
