@@ -54,6 +54,16 @@ func Messages() any {
 	}}}
 }
 
+// ReceivedMessageBody is harmless explicit-preview content, separate from the
+// deliberately leaky passive-list fixture above.
+const ReceivedMessageBody = "Received body preview.\nLiteral text: <em>not markup</em>"
+
+// PeekMessage returns the observational response for the known received copy.
+// No other message identity has an explicit-preview fixture.
+func PeekMessage() any {
+	return map[string]any{"message": map[string]string{"id": "msg_1", "body": ReceivedMessageBody}}
+}
+
 // EmailAddress returns the shared cell response used by proxy and acceptance tests.
 func EmailAddress() any {
 	now := time.Date(2026, 7, 21, 20, 1, 2, 0, time.UTC)

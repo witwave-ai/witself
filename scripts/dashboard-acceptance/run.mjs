@@ -284,6 +284,77 @@ export function trackPageRequests(page, currentPanel) {
   return { pending, replaceStreams() { for (const stream of streams) replacedStreams.add(stream); } };
 }
 
+// Keep exact detail request methods and relative routes in memory only. The
+// passive list is excluded; unexpected action routes still fail the assertions.
+export function trackMessageDetailRequests(page) {
+  const requests = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/messages/') || url.pathname.startsWith('/v1/messages/')) {
+      requests.push({ method: request.method(), path: url.pathname + url.search });
+    }
+  });
+  return requests;
+}
+
+async function exerciseConversationBodyPreview(page, expect, requests, pending) {
+  const fixture = 'Received body preview.\nLiteral text: <em>not markup</em>';
+  const expectedRequest = { method: 'GET', path: '/api/messages/msg_1/body' };
+  await expect.poll(() => pending.size).toBe(0);
+  assert.deepEqual(requests, []);
+  await expect(page.locator('#view')).not.toContainText(fixture);
+  await page.locator('#view .row a').first().click();
+  const received = page.locator('.bubble.received').first();
+  const sent = page.locator('.bubble.sent').first();
+  const body = received.locator('.message-body-content');
+  await expect(received).toBeVisible();
+  await expect(sent).toBeVisible();
+  await expect(sent.getByRole('button', { name: 'Show body', exact: true })).toHaveCount(0);
+  await expect(received.getByRole('button', { name: 'Show body', exact: true })).toBeVisible();
+  await expect(body).toBeHidden();
+  await expect.poll(() => pending.size).toBe(0);
+  assert.deepEqual(requests, []);
+  const metadata = await received.locator('.meta').textContent();
+
+  async function reveal(expectedCount) {
+    await received.getByRole('button', { name: 'Show body', exact: true }).click();
+    await expect(body).toBeVisible();
+    // textContent retains the newline and literal markup; Playwright's normal
+    // text matcher would normalize whitespace before comparing it.
+    await expect.poll(() => body.textContent()).toBe(fixture);
+    await expect(body.locator('em')).toHaveCount(0);
+    assert.equal(await body.evaluate(node => getComputedStyle(node).whiteSpace), 'pre-wrap');
+    await expect(received.getByRole('button', { name: 'Hide body', exact: true })).toBeVisible();
+    await expect.poll(() => pending.size).toBe(0);
+    assert.deepEqual(requests, Array.from({ length: expectedCount }, () => expectedRequest));
+    assert.equal(await received.locator('.meta').textContent(), metadata);
+    await expect(page.locator('#view')).not.toContainText('leaked-body-text');
+    await expect(page.locator('#view')).not.toContainText('"leaked":"payload"');
+  }
+
+  await reveal(1);
+  await received.getByRole('button', { name: 'Hide body', exact: true }).click();
+  await expect(body).toBeHidden();
+  await expect.poll(() => body.textContent()).toBe('');
+  assert.deepEqual(requests, [expectedRequest]);
+  await reveal(2);
+  await page.locator('a[data-nav="overview"]').click();
+  await expect(page.locator('#view h2').filter({ hasText: /^inventory(?:$| )/ }).first()).toBeVisible();
+  await expect(page.locator('#view')).not.toContainText(fixture);
+  await expect(page.locator('.message-body-content')).toHaveCount(0);
+  await page.locator('a[data-nav="conversations"]').click();
+  await expect(page.locator('#view h2').filter({ hasText: /^conversations(?:$| )/ }).first()).toBeVisible();
+  await page.locator('#view .row a').first().click();
+  await expect(received.getByRole('button', { name: 'Show body', exact: true })).toBeVisible();
+  await expect(body).toBeHidden();
+  await expect.poll(() => body.textContent()).toBe('');
+  await expect.poll(() => pending.size).toBe(0);
+  assert.deepEqual(requests, [expectedRequest, expectedRequest]);
+  // Retain the ordinary Conversations artifact with this harmless body shown,
+  // after proving Hide and navigation remove it and require another click.
+  await reveal(3);
+}
+
 export async function run(args) {
   const { witself, stub, out } = parseArgs(args);
   await mkdir(out, { recursive: true });
@@ -351,6 +422,7 @@ export async function run(args) {
     // Startup loads belong to overview too, including both authenticated navigations.
     activePanel = summary.panels[0];
     const { pending, replaceStreams } = trackPageRequests(page, () => activePanel);
+    const messageDetailRequests = trackMessageDetailRequests(page);
     await check('b_authentication', async () => {
       const [exchange, cleanResponse] = await Promise.all([
         page.waitForResponse(response => response.url() === tokenedURL, { timeout: TIMEOUT }),
@@ -394,6 +466,9 @@ export async function run(args) {
             await expect(page.locator('.email-sent-row').first()).toContainText('safe sent subject');
             await expect(page.getByRole('heading', { name: 'email storage', exact: true })).toBeVisible();
             await expect(page.getByRole('progressbar', { name: 'account-wide attachment capacity' })).toBeVisible();
+          }
+          if (panel.name === 'conversations') {
+            await exerciseConversationBodyPreview(page, expect, messageDetailRequests, pending);
           }
           await expect.poll(() => pending.size, { timeout: TIMEOUT }).toBe(0);
           await expect(page.locator('#live-label')).toHaveText('live');
