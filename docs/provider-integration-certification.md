@@ -199,20 +199,51 @@ model-tested only after its own real-client evidence passes. Cursor on Windows
 remains WSL-only unless the vendor publishes a supported native Agent CLI
 contract.
 
-## Planned release evidence
+## Retained contract evidence
 
-Before any cell is advertised as model-tested, the release certification job
-will emit one value-free JSON record per cell containing:
+The CI and release workflows run the existing provider fixtures through
+`tools/provider-contract-evidence`. Each native job emits a sanitized JSON
+record and retains it for 90 days as
+`provider-contract-cell-<target>-<run-id>-<run-attempt>`. The required aggregate
+job accepts exactly five target reports from the same repository, workflow,
+source ref, full commit, run ID and run attempt. Its artifact is
+`provider-contract-matrix-<run-id>-<run-attempt>` and its job summary shows the
+derived provider/platform matrix.
 
-- Witself version and commit;
-- runtime name and version;
-- operating system and architecture;
-- installation method;
-- contract, client, and model test results;
-- start and completion timestamps; and
-- a bounded failure category when a gate does not pass.
+The report preserves the three source-Codex, source-portable and
+installed-snapshot phases: 75 expected top-level test outcomes, comprising
+73 passes and two explicit native-Windows Cursor exceptions. The resulting
+35 provider/platform cells contain 34 applicable cells. Missing tests,
+unexpected skips, failures, malformed reports and mixed attempts fail the
+gate. Rerun the **entire workflow** after a failed attempt; rerunning only
+failed jobs cannot reuse earlier successful cells as evidence for the new
+attempt. A setup failure may leave no report; missing evidence fails closed.
 
-The record contains no credentials, tokens, prompts, model responses, home
-paths, or configuration contents. Generating these records and the public
-support matrix is a release-gate task; the initial pull-request harness does
-not claim to emit them yet.
+Each record includes the actual tested checkout commit and native target,
+timestamps, bounded failure categories, snapshot archive/version/checksum and
+installed-binary hash/commit identity. A pull-request checkout may be GitHub's
+synthetic merge commit, which differs from the author's branch head. Source
+phases and installed-snapshot phases remain separate. Provider executables
+are fixtures: vendor versions are unobserved, and real-client and model
+acceptance remain `not_run`. No credentials, tokens, prompts, model responses,
+home paths, configuration contents or raw test output enter these artifacts.
+
+A successful **tagged release** includes the validated aggregate as
+`provider-contract-evidence.json`. Its digest appears in the signed
+`checksums.txt`: the release contains 25 archives, 25 archive SBOMs, this JSON
+and four checksum/signing files (55 assets, 51 checksummed payloads). The
+existing 25 archive provenance attestations continue to cover archives only;
+the JSON is authenticated through the checksum signature. Both local and
+published artifact verification require its exact publishing tag, full source
+commit, repository and workflow run/attempt identity.
+
+The publishing tag is recorded separately from the provider-tested snapshot
+version. The final public archives are built separately: this evidence does
+**not** claim that their bytes ran through the provider fixtures. Archive
+snapshot builds, including Homebrew/control-plane verification and manual
+release dispatch, omit the aggregate JSON from their checksum/publication
+configuration. Manual dispatch still retains the validated Actions aggregate.
+
+Real-vendor/model certification, scheduled execution with regression alerting,
+and verification of final published binaries remain separate release-gate
+work. This contract report alone does not establish any of those claims.

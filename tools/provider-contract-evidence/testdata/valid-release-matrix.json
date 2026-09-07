@@ -1,0 +1,1116 @@
+{
+  "schema_version": "witself.provider-contract.matrix.v1",
+  "identity": {
+    "repository": "witwave-ai/witself",
+    "workflow": "release",
+    "run_id": "100",
+    "run_attempt": 1,
+    "source_ref": "refs/tags/v9.8.7",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "release_tag": "v9.8.7"
+  },
+  "generated_at": "2026-09-06T00:00:08Z",
+  "status": "passed",
+  "expected_test_outcomes": 75,
+  "passed_test_outcomes": 73,
+  "not_applicable_test_outcomes": 2,
+  "cells": [
+    {
+      "schema_version": "witself.provider-contract.cell.v1",
+      "identity": {
+        "repository": "witwave-ai/witself",
+        "workflow": "release",
+        "run_id": "100",
+        "run_attempt": 1,
+        "source_ref": "refs/tags/v9.8.7",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_tag": "v9.8.7"
+      },
+      "target": "linux-x64",
+      "goos": "linux",
+      "goarch": "amd64",
+      "started_at": "2026-09-06T00:00:00Z",
+      "completed_at": "2026-09-06T00:00:07Z",
+      "runtime_kind": "fixture",
+      "vendor_version": "unobserved",
+      "client_result": "not_run",
+      "model_result": "not_run",
+      "published_bytes_tested": false,
+      "artifact": {
+        "kind": "goreleaser_snapshot",
+        "snapshot_version": "9.8.7-SNAPSHOT-aaaaaaa",
+        "binary_reported_commit": "aaaaaaa",
+        "binary_vcs_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archive_name": "witself_9.8.7-SNAPSHOT-aaaaaaa_linux_amd64.tar.gz",
+        "archive_sha256": "2f0526a29b5777014840fe247e0267cdffecba56d3ec7a01da49d15366ba442c",
+        "binary_sha256": "2062a8a10bd094a7a834fd721214207d56b5cada2d5461cfe3fdc831300eeded",
+        "checksums_sha256": "50d4a6be956fb5274c4b92324af4b5dfd7393ae2ea82fed63841d7c5bfa7aca0"
+      },
+      "phases": [
+        {
+          "name": "source-codex",
+          "started_at": "2026-09-06T00:00:01Z",
+          "completed_at": "2026-09-06T00:00:02Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodex",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCodexRollbackRestoresPriorInstall",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "source-portable",
+          "started_at": "2026-09-06T00:00:03Z",
+          "completed_at": "2026-09-06T00:00:04Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "installed-snapshot",
+          "started_at": "2026-09-06T00:00:05Z",
+          "completed_at": "2026-09-06T00:00:06Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodexInstalledCommandMCPStdio",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        }
+      ],
+      "status": "passed",
+      "failure_category": "none"
+    },
+    {
+      "schema_version": "witself.provider-contract.cell.v1",
+      "identity": {
+        "repository": "witwave-ai/witself",
+        "workflow": "release",
+        "run_id": "100",
+        "run_attempt": 1,
+        "source_ref": "refs/tags/v9.8.7",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_tag": "v9.8.7"
+      },
+      "target": "linux-arm64",
+      "goos": "linux",
+      "goarch": "arm64",
+      "started_at": "2026-09-06T00:00:00Z",
+      "completed_at": "2026-09-06T00:00:07Z",
+      "runtime_kind": "fixture",
+      "vendor_version": "unobserved",
+      "client_result": "not_run",
+      "model_result": "not_run",
+      "published_bytes_tested": false,
+      "artifact": {
+        "kind": "goreleaser_snapshot",
+        "snapshot_version": "9.8.7-SNAPSHOT-aaaaaaa",
+        "binary_reported_commit": "aaaaaaa",
+        "binary_vcs_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archive_name": "witself_9.8.7-SNAPSHOT-aaaaaaa_linux_arm64.tar.gz",
+        "archive_sha256": "17973f010ef0890da0285c07ccca1826c9cf6531c5c9808326e2b012778a2c5f",
+        "binary_sha256": "841cf5f43bf56903ffcffb37c42bab857886f07515a340ecf4cf4500eaf52391",
+        "checksums_sha256": "f3c8a295fa963d868657fea572fa8de5947a89e355e03af2e46d8b5647cc8b12"
+      },
+      "phases": [
+        {
+          "name": "source-codex",
+          "started_at": "2026-09-06T00:00:01Z",
+          "completed_at": "2026-09-06T00:00:02Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodex",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCodexRollbackRestoresPriorInstall",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "source-portable",
+          "started_at": "2026-09-06T00:00:03Z",
+          "completed_at": "2026-09-06T00:00:04Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "installed-snapshot",
+          "started_at": "2026-09-06T00:00:05Z",
+          "completed_at": "2026-09-06T00:00:06Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodexInstalledCommandMCPStdio",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        }
+      ],
+      "status": "passed",
+      "failure_category": "none"
+    },
+    {
+      "schema_version": "witself.provider-contract.cell.v1",
+      "identity": {
+        "repository": "witwave-ai/witself",
+        "workflow": "release",
+        "run_id": "100",
+        "run_attempt": 1,
+        "source_ref": "refs/tags/v9.8.7",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_tag": "v9.8.7"
+      },
+      "target": "macos-intel",
+      "goos": "darwin",
+      "goarch": "amd64",
+      "started_at": "2026-09-06T00:00:00Z",
+      "completed_at": "2026-09-06T00:00:07Z",
+      "runtime_kind": "fixture",
+      "vendor_version": "unobserved",
+      "client_result": "not_run",
+      "model_result": "not_run",
+      "published_bytes_tested": false,
+      "artifact": {
+        "kind": "goreleaser_snapshot",
+        "snapshot_version": "9.8.7-SNAPSHOT-aaaaaaa",
+        "binary_reported_commit": "aaaaaaa",
+        "binary_vcs_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archive_name": "witself_9.8.7-SNAPSHOT-aaaaaaa_darwin_amd64.tar.gz",
+        "archive_sha256": "69c7b17416462baec90b139fea3bbe1159fb758f8243d101ffcf0c8d20628c41",
+        "binary_sha256": "dc3db053c2674c5f3667df4f0319f6af0d240d82a4e7327b2d791bd6d9a5511e",
+        "checksums_sha256": "168172a6d4ecfb691300a83dbfd3315e68c7d6645d21f6aa4c6c87d6328545f6"
+      },
+      "phases": [
+        {
+          "name": "source-codex",
+          "started_at": "2026-09-06T00:00:01Z",
+          "completed_at": "2026-09-06T00:00:02Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodex",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCodexRollbackRestoresPriorInstall",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "source-portable",
+          "started_at": "2026-09-06T00:00:03Z",
+          "completed_at": "2026-09-06T00:00:04Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "installed-snapshot",
+          "started_at": "2026-09-06T00:00:05Z",
+          "completed_at": "2026-09-06T00:00:06Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodexInstalledCommandMCPStdio",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        }
+      ],
+      "status": "passed",
+      "failure_category": "none"
+    },
+    {
+      "schema_version": "witself.provider-contract.cell.v1",
+      "identity": {
+        "repository": "witwave-ai/witself",
+        "workflow": "release",
+        "run_id": "100",
+        "run_attempt": 1,
+        "source_ref": "refs/tags/v9.8.7",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_tag": "v9.8.7"
+      },
+      "target": "macos-arm64",
+      "goos": "darwin",
+      "goarch": "arm64",
+      "started_at": "2026-09-06T00:00:00Z",
+      "completed_at": "2026-09-06T00:00:07Z",
+      "runtime_kind": "fixture",
+      "vendor_version": "unobserved",
+      "client_result": "not_run",
+      "model_result": "not_run",
+      "published_bytes_tested": false,
+      "artifact": {
+        "kind": "goreleaser_snapshot",
+        "snapshot_version": "9.8.7-SNAPSHOT-aaaaaaa",
+        "binary_reported_commit": "aaaaaaa",
+        "binary_vcs_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archive_name": "witself_9.8.7-SNAPSHOT-aaaaaaa_darwin_arm64.tar.gz",
+        "archive_sha256": "de1f0aac3955aa82caac006e85015613e1ec43120a5351643fec6bc58bfc0788",
+        "binary_sha256": "77feca02d5ecccafe05a687444259ab77938e5819fd8724957251ca26fda4d4d",
+        "checksums_sha256": "8113d2a96709cfb01892491bb78f1ea888a45ed3332b3b932df2326e5438d95c"
+      },
+      "phases": [
+        {
+          "name": "source-codex",
+          "started_at": "2026-09-06T00:00:01Z",
+          "completed_at": "2026-09-06T00:00:02Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodex",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCodexRollbackRestoresPriorInstall",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "source-portable",
+          "started_at": "2026-09-06T00:00:03Z",
+          "completed_at": "2026-09-06T00:00:04Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "installed-snapshot",
+          "started_at": "2026-09-06T00:00:05Z",
+          "completed_at": "2026-09-06T00:00:06Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodexInstalledCommandMCPStdio",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        }
+      ],
+      "status": "passed",
+      "failure_category": "none"
+    },
+    {
+      "schema_version": "witself.provider-contract.cell.v1",
+      "identity": {
+        "repository": "witwave-ai/witself",
+        "workflow": "release",
+        "run_id": "100",
+        "run_attempt": 1,
+        "source_ref": "refs/tags/v9.8.7",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "release_tag": "v9.8.7"
+      },
+      "target": "windows-x64",
+      "goos": "windows",
+      "goarch": "amd64",
+      "started_at": "2026-09-06T00:00:00Z",
+      "completed_at": "2026-09-06T00:00:07Z",
+      "runtime_kind": "fixture",
+      "vendor_version": "unobserved",
+      "client_result": "not_run",
+      "model_result": "not_run",
+      "published_bytes_tested": false,
+      "artifact": {
+        "kind": "goreleaser_snapshot",
+        "snapshot_version": "9.8.7-SNAPSHOT-aaaaaaa",
+        "binary_reported_commit": "aaaaaaa",
+        "binary_vcs_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archive_name": "witself_9.8.7-SNAPSHOT-aaaaaaa_windows_amd64.zip",
+        "archive_sha256": "a80cb1ec48958a801fbd67762118cb4b4b01a531c49eff42f667cdeab8df69b0",
+        "binary_sha256": "d8e7cf09d2986526533de4accbd5f5185792f2bf754598cf22de9ca0b0812b02",
+        "checksums_sha256": "b9c2e90b9bd3caa7daf13e80532c797e28807eff5b77298b28c54b20d4216117"
+      },
+      "phases": [
+        {
+          "name": "source-codex",
+          "started_at": "2026-09-06T00:00:01Z",
+          "completed_at": "2026-09-06T00:00:02Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodex",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCodexRollbackRestoresPriorInstall",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "source-portable",
+          "started_at": "2026-09-06T00:00:03Z",
+          "completed_at": "2026-09-06T00:00:04Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "not_applicable",
+              "failure_category": "cursor_native_windows_unsupported"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        },
+        {
+          "name": "installed-snapshot",
+          "started_at": "2026-09-06T00:00:05Z",
+          "completed_at": "2026-09-06T00:00:06Z",
+          "process_exit": 0,
+          "status": "passed",
+          "failure_category": "none",
+          "tests": [
+            {
+              "name": "TestProviderIntegrationContractCodexInstalledCommandMCPStdio",
+              "provider": "codex",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractClaude",
+              "provider": "claude-code",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractGrok",
+              "provider": "grok-build",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCursor",
+              "provider": "cursor",
+              "status": "not_applicable",
+              "failure_category": "cursor_native_windows_unsupported"
+            },
+            {
+              "name": "TestProviderIntegrationContractOpenClaw",
+              "provider": "openclaw",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractAntigravity",
+              "provider": "antigravity",
+              "status": "passed",
+              "failure_category": "none"
+            },
+            {
+              "name": "TestProviderIntegrationContractCopilot",
+              "provider": "copilot",
+              "status": "passed",
+              "failure_category": "none"
+            }
+          ]
+        }
+      ],
+      "status": "passed",
+      "failure_category": "none"
+    }
+  ],
+  "matrix": [
+    {
+      "provider": "codex",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "claude-code",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "grok-build",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "cursor",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "openclaw",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "antigravity",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "copilot",
+      "target": "linux-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "codex",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "claude-code",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "grok-build",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "cursor",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "openclaw",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "antigravity",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "copilot",
+      "target": "linux-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "codex",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "claude-code",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "grok-build",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "cursor",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "openclaw",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "antigravity",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "copilot",
+      "target": "macos-intel",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "codex",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "claude-code",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "grok-build",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "cursor",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "openclaw",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "antigravity",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "copilot",
+      "target": "macos-arm64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "codex",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "claude-code",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "grok-build",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "cursor",
+      "target": "windows-x64",
+      "source_result": "not_applicable",
+      "installed_snapshot_result": "not_applicable",
+      "contract_result": "not_applicable",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "openclaw",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "antigravity",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    },
+    {
+      "provider": "copilot",
+      "target": "windows-x64",
+      "source_result": "passed",
+      "installed_snapshot_result": "passed",
+      "contract_result": "passed",
+      "client_result": "not_run",
+      "model_result": "not_run"
+    }
+  ]
+}
