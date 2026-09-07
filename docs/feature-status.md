@@ -44,7 +44,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 2/7 pass | 4 |
 | [Self-hosted Witself](#self-hosting) | Deployment | `implemented` | `not applicable` | **conditional** | 0/7 pass | 5 |
 | [Transcripts and retention](#transcripts) | Core data | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
-| [Usage metering and customer reporting](#usage-metering) | Commercial | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Usage metering and customer reporting](#usage-metering) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 
 ## Feature details
 
@@ -771,7 +771,7 @@ Immutable value-free usage events, hourly and daily rollups, time and dimension 
 |---|---|---|
 | Behavior | **PASS** | Event append, canonical dimensions, hourly and daily rollups, time windows, grouping, filters, JSON output, API, and CLI reporting are implemented and tested. [usage_test.go](../internal/server/usage_test.go), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Entitlement / policy | **PASS** | Only an active agent token may read its own rollups in the current slice; account, realm, and cross-agent reporting are not silently exposed. [transcript-ledger.md](../docs/transcript-ledger.md), [usage_test.go](../internal/server/usage_test.go) |
-| Bounds / abuse | **CONDITIONAL** | Events are value-free; query windows, groups, and a closed dimension vocabulary are validated. Reports return at most 10,000 points with explicit truncation and totals over returned points. Boundary, hostile-import, and high-cardinality tests are present; PostgreSQL validation remains open. [transcript-ledger.md](../docs/transcript-ledger.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
+| Bounds / abuse | **PASS** | Reviewed PostgreSQL boundary, hostile-import, and high-cardinality evidence verifies the 10,000-point cap, explicit truncation, and totals over returned points. New event and query dimensions use a closed vocabulary; valid historical archive dimensions remain importable. [transcript-ledger.md](../docs/transcript-ledger.md), [usage-query-bounds-evidence.md](../docs/usage-query-bounds-evidence.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Observability | **CONDITIONAL** | Usage can be queried, but append failures, rollup lag, missing intervals, reconciliation drift, and storage growth lack continuous SLOs and alerts. [observability-and-operations.md](../docs/observability-and-operations.md), [transcript-ledger.md](../docs/transcript-ledger.md) |
 | Recovery | **PASS** | Immutable events, deterministic buckets, canonical database backup, and semantic validation of events and rollups on account archive/import provide a verified restore path. [backup-and-recovery.md](../docs/backup-and-recovery.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Rollout / canaries | **CONDITIONAL** | Agent-scoped reporting is released, while account and realm aggregation, billing-unit conversion, current managed reconciliation, and retained load evidence are incomplete. [billing-and-limits.md](../docs/billing-and-limits.md), [transcript-ledger.md](../docs/transcript-ledger.md) |
@@ -780,5 +780,4 @@ Immutable value-free usage events, hourly and daily rollups, time and dimension 
 Open gates:
 
 - `usage-operations-alerting` (observability): Connect append failures, rollup lag, missing buckets, reconciliation drift, and retained volume to continuous metrics and a tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
-- `usage-query-bounds` (bounds / abuse): Retain passing PostgreSQL boundary, hostile-import, and high-cardinality evidence for the implemented closed dimension vocabulary, 10,000-point cap, and explicit truncation contract. ([tracking/evidence](../internal/store/usage.go))
 - `usage-rollup-expansion` (rollout / canaries): Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load; Team is purchasable while Stripe usage recording remains a stub, raising this gate's urgency. ([tracking/evidence](../docs/billing-and-limits.md))
