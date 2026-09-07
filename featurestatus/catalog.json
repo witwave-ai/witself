@@ -2547,10 +2547,11 @@
           ]
         },
         "bounds_abuse": {
-          "state": "conditional",
-          "summary": "Events are value-free; query windows, groups, and a closed dimension vocabulary are validated. Reports return at most 10,000 points with explicit truncation and totals over returned points. Boundary, hostile-import, and high-cardinality tests are present; PostgreSQL validation remains open.",
+          "state": "pass",
+          "summary": "Reviewed PostgreSQL boundary, hostile-import, and high-cardinality evidence verifies the 10,000-point cap, explicit truncation, and totals over returned points. New event and query dimensions use a closed vocabulary; valid historical archive dimensions remain importable.",
           "evidence": [
             "docs/transcript-ledger.md",
+            "docs/usage-query-bounds-evidence.md",
             "internal/store/usage_integration_test.go"
           ]
         },
@@ -2593,12 +2594,6 @@
           "gate_ids": ["observability"],
           "summary": "Connect append failures, rollup lag, missing buckets, reconciliation drift, and retained volume to continuous metrics and a tested receiver.",
           "ref": "docs/observability-and-operations.md"
-        },
-        {
-          "id": "usage-query-bounds",
-          "gate_ids": ["bounds_abuse"],
-          "summary": "Retain passing PostgreSQL boundary, hostile-import, and high-cardinality evidence for the implemented closed dimension vocabulary, 10,000-point cap, and explicit truncation contract.",
-          "ref": "internal/store/usage.go"
         },
         {
           "id": "usage-rollup-expansion",
