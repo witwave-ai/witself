@@ -1523,6 +1523,7 @@
         "docs/cli-command-surface.md",
         "docs/governance-and-support.md",
         "docs/self-host-support.md",
+        "docs/support-admission-age-out-evidence.md",
         "docs/support-policy.md",
         "docs/support-runner.md"
       ],
@@ -1553,9 +1554,9 @@
             ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
             "docs/data-retention-policy.md",
             "docs/security-policy.md",
+            "docs/support-admission-age-out-evidence.md",
             "infra/cloudflare/support-email-intake/src/index.js",
             "internal/store/support.go",
-            "internal/store/support_age_out_test.go",
             "internal/store/support_email.go",
             "internal/store/support_limits_test.go"
           ]
@@ -1602,7 +1603,7 @@
         {
           "id": "support-abuse-retention",
           "gate_ids": ["bounds_abuse"],
-          "summary": "Retain PostgreSQL admission and age-out validation and add bounded evidence-attachment handling; per-account API/CLI rate limiting and a default-off bounded awaiting-customer age-out worker are implemented.",
+          "summary": "Add bounded evidence-attachment handling; per-account API/CLI rate limiting and a default-off bounded awaiting-customer age-out worker are implemented.",
           "ref": "internal/store/support.go"
         },
         {
