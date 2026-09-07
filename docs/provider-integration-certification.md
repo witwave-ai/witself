@@ -247,3 +247,80 @@ configuration. Manual dispatch still retains the validated Actions aggregate.
 Real-vendor/model certification, scheduled execution with regression alerting,
 and verification of final published binaries remain separate release-gate
 work. This contract report alone does not establish any of those claims.
+
+### Published fixture result: v0.0.278
+
+[Release v0.0.278](https://github.com/witwave-ai/witself/releases/tag/v0.0.278)
+publishes [provider-contract-evidence.json](https://github.com/witwave-ai/witself/releases/download/v0.0.278/provider-contract-evidence.json)
+with the following recorded identity:
+
+| Field | Recorded value |
+| --- | --- |
+| Schema | `witself.provider-contract.matrix.v1` |
+| Repository | `witwave-ai/witself` |
+| Source ref | `refs/tags/v0.0.278` |
+| Tested source commit | [`0f10ad899732d91226c872e73581b7ece8963b50`](https://github.com/witwave-ai/witself/commit/0f10ad899732d91226c872e73581b7ece8963b50) |
+| Workflow / run / attempt | [`release` / `34092395686` / `1`](https://github.com/witwave-ai/witself/actions/runs/34092395686/attempts/1) |
+| Report generated at | `2026-09-07T06:56:35.065136719Z` |
+| Report SHA-256 | `fc3852459ac0acc22286761ae5face262fac391644f5a6605ee78d41d7ce9470` |
+
+That exact report digest is listed in the release's signed
+[checksums.txt](https://github.com/witwave-ai/witself/releases/download/v0.0.278/checksums.txt).
+The checksum signature authenticates the report bytes; the archive provenance
+attestations cover the archives only. Signing does not certify vendor clients
+or model behavior.
+
+The five native targets recorded 75 expected test outcomes: 73 `passed` and
+two `not_applicable` native-Windows Cursor outcomes. The table below reproduces
+all 35 provider/platform rows, including each `contract_result`. Source,
+installed-snapshot and contract results are `passed` for all 34 applicable
+rows. Cursor on native Windows is `not_applicable`, with reason
+`cursor_native_windows_unsupported`; this result does not add a tested WSL
+target. Every client and model result is `not_run`.
+
+Provider executables were fixtures and vendor versions were `unobserved`.
+Installed-snapshot results concern the recorded GoReleaser snapshots, not the
+separately built final published archive bytes. Every native cell records
+`published_bytes_tested: false`. This is evidence for the release commit above;
+this documentation update does not record a new provider execution.
+
+| Provider | Target | Source | Installed snapshot | Contract | Client | Model |
+| --- | --- | --- | --- | --- | --- | --- |
+| codex | linux-x64 | passed | passed | passed | not_run | not_run |
+| claude-code | linux-x64 | passed | passed | passed | not_run | not_run |
+| grok-build | linux-x64 | passed | passed | passed | not_run | not_run |
+| cursor | linux-x64 | passed | passed | passed | not_run | not_run |
+| openclaw | linux-x64 | passed | passed | passed | not_run | not_run |
+| antigravity | linux-x64 | passed | passed | passed | not_run | not_run |
+| copilot | linux-x64 | passed | passed | passed | not_run | not_run |
+| codex | linux-arm64 | passed | passed | passed | not_run | not_run |
+| claude-code | linux-arm64 | passed | passed | passed | not_run | not_run |
+| grok-build | linux-arm64 | passed | passed | passed | not_run | not_run |
+| cursor | linux-arm64 | passed | passed | passed | not_run | not_run |
+| openclaw | linux-arm64 | passed | passed | passed | not_run | not_run |
+| antigravity | linux-arm64 | passed | passed | passed | not_run | not_run |
+| copilot | linux-arm64 | passed | passed | passed | not_run | not_run |
+| codex | macos-intel | passed | passed | passed | not_run | not_run |
+| claude-code | macos-intel | passed | passed | passed | not_run | not_run |
+| grok-build | macos-intel | passed | passed | passed | not_run | not_run |
+| cursor | macos-intel | passed | passed | passed | not_run | not_run |
+| openclaw | macos-intel | passed | passed | passed | not_run | not_run |
+| antigravity | macos-intel | passed | passed | passed | not_run | not_run |
+| copilot | macos-intel | passed | passed | passed | not_run | not_run |
+| codex | macos-arm64 | passed | passed | passed | not_run | not_run |
+| claude-code | macos-arm64 | passed | passed | passed | not_run | not_run |
+| grok-build | macos-arm64 | passed | passed | passed | not_run | not_run |
+| cursor | macos-arm64 | passed | passed | passed | not_run | not_run |
+| openclaw | macos-arm64 | passed | passed | passed | not_run | not_run |
+| antigravity | macos-arm64 | passed | passed | passed | not_run | not_run |
+| copilot | macos-arm64 | passed | passed | passed | not_run | not_run |
+| codex | windows-x64 | passed | passed | passed | not_run | not_run |
+| claude-code | windows-x64 | passed | passed | passed | not_run | not_run |
+| grok-build | windows-x64 | passed | passed | passed | not_run | not_run |
+| cursor | windows-x64 | not_applicable | not_applicable | not_applicable | not_run | not_run |
+| openclaw | windows-x64 | passed | passed | passed | not_run | not_run |
+| antigravity | windows-x64 | passed | passed | passed | not_run | not_run |
+| copilot | windows-x64 | passed | passed | passed | not_run | not_run |
+
+Real-client/model acceptance, recurring execution with regression alerting,
+and provider-fixture verification of final published binaries remain open.
