@@ -1,13 +1,17 @@
 # Narrative Memory Load And Quality Harnesses
 
-Status: five executable PostgreSQL slices. This runbook defines the original
+Status: five load/lifecycle slices plus a fixed lexical-relevance measurement.
+This runbook defines the original
 opt-in lexical-memory baseline, the bounded curation load/lifecycle slice, the
 lexical plus client-vector/hybrid recall load/quality slice, and the
 whole-account archive round-trip/retrieval-projection slice, plus the
 concurrent-agent and tenant-isolation slice for production-readiness issue
 [#46](https://github.com/witwave-ai/witself/issues/46). They provide useful,
 reproducible evidence, but individually or together, they do not close that
-issue; the remaining gates are listed below.
+issue; the remaining gates are listed below. The separate
+[adjudicated lexical-relevance measurement](#adjudicated-lexical-relevance-measurement)
+measures missed relevant memories and false positives across the entire first
+page. It does not change the five existing result contracts or hosted workflow.
 
 ## What The Lexical Harness Proves
 
@@ -1197,6 +1201,102 @@ a protected GitHub environment, a DSN secret, reviewed networking/private runner
 access as needed, and approval for any cloud spend. This hosted workflow adds
 none of those settings or resources and does not complete item 8 below.
 
+## Adjudicated Lexical-Relevance Measurement
+
+`TestNarrativeMemoryRelevancePostgres` exercises the real lexical
+`RecallMemories` path against a fixed synthetic corpus in
+`internal/loadquality/testdata/relevance-corpus.v1.json`. Each query has a
+reviewed relevance rationale, a set of relevant labels and a fixed top-K bound.
+The corpus contains overlapping vocabulary distractors, multiple relevant
+memories, synonym/spelling gaps and queries with no answer in the corpus.
+Labels describe whether a memory supplies the requested information; sharing
+query words alone does not make it relevant.
+
+These are agent-adjudicated, answer-bearing examples. A pointer to a document
+that may contain the answer is deliberately distinct from a memory that
+contains the answer; this does not measure broader topical discovery or replace
+a representative human relevance study.
+
+The corpus and relevance judgments are reviewed before observing rankings.
+Never adjust them or production ranking weights to make an observed run look
+better. Changes to the corpus require fresh independent adjudication and a new
+digest; results with different corpus digests are not directly comparable.
+There are no model calls, generated embeddings, real account values or quality
+thresholds in this measurement.
+
+With a dedicated test database DSN already in the trusted parent environment:
+
+```sh
+make test-memory-relevance \
+  MEMORY_RELEVANCE_RESULTS=/trusted-artifacts/memory-relevance.json \
+  MEMORY_RELEVANCE_PROVIDER=local \
+  MEMORY_RELEVANCE_HARDWARE=developer-machine
+```
+
+The direct invocation is:
+
+```sh
+WITSELF_MEMORY_RELEVANCE=1 \
+go test ./internal/store -run '^TestNarrativeMemoryRelevancePostgres$' \
+  -count=1 -v -timeout 10m
+```
+
+The default output path is private and includes the process id; the harness
+reports it after writing. Optional evidence metadata uses
+`WITSELF_MEMORY_RELEVANCE_{RELEASE,COMMIT,PROVIDER,HARDWARE_TIER}`; Make exposes
+the corresponding `MEMORY_RELEVANCE_*` variables, with `HARDWARE` for the last
+one. Provider and hardware labels cannot contain dots or endpoint syntax.
+Release and commit labels identify the source actually tested; they are
+operator-supplied metadata, not a verification of Git cleanliness. Retain the
+source diff/tree alongside results when measuring uncommitted changes.
+
+The fixture contains at most 24 memories and 12 queries, each with K at most 5.
+There are no workload or external-corpus overrides. One synthetic account,
+realm and agent are created, and every memory is captured through the store
+API with kind `note`, salience `0.5`, no tags and no sensitive value. Only in
+this disposable fixture, memory and version timestamps are normalized to
+2026-01-01 UTC plus their zero-based corpus index in seconds. Every query uses
+2026-01-02 UTC and the exact committed owner-lane watermark. This
+`indexed-seconds-v1` policy preserves the production scorer and prevents random
+identifiers or capture latency from choosing tied results. It is an artificial
+ordering control, not evidence about production recency behavior. Preparation
+and recall each have a two-minute deadline inside a five-minute operation
+context; the shared migration fixture owns schema cleanup. Shared connection,
+migration and cleanup helpers have their own context behavior; the Make target's
+ten-minute test timeout is the outer bound for the entire invocation.
+
+The scorer examines every returned hit, rejecting unknown or duplicate
+identities and over-limit pages. Results retain fixed case names and relevant
+rank positions, never query text, memory content or durable identifiers. The
+separately versioned `witself.memory-relevance-result.v1` contract binds the
+exact corpus digest, complete query set, clock policy and safe environment
+metadata. Its closed JSON schema and Go validator check every count and metric
+before an atomic mode-`0600` write.
+
+| Measurement | Definition |
+|---|---|
+| True positives | Returned memories whose labels belong to the query's relevant set |
+| False positives | Retrieved count minus true positives |
+| Precision at K | True positives divided by K, including unfilled positions in the denominator |
+| Recall at K | True positives divided by total relevant memories; `null` when that set is empty |
+| Reciprocal rank | One divided by the first relevant rank; zero when no relevant memory is returned |
+
+An empty response to an answerable query therefore has precision and recall
+zero. A no-answer query has recall `null` and reciprocal rank zero; inspect its
+retrieved/false-positive counts to distinguish a correct empty response from
+irrelevant results. Underfilled results can have precision below one even when
+every returned memory is relevant. Missing secondary relevant memories and
+irrelevant hits below a correct first result remain visible, unlike a
+first-hit-only rank assertion.
+
+The outcome `measured` means all cases completed and the evidence is internally
+consistent. It permits poor quality scores. A passing harness is not a
+production quality acceptance gate, a representative user study or a managed
+cloud certification. Ordinary CI covers its database-free scorer/schema tests;
+the PostgreSQL measurement is opt-in and is not added to the existing five-slice
+hosted manifest. Retain repeated measurements and review their actual scores
+before proposing a separately scoped retrieval change.
+
 ## What Still Remains For Issue #46
 
 These five slices intentionally do **not** claim production readiness. Issue #46
@@ -1224,9 +1324,10 @@ still requires:
    transcripts, archive bytes, and concurrency beyond the fifth slice's bounded
    256-principal topology. Current ceilings are fixture and correctness guards,
    not capacity claims.
-6. A richer adjudicated relevance corpus with false-positive and ranking
-   metrics beyond the two exact lexical and three constructed hybrid cases in
-   the current harnesses.
+6. Representative relevance adjudication beyond the bounded synthetic lexical
+   corpus above, including richer client-vector/hybrid cases, repeated evidence
+   and reviewed quality targets. The new whole-page false-positive and ranking
+   measurements add evidence; they do not establish production quality floors.
 7. Client-side curation quality, duplicate growth, supersession quality,
    summarization drift, and model token/cost envelopes. Those require explicit
    client inference and remain outside this model-free store harness.

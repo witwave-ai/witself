@@ -99,7 +99,15 @@ MEMORY_CONCURRENCY_LOAD_COMMIT                    ?= $(shell git rev-parse HEAD)
 MEMORY_CONCURRENCY_LOAD_PROVIDER                  ?= local
 MEMORY_CONCURRENCY_LOAD_HARDWARE                  ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load dashboard-acceptance feature-status build check check-go-mod-tidy govulncheck check-infra
+# A fixed relevance corpus has no workload knobs. Empty output uses the
+# harness's private, process-specific default path.
+MEMORY_RELEVANCE_RESULTS  ?=
+MEMORY_RELEVANCE_RELEASE  ?= $(shell git describe --tags --always --dirty)
+MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
+MEMORY_RELEVANCE_PROVIDER ?= local
+MEMORY_RELEVANCE_HARDWARE ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status build check check-go-mod-tidy govulncheck check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -296,6 +304,20 @@ test-memory-concurrency-load: ## Run the opt-in concurrent-agent and tenant-isol
 	else \
 		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
 	fi
+
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE := 1
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_RESULTS := $(MEMORY_RELEVANCE_RESULTS)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_RELEASE := $(MEMORY_RELEVANCE_RELEASE)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_COMMIT := $(MEMORY_RELEVANCE_COMMIT)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_PROVIDER := $(MEMORY_RELEVANCE_PROVIDER)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_HARDWARE_TIER := $(MEMORY_RELEVANCE_HARDWARE)
+test-memory-relevance: ## Measure the fixed synthetic lexical relevance corpus
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryRelevancePostgres$$' \
+			-count=1 -v -timeout 10m
 
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
