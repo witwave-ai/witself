@@ -40,7 +40,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `general` | **conditional** | 5/7 pass | 3 |
 | [Realm email aliases](#realm-email-aliases) | Email | `implemented` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Realm-local messaging](#realm-messaging) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
-| [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
+| [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 2/7 pass | 4 |
 | [Self-hosted Witself](#self-hosting) | Deployment | `implemented` | `not applicable` | **conditional** | 0/7 pass | 5 |
 | [Transcripts and retention](#transcripts) | Core data | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
@@ -660,12 +660,11 @@ Transactional MCP and routing installers exist for Codex, Claude Code, Grok Buil
 | Bounds / abuse | **PASS** | Exact ownership markers, path validation, collision-resistant IDs, bounded hooks, transactional backups, and no-value modes constrain installer risk. [provider-integration-certification.md](../docs/provider-integration-certification.md), [threat-model.md](../docs/threat-model.md) |
 | Observability | **CONDITIONAL** | Verification JSON and sanitized acceptance evidence schemas exist, but no recurring provider acceptance job or alerting surface is active. [memory-runtime-acceptance.md](../docs/memory-runtime-acceptance.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Recovery | **PASS** | Install journals, pre-edit backups, rollback, exact ownership, idempotent reinstall, and conservative uninstall protect client configuration. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
-| Rollout / canaries | **CONDITIONAL** | Contract tests are strong, but only the Codex contract gate crosses MCP stdio and no provider cell is advertised model-tested with a current signed-in record. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
+| Rollout / canaries | **CONDITIONAL** | v0.0.278 publishes fixture evidence authenticated by signed checksums for 35 provider/platform cells; only the Codex contract crosses MCP stdio, and real-client/model acceptance remains not_run. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Docs / support | **PASS** | The per-runtime capability matrix, hooks, preview limitations, ownership, verification, and certification boundary are documented. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 
 Open gates:
 
-- `retained-provider-evidence` (rollout / canaries): Publish retained release JSON and the public support-matrix result from the existing credential-free provider contract gates. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/45))
 - `runtime-acceptance-operations` (observability): Run provider acceptance on a recurring cadence and alert on capability regressions without retaining credentials or private prompt content. ([tracking/evidence](../docs/provider-integration-certification.md))
 - `signed-in-runtime-matrix` (rollout / canaries): Complete current signed-in model acceptance for every advertised runtime and operating-system capability cell. ([tracking/evidence](../docs/provider-integration-certification.md))
 

@@ -2173,7 +2173,7 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Contract tests are strong, but only the Codex contract gate crosses MCP stdio and no provider cell is advertised model-tested with a current signed-in record.",
+          "summary": "v0.0.278 publishes fixture evidence authenticated by signed checksums for 35 provider/platform cells; only the Codex contract crosses MCP stdio, and real-client/model acceptance remains not_run.",
           "evidence": [
             "docs/provider-integration-certification.md"
           ]
@@ -2187,12 +2187,6 @@
         }
       },
       "open_gates": [
-        {
-          "id": "retained-provider-evidence",
-          "gate_ids": ["rollout_canaries"],
-          "summary": "Publish retained release JSON and the public support-matrix result from the existing credential-free provider contract gates.",
-          "ref": "https://github.com/witwave-ai/witself/issues/45"
-        },
         {
           "id": "runtime-acceptance-operations",
           "gate_ids": ["observability"],
