@@ -550,12 +550,14 @@
     });
   }
 
-  // Every visit owns its fact, memory and transcript reads, including the same URL.
+  // Every visit owns its Overview, fact, memory and transcript reads, including the same URL.
+  var overviewViewGeneration = 0;
   var factViewGeneration = 0;
   var memoryViewGeneration = 0;
   var transcriptViewGeneration = 0;
 
   function route() {
+    overviewViewGeneration++;
     factViewGeneration++;
     memoryViewGeneration++;
     transcriptViewGeneration++;
@@ -719,12 +721,16 @@
   }
 
   function viewOverview() {
+    var generation = overviewViewGeneration;
     breadcrumb([{ label: "overview" }]);
     openEvents(null);
     fetchJSON("/api/self").then(function (self) {
+      if (generation !== overviewViewGeneration) { return; }
       renderHeader(self);
       renderOverview(self);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === overviewViewGeneration) { showError(err); }
+    });
   }
 
   function viewTranscripts() {
