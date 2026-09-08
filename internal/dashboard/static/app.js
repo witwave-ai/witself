@@ -550,7 +550,11 @@
     });
   }
 
+  // Every visit owns its memory reads, including a return to the same URL.
+  var memoryViewGeneration = 0;
+
   function route() {
+    memoryViewGeneration++;
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
     var current = parseHash();
@@ -1013,9 +1017,15 @@
   }
 
   function viewMemories() {
+    var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories" }]);
     openEvents(null, 0, false, true);
-    fetchJSON("/api/memories?limit=100").then(renderMemoriesList).catch(showError);
+    fetchJSON("/api/memories?limit=100").then(function (page) {
+      if (generation !== memoryViewGeneration) { return; }
+      renderMemoriesList(page);
+    }).catch(function (err) {
+      if (generation === memoryViewGeneration) { showError(err); }
+    });
   }
 
   function evidenceHTML(evidence) {
@@ -1035,12 +1045,14 @@
   }
 
   function viewMemory(id) {
+    var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories", href: "#/memories" }, { label: id }]);
     openEvents(null);
     Promise.all([
       fetchJSON("/api/memories/" + encodeURIComponent(id)),
       fetchJSON("/api/memories/" + encodeURIComponent(id) + "/history?limit=50"),
     ]).then(function (results) {
+      if (generation !== memoryViewGeneration) { return; }
       var memory = results[0].memory || {};
       var versions = results[1].versions || [];
       var content = memory.redacted ? "[sensitive value redacted]" : (memory.content || "");
@@ -1066,7 +1078,9 @@
         (evidenceHTML(memory.evidence) || '<div class="empty">no evidence rows</div>') + "</div></div>" +
         '<div class="panel"><h2>version history</h2><div class="list">' +
         (history || '<div class="empty">no versions</div>') + "</div></div>";
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === memoryViewGeneration) { showError(err); }
+    });
   }
 
   // --- secrets ----------------------------------------------------------
