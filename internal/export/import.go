@@ -2,7 +2,9 @@ package export
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -59,10 +61,18 @@ type ImportOptions struct {
 func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error) {
 	var m Manifest
 
-	gz, err := gzip.NewReader(r)
+	// Preserve gzip's buffering choice, but allow completion to check context
+	// between compressed reads, including loops over empty gzip members.
+	compressed, ok := r.(flate.Reader)
+	if !ok {
+		compressed = bufio.NewReader(r)
+	}
+	input := &archiveCompletionReader{reader: compressed}
+	gz, err := gzip.NewReader(input)
 	if err != nil {
 		return m, fmt.Errorf("%w: not a gzip stream: %v", ErrCorrupt, err)
 	}
+	defer func() { _ = gz.Close() }() // Close cannot verify integrity; preserve the read/callback error.
 	tr := tar.NewReader(gz)
 
 	// The manifest must lead.
@@ -235,7 +245,54 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 			return m, fmt.Errorf("%w: table %s missing from checksums", ErrCorrupt, table)
 		}
 	}
+	// TAR's end blocks do not prove that gzip's footer is valid. Finish the
+	// compressed stream, retaining default multistream and ignored TAR tails.
+	// Arm cancellation only here so earlier callback/structural errors keep
+	// their existing precedence. Memory is fixed; work scales with the tail.
+	input.ctx = ctx
+	var tail [32 << 10]byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return m, err
+		}
+		_, err := gz.Read(tail[:])
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return m, ctxErr
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return m, fmt.Errorf("%w: gzip completion: %v", ErrCorrupt, err)
+		}
+	}
 	return m, nil
+}
+
+// archiveCompletionReader forwards unchanged until completion arms ctx.
+// Checks between compressed reads also cover empty-member loops inside gzip;
+// they cannot interrupt an underlying Read that is already blocked.
+type archiveCompletionReader struct {
+	reader flate.Reader
+	ctx    context.Context
+}
+
+func (r *archiveCompletionReader) Read(p []byte) (int, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	return r.reader.Read(p)
+}
+
+func (r *archiveCompletionReader) ReadByte() (byte, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	return r.reader.ReadByte()
 }
 
 // upgradeRow lifts one row from the archive's schema to the destination's.
