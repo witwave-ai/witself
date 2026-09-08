@@ -550,13 +550,15 @@
     });
   }
 
-  // Every visit owns its fact and memory reads, including a return to the same URL.
+  // Every visit owns its fact, memory and transcript reads, including the same URL.
   var factViewGeneration = 0;
   var memoryViewGeneration = 0;
+  var transcriptViewGeneration = 0;
 
   function route() {
     factViewGeneration++;
     memoryViewGeneration++;
+    transcriptViewGeneration++;
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
     var current = parseHash();
@@ -726,9 +728,11 @@
   }
 
   function viewTranscripts() {
+    var generation = transcriptViewGeneration;
     breadcrumb([{ label: "transcripts" }]);
     openEvents(null);
     fetchJSON("/api/transcripts").then(function (body) {
+      if (generation !== transcriptViewGeneration) { return; }
       var rows = (body.transcripts || []).map(function (transcript) {
         return '<div class="row"><span class="grow"><a href="#/transcripts/' + esc(transcript.id) + '">' +
           esc(transcript.title || transcript.external_id || transcript.id) + "</a></span>" +
@@ -738,7 +742,9 @@
       $("view").innerHTML = '<div class="panel"><h2>transcripts</h2>' + filterInputHTML("transcripts") +
         '<div class="list">' + (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
       bindFilter("transcripts");
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === transcriptViewGeneration) { showError(err); }
+    });
   }
 
   // parseJSONObjectBody returns the parsed object only when body is a JSON
@@ -799,12 +805,14 @@
   }
 
   function viewTranscript(id, query) {
+    var generation = transcriptViewGeneration;
     breadcrumb([{ label: "transcripts", href: "#/transcripts" }, { label: id }]);
     var from = parseInt(query.from, 10) || 0;
     var until = parseInt(query.to, 10) || from;
     var path = "/api/transcripts/" + encodeURIComponent(id);
     path += from > 0 ? "?after_sequence=" + Math.max(0, from - 1) + "&limit=500" : "?tail=true&limit=200";
     fetchJSON(path).then(function (page) {
+      if (generation !== transcriptViewGeneration) { return; }
       var entries = page.entries || [];
       var highest = 0;
       var rows = entries.map(function (entry) {
@@ -819,7 +827,9 @@
       var anchor = document.querySelector(".entry.anchored");
       if (anchor) { anchor.scrollIntoView({ block: "center" }); }
       openEvents(id, highest);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === transcriptViewGeneration) { showError(err); }
+    });
   }
 
   // --- facts ------------------------------------------------------------
