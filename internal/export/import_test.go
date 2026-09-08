@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,295 @@ func TestReadDetectsTruncation(t *testing.T) {
 			t.Errorf("truncated by %d: error = %v, want ErrCorrupt", cut, err)
 		}
 	}
+}
+
+// TestReadGzipCompletion distinguishes the logical checksums.json trailer from
+// the enclosing gzip footer. All inputs are finite synthetic byte slices; the
+// cancellation readers need neither a worker nor a timing-dependent handoff.
+func TestReadGzipCompletion(t *testing.T) {
+	canonical := buildArchive(t, 13, "acc_gzip_completion")
+	raw := gunzip(t, canonical)
+	wantManifest, wantRows := gzipCompletionInventory(t, raw)
+	if len(canonical) < 8 || len(wantRows) != 5 ||
+		wantManifest.AccountID != "acc_gzip_completion" ||
+		!reflect.DeepEqual(wantManifest.Tables, []string{"realms", "tokens"}) {
+		t.Fatal("gzip completion fixture: nonempty canonical baseline missing")
+	}
+	join := func(a, b []byte) []byte {
+		return append(append([]byte(nil), a...), b...)
+	}
+	crc := append([]byte(nil), canonical...)
+	crc[len(crc)-8] ^= 1
+	isize := append([]byte(nil), canonical...)
+	isize[len(isize)-4] ^= 1
+	// The first member ends inside a TAR header, so disabling multistream
+	// cannot accidentally satisfy this positive control with a complete TAR.
+	split := join(regzip(t, raw[:37]), regzip(t, raw[37:]))
+	zeroTail := make([]byte, 8192)
+	dataTail := bytes.Repeat([]byte("ignored decoded archive tail\n"), 257)
+	emptyMember := regzip(t, nil)
+	dataMember := regzip(t, dataTail)
+	badLaterCRC := append([]byte(nil), dataMember...)
+	badLaterCRC[len(badLaterCRC)-8] ^= 1
+	type archiveCase struct {
+		name       string
+		archive    []byte
+		decoded    []byte
+		gzipErr    error
+		fragmented bool
+	}
+	tests := []archiveCase{
+		{"canonical", canonical, raw, nil, false},
+		{"fragmented", canonical, raw, nil, true},
+		{"multistream_split", split, raw, nil, false},
+		{"fragmented_multistream_split", split, raw, nil, true},
+		{"decoded_zero_tail", regzip(t, join(raw, zeroTail)), join(raw, zeroTail), nil, false},
+		{"decoded_nonzero_tail", regzip(t, join(raw, dataTail)), join(raw, dataTail), nil, false},
+		{"empty_member_tail", join(canonical, emptyMember), raw, nil, false},
+		{"nonempty_member_tail", join(canonical, dataMember), join(raw, dataTail), nil, false},
+		{"crc_mismatch", crc, raw, gzip.ErrChecksum, false},
+		{"fragmented_crc_mismatch", crc, raw, gzip.ErrChecksum, true},
+		{"isize_mismatch", isize, raw, gzip.ErrChecksum, false},
+	}
+	for cut := 1; cut <= 8; cut++ {
+		tests = append(tests, archiveCase{fmt.Sprintf("footer_truncated_%d", cut), canonical[:len(canonical)-cut], raw, io.ErrUnexpectedEOF, false})
+	}
+	tests = append(tests, []archiveCase{
+		{"later_member_crc_mismatch", join(canonical, badLaterCRC), join(raw, dataTail), gzip.ErrChecksum, false},
+		{"later_member_truncated", join(canonical, emptyMember[:len(emptyMember)-1]), raw, io.ErrUnexpectedEOF, false},
+		{"trailing_raw_junk", join(canonical, bytes.Repeat([]byte{'x'}, 16)), raw, gzip.ErrHeader, false},
+		{"trailing_partial_header", join(canonical, []byte{0x1f, 0x8b}), raw, io.ErrUnexpectedEOF, false},
+	}...)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(func() { t.Log("gzip completion: fixture resources released") })
+			verifyGzipCompletionContainer(t, tc.archive, tc.decoded, tc.gzipErr)
+			var input io.Reader = bytes.NewReader(tc.archive)
+			if tc.fragmented {
+				// Deliberately omit ReadByte, exercising gzip's normal bufio path.
+				input = &gzipCompletionFragmentReader{reader: bytes.NewReader(tc.archive)}
+			}
+			manifest, observedManifest, rows, err := readGzipCompletion(context.Background(), input)
+			if tc.gzipErr == nil && err != nil {
+				t.Fatal("gzip completion: valid archive was rejected")
+			}
+			requireGzipCompletionInventory(t, manifest, observedManifest, rows, wantManifest, wantRows)
+			if tc.gzipErr != nil && !errors.Is(err, ErrCorrupt) {
+				t.Fatal("gzip completion: malformed compressed stream was accepted")
+			}
+		})
+	}
+	for _, phase := range []string{"manifest", "row"} {
+		t.Run(phase+"_error_precedes_footer", func(t *testing.T) {
+			t.Cleanup(func() { t.Log("gzip completion: fixture resources released") })
+			verifyGzipCompletionContainer(t, crc, raw, gzip.ErrChecksum)
+			sentinel := errors.New("synthetic archive callback failure")
+			input := &gzipCompletionCancelReader{reader: bytes.NewReader(crc)}
+			manifestCalls, rowCalls := 0, 0
+			_, err := Read(context.Background(), input, ImportOptions{
+				CurrentSchema: 13,
+				OnManifest: func(m Manifest) error {
+					manifestCalls++
+					if !reflect.DeepEqual(m, wantManifest) {
+						t.Fatal("gzip completion: callback manifest changed")
+					}
+					if phase == "manifest" {
+						return sentinel
+					}
+					return nil
+				},
+				Row: func(table string, row []byte) error {
+					rowCalls++
+					if table+"\n"+string(row) != wantRows[0] {
+						t.Fatal("gzip completion: callback row changed")
+					}
+					return sentinel
+				},
+			})
+			wantCalls := 0
+			if phase == "row" {
+				wantCalls = 1
+			}
+			if err != sentinel || manifestCalls != 1 || rowCalls != wantCalls {
+				t.Fatal("gzip completion: callback error precedence changed")
+			}
+			if input.reader.Len() < 8 {
+				t.Fatal("gzip completion: callback error triggered footer reads")
+			}
+			t.Log("gzip completion: callback error returned without footer completion")
+		})
+	}
+	for _, kind := range []string{"decoded", "empty"} {
+		t.Run("cancel_"+kind+"_tail", func(t *testing.T) {
+			t.Cleanup(func() { t.Log("gzip completion: fixture resources released") })
+			var tail, decodedTail []byte
+			if kind == "decoded" {
+				decodedTail = bytes.Repeat([]byte{'d'}, 64<<10)
+				tail = regzip(t, decodedTail)
+			} else {
+				// Finite even with every cancellation guard removed. The empty
+				// members otherwise loop inside one gzip.Read, returning no data.
+				tail = bytes.Repeat(emptyMember, 64)
+			}
+			archive := join(canonical, tail)
+			verifyGzipCompletionContainer(t, archive, join(raw, decodedTail), nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			input := &gzipCompletionCancelReader{
+				reader: bytes.NewReader(archive), cancel: cancel,
+				// Canonical gzip headers are ten bytes. Cancel on the first
+				// compressed-body read of the first member after the complete TAR.
+				cancelAt: int64(len(canonical) + 10),
+			}
+			manifest, observedManifest, rows, err := readGzipCompletion(ctx, input)
+			requireGzipCompletionInventory(t, manifest, observedManifest, rows, wantManifest, wantRows)
+			// Check progress independently of the returned error: an outer
+			// post-read ctx check can return Canceled only after consuming all
+			// empty members when the compressed-input guard is missing.
+			if input.afterCancelReads != 0 {
+				t.Fatal("gzip completion: compressed input advanced after cancellation")
+			}
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrupt) {
+				t.Fatal("gzip completion: cancellation was not returned")
+			}
+			if !input.wasCanceled || input.reader.Len() == 0 {
+				t.Fatal("gzip completion: cancellation did not stop before the finite tail ended")
+			}
+		})
+	}
+}
+
+func verifyGzipCompletionContainer(t *testing.T, archive, want []byte, wantErr error) {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal("gzip completion fixture: ordinary gzip header was invalid")
+	}
+	t.Cleanup(func() {
+		if err := gz.Close(); err != nil {
+			t.Error("gzip completion fixture: ordinary gzip close failed")
+		}
+	})
+	got, err := io.ReadAll(gz)
+	if !errors.Is(err, wantErr) || !bytes.Equal(got, want) {
+		t.Fatal("gzip completion fixture: independent container validation disagreed")
+	}
+	t.Log("gzip completion: independent gzip container baseline verified")
+}
+
+func gzipCompletionInventory(t *testing.T, raw []byte) (Manifest, []string) {
+	t.Helper()
+	tr := tar.NewReader(bytes.NewReader(raw))
+	var manifest Manifest
+	var rows []string
+	var members []string
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal("gzip completion fixture: canonical TAR was invalid")
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal("gzip completion fixture: canonical TAR member was unreadable")
+		}
+		members = append(members, header.Name)
+		switch header.Name {
+		case "manifest.json":
+			if err := json.Unmarshal(body, &manifest); err != nil {
+				t.Fatal("gzip completion fixture: canonical manifest was invalid")
+			}
+		case "realms/000001.ndjson":
+			lines := bytes.Split(body, []byte{'\n'})
+			if len(lines) < 2 || len(lines[len(lines)-1]) != 0 {
+				t.Fatal("gzip completion fixture: canonical rows were invalid")
+			}
+			for _, line := range lines[:len(lines)-1] {
+				if !json.Valid(line) {
+					t.Fatal("gzip completion fixture: canonical row was not JSON")
+				}
+				rows = append(rows, "realms\n"+string(line))
+			}
+		case "checksums.json":
+		default:
+			t.Fatal("gzip completion fixture: unexpected canonical member")
+		}
+	}
+	if !reflect.DeepEqual(members, []string{"manifest.json", "realms/000001.ndjson", "checksums.json"}) {
+		t.Fatal("gzip completion fixture: canonical member order changed")
+	}
+	return manifest, rows
+}
+
+func readGzipCompletion(ctx context.Context, input io.Reader) (Manifest, []Manifest, []string, error) {
+	var manifests []Manifest
+	var rows []string
+	manifest, err := Read(ctx, input, ImportOptions{
+		CurrentSchema: 13,
+		OnManifest: func(m Manifest) error {
+			manifests = append(manifests, m)
+			return nil
+		},
+		Row: func(table string, row []byte) error {
+			rows = append(rows, table+"\n"+string(row))
+			return nil
+		},
+	})
+	return manifest, manifests, rows, err
+}
+
+func requireGzipCompletionInventory(t *testing.T, manifest Manifest, observed []Manifest, rows []string, wantManifest Manifest, wantRows []string) {
+	t.Helper()
+	if !reflect.DeepEqual(manifest, wantManifest) ||
+		!reflect.DeepEqual(observed, []Manifest{wantManifest}) || !reflect.DeepEqual(rows, wantRows) {
+		t.Fatal("gzip completion: logical archive inventory changed")
+	}
+	t.Log("gzip completion: exact logical archive inventory staged")
+}
+
+type gzipCompletionFragmentReader struct {
+	reader *bytes.Reader
+}
+
+func (r *gzipCompletionFragmentReader) Read(p []byte) (int, error) {
+	if len(p) > 7 {
+		p = p[:7]
+	}
+	return r.reader.Read(p)
+}
+
+type gzipCompletionCancelReader struct {
+	reader           *bytes.Reader
+	cancel           context.CancelFunc
+	cancelAt         int64
+	wasCanceled      bool
+	afterCancelReads int
+}
+
+func (r *gzipCompletionCancelReader) beforeRead() {
+	if r.wasCanceled {
+		r.afterCancelReads++
+	} else if r.cancel != nil && r.reader.Size()-int64(r.reader.Len()) >= r.cancelAt {
+		r.wasCanceled = true
+		r.cancel()
+	}
+}
+
+func (r *gzipCompletionCancelReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	r.beforeRead()
+	// One byte per call makes the cancellation boundary independent of
+	// compressed-reader lookahead. The complete input is still finite.
+	return r.reader.Read(p[:1])
+}
+
+func (r *gzipCompletionCancelReader) ReadByte() (byte, error) {
+	r.beforeRead()
+	return r.reader.ReadByte()
 }
 
 func TestReadRejectsAmbiguousControlRecords(t *testing.T) {
