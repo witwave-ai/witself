@@ -550,10 +550,12 @@
     });
   }
 
-  // Every visit owns its memory reads, including a return to the same URL.
+  // Every visit owns its fact and memory reads, including a return to the same URL.
+  var factViewGeneration = 0;
   var memoryViewGeneration = 0;
 
   function route() {
+    factViewGeneration++;
     memoryViewGeneration++;
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
@@ -892,28 +894,42 @@
   }
 
   function viewFacts() {
+    var generation = factViewGeneration;
     breadcrumb([{ label: "facts" }]);
     openEvents(null, 0, false, false, true);
     fetchJSON("/api/facts?limit=100").then(function (body) {
+      if (generation !== factViewGeneration) { return; }
       mergeFacts(body.facts);
       renderFactsList(body.facts || []);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === factViewGeneration) { showError(err); }
+    });
   }
 
   function viewFact(id) {
+    var generation = factViewGeneration;
     breadcrumb([{ label: "facts", href: "#/facts" }, { label: id }]);
     openEvents(null);
     var load = state.facts[id] ? Promise.resolve() :
-      fetchJSON("/api/facts?limit=100").then(function (body) { mergeFacts(body.facts); });
+      fetchJSON("/api/facts?limit=100").then(function (body) {
+        if (generation !== factViewGeneration) { return; }
+        mergeFacts(body.facts);
+      });
     load.then(function () {
+      if (generation !== factViewGeneration) { return; }
       var fact = state.facts[id];
       if (!fact) { throw new Error("fact " + id + " is not in the redacted inventory"); }
       // subject/predicate let the proxy prove the fact non-sensitive before
       // forwarding assertion values; without proof it locks the history.
       return fetchJSON("/api/facts/" + encodeURIComponent(id) + "/history?subject=" +
         encodeURIComponent(fact.subject) + "&predicate=" + encodeURIComponent(fact.predicate))
-        .then(function (body) { renderFact(fact, body.assertions || []); });
-    }).catch(showError);
+        .then(function (body) {
+          if (generation !== factViewGeneration) { return; }
+          renderFact(fact, body.assertions || []);
+        });
+    }).catch(function (err) {
+      if (generation === factViewGeneration) { showError(err); }
+    });
   }
 
   function renderFact(fact, assertions) {
