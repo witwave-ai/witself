@@ -334,6 +334,8 @@ govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 check: ## Run CI's exact local gate set — run before every push
+	bash scripts/check-conflict-markers.sh
+	bash scripts/test-conflict-markers.sh
 	$(MAKE) check-go-mod-tidy
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
