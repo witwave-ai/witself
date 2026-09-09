@@ -2447,3 +2447,61 @@ func (s *slowApplier) Apply(_ context.Context, accountID string, request ApplyRe
 	s.onApply(accountID)
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
+
+func TestResolvedSnapshotCollaborationAdoptionIsExplicit(t *testing.T) {
+	h := newHarness(t, false)
+	for _, tc := range []struct {
+		name     string
+		override *MessagingOverride
+		hash     string
+	}{
+		{"current free catalog", nil, "766fe9140c87c45f4352f22dd77ac846603998e54f3b60d0da442cbc6b61e992"},
+		{"existing messaging override", &MessagingOverride{Enabled: true}, "ce0396dbd11cfb6bf2183a8f7614912305401dbebf3ad7aaacb142bf0d577de0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot, err := h.m.resolveSnapshot(Record{AccountID: "acc_collaboration", Entitled: plans.Free, MessagingOverride: tc.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, present := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]; present {
+				t.Fatal("routine reconciliation adopted collaboration authority")
+			}
+			if snapshot.Hash != tc.hash {
+				t.Fatalf("legacy resolved hash=%s want=%s", snapshot.Hash, tc.hash)
+			}
+			if tc.override != nil && !slices.Contains(snapshot.Features, plans.MessagingFeature) {
+				t.Fatal("legacy messaging override was lost")
+			}
+		})
+	}
+	// Deliberate future catalog policy adoption supplies authority. Neither the
+	// issuer binary's age nor the plan name infers permission or adoption.
+	custom, err := plans.Parse([]byte(`{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true},{"id":"custom","available":true,"policies":{"collaboration_entitlement_version":1},"features":["messaging"]},{"id":"custom_enabled","available":true,"policies":{"collaboration_entitlement_version":1},"features":["messaging","collaboration"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = custom
+	for _, tc := range []struct {
+		plan    string
+		enabled bool
+	}{{"custom", false}, {"custom_enabled", true}} {
+		t.Run(tc.plan, func(t *testing.T) {
+			snapshot, err := h.m.resolveSnapshot(Record{AccountID: "acc_collaboration", Entitled: tc.plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] != 1 || snapshot.DefaultPolicies[plans.CollaborationEntitlementVersionPolicy] != 1 || slices.Contains(snapshot.Features, plans.CollaborationFeature) != tc.enabled {
+				t.Fatalf("explicitly governed snapshot=%+v", snapshot)
+			}
+			hash, err := plans.SnapshotHash(snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features)
+			if err != nil || hash != snapshot.Hash {
+				t.Fatal("governed snapshot hash lost authority")
+			}
+			snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] = 2
+			original, _ := custom.Get(tc.plan)
+			if original.Policies[plans.CollaborationEntitlementVersionPolicy] != 1 {
+				t.Fatal("resolved policy aliases catalog state")
+			}
+		})
+	}
+}

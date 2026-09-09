@@ -397,7 +397,8 @@ func validateCurrentAccountPlanSnapshot(
 		return fmt.Errorf("invalid current plan features: %w", err)
 	}
 	if snapshot.Revision == 0 {
-		if snapshot.SnapshotHash != "" {
+		_, governed := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]
+		if snapshot.SnapshotHash != "" || governed {
 			return fmt.Errorf("invalid unfenced current plan snapshot")
 		}
 		return nil

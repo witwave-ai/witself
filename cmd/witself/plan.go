@@ -685,6 +685,7 @@ var planStatusPolicyKeys = []string{
 	plans.TranscriptRetentionDaysPolicy,
 	plans.MessageRetentionDaysPolicy,
 	plans.MessagingEntitlementVersionPolicy,
+	plans.CollaborationEntitlementVersionPolicy,
 	plans.AgentEmailRetentionDaysPolicy,
 	plans.AgentEmailEntitlementVersionPolicy,
 }

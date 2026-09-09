@@ -1075,7 +1075,8 @@ func validPlanSnapshotRecord(snapshot PlanSnapshotRecord, accountID string) bool
 		return false
 	}
 	if snapshot.Revision == 0 {
-		return snapshot.SnapshotHash == ""
+		_, governed := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]
+		return snapshot.SnapshotHash == "" && !governed
 	}
 	expected, err := plans.SnapshotHash(
 		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features,

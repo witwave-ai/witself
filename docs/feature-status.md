@@ -164,6 +164,7 @@ Same-realm open requests, offers, assignment, results, claims, and foreground pr
 - Managed rollout: `limited`
 - Readiness: **conditional**
 - Plan feature keys: `collaboration`
+- Plan policy keys: `collaboration_entitlement_version`
 - Detailed docs: [agent-collaboration.md](../docs/agent-collaboration.md), [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md)
 
 | Gate | State | Current evidence and conclusion |

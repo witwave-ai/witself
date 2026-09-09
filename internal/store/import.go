@@ -1777,6 +1777,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if _, present := obj["plan_snapshot_hash"]; present && !hashPresent {
 			return badf("accounts row plan_snapshot_hash must be a string")
 		}
+		if policies, ok := obj["plan_policies"].(map[string]any); ok && !purged {
+			if _, governed := policies[plans.CollaborationEntitlementVersionPolicy]; governed {
+				_, applied, err := importedOptionalTimestamp(obj, "plan_applied_at")
+				if !revisionPresent || revision < 1 || !hashPresent || !applied || err != nil {
+					return badf("accounts row collaboration authority requires a fenced applied snapshot")
+				}
+			}
+		}
 		if revisionPresent != hashPresent {
 			return badf("accounts row plan snapshot revision and hash must be present together")
 		}

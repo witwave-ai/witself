@@ -692,3 +692,29 @@ func assertUniqueStrings(t *testing.T, kind string, values []string) {
 		seen[value] = true
 	}
 }
+
+func TestCollaborationPolicyAndSnapshotHashCompatibility(t *testing.T) {
+	for _, value := range []int64{-1, 0, 2} {
+		if err := ValidatePolicies(map[string]int64{CollaborationEntitlementVersionPolicy: value}); err == nil {
+			t.Fatalf("accepted unsupported collaboration authority %d", value)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		policies map[string]int64
+		hash     string
+	}{
+		{"legacy", nil, "6e54922240022011253c05d8f9778b65a6f276d2cba4f56061a6d06ace208ad2"},
+		{"governed denial", map[string]int64{CollaborationEntitlementVersionPolicy: 1}, "76e4f2918cac8abdc24c257985e1509d283fd57bdb33f8d914a08000918b3bb9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidatePolicies(tc.policies); err != nil {
+				t.Fatal(err)
+			}
+			got, err := SnapshotHash("test", nil, tc.policies, []string{MessagingFeature})
+			if err != nil || got != tc.hash {
+				t.Fatalf("snapshot hash=%s error=%v want=%s", got, err, tc.hash)
+			}
+		})
+	}
+}
