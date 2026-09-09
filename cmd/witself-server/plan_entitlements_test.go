@@ -37,7 +37,7 @@ func TestProjectSelfAgentEntitlementsUsesOnlyClosedAgentDomainVocabulary(t *test
 		t.Fatalf("envelope = %#v", got)
 	}
 	wantFeatures := &server.SelfAgentEntitlementFeatures{
-		Memory: true, Facts: true, Messaging: true, AgentEmailReceive: true,
+		Memory: true, Facts: true, Messaging: true, Collaboration: true, AgentEmailReceive: true,
 	}
 	if !reflect.DeepEqual(got.Features, wantFeatures) {
 		t.Fatalf("features = %#v, want %#v", got.Features, wantFeatures)
@@ -98,4 +98,27 @@ func TestProjectSelfAgentEntitlementsMatchesProductionRolloutMarkerSemantics(t *
 			t.Fatalf("modern enabled features = %#v", enabled.Features)
 		}
 	})
+}
+
+func TestProjectSelfCollaborationUsesEffectiveAuthority(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name     string
+		policies map[string]int64
+		features []string
+		want     bool
+	}{
+		{"legacy messaging only", map[string]int64{plans.MessagingEntitlementVersionPolicy: 1}, []string{plans.MessagingFeature}, true},
+		{"governed denial", map[string]int64{plans.CollaborationEntitlementVersionPolicy: 1}, []string{plans.MessagingFeature}, false},
+		{"governed enabled", map[string]int64{plans.CollaborationEntitlementVersionPolicy: 1}, []string{plans.CollaborationFeature}, true},
+		{"messaging denial", map[string]int64{plans.MessagingEntitlementVersionPolicy: 1}, []string{plans.CollaborationFeature}, false},
+		{"invalid authority", map[string]int64{plans.CollaborationEntitlementVersionPolicy: 2}, []string{plans.CollaborationFeature}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectSelfAgentEntitlements(store.AccountPlanSnapshot{Plan: "custom", AppliedAt: &now, Policies: tc.policies, Features: tc.features})
+			if got.Features == nil || got.Features.Collaboration != tc.want {
+				t.Fatalf("projected collaboration=%+v want=%v", got.Features, tc.want)
+			}
+		})
+	}
 }

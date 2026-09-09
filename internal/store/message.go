@@ -331,6 +331,46 @@ func requireMessagingEnabled(ctx context.Context, tx pgx.Tx, accountID string) e
 	return nil
 }
 
+// CollaborationEnabledForPlanSnapshot is the shared effective mutation and
+// self-projection policy. Legacy snapshots keep collaboration only while
+// messaging is enabled; present but invalid authority never becomes legacy.
+func CollaborationEnabledForPlanSnapshot(appliedAt *time.Time, policies map[string]int64, features []string) bool {
+	version, governed := policies[plans.CollaborationEntitlementVersionPolicy]
+	if governed && (appliedAt == nil || version != plans.CollaborationEntitlementVersion ||
+		!slices.Contains(features, plans.CollaborationFeature)) {
+		return false
+	}
+	return MessagingEnabledForPlanSnapshot(appliedAt, policies, features)
+}
+
+// requireCollaborationEnabled preserves the messaging refusal and account
+// status precedence. Both reads use the same transaction's account share lock,
+// so neither a plan update nor a feature transition can interleave the gates.
+func requireCollaborationEnabled(ctx context.Context, tx pgx.Tx, accountID string) error {
+	if err := requireMessagingEnabled(ctx, tx, accountID); err != nil {
+		return err
+	}
+	var policiesJSON, featuresJSON []byte
+	var appliedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT plan_policies, plan_features, plan_applied_at
+		FROM accounts WHERE id=$1 FOR SHARE`, accountID).
+		Scan(&policiesJSON, &featuresJSON, &appliedAt); err != nil {
+		return fmt.Errorf("lock account for collaboration: %w", err)
+	}
+	var policies map[string]int64
+	var features []string
+	if err := json.Unmarshal(policiesJSON, &policies); err != nil {
+		return fmt.Errorf("decode plan policies for collaboration: %w", err)
+	}
+	if err := json.Unmarshal(featuresJSON, &features); err != nil {
+		return fmt.Errorf("decode plan features for collaboration: %w", err)
+	}
+	if !CollaborationEnabledForPlanSnapshot(appliedAt, policies, features) {
+		return &FeatureNotEnabledError{Feature: plans.CollaborationFeature}
+	}
+	return nil
+}
+
 // SendMessage resolves one direct, explicit-list, or realm audience inside the
 // token-derived realm and atomically creates the immutable message and its
 // bounded send-time delivery snapshot.

@@ -51,7 +51,7 @@ func projectSelfAgentEntitlements(snapshot store.AccountPlanSnapshot) *server.Se
 			Facts:             features[plans.FactsFeature],
 			Secrets:           features[plans.SecretsFeature],
 			Messaging:         store.MessagingEnabledForPlanSnapshot(snapshot.AppliedAt, snapshot.Policies, snapshot.Features),
-			Collaboration:     features[plans.CollaborationFeature],
+			Collaboration:     store.CollaborationEnabledForPlanSnapshot(snapshot.AppliedAt, snapshot.Policies, snapshot.Features),
 			AgentEmailReceive: store.AgentEmailReceiveEnabledForPlanSnapshot(snapshot.AppliedAt, snapshot.Policies, snapshot.Features),
 			AgentEmailSend:    features[plans.AgentEmailSendFeature],
 		},

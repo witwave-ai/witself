@@ -147,6 +147,7 @@ const PLAN_LIMIT_KEYS = new Set([
 ]);
 const PLAN_POLICY_KEYS = new Set([
   "agent_email_entitlement_version",
+  "collaboration_entitlement_version",
   "agent_email_retention_days",
   "message_retention_days",
   "messaging_entitlement_version",
@@ -173,6 +174,7 @@ const RETENTION_POLICY_KEYS = new Set([
 ]);
 const ENTITLEMENT_POLICY_KEYS = new Set([
   "agent_email_entitlement_version",
+  "collaboration_entitlement_version",
   "messaging_entitlement_version",
 ]);
 
@@ -1077,7 +1079,8 @@ function validCurrentPlanSnapshot(snapshot, accountID, targetRevision) {
       !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 ||
       snapshot.revision === targetRevision ||
       !validPlanSnapshotFields(snapshot)) return false;
-  if (snapshot.revision === 0) return snapshot.snapshot_hash === "";
+  if (snapshot.revision === 0) return snapshot.snapshot_hash === "" &&
+    !Object.hasOwn(snapshot.policies, "collaboration_entitlement_version");
   return typeof snapshot.snapshot_hash === "string" &&
     /^[0-9a-f]{64}$/.test(snapshot.snapshot_hash) &&
     validAppliedAt(snapshot.applied_at);

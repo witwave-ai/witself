@@ -303,6 +303,13 @@ func TestApplyAccountPlanIfFitsRejectsInvalidResultEnvelopes(t *testing.T) {
 			result.AppliedSnapshot = validApplied.AppliedSnapshot
 			return result
 		}()},
+		{name: "blocked current collaboration authority without fence", result: func() client.AccountPlanFitApplyResult {
+			result := validBlocked
+			current := *result.CurrentSnapshot
+			current.Policies = map[string]int64{plans.CollaborationEntitlementVersionPolicy: 1}
+			result.CurrentSnapshot = &current
+			return result
+		}()},
 		{name: "blocked current not older", result: func() client.AccountPlanFitApplyResult {
 			result := validBlocked
 			current := *result.CurrentSnapshot

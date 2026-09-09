@@ -112,6 +112,9 @@ func (s *Store) SetAccountPlan(
 		return AccountPlanSnapshot{}, fmt.Errorf("%w: %v", ErrPlanPolicyInvalid, err)
 	}
 	legacy := revision == 0 && snapshotHash == ""
+	if _, governed := policies[plans.CollaborationEntitlementVersionPolicy]; governed && legacy {
+		return AccountPlanSnapshot{}, fmt.Errorf("%w: collaboration authority requires a fenced snapshot", ErrPlanSnapshotInvalid)
+	}
 	if !legacy {
 		if revision < 1 {
 			return AccountPlanSnapshot{}, fmt.Errorf("%w: revision must be positive", ErrPlanSnapshotInvalid)
@@ -145,6 +148,8 @@ func (s *Store) SetAccountPlan(
 		     plan_snapshot_revision = $6, plan_snapshot_hash = $7
 		 WHERE id = $1
 		   AND (to_jsonb(account_record)->>'purged_at') IS NULL
+		   AND (NOT (plan_policies ? 'collaboration_entitlement_version')
+		        OR $4::jsonb ? 'collaboration_entitlement_version')
 		   AND (
 		     ($6 = 0 AND $7 = '' AND plan_snapshot_revision = 0)
 		     OR ($6 > plan_snapshot_revision)

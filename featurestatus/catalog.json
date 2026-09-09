@@ -399,6 +399,9 @@
       "plan_feature_keys": [
         "collaboration"
       ],
+      "plan_policy_keys": [
+        "collaboration_entitlement_version"
+      ],
       "docs": [
         "docs/agent-collaboration.md",
         "docs/autonomous-realm-messaging.md"

@@ -211,6 +211,39 @@ automatically attempt to supply the content-free checkpoint and fail open;
 installed policy then directs Claude to use non-blocking listen for unread
 metadata. The durable mailbox remains waiting while Claude is closed.
 
+## Collaboration plan authority and rollout
+
+Request mutations (open, offer, decline, select, cancel, claim, renew, release,
+and complete) require messaging and the effective collaboration entitlement.
+Request list/show and mailbox listen remain available under the messaging gate.
+Snapshots without `collaboration_entitlement_version` retain legacy collaboration
+access while messaging is enabled. In a version-1 snapshot, absence of
+`collaboration` from the positive feature list is an explicit denial. The self
+entitlement projection uses the same rule as request mutations.
+
+The enforcement capability is implemented, but the current catalog does not
+adopt it. Routine control-plane reconciliation preserves the identical legacy
+snapshot and hash, including accounts with messaging overrides. Deliberate
+future addition of the version marker to an authoritative catalog policy is the
+adoption signal; the existing resolution, validation and hash pipeline preserves
+it. Feature defaults and prices are unchanged by this implementation.
+
+Existing account rows and archives are not backfilled: the existing policy JSON
+field preserves authority through export/import. Governed live imports require
+an applied, positively fenced snapshot with a matching hash.
+Both ordinary apply and conditional fit/apply refuse removing an established
+marker, even with a newer revision; an enabled feature can still be restored
+by a later governed snapshot.
+
+Deploy compatible serving cells and the control-plane bridge before the new
+catalog policy is activated. Older closed policy validators reject the marker. Such
+rejections must remain pending convergence; never retry by removing the marker.
+Rolling the issuer back cannot clear authority on compatible cells. After the
+marker is established, rolling serving cells back to binaries without the
+collaboration gate is unsupported: retain compatible serving cells or stop
+affected mutation serving during rollback. This code change does not deploy or
+activate a live account policy.
+
 ## System Boundary
 
 ```text
