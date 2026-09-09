@@ -1600,6 +1600,69 @@ fixed overage pricing is set. On the sealed plane, `secret_read`, `totp_code`,
 and `encrypted_storage_byte` carry real envelope-storage cost and should be
 observed on the same basis (see [key-hierarchy.md](key-hierarchy.md)).
 
+## Entitlement delivery monitoring
+
+The control plane compares its resolved desired snapshot revision and hash with
+its exact cell acknowledgement during each scheduled reconciliation. Delivery
+monitoring uses those authoritative results, so a change that never reaches a
+cell remains visible as pending or failed; a cell's applied revision alone is
+not delivery proof. A received change with a lost acknowledgement also remains
+pending until reconciliation verifies it. Blocked capacity-decreasing changes
+continue to obey the existing fit-and-apply policy.
+
+The Worker exposes aggregate `witself_entitlement_delivery_*` gauges through
+its existing public `/metrics/probes` endpoint. It sends the same bounded page
+of active accounts to the CP and adds optional monitoring to the same private
+cursor checkpoint. Page counts distinguish `scanned`, `seeded`, `apply_pending`
+and `failed`. Pending and failed overlap: do not sum them as distinct accounts.
+A failure with no pending bit means delivery could not be established, not that
+an entitlement is healthy. No account identifiers, plan names, cursors, tokens
+or raw error messages appear in these gauges.
+
+`last_cycle_accounts` is published only after an intact traversal from the
+start of the directory to its terminal cursor. Earlier failing pages remain in
+that traversal's totals even when later pages are healthy. An empty complete
+directory produces zero; an unmeasured startup or a legacy/malformed midcycle
+checkpoint does not. Monitoring failures leave the same cursor progression and
+reconciliation calls available, possibly without optional monitoring metadata.
+The next full measured traversal restores coverage. A checkpoint holds at most
+512 pages and 64 KiB of monitoring data; exceeding these observation bounds
+invalidates coverage while reconciliation continues.
+
+The current enable flag and `snapshot_state` distinguish disabled, missing,
+invalid, unavailable and valid observations. `metrics_up=1` means structurally
+valid data, not recent data. Page acknowledgement and cycle completion Unix
+timestamps remain fixed between observations. There is no recorded start time
+for each pending entitlement, so no oldest-unapplied account-age metric or
+per-account delivery deadline is claimed. A traversal spans changing directory
+state rather than a transactional fleet snapshot; its counts are account
+observations. KV reads and writes are eventually consistent and overlapping
+cron invocations can replace a checkpoint with an older coherent traversal.
+The monitor does not provide exactly-once traversal or cross-isolate CAS.
+
+The separate `platform.monitoring.entitlementDelivery.enabled` alert capability
+is **false by default**. It additionally requires monitoring, alerting and the
+existing public probe scrape to be enabled. Existing serving-cell values are
+unchanged. Its rules report unavailable data after 15 minutes, no page
+acknowledgement for 15 minutes sustained for another 10 minutes, and pending or
+unverified deliveries persisting across completed traversal observations for
+30 minutes. A measured first traversal or an old completed traversal receives
+a six-hour observation budget sustained for 15 minutes. An unmeasured tail
+with neither a completed traversal nor a known current start instead alerts
+after 15 minutes; its zero start timestamp means unknown, not an invented age.
+The six-hour budget is an operational
+fleet-scan threshold; review it for large fleets. Alert persistence does not
+measure the age of a particular account's change. Explicit disablement
+suppresses these delivery alerts; a missing enablement metric is unknown,
+not disabled. Existing probe rules cover endpoint scrape failures.
+
+This is implemented monitoring capability, not evidence of deployment or rule
+activation. A later authorized rollout must establish readable, complete CP
+observations before enabling the new rules. See the
+[entitlement monitoring runbook](runbooks.md#entitlement-delivery-monitoring)
+for diagnosis and the [metric reference](observability-and-operations.md#entitlement-delivery-observations)
+for the public projection.
+
 ## Related Docs
 
 - [requirements.md](requirements.md)

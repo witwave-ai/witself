@@ -3170,3 +3170,50 @@ points customers here.
    (security@witwave.ai, [security-policy.md](security-policy.md)) and get a
    public issue only after the disclosure decision, under the same value-free
    rules.
+
+## Entitlement delivery monitoring
+
+These alerts diagnose the CP-to-cell acknowledgement path without changing
+billing or bypassing capacity checks. First distinguish the reported state:
+explicit `enabled=0` is disabled; missing, invalid or unavailable observations
+are not successful delivery. Confirm the monitoring capability and rule gate
+were intentionally rolled out before treating a missing new metric family as
+an account incident. No activation is performed by the monitoring code.
+
+For `WitselfEntitlementDeliveryMetricsUnavailable`, inspect the existing public
+probe scrape and the closed snapshot-state gauge. The probe endpoint's own
+HTTP failure is covered by existing probe alerts. If probes remain healthy,
+check Worker checkpoint-read/persistence availability through existing
+operator procedures; never paste cursor documents, account identifiers,
+credentials or error bodies into alerts or public incident reports.
+
+For `WitselfEntitlementDeliverySchedulerStale`, compare the fixed last page
+acknowledgement timestamp with current time. It is not a latest-attempt
+heartbeat: unacknowledged, partial, malformed or unavailable CP responses do
+not refresh it. Inspect the existing authenticated lifecycle status and safe
+Worker diagnostics. Do not manually advance or reset its private directory
+cursor to make the alert clear.
+
+For `WitselfEntitlementDeliveryCycleIncomplete`, inspect coverage and cycle
+start/completion timestamps. A legacy or invalid midcycle checkpoint must
+finish that unmeasured tail and then complete a fresh traversal. Large fleets
+need one five-minute tick per directory page. When both completion and current
+start timestamps are zero, the start is unknown and sustained incomplete
+coverage alerts after 15 minutes. A measured first traversal or a previous
+completion uses the six-hour budget plus 15 minutes; the threshold is an
+operational budget, not a promised individual entitlement delay. Monitoring
+page/size bounds or repeated cursors can make coverage unavailable even while
+ordinary reconciliation continues. Concurrent, eventually consistent KV
+writes may expose older coherent checkpoints; do not interpret them as a
+transactional fleet snapshot.
+
+For `WitselfEntitlementDeliveryGap`, examine pending and failed observations
+separately. Pending means the CP has not recorded the exact desired snapshot
+acknowledgement, including never-delivered requests, lost acknowledgements and
+blocked downgrades. Failed includes an unknown current delivery result even
+when stored revisions previously matched. Use existing authorized admin
+inspection to compare desired/applied revision and hash for the affected
+account; preserve the CP as entitlement authority. Do not force an apply,
+override a plan, change billing, or bypass a fit check as monitoring remediation.
+A later completely measured healthy traversal clears the gap. Its 30-minute
+persistence is aggregate observation persistence, not the age of one account.

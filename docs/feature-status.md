@@ -37,7 +37,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
 | [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
-| [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `general` | **conditional** | 5/7 pass | 3 |
+| [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `general` | **conditional** | 6/7 pass | 2 |
 | [Realm email aliases](#realm-email-aliases) | Email | `implemented` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Realm-local messaging](#realm-messaging) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -570,7 +570,7 @@ Personal, Professional, and Team are available through general self-service bill
 | Behavior | **PASS** | Catalog load, pricing projection, account plan state, effective snapshots, limit resolution, overrides, and admin inspection are implemented and tested. [billing-and-limits.md](../docs/billing-and-limits.md), [plans_test.go](../internal/plans/plans_test.go) |
 | Entitlement / policy | **PASS** | Plans remain global control-plane truth while cells store only resolved account behavior; per-account overrides change operation without rewriting price or plan identity. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
 | Bounds / abuse | **PASS** | Commercial limits are bounded by independent platform ceilings, missing keys have explicit unlimited semantics, and invalid zero or oversized policies fail closed. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.go](../internal/plans/plans.go) |
-| Observability | **CONDITIONAL** | Usage events, current policy views, and admin surfaces exist; there is no unified entitlement-drift dashboard or alert path. [billing-and-limits.md](../docs/billing-and-limits.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **PASS** | Authoritative CP reconciliation results expose value-free pending and unverified delivery observations over complete traversals, with explicit unavailable/stale states and separately gated default-off alerts; live rollout remains an operator step. [entitlement-delivery.rules.yaml](../.gitops/charts/platform/files/entitlement-delivery.rules.yaml), [billing-and-limits.md](../docs/billing-and-limits.md), [entitlement-delivery-metrics.test.mjs](../infra/cloudflare/control-plane/test/entitlement-delivery-metrics.test.mjs), [plan_lifecycle_test.go](../internal/cpserver/plan_lifecycle_test.go) |
 | Recovery | **PASS** | Resolved snapshots, version floors, overrides, usage events, and account archive/import preserve policy state across retries and movement. [backup-and-recovery.md](../docs/backup-and-recovery.md), [billing-and-limits.md](../docs/billing-and-limits.md) |
 | Rollout / canaries | **CONDITIONAL** | Professional and Team checkout is generally available (#307/#308); operator seats remain 1/3/25 for Personal/Professional/Team. Enterprise is contact-only. Broader dependent-feature enrollment and current per-account override acceptance remain open. [billing-and-limits.md](../docs/billing-and-limits.md), [launch-readiness.md](../docs/launch-readiness.md), [plans.json](../web/plans/plans.json) |
 | Docs / support | **PASS** | Pricing direction, limits, retention, account overrides, authority split, and unavailable-plan behavior are documented. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
@@ -578,7 +578,6 @@ Personal, Professional, and Team are available through general self-service bill
 Open gates:
 
 - `enterprise-activation` (rollout / canaries): Keep Enterprise unavailable until its dependent features and billing transitions meet their gates; Professional and Team customer checkout is already generally available. ([tracking/evidence](../web/plans/plans.json))
-- `entitlement-drift-monitoring` (observability): Add a value-free control-plane versus cell snapshot drift view and alert. ([tracking/evidence](../docs/billing-and-limits.md))
 - `paid-plan-feature-acceptance` (rollout / canaries): Verify broader paid-plan email enrollment and current per-account overrides against resolved snapshots; checkout availability and support entitlement enforcement are already implemented. ([tracking/evidence](../web/plans/plans.json))
 
 <a id="realm-email-aliases"></a>

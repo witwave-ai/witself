@@ -1,3 +1,5 @@
+import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
+
 // Use a dedicated five-minute Workers cron and reuse DIRECTORY. An Actions
 // schedule would consume about 8,600 runner minutes/month; cron is included in
 // the Workers plan already required by this CP (~17k monthly invocations is
@@ -349,6 +351,9 @@ export async function uptimeProbeMetricsResponse(request, env) {
       status: 405, headers: { ...headers, Allow: "GET" },
     });
   }
+  // Failure-isolated and independently bounded: an entitlement checkpoint
+  // outage must not change healthy probe exposition to HTTP 503.
+  const delivery = entitlementDeliveryLines(env);
   try {
     const { scheduler, targets, writeOk, recoveredFromMalformed = false } = await bounded(
       (signal) => readRun(env.DIRECTORY, signal), SNAPSHOT_TIMEOUT_MS,
@@ -386,6 +391,7 @@ export async function uptimeProbeMetricsResponse(request, env) {
     for (const row of targets.filter((row) => targetState(row) === "skipped")) {
       lines.push(`witself_probe_skipped{target="${row.target}"} 1`);
     }
+    lines.push(...await delivery);
     return new Response(`${lines.join("\n")}\n`, { headers });
   } catch {
     return new Response("probe results unavailable\n", { status: 503, headers });
