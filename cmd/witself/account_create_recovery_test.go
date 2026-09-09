@@ -127,6 +127,8 @@ func TestAccountCreateAllowsOmittedInvite(t *testing.T) {
 		request *http.Request,
 	) {
 		switch request.URL.Path {
+		case "/legal/versions.json":
+			writeSignupLegalTestManifest(writer, termsVersion, privacyVersion)
 		case "/v1/accounts":
 			var body struct {
 				ProvisionID    string  `json:"provision_id"`
@@ -163,9 +165,7 @@ func TestAccountCreateAllowsOmittedInvite(t *testing.T) {
 		"--challenge", "challenge-response",
 		"--endpoint", server.URL,
 	}
-	if code := accountCreateWithLegalVersions(
-		args, termsVersion, privacyVersion,
-	); code != 0 {
+	if code := accountCreate(args); code != 0 {
 		t.Fatalf("invite-less account create exit = %d, want 0", code)
 	}
 	if gotInvite == nil || *gotInvite != "" ||
@@ -195,6 +195,7 @@ func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var requests []provisionRequest
+	var manifestCalls int
 	const (
 		controlPlaneEndpoint = "https://control.example"
 		cellEndpoint         = "https://cell.example"
@@ -214,6 +215,15 @@ func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
 			}, nil
 		}
 		switch request.URL.Path {
+		case "/legal/versions.json":
+			mu.Lock()
+			manifestCalls++
+			call := manifestCalls
+			mu.Unlock()
+			if call > 1 {
+				return response(http.StatusServiceUnavailable, `{}`)
+			}
+			return response(http.StatusOK, signupLegalTestManifest(acceptedTermsVersion, acceptedPrivacyVersion))
 		case "/v1/accounts":
 			var body provisionRequest
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
@@ -263,9 +273,7 @@ func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
 		accountCreateTestArgs(controlPlaneEndpoint, "invite-private"),
 		"--accept-terms",
 	)
-	if code := accountCreateWithLegalVersions(
-		initialArgs, acceptedTermsVersion, acceptedPrivacyVersion,
-	); code != 1 {
+	if code := accountCreate(initialArgs); code != 1 {
 		t.Fatalf("initial consentful account create exit = %d, want 1", code)
 	}
 	journal, err := local.ReadAccountProvisionJournal("default")
@@ -299,17 +307,19 @@ func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
 	}
 
 	// Acceptance is already durable in the journal, so the retry does not need
-	// to repeat --accept-terms. Even with bumped compiled-in versions, it must
-	// reproduce the original consentful request.
+	// to repeat --accept-terms. An unavailable manifest after a legal-version
+	// change must not prevent reproducing the original consentful request.
 	resumeArgs := accountCreateTestArgs(controlPlaneEndpoint, "invite-private")
-	if code := accountCreateWithLegalVersions(
-		resumeArgs, bumpedTermsVersion, bumpedPrivacyVersion,
-	); code != 0 {
+	if code := accountCreate(resumeArgs); code != 0 {
 		t.Fatalf("resumed consentful account create exit = %d, want 0", code)
 	}
 	mu.Lock()
 	gotRequests := append([]provisionRequest(nil), requests...)
+	gotManifestCalls := manifestCalls
 	mu.Unlock()
+	if gotManifestCalls != 1 {
+		t.Fatalf("manifest calls = %d; recovery must not fetch again", gotManifestCalls)
+	}
 	if len(gotRequests) != 4 || gotRequests[0].ProvisionID == "" {
 		t.Fatalf("provision requests = %#v", gotRequests)
 	}

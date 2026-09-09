@@ -1,19 +1,28 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/jsonstrict"
 	"github.com/witwave-ai/witself/internal/legal"
 )
+
+const maxConsentManifestBytes = 64 << 10
+
+var consentManifestVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // legalCmd reads the published legal documents from the terminal — the same
 // pages, at the same versions, that signup consent records. The documents
@@ -52,12 +61,27 @@ func legalBaseURL() string {
 }
 
 func legalHTTPGet(rawURL, accept string) ([]byte, error) {
+	return legalHTTPGetBounded(context.Background(), rawURL, accept, 1<<20)
+}
+
+// legalHTTPGetBounded reads public legal content without account credentials.
+// Its deadline covers redirects and the complete body, and redirects must stay
+// on the original authority (including scheme and port).
+func legalHTTPGetBounded(ctx context.Context, rawURL, accept string, limit int64) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-		return nil, fmt.Errorf("invalid legal endpoint %q", rawURL)
+	if err != nil || !validLegalURL(parsed) {
+		return nil, errors.New("invalid legal endpoint")
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || !validLegalURL(req.URL) ||
+			req.URL.Scheme != parsed.Scheme || !strings.EqualFold(req.URL.Host, parsed.Host) {
+			return errors.New("legal redirect left the original authority or exceeded the limit")
+		}
+		return nil
+	}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -66,17 +90,74 @@ func legalHTTPGet(rawURL, accept string) ([]byte, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		// Transport errors can contain redirected URLs. Keep remote-controlled
+		// values out of diagnostics and never print URL credentials.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("legal request interrupted: %w", ctx.Err())
+		}
+		return nil, errors.New("legal request failed or redirected outside its authority")
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s returned %d", parsed.String(), resp.StatusCode)
+		return nil, fmt.Errorf("legal endpoint returned %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, errors.New("legal response body could not be read completely")
+	}
+	if int64(len(body)) > limit {
+		return nil, errors.New("legal response exceeds the size limit")
 	}
 	return body, nil
+}
+
+func validLegalURL(parsed *url.URL) bool {
+	return parsed != nil && (parsed.Scheme == "https" || parsed.Scheme == "http") &&
+		parsed.Hostname() != "" && parsed.User == nil && parsed.Opaque == "" && parsed.Fragment == ""
+}
+
+func signupLegalBase(controlPlane string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(controlPlane))
+	if err != nil || !validLegalURL(parsed) || parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", errors.New("invalid control plane endpoint for legal consent")
+	}
+	parsed.Path, parsed.RawPath = "/legal", ""
+	return parsed.String(), nil
+}
+
+// signupLegalVersions validates the exact served consent fields before the
+// caller publishes a journal. Other manifest documents are not consent inputs.
+func signupLegalVersions(ctx context.Context, base string) (string, string, error) {
+	body, err := legalHTTPGetBounded(ctx, base+"/versions.json", "application/json", maxConsentManifestBytes)
+	if err != nil {
+		return "", "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := jsonstrict.ConsumeUniqueValue(decoder); err != nil {
+		return "", "", errors.New("legal manifest must contain unique JSON fields")
+	}
+	if err := jsonstrict.RequireEOF(decoder); err != nil {
+		return "", "", errors.New("legal manifest must contain one complete JSON object")
+	}
+	var manifest map[string]json.RawMessage
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return "", "", errors.New("invalid legal manifest")
+	}
+	versions := make([]string, 0, 2)
+	for _, slug := range []string{"terms", "privacy"} {
+		var entry map[string]json.RawMessage
+		if err := json.Unmarshal(manifest[slug], &entry); err != nil {
+			return "", "", fmt.Errorf("legal manifest lacks a valid %s entry", slug)
+		}
+		var version, path string
+		if json.Unmarshal(entry["version"], &version) != nil ||
+			!consentManifestVersionPattern.MatchString(version) ||
+			json.Unmarshal(entry["path"], &path) != nil || path != "/legal/"+slug {
+			return "", "", fmt.Errorf("legal manifest has an invalid %s version or path", slug)
+		}
+		versions = append(versions, version)
+	}
+	return versions[0], versions[1], nil
 }
 
 type legalManifestEntry struct {

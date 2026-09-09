@@ -414,6 +414,227 @@ function assertNoSignupSecretsOrPII(state) {
   assert.equal(Object.hasOwn(state.account ?? {}, "email"), false);
 }
 
+function historicalInitializedCheckpoint() {
+  return {
+    schema_version: "witself.signup.v1",
+    revision: 0,
+    phase: "initialized",
+    provision_id: PROVISION,
+    request_fingerprint:
+      "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+    cell: null,
+    account: null,
+    created_at: "2026-07-25T12:00:00.000Z",
+    email_attempted: false,
+    verification_email_sent: false,
+  };
+}
+
+test("malformed stored signup envelopes fail closed without side effects", async (t) => {
+  const initial = historicalInitializedCheckpoint();
+  const cases = [
+    ["stored null", null],
+    ["stored false", false],
+    ["stored zero", 0],
+    ["stored empty string", ""],
+    ["stored string", "checkpoint-value-must-not-escape"],
+    ["stored array", []],
+    ["missing schema", { ...initial, schema_version: undefined }],
+    ["unknown schema", { ...initial, schema_version: "witself.signup.v2" }],
+    ["malformed schema", { ...initial, schema_version: ["witself.signup.v1"] }],
+    ["missing phase", { ...initial, phase: undefined }],
+    ["unknown phase", { ...initial, phase: "legal_rejected" }],
+    ["inherited constructor phase", { ...initial, phase: "constructor" }],
+    ["inherited toString phase", { ...initial, phase: "toString" }],
+    ["inherited prototype phase", { ...initial, phase: "__proto__" }],
+    ["numeric phase", { ...initial, phase: 0 }],
+    ["array phase", { ...initial, phase: ["initialized"] }],
+    ["missing revision", { ...initial, revision: undefined }],
+    ["null revision", { ...initial, revision: null }],
+    ["string revision", { ...initial, revision: "0" }],
+    ["negative revision", { ...initial, revision: -1 }],
+    ["fractional revision", { ...initial, revision: 0.5 }],
+    ["unsafe revision", { ...initial, revision: Number.MAX_SAFE_INTEGER + 1 }],
+    ["nonfinite revision", { ...initial, revision: Infinity }],
+    ["NaN revision", { ...initial, revision: NaN }],
+    ["unknown schema before fingerprint conflict", {
+      ...initial,
+      schema_version: "witself.signup.v2",
+      request_fingerprint: "different-request-fingerprint",
+    }],
+  ];
+  for (const [name, state] of cases) {
+    await t.test(name, async () => {
+      const storage = new Storage();
+      await storage.put("account-signup", state);
+      const before = structuredClone(storage.values);
+      const callbacks = [];
+      const setup = harness({
+        storage,
+        env: {
+          CP_SIGNUP_TURNSTILE_ENABLED: "true",
+          CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture-secret",
+          CP_SIGNUP_DAILY_LIMIT_PER_IP: "1",
+          CP_SIGNUP_DAILY_LIMIT_GLOBAL: "1",
+        },
+        verifyTurnstile: async () => {
+          callbacks.push("turnstile");
+          return { ok: true };
+        },
+        consumeCounter: async () => {
+          callbacks.push("counter");
+          return { allowed: true };
+        },
+        sendVerification: async () => {
+          callbacks.push("email");
+          return false;
+        },
+      });
+      const directoryBefore = structuredClone(setup.directory.values);
+
+      const response = await setup.runtime.fetch(signupRequest());
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), {
+        schema_version: "witself.v0",
+        error: "account signup checkpoint is invalid",
+      });
+      assert.deepEqual(callbacks, []);
+      assert.equal(setup.inviteReservations(), 0);
+      assert.equal(setup.placements(), 0);
+      assert.deepEqual(setup.target.calls, []);
+      assert.deepEqual(setup.service.calls, []);
+      assert.equal(setup.service.receipts.size, 0);
+      assert.deepEqual(storage.values, before);
+      assert.deepEqual(setup.directory.values, directoryBefore);
+    });
+  }
+});
+
+test("an absent signup checkpoint still creates one exact account", async () => {
+  const setup = harness();
+  assert.equal(await setup.storage.get("account-signup"), undefined);
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(setup.service.receipts.size, 1);
+  assert.equal(setup.storage.values.get("account-signup").phase, "completed");
+});
+
+test("historical initialized signup retains its exact fingerprint and revision", async () => {
+  const storage = new Storage();
+  const state = historicalInitializedCheckpoint();
+  await storage.put("account-signup", state);
+  storage.failPhaseOnce = "invite_reserved";
+  const setup = harness({ storage });
+
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 500);
+  assert.equal(setup.inviteReservations(), 1);
+  assert.deepEqual(storage.values.get("account-signup"), state);
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(setup.service.receipts.size, 1);
+});
+
+test("every historical signup phase resumes after its committed checkpoint", async (t) => {
+  const phases = [
+    "abuse_preflight",
+    "initialized",
+    "invite_reserved",
+    "cell_selected",
+    "protocol_verified",
+    "target_reserved",
+    "cell_acknowledged",
+    "target_attached",
+    "pending_projected",
+    "route_projected",
+    "resident_promoted",
+    "completed",
+  ];
+  for (const mode of ["dark", "counters", "challenge-and-counters"]) {
+    for (const phase of phases) {
+      if (mode === "dark" && phase === "abuse_preflight") continue;
+      await t.test(`${mode}: ${phase}`, async () => {
+        class CrashAfterCheckpointStorage extends Storage {
+          async put(key, value) {
+            await super.put(key, value);
+            if (key === "account-signup" && value.phase === this.stopPhase) {
+              this.stopPhase = null;
+              throw new Error("simulated crash after committed checkpoint");
+            }
+          }
+        }
+        const storage = new CrashAfterCheckpointStorage();
+        storage.stopPhase = phase;
+        let verifications = 0;
+        let counterCalls = 0;
+        let emails = 0;
+        const options = {
+          storage,
+          env: mode === "dark" ? {} : {
+            CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+            CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+            ...(mode === "challenge-and-counters" ? {
+              CP_SIGNUP_TURNSTILE_ENABLED: "true",
+              CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture-secret",
+            } : {}),
+          },
+          verifyTurnstile: async () => {
+            verifications++;
+            return { ok: true };
+          },
+          consumeCounter: async () => {
+            counterCalls++;
+            return { allowed: true };
+          },
+          sendVerification: async () => {
+            emails++;
+            return true;
+          },
+        };
+        const setup = harness(options);
+        const first = await setup.runtime.fetch(signupRequest());
+        assert.equal(first.status, 500);
+        const checkpoint = await storage.get("account-signup");
+        assert.equal(checkpoint.phase, phase);
+        assert.equal(
+          Object.hasOwn(checkpoint, "turnstile_verified"),
+          mode === "challenge-and-counters",
+        );
+        assert.equal(
+          Object.hasOwn(checkpoint, "signup_ip_scope"),
+          phase === "abuse_preflight",
+        );
+
+        // A new runtime reads only the durable checkpoint; external receipts
+        // retain exactly the side effects completed before the simulated crash.
+        const resumed = harness({
+          ...options,
+          directory: setup.directory,
+          service: setup.service,
+          target: setup.target,
+        });
+        assert.equal((await resumed.runtime.fetch(signupRequest())).status, 201);
+        const completed = await storage.get("account-signup");
+        assert.equal(completed.phase, "completed");
+        assert.equal(completed.provision_id, checkpoint.provision_id);
+        assert.equal(completed.request_fingerprint, checkpoint.request_fingerprint);
+        assert.equal(completed.verification_email_sent, true);
+        assert.equal(setup.placements() + resumed.placements(), 1);
+        assert.equal(setup.inviteReservations() + resumed.inviteReservations(), 1);
+        assert.equal(setup.service.receipts.size, 1);
+        assert.equal(verifications, mode === "challenge-and-counters" ? 1 : 0);
+        assert.equal(counterCalls, mode === "dark" ? 0 : 2);
+        assert.equal(emails, 1);
+
+        // Completed states with persisted email intent/results also remain
+        // exact replays, without another email, quota use, or state write.
+        assert.equal((await resumed.runtime.fetch(signupRequest())).status, 201);
+        assert.deepEqual(await storage.get("account-signup"), completed);
+        assert.equal(emails, 1);
+        assert.equal(counterCalls, mode === "dark" ? 0 : 2);
+      });
+    }
+  }
+});
+
 test("lost committed cell response replays the same provision on the same cell", async () => {
   const service = new CellService();
   service.ambiguousFirst = true;
