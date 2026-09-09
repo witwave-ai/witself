@@ -430,6 +430,65 @@ function assertProjection(projection, target, operation) {
   }
 }
 
+function assertAbortFence(state) {
+  const operation = state.operation;
+  if (
+    !["evacuate", "move"].includes(operation.kind) ||
+    state.location.kind !== "live" ||
+    state.location.cell !== operation.source_cell ||
+    Object.values(state.projections).some((value) => value !== null) ||
+    operation.evacuation_id !== operation.operation_id ||
+    !/^[0-9a-f-]{36}$/.test(operation.operation_id) ||
+    operation.archive?.archive_id !== operation.operation_id ||
+    operation.archive?.object !==
+      `archives/${state.account_id}/${operation.operation_id}.tar.gz` ||
+    !Number.isSafeInteger(operation.request_epoch) ||
+    operation.request_epoch < 0 ||
+    operation.request_epoch >= operation.epoch ||
+    (
+      Number.isSafeInteger(state.location.route.epoch) &&
+      state.location.route.epoch !== operation.request_epoch
+    ) ||
+    typeof operation.source_registration_id !== "string" ||
+    operation.source_registration_id.length === 0 ||
+    (
+      state.location.route.cell_registration_id &&
+      state.location.route.cell_registration_id !==
+        operation.source_registration_id
+    ) ||
+    (
+      operation.kind === "move" &&
+      (
+        operation.target_cell === null ||
+        operation.target_cell === operation.source_cell ||
+        typeof operation.target_registration_id !== "string" ||
+        operation.target_registration_id.length === 0
+      )
+    ) ||
+    (
+      operation.kind === "evacuate" && operation.target_cell !== null
+    )
+  ) {
+    fail("invalid-state", "pre-archive abort fence is invalid");
+  }
+}
+
+function assertAbortReceipt(state) {
+  const receipt = state.operation.abort_receipt;
+  if (
+    !isObject(receipt) ||
+    Object.keys(receipt).sort().join(",") !==
+      "aborted,account_id,evacuation_id,evacuation_role,status" ||
+    receipt.account_id !== state.account_id ||
+    receipt.evacuation_id !== state.operation.evacuation_id ||
+    receipt.evacuation_role !== "source" ||
+    receipt.aborted !== true ||
+    !["active", "suspended", "closed"].includes(receipt.status)
+  ) {
+    fail("invalid-state", "pre-archive abort receipt is invalid");
+  }
+}
+
 /**
  * Validate a value read from Durable Object storage before using it.
  * The function returns the same plain object so callers can use it inline.
@@ -542,6 +601,16 @@ export function validateLifecycleState(state) {
     assertProjection(state.projections.route, "route", operation);
     assertProjection(state.projections.archive, "archive", operation);
     assertProjection(state.projections.cleanup, "cleanup", operation);
+    if (
+      ["abort_requested", "abort_cleanup_pending"].includes(operation.phase)
+    ) {
+      assertAbortFence(state);
+    }
+    if (operation.phase === "abort_cleanup_pending") {
+      assertAbortReceipt(state);
+    } else if (Object.hasOwn(operation, "abort_receipt")) {
+      fail("invalid-state", "abort receipt requires pending abort cleanup");
+    }
   }
 
   if (state.last_completed !== null) {
@@ -1446,9 +1515,49 @@ export function completeOperation(
 }
 
 /**
- * Release an evacuation/move claim before an archive is committed. The caller
- * must first undo any source-side suspension; once archive authority exists,
- * rollback is forbidden and the operation must be resumed to completion.
+ * Fence out export before requesting source abort. Receipt and object cleanup
+ * remain owned by this operation; archive authority can never enter this path.
+ */
+export function requestAbortOperation(stateInput, { operation_id: operationID }) {
+  const state = validateLifecycleState(stateInput);
+  const operation = currentOperation(state, operationID);
+  if (operation.phase === "abort_requested") return state;
+  if (!["claimed", "source_suspended"].includes(operation.phase)) {
+    fail("phase-mismatch", "archive authority cannot enter abort intent");
+  }
+  assertAbortFence(state);
+  return bump(state, {
+    operation: { ...operation, phase: "abort_requested" },
+  });
+}
+
+export function acknowledgeAbortOperation(
+  stateInput,
+  { operation_id: operationID, receipt },
+) {
+  const state = validateLifecycleState(stateInput);
+  const operation = currentOperation(state, operationID);
+  requirePhase(operation, "abort_requested");
+  const next = bump(state, {
+    operation: {
+      ...operation,
+      phase: "abort_cleanup_pending",
+      abort_receipt: {
+        account_id: receipt?.account_id,
+        evacuation_id: receipt?.evacuation_id,
+        evacuation_role: receipt?.evacuation_role,
+        status: receipt?.status,
+        aborted: receipt?.aborted,
+      },
+    },
+  });
+  return validateLifecycleState(next);
+}
+
+/**
+ * Retire a pre-archive abort after the caller has resumed the source and
+ * deleted its candidate. Legacy callers retain the original pre-archive
+ * contract; a requested durable abort must first persist its exact receipt.
  */
 export function abortOperation(
   stateInput,
@@ -1480,7 +1589,11 @@ export function abortOperation(
       `${operation.kind} cannot be aborted`,
     );
   }
-  if (!["claimed", "source_suspended"].includes(operation.phase)) {
+  if (
+    !["claimed", "source_suspended", "abort_cleanup_pending"].includes(
+      operation.phase,
+    )
+  ) {
     fail(
       "phase-mismatch",
       `operation cannot be aborted from phase ${operation.phase}`,
@@ -1665,6 +1778,10 @@ export function nextLifecycleStep(stateInput) {
   const base = stepBase(operation);
 
   switch (operation.phase) {
+    case "abort_requested":
+      return { ...base, type: "cell", action: "abort_source" };
+    case "abort_cleanup_pending":
+      return { ...base, type: "cleanup", action: "cleanup_aborted_archive" };
     case "claimed":
       if (operation.kind === "restore" || operation.kind === "move") {
         return {

@@ -3404,6 +3404,425 @@ test("ambiguous multipart completion is deleted only after exact abort", async (
   );
 });
 
+test("failed exact delete after ambiguous completion remains durable across restart", async (t) => {
+  const directory = new KV({
+    [`acct:${ACCOUNT}`]: sourceRoute(),
+    [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example", false),
+  });
+  const storage = new Storage();
+  const bucket = new Bucket();
+  const object = `archives/${ACCOUNT}/${OPERATION_ID}.tar.gz`;
+  const unrelatedObject = `archives/${ACCOUNT}/unrelated.tar.gz`;
+  bucket.values.set(unrelatedObject, new Uint8Array([9]));
+  bucket.failDeleteOnce = true;
+  const events = [];
+  let exportCalls = 0;
+  let abortCalls = 0;
+  const originalDelete = bucket.delete.bind(bucket);
+  bucket.delete = async (key) => {
+    events.push(`delete:${key}`);
+    return originalDelete(key);
+  };
+  const dependencies = {
+    fetch: async (url, init = {}) => {
+      if (url.endsWith("/v1/version")) return protocolResponse();
+      if (url.endsWith(":begin-evacuation")) {
+        return Response.json({
+          account_id: ACCOUNT,
+          evacuation_id: OPERATION_ID,
+          evacuation_role: "source",
+          status: "suspended",
+        });
+      }
+      if (url.endsWith("/placement-policy")) {
+        return Response.json({
+          account_id: ACCOUNT,
+          placement_policy: { allowed_clouds: ["aws"] },
+        });
+      }
+      if (url.endsWith(":export-evacuation")) {
+        exportCalls++;
+        return new Response(new Uint8Array([1]));
+      }
+      if (url.endsWith(":abort-evacuation")) {
+        abortCalls++;
+        events.push("abort");
+        return Response.json({
+          account_id: ACCOUNT,
+          evacuation_id: JSON.parse(init.body).evacuation_id,
+          evacuation_role: "source",
+          status: "active",
+          aborted: true,
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+    randomUUID: () => OPERATION_ID,
+    now: () => new Date("2026-07-25T12:00:00.000Z"),
+    streamArchive: async (archiveBucket, key) => {
+      archiveBucket.values.set(key, new Uint8Array([1, 2, 3]));
+      events.push("complete-committed");
+      throw new Error("lost multipart completion acknowledgement");
+    },
+    verifyArchive: async () => {
+      throw new Error("verification must not run");
+    },
+  };
+  const createRuntime = () => new DurableAccountLifecycle(
+    { storage, id: { name: ACCOUNT } },
+    { DIRECTORY: directory, ARCHIVES: bucket },
+    dependencies,
+  );
+  const response = await createRuntime().fetch(
+    request("evacuate", { cell_name: SOURCE }),
+  );
+  assert.equal(response.status, 500);
+  assert.deepEqual(events, [
+    "complete-committed", "abort", `delete:${object}`,
+  ]);
+  assert.equal(bucket.values.has(object), true);
+  const first = structuredClone(storage.values.get("account-lifecycle"));
+  const pending = {
+    exact_operation_retained: first.operation?.operation_id === OPERATION_ID,
+    alarm_scheduled: storage.alarm !== null,
+  };
+
+  // Invoke the restarted alarm even when the broken implementation cleared
+  // it, proving that an external wakeup alone cannot recover the lost intent.
+  await createRuntime().alarm();
+  const completed = storage.values.get("account-lifecycle");
+  const observed = {
+    ...pending,
+    object_removed_after_restart: !bucket.values.has(object),
+    export_calls: exportCalls,
+    abort_calls: abortCalls,
+    delete_attempts: events.filter((event) => event === `delete:${object}`).length,
+  };
+  t.diagnostic(JSON.stringify(observed));
+  assert.equal(completed.operation, null);
+  assert.equal(completed.last_completed.outcome, "aborted");
+  assert.equal(completed.location.kind, "live");
+  assert.equal(completed.location.cell, SOURCE);
+  assert.deepEqual(directory.value(`acct:${ACCOUNT}`), sourceRoute());
+  assert.equal(directory.value(`archived:${ACCOUNT}`), null);
+  assert.deepEqual([...bucket.values.get(unrelatedObject)], [9]);
+  assert.equal(storage.alarm, null);
+  assert.deepEqual(observed, {
+    exact_operation_retained: true,
+    alarm_scheduled: true,
+    object_removed_after_restart: true,
+    export_calls: 1,
+    abort_calls: 1,
+    delete_attempts: 2,
+  });
+});
+
+function abortCleanupFixture({ kind = "evacuate", fault = null, receipt = {} } = {}) {
+  const directory = new KV({
+    [`acct:${ACCOUNT}`]: sourceRoute(7),
+    [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example", false),
+    [`cell:${TARGET}`]: cell(TARGET, "https://target.example"),
+  });
+  let faultRaised = false;
+  const trip = (boundary) => {
+    if (fault === boundary && !faultRaised) {
+      faultRaised = true;
+      throw new Error(`injected ${boundary} failure`);
+    }
+  };
+  class AbortStorage extends Storage {
+    async put(key, value) {
+      const phase = value.operation?.phase ??
+        (value.last_completed?.outcome === "aborted" ? "abort_terminal" : "other");
+      trip(`${phase}:before`);
+      await super.put(key, value);
+      this.savedStates ??= [];
+      this.savedStates.push(structuredClone(value));
+      trip(`${phase}:after`);
+    }
+  }
+  const storage = new AbortStorage();
+  const bucket = new Bucket();
+  const object = `archives/${ACCOUNT}/${OPERATION_ID}.tar.gz`;
+  const unrelated = `archives/${ACCOUNT}/unrelated.tar.gz`;
+  bucket.values.set(unrelated, new Uint8Array([9]));
+  const calls = { export: 0, abort: 0, delete: 0, release: 0, reserve: 0 };
+  let sourceAborted = false;
+  let rejectAbort = false;
+  const proof = {
+    account_id: ACCOUNT, evacuation_id: OPERATION_ID,
+    evacuation_role: "source", status: "active", aborted: true,
+  };
+  const originalDelete = bucket.delete.bind(bucket);
+  bucket.delete = async (key) => {
+    calls.delete++;
+    assert.equal(key, object);
+    assert.equal(sourceAborted, true);
+    const stored = storage.values.get("account-lifecycle");
+    assert.equal(stored.operation.phase, "abort_cleanup_pending");
+    assert.deepEqual(stored.operation.abort_receipt, { ...proof, ...receipt });
+    trip("delete:before");
+    await originalDelete(key);
+    trip("delete:after");
+  };
+  const authority = new TargetAuthority(directory);
+  const dependencies = {
+    randomUUID: () => OPERATION_ID,
+    now: () => new Date("2026-07-25T12:00:00.000Z"),
+    fetch: async (url, init = {}) => {
+      if (url.endsWith("/v1/version")) return protocolResponse();
+      if (url.endsWith(":begin-evacuation")) {
+        assert.equal(sourceAborted, false);
+        return Response.json({ ...proof, status: "suspended", aborted: false });
+      }
+      if (url.endsWith("/placement-policy")) {
+        assert.equal(sourceAborted, false);
+        return Response.json({
+          account_id: ACCOUNT,
+          placement_policy: { allowed_clouds: ["aws", "civo"] },
+        });
+      }
+      if (url.endsWith(":export-evacuation")) {
+        assert.equal(sourceAborted, false, "never export after source abort");
+        calls.export++;
+        return new Response(new Uint8Array([1]));
+      }
+      if (url.endsWith(":abort-evacuation")) {
+        calls.abort++;
+        const stored = storage.values.get("account-lifecycle");
+        assert.equal(stored.operation.phase, "abort_requested");
+        assert.equal(JSON.parse(init.body).evacuation_id, OPERATION_ID);
+        assert.notEqual(storage.alarm, null);
+        trip("abort_response:before");
+        sourceAborted = true;
+        trip("abort_response:after");
+        return Response.json({
+          ...proof, ...receipt,
+          ...(rejectAbort ? { evacuation_id: "different" } : {}),
+          ignored_provider_field: "must-not-be-persisted",
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+    streamArchive: async (archiveBucket, key) => {
+      archiveBucket.values.set(key, new Uint8Array([1, 2, 3]));
+      throw new Error("lost multipart completion acknowledgement");
+    },
+    verifyArchive: async () => { throw new Error("verification must not run"); },
+    targetCoordinatorRequest: async (cellName, path, payload) => {
+      if (path === "/reserve") {
+        calls.reserve++;
+        const phase = storage.values.get("account-lifecycle")?.operation?.phase;
+        assert.ok(!["abort_requested", "abort_cleanup_pending"].includes(phase));
+      }
+      if (path === "/release") {
+        calls.release++;
+        assert.equal(bucket.values.has(object), false);
+        trip("release:before");
+      }
+      const result = await authority.request(cellName, path, payload);
+      if (path === "/release") trip("release:after");
+      return result;
+    },
+  };
+  const restart = () => new DurableAccountLifecycle(
+    { storage, id: { name: ACCOUNT } },
+    { DIRECTORY: directory, ARCHIVES: bucket }, dependencies,
+  );
+  return {
+    storage, bucket, directory, object, unrelated, calls, authority, restart,
+    setRejectAbort: (value) => { rejectAbort = value; },
+    sourceAborted: () => sourceAborted,
+    request: () => request(kind, kind === "move"
+      ? { source_cell: SOURCE, target_cell: TARGET }
+      : { cell_name: SOURCE }),
+  };
+}
+
+test("pre-archive abort resumes every durable and external failure boundary", async (t) => {
+  for (const kind of ["evacuate", "move"]) {
+    const faults = [
+      "abort_requested:before", "abort_requested:after",
+      "abort_cleanup_pending:before", "abort_cleanup_pending:after",
+      "abort_response:before", "abort_response:after", "delete:before", "delete:after",
+      "abort_terminal:before", "abort_terminal:after",
+      ...(kind === "move" ? ["release:before", "release:after"] : []),
+    ];
+    for (const fault of faults) {
+      await t.test(`${kind} ${fault}`, async () => {
+        const f = abortCleanupFixture({ kind, fault });
+        const response = await f.restart().fetch(f.request());
+        assert.equal(response.status, fault.startsWith("abort_response:") ? 502 : 500);
+        assert.notEqual(f.storage.alarm, null);
+        const first = structuredClone(f.storage.values.get("account-lifecycle"));
+        if (fault === "abort_requested:before") {
+          assert.equal(f.sourceAborted(), false);
+          assert.equal(first.operation.phase, "source_suspended");
+        } else if (fault !== "abort_terminal:after") {
+          assert.ok(["abort_requested", "abort_cleanup_pending"].includes(first.operation.phase));
+        }
+        if (fault.startsWith("abort_requested:") ||
+          fault.startsWith("abort_cleanup_pending:") || fault.startsWith("abort_response:")) {
+          assert.equal(f.calls.delete, 0);
+          assert.equal(f.bucket.values.has(f.object), true);
+        }
+        const reserveCalls = f.calls.reserve;
+        await f.restart().alarm();
+        const completed = f.storage.values.get("account-lifecycle");
+        assert.equal(completed.operation, null);
+        assert.equal(completed.last_completed.outcome, "aborted");
+        assert.equal(completed.last_completed.epoch, 8);
+        assert.deepEqual(completed.location.route, sourceRoute(7));
+        assert.deepEqual(f.directory.value(`acct:${ACCOUNT}`), sourceRoute(7));
+        assert.equal(f.directory.value(`archived:${ACCOUNT}`), null);
+        assert.equal(f.bucket.values.has(f.object), false);
+        assert.deepEqual([...f.bucket.values.get(f.unrelated)], [9]);
+        if (fault === "abort_requested:before") {
+          // No intent was committed on the first attempt. Its alarm may
+          // re-export, settle abort, then rearm for the original export error.
+          // The harmless terminal wakeup must not repeat any external work.
+          assert.notEqual(f.storage.alarm, null);
+          const settledCalls = { ...f.calls };
+          await f.restart().alarm();
+          assert.deepEqual(f.calls, settledCalls);
+        }
+        assert.equal(f.storage.alarm, null);
+        assert.equal(f.calls.export, fault === "abort_requested:before" ? 2 : 1);
+        assert.equal(f.calls.abort,
+          ["abort_cleanup_pending:before", "abort_response:before", "abort_response:after"].includes(fault) ? 2 : 1);
+        assert.equal(f.authority.reservations.size, 0);
+        if (fault !== "abort_requested:before") assert.equal(f.calls.reserve, reserveCalls);
+      });
+    }
+  }
+});
+
+test("proven move abort cleans up after its target reservation expires", async () => {
+  const f = abortCleanupFixture({ kind: "move", fault: "delete:before" });
+  assert.equal((await f.restart().fetch(f.request())).status, 500);
+  const reserveCalls = f.calls.reserve;
+  f.authority.reservations.clear();
+  f.directory.values.delete(`cell:${TARGET}`);
+  await f.restart().alarm();
+  assert.equal(f.calls.reserve, reserveCalls);
+  assert.equal(f.calls.export, 1);
+  assert.equal(f.calls.abort, 1);
+  assert.equal(f.calls.delete, 2);
+  assert.equal(f.calls.release, 1);
+  assert.equal(f.bucket.values.has(f.object), false);
+  assert.equal(f.storage.values.get("account-lifecycle").operation, null);
+  assert.equal(f.storage.alarm, null);
+});
+
+test("foreground abort cleanup never reports a successful evacuation or move", async (t) => {
+  for (const kind of ["evacuate", "move"]) {
+    await t.test(kind, async () => {
+      const f = abortCleanupFixture({ kind, fault: "delete:before" });
+      assert.equal((await f.restart().fetch(f.request())).status, 500);
+      const response = await f.restart().fetch(f.request());
+      assert.equal(f.storage.values.get("account-lifecycle").operation, null);
+      assert.deepEqual(f.directory.value(`acct:${ACCOUNT}`), sourceRoute(7));
+      assert.equal(f.directory.value(`archived:${ACCOUNT}`), null);
+      assert.equal(f.bucket.values.has(f.object), false);
+      assert.equal(f.storage.alarm, null);
+      assert.equal(f.calls.export, 1);
+      assert.equal(f.calls.abort, 1);
+      assert.equal(response.status, 502);
+      assert.match((await response.json()).error, /aborted.*cleanup completed/);
+    });
+  }
+});
+
+test("abort receipt refusal retains the candidate and retries only the exact source abort", async () => {
+  const f = abortCleanupFixture();
+  f.setRejectAbort(true);
+  assert.equal((await f.restart().fetch(f.request())).status, 502);
+  assert.equal(f.storage.values.get("account-lifecycle").operation.phase, "abort_requested");
+  assert.equal(f.bucket.values.has(f.object), true);
+  assert.equal(f.calls.delete, 0);
+  assert.notEqual(f.storage.alarm, null);
+  f.setRejectAbort(false);
+  await f.restart().alarm();
+  assert.equal(f.calls.export, 1);
+  assert.equal(f.calls.abort, 2);
+  assert.equal(f.calls.delete, 1);
+  assert.equal(f.storage.alarm, null);
+});
+
+test("abort cleanup preserves all three source-supported receipt statuses", async (t) => {
+  for (const status of ["active", "suspended", "closed"]) {
+    await t.test(status, async () => {
+      const f = abortCleanupFixture({ receipt: { status } });
+      assert.equal((await f.restart().fetch(f.request())).status, 500);
+      assert.equal(f.storage.values.get("account-lifecycle").last_completed.outcome, "aborted");
+      assert.equal(f.calls.delete, 1);
+      assert.equal(f.storage.alarm, null);
+    });
+  }
+});
+
+test("unsupported abort receipt status stays abort-requested without deletion", async (t) => {
+  for (const [name, status] of [["unexpected", "pending"], ["oversized", "x".repeat(4096)]]) {
+    await t.test(name, async (t) => {
+      const f = abortCleanupFixture({ receipt: { status } });
+      assert.equal((await f.restart().fetch(f.request())).status, 500);
+      const stored = f.storage.values.get("account-lifecycle");
+      const observed = {
+        status_length: status.length,
+        durable_cleanup_proof: f.storage.savedStates.some((s) =>
+          s.operation?.phase === "abort_cleanup_pending"),
+        phase: stored.operation?.phase ?? "terminal",
+        delete_calls: f.calls.delete,
+        candidate_retained: f.bucket.values.has(f.object),
+        alarm_retained: f.storage.alarm !== null,
+      };
+      t.diagnostic(JSON.stringify(observed));
+      assert.deepEqual(observed, {
+        status_length: status.length,
+        durable_cleanup_proof: false,
+        phase: "abort_requested",
+        delete_calls: 0,
+        candidate_retained: true,
+        alarm_retained: true,
+      });
+    });
+  }
+});
+
+test("malformed persisted abort proof cannot delete, renew or export", async (t) => {
+  const mutations = [
+    (s) => { delete s.operation.abort_receipt; },
+    (s) => { s.operation.abort_receipt.aborted = false; },
+    (s) => { s.operation.abort_receipt.account_id = "different"; },
+    (s) => { s.operation.abort_receipt.evacuation_id = "different"; },
+    (s) => { s.operation.abort_receipt.evacuation_role = "target"; },
+    (s) => { s.operation.abort_receipt.status = ""; },
+    (s) => { s.operation.abort_receipt.status = "pending"; },
+    (s) => { s.operation.abort_receipt.status = "x".repeat(4096); },
+    (s) => { s.operation.abort_receipt.extra = true; },
+    (s) => { s.operation.archive.object = "archives/other/candidate.tar.gz"; },
+    (s) => { s.operation.archive.archive_id = "different"; },
+    (s) => { s.operation.epoch++; },
+    (s) => { s.operation.request_epoch++; },
+    (s) => { s.operation.source_registration_id = "different"; },
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    await t.test(String(index), async () => {
+      const f = abortCleanupFixture({ kind: "move", fault: "delete:before" });
+      assert.equal((await f.restart().fetch(f.request())).status, 500);
+      const state = structuredClone(f.storage.values.get("account-lifecycle"));
+      mutate(state);
+      f.storage.values.set("account-lifecycle", state);
+      const calls = { ...f.calls };
+      await f.restart().alarm();
+      assert.deepEqual(f.calls, calls);
+      assert.deepEqual(f.storage.values.get("account-lifecycle"), state);
+      assert.equal(f.bucket.values.has(f.object), true);
+      assert.notEqual(f.storage.alarm, null);
+    });
+  }
+});
+
 test("contradictory import and resume receipts never retire the archive", async (t) => {
   const fixtures = [
     {
@@ -4050,6 +4469,6 @@ test("abort evacuation rejects a target-role receipt", async () => {
     /abort evacuation returned 2xx without an exact/,
   );
   const state = coordinator.storage.values.get("account-lifecycle");
-  assert.equal(state.operation.phase, "source_suspended");
+  assert.equal(state.operation.phase, "abort_requested");
   assert.equal(state.last_completed, null);
 });
