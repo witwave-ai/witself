@@ -18,7 +18,7 @@ Managed token files live under `~/.witself/tokens`; `WITSELF_HOME` replaces
 | Credential | Resolution, highest priority first | Commands |
 |---|---|---|
 | Admin token | `--token`, `--token-file`, `WITSELF_ADMIN_TOKEN`, managed `admin.token` | `whoami`, tickets, account policies, email aliases/domains, `cells list`, events |
-| Fleet token | `--fleet-token`, `WITSELF_FLEET_TOKEN`, managed `fleet.token` | `admin`, `invite`, `placement rescue`, `cells show` and repairs; see cell authentication below |
+| Fleet token | `--fleet-token`, `WITSELF_FLEET_TOKEN`, managed `fleet.token` | `admin`, `invite`, `placement rescue`, `settings`, `cells show` and repairs; see cell and settings authentication below |
 | Domain recovery token, in addition to the admin token | `--recovery-token-file`, `WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE`, managed `agent-email-domain-recovery.token` | `email-domain journal` and `email-domain recovery` |
 
 Recovery token files must be regular files, must not be symlinks, and must have
@@ -175,6 +175,92 @@ witself-admin placement rescue --account-id ACCOUNT_ID \
 `--axes` defaults to all three axes; it accepts a comma-separated subset of
 `cloud`, `region`, and `channel`. JSON wraps the receipt in `placement_rescue`
 and includes whether anything changed.
+
+## Settings
+
+[Handlers](../cmd/witself-admin/settings_cmd.go) and
+[client](../internal/client/fleet_settings.go). These commands inspect and
+change the fleet-wide placement runner, pending-account reaper, and default
+placement strategy.
+
+```sh
+witself-admin settings show --json
+witself-admin settings placement-runner show --json
+witself-admin settings placement-runner enable --yes --json
+witself-admin settings placement-runner disable --yes --json
+witself-admin settings placement-runner set \
+  --restore-archives=true --restore-batch 4 --restore-any-region=false \
+  --rebalance=true --rebalance-batch 1 --yes --json
+witself-admin settings placement-runner run --restore-batch 2 --yes --json
+witself-admin settings reaper show --json
+witself-admin settings reaper enable --ttl-minutes 60 --yes --json
+witself-admin settings reaper disable --yes --json
+witself-admin settings placement show --json
+witself-admin settings placement set --strategy weighted --yes --json
+witself-admin settings placement set \
+  --strategy pinned --pinned-cell civo-example --yes --json
+```
+
+Every verb accepts `--endpoint` and `--json` and uses the fleet token:
+`--fleet-token` or its `--token` alias, then `--token-file`, then
+`WITSELF_FLEET_TOKEN`, then managed `fleet.token`. Do not combine
+`--fleet-token` with `--token`. There is no admin-token fallback. The
+control-plane endpoint must be an HTTP or HTTPS origin, optionally ending in
+`/`, without a base path, credentials, query, or fragment. Help returns
+success without credentials.
+
+| Verb | Control-plane requests | Result |
+|---|---|---|
+| `show` | `GET /v1/placement-runner`, `GET /v1/reaper`, `GET /v1/placement` | All three configurations |
+| `placement-runner show` | `GET /v1/placement-runner` | Stored runner configuration |
+| `placement-runner enable`, `disable`, `set` | `POST /v1/placement-runner` | Updated runner configuration |
+| `placement-runner run` | `POST /v1/placement:run` | Effective configuration and restore/rebalance results |
+| `reaper show` | `GET /v1/reaper` | Pending-account expiry configuration |
+| `reaper enable`, `disable` | `POST /v1/reaper` | Updated expiry configuration |
+| `placement show` | `GET /v1/placement` | Default placement strategy |
+| `placement set` | `POST /v1/placement` | Updated strategy and optional pinned cell |
+
+Every write requires `--yes`; missing confirmation or invalid arguments are
+refused before any request. Enabling or running the placement runner can move
+live or archived accounts. Keep the runner disabled during rollouts that
+require it, as described in the [runbooks](runbooks.md).
+
+Runner `enable` and `disable` change only `enabled`. Runner `set` requires at
+least one of `--restore-archives`, `--restore-batch`, `--restore-any-region`,
+`--rebalance`, or `--rebalance-batch`; only explicitly supplied flags are sent,
+preserving the other stored settings. Use `--FLAG=false` to turn off a boolean.
+Restore batches range from 1 to 10 and rebalance batches from 1 to 5.
+`run` accepts the same optional flags, runs synchronously using the stored
+configuration plus those overrides, and allows up to ten minutes for the
+response. A manual run uses `enabled=true` even when the scheduled runner is
+disabled; its overrides do not change stored settings. A `restore_error` or
+`rebalance_error`, or an account entry with `ok: false` in `restored` or
+`rebalanced`, produces exit status `1`, including when the HTTP response is
+successful. The complete result is printed so successful and failed accounts
+remain visible. Remaining work after a successful bounded batch is not an error.
+
+Reaper `enable` requires a finite `--ttl-minutes` value of at least `1`;
+fractional minutes such as `1.5` are accepted and preserved in configuration
+reads and output. It prints a reminder to stderr that cells must serve `:reap`
+before enabling the sweep.
+The reaper closes accounts that never activated within that window.
+`disable` sends only `{"enabled":false}` and the control plane drops the TTL.
+Placement `set` requires `--strategy weighted` or `--strategy pinned`;
+`pinned` additionally requires `--pinned-cell NAME` with 1–64 lowercase
+letters, digits, or hyphens. `--pinned-cell` is accepted only with `pinned`.
+
+Output reflects the control plane's authoritative response. Setters reject
+responses that do not acknowledge the supplied settings, and all responses
+must carry `schema_version: "witself.v0"`. JSON for `show` contains
+`schema_version`, `placement_runner`, `reaper`, and `placement`; individual
+configuration verbs contain `schema_version` and the corresponding field.
+Manual-run JSON also contains the restore/rebalance results and any step
+errors. Without `--json`, commands display text tables. These settings verbs
+have no `--force` option or direct restore, rebalance, purge, or evacuation
+commands.
+
+`witself-admin` reaches operators through the tagged client release train,
+including Homebrew. These CLI commands use existing control-plane routes.
 
 ## Backup evidence
 
