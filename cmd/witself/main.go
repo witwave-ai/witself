@@ -22,7 +22,6 @@ import (
 	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/legacyrunnercleanup"
-	"github.com/witwave-ai/witself/internal/legal"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/textsafe"
@@ -2496,14 +2495,10 @@ func accountForget(args []string) int {
 // bootstrap uses — and remembers it under a local name so later commands are
 // just `witself realm create --account NAME ...`.
 func accountCreate(args []string) int {
-	return accountCreateWithLegalVersions(
-		args, legal.TermsVersion, legal.PrivacyVersion,
-	)
+	return accountCreateWithContext(context.Background(), args)
 }
 
-func accountCreateWithLegalVersions(
-	args []string, currentTermsVersion, currentPrivacyVersion string,
-) int {
+func accountCreateWithContext(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	email := fs.String("email", "", "account owner email")
@@ -2544,27 +2539,35 @@ func accountCreateWithLegalVersions(
 		return 1
 	}
 
-	// --accept-terms records consent to the compiled-in current legal
-	// versions. Consent participates in the durable request fingerprint so a
-	// resumed or replayed journal keeps binding the exact same consent. On a
-	// resume, the journal's accepted versions override newly compiled versions;
-	// the dark default (flag absent) leaves the fingerprint input byte-identical
-	// to older CLIs.
+	// A new consentful signup selects the versions served by its own control
+	// plane. Existing journals always replay their exact accepted versions;
+	// neither a later --accept-terms nor changed legal pages may rewrite an
+	// ambiguous request. Consentless legacy requests keep their fingerprint.
 	consentTermsVersion, consentPrivacyVersion := "", ""
-	if journalErr == nil && existingJournal.AcceptedTermsVersion != "" {
+	legalBase := ""
+	if journalErr == nil {
 		consentTermsVersion = existingJournal.AcceptedTermsVersion
 		consentPrivacyVersion = existingJournal.AcceptedPrivacyVersion
 	} else if *acceptTerms {
-		consentTermsVersion = currentTermsVersion
-		consentPrivacyVersion = currentPrivacyVersion
+		var err error
+		legalBase, err = signupLegalBase(*endpoint)
+		if err == nil {
+			consentTermsVersion, consentPrivacyVersion, err = signupLegalVersions(ctx, legalBase)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: fetch current legal versions: %v\n", err)
+			return 1
+		}
 	}
 	if consentTermsVersion != "" {
-		// Say exactly which texts the consent record will name; the pages
-		// are the authoritative copies and `witself legal` reads them here.
-		fmt.Printf("recording consent to Terms of Service v%s and Privacy Policy v%s\n",
-			consentTermsVersion, consentPrivacyVersion)
-		fmt.Printf("  %s/terms · %s/privacy · read in-terminal: witself legal terms\n",
-			legal.BaseURL, legal.BaseURL)
+		if journalErr == nil {
+			fmt.Printf("resuming recorded consent to Terms of Service v%s and Privacy Policy v%s\n",
+				consentTermsVersion, consentPrivacyVersion)
+		} else {
+			fmt.Printf("recording consent to Terms of Service v%s and Privacy Policy v%s\n",
+				consentTermsVersion, consentPrivacyVersion)
+			fmt.Printf("  %s/terms · %s/privacy\n", legalBase, legalBase)
+		}
 	}
 	requestFingerprint, err := client.AccountCreateRequestFingerprint(
 		*endpoint, localName, *email, *invite, *displayName,
@@ -2632,7 +2635,6 @@ func accountCreateWithLegalVersions(
 		return 1
 	}
 
-	ctx := context.Background()
 	acct, err := client.CreateAccountExact(
 		ctx, *endpoint, *email, *invite, *displayName, journal.ProvisionID,
 		*challenge, consentTermsVersion, consentPrivacyVersion,

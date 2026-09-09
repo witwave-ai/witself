@@ -87,6 +87,22 @@ function phaseAtLeast(state, phase) {
   return PHASE[state.phase] >= PHASE[phase];
 }
 
+function requireStoredSignupState(state) {
+  // Unknown checkpoints must never fall through phase comparisons and start
+  // provisioning. This also makes unsupported state from a newer deployment
+  // fail closed when an operator rolls back to this runtime.
+  if (
+    !isObject(state) ||
+    state.schema_version !== "witself.signup.v1" ||
+    typeof state.phase !== "string" ||
+    !Object.hasOwn(PHASE, state.phase) ||
+    !Number.isSafeInteger(state.revision) ||
+    state.revision < 0
+  ) {
+    fail("account signup checkpoint is invalid", 500);
+  }
+}
+
 function consentVersionError(
   consentTermsVersion,
   consentPrivacyVersion,
@@ -444,7 +460,8 @@ export class DurableAccountSignup {
     }
     const fingerprint = await this.hash(requestCanonical(request));
     let state = await this.storage.get(STATE_KEY);
-    if (state) {
+    if (state !== undefined) {
+      requireStoredSignupState(state);
       if (
         state.provision_id !== request.provision_id ||
         state.request_fingerprint !== fingerprint
