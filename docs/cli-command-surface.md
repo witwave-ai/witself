@@ -156,6 +156,7 @@ plumbing, not a customer workflow.
 | `witself-admin` | `help` | implemented | `--help`, `-h` |
 | `witself-admin` | `invite` | implemented | — |
 | `witself-admin` | `placement` | implemented | — |
+| `witself-admin` | `settings` | implemented | — |
 | `witself-admin` | `ticket` | implemented | — |
 | `witself-admin` | `version` | implemented | `--version`, `-v` |
 | `witself-admin` | `whoami` | implemented | — |
@@ -366,6 +367,55 @@ explicit `--accepting=true` registration or `undrain`.
 `DELETE /v1/cells/{name}`. The control plane refuses deletion until the cell
 is drained and has no remaining account directory entries; the CLI preserves
 the refusal text. These repair verbs expose neither `--force` nor a purge path.
+
+### Operator control-plane settings (implemented)
+
+The implemented `witself-admin settings` surface provides scriptable
+placement-runner, pending-account reaper, and default placement-strategy
+configuration. See [the settings reference](witself-admin.md#settings) for
+the complete verb-to-route table and output contracts.
+
+```sh
+witself-admin settings show --json
+witself-admin settings placement-runner show
+witself-admin settings placement-runner enable --yes
+witself-admin settings placement-runner disable --yes
+witself-admin settings placement-runner set --restore-batch 4 --yes
+witself-admin settings placement-runner run --yes --json
+witself-admin settings reaper show
+witself-admin settings reaper enable --ttl-minutes 60 --yes
+witself-admin settings reaper disable --yes
+witself-admin settings placement show
+witself-admin settings placement set --strategy weighted --yes
+witself-admin settings placement set --strategy pinned --pinned-cell CELL --yes
+```
+
+All verbs use the fleet token (`--fleet-token`, its `--token` alias,
+`--token-file`, `WITSELF_FLEET_TOKEN`, or managed `fleet.token`) and support
+`--endpoint` and `--json`. `show` reads all three configurations; individual
+`show` verbs GET `/v1/placement-runner`, `/v1/reaper`, or `/v1/placement`.
+Configuration writes POST to the matching route and require `--yes` before
+any request. JSON wraps the authoritative configuration in `placement_runner`,
+`reaper`, or `placement`, alongside `schema_version: "witself.v0"`.
+
+Runner `set` sends only explicitly supplied `--restore-archives`,
+`--restore-batch`, `--restore-any-region`, `--rebalance`, and
+`--rebalance-batch` flags; `enable` and `disable` change only `enabled`.
+Runner `run` POSTs `/v1/placement:run` with the same optional overrides and a
+ten-minute timeout. It performs a manual pass even when the scheduled runner
+is disabled, without saving its overrides, and exits `1` after printing the
+complete result if a restore or rebalance step failed or any account in
+`restored` or `rebalanced` has `ok: false`, even in an HTTP-success response.
+Remaining work after a successful bounded batch is not an error. Enabling or
+running it may move live or archived accounts.
+
+Reaper enablement requires finite `--ttl-minutes` of at least `1`, accepts
+fractional minutes such as `1.5`, and prints a stderr reminder that cells must
+serve `:reap` first. Reads and output preserve fractional values. The reaper
+closes accounts that never activated within that window. Placement strategy is `weighted` or
+`pinned`; pinned placement requires a valid `--pinned-cell` name. Invalid
+arguments and missing `--yes` fail before any request. These verbs expose no
+`--force` or direct restore, rebalance, purge, or evacuation commands.
 
 ### Operator-only signup invite administration
 

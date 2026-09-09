@@ -79,6 +79,8 @@ func run(args []string) int {
 		return eventsCmd(args[1:])
 	case "placement":
 		return placementCmd(args[1:])
+	case "settings":
+		return settingsCmd(args[1:])
 	case "backup-evidence":
 		return backupEvidenceCmd(args[1:])
 	case "dashboard", "tui":
@@ -110,6 +112,8 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	cliout.Line(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
 	cliout.Line(w, "                                (rescue)")
+	cliout.Line(w, "  witself-admin settings ...  Manage control-plane placement runner, reaper, and placement strategy")
+	cliout.Line(w, "                                (show|placement-runner|reaper|placement; writes require --yes)")
 	cliout.Line(w, "  witself-admin backup-evidence ... Verify retained Civo pre-migration backup")
 	cliout.Line(w, "                                artifacts offline; count-only output (verify)")
 	cliout.Line(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")

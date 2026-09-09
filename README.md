@@ -802,6 +802,20 @@ witself-infra rebalance -control-plane https://self.witwave.ai -dry-run
 witself-infra placement-runner -control-plane https://self.witwave.ai -enable -run
 ```
 
+The operator CLI also provides fleet-wide settings and manual runner passes:
+
+```sh
+witself-admin settings show --endpoint https://self.witwave.ai --json
+witself-admin settings placement-runner enable --yes --json
+witself-admin settings placement-runner run --yes --json
+witself-admin settings placement-runner disable --yes --json
+```
+
+These commands use a fleet token. Writes require `--yes`; a manual pass can
+move accounts and allows up to ten minutes for the response. See
+[witself-admin settings](docs/witself-admin.md#settings) for partial runner
+updates, pending-account reaper settings, and weighted or pinned placement.
+
 If an archived account has impossible hard pins, an operator can clear only
 the blocked axes while preserving its ranked preferences. The rescued policy
 is applied to the imported account before it resumes on its destination cell:
