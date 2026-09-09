@@ -130,7 +130,7 @@ expected_upstream.each do |name, names|
   actual = group.fetch("rules").map { |rule| rule["alert"] }.compact
   abort "unexpected #{name} alert allowlist: #{actual.inspect}" unless actual.sort == names.sort
 end
-allowed_group_names = expected_upstream.keys + existing_group_names + %w[witself-watchdog platform-resources platform-node platform-storage platform-certificates platform-argocd]
+allowed_group_names = expected_upstream.keys + existing_group_names + %w[witself-watchdog witself-entitlement-delivery platform-resources platform-node platform-storage platform-certificates platform-argocd]
 abort "unexpected upstream group rendered: #{(rendered_groups.map { |group| group['name'] } - allowed_group_names).inspect}" unless (rendered_groups.map { |group| group["name"] } - allowed_group_names).empty?
 alerts = rendered_groups.flat_map { |group| group.fetch("rules") }.select { |rule| rule["alert"] }
 custom_names = %w[NodeFilesystemSpaceFillingUp WitselfPrometheusPVCUsageHigh WitselfCertificateExpiringSoon WitselfArgoApplicationUnhealthy]

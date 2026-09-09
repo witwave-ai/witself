@@ -213,6 +213,8 @@ platform:
       enabled: true
     uptimeProbes:
       enabled: true
+    entitlementDelivery:
+      enabled: true
     receiver:
       kind: pagerduty
       secretName: witself-monitoring-pagerduty-v1

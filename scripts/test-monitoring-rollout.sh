@@ -181,7 +181,9 @@ ruby -ryaml -rbase64 -e '
   jobs = YAML.safe_load(Base64.strict_decode64(config), aliases: false)
   expected = [{"job_name" => "witself-probes", "scheme" => "https", "metrics_path" => "/metrics/probes", "scrape_interval" => "60s", "static_configs" => [{"targets" => ["self.witwave.ai:443"]}]}]
   abort "probe scrape is not the exact public unauthenticated job" unless jobs == expected
-  abort "serving cell implicitly enabled entitlement delivery alerts" if docs.any? { |doc| Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-entitlement-delivery" } }
+  delivery = docs.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-entitlement-delivery" } }
+  abort "serving-cell entitlement delivery rule is not unique and selected" unless delivery.length == 1 && delivery[0].dig("metadata", "namespace") == "monitoring" && delivery[0].dig("metadata", "labels", "release") == "witself-monitoring"
+  abort "serving-cell entitlement delivery rules differ from their tested source" unless delivery[0]["spec"] == YAML.load_file(ARGV[2])
   rules = docs.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-uptime-probes" } }
   abort "probe rules missing or duplicated" unless rules.length == 1
   abort "probe rules are outside Prometheus selection" unless rules[0].dig("metadata", "namespace") == "monitoring" && rules[0].dig("metadata", "labels", "release") == "witself-monitoring"
@@ -189,7 +191,7 @@ ruby -ryaml -rbase64 -e '
   abort "probe rules differ from their tested source" unless actual_rules == YAML.load_file(ARGV[1]).dig("groups", 0, "rules")
   alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
   abort "probe rollout changed receiver mounts" unless alertmanager.dig("spec", "secrets").sort == %w[witself-monitoring-deadman-v1 witself-monitoring-pagerduty-v1]
-' "$tmp/probes-child.yaml" "$probe_rules"
+' "$tmp/probes-child.yaml" "$probe_rules" "$delivery_rules"
 
 helm template witself-platform "$platform_chart" \
   --set cell.name=monitoring-ci \
