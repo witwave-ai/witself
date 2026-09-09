@@ -1,0 +1,549 @@
+{
+  "rule_files": [
+    "../files/entitlement-delivery.rules.yaml"
+  ],
+  "evaluation_interval": "30s",
+  "tests": [
+    {
+      "name": "missing second target is visible beside healthy first target",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "up{job=\"witself-probes\",instance=\"missing:443\"}",
+          "values": "1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "14m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "16m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "missing:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery observations are unavailable for a control-plane scrape target.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "enabled invalid snapshot is unavailable",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "14m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "16m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery observations are unavailable for a control-plane scrape target.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "explicit disabled suppresses unknown stale and retained gap",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_ack_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "60+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_cycle_started_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "1+0x500"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "7h",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "7h",
+          "alertname": "WitselfEntitlementDeliverySchedulerStale",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "7h",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "7h",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "pending gap persists then a fully measured zero clears it",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "1+0x39 0+0x20"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0+0x60"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "29m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "31m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "A completed control-plane traversal retains pending or unverified entitlement deliveries.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "40m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "unknown failure cannot hide behind zero apply pending",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "0+0x60"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "1+0x60"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "31m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "A completed control-plane traversal retains pending or unverified entitlement deliveries.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "complete zero and missing complete samples are not false positive gaps",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "0+0x60"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0+0x60"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "60m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "brief scrape gap preserves a pending aggregate alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x19 _ _ 1+0x40"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "1+0x19 _ _ 1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "31m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "A completed control-plane traversal retains pending or unverified entitlement deliveries.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "acknowledgement timestamp ages without scrape-time refresh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_ack_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x60"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "24m",
+          "alertname": "WitselfEntitlementDeliverySchedulerStale",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "26m",
+          "alertname": "WitselfEntitlementDeliverySchedulerStale",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "The control plane has no recent fully accounted entitlement reconciliation page.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "first complete cycle remains unknown until end of scan budget",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_cycle_started_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "60+0x500"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "15m",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "6h",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "6h17m",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has no complete observed traversal within its scan budget.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "old complete cycle ages independently of fresh pages",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "60+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_cycle_started_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "60+60x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_ack_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "60+60x500"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "6h17m",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has no complete observed traversal within its scan budget.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "6h17m",
+          "alertname": "WitselfEntitlementDeliverySchedulerStale",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "whole endpoint outage remains covered by existing probe scrape alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "16m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "real brief scrape failures do not reset a permanently missing metric family",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x6 0 1+0x6 0 1+0x6 0 1+0x20"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "16m",
+          "alertname": "WitselfEntitlementDeliveryMetricsUnavailable",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery observations are unavailable for a control-plane scrape target.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unmeasured tail with unknown start alerts without inventing an epoch age",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_metrics_up{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_cycle_started_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x500"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "14m",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "16m",
+          "alertname": "WitselfEntitlementDeliveryCycleIncomplete",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has no complete observed traversal within its scan budget.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

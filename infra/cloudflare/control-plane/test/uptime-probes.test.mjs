@@ -1200,7 +1200,7 @@ test("public metrics bypass account/auth paths, preserve stale timestamps and ke
   const directory = new DirectoryKV({ [UPTIME_PROBES_KEY]: document });
   const env = new Proxy({ DIRECTORY: directory }, {
     get(target, key) {
-      assert.equal(key, "DIRECTORY", "metrics must not access auth, account, limiter or container bindings");
+      assert.ok(["DIRECTORY", "CP_PLAN_LIFECYCLE_ENABLED"].includes(key), "metrics may read only snapshots and lifecycle enablement, not auth, account, limiter or container bindings");
       return target[key];
     },
   });
@@ -1220,6 +1220,9 @@ test("public metrics bypass account/auth paths, preserve stale timestamps and ke
   assert.equal(body.includes(PRIVATE_MARKER), false);
   assert.ok(body.endsWith("\n"));
   assert.deepEqual(body.trim().split("\n").filter((line) => !line.startsWith("#")).sort(), [
+    "witself_entitlement_delivery_enabled 0",
+    "witself_entitlement_delivery_metrics_up 0",
+    'witself_entitlement_delivery_snapshot_state{state="disabled"} 1',
     "witself_probe_scheduler_last_run_timestamp_seconds 0",
     "witself_probe_scheduler_target_count 0",
     "witself_probe_directory_ok 0",

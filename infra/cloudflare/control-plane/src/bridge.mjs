@@ -49,6 +49,10 @@ import {
   reconcileAgentEmailDomainsForPlan,
   readAgentEmailDomainPlanFit,
 } from "./agent-email-domain-runtime.mjs";
+import {
+  PLAN_LIFECYCLE_CURSOR_KEY,
+  deliveryBounded, writeDeliveryCheckpoint,
+} from "./entitlement-delivery-metrics.mjs";
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
@@ -186,7 +190,7 @@ export const INTERNAL_ACCOUNTS_PATH = "/v1/internal/accounts";
 export const INTERNAL_PATH_PREFIX = "/v1/internal/";
 export const PLAN_LIFECYCLE_ACTIVATE_PATH =
   "/v1/internal/plan-lifecycle:activate";
-export const PLAN_LIFECYCLE_CURSOR_KEY = "config:plan_lifecycle_cursor";
+export { PLAN_LIFECYCLE_CURSOR_KEY };
 export const PLAN_LIFECYCLE_PAGE_SIZE = 100;
 
 const PLAN_LIFECYCLE_TICK_PATH = "/v1/plan-lifecycle:tick";
@@ -628,8 +632,7 @@ function billingMutationTickResult(result, count) {
 // accounts are retried on the next complete directory cycle, so one broken
 // account cannot pin every later account behind it.
 export async function runScheduledPlanLifecycle(env, containerFetch) {
-  const enabled = String(env.CP_PLAN_LIFECYCLE_ENABLED ?? "")
-    .trim().toLowerCase() === "true";
+  const enabled = planLifecycleEnabled(env);
   const token = String(env.INTERNAL_BRIDGE_TOKEN ?? "");
   if (!enabled) {
     return { ran: false, configured: true };
@@ -669,16 +672,44 @@ export async function runScheduledPlanLifecycle(env, containerFetch) {
         signal: AbortSignal.timeout(PLAN_LIFECYCLE_TICK_TIMEOUT_MS),
       },
     );
-    const response = await containerFetch(request);
-    if (!response.ok) {
-      console.log(`plan-lifecycle: scheduled tick failed status=${response.status}`);
-      return { ran: true, succeeded: false };
-    }
-    let doc;
+    let doc, failedStatus;
     try {
-      doc = await response.json();
+      doc = await deliveryBounded(async (signal) => {
+        const response = await containerFetch(request);
+        let reader;
+        try {
+          signal.throwIfAborted();
+          if (!response.ok) {
+            failedStatus = response.status;
+            throw new Error("tick unavailable");
+          }
+          if (!response.body) throw new Error("tick unavailable");
+          reader = response.body.getReader();
+          const cancel = () => { void reader.cancel().catch(() => {}); };
+          signal.addEventListener("abort", cancel, { once: true });
+          try {
+            const chunks = []; let size = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              signal.throwIfAborted();
+              if (done) break;
+              size += value.byteLength;
+              if (size > 64 * 1024) throw new Error("tick acknowledgement too large");
+              chunks.push(value);
+            }
+            const bytes = new Uint8Array(size); let offset = 0;
+            for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+            return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+          } finally { signal.removeEventListener("abort", cancel); }
+        } finally {
+          if (reader) { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+          else if (response.body) void response.body.cancel().catch(() => {});
+        }
+      }, PLAN_LIFECYCLE_TICK_TIMEOUT_MS);
     } catch {
-      console.log("plan-lifecycle: scheduled tick returned invalid JSON");
+      console.log(failedStatus === undefined
+        ? "plan-lifecycle: scheduled tick returned invalid JSON"
+        : `plan-lifecycle: scheduled tick failed status=${failedStatus}`);
       return { ran: true, succeeded: false };
     }
     const result = planLifecycleTickResult(doc, page.account_ids.length);
@@ -687,13 +718,7 @@ export async function runScheduledPlanLifecycle(env, containerFetch) {
       return { ran: true, succeeded: false };
     }
 
-    await env.DIRECTORY.put(
-      PLAN_LIFECYCLE_CURSOR_KEY,
-      JSON.stringify({
-        cursor: page.next_cursor,
-        updated_at: new Date().toISOString(),
-      }),
-    );
+    await writeDeliveryCheckpoint(env.DIRECTORY, stored, cursor, page.next_cursor, result);
     console.log(
       "plan-lifecycle: scheduled tick " +
       `scanned=${result.scanned} seeded=${result.seeded} ` +

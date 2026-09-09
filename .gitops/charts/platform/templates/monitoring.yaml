@@ -398,6 +398,10 @@ spec:
 {{ if $monitoring.uptimeProbes.enabled }}
           uptime-probes:
 {{ .Files.Get "files/uptime-probes.rules.yaml" | nindent 12 }}
+{{ if $monitoring.entitlementDelivery.enabled }}
+          entitlement-delivery:
+{{ .Files.Get "files/entitlement-delivery.rules.yaml" | nindent 12 }}
+{{ end }}
 {{ end }}
 {{ end }}
   destination:

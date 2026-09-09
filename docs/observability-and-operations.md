@@ -1252,3 +1252,41 @@ Required checks once the server and chart exist:
 - [release-and-build.md](release-and-build.md)
 - [implementation-plan.md](implementation-plan.md)
 - [threat-model.md](threat-model.md)
+
+## Entitlement delivery observations
+
+The existing public CP `/metrics/probes` response includes value-free
+`witself_entitlement_delivery_*` gauges. This is a projection of the private
+Worker reconciliation checkpoint, not a scrape of account data or a call to a
+cell. The additional KV read is independently bounded to five seconds; its
+failure emits unavailable entitlement observations without changing healthy
+probe HTTP 200. Existing probe read failures retain HTTP 503. Non-GET requests
+still receive HTTP 405 before any read.
+
+| Suffix | Meaning |
+|---|---|
+| `enabled` | Current normalized CP lifecycle enablement flag. |
+| `metrics_up` | Valid checkpoint metadata is readable; independent of freshness. |
+| `snapshot_state{state}` | One closed state: disabled, missing, invalid, unavailable or valid. |
+| `last_ack_timestamp_seconds` | Completion time of the last fully accounted CP page, including pages with account failures. |
+| `last_page_accounts{outcome}` | Last page's scanned, seeded, apply_pending and failed observations; outcomes overlap. |
+| `cycle_in_progress` | A private continuation cursor exists, including an unmeasured chain. |
+| `cycle_started_timestamp_seconds` | Current measured traversal's start, or zero when no current chain is measured. |
+| `cycle_coverage_complete` | A retained complete measured traversal exists; not instantaneous fleet coverage. |
+| `last_cycle_completed_timestamp_seconds` | Last complete traversal's time, or zero before one is established. |
+| `last_cycle_accounts{outcome}` | Entire last measured traversal; omitted when no complete traversal exists. |
+
+Only the three state families (`enabled`, `metrics_up`,
+`snapshot_state`) are emitted when data is disabled or unreadable. No account,
+plan, cursor, provider, endpoint, token or raw error value is a metric label.
+Count and timestamp HELP text distinguishes unavailable, partial and stale
+observations. Pending and failed must be viewed separately, not added as a
+unique count. A successful acknowledgement after reconciliation can include a
+change repaired during that page; the gauges do not reconstruct earlier
+failure history or measure per-account unapplied age.
+
+See [billing and limits](billing-and-limits.md#entitlement-delivery-monitoring)
+for traversal/KV consistency limits and the separate default-off alert gate.
+Tests and rendered rules establish capability only; actual Worker deployment,
+fresh observation checks and alert activation require a later authorized
+rollout.

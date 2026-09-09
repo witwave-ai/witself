@@ -1,0 +1,67 @@
+groups:
+  - name: witself-entitlement-delivery
+    interval: 30s
+    rules:
+      - alert: WitselfEntitlementDeliveryMetricsUnavailable
+        # Match each expected public scrape target. A healthy peer must not
+        # hide an absent family, including before its first observation.
+        expr: |
+          ((max_over_time(up{job="witself-probes"}[5m]) == 1)
+            unless on(job, instance) (last_over_time(witself_entitlement_delivery_metrics_up{job="witself-probes"}[5m]) == 1))
+            unless on(job, instance) (last_over_time(witself_entitlement_delivery_enabled{job="witself-probes"}[5m]) == 0)
+        for: 15m
+        labels:
+          severity: warning
+          service: entitlement-delivery
+          witself_alert: "true"
+        annotations:
+          summary: Entitlement delivery observations are unavailable for a control-plane scrape target.
+          runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring
+      - alert: WitselfEntitlementDeliverySchedulerStale
+        expr: |
+          (time() - last_over_time(witself_entitlement_delivery_last_ack_timestamp_seconds{job="witself-probes"}[5m]) > 900)
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_enabled{job="witself-probes"}[5m]) == 1)
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_metrics_up{job="witself-probes"}[5m]) == 1)
+        for: 10m
+        labels:
+          severity: critical
+          service: entitlement-delivery
+          witself_alert: "true"
+        annotations:
+          summary: The control plane has no recent fully accounted entitlement reconciliation page.
+          runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring
+      - alert: WitselfEntitlementDeliveryCycleIncomplete
+        # Zero completion is unknown coverage, never a healthy empty fleet.
+        # An unmeasured tail has no known start and alerts after the for period.
+        # Only measured times receive the six-hour scan budget, not account age.
+        expr: |
+          (((time() - last_over_time(witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job="witself-probes"}[5m]) > 21600)
+              and (last_over_time(witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job="witself-probes"}[5m]) > 0))
+            or ((last_over_time(witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job="witself-probes"}[5m]) == 0)
+              and ((last_over_time(witself_entitlement_delivery_cycle_started_timestamp_seconds{job="witself-probes"}[5m]) == 0)
+                or ((last_over_time(witself_entitlement_delivery_cycle_started_timestamp_seconds{job="witself-probes"}[5m]) > 0)
+                  and (time() - last_over_time(witself_entitlement_delivery_cycle_started_timestamp_seconds{job="witself-probes"}[5m]) > 21600)))))
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_enabled{job="witself-probes"}[5m]) == 1)
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_metrics_up{job="witself-probes"}[5m]) == 1)
+        for: 15m
+        labels:
+          severity: warning
+          service: entitlement-delivery
+          witself_alert: "true"
+        annotations:
+          summary: Entitlement delivery has no complete observed traversal within its scan budget.
+          runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring
+      - alert: WitselfEntitlementDeliveryGap
+        # The two outcomes overlap: max tests either gap, not a unique count.
+        # Persistence is aggregate observation age, not per-account delay.
+        expr: |
+          (max without(outcome) (last_over_time(witself_entitlement_delivery_last_cycle_accounts{job="witself-probes",outcome=~"apply_pending|failed"}[5m])) > 0)
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_enabled{job="witself-probes"}[5m]) == 1)
+        for: 30m
+        labels:
+          severity: warning
+          service: entitlement-delivery
+          witself_alert: "true"
+        annotations:
+          summary: A completed control-plane traversal retains pending or unverified entitlement deliveries.
+          runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring

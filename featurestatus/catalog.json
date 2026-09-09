@@ -1855,11 +1855,13 @@
           ]
         },
         "observability": {
-          "state": "conditional",
-          "summary": "Usage events, current policy views, and admin surfaces exist; there is no unified entitlement-drift dashboard or alert path.",
+          "state": "pass",
+          "summary": "Authoritative CP reconciliation results expose value-free pending and unverified delivery observations over complete traversals, with explicit unavailable/stale states and separately gated default-off alerts; live rollout remains an operator step.",
           "evidence": [
+            ".gitops/charts/platform/files/entitlement-delivery.rules.yaml",
             "docs/billing-and-limits.md",
-            "docs/observability-and-operations.md"
+            "infra/cloudflare/control-plane/test/entitlement-delivery-metrics.test.mjs",
+            "internal/cpserver/plan_lifecycle_test.go"
           ]
         },
         "recovery": {
@@ -1894,12 +1896,6 @@
           "gate_ids": ["rollout_canaries"],
           "summary": "Keep Enterprise unavailable until its dependent features and billing transitions meet their gates; Professional and Team customer checkout is already generally available.",
           "ref": "web/plans/plans.json"
-        },
-        {
-          "id": "entitlement-drift-monitoring",
-          "gate_ids": ["observability"],
-          "summary": "Add a value-free control-plane versus cell snapshot drift view and alert.",
-          "ref": "docs/billing-and-limits.md"
         },
         {
           "id": "paid-plan-feature-acceptance",
