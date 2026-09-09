@@ -6782,6 +6782,13 @@ func validBackupID(value string) bool {
 // visibility is any-operator (locked with the product decision) so no
 // extra role guard is needed here.
 
+const (
+	// Support bodies allow 64 KiB after JSON decoding. Leave room for the
+	// six-byte Unicode escape form of every body byte plus ticket metadata.
+	maxSupportTicketRequestBytes      = 512 * 1024
+	maxSupportTicketStateRequestBytes = 8 * 1024
+)
+
 func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
@@ -6790,7 +6797,7 @@ func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in O
 			Priority string `json:"priority"`
 			Body     string `json:"body"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketRequestBytes); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
@@ -6901,7 +6908,7 @@ func replySupportTicketHandler(auth AuthFunc, reply func(ctx context.Context, ac
 		var req struct {
 			Body string `json:"body"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketRequestBytes); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
@@ -6945,7 +6952,7 @@ func changeSupportTicketStateHandler(auth AuthFunc, changeState func(ctx context
 		var req struct {
 			State string `json:"state"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.State) == "" {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketStateRequestBytes); err != nil || strings.TrimSpace(req.State) == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing state")
 			return
 		}
