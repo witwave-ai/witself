@@ -353,8 +353,20 @@ stale incomplete multipart uploads for every prefix. The production
 limit. Do not remove or narrow that rule: a Worker terminated before it can
 record the multipart upload id cannot abort that upload itself. If multipart
 completion is ambiguous before archive authority is committed, the Worker
-first obtains an exact source abort receipt and then best-effort deletes the
-attempt-unique completed object key.
+persists `abort_requested` before requesting the exact source abort, then
+persists its receipt in `abort_cleanup_pending` before deleting only that
+attempt-unique completed object key. The alarm retries deletion and exact
+target-reservation release before retiring the operation; it never re-exports
+after durable abort intent. The original live route remains authoritative.
+
+Once either abort phase is written, the supported rollback floor is a Worker
+that understands both `abort_requested` and `abort_cleanup_pending`. Older
+readers, including v0.0.283, reject these phases and retain the alarm and object,
+but cannot finish cleanup and may renew a move's target reservation. An
+emergency older rollback therefore pauses cleanup and can block further
+lifecycle operations: restore a compatible reader, and never rewrite the
+phase backward or clear its alarm. This does not authorize scanning or deleting
+older orphan candidates, authoritative waiting archives, or closed archives.
 
 Sandbox override: add `-destroy-accounts` to skip the archive step entirely
 and force-purge the directory entries. This is an explicit acknowledgment
