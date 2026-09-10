@@ -44,8 +44,8 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.282
-    imageTag: 0.0.282
+    chartVersion: 0.0.284
+    imageTag: 0.0.284
     backendKind: managed
     # Schema-28's compatibility hold expired long ago (cells run schema 94);
     # in-product permanent fact deletion backs the published privacy policy.
@@ -100,15 +100,15 @@ apps:
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
-    # Two nodes in one zone: spread by hostname. Hard (DoNotSchedule): with
-    # ScheduleAnyway the scheduler's balance scoring placed both server replicas
-    # on one node (2026-09-05, batch B), defeating the second replica. Two nodes
-    # always satisfy maxSkew 1; a lost node leaves the second replica Pending
-    # while the PDB keeps the first serving.
+    # Two nodes in one zone: spread each ReplicaSet revision by hostname.
+    # Ignore old-revision pods when placing new replicas during a surge rollout.
+    # Verify actual placement after convergence; scheduling does not rebalance
+    # already-running pods.
     topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: DoNotSchedule
+        matchLabelKeys: [pod-template-hash]
         labelSelector:
           matchLabels:
             app.kubernetes.io/name: witself-server
@@ -143,6 +143,7 @@ apps:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
+          matchLabelKeys: [pod-template-hash]
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: witself-worker
