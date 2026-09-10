@@ -641,7 +641,8 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 		SELECT status,failure_count,retry_after,last_failure_code,
 		       processed_profile_count,batch_count
 		  FROM avatar_style_rollout_jobs
-		 WHERE account_id=$1 AND realm_id=$2`, provisioned.AccountID, realm.ID).Scan(
+		 WHERE account_id=$1 AND realm_id=$2
+		 FOR UPDATE`, provisioned.AccountID, realm.ID).Scan(
 		&status, &failures, &retryAfter, &failureCode, &processed, &batches); err != nil {
 		t.Fatal(err)
 	}
