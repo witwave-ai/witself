@@ -44,6 +44,7 @@ type runtimeMetrics struct {
 	memoryLimitRejects    map[limitMetricLabels]uint64
 	factLimitRejects      map[limitMetricLabels]uint64
 	messageRateRejects    map[messageRateMetricLabels]uint64
+	messageProcessing     map[operationMetricLabels]uint64
 	agentEmailIngests     map[string]uint64
 	agentEmailRateRejects map[agentEmailRateMetricLabels]uint64
 	auditAppends          map[auditAppendMetricLabels]uint64
@@ -171,6 +172,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		memoryLimitRejects:    make(map[limitMetricLabels]uint64),
 		factLimitRejects:      make(map[limitMetricLabels]uint64),
 		messageRateRejects:    make(map[messageRateMetricLabels]uint64),
+		messageProcessing:     make(map[operationMetricLabels]uint64),
 		agentEmailIngests:     make(map[string]uint64),
 		agentEmailRateRejects: make(map[agentEmailRateMetricLabels]uint64),
 		// Keep all bounded series present before the first failure so Prometheus
@@ -192,6 +194,11 @@ func newRuntimeMetrics() *runtimeMetrics {
 		}
 		metrics.selfDigestLatency[surface] = &metricHistogram{Buckets: make([]uint64, len(selfDigestLatencyBuckets))}
 		metrics.selfDigestElided[surface] = &metricHistogram{Buckets: make([]uint64, len(hitBuckets))}
+	}
+	for _, operation := range []string{"claim", "renew", "release", "request_claim", "request_renew", "request_release", "unknown"} {
+		for _, result := range []string{"success", "feature_disabled", "rate_limited", "bad_input", "not_found", "forbidden", "plan_limited", "busy", "conflict", "error"} {
+			metrics.messageProcessing[operationMetricLabels{Operation: operation, Result: result}] = 0
+		}
 	}
 	return metrics
 }
@@ -328,6 +335,48 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.CompleteMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in CompleteMessageRequestRequest) (CompleteMessageRequestResult, error) {
 			result, err := operation(ctx, p, requestID, in)
 			m.observeMessageRateRejection(err, "request_complete")
+			return result, err
+		}
+	}
+	if operation := cfg.ClaimMessage; operation != nil {
+		cfg.ClaimMessage = func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimMessageRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "claim")
+			return result, err
+		}
+	}
+	if operation := cfg.RenewMessageClaim; operation != nil {
+		cfg.RenewMessageClaim = func(ctx context.Context, p DomainPrincipal, messageID string, in RenewMessageClaimRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "renew")
+			return result, err
+		}
+	}
+	if operation := cfg.ReleaseMessageClaim; operation != nil {
+		cfg.ReleaseMessageClaim = func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "release")
+			return result, err
+		}
+	}
+	if operation := cfg.ClaimMessageRequest; operation != nil {
+		cfg.ClaimMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in ClaimMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_claim")
+			return result, err
+		}
+	}
+	if operation := cfg.RenewMessageRequest; operation != nil {
+		cfg.RenewMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in RenewMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_renew")
+			return result, err
+		}
+	}
+	if operation := cfg.ReleaseMessageRequest; operation != nil {
+		cfg.ReleaseMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in ReleaseMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_release")
 			return result, err
 		}
 	}
@@ -579,6 +628,45 @@ func (m *runtimeMetrics) observeMessageRateRejection(err error, operation string
 		Operation:      operation,
 	}]++
 	m.mu.Unlock()
+}
+
+// Count completed calls, including idempotent replays, rather than inferring
+// durable transitions or lease expiry from callback outcomes.
+func (m *runtimeMetrics) observeMessageProcessingOperation(err error, operation string) {
+	switch operation {
+	case "claim", "renew", "release", "request_claim", "request_renew", "request_release":
+	default:
+		operation = "unknown"
+	}
+	result := messageProcessingMetricResult(err)
+	m.mu.Lock()
+	m.messageProcessing[operationMetricLabels{Operation: operation, Result: result}]++
+	m.mu.Unlock()
+}
+
+func messageProcessingMetricResult(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, ErrFeatureNotEnabled):
+		return "feature_disabled"
+	case errors.Is(err, ErrMessageRateLimited):
+		return "rate_limited"
+	case errors.Is(err, ErrBadInput):
+		return "bad_input"
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, ErrPlanLimit):
+		return "plan_limited"
+	case errors.Is(err, ErrBusy):
+		return "busy"
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
+		return "conflict"
+	default:
+		return "error"
+	}
 }
 
 func agentEmailIngestMetricOutcome(err error) string {
@@ -887,6 +975,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		memoryLimitRejects:    maps.Clone(m.memoryLimitRejects),
 		factLimitRejects:      maps.Clone(m.factLimitRejects),
 		messageRateRejects:    maps.Clone(m.messageRateRejects),
+		messageProcessing:     maps.Clone(m.messageProcessing),
 		agentEmailIngests:     maps.Clone(m.agentEmailIngests),
 		agentEmailRateRejects: maps.Clone(m.agentEmailRateRejects),
 		auditAppends:          maps.Clone(m.auditAppends),
@@ -966,6 +1055,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_message_rate_limit_rejections_total", "Messaging write refusals by bounded rate-limit dimension, scope, and operation.", m.messageRateRejects, func(key messageRateMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_message_processing_operations_total", "Completed messaging processing callback calls by operation and result; idempotent replays are counted as calls, not durable transitions or lease events.", m.messageProcessing, func(key operationMetricLabels) string {
+		return labels("operation", key.Operation, "result", key.Result)
 	})
 	writeCounterMap(w, "witself_agent_email_ingests_total", "Signed inbound agent-email deliveries by bounded storage or refusal outcome.", m.agentEmailIngests, func(outcome string) string {
 		return labels("outcome", outcome)
