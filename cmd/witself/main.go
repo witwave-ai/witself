@@ -2530,7 +2530,7 @@ func accountCreateWithContext(ctx context.Context, args []string) int {
 	if errors.Is(journalErr, local.ErrAccountProvisionJournalUnavailable) {
 		// Claim the local name BEFORE creating anything remote: a taken name
 		// must not strand a freshly provisioned account's only credential.
-		if err := local.Available(localName); err != nil {
+		if err := local.AvailableAccountProvisionName(localName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
@@ -2630,9 +2630,20 @@ func accountCreateWithContext(ctx context.Context, args []string) int {
 	// Recheck after journal publication. Another process can have created a
 	// local binding between the initial availability check and the stable
 	// provision-id election; no remote mutation occurs on that conflict.
-	if err := local.Available(localName); err != nil {
+	if err := local.AvailableAccountProvisionName(localName); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
+	}
+
+	if journal.LegalRefusal != nil {
+		journal, err = resumeAccountLegalReconsent(ctx, localName, *endpoint, *email, *invite, *displayName, *acceptTerms, journal)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: resume legal acceptance: %v\n", err)
+			return 1
+		}
+		requestFingerprint = journal.RequestFingerprint
+		consentTermsVersion = journal.AcceptedTermsVersion
+		consentPrivacyVersion = journal.AcceptedPrivacyVersion
 	}
 
 	acct, err := client.CreateAccountExact(
@@ -2640,6 +2651,15 @@ func accountCreateWithContext(ctx context.Context, args []string) int {
 		*challenge, consentTermsVersion, consentPrivacyVersion,
 	)
 	if err != nil {
+		var legalErr *client.SignupLegalRefusalError
+		if errors.As(err, &legalErr) {
+			if _, saveErr := local.RecordAccountProvisionLegalRefusal(localName, journal, legalErr.Refusal); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: save legal refusal for safe recovery: %v\n", saveErr)
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, "witself: legal acceptance changed; the refused signup is saved. Review the current documents and rerun the same account create command with --accept-terms")
+			return 1
+		}
 		var challengeErr *client.SignupChallengeError
 		if errors.As(err, &challengeErr) {
 			fmt.Fprintf(

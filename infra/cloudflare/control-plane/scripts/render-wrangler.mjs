@@ -75,6 +75,10 @@ function committedPlainTextVar(name) {
   return matches[0][1];
 }
 
+if (committedPlainTextVar("CP_SIGNUP_LEGAL_ENFORCEMENT") !== "false") {
+  throw new Error("signup legal enforcement must remain dark until a separately reviewed activation");
+}
+
 if (committedPlainTextVar("CP_SIGNUP_OPEN") === "true" &&
     (parseSignupLimit(committedPlainTextVar(
       "CP_SIGNUP_DAILY_LIMIT_PER_IP",

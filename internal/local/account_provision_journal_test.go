@@ -97,13 +97,7 @@ func TestAccountProvisionJournalLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
-		t.Fatalf("journal mode = %v", info.Mode())
-	}
+	assertAccountProvisionPrivateTestPath(t, path, false)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +239,7 @@ func TestAccountProvisionJournalBackfillsLegacyConsentVersions(t *testing.T) {
 }
 
 func TestAccountProvisionJournalCreatesMissingPrivateHome(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "missing", ".witself")
+	home := missingAccountProvisionTestHome(t)
 	t.Setenv("WITSELF_HOME", home)
 	if _, _, err := BeginAccountProvisionJournal(
 		"default", testAccountProvisionFingerprint,
@@ -257,13 +251,7 @@ func TestAccountProvisionJournalCreatesMissingPrivateHome(t *testing.T) {
 		filepath.Join(home, "journal"),
 		filepath.Join(home, "journal", "account-provision"),
 	} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.IsDir() || info.Mode().Perm() != 0o700 {
-			t.Fatalf("%s mode = %v", path, info.Mode())
-		}
+		assertAccountProvisionPrivateTestPath(t, path, true)
 	}
 }
 
@@ -334,13 +322,7 @@ func TestSaveProvisionedAccountDurableResumesPartialCommit(t *testing.T) {
 		filepath.Join(home, "config.json"),
 		filepath.Join(home, "tokens", "accounts", "default", "owner.token"),
 	} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode = %v", path, info.Mode())
-		}
+		assertAccountProvisionPrivateTestPath(t, path, false)
 	}
 	if _, err := ReadAccountProvisionJournal("default"); err != nil {
 		t.Fatalf("durable save removed journal early: %v", err)
@@ -377,9 +359,7 @@ func TestAccountProvisionJournalRejectsUnsafeFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		path, _ := AccountProvisionJournalPath("default")
-		if err := os.Chmod(path, 0o640); err != nil {
-			t.Fatal(err)
-		}
+		makeAccountProvisionTestPathReadable(t, path)
 		if _, err := ReadAccountProvisionJournal("default"); !errors.Is(
 			err, ErrAccountProvisionJournalUnsafe,
 		) {
@@ -400,7 +380,7 @@ func TestAccountProvisionJournalRejectsUnsafeFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		target := filepath.Join(home, "target")
-		if err := os.WriteFile(target, []byte("unchanged"), 0o600); err != nil {
+		if err := writeAccountProvisionPrivateTestFile(target, []byte("unchanged")); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(target, path); err != nil {
@@ -426,9 +406,7 @@ func TestAccountProvisionJournalRejectsUnsafeFiles(t *testing.T) {
 		}
 		path, _ := AccountProvisionJournalPath("default")
 		lockPath := filepath.Join(filepath.Dir(path), accountProvisionJournalLockFile)
-		if err := os.Chmod(lockPath, 0o640); err != nil {
-			t.Fatal(err)
-		}
+		makeAccountProvisionTestPathReadable(t, lockPath)
 		if _, err := ReadAccountProvisionJournal("default"); !errors.Is(
 			err, ErrAccountProvisionJournalUnsafe,
 		) {
@@ -475,10 +453,8 @@ func TestAccountProvisionJournalRejectsUnsafeFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		tokenPath, _ := TokenPath("default")
-		if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(tokenPath, []byte("witself_opr_different\n"), 0o600); err != nil {
+		createAccountProvisionPrivateTestTokenDirs(t, home, "default")
+		if err := writeAccountProvisionPrivateTestFile(tokenPath, []byte("witself_opr_different\n")); err != nil {
 			t.Fatal(err)
 		}
 		if err := SaveProvisionedAccountDurable(
@@ -488,13 +464,4 @@ func TestAccountProvisionJournalRejectsUnsafeFiles(t *testing.T) {
 			t.Fatalf("save over conflicting token = %v", err)
 		}
 	})
-}
-
-func privateAccountProvisionTestHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	if err := os.Chmod(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return home
 }

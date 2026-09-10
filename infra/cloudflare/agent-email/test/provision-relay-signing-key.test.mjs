@@ -82,6 +82,7 @@ function configs() {
     [CP_CONFIG]: JSON.stringify({
       name: CONTROL_PLANE_WORKER,
       main: "src/index.js",
+      services: [{ binding: "LEGAL_DOCUMENTS", service: "witself-legal" }],
       secrets: { required: [
         "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
         "CONTROL_PLANE_EDGE_TOKEN",
@@ -99,6 +100,7 @@ function configs() {
         CP_SIGNUP_DAILY_LIMIT_PER_IP: "10",
         CP_SIGNUP_DAILY_LIMIT_GLOBAL: "500",
         CP_SIGNUP_OPEN: "true",
+        CP_SIGNUP_LEGAL_ENFORCEMENT: "false",
         WITSELF_EDGE_RELEASE_VERSION: release.version,
         WITSELF_EDGE_RELEASE_COMMIT: release.commit,
         WITSELF_EDGE_RELEASE_DATE: release.date,
@@ -296,6 +298,8 @@ function cpVersion(id = cpVersionID, { releaseVersion = release.version } = {}) 
         plain("CP_SIGNUP_DAILY_LIMIT_PER_IP", "10"),
         plain("CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"),
         plain("CP_SIGNUP_OPEN", "true"),
+        plain("CP_SIGNUP_LEGAL_ENFORCEMENT", "false"),
+        { name: "LEGAL_DOCUMENTS", type: "service", service: "witself-legal" },
         plain("CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"),
         plain("CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"),
         secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),

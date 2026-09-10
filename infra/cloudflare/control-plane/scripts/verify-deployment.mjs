@@ -172,6 +172,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "routes",
     "secrets",
     "send_email",
+    "services",
     "triggers",
     "unsafe",
     "vars",
@@ -185,6 +186,10 @@ function assertGeneratedConfigContract(config, expectedMain) {
   if (config.compatibility_date !== COMPATIBILITY_DATE ||
       !sameJSON(config.limits, { cpu_ms: CPU_LIMIT_MS })) {
     throw new Error("generated config Worker runtime did not match");
+  }
+  if (!sameJSON(config.services, [{ binding: "LEGAL_DOCUMENTS", service: "witself-legal" }]) ||
+      config.vars?.CP_SIGNUP_LEGAL_ENFORCEMENT !== "false") {
+    throw new Error("generated config signup legal service or dark gate did not match");
   }
   if (!sameJSON(config.secrets, { required: REQUIRED_SECRET_BINDINGS })) {
     throw new Error("generated config required secret contract did not match");
@@ -264,6 +269,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
+    "CP_SIGNUP_LEGAL_ENFORCEMENT",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
@@ -654,6 +660,8 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
+    "CP_SIGNUP_LEGAL_ENFORCEMENT",
+    "LEGAL_DOCUMENTS",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
@@ -713,6 +721,18 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "AGENT_EMAIL_DIRECTORY",
     expected.agent_email_directory_id,
   );
+  const legacyLegalBindings = allowLegacyEmptyManagedDeliveryCohort === true &&
+    expected.version === "0.0.240" && !bindings.has("LEGAL_DOCUMENTS") &&
+    !bindings.has("CP_SIGNUP_LEGAL_ENFORCEMENT");
+  if (!legacyLegalBindings) {
+    exactPlainBinding(bindings, "CP_SIGNUP_LEGAL_ENFORCEMENT", "false");
+    const legal = bindings.get("LEGAL_DOCUMENTS");
+    if (legal?.type !== "service" || legal.service !== "witself-legal" ||
+        (legal.environment !== undefined && legal.environment !== "production") ||
+        legal.entrypoint !== undefined || legal.props !== undefined) {
+      throw new Error("deployed Worker version has the wrong LEGAL_DOCUMENTS service binding");
+    }
+  }
   for (const [name, value] of [
     ["AGENT_EMAIL_DOMAIN", "witmail.net"],
     ["AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"],

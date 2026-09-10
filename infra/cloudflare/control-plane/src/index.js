@@ -82,6 +82,7 @@
 // authoritative copy moves to a Durable Object (KV has no transactions) and
 // KV stays the read projection. The O(accounts) scan in DELETE moves to DO
 // counters at the same time.
+import { readCanonicalLegal, readLegalJSON, validReconsent } from "./signup-legal.mjs";
 import { Container, getContainer } from "@cloudflare/containers";
 import {
   runScheduledUptimeProbes,
@@ -325,6 +326,7 @@ function withResponseSecurityHeaders(response, noStore) {
 
 const err = (msg, status) => json({ schema_version: "witself.v0", error: msg }, status);
 
+const SIGNUP_LEGAL_READINESS_PATH = "/v1/signup-legal-readiness";
 const DIRECTORY_PATH = /^\/v1\/directory\/([A-Za-z0-9_-]{1,128})$/;
 const VERIFY_PATH = /^\/verify\/([0-9a-f]{64})$/;
 // Account ids are splice into URLs and HTML — same charset the directory
@@ -353,6 +355,7 @@ const ACCOUNT_BACKUP_RUN_PATH = "/v1/backups:run";
 const ACCOUNT_BACKUP_RESTORE_DRILL_PATH =
   "/v1/backups:restore-drill";
 const ACCOUNT_BACKUP_ID = /^backup_[0-9]{8}T[0-9]{6}Z$/;
+const SIGNUP_RECONSENT_PATH = /^\/v1\/account-signups\/([A-Za-z0-9_-]{1,128}):reconsent$/;
 const SUPPORT_EMAIL_INTAKE_PATH = "/v1/intake/support-email";
 const SUPPORT_EMAIL_INTAKE_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60;
 const SUPPORT_EMAIL_INTAKE_PENDING_TTL_SECONDS = 60;
@@ -428,6 +431,34 @@ function fleetAuthorized(request, env) {
   const h = request.headers.get("Authorization") || "";
   if (!h.startsWith("Bearer ")) return false;
   return timingSafeEqual(h.slice(7).trim(), env.FLEET_TOKEN);
+}
+
+async function handleSignupLegalReadiness(request, env) {
+  const respond = (body, status = 200, extra = {}) => json({
+    schema_version: "witself.signup-legal-readiness.v1",
+    ...body,
+  }, status, { "Cache-Control": "private, no-store", ...extra });
+  if (request.method !== "GET") {
+    return respond({ error: "method not allowed" }, 405, { Allow: "GET" });
+  }
+  if (!fleetAuthorized(request, env)) {
+    return respond({ error: "unauthorized" }, 401);
+  }
+  if (new URL(request.url).search !== "") {
+    return respond({ error: "query parameters are not allowed" }, 400);
+  }
+  try {
+    const legal = await readCanonicalLegal(env, request.signal);
+    return respond({
+      status: "ready",
+      enforcement_enabled: env.CP_SIGNUP_LEGAL_ENFORCEMENT === "true",
+      terms_version: legal.terms,
+      privacy_version: legal.privacy,
+      manifest_sha256: legal.manifest_sha256,
+    });
+  } catch {
+    return respond({ status: "unavailable", error: "signup legal authority is unavailable" }, 503);
+  }
 }
 
 function supportEmailIntakeAuthorized(request, env) {
@@ -1955,6 +1986,7 @@ async function handleSignup(request, env) {
             ? { source_ip: sourceIP(request) }
             : {}),
         }),
+        signal: request.signal,
       }),
     );
   } catch (error) {
@@ -1962,6 +1994,38 @@ async function handleSignup(request, env) {
       `account signup outcome is ambiguous: ${String(error?.message ?? error)}`,
       502,
     );
+  }
+}
+
+// Public transition authority is limited to an exact persisted refusal. The
+// internal candidate-reservation route is never exposed by the edge router.
+function privateSignupResponse(response) {
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "private, no-store");
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function handleSignupReconsent(request, env, provisionID) {
+  if (env.SIGNUP_IP_LIMITER &&
+      !await rateLimitAllows(env.SIGNUP_IP_LIMITER, request, "signup-ip")) {
+    return privateSignupResponse(rateLimited());
+  }
+  let body;
+  try { body = (await readLegalJSON(request, request.signal)).value; }
+  catch { return privateSignupResponse(err("invalid signup re-consent request", 400)); }
+  if (!validReconsent(body) || body.refusal.provision_id !== provisionID) {
+    return privateSignupResponse(err("invalid signup re-consent request", 400));
+  }
+  if (!env.ACCOUNT_SIGNUP) return privateSignupResponse(err("account signup Durable Object is unavailable", 503));
+  try {
+    const id = env.ACCOUNT_SIGNUP.idFromName(`provision:${provisionID}`);
+    return privateSignupResponse(await env.ACCOUNT_SIGNUP.get(id).fetch(new Request(
+      "https://account-signup.internal/legal/reconsent",
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body), signal: request.signal },
+    )));
+  } catch {
+    return privateSignupResponse(err("signup re-consent outcome is ambiguous", 502));
   }
 }
 
@@ -4571,7 +4635,8 @@ async function handleAccountBackups(request, env, url) {
 // list aligned with the dispatch table also gives pre-auth 401/405 responses
 // the same no-store boundary without changing public-route cache behavior.
 function isProtectedWorkerRoute(pathname) {
-  return pathname === SUPPORT_EMAIL_INTAKE_PATH ||
+  return pathname === SIGNUP_LEGAL_READINESS_PATH ||
+    pathname === SUPPORT_EMAIL_INTAKE_PATH ||
     pathname === "/v1/cells" ||
     CELL_PATH.test(pathname) ||
     PURGE_PATH.test(pathname) ||
@@ -4627,6 +4692,12 @@ async function handleFetch(request, env, ctx) {
     // container dispatch. The outer security-header wrapper still applies.
     if (url.pathname === UPTIME_PROBES_PATH) {
       return uptimeProbeMetricsResponse(request, env);
+    }
+
+    // The fleet-only diagnostic reads one service binding without consuming
+    // public or signup limits, touching account state or reaching a container.
+    if (url.pathname === SIGNUP_LEGAL_READINESS_PATH) {
+      return handleSignupLegalReadiness(request, env);
     }
 
     // Machine lifecycle callbacks carry their own bridge authority, and the
@@ -4945,6 +5016,12 @@ async function handleFetch(request, env, ctx) {
       return handleVerify(env, vm[1]);
     }
 
+    const reconsent = url.pathname.match(SIGNUP_RECONSENT_PATH);
+    if (reconsent) {
+      if (request.method !== "POST") return err("method not allowed", 405);
+      return handleSignupReconsent(request, env, reconsent[1]);
+    }
+
     // Signup: public, invite-gated. The one door you can knock on with nothing.
     if (url.pathname === "/v1/accounts") {
       if (request.method !== "POST") {
@@ -5046,8 +5123,9 @@ const SCHEDULED_TASKS = Object.freeze({
 export default {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname;
+    const response = await handleFetch(request, env, ctx);
     return withResponseSecurityHeaders(
-      await handleFetch(request, env, ctx),
+      SIGNUP_RECONSENT_PATH.test(pathname) ? privateSignupResponse(response) : response,
       isProtectedWorkerRoute(pathname),
     );
   },

@@ -721,6 +721,16 @@ test("release renderer injects matching immutable container and Worker identity"
   assert.equal(rendered.status, 0, rendered.stderr);
 
   const config = await readFile(output, "utf8");
+  assert.match(config, /"CP_SIGNUP_LEGAL_ENFORCEMENT"\s*:\s*"false"/);
+  assert.match(config, /"services"\s*:\s*\[\s*\{\s*"binding"\s*:\s*"LEGAL_DOCUMENTS"\s*,\s*"service"\s*:\s*"witself-legal"\s*\}\s*\]/);
+  for (const changed of [
+    config.replace('"service": "witself-legal"', '"service": "other-worker"'),
+    config.replace('"service": "witself-legal"', '"service": "witself-legal", "entrypoint": "Other"'),
+    config.replace('"CP_SIGNUP_LEGAL_ENFORCEMENT": "false"', '"CP_SIGNUP_LEGAL_ENFORCEMENT": "true"'),
+  ]) {
+    assert.notEqual(changed, config);
+    assert.throws(() => expectedBuildMetadata(changed), /signup legal/);
+  }
   assert.deepEqual(expectedBuildMetadata(config), {
     service: "witself-control-plane",
     version,
@@ -1317,6 +1327,7 @@ function deployedVersion(overrides = {}) {
           ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "10"],
           ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
           ["CP_SIGNUP_OPEN", "true"],
+          ["CP_SIGNUP_LEGAL_ENFORCEMENT", "false"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
           ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
@@ -1358,6 +1369,7 @@ function deployedVersion(overrides = {}) {
           bucket_name,
           type: "r2_bucket",
         })),
+        { name: "LEGAL_DOCUMENTS", type: "service", service: "witself-legal" },
         { name: "EMAIL", type: "send_email" },
         {
           name: "RECOVER_LIMITER",
@@ -2286,4 +2298,32 @@ test("dark deployment refuses every persistent activation secret", async () => {
     /runProductionWranglerDeploy\([\s\S]*?environment: commandEnvironments\.wranglerMutation/,
     "provider mutation must pass the explicit Wrangler mutation environment",
   );
+});
+
+
+test("signup legal deployment is dark and bound only to the existing legal service", () => {
+  assert.doesNotThrow(() => verifyWorkerVersion(deployedVersion(), expectedIdentity(), versionID));
+  for (const mutate of [
+    (b) => { b.find((v) => v.name === "CP_SIGNUP_LEGAL_ENFORCEMENT").text = "true"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").service = "other-worker"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").type = "plain_text"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").environment = "staging"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").entrypoint = "Other"; },
+    (b) => { b.splice(b.findIndex((v) => v.name === "LEGAL_DOCUMENTS"), 1); },
+  ]) {
+    const version = deployedVersion();
+    mutate(version.resources.bindings);
+    assert.throws(() => verifyWorkerVersion(version, expectedIdentity(), versionID), /LEGAL_DOCUMENTS|CP_SIGNUP_LEGAL_ENFORCEMENT/);
+  }
+});
+
+
+test("ordinary release renderer cannot silently activate legal enforcement", async (t) => {
+  const paths = await isolatedSignupRenderer(t, { open: "true", perIP: "10", global: "500" });
+  const templatePath = join(dirname(dirname(paths.renderer)), "wrangler.template.jsonc");
+  const template = await readFile(templatePath, "utf8");
+  await writeFile(templatePath, replaceCommittedVar(template, "CP_SIGNUP_LEGAL_ENFORCEMENT", "true"));
+  const result = runIsolatedRenderer(paths);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /signup legal enforcement must remain dark/);
 });
