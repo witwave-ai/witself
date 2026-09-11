@@ -75,8 +75,8 @@ function committedPlainTextVar(name) {
   return matches[0][1];
 }
 
-if (committedPlainTextVar("CP_SIGNUP_LEGAL_ENFORCEMENT") !== "false") {
-  throw new Error("signup legal enforcement must remain dark until a separately reviewed activation");
+if (committedPlainTextVar("CP_SIGNUP_LEGAL_ENFORCEMENT") !== "true") {
+  throw new Error("committed CP_SIGNUP_LEGAL_ENFORCEMENT must be exactly true");
 }
 
 if (committedPlainTextVar("CP_SIGNUP_OPEN") === "true" &&

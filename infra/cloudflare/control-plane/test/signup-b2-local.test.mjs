@@ -192,7 +192,7 @@ test("B2 authority failure preserves pending admission and cannot block an admit
     { canonical: 2, publicSignup: 3, publicReconsent: 0, provision: 2, reserve: 0 });
 });
 
-test("B2 local flag-off keeps legal checkpoints sticky while fresh invited signup stays dark", async (t) => {
+test("B2 local flag-off keeps legal checkpoints sticky while fresh invited signup skips legal checks", async (t) => {
   await t.test("pending remains authority-gated after local flag off", async (t) => {
     const fixture = await fixtureFor(t);
     fixture.setAuthorityAvailable(false);

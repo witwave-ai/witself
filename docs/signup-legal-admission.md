@@ -1,13 +1,14 @@
 # Signup legal admission and explicit re-consent
 
-The release includes capable readers and clients. Enforcement is **off**: the
-committed `CP_SIGNUP_LEGAL_ENFORCEMENT` value is exactly `false`. The renderer and
-provider verifier both pin that value. Activation needs a separate reviewed
-configuration change after the capable CLI and control plane have shipped. This
-change does not publish or revise any legal document, change existing-account
-consent, or implement a customer notification policy.
+The committed contract enables signup legal enforcement:
+`CP_SIGNUP_LEGAL_ENFORCEMENT` is exactly `true`. The renderer and provider verifier
+both pin that value. This prepared contract flip must not merge until the client
+release carrying PR #444 is the Homebrew floor; enforcement changes in the
+deployed control plane only after deployment. This change does not publish or
+revise any legal document, change existing-account consent, or implement a
+customer notification policy.
 
-When enforcement is enabled, a fresh signup with nonempty consent reads the
+Under this contract, a fresh signup with nonempty consent reads the
 canonical pair through the `LEGAL_DOCUMENTS` HTTP service binding to the existing
 `witself-legal` Worker. It requests only `/legal/versions.json`, rejects redirects,
 and permits at most 64 KiB with a 15-second total read deadline. Labels must be
@@ -52,18 +53,19 @@ the existing Go/JS normalization differences without changing either fingerprint
 
 `GET /v1/signup-legal-readiness` requires the existing fleet bearer credential
 and accepts no query arguments. It reads the configured `LEGAL_DOCUMENTS`
-binding once, even while enforcement is off. Its private, no-store JSON reports
-the effective enforcement boolean, accepted terms/privacy versions and SHA-256
-of the actual manifest bytes. Authority failure returns a fixed 503 without
-versions or a digest. The check does not consume signup or public rate limits,
-access account state, dispatch a container, or change enforcement.
+binding once, including when enforcement is disabled for rollback. Its private,
+no-store JSON reports the effective enforcement boolean, accepted terms/privacy
+versions and SHA-256 of the actual manifest bytes. Authority failure returns a
+fixed 503 without versions or a digest. The check does not consume signup or
+public rate limits, access account state, dispatch a container, or change
+enforcement.
 
 After deploying a release containing this route, use its verified CP origin and
 compare the returned pair and digest with an independently validated public
 manifest. Retain provider binding-target metadata as well: the response alone
 does not prove which Worker owns the binding. A successful check proves that
-invocation's binding read, not signup, re-consent, CLI durability or readiness to
-enable enforcement. No legal publication is authorized by this result.
+invocation's binding read, not signup, re-consent, CLI durability or rollout
+readiness. No legal publication is authorized by this result.
 
 ## One explicit successor
 
@@ -113,11 +115,15 @@ credential journals remain readable. A concurrent credential winner prevents a
 stale refusal or promotion and still recovers offline. Older CLIs reject v2
 journals; they must not delete them to recover.
 
-Release and deploy capable code with enforcement off, verify the service binding
-and admitted-retry controls, then separately review activation. Existing B1
-pending, reserved and rejected states remain binding even when enforcement is
-later disabled. A reserved open-signup attempt still requires open signup to be
-available.
+The capable client release carrying PR #444 must be the Homebrew floor before
+merging this enabled contract. Verify the service binding and admitted-retry
+controls before deploying it.
+
+To roll back enforcement, re-pin `CP_SIGNUP_LEGAL_ENFORCEMENT` to the exact string
+`false` in the Wrangler template, renderer guard, and verifier's generated-config
+and live-binding checks, then redeploy. Existing B1 pending, reserved and rejected
+states remain binding even when enforcement is disabled. A reserved open-signup
+attempt still requires open signup to be available.
 
 CP v0.0.284/B0 is the minimum **state-reader safety** floor: it rejects the new
 preadmission phases instead of accidentally provisioning them. It cannot resume
