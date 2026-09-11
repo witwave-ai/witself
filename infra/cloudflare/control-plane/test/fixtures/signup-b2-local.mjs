@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { register } from "node:module";
+import { isDeepStrictEqual } from "node:util";
 
 register(new URL("./cloudflare-containers-loader.mjs", import.meta.url));
 register(new URL("./signup-b2-legal-loader.mjs", import.meta.url));
@@ -63,8 +64,25 @@ class Storage {
   }
 }
 
-export async function makeSignupB2Fixture() {
+export async function makeSignupB2Fixture(options) {
   assert.equal(activeFixture, false, "B2 fixtures must run sequentially");
+  const cliMode = options !== undefined;
+  if (cliMode) {
+    assert.deepEqual(Object.keys(options), ["cliOrigin"], "closed CLI fixture options");
+    assert.match(options.cliOrigin, /^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/, "numeric loopback origin");
+    const parsed = new URL(options.cliOrigin);
+    assert.equal(parsed.origin, options.cliOrigin, "canonical loopback origin");
+  }
+  const origin = cliMode ? options.cliOrigin : B2.origin;
+  const cellOrigin = cliMode ? origin : B2.cellOrigin;
+  const accountID = cliMode ? "acc_abcdefghijklmnop" : ACCOUNT;
+  const operatorID = cliMode ? "opr_abcdefghijklmnop" : OPERATOR;
+  let originalID = cliMode ? null : B2.provision;
+  let candidateID = cliMode ? null : B2.candidate;
+  let transitionID = cliMode ? null : B2.transition;
+  const cliCounts = { manifest: 0, bootstrap: 0 };
+  let lastBootstrapToken = null;
+  let claimedBootstrap = false;
   const originalFetch = globalThis.fetch;
   const violations = [];
   const check = (condition, code) => {
@@ -107,9 +125,12 @@ export async function makeSignupB2Fixture() {
   let bootstrapSequence = 0;
   const ipScope = await signupIPScope(B2.sourceIP);
   const roles = new Map([
-    [`provision:${B2.provision}`, "original"], [`provision:${B2.candidate}`, "candidate"],
     [`invite:${B2.invite}`, "invite"], [ipScope, "ip"], ["signup-counter:global", "global"],
   ]);
+  if (!cliMode) {
+    roles.set(`provision:${originalID}`, "original");
+    roles.set(`provision:${candidateID}`, "candidate");
+  }
   // One direct setup read supplies expected labels from the unchanged handler;
   // canonical binding reads are counted separately and always use that handler.
   const manifest = await legal.fetch(new Request("https://legal.internal/legal/versions.json")).json();
@@ -124,7 +145,7 @@ export async function makeSignupB2Fixture() {
   check(currentPair.consent_terms_version !== stalePair.consent_terms_version &&
     currentPair.consent_privacy_version !== stalePair.consent_privacy_version, "synthetic prior labels");
   const cell = {
-    name: CELL, endpoint: B2.cellOrigin, cloud: "civo", region: "fixture",
+    name: CELL, endpoint: cellOrigin, cloud: "civo", region: "fixture",
     region_code: "fixture", accepting: true,
     provision_token: PROVISION_TOKEN, registration_id: REGISTRATION,
   };
@@ -134,9 +155,9 @@ export async function makeSignupB2Fixture() {
     [`cell:${CELL}`, JSON.stringify(cell)], [`invite:${B2.invite}`, JSON.stringify(invite)],
     ["config:placement", JSON.stringify({ strategy: "pinned", pinned_cell: CELL })],
   ]);
-  const knownID = (id) => id === B2.provision || id === B2.candidate;
+  const knownID = (id) => typeof id === "string" && (id === originalID || id === candidateID);
   const directoryKey = (key) => directory.has(key) || key === "config:reaper" ||
-    key === `acct:${ACCOUNT}` || key === `pending:${ACCOUNT}`;
+    key === `acct:${accountID}` || key === `pending:${accountID}`;
   const env = {
     CP_SIGNUP_LEGAL_ENFORCEMENT: "true", CP_SIGNUP_OPEN: "false",
     CP_SIGNUP_TURNSTILE_ENABLED: "true", CP_SIGNUP_TURNSTILE_SECRET_KEY: TURNSTILE_SECRET,
@@ -169,7 +190,7 @@ export async function makeSignupB2Fixture() {
         catch { check(false, "invalid directory JSON"); }
         if (key === `invite:${B2.invite}`) {
           check(JSON.stringify(value) === JSON.stringify({ ...invite, uses: 1 }), "invite projection");
-        } else if (key === `pending:${ACCOUNT}`) {
+        } else if (key === `pending:${accountID}`) {
           check(value.cell === CELL && value.route_epoch === 0 && knownID(value.provision_id) &&
             Number.isFinite(Date.parse(value.created_at)), "pending projection");
           const keys = ["cell", "created_at", "route_epoch", "provision_id"];
@@ -178,14 +199,14 @@ export async function makeSignupB2Fixture() {
             check(value.emails_sent === 1 && Number.isFinite(Date.parse(value.last_email_at)), "pending email projection");
           }
           exact(value, keys, "pending shape");
-        } else if (key === `acct:${ACCOUNT}`) {
+        } else if (key === `acct:${accountID}`) {
           exact(value, ["cell", "endpoint", "region", "region_code", "cell_registration_id", "epoch"], "route shape");
-          check(value.cell === CELL && value.endpoint === B2.cellOrigin && value.epoch === 0 &&
+          check(value.cell === CELL && value.endpoint === cellOrigin && value.epoch === 0 &&
             value.cell_registration_id === REGISTRATION && value.region === cell.region &&
             value.region_code === cell.region_code, "route projection");
         } else if (/^verify:[0-9a-f]{64}$/.test(key)) {
           exact(value, ["account_id", "cell", "created_at"], "verification shape");
-          check(value.account_id === ACCOUNT && value.cell === CELL &&
+          check(value.account_id === accountID && value.cell === CELL &&
             Number.isFinite(Date.parse(value.created_at)) && options?.expirationTtl === 604800,
           "verification projection");
           verificationHashes.add(key.slice(7));
@@ -205,7 +226,8 @@ export async function makeSignupB2Fixture() {
       exact(value, ["to", "from", "subject", "text", "html"], "email shape");
       check(value.to === B2.email && value.from === "no-reply@witwave.ai" &&
         value.subject === "Verify your Witself account", "email addressing");
-      const links = value.text.match(/https:\/\/cp\.b2\.invalid\/verify\/[0-9a-f]{64}/g) ?? [];
+      const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const links = value.text.match(new RegExp(`${escapedOrigin}/verify/[0-9a-f]{64}`, "g")) ?? [];
       check(links.length === 1 && value.html.includes(links[0]), "verification link");
       const token = new URL(links[0]).pathname.slice("/verify/".length);
       check(verificationHashes.has(createHash("sha256").update(token).digest("hex")), "verification hash binding");
@@ -266,14 +288,14 @@ export async function makeSignupB2Fixture() {
         }
         exact(value, [...base, "account_id", "route_epoch"], "target attachment shape");
         const target = targets.get(value.provision_id);
-        check(target && value.account_id === ACCOUNT && value.route_epoch === 0, "target account tuple");
+        check(target && value.account_id === accountID && value.route_epoch === 0, "target account tuple");
         if (url.pathname === "/provision/attach") {
           check(!target.attached, "duplicate target attach"); target.attached = true; counts.targetAttach++;
-          return Response.json({ ok: true, provision_id: value.provision_id, account_id: ACCOUNT, attached: true });
+          return Response.json({ ok: true, provision_id: value.provision_id, account_id: accountID, attached: true });
         }
         check(target.attached && !target.resident, "target promotion order");
         target.resident = true; counts.targetPromote++;
-        return Response.json({ ok: true, provision_id: value.provision_id, account_id: ACCOUNT, resident: true });
+        return Response.json({ ok: true, provision_id: value.provision_id, account_id: accountID, resident: true });
       } };
     },
   };
@@ -292,7 +314,7 @@ export async function makeSignupB2Fixture() {
       counts.turnstile++;
       return Response.json({ success: true, "error-codes": [] });
     }
-    check(url.origin === B2.cellOrigin, "unexpected fetch origin");
+    check(url.origin === cellOrigin, "unexpected fetch origin");
     if (url.pathname === "/v1/version") {
       check(request.method === "GET", "cell protocol method"); counts.protocol++;
       return Response.json({ schema_version: "witself.v0", account_provision_protocol: 1 });
@@ -300,7 +322,7 @@ export async function makeSignupB2Fixture() {
     check(request.method === "POST" && request.headers.get("Authorization") === `Bearer ${PROVISION_TOKEN}`,
       "cell mutation authentication");
     const value = await jsonOf(request);
-    if (url.pathname === `/v1/accounts/${ACCOUNT}:events`) {
+    if (url.pathname === `/v1/accounts/${accountID}:events`) {
       exact(value, ["verb", "actor_kind", "metadata"], "event shape");
       exact(value.metadata, ["to_masked"], "event metadata shape");
       check(value.verb === "account.email.verify.sent" && value.actor_kind === "control_plane" &&
@@ -320,10 +342,11 @@ export async function makeSignupB2Fixture() {
       receipts.set(value.provision_id, structuredClone(value));
     }
     counts.provision++; bootstrapSequence++;
+    lastBootstrapToken = `b2-fake-bootstrap-${bootstrapSequence}`;
     return Response.json({
       schema_version: "witself.v0", provision_id: value.provision_id, replayed: !!prior,
-      account: { account_id: ACCOUNT, operator_id: OPERATOR, email: B2.email,
-        status: "pending", bootstrap_token: `b2-fake-bootstrap-${bootstrapSequence}` },
+      account: { account_id: accountID, operator_id: operatorID, email: B2.email,
+        status: "pending", bootstrap_token: lastBootstrapToken },
       recorded_consent_terms_version: value.consent_terms_version,
       recorded_consent_privacy_version: value.consent_privacy_version,
     }, { status: 201 });
@@ -343,8 +366,8 @@ export async function makeSignupB2Fixture() {
     async dispatchPublic(request) {
       check(!closed, "closed public fixture");
       const url = urlOf(request);
-      const reconsent = url.pathname === `/v1/account-signups/${B2.provision}:reconsent`;
-      check(url.origin === B2.origin && request.method === "POST" &&
+      const reconsent = originalID !== null && url.pathname === `/v1/account-signups/${originalID}:reconsent`;
+      check(url.origin === origin && request.method === "POST" &&
         (url.pathname === "/v1/accounts" || reconsent), "public route");
       const raw = await request.clone().text();
       check(raw.length <= 65536, "public request bound");
@@ -354,9 +377,26 @@ export async function makeSignupB2Fixture() {
       check(request.headers.get("CF-Connecting-IP") === B2.sourceIP &&
         body.email === B2.email && body.display_name === B2.displayName && body.invite === B2.invite,
       "public fixture core");
+      if (cliMode) {
+        const validID = (id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id);
+        if (!reconsent && originalID === null) {
+          check(validID(body.provision_id), "CLI original identity");
+          originalID = body.provision_id;
+          roles.set(`provision:${originalID}`, "original");
+        } else if (reconsent && candidateID === null) {
+          const refused = storages.get(`provision:${originalID}`)?.values.get(STATE_KEY);
+          check(refused?.phase === "legal_rejected" &&
+            isDeepStrictEqual(body.refusal, refused.legal_refusal), "CLI exact predecessor refusal");
+          check(validID(body.candidate?.provision_id) && body.candidate.provision_id !== originalID &&
+            validID(body.transition_id), "CLI successor identities");
+          candidateID = body.candidate.provision_id;
+          transitionID = body.transition_id;
+          roles.set(`provision:${candidateID}`, "candidate");
+        }
+      }
       if (reconsent) {
-        check(body.refusal?.provision_id === B2.provision && body.candidate?.provision_id === B2.candidate &&
-          body.transition_id === B2.transition, "public successor identities");
+        check(body.refusal?.provision_id === originalID && body.candidate?.provision_id === candidateID &&
+          body.transition_id === transitionID, "public successor identities");
         registrationHashes.push(createHash("sha256").update(raw).digest("hex")); counts.publicReconsent++;
       } else {
         check(knownID(body.provision_id), "public provision identity"); counts.publicSignup++;
@@ -394,11 +434,12 @@ export async function makeSignupB2Fixture() {
         counterCounts: { ip: counter(ipScope), global: counter("signup-counter:global") },
         inviteUses: JSON.parse(directory.get(`invite:${B2.invite}`)).uses,
         logicalAccounts: receipts.size, verificationEntries: verificationHashes.size,
-        receiptPairs: [...receipts].map(([id, value]) => ({ role: id === B2.provision ? "original" : "candidate",
+        receiptPairs: [...receipts].map(([id, value]) => ({ role: id === originalID ? "original" : "candidate",
           consent_terms_version: value.consent_terms_version, consent_privacy_version: value.consent_privacy_version })),
         // At most three <=32-KiB synthetic records, for a separately pinned
         // historical-reader stage. No historical source is imported here.
         generatedLegalStates: Object.fromEntries(generatedLegalStates),
+        ...(cliMode ? { cli: { originalID, candidateID, transitionID, ...cliCounts, currentPair } } : {}),
       });
     },
     assertNoUnexpectedCalls,
@@ -408,6 +449,35 @@ export async function makeSignupB2Fixture() {
       finally { closed = true; globalThis.fetch = originalFetch; activeFixture = false; }
     },
   };
+  if (cliMode) {
+    fixture.dispatchCLILegalManifest = async (request, prior = false) => {
+      const url = urlOf(request);
+      check(!closed && request.method === "GET" && url.href === `${origin}/legal/versions.json` &&
+        typeof prior === "boolean", "CLI manifest route");
+      check(!prior || (cliCounts.manifest === 0 && originalID === null), "one initial manifest fault");
+      cliCounts.manifest++;
+      const response = legal.fetch(request);
+      if (!prior) return response;
+      const value = await response.json();
+      value.terms.version = stalePair.consent_terms_version;
+      value.privacy.version = stalePair.consent_privacy_version;
+      return new Response(JSON.stringify(value), { status: response.status, headers: response.headers });
+    };
+    fixture.dispatchCLIBootstrap = async (request) => {
+      const url = urlOf(request);
+      check(!closed && request.method === "POST" && url.href === `${origin}/v1/auth/bootstrap`,
+        "CLI bootstrap route");
+      const value = await jsonOf(request);
+      exact(value, ["bootstrap_token"], "CLI bootstrap body");
+      check(lastBootstrapToken !== null && value.bootstrap_token === lastBootstrapToken &&
+        !claimedBootstrap && receipts.size === 1 &&
+        [...storages.values()].some((entry) => entry.values.get(STATE_KEY)?.phase === "completed"),
+      "one exact completed-account bootstrap");
+      claimedBootstrap = true;
+      cliCounts.bootstrap++;
+      return Response.json({ operator_id: operatorID, operator_token: "witself_opr_accountCreateRecovery" });
+    };
+  }
   resetContainerCalls(); activeFixture = true;
   // No network fallback: the saved function is only restored on close.
   globalThis.fetch = dispatchFixtureFetch;
