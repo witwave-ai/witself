@@ -31,7 +31,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Account audit trail and retention](#audit-trail-retention) | Governance | `building` | `limited` | **not ready** | 0/7 pass | 4 |
 | [Billing and plan transitions](#billing-plan-transitions) | Commercial | `implemented` | `general` | **conditional** | 2/7 pass | 4 |
 | [Custom inbound email domains](#custom-email-domains) | Email | `building` | `dark` | **not ready** | 2/7 pass | 6 |
-| [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -389,7 +389,7 @@ Open gates:
 
 ### Durable facts
 
-Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, and per-agent fact limits are implemented. Advanced authority, predicate registries, reminder delivery, and cross-agent facts remain deferred to the access-policy rock.
+Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, per-agent fact limits, and documented advanced fact policy are implemented. Cross-agent and group fact access remain deferred to the access-policy rock.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
@@ -406,11 +406,10 @@ Stable subjects, immutable resolved assertions, candidates, typed values, guarde
 | Observability | **CONDITIONAL** | Value-free usage/audit records and the accepted serving-cell alert path exist. #357 adds a tested fact DELETE 5xx-ratio rule from HTTP metrics; live loading proof, broader fact-operation instrumentation, and SLOs remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [metrics.go](../internal/server/metrics.go) |
 | Recovery | **PASS** | Immutable assertion history, candidate review, reversible changes, archive/import, and explicit permanent-delete fencing provide recovery semantics. [backup-and-recovery.md](../docs/backup-and-recovery.md), [fact-service.md](../docs/fact-service.md) |
 | Rollout / canaries | **CONDITIONAL** | Core behavior is released and permanent fact deletion is enabled on both cells (#312). Retained current-release preview/apply/isolation acceptance remains open. [values.yaml](../.gitops/cells/civo-sandbox-use1-backup/values.yaml), [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [runbooks.md](../docs/runbooks.md) |
-| Docs / support | **CONDITIONAL** | Core fact contracts are reconciled with store, routes, and CLI/MCP. advanced-fact-policy remains open under the access-policy rock for authority rules, predicate registries, reminder delivery, and cross-agent ownership. [mcp.go](../cmd/witself/mcp.go), [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go), [fact_temporal.go](../internal/store/fact_temporal.go), [fact_value_type.go](../internal/store/fact_value_type.go) |
+| Docs / support | **PASS** | Core and advanced fact policy are documented in facts-model.md and reconciled with store, routes, and CLI/MCP. Cross-agent and group fact access remain deferred to the access-policy rock. [mcp.go](../cmd/witself/mcp.go), [access-policy.md](../docs/access-policy.md), [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go), [fact_temporal.go](../internal/store/fact_temporal.go), [fact_value_type.go](../internal/store/fact_value_type.go) |
 
 Open gates:
 
-- `advanced-fact-policy` (docs / support): Deferred to the access-policy rock: define authority/conflict policy, governed predicate registries, reminder delivery, and cross-agent/group fact access. Current candidate fences, type validation, and occurrence queries do not implement those policies. ([tracking/evidence](../docs/facts-model.md))
 - `fact-delete-canary` (rollout / canaries): Retain a current-release preview/apply/isolation canary for permanent deletion; #312 already enabled the guarded path on both cells. ([tracking/evidence](../docs/fact-service.md))
 - `fact-operations` (observability): Retain live proof for the #357 DELETE failure-ratio rule, define fact SLOs, and instrument remaining fact operations on the shared alert path. ([tracking/evidence](../docs/observability-and-operations.md))
 

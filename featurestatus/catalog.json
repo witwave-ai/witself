@@ -1210,7 +1210,7 @@
       "id": "facts",
       "name": "Durable facts",
       "area": "Memory",
-      "summary": "Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, and per-agent fact limits are implemented. Advanced authority, predicate registries, reminder delivery, and cross-agent facts remain deferred to the access-policy rock.",
+      "summary": "Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, per-agent fact limits, and documented advanced fact policy are implemented. Cross-agent and group fact access remain deferred to the access-policy rock.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_feature_keys": [
@@ -1283,10 +1283,11 @@
           ]
         },
         "docs_support": {
-          "state": "conditional",
-          "summary": "Core fact contracts are reconciled with store, routes, and CLI/MCP. advanced-fact-policy remains open under the access-policy rock for authority rules, predicate registries, reminder delivery, and cross-agent ownership.",
+          "state": "pass",
+          "summary": "Core and advanced fact policy are documented in facts-model.md and reconciled with store, routes, and CLI/MCP. Cross-agent and group fact access remain deferred to the access-policy rock.",
           "evidence": [
             "cmd/witself/mcp.go",
+            "docs/access-policy.md",
             "docs/fact-service.md",
             "docs/facts-model.md",
             "internal/server/fact.go",
@@ -1297,12 +1298,6 @@
         }
       },
       "open_gates": [
-        {
-          "id": "advanced-fact-policy",
-          "gate_ids": ["docs_support"],
-          "summary": "Deferred to the access-policy rock: define authority/conflict policy, governed predicate registries, reminder delivery, and cross-agent/group fact access. Current candidate fences, type validation, and occurrence queries do not implement those policies.",
-          "ref": "docs/facts-model.md"
-        },
         {
           "id": "fact-delete-canary",
           "gate_ids": ["rollout_canaries"],

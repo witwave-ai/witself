@@ -191,8 +191,7 @@ accepts only `login` and implements the bootstrap-file exchange above.
 The target managed authorization work depends on the access-policy rock:
 realm role/scope bundles, policy/group administration, and cross-agent operator
 authority require their own implemented contracts and tests. No command or
-permission is granted by this document. The related gates are
-`access-policy-contract-reconciliation` and `advanced-fact-policy`; hosted
+permission is granted by this document. The related gate is `access-policy-contract-reconciliation`; hosted
 authentication implementation remains tracked separately from
 `operator-auth-contract-reconciliation` in the feature scorecard.
 
