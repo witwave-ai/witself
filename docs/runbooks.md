@@ -3191,15 +3191,19 @@ identifier appears in these rules or their metrics.
 | --- | --- |
 | `WitselfSealedPlanePostureMetricsUnavailable` | Critical after the collector is absent or its maximum `_up` is below 1 for 3 minutes. Check the server release and scrape target, then database reachability and the posture query timeout. A failed read suppresses the posture gauges; missing gauges are not healthy zeroes. |
 | `WitselfSecretMaterialDeliveryErrorRatio` | Warning when delivery `result="error"` exceeds 5% over 10 minutes, with total traffic above 0.01 requests/second, for 10 minutes. Inspect protected server logs for database and audit-append failures. The `conflict`, `forbidden`, `not_found`, and `invalid` result classes count as non-error outcomes for the availability SLO; inspect them separately when diagnosing a failed client workflow. |
-| `WitselfVaultRotationFenceConflicts` | Warning when rotation `result="conflict"` increases by more than 5 over 15 minutes for 5 minutes. Compare the bounded `operation` classes (`start`, `stage`, `commit`, `cancel`) and inspect the authenticated rotation's current fence and staged progress. The class includes state/key and idempotency conflicts; it does not prove every conflict was a stale fence. Resume the existing rotation through the supported workflow after resolving ownership; do not clear fences or rotate keys from an alert alone. |
+| `WitselfVaultRotationFenceConflicts` | Warning when rotation `result="conflict"` calls exceed a combined budget of 5 over 15 minutes for 5 minutes, summing reset-adjusted observed increases across all series and any new-series count not already included in those increases. Compare the bounded `operation` classes (`start`, `stage`, `commit`, `cancel`) and inspect the authenticated rotation's current fence and staged progress. The class includes state/key and idempotency conflicts; it does not prove every conflict was a stale fence. Resume the existing rotation through the supported workflow after resolving ownership; do not clear fences or rotate keys from an alert alone. |
 | `WitselfVaultRotationStuckOpen` | Warning when the oldest open rotation exceeds 86,400 seconds for 15 minutes. Inspect active rotation state and missing staging acknowledgements through an authorized client. A long-running client-owned rotation needs an explicit resume or cancel decision; no backend job completes it automatically. |
 | `WitselfSecretMaterialDeliveryVolumeAnomaly` | Warning when aggregate delivery attempts exceed 1/second over 15 minutes, or `witself_secret_material_max_agent_deliveries_15m` exceeds 120, for 15 minutes. Compare bounded result and field-kind classes, recent workload changes, and authenticated audit evidence. The SQL gauge is the single maximum count of best-effort successful `secret_read` usage events across account/agent pairs, so it may undercount delivered material and cannot identify an agent. |
 
-The rotation conflict alert also counts first-observed conflicts until each
-series has a fifteen-minute-old observation, with the same budget and hold.
-It compares series before aggregation so an existing replica cannot hide a
-new process's initial burst. This startup check can conservatively repeat an
-alert after a scrape gap that removes the older observation.
+The rotation conflict alert always includes each series' reset-adjusted observed
+increase, preserving observed conflicts if a newly started counter resets during
+the alert hold. Until a series has a fifteen-minute-old observation, it also adds
+any positive difference between its current count and that increase, or its full
+current count if there are too few samples to calculate an increase. These
+contributions are summed before checking the budget, so conflicts split between
+established and newly started replicas can exceed the combined budget without
+counting an observed increase twice. Counting newly observed series can
+conservatively repeat an alert after a scrape gap that removes the older observation.
 
 The conflict and volume ceilings are provisional: there is no established
 production sealed-plane volume baseline. Tune them against reviewed normal

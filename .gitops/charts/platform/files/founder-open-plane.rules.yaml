@@ -324,13 +324,16 @@ groups:
           summary: Secret material deliveries exceed the bounded server-error ratio.
           runbook: docs/runbooks.md#sealed-plane-alerts
       - alert: WitselfVaultRotationFenceConflicts
-        # Include conflicts before the first scrape until the same series has
-        # a fifteen-minute-old observation. Compare before summing so an
-        # existing replica cannot hide a new process's initial conflicts.
+        # Sum all reset-adjusted increases with only the new-series count not
+        # already included in those increases, so old and new replicas share a
+        # budget without double counting or losing observed conflicts on reset.
+        # Fall back to the current count when increase lacks a second sample.
         expr: >-
-          sum(increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m])) > 5
-          or sum(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}
-            unless witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"} offset 15m) > 5
+          (sum(increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m])) or vector(0))
+          + (sum((clamp_min(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}
+            - increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m]), 0)
+            or witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"})
+            unless witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"} offset 15m) or vector(0)) > 5
         for: 5m
         labels:
           severity: warning

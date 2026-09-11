@@ -1297,6 +1297,91 @@ tests:
       - eval_time: 15m
         alertname: WitselfVaultRotationFenceConflicts
         exp_alerts: []
+  - name: observed and first observed rotation conflicts share one budget across replicas
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-a",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0+0x20 3+0x19
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-b",flow="rotation",operation="cancel",result="conflict"}'
+        values: _x21 3+0x19
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 40m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: combined rotation conflicts below budget do not double count new replica increases
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-a",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0+0x20 2+0x19
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-b",flow="rotation",operation="cancel",result="conflict"}'
+        values: _x21 0 2+0x18
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: newly observed rotation conflicts survive a counter reset during the alert hold
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-new",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0 6+0x1 0+0x17
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 14m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 15m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
   - name: open rotation stays quiet at twenty four hours and alerts above it
     interval: 1m
     input_series:
