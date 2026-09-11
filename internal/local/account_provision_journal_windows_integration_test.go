@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsAccountProvisionMissingParentRefusesWithoutMutation(t *testing.T) {
@@ -233,26 +235,68 @@ func TestWindowsAccountProvisionTemporaryDeletionBindsIdentity(t *testing.T) {
 }
 
 func TestWindowsAccountProvisionRetainedAncestorsBlockReplacement(t *testing.T) {
-	anchor := t.TempDir()
-	home := filepath.Join(anchor, ".witself")
-	pins, err := pinAccountProvisionDirectories(home, filepath.Join(home, "journal", "account-provision"), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := pins.close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	for _, path := range []string{home, filepath.Join(home, "journal"), filepath.Join(home, "journal", "account-provision")} {
-		if err := os.Rename(path, path+".rebound"); err == nil {
-			t.Fatalf("pinned ancestor was replaced: %s", path)
-		}
-	}
-	for _, pin := range pins.directories {
-		if err := validateAccountProvisionDirectoryPin(pin); err != nil {
-			t.Fatal(err)
-		}
+	for _, name := range []string{"created", "reopened"} {
+		t.Run(name, func(t *testing.T) {
+			anchor := t.TempDir()
+			home := filepath.Join(anchor, ".witself")
+			directory := filepath.Join(home, "journal", "account-provision")
+			pins, err := pinAccountProvisionDirectories(home, directory, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := pins.close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if name == "reopened" {
+				if err := pins.close(); err != nil {
+					t.Fatal(err)
+				}
+				pins, err = pinAccountProvisionDirectories(home, directory, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			// An open child must not accidentally provide the leaf's rename barrier.
+			entries, err := os.ReadDir(directory)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("pinned leaf is not empty: %v", err)
+			}
+			// Windows path-based FileInfo values load their file ID lazily when
+			// SameFile is first called, by reopening the recorded path. Take the
+			// leaf identity from the pin's own handle-based stat so the rename
+			// below cannot make a pre-mutation value reopen a rebound path.
+			leaf := pins.directories[len(pins.directories)-1]
+			if leaf.path != filepath.Clean(directory) || leaf.info == nil {
+				t.Fatalf("leaf pin is not the journal directory: %q", leaf.path)
+			}
+			leafInfo := leaf.info
+			for _, path := range []string{home, filepath.Join(home, "journal"), directory} {
+				err := os.Rename(path, path+".rebound")
+				if err == nil {
+					t.Fatalf("pinned ancestor was replaced: %s", path)
+				}
+				if path == directory && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+					t.Fatalf("empty leaf rename did not fail with a sharing violation: %v", err)
+				}
+			}
+			for _, pin := range pins.directories {
+				if err := validateAccountProvisionDirectoryPin(pin); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := pins.close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(directory, directory+".rebound"); err != nil {
+				t.Fatalf("empty leaf rename failed after closing pins: %v", err)
+			}
+			moved, err := os.Lstat(directory + ".rebound")
+			if err != nil || !os.SameFile(leafInfo, moved) {
+				t.Fatalf("renamed leaf identity changed: %v", err)
+			}
+		})
 	}
 }
 

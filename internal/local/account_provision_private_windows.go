@@ -201,7 +201,9 @@ func createAccountProvisionWindowsPrivateDirectory(path string) (*os.File, error
 	}
 	// This handle pins the directory against deletion/replacement; it makes no
 	// directory-flush or ancestor-pinning claim.
-	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+	// MS-FSA sharing checks exclude metadata-only handles. FILE_TRAVERSE
+	// participates without requesting directory listing or mutation rights.
+	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
 		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
