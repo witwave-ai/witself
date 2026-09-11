@@ -1,0 +1,17 @@
+cell:
+  name: {{.Name}}
+  cloud: {{.Cloud}}
+  region: {{.Region}}
+{{- if .DomainDocumentationOnly }}
+  # These checked-in names are documentation/defaults only. The supported
+  # Civo Pulumi path replaces both values with the cluster's Civo-managed
+  # DNS name before Argo CD applies this file. Do not deploy this values file
+  # directly: externalDNS is intentionally disabled for Civo.
+{{- end }}
+  domain: {{.Domain}}
+  apiHost: {{.APIHost}}
+gitops:
+  repoURL: {{.RepoURL}}
+  targetRevision: {{.TargetRevision}}
+  valuesPath: .gitops/cells/{{.Name}}/values.yaml
+{{.Overlay}}

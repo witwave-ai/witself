@@ -1,0 +1,94 @@
+cell:
+  name: {{.Name}}
+  cloud: {{.Cloud}}
+  accountAlias: {{.AccountAlias}}
+  region: {{.Region}}
+  role: {{.Role}}
+  domain: {{.Domain}}
+  apiHost: {{.APIHost}}
+gitops:
+  repoURL: {{.RepoURL}}
+  targetRevision: {{.TargetRevision}}
+apps:
+  witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: {{.ChartVersion}}
+    imageTag: {{.ImageTag}}
+    backendKind: managed
+    awsAlbIngress:
+      enabled: true
+      className: alb
+      annotations:
+        alb.ingress.kubernetes.io/target-type: ip
+        alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+        alb.ingress.kubernetes.io/ssl-redirect: "443"
+        alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+        alb.ingress.kubernetes.io/healthcheck-port: "8081"
+        alb.ingress.kubernetes.io/healthcheck-path: /readyz
+        alb.ingress.kubernetes.io/success-codes: "200"
+      hosts:
+        - paths:
+            - path: /
+              pathType: Prefix
+      tls: []
+    secrets:
+      bootstrap:
+        enabled: true
+        remoteKeySuffix: bootstrap/operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
+      database:
+        remoteKeySuffix: db
+        targetName: witself-db
+        urlKey: dsn
+        refreshInterval: 1h
+      provision:
+        enabled: true
+        remoteKeySuffix: provision/token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+platform:
+  awsAlbIngress:
+    enabled: true
+    className: alb
+    scheme: internet-facing
+    ipAddressType: ipv4
+    groupName: witself-public
+    listeners:
+      - protocol: HTTP
+        port: 80
+  certManager:
+    enabled: true
+    chartVersion: {{.CertManagerChartVersion}}
+    namespace: cert-manager
+  externalDNS:
+    enabled: true
+    chartVersion: {{.ExternalDNSChartVersion}}
+    namespace: external-dns
+    serviceAccountName: external-dns
+    domainFilters:
+      - {{.Domain}}
+    txtOwnerId: {{.Name}}
+{{- if .AWSZoneType }}
+    extraArgs:
+      aws-zone-type: {{.AWSZoneType}}
+{{- end }}
+  externalSecrets:
+    enabled: true
+    chartVersion: {{.ExternalSecretsChartVersion}}
+    namespace: external-secrets
+    storeName: aws
+    secretsManagerRegion: {{.Region}}
+  keda:
+    enabled: true
+    chartVersion: {{.KEDAChartVersion}}
+    namespace: keda
+  metricsServer:
+    enabled: true
+    chartVersion: {{.MetricsServerChartVersion}}
+    namespace: kube-system
+    replicas: 2

@@ -227,6 +227,9 @@ deployment cells under a thin global control plane.
   federation, policy `deny` effects, and advanced vector-profile migration.
 - [helm-chart.md](helm-chart.md): first self-hosted Kubernetes deployment
   artifact and chart requirements.
+- [gitops-values-generation.md](gitops-values-generation.md): generating
+  per-cell `.gitops/cells/<cell>/values.yaml` overlays from cell config, the
+  `roll-cell.sh` pin contract, and the CI drift check.
 - [terraform-infrastructure.md](terraform-infrastructure.md): AWS, GCP, and
   Azure infrastructure modules and stack layout.
 - [governance-and-support.md](governance-and-support.md): public-code,

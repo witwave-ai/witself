@@ -1,0 +1,236 @@
+apps:
+  civoPostgres:
+    enabled: true
+    namespace: witself
+    chartVersion: {{.CivoPostgresChartVersion}}
+    authSecretName: witself-postgresql-auth
+    storage: 8Gi
+    # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
+    # Micro adds headroom; the other Civo cells inherit nano.
+    resourcesPreset: micro
+    # Preserve this cell's running image content; do not align the backup pin.
+    # The tag-to-digest change plus exporter activation causes ONE PostgreSQL
+    # restart. Both server replicas are expected to crash-loop for ~1 minute
+    # while PostgreSQL returns; two replicas/PDBs do not mask this DB outage.
+    image:
+      registry: registry-1.docker.io
+      repository: bitnami/postgresql
+      digest: sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f
+    networkPolicy:
+      enabled: true
+      allowExternal: false
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
+  witselfServer:
+    enabled: true
+    namespace: witself
+    # The apps chart emits worker.agentEmailRetention settings, which require
+    # the v0.0.211+ server chart schema.
+    chartVersion: {{.ChartVersion}}
+    imageTag: {{.ImageTag}}
+    backendKind: managed
+    # Schema-28's compatibility hold expired long ago (cells run schema 94);
+    # in-product permanent fact deletion backs the published privacy policy.
+    factDeletionEnabled: true
+    # All writers on 0.0.273: config-only rollout; ConfigMap checksum restarts
+    # pods and reruns digest backfill.
+    avatarPayloadCompactionEnabled: true
+    billing:
+      endpoint: https://self.witwave.ai
+    agentEmail:
+      providerEventTokenSecret:
+        name: witself-agent-email-provider-event-v2
+        key: token
+      receivePilot:
+        enabled: false
+      receiveProduction:
+        enabled: true
+        domain: witmail.net
+        acceptedLegacyDomains:
+          - agent-mail.witwave.ai
+        audience: civo-sandbox-usw2-dev
+        accountIDs: []
+        accountIDsExistingSecret:
+          name: witself-agent-email-receive-cohort-v1
+          key: account_ids
+        retryCanaryAgentID: ""
+        retryCanaryAgentIDExistingSecret:
+          name: witself-agent-email-retry-canary-v1
+          key: agent_id
+        relayPublicKeysJSON: '{"relay-2026-08":"iwuwCIdpnBlEc+9upLpJUVFHjYLyV86iuwc9MBqvr9w="}'
+        relayReplayWindow: 5m
+    backup:
+      enabled: true
+      validationEnabled: false
+      targetName: witself-backup
+    replicaCount: 2
+    # Phase 2 of the monitoring rollout: expose server metrics to the
+    # monitoring-namespace Prometheus only.
+    metrics:
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
+    networkPolicy:
+      metricsFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    # Two nodes in one zone: spread each ReplicaSet revision by hostname.
+    # Ignore old-revision pods when placing new replicas during a surge rollout.
+    # Verify actual placement after convergence; scheduling does not rebalance
+    # already-running pods.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        matchLabelKeys: [pod-template-hash]
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: witself-server
+            app.kubernetes.io/instance: witself-server
+    worker:
+      enabled: true
+      # Preview-first per the chart's own rollout contract: value-free
+      # counts only until a config-only flip to enforce. grace stays the
+      # chart default 720h - the privacy policy's 30 days.
+      accountPurge:
+        enabled: true
+        mode: enforce
+      replicaCount: 2
+      # Phase 2: worker metrics restricted to the same Prometheus peers.
+      metrics:
+        serviceMonitor:
+          enabled: true
+          labels:
+            release: witself-monitoring
+      networkPolicy:
+        metricsFrom:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: monitoring
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
+      podDisruptionBudget:
+        enabled: true
+        minAvailable: 1
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: witself-worker
+              app.kubernetes.io/instance: witself-server
+              app.kubernetes.io/component: worker
+      agentEmailOutbound:
+        enabled: true
+        dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
+        dispatchAudience: witself-agent-email-send
+        dispatchKeyID: civo-sandbox-usw2-dev-2026-08
+        dispatchPrivateKeySecret:
+          name: witself-agent-email-outbound-dispatch-v1
+          key: private-key
+      agentEmailRetention:
+        enabled: true
+        mode: enforce
+        batchSize: 100
+        interval: 1m
+        batchTimeout: 2m
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    civoIngress:
+      enabled: true
+      className: traefik
+      clusterIssuer: letsencrypt-prod
+      tlsSecretName: witself-api-tls
+      acme:
+        email: support@witwave.ai
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretName: letsencrypt-prod-private-key
+    secrets:
+      bootstrap:
+        enabled: true
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+      database:
+        enabled: true
+        targetName: witself-db
+        urlKey: dsn
+      provision:
+        enabled: true
+        targetName: witself-provision
+        tokenKey: token
+platform:
+{{- if .Monitoring }}
+  # Phase 3 of the monitoring rollout (runbook: Founder open-plane monitoring).
+  # Stack (phase 1) and scrape targets (phase 2) are verified; this enables
+  # alert routing: PagerDuty Events API v2 incidents plus the external
+  # dead-man heartbeat. Secret values live only in the two immutable
+  # in-cluster Secrets named here; nothing sensitive enters Git or Argo state.
+  monitoring:
+    enabled: true
+    alerting:
+      enabled: true
+{{- if .CollectorAlerts }}
+    collectorAlerts:
+      enabled: true
+{{- end }}
+    postgresql:
+      enabled: true
+    nodeExporter:
+      enabled: true
+    kubelet:
+      cadvisor: true
+    defaultRules:
+      enabled: true
+    certManager:
+      enabled: true
+    argocd:
+      enabled: true
+    uptimeProbes:
+      enabled: true
+    entitlementDelivery:
+      enabled: true
+    receiver:
+      kind: pagerduty
+      secretName: witself-monitoring-pagerduty-v1
+      secretKey: routing_key
+    receiverDeadman:
+      secretName: witself-monitoring-deadman-v1
+      secretKey: url
+{{- end }}
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: {{.CertManagerChartVersion}}
+    namespace: cert-manager
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+    serviceAccountAnnotations: {}
+    azureVaultURL: ""
+  keda:
+    enabled: false
+  # Resource Metrics API; keep server and worker replica counts manual.
+  metricsServer:
+    enabled: true

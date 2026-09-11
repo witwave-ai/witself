@@ -111,7 +111,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status build check check-go-mod-tidy govulncheck check-infra
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status gitops-cell-values build check check-go-mod-tidy govulncheck check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -326,6 +326,9 @@ test-memory-relevance: ## Measure the fixed synthetic lexical relevance corpus
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
 
+gitops-cell-values: ## Generate per-cell GitOps values overlays from cell config
+	bash scripts/gitops-cell-values.sh --write
+
 check-go-mod-tidy: ## Verify both Go modules are tidy without modifying them
 	go mod tidy -diff
 	cd infra/pulumi && go mod tidy -diff
@@ -367,6 +370,8 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	npm --prefix infra/cloudflare/control-plane test
 	npm --prefix infra/cloudflare/control-plane run bundle:check
 	bash scripts/test-helm-rollout.sh
+	bash scripts/gitops-cell-values.sh --check
+	bash scripts/test-gitops-cell-values.sh
 	bash scripts/test-roll-cell-gate.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
