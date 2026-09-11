@@ -90,7 +90,6 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 	events := make(chan runtimeEvent, len(jobs)+len(servers)+1)
 	var jobWG sync.WaitGroup
 	for _, job := range jobs {
-		job := job
 		r.metrics.setJobRunning(job.Name, true)
 		jobWG.Add(1)
 		go func() {
@@ -107,7 +106,6 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 		}()
 	}
 	for _, running := range servers {
-		running := running
 		go func() {
 			if err := running.srv.Serve(running.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				events <- runtimeEvent{kind: "listener", name: running.name, err: err}

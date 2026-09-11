@@ -1313,7 +1313,6 @@ func TestAccountEvacuationMigrationCoversCanonicalArchiveTablesPostgres(
 	ctx, st := openAccountEvacuationTestStore(t)
 
 	for _, archiveTable := range canonicalArchiveTables {
-		archiveTable := archiveTable
 		t.Run(archiveTable.name, func(t *testing.T) {
 			wantFunction := "witself_tenant_evacuation_fence"
 			switch archiveTable.name {
@@ -1573,7 +1572,6 @@ func TestAccountEvacuationMigrationDowngradePostgres(t *testing.T) {
 			wantErrorText: "evacuation state exists",
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			st, dsn := newMigrationTestStore(t, baseDSN)

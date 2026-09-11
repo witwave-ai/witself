@@ -1,13 +1,29 @@
 version: "2"
 
+# The `default: none` shape keeps the enabled set explicit. When adding a new
+# linter, run it clean across the root module and infra/pulumi first (see
+# backlog #342).
+#
+# Not yet enabled here because their first-run triage exceeds the ~60-edit
+# budget for a single hygiene slice; each becomes its own follow-up. Counts
+# were measured with max-issues-per-linter=0 / max-same-issues=0 on top of
+# this slice's copyloopvar cleanup:
+#   - bodyclose (root: 86; infra/pulumi: 0)
+#   - errorlint (root: 176; infra/pulumi: 6)
+#   - gosec     (root: 959; infra/pulumi: 60)
+#   - modernize (root: 438; infra/pulumi: 89)
+#   - noctx     (root: 222; infra/pulumi: 0)
 linters:
   default: none
   enable:
+    - copyloopvar
     - errcheck
     - govet
     - ineffassign
     - misspell
     - revive
+    - rowserrcheck
+    - sqlclosecheck
     - staticcheck
     - unused
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -199,7 +200,7 @@ func readMemorySupersedeReplacements(path, operationKey string) ([]client.Supers
 	if err := decoder.Decode(&replacements); err != nil {
 		return nil, fmt.Errorf("decode --replacements-file: %w", err)
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = fmt.Errorf("multiple JSON values")
 		}
@@ -1130,7 +1131,7 @@ func memoryCaptureEvidence(in memoryEvidenceFlags) ([]client.MemoryEvidenceInput
 		if err := decoder.Decode(&evidence); err != nil {
 			return nil, fmt.Errorf("decode --evidence-file: %w", err)
 		}
-		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 			if err == nil {
 				err = fmt.Errorf("multiple JSON values")
 			}

@@ -1199,7 +1199,6 @@ func TestAccountMessagingAndRetentionOverridesAreIndependentOfBilling(t *testing
 func TestMessageRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	for _, days := range []int64{0, plans.MaxMessageRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetMessageRetentionOverride(
 			t.Context(), "acct_bad_message_retention", &days,
 			testAdminActor(), "invalid test",
@@ -1307,7 +1306,6 @@ func TestAgentEmailOverridesAreIndependentOfBilling(t *testing.T) {
 func TestAgentEmailRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	for _, days := range []int64{0, plans.MaxAgentEmailRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetAgentEmailRetentionOverride(
 			t.Context(), "acct_bad_email_retention", &days,
 			testAdminActor(), "invalid test",
@@ -1418,7 +1416,6 @@ func TestRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()
 	for _, days := range []int64{0, plans.MaxTranscriptRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetTranscriptRetentionOverride(
 			ctx, "acct_bad", &days, testAdminActor(), "invalid test",
 		); !errors.Is(err, ErrAdminInput) {

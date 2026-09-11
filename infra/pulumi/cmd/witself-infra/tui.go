@@ -774,7 +774,8 @@ func (s liveDataSource) probeHealth(ctx context.Context, configPath, cell string
 	out, err := cmd.Output()
 	if err != nil {
 		detail := ""
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			detail = strings.TrimSpace(string(ee.Stderr))
 		}
 		if detail != "" {

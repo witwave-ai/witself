@@ -205,7 +205,6 @@ func TestMemoryVectorHybridRecallPostgres(t *testing.T) {
 	start := make(chan struct{})
 	errs := make(chan error, 2)
 	for _, version := range []string{"race-a", "race-b"} {
-		version := version
 		go func() {
 			<-start
 			_, err := st.CreateMemoryVectorProfile(ctx, p, CreateMemoryVectorProfileInput{

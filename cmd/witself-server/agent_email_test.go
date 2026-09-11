@@ -824,7 +824,6 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 		agentEmailCellStorageHardRowsEnv,
 	} {
 		original, present := os.LookupEnv(name)
-		name, original, present := name, original, present
 		t.Cleanup(func() {
 			if present {
 				_ = os.Setenv(name, original)

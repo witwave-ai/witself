@@ -122,7 +122,7 @@ func normalizedLockedLayers(sanitized []byte, pack StylePack) (map[string][]byte
 	decoder := xml.NewDecoder(bytes.NewReader(sanitized))
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -234,7 +234,7 @@ func validateLockedLayerDependencySafety(sanitized []byte, pack StylePack) error
 	decoder := xml.NewDecoder(bytes.NewReader(sanitized))
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {

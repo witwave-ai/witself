@@ -305,7 +305,6 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		results := make(chan error, 2)
 		realm := fixture.realms[0]
 		for index, target := range []*Store{st, replica} {
-			index, target := index, target
 			go func() {
 				<-start
 				_, ingestErr := ingestAgentEmailRate(
@@ -497,7 +496,6 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		}
 		results := make(chan cleanupResult, 2)
 		for _, target := range []*Store{st, replica} {
-			target := target
 			go func() {
 				<-start
 				deleted, cleanupErr := target.DeleteStaleAgentEmailRateBuckets(
