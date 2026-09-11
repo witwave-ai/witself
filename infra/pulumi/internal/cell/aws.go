@@ -136,16 +136,16 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 		DbSubnetGroupName:   net.dbSubnetGroup,
 		VpcSecurityGroupIds: pulumi.StringArray{net.dbSecurityGrp},
 		MultiAz:             pulumi.Bool(!minimal),
-		// Dev-friendly lifecycle so `destroy` is clean and leaves no billed
-		// snapshot. The prod profile will flip these in a later slice.
+		// Snapshot policy is independent of deletion protection; break-glass
+		// unprotect preserves the existing final-snapshot behavior.
 		SkipFinalSnapshot:  pulumi.Bool(true),
-		DeletionProtection: pulumi.Bool(false),
+		DeletionProtection: pulumi.Bool(c.deletionProtection),
 		PubliclyAccessible: pulumi.Bool(false),
 		Tags:               resourceTags(rname(c.name, "db"), "database"),
 		// The DB has an explicit Identifier, so a replacement (e.g. enabling
 		// storage encryption) must delete the old instance before creating the new
 		// one — otherwise the two collide on the name (DBInstanceAlreadyExists).
-	}, pulumi.Provider(prov), pulumi.DeleteBeforeReplace(true))
+	}, pulumi.Provider(prov), pulumi.DeleteBeforeReplace(true), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return err
 	}

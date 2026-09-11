@@ -34,7 +34,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
@@ -158,6 +157,9 @@ The cell name is composed: <cloud>-<account-alias>-<region-code>-<role>
 Cells can live in the config file instead of flags:
   witself-infra up -cell aws-sandbox-usw2-dev
 Precedence: explicit flag > cell entry > defaults block > built-in.
+Deletion protection is inventory-only: cell deletion_protection > defaults > true.
+To destroy, record deletion_protection: false on that cell and apply a separate
+up before destroy. No flag bypasses deletion protection or the required record.
 
 flags:
   -cell           cell name from infra.yaml — fills every unset flag
@@ -424,7 +426,7 @@ func run(args []string) error {
 	// pins in its security_context. A wrong profile that resolves to a
 	// different account must fail before EnsureAWSSession or a stack Upsert
 	// lets a fresh state backend appear in the wrong account. Destroy defers
-	// this provider read until its three safety guards pass below. Only fires
+	// this provider read until its safety guards pass below. Only fires
 	// for -cell (bare-flag invocations preserve today's zero-safety-net
 	// behavior; the safety net is opt-in via the config file).
 	if *cellSelector != "" {
@@ -626,6 +628,10 @@ func run(args []string) error {
 			backend.EnsureAWSSession(ctx, *awsProfile)
 		}
 	}
+	deletionProtection, err := loadCellDeletionProtection(cellName, *configPath)
+	if err != nil {
+		return err
+	}
 	if *gitopsValuesPath == "" {
 		*gitopsValuesPath = cell.DefaultGitopsValuesPath(cellName)
 	}
@@ -813,17 +819,18 @@ func run(args []string) error {
 	// Behavior config (cloud/profile/cidr) + the real region for the
 	// provider. The name components are encoded in the cell/stack name itself.
 	stackConfig := map[string]string{
-		"witself:cloud":            *cloud,
-		"witself:profile":          *profile,
-		"witself:accountAlias":     *accountAlias,
-		"witself:role":             *role,
-		"witself:channel":          *channel,
-		"witself:k8sVersion":       *k8sVersion,
-		"witself:argocd":           fmt.Sprintf("%t", *argocd),
-		"witself:gitopsRepo":       *gitopsRepo,
-		"witself:gitopsPath":       *gitopsPath,
-		"witself:gitopsValuesPath": *gitopsValuesPath,
-		"witself:gitopsRevision":   *gitopsRevision,
+		"witself:cloud":              *cloud,
+		"witself:profile":            *profile,
+		"witself:deletionProtection": fmt.Sprintf("%t", deletionProtection),
+		"witself:accountAlias":       *accountAlias,
+		"witself:role":               *role,
+		"witself:channel":            *channel,
+		"witself:k8sVersion":         *k8sVersion,
+		"witself:argocd":             fmt.Sprintf("%t", *argocd),
+		"witself:gitopsRepo":         *gitopsRepo,
+		"witself:gitopsPath":         *gitopsPath,
+		"witself:gitopsValuesPath":   *gitopsValuesPath,
+		"witself:gitopsRevision":     *gitopsRevision,
 	}
 	if *cloud != "civo" {
 		stackConfig["witself:cidr"] = *cidr
@@ -909,7 +916,7 @@ func run(args []string) error {
 	switch cmd {
 	case "up":
 		sink.start(cellName, "pulumi.up", "")
-		_, err = stack.Up(ctx, optup.ProgressStreams(os.Stdout))
+		_, err = upWithDeletionProtection(ctx, &stack, cellName, deletionProtection, os.Stdout)
 		if err != nil {
 			sink.errPhase(cellName, "pulumi.up", err)
 		} else {
@@ -953,34 +960,36 @@ func run(args []string) error {
 		}
 	case "preview":
 		sink.start(cellName, "pulumi.preview", "")
-		_, err = stack.Preview(ctx, optpreview.ProgressStreams(os.Stdout))
+		_, err = previewWithDeletionProtection(ctx, &stack, cellName, deletionProtection, optpreview.ProgressStreams(os.Stdout))
 		if err != nil {
 			sink.errPhase(cellName, "pulumi.preview", err)
 		} else {
 			sink.end(cellName, "pulumi.preview", "")
 		}
 	case "destroy":
-		if *controlPlane != "" {
-			sink.start(cellName, "fleet.remove", "")
-			// Fleet removal is a pre-step: drain first (placement stops), then
-			// remove — refusing while accounts live on the cell unless the
-			// operator explicitly acknowledges their destruction.
-			if err := removeCell(ctx, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts); err != nil {
-				sink.errPhase(cellName, "fleet.remove", err)
-				return err
+		err = runDestroyAfterUnprotect(ctx, &stack, cellName, deletionProtection, func() error {
+			if *controlPlane != "" {
+				sink.start(cellName, "fleet.remove", "")
+				// Fleet removal is a pre-step: drain first (placement stops), then
+				// remove — refusing while accounts live on the cell unless the
+				// operator explicitly acknowledges their destruction.
+				if err := removeCell(ctx, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts); err != nil {
+					sink.errPhase(cellName, "fleet.remove", err)
+					return err
+				}
+				sink.end(cellName, "fleet.remove", "")
 			}
-			sink.end(cellName, "fleet.remove", "")
-		}
-		sink.start(cellName, "pulumi.destroy", "")
-		_, err = stack.Destroy(ctx, optdestroy.ProgressStreams(os.Stdout))
-		if err != nil {
-			sink.errPhase(cellName, "pulumi.destroy", err)
-		} else {
+			return nil
+		}, func() error {
+			sink.start(cellName, "pulumi.destroy", "")
+			_, destroyErr := stack.Destroy(ctx, optdestroy.ProgressStreams(os.Stdout))
+			if destroyErr != nil {
+				sink.errPhase(cellName, "pulumi.destroy", destroyErr)
+				return destroyErr
+			}
 			sink.end(cellName, "pulumi.destroy", "")
-		}
-		if err == nil {
-			err = verifyPulumiDestroyEmpty(ctx, stack)
-		}
+			return verifyPulumiDestroyEmpty(ctx, stack)
+		})
 	case "refresh":
 		_, err = stack.Refresh(ctx)
 	case "outputs":

@@ -44,19 +44,12 @@ func provisionAWSDBSecret(ctx *pulumi.Context, c awsCell, db *rds.Instance, pw *
 		return string(b), err
 	}).(pulumi.StringOutput)
 
-	// Dev cells force-delete the secret on destroy (no recovery window) so a
-	// teardown leaves nothing billed; prod keeps the default 30-day recovery.
-	recovery := 0
-	if c.profile == "prod" {
-		recovery = 30
-	}
-
 	secret, err := secretsmanager.NewSecret(ctx, "witself-db", &secretsmanager.SecretArgs{
 		Name:                 pulumi.String(dbSecretName(c)),
 		Description:          pulumi.String("Witself cell Postgres connection (managed by witself-infra)"),
-		RecoveryWindowInDays: pulumi.Int(recovery),
+		RecoveryWindowInDays: pulumi.Int(awsSecretRecoveryDays(c)),
 		Tags:                 resourceTags(dbSecretName(c), "database"),
-	}, pulumi.Provider(prov))
+	}, pulumi.Provider(prov), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return err
 	}
@@ -103,20 +96,12 @@ func provisionAWSBootstrapSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 		return string(b), err
 	}).(pulumi.StringOutput)
 
-	// Dev cells force-delete the secret on destroy (no recovery window) so a
-	// teardown leaves no bootstrap material behind; prod keeps the default
-	// recovery window.
-	recovery := 0
-	if c.profile == "prod" {
-		recovery = 30
-	}
-
 	bsecret, err := secretsmanager.NewSecret(ctx, "witself-bootstrap-token", &secretsmanager.SecretArgs{
 		Name:                 pulumi.String(bootstrapSecretName(c)),
 		Description:          pulumi.String("Witself first-operator bootstrap token (managed by witself-infra)"),
-		RecoveryWindowInDays: pulumi.Int(recovery),
+		RecoveryWindowInDays: pulumi.Int(awsSecretRecoveryDays(c)),
 		Tags:                 resourceTags(bootstrapSecretName(c), "bootstrap"),
-	}, pulumi.Provider(prov))
+	}, pulumi.Provider(prov), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return err
 	}
@@ -145,17 +130,12 @@ func provisionAWSProvisionSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 		return err
 	}
 
-	recovery := 0
-	if c.profile == "prod" {
-		recovery = 30
-	}
-
 	psecret, err := secretsmanager.NewSecret(ctx, "witself-provision-token", &secretsmanager.SecretArgs{
 		Name:                 pulumi.String(provisionSecretName(c)),
 		Description:          pulumi.String("Witself cell provisioning and backup tokens (managed by witself-infra)"),
-		RecoveryWindowInDays: pulumi.Int(recovery),
+		RecoveryWindowInDays: pulumi.Int(awsSecretRecoveryDays(c)),
 		Tags:                 resourceTags(provisionSecretName(c), "provision"),
-	}, pulumi.Provider(prov))
+	}, pulumi.Provider(prov), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return err
 	}
@@ -171,4 +151,14 @@ func provisionAWSProvisionSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 	ctx.Export("provisionToken", pulumi.ToSecret(credentials.provisionToken))
 	ctx.Export("backupToken", pulumi.ToSecret(credentials.backupToken))
 	return nil
+}
+
+// awsSecretRecoveryDays retains the existing profile policy when unprotected.
+// Zero makes the provider send ForceDeleteWithoutRecovery; protected secrets
+// always use AWS's maximum recovery window instead.
+func awsSecretRecoveryDays(c awsCell) int {
+	if c.deletionProtection || c.profile == "prod" {
+		return 30
+	}
+	return 0
 }

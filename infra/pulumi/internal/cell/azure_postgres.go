@@ -3,6 +3,7 @@ package cell
 import (
 	"strings"
 
+	authorization "github.com/pulumi/pulumi-azure-native-sdk/authorization/v3"
 	dbforpostgresql "github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v3"
 	privatedns "github.com/pulumi/pulumi-azure-native-sdk/privatedns/v3"
 	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
@@ -132,7 +133,7 @@ func provisionAzurePostgres(ctx *pulumi.Context, c azureCell, net *azureNetwork)
 			Type:          pulumi.String("Premium_LRS"),
 		},
 		Tags: azureResourceTags(c, rname(c.name, "db"), "database"),
-	}, pulumi.DependsOn([]pulumi.Resource{zoneLink}), pulumi.DeleteBeforeReplace(true))
+	}, pulumi.DependsOn([]pulumi.Resource{zoneLink}), pulumi.DeleteBeforeReplace(true), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
 	}
@@ -141,9 +142,28 @@ func provisionAzurePostgres(ctx *pulumi.Context, c azureCell, net *azureNetwork)
 		ResourceGroupName: net.resourceGroupName,
 		ServerName:        server.Name,
 		DatabaseName:      pulumi.String(dbName),
-	}, pulumi.DependsOn([]pulumi.Resource{server}))
+	}, pulumi.DependsOn([]pulumi.Resource{server}), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
+	}
+
+	if c.deletionProtection {
+		// A server-scoped ARM lock also prevents deleting its databases and
+		// enclosing resource group. Keep the lock itself unprotected so the
+		// separate unprotect up can remove it before destroy.
+		if _, err := authorization.NewManagementLockAtResourceLevel(ctx, "witself-db-deletion-protection", &authorization.ManagementLockAtResourceLevelArgs{
+			ApiVersion:                pulumi.String("2016-09-01"),
+			Level:                     pulumi.String("CanNotDelete"),
+			LockName:                  pulumi.String("witself-deletion-protection"),
+			Notes:                     pulumi.String("Managed by witself-infra. Set deletion_protection: false on this cell and apply a separate up before destroy."),
+			ParentResourcePath:        pulumi.String(""),
+			ResourceGroupName:         net.resourceGroupName,
+			ResourceName:              server.Name,
+			ResourceProviderNamespace: pulumi.String("Microsoft.DBforPostgreSQL"),
+			ResourceType:              pulumi.String("flexibleServers"),
+		}, pulumi.DependsOn([]pulumi.Resource{database})); err != nil {
+			return nil, err
+		}
 	}
 
 	dsn := pulumi.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=require", dbUser, pw.Result, server.FullyQualifiedDomainName, dbName)
