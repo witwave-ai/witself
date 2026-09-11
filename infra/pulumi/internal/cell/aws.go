@@ -151,7 +151,7 @@ func provisionAWS(ctx *pulumi.Context, c awsCell) error {
 	}
 
 	// Convenience DSN; secret because it embeds the password.
-	dsn := pulumi.All(db.Endpoint, pw.Result).ApplyT(func(a []interface{}) string {
+	dsn := pulumi.All(db.Endpoint, pw.Result).ApplyT(func(a []any) string {
 		return fmt.Sprintf("postgres://witself:%s@%s/witself?sslmode=require", a[1], a[0])
 	}).(pulumi.StringOutput)
 

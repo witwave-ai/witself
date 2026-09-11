@@ -31,9 +31,9 @@ func provisionSecretName(c awsCell) string { return c.name + "/provision/token" 
 // cluster. The value is a JSON object so an ExternalSecret can pull individual
 // keys.
 func provisionAWSDBSecret(ctx *pulumi.Context, c awsCell, db *rds.Instance, pw *random.RandomPassword, prov *aws.Provider) error {
-	payload := pulumi.All(db.Address, db.Port, pw.Result).ApplyT(func(a []interface{}) (string, error) {
+	payload := pulumi.All(db.Address, db.Port, pw.Result).ApplyT(func(a []any) (string, error) {
 		host, port, password := a[0].(string), a[1].(int), a[2].(string)
-		b, err := json.Marshal(map[string]interface{}{
+		b, err := json.Marshal(map[string]any{
 			"host":     host,
 			"port":     port,
 			"username": "witself",
