@@ -23,9 +23,12 @@ The current credential boundaries are:
 | Provision/service credential | Separately configured cell control-plane authority. It is not an `admin` value accepted by ordinary operator/agent authentication. |
 
 Evidence: `internal/store/auth.go:43-75,102-173,222-278`,
-`internal/server/server.go:3312-3400,4107-4125`. Curator credentials require a
+`internal/server/server.go` `requireOperator` (line 3260),
+`requireOperatorAnyStatus` (line 3276), `requireDomainPrincipal` (line 3303),
+`requireDomainPrincipalAnyProfile` (line 3316), and
+`legacyProvisionAccountHandler` (line 4108). Curator credentials require a
 display name and a positive TTL no greater than 24 hours
-(`internal/server/server.go:6453-6500`).
+(`internal/server/server.go` `createCuratorTokenHandler` (line 6446)).
 
 Account roles are distinct from token kinds: newly created non-root operators
 receive `account_operator`; the root operator resolves to `account_owner`.
@@ -41,7 +44,8 @@ Facts and narrative memories use the authenticated agent as owner. Fact reads
 and writes require an agent token, and fact lookup includes account, realm, and
 owner-agent predicates. Memory get/list likewise require an agent principal and
 filter to its account, realm, and agent-owned records
-(`internal/server/fact.go:219-224,291-296`,
+(`internal/server/fact.go` `setFactHandler` (line 219) and
+`factsReadHandler` (line 285),
 `internal/store/fact.go:460-462`, `internal/store/memory.go:459-481,1200-1204`).
 
 On the direct fact and memory routes, an operator credential does not confer
@@ -49,8 +53,9 @@ access to any agent's facts or narrative memories; those handlers reject
 operator principals. This is a route-level restriction, not a data-access
 boundary: the whole-account export route (`GET /v1/export`) accepts an
 `account_operator` bearer token through `requireOperatorAnyStatus`
-(`internal/server/export_self.go:45`), and the archive it streams contains every
-agent's fact assertion values and memory version contents, including records
+(`internal/server/export_self.go` `accountSelfExportHandler` (line 45)), and the
+archive it streams contains every agent's fact assertion values and memory
+version contents, including records
 marked sensitive (`internal/store/export.go:956-979,1186-1213`). Treat an
 operator token as able to read the account's complete content through export.
 The account-wide transcript audit-read is likewise a separate operator
@@ -58,7 +63,8 @@ permission: operators may list/read account transcripts; agents see their own
 (`internal/store/transcript.go:410-425,448-467`).
 
 The secret vault also requires a full agent principal; this document does not
-grant operator or group access to it (`internal/server/secret.go:467-476`).
+grant operator or group access to it
+(`internal/server/secret.go` `secretAgentHandler` (line 467)).
 The client-custodied ciphertext boundary is recorded in the
 [API contract amendment](api-contract.md): the backend never decrypts sealed
 field packages.
@@ -73,8 +79,10 @@ responses are flat `witself.v0` objects; do not wrap them in `ok`/`data`.
 [Capability discovery](api-contract.md#capability-discovery) is public and
 returns `principal: null`. The current `features.policies` and `features.groups`
 entries each contain `{"supported":false,"reason":"not_implemented"}`
-(`internal/server/server.go:3130-3153,3213-3218,3247-3248`). Capability discovery
-does not authenticate a caller or grant data access.
+(`internal/server/capabilities.go` `configuredCapabilities` (lines 82-83);
+`internal/server/server.go` `apiMux` (line 2389), `feature` (line 3104),
+`capabilities` (line 3120), and `capabilitiesHandler` (line 3185)). Capability
+discovery does not authenticate a caller or grant data access.
 
 ## Target access-policy work
 

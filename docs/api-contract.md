@@ -103,10 +103,13 @@ These are account roles, not implemented per-realm access-policy memberships.
 Provision/service authority uses separately configured cell handlers, not a
 third ordinary `admin` principal kind. For example, account provisioning
 compares the bearer value with the configured provision credential rather than
-accepting an operator/agent token (`internal/server/server.go:4107-4125`).
+accepting an operator/agent token
+(`internal/server/server.go` `legacyProvisionAccountHandler` (line 4108)).
 Ordinary operator/domain wrappers require an active account. Narrow
 status/recovery/safety endpoints explicitly use the any-status operator wrapper
-(`internal/server/server.go:3312-3400`).
+(`internal/server/server.go` `requireOperator` (line 3260),
+`requireOperatorAnyStatus` (line 3276), `requireDomainPrincipal` (line 3303),
+and `requireDomainPrincipalAnyProfile` (line 3316)).
 
 The implemented authentication shapes are flat JSON objects, with no `ok`/`data`
 wrapper:
@@ -121,10 +124,11 @@ identity response is present only when the role lookup is configured; the
 example shows an owner, and non-root operators report their stored role.
 `whoami` requires an active account and an operator credential; an agent token
 does not turn it into an agent identity endpoint. Evidence:
-`internal/server/server.go:2421,2513-2515,3077-3103,6145-6174`,
+`internal/server/server.go` `apiMux` (lines 2391, 2483-2485),
+`bootstrapLoginHandler` (line 3053), and `whoamiHandler` (line 6143),
 `internal/store/auth.go:102-173,199-219`. Refusals from these handlers use the
 flat `{"schema_version":"witself.v0","error":"<message>"}` shape
-(`internal/server/server.go:3107-3113`).
+(`internal/server/server.go` `writeJSONError` (line 3081)).
 
 `POST /v1/agents/{agent_id}/curator-tokens` requires an operator credential and
 accepts `{"access_profile":"curator-preview","display_name":"<label>","ttl":"1h"}`.
@@ -132,8 +136,9 @@ The alternate profile is `curator-apply`; display name is required and TTL must
 be positive and at most `24h`. Unknown fields are rejected. The flat success
 object contains `schema_version`, `agent_token`, `token_id`, `agent_id`,
 `agent_name`, `access_profile`, `display_name`, and `expires_at`
-(`internal/server/server.go:6453-6528`). Ordinary domain routes reject both
-restricted profiles; the specific curation permissions are described below.
+(`internal/server/server.go` `createCuratorTokenHandler` (line 6446)). Ordinary
+domain routes reject both restricted profiles; the specific curation permissions
+are described below.
 
 Browser/device-code login sessions, per-realm operator role grants, declarative
 policy decisions, and group principal/owner targeting remain targets. They
@@ -417,8 +422,10 @@ Capability results should include:
 
 The current `features.policies` and `features.groups` values are each exactly
 `{"supported":false,"reason":"not_implemented"}`
-(`internal/server/server.go:3130-3153,3213-3218,3247-3248`). They do not advertise
-a policy-test or group-management API. Cross-agent fact/memory authorization
+(`internal/server/capabilities.go` `configuredCapabilities` (lines 82-83);
+`internal/server/server.go` `apiMux` (line 2389), `feature` (line 3104),
+`capabilities` (line 3120), and `capabilitiesHandler` (line 3185)). They do not
+advertise a policy-test or group-management API. Cross-agent fact/memory authorization
 remains target work under `access-policy-contract-reconciliation`.
 
 Examples of feature flags:
@@ -1247,7 +1254,7 @@ Notes on specific actions and workflows:
   `secret.archived`/`secret.restored`/`secret.deleted`.
 - `:grant` and `:revoke` cross-agent/operator secret access remain target-only.
   The current vault wrapper requires a full agent principal
-  (`internal/server/secret.go:467-476`); the target open-plane
+  (`internal/server/secret.go` `secretAgentHandler` (line 467)); the target open-plane
   [access policy](access-policy.md) does not grant secret access.
 - `:generate` (on `/v1/password`) is a stateless generator: it returns a freshly
   generated password once and creates no resource. It is a `POST` because the

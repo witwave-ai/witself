@@ -10,7 +10,9 @@ The server advertises `features.groups` and `features.policies` as
 `GET /v1/capabilities` response. The response has `principal: null`; it describes
 feature availability, not the caller's permissions. These wire fields are pinned
 in [Capability discovery](api-contract.md#capability-discovery) and implemented
-in `internal/server/server.go:3130-3153,3213-3218,3247-3248`.
+in `internal/server/capabilities.go` `configuredCapabilities` (lines 82-83);
+`internal/server/server.go` `apiMux` (line 2389), `feature` (line 3104),
+`capabilities` (line 3120), and `capabilitiesHandler` (line 3185).
 
 There are no registered `/v1/groups` or `/v1/policies` handlers in
 `internal/server/server.go`, and the CLI dispatch has no `group` or `policy`
