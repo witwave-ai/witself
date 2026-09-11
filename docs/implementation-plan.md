@@ -772,9 +772,12 @@ Deliverables:
   `client_side_decrypt`/`server_side_decrypt` support.
 - KEK rotation path (`key.rotated`) as an explicit, audited maintenance
   operation (not an automatic side effect).
-- Metrics for reveals, TOTP codes, and KMS operations
-  (`witself_secret_reveals_total`, `witself_totp_*`,
-  `witself_kms_operations_total`), with no secret material in labels.
+- Current ADR 0003 metrics: `witself_secret_material_deliveries_total`,
+  `witself_vault_lifecycle_operations_total`, secret-limit rejections, and
+  cell-wide posture gauges. These observe encrypted material delivery and
+  vault lifecycle calls; they cannot observe client decrypt/TOTP success and
+  include no agent-secret KMS operations or secret material in labels. See
+  [Sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos).
 - Audit events: `secret.reveal`, `totp.code`, `key.rotated`, each carrying the
   `server_side_decrypt` flag when the value crossed the server boundary.
 

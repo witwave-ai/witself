@@ -41,6 +41,8 @@ type runtimeMetrics struct {
 	curationOperations    map[operationMetricLabels]uint64
 	planLimitRejects      map[limitMetricLabels]uint64
 	secretLimitRejects    map[limitMetricLabels]uint64
+	secretDeliveries      map[secretDeliveryMetricLabels]uint64
+	vaultLifecycleOps     map[vaultLifecycleMetricLabels]uint64
 	memoryLimitRejects    map[limitMetricLabels]uint64
 	factLimitRejects      map[limitMetricLabels]uint64
 	messageRateRejects    map[messageRateMetricLabels]uint64
@@ -48,6 +50,14 @@ type runtimeMetrics struct {
 	agentEmailIngests     map[string]uint64
 	agentEmailRateRejects map[agentEmailRateMetricLabels]uint64
 	auditAppends          map[auditAppendMetricLabels]uint64
+}
+
+type secretDeliveryMetricLabels struct {
+	FieldKind, Result string
+}
+
+type vaultLifecycleMetricLabels struct {
+	Flow, Operation, Result string
 }
 
 type httpMetricLabels struct {
@@ -154,6 +164,27 @@ var selfDigestLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
 var hitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100}
 
 func newRuntimeMetrics() *runtimeMetrics {
+	// Emit every supported sealed-plane series even on an idle scrape. Alerts
+	// must still handle activity that occurs before Prometheus first scrapes.
+	secretDeliveries := make(map[secretDeliveryMetricLabels]uint64)
+	for _, fieldKind := range []string{"password", "api_key", "token", "totp", "other"} {
+		secretDeliveries[secretDeliveryMetricLabels{FieldKind: fieldKind, Result: "success"}] = 0
+	}
+	for _, result := range []string{"conflict", "forbidden", "not_found", "invalid", "error"} {
+		secretDeliveries[secretDeliveryMetricLabels{FieldKind: "unknown", Result: result}] = 0
+	}
+	vaultLifecycleOps := make(map[vaultLifecycleMetricLabels]uint64)
+	for flow, operations := range map[string][]string{
+		"registration": {"register"},
+		"enrollment":   {"create", "approve", "receive", "consume", "cancel"},
+		"rotation":     {"start", "stage", "commit", "cancel"},
+	} {
+		for _, operation := range operations {
+			for _, result := range []string{"success", "conflict", "forbidden", "not_found", "invalid", "error"} {
+				vaultLifecycleOps[vaultLifecycleMetricLabels{Flow: flow, Operation: operation, Result: result}] = 0
+			}
+		}
+	}
 	metrics := &runtimeMetrics{
 		httpRequests:          make(map[httpMetricLabels]uint64),
 		httpLatency:           make(map[httpDurationLabels]*metricHistogram),
@@ -169,6 +200,8 @@ func newRuntimeMetrics() *runtimeMetrics {
 		curationOperations:    make(map[operationMetricLabels]uint64),
 		planLimitRejects:      make(map[limitMetricLabels]uint64),
 		secretLimitRejects:    make(map[limitMetricLabels]uint64),
+		secretDeliveries:      secretDeliveries,
+		vaultLifecycleOps:     vaultLifecycleOps,
 		memoryLimitRejects:    make(map[limitMetricLabels]uint64),
 		factLimitRejects:      make(map[limitMetricLabels]uint64),
 		messageRateRejects:    make(map[messageRateMetricLabels]uint64),
@@ -390,6 +423,92 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 				}]++
 				m.mu.Unlock()
 			}
+			return result, err
+		}
+	}
+
+	if operation := cfg.AccessSecretField; operation != nil {
+		cfg.AccessSecretField = func(ctx context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
+			result, err := operation(ctx, p, secretID, fieldID, in)
+			// Failed authorization may not have resolved a field. Never infer
+			// field identity or local decryption from a failed delivery.
+			fieldKind := "unknown"
+			if err == nil {
+				fieldKind = metricSecretFieldKind(result.FieldKind)
+			}
+			m.mu.Lock()
+			m.secretDeliveries[secretDeliveryMetricLabels{FieldKind: fieldKind, Result: metricSecretResult(err)}]++
+			m.mu.Unlock()
+			return result, err
+		}
+	}
+	if operation := cfg.RegisterVaultKey; operation != nil {
+		cfg.RegisterVaultKey = func(ctx context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("registration", "register", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CreateVaultKeyEnrollment; operation != nil {
+		cfg.CreateVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("enrollment", "create", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ApproveVaultKeyEnrollment; operation != nil {
+		cfg.ApproveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in ApproveVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "approve", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ReceiveVaultKeyEnrollment; operation != nil {
+		cfg.ReceiveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, targetLocationID string) (VaultKeyEnrollmentTransfer, error) {
+			result, err := operation(ctx, p, enrollmentID, targetLocationID)
+			m.observeVaultLifecycleOperation("enrollment", "receive", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ConsumeVaultKeyEnrollment; operation != nil {
+		cfg.ConsumeVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in ConsumeVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "consume", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CancelVaultKeyEnrollment; operation != nil {
+		cfg.CancelVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in CancelVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "cancel", err)
+			return result, err
+		}
+	}
+	if operation := cfg.StartVaultKeyRotation; operation != nil {
+		cfg.StartVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, in StartVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("rotation", "start", err)
+			return result, err
+		}
+	}
+	if operation := cfg.StageVaultKeyRotation; operation != nil {
+		cfg.StageVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in StageVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "stage", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CommitVaultKeyRotation; operation != nil {
+		cfg.CommitVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in CommitVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "commit", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CancelVaultKeyRotation; operation != nil {
+		cfg.CancelVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in CancelVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "cancel", err)
 			return result, err
 		}
 	}
@@ -861,6 +980,43 @@ func writeSupportSLOPrometheus(
 	writeIntGauge(w, "witself_support_oldest_unanswered_seconds", "Age of the oldest ticket awaiting its first response.", status.OldestUnansweredSeconds)
 }
 
+// SealedPlanePostureMetrics contains only cell-wide counts and ages; no tenant identifiers.
+type SealedPlanePostureMetrics struct {
+	OpenRotations                  int64
+	OldestOpenRotationSeconds      int64
+	PendingEnrollments             int64
+	OldestPendingEnrollmentSeconds int64
+	MaxAgentDeliveries15m          int64
+}
+
+const sealedPlanePostureMetricsTimeout = 2 * time.Second
+
+// writeSealedPlanePosturePrometheus omits posture values if the projection is
+// unavailable, so a failed read cannot look like a healthy empty cell.
+func writeSealedPlanePosturePrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (SealedPlanePostureMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, sealedPlanePostureMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || status.OpenRotations < 0 || status.OldestOpenRotationSeconds < 0 ||
+		status.PendingEnrollments < 0 || status.OldestPendingEnrollmentSeconds < 0 || status.MaxAgentDeliveries15m < 0 {
+		writeIntGauge(w, "witself_sealed_plane_posture_metrics_up", "1 when sealed-plane posture was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_sealed_plane_posture_metrics_up", "1 when sealed-plane posture was read successfully.", 1)
+	writeIntGauge(w, "witself_vault_open_rotations", "Open vault key rotations in this cell.", status.OpenRotations)
+	writeIntGauge(w, "witself_vault_oldest_open_rotation_seconds", "Age of the oldest open vault key rotation in this cell.", status.OldestOpenRotationSeconds)
+	writeIntGauge(w, "witself_vault_pending_enrollments", "Unexpired pending or approved vault key enrollments in this cell.", status.PendingEnrollments)
+	writeIntGauge(w, "witself_vault_oldest_pending_enrollment_seconds", "Age of the oldest unexpired pending or approved vault key enrollment in this cell.", status.OldestPendingEnrollmentSeconds)
+	writeIntGauge(w, "witself_secret_material_max_agent_deliveries_15m", "Maximum secret-read usage-event count for one agent over the last 15 minutes in this cell.", status.MaxAgentDeliveries15m)
+}
+
 // Each live collector uses its own bounded read and omits measurements on
 // failure, so an unavailable projection cannot appear as a healthy zero.
 func writeIdentityCapacityPrometheus(
@@ -972,6 +1128,8 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		curationOperations:    maps.Clone(m.curationOperations),
 		planLimitRejects:      maps.Clone(m.planLimitRejects),
 		secretLimitRejects:    maps.Clone(m.secretLimitRejects),
+		secretDeliveries:      maps.Clone(m.secretDeliveries),
+		vaultLifecycleOps:     maps.Clone(m.vaultLifecycleOps),
 		memoryLimitRejects:    maps.Clone(m.memoryLimitRejects),
 		factLimitRejects:      maps.Clone(m.factLimitRejects),
 		messageRateRejects:    maps.Clone(m.messageRateRejects),
@@ -1046,6 +1204,12 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_secret_material_deliveries_total", "Ciphertext delivery calls by bounded field kind and result; does not observe client decryption.", m.secretDeliveries, func(key secretDeliveryMetricLabels) string {
+		return labels("field_kind", key.FieldKind, "result", key.Result)
+	})
+	writeCounterMap(w, "witself_vault_lifecycle_operations_total", "Vault lifecycle calls by bounded flow, operation, and result; idempotent replays count as calls.", m.vaultLifecycleOps, func(key vaultLifecycleMetricLabels) string {
+		return labels("flow", key.Flow, "operation", key.Operation, "result", key.Result)
 	})
 	writeCounterMap(w, "witself_memory_limit_rejections_total", "Net-positive active-memory mutation refusals by bounded limit dimension and operation.", m.memoryLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
@@ -1157,6 +1321,39 @@ func metricRoute(pattern string) string {
 		return pattern
 	}
 	return "unmatched"
+}
+
+func (m *runtimeMetrics) observeVaultLifecycleOperation(flow, operation string, err error) {
+	m.mu.Lock()
+	m.vaultLifecycleOps[vaultLifecycleMetricLabels{Flow: flow, Operation: operation, Result: metricSecretResult(err)}]++
+	m.mu.Unlock()
+}
+
+func metricSecretResult(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict),
+		errors.Is(err, ErrSecretVaultKeyMismatch), errors.Is(err, ErrSecretVaultKeyUnavailable):
+		return "conflict"
+	case errors.Is(err, ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrBadInput):
+		return "invalid"
+	default:
+		return "error"
+	}
+}
+
+func metricSecretFieldKind(kind string) string {
+	switch kind {
+	case "password", "api_key", "token", "totp":
+		return kind
+	default:
+		return "other"
+	}
 }
 
 func metricResult(ok bool) string {

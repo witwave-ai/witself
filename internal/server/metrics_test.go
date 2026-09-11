@@ -213,7 +213,7 @@ func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil).ServeHTTP(
+			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil, nil).ServeHTTP(
 				response,
 				httptest.NewRequest(http.MethodGet, "/metrics", nil),
 			)
@@ -783,7 +783,7 @@ func metricsMuxForCellStorageTest(
 	metrics *runtimeMetrics,
 	read func(context.Context) (AgentEmailCellStorageMetrics, error),
 ) http.Handler {
-	return metricsMuxFor(metrics, read, nil, nil, nil)
+	return metricsMuxFor(metrics, read, nil, nil, nil, nil)
 }
 
 // The SLO gauges must separate "nothing waiting" from "read failed": a broken
@@ -792,7 +792,7 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	ok := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 90061}, nil
-	}, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := ok.Body.String()
 	for _, want := range []string{
 		"witself_support_slo_metrics_up 1",
@@ -806,7 +806,7 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	broken := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{}, errors.New("db down with tenant detail")
-	}, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	b := broken.Body.String()
 	if !strings.Contains(b, "witself_support_slo_metrics_up 0") ||
 		strings.Contains(b, "witself_support_unanswered_tickets") ||
@@ -852,7 +852,7 @@ func TestIdentityCapacityMetricsAreValueFreeAndBounded(t *testing.T) {
 			AgentsPerRealm: IdentityCapacityDimensionMetrics{AccountsMeasured: 5, AccountsNearLimit: 1, AccountsAtLimit: 0, AccountsUnlimited: 2, MinHeadroomRatio: 0.1},
 			OperatorSeats:  IdentityCapacityDimensionMetrics{AccountsMeasured: 0, AccountsUnlimited: 7, MinHeadroomRatio: 1},
 		}, nil
-	}, nil).ServeHTTP(response, capacityMetricsRequest())
+	}, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 	if response.Code != http.StatusOK || reads != 1 {
 		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
 	}
@@ -893,7 +893,7 @@ func TestIdentityCapacityMetricsFailClosedWithoutErrorText(t *testing.T) {
 			metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
 				assertCapacityMetricsDeadline(ctx, t)
 				return IdentityCapacityMetrics{Realms: valid, AgentsPerRealm: valid, OperatorSeats: test.status}, test.err
-			}, nil).ServeHTTP(response, capacityMetricsRequest())
+			}, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 			assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_identity_capacity_")
 		})
 	}
@@ -906,7 +906,7 @@ func TestAuditAppendMetricsAreValueFreeAndBounded(t *testing.T) {
 		reads++
 		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, nil
-	}).ServeHTTP(response, capacityMetricsRequest())
+	}, nil).ServeHTTP(response, capacityMetricsRequest())
 	if response.Code != http.StatusOK || reads != 1 {
 		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
 	}
@@ -930,7 +930,7 @@ func TestAuditAppendMetricsFailClosedWithoutErrorText(t *testing.T) {
 	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
 		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, errors.New("database_capacity_error_canary account_capacity_private")
-	}).ServeHTTP(response, capacityMetricsRequest())
+	}, nil).ServeHTTP(response, capacityMetricsRequest())
 	assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_audit_append_")
 }
 
@@ -1019,5 +1019,265 @@ func TestRuntimeMetricsAuditAppendReasonsAreBounded(t *testing.T) {
 		if strings.Contains(output.String(), forbidden) {
 			t.Fatalf("audit metrics exposed %q", forbidden)
 		}
+	}
+}
+
+func TestRuntimeMetricsObserveSecretMaterialDeliveriesWithBoundedLabels(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	principal := DomainPrincipal{Kind: "agent", ID: "agent_sealed_private", AccountID: "account_sealed_private", RealmID: "realm_sealed_private", AgentName: "agent_name_sealed_private"}
+	var nextKind string
+	var nextErr error
+	calls := 0
+	cfg := metrics.instrumentConfig(Config{
+		AccessSecretField: func(ctx context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
+			calls++
+			if p != principal || secretID != "secret_sealed_private" || fieldID != "field_sealed_private" || in.IdempotencyKey != "request_sealed_private" {
+				t.Fatal("delivery wrapper changed operation arguments")
+			}
+			return SecretMaterial{SecretID: secretID, FieldID: fieldID, FieldName: "secret_name_sealed_private", FieldKind: nextKind, Ciphertext: []byte("ciphertext_sealed_private")}, nextErr
+		},
+	})
+	for _, kind := range []string{"password", "api_key", "token", "totp", "kind_sealed_private"} {
+		nextKind, nextErr = kind, nil
+		result, err := cfg.AccessSecretField(context.Background(), principal, "secret_sealed_private", "field_sealed_private", AccessSecretFieldRequest{IdempotencyKey: "request_sealed_private"})
+		if err != nil || result.FieldKind != kind || string(result.Ciphertext) != "ciphertext_sealed_private" {
+			t.Fatalf("delivery wrapper changed result: kind=%q err=%v", result.FieldKind, err)
+		}
+	}
+	for _, err := range []error{ErrNotFound, ErrForbidden, ErrConflict, ErrIdempotencyConflict, ErrSecretVaultKeyMismatch, ErrSecretVaultKeyUnavailable, ErrBadInput, errors.New("error_sealed_private")} {
+		nextKind, nextErr = "password", fmt.Errorf("wrapped: %w", err)
+		_, gotErr := cfg.AccessSecretField(context.Background(), principal, "secret_sealed_private", "field_sealed_private", AccessSecretFieldRequest{IdempotencyKey: "request_sealed_private"})
+		if gotErr != nextErr {
+			t.Fatal("delivery wrapper changed returned error")
+		}
+	}
+	if calls != 13 {
+		t.Fatalf("operation calls=%d want 13", calls)
+	}
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	assertMetricSamples(t, output.String(), "witself_secret_material_deliveries_total", map[string]string{
+		`witself_secret_material_deliveries_total{field_kind="password",result="success"}`:  "1",
+		`witself_secret_material_deliveries_total{field_kind="api_key",result="success"}`:   "1",
+		`witself_secret_material_deliveries_total{field_kind="token",result="success"}`:     "1",
+		`witself_secret_material_deliveries_total{field_kind="totp",result="success"}`:      "1",
+		`witself_secret_material_deliveries_total{field_kind="other",result="success"}`:     "1",
+		`witself_secret_material_deliveries_total{field_kind="unknown",result="not_found"}`: "1",
+		`witself_secret_material_deliveries_total{field_kind="unknown",result="forbidden"}`: "1",
+		`witself_secret_material_deliveries_total{field_kind="unknown",result="conflict"}`:  "4",
+		`witself_secret_material_deliveries_total{field_kind="unknown",result="invalid"}`:   "1",
+		`witself_secret_material_deliveries_total{field_kind="unknown",result="error"}`:     "1",
+	})
+	if strings.Contains(output.String(), "sealed_private") || strings.Contains(output.String(), "server_side_decrypt") {
+		t.Fatalf("delivery metrics leaked private material or obsolete decryption label:\n%s", output.String())
+	}
+}
+
+func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
+	principal := DomainPrincipal{Kind: "agent", ID: "agent_sealed_private"}
+	for _, test := range []struct {
+		flow, operation string
+		configure       func(*Config, error) func(Config) error
+	}{
+		{"registration", "register", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.RegisterVaultKey = func(ctx context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
+				if p != principal {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyMutationResult{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.RegisterVaultKey(context.Background(), principal, RegisterVaultKeyRequest{})
+				return err
+			}
+		}},
+		{"enrollment", "create", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.CreateVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+				if p != principal {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyEnrollment{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.CreateVaultKeyEnrollment(context.Background(), principal, CreateVaultKeyEnrollmentRequest{})
+				return err
+			}
+		}},
+		{"enrollment", "approve", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.ApproveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in ApproveVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyEnrollment{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.ApproveVaultKeyEnrollment(context.Background(), principal, "lifecycle_sealed_private", ApproveVaultKeyEnrollmentRequest{})
+				return err
+			}
+		}},
+		{"enrollment", "receive", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.ReceiveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, targetLocationID string) (VaultKeyEnrollmentTransfer, error) {
+				if p != principal || id != "lifecycle_sealed_private" || targetLocationID != "location_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyEnrollmentTransfer{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.ReceiveVaultKeyEnrollment(context.Background(), principal, "lifecycle_sealed_private", "location_sealed_private")
+				return err
+			}
+		}},
+		{"enrollment", "consume", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.ConsumeVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in ConsumeVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyEnrollment{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.ConsumeVaultKeyEnrollment(context.Background(), principal, "lifecycle_sealed_private", ConsumeVaultKeyEnrollmentRequest{})
+				return err
+			}
+		}},
+		{"enrollment", "cancel", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.CancelVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in CancelVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyEnrollment{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.CancelVaultKeyEnrollment(context.Background(), principal, "lifecycle_sealed_private", CancelVaultKeyEnrollmentRequest{})
+				return err
+			}
+		}},
+		{"rotation", "start", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.StartVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, in StartVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+				if p != principal {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyRotationMutationResult{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.StartVaultKeyRotation(context.Background(), principal, StartVaultKeyRotationRequest{})
+				return err
+			}
+		}},
+		{"rotation", "stage", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.StageVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in StageVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyRotationMutationResult{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.StageVaultKeyRotation(context.Background(), principal, "lifecycle_sealed_private", StageVaultKeyRotationRequest{})
+				return err
+			}
+		}},
+		{"rotation", "commit", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.CommitVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in CommitVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyRotationMutationResult{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.CommitVaultKeyRotation(context.Background(), principal, "lifecycle_sealed_private", CommitVaultKeyRotationRequest{})
+				return err
+			}
+		}},
+		{"rotation", "cancel", func(cfg *Config, nextErr error) func(Config) error {
+			cfg.CancelVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in CancelVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+				if p != principal || id != "lifecycle_sealed_private" {
+					t.Fatal("lifecycle wrapper changed arguments")
+				}
+				return VaultKeyRotationMutationResult{}, nextErr
+			}
+			return func(cfg Config) error {
+				_, err := cfg.CancelVaultKeyRotation(context.Background(), principal, "lifecycle_sealed_private", CancelVaultKeyRotationRequest{})
+				return err
+			}
+		}},
+	} {
+		t.Run(test.flow+"/"+test.operation, func(t *testing.T) {
+			metrics := newRuntimeMetrics()
+			for _, nextErr := range []error{nil, fmt.Errorf("wrapped: %w", ErrConflict), errors.New("error_sealed_private")} {
+				cfg := Config{}
+				invoke := test.configure(&cfg, nextErr)
+				if got := invoke(metrics.instrumentConfig(cfg)); got != nextErr {
+					t.Fatal("lifecycle wrapper changed returned error")
+				}
+			}
+			var output bytes.Buffer
+			metrics.writePrometheus(&output)
+			want := zeroVaultLifecycleSamples()
+			for _, result := range []string{"success", "conflict", "error"} {
+				want[`witself_vault_lifecycle_operations_total{flow="`+test.flow+`",operation="`+test.operation+`",result="`+result+`"}`] = "1"
+			}
+			assertMetricSamples(t, output.String(), "witself_vault_lifecycle_operations_total", want)
+			if strings.Contains(output.String(), "sealed_private") {
+				t.Fatalf("lifecycle metrics leaked private data:\n%s", output.String())
+			}
+		})
+	}
+}
+
+func TestSealedPlanePostureMetricsRenderAndFailValueFree(t *testing.T) {
+	healthy := SealedPlanePostureMetrics{OpenRotations: 2, OldestOpenRotationSeconds: 90061, PendingEnrollments: 3, OldestPendingEnrollmentSeconds: 61, MaxAgentDeliveries15m: 121}
+	gaugeNames := []string{"witself_vault_open_rotations", "witself_vault_oldest_open_rotation_seconds", "witself_vault_pending_enrollments", "witself_vault_oldest_pending_enrollment_seconds", "witself_secret_material_max_agent_deliveries_15m"}
+	for _, test := range []struct {
+		name     string
+		status   SealedPlanePostureMetrics
+		err      error
+		disabled bool
+	}{
+		{name: "healthy", status: healthy},
+		{name: "zero"},
+		{name: "read error", status: healthy, err: errors.New("error_sealed_private")},
+		{name: "negative rotations", status: SealedPlanePostureMetrics{OpenRotations: -1}},
+		{name: "negative rotation age", status: SealedPlanePostureMetrics{OldestOpenRotationSeconds: -1}},
+		{name: "negative enrollments", status: SealedPlanePostureMetrics{PendingEnrollments: -1}},
+		{name: "negative enrollment age", status: SealedPlanePostureMetrics{OldestPendingEnrollmentSeconds: -1}},
+		{name: "negative volume", status: SealedPlanePostureMetrics{MaxAgentDeliveries15m: -1}},
+		{name: "nil reader", disabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			read := func(ctx context.Context) (SealedPlanePostureMetrics, error) {
+				reads++
+				assertCapacityMetricsDeadline(ctx, t)
+				return test.status, test.err
+			}
+			if test.disabled {
+				read = nil
+			}
+			response := httptest.NewRecorder()
+			metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, read).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics?agent=agent_sealed_private", nil))
+			if response.Code != http.StatusOK || (!test.disabled && reads != 1) || (test.disabled && reads != 0) {
+				t.Fatalf("response=%d reads=%d", response.Code, reads)
+			}
+			body := response.Body.String()
+			want := map[string]string{}
+			if !test.disabled {
+				want["witself_sealed_plane_posture_metrics_up"] = "0"
+				if test.name == "healthy" || test.name == "zero" {
+					want["witself_sealed_plane_posture_metrics_up"] = "1"
+					for i, value := range []int64{test.status.OpenRotations, test.status.OldestOpenRotationSeconds, test.status.PendingEnrollments, test.status.OldestPendingEnrollmentSeconds, test.status.MaxAgentDeliveries15m} {
+						want[gaugeNames[i]] = strconv.FormatInt(value, 10)
+					}
+				}
+			}
+			var samples strings.Builder
+			for line := range strings.SplitSeq(body, "\n") {
+				if strings.HasPrefix(line, "witself_sealed_plane_posture_") || (strings.HasPrefix(line, "witself_vault_") && !strings.HasPrefix(line, "witself_vault_lifecycle_")) || strings.HasPrefix(line, "witself_secret_material_max_agent_") {
+					samples.WriteString(line + "\n")
+				}
+			}
+			assertMetricSamples(t, samples.String(), "witself_", want)
+			if strings.Contains(body, "sealed_private") {
+				t.Fatalf("posture metrics leaked private data:\n%s", body)
+			}
+		})
 	}
 }

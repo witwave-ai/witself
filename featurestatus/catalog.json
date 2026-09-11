@@ -2240,13 +2240,17 @@
           ]
         },
         "observability": {
-          "state": "conditional",
-          "summary": "Value-free audit and lifecycle state exist and a tested external escalation path (PagerDuty plus dead-man) is live on the serving cell, but sealed-plane SLOs and anomaly alerts are still not defined or connected to it.",
+          "state": "pass",
+          "summary": "Value-free delivery/lifecycle metrics, cell posture gauges, sealed-plane SLOs, and five tested default-off alerts are implemented. Serving-cell activation requires the server release, series verification, then the alert values flip; source evidence does not claim live SLO attainment.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
-            "docs/launch-readiness.md",
+            ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/observability-and-operations.md",
-            "docs/sealed-plane-acceptance.md"
+            "docs/runbooks.md",
+            "internal/server/metrics.go",
+            "internal/server/metrics_test.go",
+            "internal/store/sealed_plane_posture.go",
+            "internal/store/sealed_plane_posture_integration_test.go"
           ]
         },
         "recovery": {
@@ -2292,12 +2296,6 @@
           "gate_ids": ["recovery", "rollout_canaries"],
           "summary": "Complete four-runtime reveal/TOTP recovery and multi-cloud archive/movement drills with sanitized evidence.",
           "ref": "docs/sealed-plane-acceptance.md"
-        },
-        {
-          "id": "sealed-operations-alerting",
-          "gate_ids": ["observability"],
-          "summary": "Define sealed-plane SLOs and add sealed-plane alert rules for enrollment, reveal, recovery, rotation, and anomaly signals; the tested external escalation path (PagerDuty plus dead-man) already exists.",
-          "ref": "docs/observability-and-operations.md"
         }
       ]
     },

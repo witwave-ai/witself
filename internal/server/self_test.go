@@ -1433,7 +1433,7 @@ func TestSelfDigestLoaderErrorMetricsAreValueFree(t *testing.T) {
 				t.Fatalf("self status = %d", response.Code)
 			}
 			metricResponse := httptest.NewRecorder()
-			metricsMuxFor(metrics, nil, nil, nil, nil).ServeHTTP(metricResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			metricsMuxFor(metrics, nil, nil, nil, nil, nil).ServeHTTP(metricResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			text := metricResponse.Body.String()
 			for _, want := range []string{
 				`witself_self_digest_reads_total{surface="session_hook",elided="false",result="error"} 1`,

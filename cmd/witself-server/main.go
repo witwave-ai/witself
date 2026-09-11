@@ -213,6 +213,19 @@ func serve() int {
 				OldestUnansweredSeconds: m.OldestUnansweredSeconds,
 			}, nil
 		}
+		cfg.ReadSealedPlanePostureMetrics = func(ctx context.Context) (server.SealedPlanePostureMetrics, error) {
+			m, err := st.ReadSealedPlanePostureMetrics(ctx)
+			if err != nil {
+				return server.SealedPlanePostureMetrics{}, err
+			}
+			return server.SealedPlanePostureMetrics{
+				OpenRotations:                  m.OpenRotations,
+				OldestOpenRotationSeconds:      m.OldestOpenRotationSeconds,
+				PendingEnrollments:             m.PendingEnrollments,
+				OldestPendingEnrollmentSeconds: m.OldestPendingEnrollmentSeconds,
+				MaxAgentDeliveries15m:          m.MaxAgentDeliveries15m,
+			}, nil
+		}
 		cfg.ReadAgentEmailCellStorageMetrics = func(
 			ctx context.Context,
 		) (server.AgentEmailCellStorageMetrics, error) {
