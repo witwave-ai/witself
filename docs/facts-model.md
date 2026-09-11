@@ -1,8 +1,8 @@
 # Witself Facts Model
 
-Status: core service implemented; advanced policy deferred. Reconciled with the
-CLI, fact routes, and store on 2026-09-04. The access-policy rock retains the open
-gate `advanced-fact-policy`; see [Resolve advanced fact policy](#resolve-advanced-fact-policy).
+Status: core service implemented; advanced fact policy documented. Reconciled with
+the CLI, fact routes, and store on 2026-09-11. Cross-agent and group fact access
+remain deferred to the [access-policy rock](access-policy.md).
 
 A current fact is one resolved assertion at a stable subject/predicate address
 inside the authenticated agent's account and realm. Exact lookup returns that
@@ -70,8 +70,10 @@ resolve to the canonical subject instead of creating another fact collection.
 Predicates are case-sensitive lowercase identifiers, optionally namespaced with
 `/`, for example `preferences/editor`. They start with a letter, use lowercase
 letters, digits, `_`, `-`, and `.`, allow at most eight non-empty path segments,
-and occupy at most 255 bytes. This is syntax validation, not a registry of
-approved predicate meanings. [Predicate validation](../internal/store/fact.go).
+and occupy at most 255 bytes. The server validates this syntax and declared
+cardinality only; there is no server-side predicate registry service. See
+[Predicate registry](#predicate-registry) and
+[`validFactPredicate`](../internal/store/fact.go).
 
 `value_type` has built-in validation for `string`, `number`, `boolean`, `list`,
 `object`, `json`, `date`, `datetime`, `url`, `email`, `address`, and `location`.
@@ -184,27 +186,124 @@ at 90 percent. [Capacity wire contract](api-contract.md#action-and-colon-routes)
 [set accounting](../internal/store/fact.go), and
 [candidate accounting](../internal/store/fact_candidate.go).
 
-## Resolve advanced fact policy
+## Conflict authority
 
-The following boundaries are reconciled; the unimplemented policies remain
-**explicitly deferred to the [access-policy rock](access-policy.md)** under
-**`advanced-fact-policy`**. This gate remains open and does not define a new
-permission or grant access.
-
-| Topic | Implemented today | Deferred target under `advanced-fact-policy` |
-| --- | --- | --- |
-| Conflict authority | Direct set resolves the new assertion. Proposal stores a separate `pending` or `conflict` candidate; explicit confirmation refuses if the resolved assertion changed since proposal. HTTP set rejects caller-claimed non-agent `source_kind`. | An authority hierarchy across self, operator, imports, inference, or competing agents; automatic conflict arbitration. Source and confidence metadata do not implement such a hierarchy. |
-| Predicate registries | Predicate syntax and built-in value-type validation; callers may use custom predicate names and valid custom type identifiers. | A governed registry assigning predicate meanings, ownership, cardinality rules, or authority. The built-in type table is not that registry. |
-| Reminders | `fact upcoming` / `witself.fact.upcoming` project resolved dates and datetimes in a bounded window. Annual recurrence must be explicit and only applies to dates; February 29 is skipped in non-leap years. Sensitive occurrences are omitted unless requested. | Reminder scheduling, notification delivery, or waking an agent. The temporal projection does not provide those workflows. |
-| Cross-agent facts | Fact, subject, candidate, and occurrence operations require an agent principal and are bound to its account, realm, and owner-agent id. A subject describing another agent is still owned by the caller. | Reading, contributing to, curating, or deleting another agent's collection; group-owned facts and the draft per-verb access rules. No `owner` argument or policy grant enables those operations today. |
-
-Evidence: [direct set and scoped reads](../internal/store/fact.go),
-[candidate conflict fencing](../internal/store/fact_candidate.go),
-[agent-only HTTP handlers](../internal/server/fact.go),
-[subject handlers](../internal/server/fact_subject.go),
-[value types](../internal/store/fact_value_type.go),
-[temporal projection](../internal/store/fact_temporal.go), and
+A canonical Witself fact outranks any narrative memory or transcript. Client
+routing treats recalled memories and transcripts as advisory input, never as
+authority over a stored fact address.
+[Agent memory routing](agent-memory-routing.md) and
 [MCP fact descriptions](../cmd/witself/mcp.go).
+
+Within facts, the newest confirmed assertion at a subject/predicate address is
+authoritative. Direct `witself.fact.set` and `POST /v1/facts` append an
+assertion and move `resolved_assertion_id` atomically.
+[`SetFact`](../internal/store/fact.go). Unconfirmed candidates never override a
+confirmed value; they remain `pending` or `conflict` until explicit review.
+[`ProposeFact`](../internal/store/fact_candidate.go). Confirmation refuses when
+the resolved assertion changed since proposal, returning
+[`ErrFactConflict`](../internal/store/fact.go).
+[`ConfirmFactCandidate`](../internal/store/fact_candidate.go). A rejected
+candidate is retained as history with status `rejected` and cannot become
+authoritative without a new confirmation.
+[`RejectFactCandidate`](../internal/store/fact_candidate.go). A correction
+("X instead of Y") is a new confirmed assertion via set or confirm, never a
+delete. HTTP set rejects caller-claimed non-agent `source_kind`.
+[`setFactHandler`](../internal/server/fact.go).
+
+Cross-agent or operator precedence hierarchies are not implemented. Those belong
+to the access-policy rock.
+
+## Predicate registry
+
+There is no server-side predicate registry service. The store validates predicate
+shape through [`validFactPredicate`](../internal/store/fact.go), accepts
+`cardinality` values [`one`](../internal/store/fact.go),
+[`many`](../internal/store/fact.go), and
+[`one_at_a_time`](../internal/store/fact.go), and validates built-in
+`value_type` identifiers through
+[`builtInFactValueTypes`](../internal/store/fact_value_type.go). Custom logical
+types remain caller-declared JSON with common size validation only.
+
+The table below documents predicates and namespaces referenced by the shipped
+client contracts today. It is documentation, not an enforced server registry.
+Callers may use any syntactically valid predicate name. The store persists only
+the caller-supplied `sensitive` flag on writes and redacts broad lists from that
+stored flag; it does not apply predicate defaults.
+[`SetFact`](../internal/store/fact.go), [list redaction](../internal/store/fact_usage.go).
+
+| Predicate | Value type | Cardinality | Client routing convention | Referenced in |
+| --- | --- | --- | --- | --- |
+| `identity/name` | `string` | `one` | mark `sensitive: true` | [MCP routing instructions](../cmd/witself/cursor_instructions.go), [MCP tool contract](mcp-tools.md), [`witself.fact.delete` example](mcp-tools.md) |
+| `preferences/editor` | `string` | `one` | `sensitive: false` | [MCP tool contract](mcp-tools.md), [`witself.fact.set` schema](../cmd/witself/mcp.go) |
+| `identity/birth-date` | `date` | `one` | `sensitive: false` | [fact service examples](fact-service.md) |
+| `resources/repository` | `string` or `url` | `one` | `sensitive: false` | [fact service examples](fact-service.md) |
+
+Built-in `value_type` identifiers accepted by the store:
+
+| Value type | JSON shape | Notes |
+| --- | --- | --- |
+| `string` | string | |
+| `number` | number | |
+| `boolean` | boolean | |
+| `list` | array | |
+| `object` | object | |
+| `json` | any JSON value | |
+| `date` | `YYYY-MM-DD` string | pairs with [`FactRecurrenceAnnual`](../internal/store/fact.go) only |
+| `datetime` | RFC 3339 string, normalized to UTC | |
+| `url` | absolute `http`/`https` URL string | |
+| `email` | bare email address string | |
+| `address` | non-empty string or non-empty object | |
+| `location` | non-empty string or non-empty object | |
+
+Omitted `value_type` is inferred from JSON shape during normalization.
+[`normalizeSetFactInput`](../internal/store/fact.go). A governed cross-agent
+predicate registry remains out of scope until the access-policy rock defines one.
+
+## Reminders
+
+Dated facts may carry `valid_from`, `valid_until`, and explicit
+`recurrence: "annual"` on `value_type: "date"` assertions and candidates.
+Recurrence is never inferred from a predicate or value.
+[`normalizeSetFactInput`](../internal/store/fact.go),
+[`UpcomingFacts`](../internal/store/fact_temporal.go).
+
+`witself fact upcoming`, `witself.fact.upcoming`, and `GET /v1/fact-occurrences`
+project resolved date and datetime facts in a bounded window through
+[`UpcomingFacts`](../internal/store/fact_temporal.go) and
+[`upcomingFactsHandler`](../internal/server/fact.go). February 29 annual
+occurrences are skipped in non-leap years. Sensitive temporal facts are omitted
+unless explicitly requested because an occurrence timestamp is itself the value.
+
+Reminders are a read-side query, not a delivery feature. There is no scheduler,
+notification worker, or agent-waking workflow in the fact service. Delivery
+remains out of scope until the messaging lane owns it.
+
+## Cross-agent fact access
+
+Facts are owner-agent scoped today. Every fact, subject, candidate, history, and
+occurrence operation requires an agent principal and is bound to the
+authenticated agent's account, realm, and owner-agent id. HTTP handlers reject
+operator principals with `403` and the message that only an agent token may use
+the surface: [`setFactHandler`](../internal/server/fact.go),
+[`factsReadHandler`](../internal/server/fact.go),
+[`deleteFactHandler`](../internal/server/fact.go),
+[`proposeFactHandler`](../internal/server/fact.go),
+[`factCandidateActionHandler`](../internal/server/fact.go),
+[`upcomingFactsHandler`](../internal/server/fact.go), and the subject handlers
+[`upsertFactSubjectHandler`](../internal/server/fact_subject.go),
+[`listFactSubjectsHandler`](../internal/server/fact_subject.go),
+[`addFactSubjectAliasHandler`](../internal/server/fact_subject.go). Store reads
+and writes scope queries to `account_id`, `realm_id`, and `owner_agent_id`.
+[`getFactTx`](../internal/store/fact.go),
+[`ProposeFact`](../internal/store/fact_candidate.go),
+[`UpcomingFacts`](../internal/store/fact_temporal.go).
+
+A subject describing another person, place, or project is still owned by the
+caller's agent; there is no `owner` argument or policy grant to read, write,
+curate, or delete another agent's collection. Cross-agent and group-owned facts
+are deferred to the access-policy rock and the open gates of the
+`access-policy-security-groups` feature in
+[access-policy.md](access-policy.md).
 
 ## Primary Flag
 
@@ -220,7 +319,7 @@ still calls its projection `primary_facts` and marks projected entries
 The earlier group/cross-agent `witself://fact/...` reference-resolution promises
 and automatic file-ingest workflow are also removed from the implemented model.
 They do not appear in the shipped fact dispatch or routes. Any future policy for
-these targets belongs to the access-policy rock and `advanced-fact-policy`.
+these targets belongs to the access-policy rock.
 
 ## Related Docs
 

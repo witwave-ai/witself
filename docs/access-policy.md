@@ -58,6 +58,10 @@ archive it streams contains every agent's fact assertion values and memory
 version contents, including records
 marked sensitive (`internal/store/export.go:956-979,1186-1213`). Treat an
 operator token as able to read the account's complete content through export.
+The route accepts any active operator credential, owner or operator alike, through
+`requireOperatorAnyStatus` (`internal/server/export_self.go`), and the archive also
+carries sealed-plane secret ciphertext and wrapped DEKs (`internal/store/export.go`),
+which stay undecryptable without the agent's client-held vault key.
 The account-wide transcript audit-read is likewise a separate operator
 permission: operators may list/read account transcripts; agents see their own
 (`internal/store/transcript.go:410-425,448-467`).
@@ -91,8 +95,8 @@ The access-policy rock still needs implementation and contract review for:
 - Realm-local cross-agent Policy objects, filtered permissions, and a policy
   decision/test API.
 - Group subjects, targets, membership, and group-owned facts or memories.
-- Cross-agent fact conflict authority and predicate/reminder policy, tracked by
-  `advanced-fact-policy` in [facts-model.md](facts-model.md).
+- Cross-agent and group-owned fact read, write, curation, and deletion beyond
+  the owner-agent scope documented in [facts-model.md](facts-model.md).
 - Explicit cross-agent operator permissions, scope vocabulary, decision audit,
   and mutation/preview guardrails.
 - Federation trust, cross-realm identity access, and channel authorization.
