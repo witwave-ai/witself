@@ -23,7 +23,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Account lifecycle and movement](#account-lifecycle) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 2 |
 | [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `general` | **conditional** | 5/7 pass | 2 |
 | [Agent avatars](#agent-avatars) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
-| [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **accepted** | 6/6 pass | 0 |
 | [Agent email receive](#agent-email-receive) | Email | `implemented` | `limited` | **conditional** | 4/7 pass | 4 |
 | [Agent email send](#agent-email-send) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 4 |
@@ -170,7 +170,7 @@ Same-realm open requests, offers, assignment, results, claims, and foreground pr
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **PASS** | Request, offer, selection, assignment, result, claim, acknowledge, release, and escalation state machines are implemented and tested. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [message_request_hardening_integration_test.go](../internal/store/message_request_hardening_integration_test.go) |
-| Entitlement / policy | **CONDITIONAL** | Same-realm authority and claim fences are enforced, but request-graph operations currently check messaging rather than the separately cataloged collaboration feature key. [billing-and-limits.md](../docs/billing-and-limits.md), [message_feature_gate_integration_test.go](../internal/store/message_feature_gate_integration_test.go) |
+| Entitlement / policy | **PASS** | Every messaging-enabled catalog plan adopts collaboration entitlement v1. All nine request mutations independently require collaboration; PostgreSQL tests cover typed denials, successful transitions, and marker-free legacy access. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [plans_test.go](../internal/plans/plans_test.go), [message_feature_gate_integration_test.go](../internal/store/message_feature_gate_integration_test.go), [plans.json](../web/plans/plans.json) |
 | Bounds / abuse | **PASS** | Bounded payloads, claim leases, deterministic failure escalation, request state transitions, and messaging rate limits constrain work. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [inter-agent-messaging.md](../docs/inter-agent-messaging.md) |
 | Observability | **CONDITIONAL** | Value-free message and worker metrics are continuously scraped with live PagerDuty alert routing and a tested receiver; generic worker-job alerts cover the workers, but no request-graph-specific alert rules exist. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
 | Recovery | **PASS** | Durable canonical mailboxes, exact claim fences, retryable releases, request history, and archive/import preserve work across failures. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [backup-and-recovery.md](../docs/backup-and-recovery.md) |
@@ -179,7 +179,6 @@ Same-realm open requests, offers, assignment, results, claims, and foreground pr
 
 Open gates:
 
-- `collaboration-entitlement-enforcement` (entitlement / policy): Define collaboration as bundled metadata or independently enforce its plan key on request-graph operations without breaking existing snapshots. ([tracking/evidence](../internal/store/message_feature_gate_integration_test.go))
 - `current-live-request-canary` (rollout / canaries): Retain a current-release offer, assignment, result, retry, and escalation canary. ([tracking/evidence](../docs/autonomous-realm-messaging.md))
 - `external-alert-path` (observability): Add request-graph and message-family alert rules to the live rule set; continuous scrape, generic worker-job alerts, and the tested PagerDuty/dead-man receiver are already in place. ([tracking/evidence](../docs/observability-and-operations.md))
 

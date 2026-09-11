@@ -221,19 +221,28 @@ access while messaging is enabled. In a version-1 snapshot, absence of
 `collaboration` from the positive feature list is an explicit denial. The self
 entitlement projection uses the same rule as request mutations.
 
-The enforcement capability is implemented, but the current catalog does not
-adopt it. Routine control-plane reconciliation preserves the identical legacy
-snapshot and hash, including accounts with messaging overrides. Deliberate
-future addition of the version marker to an authoritative catalog policy is the
-adoption signal; the existing resolution, validation and hash pipeline preserves
-it. Feature defaults and prices are unchanged by this implementation.
+The canonical catalog (`web/plans/plans.json`) adopts
+`collaboration_entitlement_version: 1` for every plan: Personal (`free`),
+Professional (`standard`), Team, and Enterprise. Collaboration is independently
+enforced and stays bundled with messaging on the paid plans; Personal carries
+the marker but grants neither messaging nor collaboration. Because every plan
+carries the marker, a paid account that downgrades to Personal (Stripe
+cancellation, subscription end, or operator downgrade) applies the catalog
+Personal snapshot through the ordinary and fit apply paths and lands
+Applied=Free on the cell. The existing resolution, validation, and hash pipeline
+carries the marker into newly resolved snapshots, including messaging overrides.
+Previously applied snapshots without the marker retain collaboration access
+while messaging is enabled until a governed snapshot is applied. Feature
+defaults and prices are unchanged.
 
 Existing account rows and archives are not backfilled: the existing policy JSON
 field preserves authority through export/import. Governed live imports require
 an applied, positively fenced snapshot with a matching hash.
-Both ordinary apply and conditional fit/apply refuse removing an established
-marker, even with a newer revision; an enabled feature can still be restored
-by a later governed snapshot.
+Both ordinary apply and conditional fit/apply refuse a snapshot that removes
+the established marker, even at a newer revision; a synthetic Personal-shaped
+snapshot without the marker is refused as `ErrPlanSnapshotStale` after any
+governed plan. An enabled feature can still be restored by a later governed
+snapshot.
 
 Deploy compatible serving cells and the control-plane bridge before the new
 catalog policy is activated. Older closed policy validators reject the marker. Such

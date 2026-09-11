@@ -416,11 +416,13 @@
           ]
         },
         "entitlement_policy": {
-          "state": "conditional",
-          "summary": "Same-realm authority and claim fences are enforced, but request-graph operations currently check messaging rather than the separately cataloged collaboration feature key.",
+          "state": "pass",
+          "summary": "Every messaging-enabled catalog plan adopts collaboration entitlement v1. All nine request mutations independently require collaboration; PostgreSQL tests cover typed denials, successful transitions, and marker-free legacy access.",
           "evidence": [
-            "docs/billing-and-limits.md",
-            "internal/store/message_feature_gate_integration_test.go"
+            "docs/autonomous-realm-messaging.md",
+            "internal/plans/plans_test.go",
+            "internal/store/message_feature_gate_integration_test.go",
+            "web/plans/plans.json"
           ]
         },
         "bounds_abuse": {
@@ -465,12 +467,6 @@
         }
       },
       "open_gates": [
-        {
-          "id": "collaboration-entitlement-enforcement",
-          "gate_ids": ["entitlement_policy"],
-          "summary": "Define collaboration as bundled metadata or independently enforce its plan key on request-graph operations without breaking existing snapshots.",
-          "ref": "internal/store/message_feature_gate_integration_test.go"
-        },
         {
           "id": "current-live-request-canary",
           "gate_ids": ["rollout_canaries"],
