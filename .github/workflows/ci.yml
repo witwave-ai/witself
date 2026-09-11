@@ -388,6 +388,13 @@ jobs:
           -run '^(TestLocalLockFile|TestAutoLockPlatform|TestAutoLockIdentity|TestRegistryClaimLock|TestPIDRunning|TestCapturePlatform|TestReplaceFileAtomic)'
           -count=1
 
+      - name: Native signup journal and recovery
+        if: runner.os == 'Windows'
+        run: >-
+          go test -json ./internal/local ./cmd/witself
+          -run '^(TestWindowsAccountProvisionJournalSyncBoundary|TestAccountProvisionJournalLifecycle|TestAccountProvisionBeginResyncsAmbiguousPromotionBeforeReturningCandidate|TestAccountCreateResumesAmbiguousProvisionWithSameID|TestAccountCreateSuccessfulSuccessorSavesCredentialAndRecoversOffline|TestAccountCreatePendingReconsentRequiresDurabilityBeforeRemoteRegistration|TestAccountProvisionWindowsPrivateCreationBeforeWrite|TestAccountProvisionWindowsPrivateDescriptorPolicy|TestAccountProvisionWindowsPrivateHandleRejectsUnsafeACLWithoutRepair|TestAccountProvisionWindowsPrivateCreationPreservesExistingObjects|TestAccountProvisionWindowsPrivateHandleIdentityFences|TestAccountProvisionWindowsPrivateHandleRejectsReparsePath|TestWindowsAccountProvisionMissingParentRefusesWithoutMutation|TestWindowsAccountProvisionReparseParentRefusesWithoutMutation|TestWindowsAccountProvisionUnsafeExistingHomeIsNotRepaired|TestWindowsAccountProvisionFixedAnchorDurabilityReplay|TestWindowsAccountProvisionExistingLockReestablishesPublication|TestWindowsAccountProvisionTemporaryDeletionBindsIdentity|TestWindowsAccountProvisionRetainedAncestorsBlockReplacement|TestWindowsAccountProvisionAvailabilityRejectsUnsafeConfigWithoutRepair|TestWindowsAccountProvisionTemporaryCreationIsPrivateBeforeWrite)$'
+          -count=1
+
       - name: Managed instruction platform primitives
         run: >-
           go test ./cmd/witself

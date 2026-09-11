@@ -40,6 +40,35 @@ def check(text, workflow):
                  "PowerShell static analysis", "Native platform safety primitives",
                  "Managed instruction platform primitives", "Codex Windows hook contract"):
         step(native, name)
+    signup = step(native, "Native signup journal and recovery")
+    signup_selector = (
+        "^(TestWindowsAccountProvisionJournalSyncBoundary|TestAccountProvisionJournalLifecycle|"
+        "TestAccountProvisionBeginResyncsAmbiguousPromotionBeforeReturningCandidate|"
+        "TestAccountCreateResumesAmbiguousProvisionWithSameID|"
+        "TestAccountCreateSuccessfulSuccessorSavesCredentialAndRecoversOffline|"
+        "TestAccountCreatePendingReconsentRequiresDurabilityBeforeRemoteRegistration|"
+        "TestAccountProvisionWindowsPrivateCreationBeforeWrite|"
+        "TestAccountProvisionWindowsPrivateDescriptorPolicy|"
+        "TestAccountProvisionWindowsPrivateHandleRejectsUnsafeACLWithoutRepair|"
+        "TestAccountProvisionWindowsPrivateCreationPreservesExistingObjects|"
+        "TestAccountProvisionWindowsPrivateHandleIdentityFences|"
+        "TestAccountProvisionWindowsPrivateHandleRejectsReparsePath|"
+        "TestWindowsAccountProvisionMissingParentRefusesWithoutMutation|"
+        "TestWindowsAccountProvisionReparseParentRefusesWithoutMutation|"
+        "TestWindowsAccountProvisionUnsafeExistingHomeIsNotRepaired|"
+        "TestWindowsAccountProvisionFixedAnchorDurabilityReplay|"
+        "TestWindowsAccountProvisionExistingLockReestablishesPublication|"
+        "TestWindowsAccountProvisionTemporaryDeletionBindsIdentity|"
+        "TestWindowsAccountProvisionRetainedAncestorsBlockReplacement|"
+        "TestWindowsAccountProvisionAvailabilityRejectsUnsafeConfigWithoutRepair|"
+        "TestWindowsAccountProvisionTemporaryCreationIsPrivateBeforeWrite)$"
+    )
+    require(native.count("- name: Native signup journal and recovery") == 1 and
+            [line.strip() for line in signup.splitlines() if line.strip()] == [
+                "if: runner.os == 'Windows'", "run: >-",
+                "go test -json ./internal/local ./cmd/witself",
+                "-run '" + signup_selector + "'", "-count=1",
+            ], "exact blocking Windows signup journal and recovery tests")
     build = step(native, "Build native Witself client")
     require("shell: bash" in build and
             'if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi' in build and
@@ -138,6 +167,11 @@ try:
     canaries = [
         ("matrix omission", "- target: linux-arm64", "- target: unsupported"),
         ("missing neighbor", "name: Codex Windows hook contract", "name: Removed hook gate"),
+        ("missing signup recovery step", "name: Native signup journal and recovery", "name: Removed signup gate"),
+        ("missing native directory sync probe", "TestWindowsAccountProvisionJournalSyncBoundary|", ""),
+        ("missing private Windows coverage", "|TestAccountProvisionWindowsPrivateCreationBeforeWrite", ""),
+        ("missing runtime Windows coverage", "|TestWindowsAccountProvisionMissingParentRefusesWithoutMutation", ""),
+        ("missing native signup JSON", "go test -json ./internal/local ./cmd/witself", "go test ./internal/local ./cmd/witself"),
         ("checkout build output", 'go build -o "$RUNNER_TEMP/witself-native-smoke$executable_suffix" ./cmd/witself',
          'go build ./cmd/witself'),
         ("wrong archive input", '--dist dist', '--dist unrelated'),

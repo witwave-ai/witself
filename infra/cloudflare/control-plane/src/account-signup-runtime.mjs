@@ -1,4 +1,8 @@
 import {
+  LEGAL_PHASES, allowedCounterReceipt, awaitLegalAbort, legalCore, legalCoreByteLength, legalCoreCanonical, readCanonicalLegal, readLegalJSON, registrationAck,
+  sameLegalValue, validLegalCore, validLegalState, validReconsent, validRegistration,
+} from "./signup-legal.mjs";
+import {
   consumeSignupCounter,
   parseSignupLimit,
   SIGNUP_GLOBAL_SCOPE,
@@ -53,7 +57,7 @@ const PHASE = {
 function json(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
   });
 }
 
@@ -95,7 +99,7 @@ function requireStoredSignupState(state) {
     !isObject(state) ||
     state.schema_version !== "witself.signup.v1" ||
     typeof state.phase !== "string" ||
-    !Object.hasOwn(PHASE, state.phase) ||
+    (!Object.hasOwn(PHASE, state.phase) && !validLegalState(state)) ||
     !Number.isSafeInteger(state.revision) ||
     state.revision < 0
   ) {
@@ -350,6 +354,11 @@ export class DurableAccountSignup {
   }
 
   fetch(request) {
+    // A predecessor never waits on a candidate while owning its queue. Two
+    // opposite successor requests therefore fail on occupancy, not deadlock.
+    if (request.method === "POST" && new URL(request.url).pathname === "/legal/reconsent") {
+      return this.handleReconsent(request);
+    }
     return this.serial(() => this.handleFetch(request));
   }
 
@@ -383,7 +392,10 @@ export class DurableAccountSignup {
     }
     try {
       if (url.pathname === "/run") {
-        return await this.run(input);
+        return await this.run(input, request.signal);
+      }
+      if (url.pathname === "/legal/reserve") {
+        return await this.reserveLegalCandidate(input);
       }
       if (url.pathname === "/invite/reserve") {
         return await this.reserveInvite(input);
@@ -399,6 +411,148 @@ export class DurableAccountSignup {
         error instanceof SignupError ? error.responseFields : {},
       );
     }
+  }
+
+  async admitLegal(state, signal) {
+    if (!validLegalState(state)) fail("signup legal checkpoint is invalid", 500);
+    const abuse = state.legal_abuse;
+    if (state.legal_open_signup && this.env.CP_SIGNUP_OPEN !== "true") {
+      fail("open signup is unavailable", 503);
+    }
+    if (abuse.turnstile !== turnstileEnabled(this.env) ||
+        abuse.per_ip_limit !== parseSignupLimit(this.env.CP_SIGNUP_DAILY_LIMIT_PER_IP) ||
+        abuse.global_limit !== parseSignupLimit(this.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL)) {
+      fail("signup abuse policy changed; retry when the original policy is available", 503);
+    }
+    let manifest;
+    try { manifest = await readCanonicalLegal(this.env, signal); }
+    catch { fail("signup legal authority is unavailable", 503); }
+    if (signal?.aborted) fail("signup legal authority is unavailable", 503);
+    if (state.legal_terms_version !== manifest.terms || state.legal_privacy_version !== manifest.privacy) {
+      return this.save({
+        ...state, phase: "legal_rejected", legal_manifest_sha256: manifest.manifest_sha256,
+        legal_refusal: {
+          schema_version: "witself.signup-legal-refusal.v1", code: "signup_legal_stale",
+          error: "signup legal acceptance is out of date", provision_id: state.provision_id,
+          request_fingerprint: state.request_fingerprint,
+          consent_terms_version: state.legal_terms_version,
+          consent_privacy_version: state.legal_privacy_version,
+          refusal_id: crypto.randomUUID(), refusal_revision: state.revision + 1,
+          required_terms_version: manifest.terms, required_privacy_version: manifest.privacy,
+        },
+      });
+    }
+    const { legal_core_fingerprint: _core, legal_terms_version: _terms, legal_privacy_version: _privacy,
+      legal_open_signup: _open, legal_abuse: _abuse, ...admitted } = state;
+    return this.save({ ...admitted, phase: "initialized", legal_admission: manifest });
+  }
+
+  async handleReconsent(request) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    request.signal.addEventListener("abort", abort, { once: true });
+    if (request.signal.aborted) abort();
+    const timeout = setTimeout(abort, 15000);
+    const signal = controller.signal;
+    try {
+      const { value: input } = await readLegalJSON(request, signal);
+      if (!validReconsent(input)) fail("invalid signup re-consent request", 400);
+      const prepared = await awaitLegalAbort(this.serial(async () => {
+        if (signal.aborted) fail("signup re-consent is unavailable", 503);
+        const state = await this.storage.get(STATE_KEY);
+        if (!validLegalState(state) || state.phase !== "legal_rejected") {
+          fail("signup refusal is unavailable", 409);
+        }
+        if (this.objectName !== `provision:${input.refusal.provision_id}` ||
+            !sameLegalValue(state.legal_refusal, input.refusal)) fail("signup refusal conflicts", 409);
+        const candidate = normalizedRequest({ ...input, ...input.candidate }, { inviteOptional: state.legal_open_signup });
+        if (!validLegalCore(legalCore(candidate)) || legalCoreByteLength(input) > 32 * 1024) {
+          fail("invalid bounded signup candidate", 400);
+        }
+        if (await this.hash(legalCoreCanonical(candidate)) !== state.legal_core_fingerprint) {
+          fail("signup re-consent request conflicts", 409);
+        }
+        const registration = {
+          refusal: input.refusal, transition_id: input.transition_id, candidate: input.candidate,
+          core_fingerprint: state.legal_core_fingerprint, open_signup: state.legal_open_signup,
+          request_fingerprint: await this.hash(requestCanonical(candidate)),
+          abuse: state.legal_abuse, registered: false,
+        };
+        if (state.legal_successor !== undefined) {
+          if (!sameLegalValue({ ...state.legal_successor, registered: false }, registration)) {
+            fail("signup successor already selected", 409);
+          }
+          return state.legal_successor;
+        }
+        if (signal.aborted) fail("signup re-consent is unavailable", 503);
+        await this.save({ ...state, legal_successor: registration });
+        return registration;
+      }), signal);
+      if (!prepared.registered) {
+        if (!this.env.ACCOUNT_SIGNUP) fail("signup successor authority is unavailable", 503);
+        const id = this.env.ACCOUNT_SIGNUP.idFromName(`provision:${prepared.candidate.provision_id}`);
+        let response;
+        try {
+          response = await awaitLegalAbort(this.env.ACCOUNT_SIGNUP.get(id).fetch(new Request("https://account-signup.internal/legal/reserve", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(prepared), signal,
+          })), signal);
+        } catch { fail("signup successor outcome is ambiguous", 502); }
+        if (response.status === 409) fail("signup successor conflicts", 409);
+        let ack;
+        try { ack = (await readLegalJSON(response, signal)).value; }
+        catch { fail("signup successor outcome is ambiguous", 502); }
+        if (response.status !== 200 || !sameLegalValue(ack, registrationAck(prepared))) {
+          fail("signup successor outcome is ambiguous", 502);
+        }
+      }
+      return await awaitLegalAbort(this.serial(async () => {
+        if (signal.aborted) fail("signup re-consent is unavailable", 503);
+        const state = await this.storage.get(STATE_KEY);
+        if (!validLegalState(state) || state.phase !== "legal_rejected" ||
+            !sameLegalValue({ ...state.legal_successor, registered: false }, { ...prepared, registered: false })) {
+          fail("signup successor checkpoint conflicts", 409);
+        }
+        if (signal.aborted) fail("signup re-consent is unavailable", 503);
+        if (!state.legal_successor.registered) {
+          await this.save({ ...state, legal_successor: { ...prepared, registered: true } });
+        }
+        return json(registrationAck(prepared));
+      }), signal);
+    } catch (error) {
+      return errorResponse(error instanceof SignupError ? error.message : "signup re-consent is unavailable",
+        error instanceof SignupError ? error.status : 503);
+    } finally {
+      clearTimeout(timeout);
+      request.signal.removeEventListener("abort", abort);
+    }
+  }
+
+  async reserveLegalCandidate(registration) {
+    if (!validRegistration(registration) || registration.registered !== false ||
+        this.objectName !== `provision:${registration.candidate.provision_id}`) {
+      fail("invalid signup successor reservation", 400);
+    }
+    const current = await this.storage.get(STATE_KEY);
+    if (current !== undefined) {
+      requireStoredSignupState(current);
+      if (current.provision_id !== registration.candidate.provision_id ||
+          current.request_fingerprint !== registration.request_fingerprint ||
+          !sameLegalValue(current.legal_reservation, registration)) fail("signup successor conflicts", 409);
+      return json(registrationAck(registration));
+    }
+    await this.storage.put(STATE_KEY, {
+      schema_version: "witself.signup.v1", revision: 0, phase: "legal_reserved",
+      provision_id: registration.candidate.provision_id, request_fingerprint: registration.request_fingerprint,
+      cell: null, account: null, created_at: this.now().toISOString(),
+      email_attempted: false, verification_email_sent: false,
+      legal_core_fingerprint: registration.core_fingerprint,
+      legal_terms_version: registration.candidate.consent_terms_version,
+      legal_privacy_version: registration.candidate.consent_privacy_version,
+      legal_open_signup: registration.open_signup, legal_abuse: registration.abuse,
+      legal_reservation: registration,
+      ...(registration.abuse.turnstile ? { turnstile_verified: true } : {}),
+    });
+    return json(registrationAck(registration));
   }
 
   async inviteStatus() {
@@ -431,14 +585,24 @@ export class DurableAccountSignup {
     });
   }
 
-  async run(input) {
-    const openSignup = this.env.CP_SIGNUP_OPEN === "true" &&
+  async run(input, signal) {
+    let state = await this.storage.get(STATE_KEY);
+    if (state !== undefined) requireStoredSignupState(state);
+    const legalState = state !== undefined && LEGAL_PHASES.has(state.phase);
+    const admitted = state !== undefined && !legalState && state.phase !== "abuse_preflight";
+    const openSignup = (this.env.CP_SIGNUP_OPEN === "true" || legalState || admitted) &&
       isObject(input) &&
       (input.invite == null || input.invite === "");
     const request = normalizedRequest(input, {
       inviteOptional: openSignup,
-      deferConsentValidation: openSignup,
+      deferConsentValidation: openSignup && !legalState,
     });
+    if (!admitted && !legalState && this.env.CP_SIGNUP_LEGAL_ENFORCEMENT === "true" && request.consent_terms_version &&
+        (!validLegalCore(legalCore(request)) || legalCoreByteLength({
+          email: input.email,
+          display_name: input.display_name ?? "",
+          invite: typeof input.invite === "string" ? input.invite : "",
+        }) > 32 * 1024)) fail("invalid bounded signup request", 400);
     const perIPLimit = parseSignupLimit(
       this.env.CP_SIGNUP_DAILY_LIMIT_PER_IP,
     );
@@ -446,7 +610,7 @@ export class DurableAccountSignup {
       this.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL,
     );
     if (
-      openSignup &&
+      openSignup && !legalState && !admitted &&
       (
         !turnstileEnabled(this.env) ||
         perIPLimit < 1 ||
@@ -459,7 +623,6 @@ export class DurableAccountSignup {
       fail("signup Durable Object identity mismatch", 400);
     }
     const fingerprint = await this.hash(requestCanonical(request));
-    let state = await this.storage.get(STATE_KEY);
     if (state !== undefined) {
       requireStoredSignupState(state);
       if (
@@ -482,6 +645,16 @@ export class DurableAccountSignup {
           fail("signup abuse checkpoint is invalid", 500);
         }
       }
+    }
+
+    if (legalState) {
+      if (state.legal_terms_version !== request.consent_terms_version || state.legal_privacy_version !== request.consent_privacy_version ||
+          state.legal_open_signup !== (request.invite === "") ||
+          state.legal_core_fingerprint !== await this.hash(legalCoreCanonical(request))) {
+        fail("signup legal checkpoint is invalid", 500);
+      }
+      if (state.phase === "legal_rejected") return json(state.legal_refusal, 409);
+      state = await this.admitLegal(state, signal);
     }
 
     let turnstileVerified = state?.turnstile_verified === true;
@@ -511,7 +684,9 @@ export class DurableAccountSignup {
       // A retry can then replay the exact marker even if the caller's network
       // changes after a committed response is lost. Successful Turnstile
       // verification shares this preflight so it is never repeated either.
-      if (perIPLimit > 0 || globalLimit > 0) {
+      if (perIPLimit > 0 || globalLimit > 0 ||
+          (this.env.CP_SIGNUP_LEGAL_ENFORCEMENT === "true" &&
+           request.consent_terms_version !== "" && turnstileVerified)) {
         state = {
           schema_version: "witself.signup.v1",
           revision: 0,
@@ -534,6 +709,8 @@ export class DurableAccountSignup {
     }
 
     if (!state || state.phase === "abuse_preflight") {
+      let perIPReceipt = null;
+      let globalReceipt = null;
       if (perIPLimit > 0) {
         const scope = state?.signup_ip_scope ??
           await signupIPScope(request.source_ip, this.hash);
@@ -545,6 +722,7 @@ export class DurableAccountSignup {
         if (typeof verdict?.allowed !== "boolean") {
           fail("signup counter returned an invalid verdict", 502);
         }
+        perIPReceipt = allowedCounterReceipt(verdict, perIPLimit);
         if (!verdict.allowed) {
           console.log(`signup: daily counter denied scope ${scope}`);
           if (state?.phase === "abuse_preflight") {
@@ -563,6 +741,7 @@ export class DurableAccountSignup {
         if (typeof verdict?.allowed !== "boolean") {
           fail("signup counter returned an invalid verdict", 502);
         }
+        globalReceipt = allowedCounterReceipt(verdict, globalLimit);
         if (!verdict.allowed) {
           console.log(
             `signup: daily counter denied scope ${SIGNUP_GLOBAL_SCOPE}`,
@@ -589,7 +768,38 @@ export class DurableAccountSignup {
         }
       }
 
-      if (state?.phase === "abuse_preflight") {
+      if (this.env.CP_SIGNUP_LEGAL_ENFORCEMENT === "true" && request.consent_terms_version !== "") {
+        if (turnstileVerified !== turnstileEnabled(this.env)) {
+          fail("signup abuse policy changed; retry when the original policy is available", 503);
+        }
+        if ((perIPLimit > 0 && !perIPReceipt) || (globalLimit > 0 && !globalReceipt)) {
+          fail("signup counter returned an invalid completion receipt", 502);
+        }
+        // Completed abuse controls are persisted before the legal read. A
+        // timeout retries the same receipt instead of spending a token twice.
+        const pending = {
+          ...(state ?? {
+            schema_version: "witself.signup.v1", revision: 0,
+            provision_id: request.provision_id, request_fingerprint: fingerprint,
+            cell: null, account: null, created_at: this.now().toISOString(),
+            email_attempted: false, verification_email_sent: false,
+          }),
+          phase: "legal_pending", legal_core_fingerprint: await this.hash(legalCoreCanonical(request)),
+          legal_terms_version: request.consent_terms_version, legal_privacy_version: request.consent_privacy_version,
+          legal_open_signup: openSignup,
+          legal_abuse: {
+            root_provision_id: request.provision_id,
+            signup_ip_scope: perIPLimit > 0 ? state.signup_ip_scope : null,
+            turnstile: turnstileEnabled(this.env), per_ip_limit: perIPLimit,
+            global_limit: globalLimit, per_ip: perIPReceipt, global: globalReceipt,
+          },
+          ...(turnstileVerified ? { turnstile_verified: true } : {}),
+        };
+        delete pending.signup_ip_scope;
+        if (!validLegalState(pending)) fail("signup legal checkpoint is invalid", 500);
+        state = await this.save(pending);
+        state = await this.admitLegal(state, signal);
+      } else if (state?.phase === "abuse_preflight") {
         const { signup_ip_scope: _signupIPScope, ...initialized } = state;
         state = await this.save({
           ...initialized,
@@ -613,6 +823,7 @@ export class DurableAccountSignup {
       }
     }
 
+    if (state.phase === "legal_rejected") return json(state.legal_refusal, 409);
     if (!phaseAtLeast(state, "invite_reserved")) {
       if (openSignup) {
         state = await this.advance(state, "invite_reserved", {
@@ -1331,6 +1542,7 @@ export class DurableAccountSignup {
   }
 
   async save(state) {
+    if (!Number.isSafeInteger(state.revision + 1)) fail("account signup revision is exhausted", 500);
     const saved = { ...state, revision: state.revision + 1 };
     await this.storage.put(STATE_KEY, saved);
     return saved;

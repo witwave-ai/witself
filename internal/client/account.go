@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -132,8 +133,11 @@ func CreateAccountExact(
 	if err != nil {
 		return nil, err
 	}
-	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts"
-	client := &http.Client{Timeout: 60 * time.Second}
+	url, err := signupMutationURL(controlPlane, "/v1/accounts")
+	if err != nil {
+		return nil, err
+	}
+	client := signupHTTPClient()
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -147,11 +151,20 @@ func CreateAccountExact(
 
 		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("connect to %s: %w", controlPlane, err)
+			lastErr = errors.New("account creation request failed")
 			if ctx.Err() != nil {
-				return nil, lastErr
+				return nil, fmt.Errorf("account creation interrupted: %w", ctx.Err())
 			}
 			continue
+		}
+		if !signupResponseMatches(resp, url) {
+			_ = resp.Body.Close()
+			return nil, errors.New("account creation response left the selected endpoint")
+		}
+		if resp.StatusCode == http.StatusConflict {
+			lastErr = signupLegalRefusal(resp, provisionID, consentTermsVersion, consentPrivacyVersion)
+			_ = resp.Body.Close()
+			return nil, lastErr
 		}
 		if resp.StatusCode != http.StatusCreated {
 			responseErr := accountCreateResponseError(

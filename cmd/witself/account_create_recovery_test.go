@@ -91,10 +91,7 @@ func TestAccountCreateResumesAmbiguousProvisionWithSameID(t *testing.T) {
 			t.Fatalf("pending journal contains %q", forbidden)
 		}
 	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("journal mode = %v, err = %v", info.Mode(), err)
-	}
+	assertAccountCreatePrivateTestFile(t, path)
 
 	if code := accountCreate(args); code != 0 {
 		t.Fatalf("resumed account create exit = %d, want 0", code)
@@ -524,8 +521,8 @@ func TestAccountCreateResumesCredentialBeforeLocalSave(t *testing.T) {
 			// Block the durable local token directory only after the remote
 			// bootstrap succeeds. The private journal credential write uses a
 			// disjoint path and must survive this local-save failure.
-			if err := os.WriteFile(
-				filepath.Join(home, "tokens"), []byte("blocked"), 0o600,
+			if err := writeAccountCreatePrivateTestFile(
+				filepath.Join(home, "tokens"), []byte("blocked"),
 			); err != nil {
 				t.Error(err)
 			}
@@ -672,10 +669,7 @@ func accountCreateTestArgs(endpoint, invite string) []string {
 
 func privateAccountCreateTestHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	if err := os.Chmod(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	home := newAccountCreateTestHome(t)
 	t.Setenv("WITSELF_HOME", home)
 	t.Setenv("WITSELF_ACCOUNT", "")
 	return home
@@ -730,12 +724,6 @@ func assertAccountCreateSaved(t *testing.T, home string) {
 		filepath.Join(home, "config.json"),
 		filepath.Join(home, "tokens", "accounts", "default", "owner.token"),
 	} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode = %v", path, info.Mode())
-		}
+		assertAccountCreatePrivateTestFile(t, path)
 	}
 }
