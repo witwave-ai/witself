@@ -1060,3 +1060,392 @@ tests:
         exp_annotations:
           summary: At least half of self-digest reads elide entries.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: sealed posture failure waits three minutes and healthy reads stay quiet
+    interval: 1m
+    input_series:
+      - series: 'witself_sealed_plane_posture_metrics_up'
+        values: 1+0x5 0+0x6
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfSealedPlanePostureMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: WitselfSealedPlanePostureMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfSealedPlanePostureMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Sealed-plane posture metrics are unavailable.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: absent sealed posture fails closed after three minutes
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WitselfSealedPlanePostureMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WitselfSealedPlanePostureMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Sealed-plane posture metrics are unavailable.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: delivery error ratio stays quiet at five percent and fires above it
+    interval: 1m
+    input_series:
+      - series: 'witself_secret_material_deliveries_total{field_kind="password",result="success"}'
+        values: 0+19x20 398+18x20
+      - series: 'witself_secret_material_deliveries_total{field_kind="unknown",result="error"}'
+        values: 0+1x20 22+2x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSecretMaterialDeliveryErrorRatio
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: WitselfSecretMaterialDeliveryErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Secret material deliveries exceed the bounded server-error ratio.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: quiet sealed cell does not alert until delivery traffic arrives
+    interval: 1m
+    input_series:
+      - series: 'witself_secret_material_deliveries_total{field_kind="password",result="success"}'
+        values: 0+0x41 18+18x30
+      - series: 'witself_secret_material_deliveries_total{field_kind="unknown",result="error"}'
+        values: 0+0x20 0.3+0.3x20 8.3+2x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSecretMaterialDeliveryErrorRatio
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WitselfSecretMaterialDeliveryErrorRatio
+        exp_alerts: []
+      - eval_time: 72m
+        alertname: WitselfSecretMaterialDeliveryErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Secret material deliveries exceed the bounded server-error ratio.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: rotation fence budget stays quiet at five conflicts and fires above it
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="commit",result="conflict"}'
+        values: 0+0.3333333333333333x30 11+1x30
+      - series: 'witself_vault_lifecycle_operations_total{flow="enrollment",operation="approve",result="conflict"}'
+        values: 0+100x61
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="stage",result="error"}'
+        values: 0+100x61
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: rotation conflicts before the first scrape fire and expire after fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="cancel",result="conflict"}'
+        values: 6+0x20
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 6m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 14m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 15m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: first observed rotation conflicts at the budget stay quiet and ignore other results and flows
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="cancel",result="conflict"}'
+        values: 5+0x20
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="commit",result="conflict"}'
+        values: 0+0x20
+      - series: 'witself_vault_lifecycle_operations_total{flow="enrollment",operation="cancel",result="conflict"}'
+        values: 100+0x20
+      - series: 'witself_vault_lifecycle_operations_total{flow="rotation",operation="cancel",result="error"}'
+        values: 100+0x20
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: a new rotation conflict counter is checked before aggregating existing replicas
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{namespace="witself",pod="server-old",container="witself-server",flow="rotation",operation="cancel",result="conflict"}'
+        values: 100+0x40
+      - series: 'witself_vault_lifecycle_operations_total{namespace="witself",pod="server-new",container="witself-server",flow="rotation",operation="cancel",result="conflict"}'
+        values: _x20 6+0x19
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 34m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 35m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: first observed rotation conflicts sum across replicas
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-a",flow="rotation",operation="cancel",result="conflict"}'
+        values: 3+0x20
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-b",flow="rotation",operation="cancel",result="conflict"}'
+        values: 3+0x20
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 15m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: observed and first observed rotation conflicts share one budget across replicas
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-a",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0+0x20 3+0x19
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-b",flow="rotation",operation="cancel",result="conflict"}'
+        values: _x21 3+0x19
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 40m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: combined rotation conflicts below budget do not double count new replica increases
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-a",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0+0x20 2+0x19
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-b",flow="rotation",operation="cancel",result="conflict"}'
+        values: _x21 0 2+0x18
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: newly observed rotation conflicts survive a counter reset during the alert hold
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_lifecycle_operations_total{pod="server-new",flow="rotation",operation="cancel",result="conflict"}'
+        values: 0 6+0x1 0+0x17
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 14m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+      - eval_time: 15m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVaultRotationFenceConflicts
+        exp_alerts: []
+  - name: open rotation stays quiet at twenty four hours and alerts above it
+    interval: 1m
+    input_series:
+      - series: 'witself_vault_oldest_open_rotation_seconds'
+        values: 86400+0x20 86401+0x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfVaultRotationStuckOpen
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WitselfVaultRotationStuckOpen
+        exp_alerts: []
+      - eval_time: 37m
+        alertname: WitselfVaultRotationStuckOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: A vault key rotation has remained open for over 24 hours.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: cell delivery volume stays quiet at one per second and alerts above it
+    interval: 1m
+    input_series:
+      - series: 'witself_secret_material_deliveries_total{field_kind="password",result="success"}'
+        values: 0+60x20 1261+61x30
+      - series: 'witself_secret_material_max_agent_deliveries_15m'
+        values: 120+0x51
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSecretMaterialDeliveryVolumeAnomaly
+        exp_alerts: []
+      - eval_time: 51m
+        alertname: WitselfSecretMaterialDeliveryVolumeAnomaly
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Secret material delivery volume exceeds a provisional ceiling.
+              runbook: docs/runbooks.md#sealed-plane-alerts
+  - name: per agent delivery ceiling stays quiet at one hundred twenty and alerts above it
+    interval: 1m
+    input_series:
+      - series: 'witself_secret_material_deliveries_total{field_kind="password",result="success"}'
+        values: 0+0x41
+      - series: 'witself_secret_material_max_agent_deliveries_15m'
+        values: 120+0x20 121+0x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSecretMaterialDeliveryVolumeAnomaly
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WitselfSecretMaterialDeliveryVolumeAnomaly
+        exp_alerts: []
+      - eval_time: 37m
+        alertname: WitselfSecretMaterialDeliveryVolumeAnomaly
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: sealed-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Secret material delivery volume exceeds a provisional ceiling.
+              runbook: docs/runbooks.md#sealed-plane-alerts

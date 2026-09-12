@@ -283,7 +283,7 @@ func TestRuntimeMetricsMessageProcessingHTTPContention(t *testing.T) {
 			}
 			assertMessageProcessingSamples(t, metrics, want)
 			metricsResponse := httptest.NewRecorder()
-			metricsMuxFor(metrics, nil, nil, nil, nil).ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			metricsMuxFor(metrics, nil, nil, nil, nil, nil).ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			if metricsResponse.Code != http.StatusOK || calls != 6 {
 				t.Fatalf("scrape status %d, processing callbacks %d, want 200/6", metricsResponse.Code, calls)
 			}

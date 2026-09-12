@@ -299,3 +299,66 @@ groups:
         annotations:
           summary: Audit appends report a database or unexpected failure.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-sealed-plane
+    interval: 30s
+    rules:
+      - alert: WitselfSealedPlanePostureMetricsUnavailable
+        expr: absent(witself_sealed_plane_posture_metrics_up) or max(witself_sealed_plane_posture_metrics_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Sealed-plane posture metrics are unavailable.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfSecretMaterialDeliveryErrorRatio
+        expr: (sum(rate(witself_secret_material_deliveries_total{result="error"}[10m])) / clamp_min(sum(rate(witself_secret_material_deliveries_total[10m])), 0.001)) > 0.05 and sum(rate(witself_secret_material_deliveries_total[10m])) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Secret material deliveries exceed the bounded server-error ratio.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfVaultRotationFenceConflicts
+        # Sum all reset-adjusted increases with only the new-series count not
+        # already included in those increases, so old and new replicas share a
+        # budget without double counting or losing observed conflicts on reset.
+        # Fall back to the current count when increase lacks a second sample.
+        expr: >-
+          (sum(increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m])) or vector(0))
+          + (sum((clamp_min(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}
+            - increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m]), 0)
+            or witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"})
+            unless witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"} offset 15m) or vector(0)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfVaultRotationStuckOpen
+        expr: max(witself_vault_oldest_open_rotation_seconds) > 86400
+        for: 15m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: A vault key rotation has remained open for over 24 hours.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfSecretMaterialDeliveryVolumeAnomaly
+        expr: sum(rate(witself_secret_material_deliveries_total[15m])) > 1 or max(witself_secret_material_max_agent_deliveries_15m) > 120
+        for: 15m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Secret material delivery volume exceeds a provisional ceiling.
+          runbook: docs/runbooks.md#sealed-plane-alerts

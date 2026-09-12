@@ -3201,7 +3201,9 @@ in one parent commit.
    In the third GitOps change, set the immutable Secret names/keys and enable
    `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
    `witself_alert=true` incident route, the `witself_watchdog=true` dead-man
-   route, and the committed bounded rules to converge.
+   route, and the enabled subset of the 27 committed bounded incident rules to
+   converge. Four collector rules and five sealed-plane rules have separate
+   default-off gates; `WitselfWatchdog` is the separate heartbeat rule.
    Confirm zero
    `prometheus_rule_evaluation_failures_total`, the schema-91 logical storage
    gauges are present, and PostgreSQL PVC capacity/available metrics match the
@@ -3292,6 +3294,61 @@ approved deletion. A one-node cluster loss can also remove this alerting plane,
 so production acceptance requires the external dead-man above (the
 `WitselfWatchdog` heartbeat and its outside monitor) in addition to the
 in-cluster receiver path.
+
+### Sealed-plane alerts
+
+The five `witself-sealed-plane` rules require both
+`platform.monitoring.alerting.enabled` and the separate, default-off
+`platform.monitoring.sealedPlaneAlerts.enabled`. Keep the sealed-plane gate off
+until a compatible server release is serving and its metrics are verified. The
+platform chart automatically syncs from its configured GitOps revision, so the
+release-before-rules merge order remains: ship the server metrics, roll the
+release train, verify the new series on the serving cell, then merge the rules
+and enable their gate in a separately reviewed serving-cell values change.
+Never flip the gate while posture metrics are absent: that condition pages after
+three minutes. The chart's safe default also protects an early rules sync.
+
+Verify `witself_sealed_plane_posture_metrics_up=1` and all five posture gauges
+across multiple scrapes. Verify `witself_secret_material_deliveries_total` and
+`witself_vault_lifecycle_operations_total` after an authorized operation has
+created their process-local series; an idle process need not have a counter
+series. Review the [sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos)
+before interpreting these signals. A material delivery means the server returned
+ciphertext and its wrapped key after authorization. It does not establish that
+the client decrypted or used the material. No account, agent, secret, or field
+identifier appears in these rules or their metrics.
+
+| Alert | Trigger and first diagnostic step |
+| --- | --- |
+| `WitselfSealedPlanePostureMetricsUnavailable` | Critical after the collector is absent or its maximum `_up` is below 1 for 3 minutes. Check the server release and scrape target, then database reachability and the posture query timeout. A failed read suppresses the posture gauges; missing gauges are not healthy zeroes. |
+| `WitselfSecretMaterialDeliveryErrorRatio` | Warning when delivery `result="error"` exceeds 5% over 10 minutes, with total traffic above 0.01 requests/second, for 10 minutes. Inspect protected server logs for database and audit-append failures. The `conflict`, `forbidden`, `not_found`, and `invalid` result classes count as non-error outcomes for the availability SLO; inspect them separately when diagnosing a failed client workflow. |
+| `WitselfVaultRotationFenceConflicts` | Warning when rotation `result="conflict"` calls exceed a combined budget of 5 over 15 minutes for 5 minutes, summing reset-adjusted observed increases across all series and any new-series count not already included in those increases. Compare the bounded `operation` classes (`start`, `stage`, `commit`, `cancel`) and inspect the authenticated rotation's current fence and staged progress. The class includes state/key and idempotency conflicts; it does not prove every conflict was a stale fence. Resume the existing rotation through the supported workflow after resolving ownership; do not clear fences or rotate keys from an alert alone. |
+| `WitselfVaultRotationStuckOpen` | Warning when the oldest open rotation exceeds 86,400 seconds for 15 minutes. Inspect active rotation state and missing staging acknowledgements through an authorized client. A long-running client-owned rotation needs an explicit resume or cancel decision; no backend job completes it automatically. |
+| `WitselfSecretMaterialDeliveryVolumeAnomaly` | Warning when aggregate delivery attempts exceed 1/second over 15 minutes, or `witself_secret_material_max_agent_deliveries_15m` exceeds 120, for 15 minutes. Compare bounded result and field-kind classes, recent workload changes, and authenticated audit evidence. The SQL gauge is the single maximum count of best-effort successful `secret_read` usage events across account/agent pairs, so it may undercount delivered material and cannot identify an agent. |
+
+The rotation conflict alert always includes each series' reset-adjusted observed
+increase, preserving observed conflicts if a newly started counter resets during
+the alert hold. Until a series has a fifteen-minute-old observation, it also adds
+any positive difference between its current count and that increase, or its full
+current count if there are too few samples to calculate an increase. These
+contributions are summed before checking the budget, so conflicts split between
+established and newly started replicas can exceed the combined budget without
+counting an observed increase twice. Counting newly observed series can
+conservatively repeat an alert after a scrape gap that removes the older observation.
+
+The conflict and volume ceilings are provisional: there is no established
+production sealed-plane volume baseline. Tune them against reviewed normal
+traffic after activation; retain warning severity for these signals. Use
+`witself_vault_pending_enrollments` and
+`witself_vault_oldest_pending_enrollment_seconds` to investigate pending or
+approved enrollments before their expiry; expired records are excluded even if
+lazy cleanup has not run. Enrollment age has a documented review objective but
+no separate paging rule in this group.
+
+For a rule-only rollback, set `platform.monitoring.sealedPlaneAlerts.enabled`
+false. Other alert groups and the monitoring stack remain enabled. Keep any
+diagnostic evidence value-free; credentials, ciphertext, wrapped keys, and
+client error details belong outside metric labels and public incident notes.
 
 ## Incident communications
 

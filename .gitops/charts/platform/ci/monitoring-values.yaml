@@ -19,6 +19,8 @@ platform:
       enabled: true
     collectorAlerts:
       enabled: true
+    sealedPlaneAlerts:
+      enabled: true
     receiver:
       secretName: witself-alert-receiver-v1
       secretKey: url

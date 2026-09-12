@@ -214,15 +214,15 @@ Initial metric families should include:
 | `witself_http_in_flight_requests` | In-flight HTTP requests. |
 | `witself_auth_attempts_total` | Authentication attempts by principal kind, result, and reason class. |
 | `witself_token_operations_total` | Token create, rotate, revoke, and verification operations. |
-| `witself_secret_operations_total` | Sealed-plane secret operations by operation (`create`, `show`, `update`, `rename`, `copy`, `archive`, `restore`, `delete`, `grant`, `revoke`), owner kind, and result. The `show` operation returns metadata only and never a value; reveals are counted separately. |
+| `witself_secret_material_deliveries_total` | Implemented ciphertext-material delivery calls by bounded `field_kind` and `result`. Success means the server authorized and returned encrypted material, not that a client decrypted it. |
 | `witself_secret_limit_rejections_total` | Implemented non-retryable stored-secret create refusals. Its bounded labels are exactly `limit_dimension="stored_secret"` and `operation="create"`; it never carries an account, realm, agent, secret id, name, value, or error text. |
 | `witself_fact_limit_rejections_total` | Implemented non-retryable current-fact capacity refusals. Its bounded labels are exactly `limit_dimension="stored_fact"` and operation from the closed set `create` or `confirm`; it never carries account, realm, agent, subject, predicate, fact/candidate id, usage, maximum, value, or error text. Phase B activates finite defaults only after migration 0078 reconciles every target cell. |
 | `witself_memory_limit_rejections_total` | Implemented non-retryable active-memory capacity refusals. Its bounded labels are exactly `limit_dimension="stored_memory"` and operation from the closed set `create`, `supersede`, `restore`, `reactivate`, or `curation_apply`; it never carries account, realm, agent, memory, plan, usage, maximum, content, or error-text labels. |
 | `witself_plan_limit_rejections_total` | Implemented non-retryable realm and agent create refusals. Its bounded labels are `limit_dimension="realms"`, legacy `"agents"`, or `"agents_per_realm"`, plus `operation="create"`; it never carries an account, realm, agent, resource name, or error text. |
-| `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
-| `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
-| `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
-| `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
+| `witself_vault_lifecycle_operations_total` | Implemented vault registration, enrollment, and rotation calls by bounded `flow`, `operation`, and `result`, including fence conflicts and successful idempotent replays. |
+| `witself_sealed_plane_posture_metrics_up` | Implemented cell-wide posture reader health: 1 for a valid snapshot, 0 on read failure or invalid values; other posture gauges are omitted on failure. |
+| `witself_vault_open_rotations`, `witself_vault_oldest_open_rotation_seconds` | Implemented count and oldest age of open rotations, with no tenant labels. |
+| `witself_vault_pending_enrollments`, `witself_vault_oldest_pending_enrollment_seconds`, `witself_secret_material_max_agent_deliveries_15m` | Implemented unexpired pending/approved enrollment count and oldest age, plus the largest per-account/agent count of best-effort `secret_read` usage events in the preceding 15 minutes. Only aggregate values leave the store. |
 | `witself_memory_operations_total` | Memory domain operations by operation (`add`, `read`, `list`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, `evidence_resolve`, `delete`), authenticated principal kind, and result. Authentication or request-decoding failures remain visible in the HTTP family rather than being misreported as completed domain calls. |
 | `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), authenticated principal kind, and result. |
 | `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and authenticated principal kind. |
@@ -409,17 +409,30 @@ keeps the final-verdict response in `result` and returns the value-free route
 breakdown in `route_lookup_result`, grouped only by `result`, `evidence`, and
 `route_kind`. This makes `cp_error` on `custom_domain` routes directly visible
 without exposing a customer domain or tenant identifier.
-Metric names can evolve during implementation, but the coverage categories
-should remain. The sealed-plane families (`witself_secret_operations_total`,
-`witself_secret_reveals_total`, `witself_totp_operations_total`,
-`witself_kms_operations_total`, and `witself_kms_operation_duration_seconds`)
-count events and never carry payload: no secret value, field value, TOTP seed,
-generated code, or key material ever appears in a metric or its labels. They
-are present only when the sealed plane is enabled. The `server_side_decrypt`
-label on the reveal and TOTP families records which decrypt path served the
-value — `true` for token-only pods where the server mediates decryption,
-`false` for client-held decryption — per the hybrid model in
-[key-hierarchy.md](key-hierarchy.md).
+The implemented sealed-plane families are
+`witself_secret_material_deliveries_total`,
+`witself_vault_lifecycle_operations_total`, `witself_secret_limit_rejections_total`,
+and the cell-wide posture gauges listed above. They carry no account, realm,
+agent, secret, field id, name, value, ciphertext, wrapped DEK, TOTP seed, code,
+key material, or error text. The server does not emit reveal, TOTP-generation,
+or agent-secret KMS counters. Decryption and TOTP generation are client-local under
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md).
+
+Delivery `field_kind` is `password`, `api_key`, `token`, or `totp`, with `other`
+for any remaining field kind on success and `unknown` when the call fails.
+Delivery and lifecycle `result` is `success`, `conflict`, `forbidden`,
+`not_found`, `invalid`, or `error`. Conflicts include state/idempotency fences
+and vault-key mismatch/unavailability; they are not unexpected server errors.
+Lifecycle flow/operation pairs are `registration/register`,
+`enrollment/{create,approve,receive,consume,cancel}`, and
+`rotation/{start,stage,commit,cancel}`. Calls rejected before the domain
+callback (authentication, routing, decoding) appear only in the HTTP family.
+Counters appear after their first observation and reset on process restart.
+The posture reader runs one database query per scrape with a two-second timeout.
+Its per-account 15-minute usage aggregation uses the existing
+`usage_events_by_account_dimension_time` index; account/agent grouping remains
+inside SQL and only the maximum count leaves the store. No schema migration is
+needed. Combine cell aggregates with `max`, not a sum across replicas.
 
 The cross-realm collaboration families
 (`witself_conversations_total`, `witself_relay_envelopes_total`,
@@ -541,13 +554,9 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   profile id, model name, dimensions, or vector value.
 - `backend_kind`, such as `managed`, `self_hosted`, or `local`.
 - `store_backend`, `object_store_provider`.
-- `kms_provider`, the KMS provider family for sealed-plane operations, such as
-  `aws_kms`, `gcp_kms`, `azure_key_vault`, or `local_dev`. It must never carry a
-  key id, key ARN, endpoint URL, or key material.
-- `server_side_decrypt`, `true` or `false`, recording which decrypt path served
-  a reveal or TOTP code: `true` when the server mediates decryption for a
-  token-only pod, `false` for client-held decryption. It never carries a key,
-  a value, or any plaintext.
+- Sealed delivery `field_kind`, and vault lifecycle `flow`, `operation`, and
+  `result`, restricted to the closed sets above. No decrypt-path or KMS labels
+  apply to client-custodied agent secrets.
 - `reason_class`, a small normalized set such as `missing`, `stale`,
   `incompatible`, `non_finite`, `wrong_dimension`, or `unauthorized`, for
   optional-vector validation and fallback events.
@@ -591,8 +600,8 @@ Expected log fields:
 - Owner kind (`self`, `other_agent`, or `group`) for identity operations.
 - Permission verb and decision for policy-gated operations.
 - Recall mode and bounded vector coverage class for recall operations.
-- KMS provider, KMS operation, and the `server_side_decrypt` flag for
-  sealed-plane reveal, TOTP code, and key operations.
+- Bounded operation and result classes for sealed material delivery and vault
+  lifecycle operations; server logs cannot report local decrypt or TOTP outcomes.
 - Backend kind.
 - Stable error code when an operation fails.
 
@@ -700,6 +709,56 @@ resources when those CRDs are installed and the corresponding values are
 enabled. The worker has a separate metrics Service and separate optional
 monitors so API and worker scrape selectors never overlap. The chart should not
 require those CRDs for a basic install.
+
+## Sealed-plane SLOs
+
+These objectives cover server-observable ciphertext delivery and vault lifecycle
+state under [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
+`AccessSecretField` authorizes a request and returns ciphertext plus its wrapped
+DEK. Its successful audit event, `secret.material.delivered`, does not prove
+client decryption, TOTP generation, or receipt at a plaintext sink. Local
+integrity failures never reach these server counters.
+
+| Objective | Measurement and operational threshold |
+| --- | --- |
+| Delivery availability | At least 99.9% non-`error` domain calls over a rolling 30 days: `1 - (sum(increase(witself_secret_material_deliveries_total{result="error"}[30d])) or vector(0)) / sum(increase(witself_secret_material_deliveries_total[30d]))`. With no calls the SLI is undefined, not evidence of success. A missing sparse error series means zero observed errors only when delivery observations exist. Expected conflicts, denials, missing fields, and invalid input remain non-`error` outcomes; this is server availability, not an authorized-reveal success rate. |
+| Delivery error alert | More than 5% `error` calls over 10 minutes, above 0.01 calls/second, sustained for 10 minutes. This shorter operational threshold is distinct from the 30-day objective. |
+| Rotation conflict budget | At most five `flow="rotation",result="conflict"` calls per 15 minutes, combining reset-adjusted observed increases across all series with any new-series count not already included in those increases across rotation operations. More than five combined conflicts sustained for five minutes warns about fences, stale state, or retry contention; successful idempotent replays are `success`. |
+| Rotation completion | No open rotation older than 24 hours. An age above 86,400 seconds for 15 minutes warns. Committed/cancelled rotations are excluded; this measures outstanding work, not historical completion latency. |
+| Pending enrollment age | Monitor the count and oldest age of unexpired `pending`/`approved` enrollments. Complete or cancel before the request's expiry. Expired requests are excluded even before lazy cleanup; no pending-enrollment page or global TTL is introduced. |
+| Delivery volume ceiling | Provisional warning when all delivery calls exceed one/second over 15 minutes, or one account/agent has more than 120 recorded `secret_read` usage events in 15 minutes, sustained for 15 minutes. The SQL projection exposes only the maximum count. Usage recording is best effort, so this gauge can undercount successful deliveries. |
+| KMS latency and local decrypt | Not applicable to the server SLO: the backend calls no agent-secret KMS and receives no client decrypt outcome. There is no emitted KMS latency series or claimed client-success objective. Any future client telemetry needs its own value-free contract and measured baseline. |
+
+The platform defaults configure seven-day Prometheus retention, also capped at
+4 GB, and the serving-cell values do not override them. A `[30d]` query against
+this shorter history
+cannot establish 30-day compliance. The availability objective requires a full
+30 days of retained aggregate evidence before reporting attainment; the query
+above defines the SLI but does not prove that the required history exists.
+This implementation does not change retention or provision another collector.
+
+The volume ceiling is a provisional fixed threshold, not a learned baseline.
+Production sealed-plane volume has no established baseline; tune it using
+sanitized aggregate observations after certification. Fence, age, volume, and
+delivery-error alerts are warnings. Only posture-reader unavailability is
+critical: `witself_sealed_plane_posture_metrics_up` absent or below one for
+three minutes. A failed reader emits `_up 0` and omits every posture gauge, so
+missing data cannot masquerade as zero outstanding work. A nil reader omits
+the entire family and the enabled absence alert fails closed.
+
+The five rules live in the `witself-sealed-plane` group and require monitoring,
+alerting, and the default-off
+`platform.monitoring.sealedPlaneAlerts.enabled` values switch. All use
+`service="sealed-plane"`, `witself_alert="true"`, and the existing incident
+receiver. Cell values are unchanged by this implementation. Release the server
+metrics first through the release train, verify the new families on each
+serving replica's `/metrics` (exercise synthetic delivery/lifecycle calls for
+sparse counters), then merge/enable rules through the serving-cell values flip.
+GitOps tracks `main` with automated sync; an absent-series rule enabled before
+the server release would page. Source tests and the feature-catalog gate are
+implementation evidence, not evidence that production has been rolled or that
+these objectives have been met. See [Sealed-plane alerts](runbooks.md#sealed-plane-alerts)
+for response actions and rollout acceptance.
 
 ## Alerts And Dashboards
 
@@ -1186,7 +1245,8 @@ Required checks once the server and chart exist:
 - Tests proving `owner_kind` only ever takes `self`, `other_agent`, or `group`
   for access-perspective metrics, and only `agent` or `group` for
   data-ownership metrics, and never an agent name, group name, or realm id.
-- Tests proving `server_side_decrypt` only ever takes `true` or `false`.
+- Tests proving sealed delivery and lifecycle labels use only their closed sets,
+  and posture read failures omit gauges without exposing error text.
 - Tests proving memory content, fact values, message bodies, and embedding
   vectors never appear in metrics, logs, or health responses.
 - Tests proving active-memory refusal labels are restricted to

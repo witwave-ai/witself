@@ -378,7 +378,7 @@ spec:
           founder-open-plane:
 {{- $founderGroups := list }}
 {{- range $group := (fromYaml (.Files.Get "files/founder-open-plane.rules.yaml")).groups }}
-{{- if or (ne $group.name "witself-collectors") $monitoring.collectorAlerts.enabled }}
+{{- if and (or (ne $group.name "witself-collectors") $monitoring.collectorAlerts.enabled) (or (ne $group.name "witself-sealed-plane") $monitoring.sealedPlaneAlerts.enabled) }}
 {{- $founderGroups = append $founderGroups $group }}
 {{- end }}
 {{- end }}

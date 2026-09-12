@@ -108,6 +108,10 @@ platform:
       # Enable after the server exposes healthy identity-capacity metrics and
       # both server and worker expose healthy audit-append metrics.
       enabled: false
+    sealedPlaneAlerts:
+      # Enable only after the server release exposes healthy sealed posture
+      # metrics and the material-delivery and vault-lifecycle counters.
+      enabled: false
     postgresql:
       # Enable only with the cell's Civo PostgreSQL exporter and alerting.
       enabled: false
