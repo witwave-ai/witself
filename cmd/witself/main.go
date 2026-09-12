@@ -3968,7 +3968,7 @@ func factUpcoming(args []string) int {
 
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail|hook|flush|fence ...")
+		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail|hook|flush|fence|status ...")
 		return 2
 	}
 	switch args[0] {
@@ -3988,6 +3988,8 @@ func transcriptCmd(args []string) int {
 		return transcriptFlush(args[1:])
 	case "fence":
 		return transcriptFence(args[1:])
+	case "status":
+		return transcriptStatus(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself transcript: unknown subcommand %q\n", args[0])
 		return 2

@@ -2253,7 +2253,7 @@ func transcriptFlush(args []string) int {
 		}
 		deferred := countBlockedCaptureEvents(remaining, nil, heldPaths)
 		if quarantined > 0 || deferred > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined)
+			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined, remaining)
 		}
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		if deferred > 0 {
@@ -2265,7 +2265,7 @@ func transcriptFlush(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		if quarantined > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined)
+			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined, nil)
 			writeSkippedEphemeralSessionSummary(runtimeName)
 		}
 		return 1
@@ -2477,11 +2477,11 @@ func transcriptFlush(args []string) int {
 		if deferredErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
 		}
-		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined)
+		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined, remaining)
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		return 1
 	}
-	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined)
+	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined, remaining)
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
 }
@@ -2566,10 +2566,15 @@ func partitionEphemeralCodex(
 	return remaining, len(moved)
 }
 
-func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined int) {
+func writeTranscriptFlushSummary(
+	runtime string,
+	flushed, deferred, quarantined int,
+	remaining []transcriptcapture.PendingEvent,
+) {
 	if deferred > 0 {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)",
 			flushed, runtime, deferred)
+		writeDeferredBuckets(runtime, deferred, remaining)
 	} else {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)", flushed, runtime)
 	}
@@ -2577,6 +2582,61 @@ func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined 
 		fmt.Fprintf(os.Stderr, "; quarantined %d ephemeral event(s)", quarantined)
 	}
 	fmt.Fprintln(os.Stderr)
+}
+
+// writeDeferredBuckets shows the backlog's shape, not its content. Events the
+// upload gate holds are attributed to a missing terminal, an orphaned run, or a
+// session with no local state; anything deferred for another reason, such as a
+// server rejection, is reported as the remainder.
+func writeDeferredBuckets(runtime string, deferred int, remaining []transcriptcapture.PendingEvent) {
+	summary, err := transcriptcapture.SummarizeDeferred(runtime, remaining)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, " (%s %d, %s %d, %s %d",
+		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
+		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
+		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	if other := deferred - summary.Total(); other > 0 {
+		fmt.Fprintf(os.Stderr, ", other %d", other)
+	}
+	fmt.Fprint(os.Stderr, ")")
+}
+
+const transcriptStatusUsage = "usage: witself transcript status --runtime RUNTIME"
+
+// transcriptStatus reports the local capture backlog for one runtime, using the
+// same value-free buckets that a flush prints when it defers work.
+func transcriptStatus(args []string) int {
+	fs := flag.NewFlagSet("transcript status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, transcriptStatusUsage)
+	runtime := fs.String("runtime", "", "capture runtime (codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot)")
+	if parsed, code := parseCommandFlags(fs, args); !parsed {
+		return code
+	}
+	runtimeName, err := transcriptcapture.NormalizeRuntime(*runtime)
+	if err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, transcriptStatusUsage)
+		return 2
+	}
+	pending, err := transcriptcapture.Pending(runtimeName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
+		return 1
+	}
+	summary, err := transcriptcapture.SummarizeDeferred(runtimeName, pending)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read capture state: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%s capture: %d queued event(s); deferred %d (%s %d, %s %d, %s %d)\n",
+		runtimeName, len(pending), summary.Total(),
+		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
+		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
+		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	writeSkippedEphemeralSessionSummary(runtimeName)
+	return 0
 }
 
 func writeSkippedEphemeralSessionSummary(runtime string) {

@@ -669,7 +669,7 @@ witself
   integrations
   install RUNTIME[,RUNTIME...]|all
   uninstall RUNTIME[,RUNTIME...]|all
-  transcript create|append|list|show|tail|flush
+  transcript create|append|list|show|tail|flush|fence|status
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
   federation peers|card  # target; not implemented
@@ -3817,8 +3817,11 @@ witself transcript list --account default
 witself transcript show trn_123 --account default --json
 witself transcript tail trn_123 --account default --agent scott --limit 20
 witself transcript flush --runtime codex
+witself transcript status --runtime cursor
 witself transcript fence --runtime codex --session delegated-session-id \
   --run captured-run-id --turn captured-turn-id --reason job-completed
+witself transcript fence --runtime cursor --session headless-session-id \
+  --latest --reason job-completed
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
@@ -3836,26 +3839,46 @@ returns a concrete delivery error; it does not stop merely because a large
 valid backlog takes longer than the detached hook flusher's bounded work
 window.
 
-`fence` is the companion completion command for a delegated Codex job whose
-runtime emits no terminal hook. It requires `--runtime codex`, `--session`,
-`--run`, and `--turn`; `--reason` defaults to `job-completed`. The orchestrator
-must pin the captured run and turn IDs when the job starts and reuse those
-exact IDs for every completion retry. Reading the current IDs when completion
-arrives can select a resumed job's turn and is unsafe; a session-only fence
-is refused. It appends a synthetic `turn.completed` system event with body
+`fence` is the companion completion command for a delegated job whose runtime
+emits no terminal hook. It requires `--session` and a `--runtime` that capture
+knows (`codex`, `claude-code`, `grok-build`, `cursor`, `openclaw`,
+`antigravity`, or `copilot`), plus either the pinned `--run` and `--turn` pair
+or `--latest`; the two forms are mutually exclusive and `--reason` defaults to
+`job-completed`. With the pinned form the orchestrator must pin the captured run
+and turn IDs when the job starts and reuse those exact IDs for every completion
+retry. Reading the current IDs when completion arrives can select a resumed
+job's turn and is unsafe; a session-only fence is refused. It appends a
+synthetic `turn.completed` system event with body
 `delegation job completed` and data
 containing `synthetic_fence: true` and the reason, through the normal hook
 enqueue path, then starts the normal flush. An existing local session and
-matching open run and turn are required. A repeat for the most recent synthetic
+matching bound run are required. A repeat for the most recent synthetic
 completion in the current run is a no-op even after upload or subsequent
 prompts. Once a later fence completes or a new run starts, older completions
-are rejected as stale. Other mismatched identities, sessions without an open
+are rejected as stale. Other mismatched identities, sessions without a held
 turn, and unknown sessions are refused without changing the current turn.
 Sensitive-turn redaction runs
 exactly as for Stop before the turn becomes upload-ready, retaining the
 synthetic marker while omitting the caller-provided reason. Ephemeral Codex
 sessions remain excluded. This command does not recover missing assistant text
 or install an orchestrator callback.
+
+`--latest` is the headless-launcher form for a runtime that carries its own
+turn ids, so local state never opens a turn to pin. It derives the session's
+bound run from local capture state and fences every turn of that session whose
+events the upload gate still holds, including turns orphaned by an earlier
+resume. It reports how many turns it closed, is a no-op when nothing is held
+(including after the runtime's own SessionEnd removed the session's local
+state), and is safe to run unconditionally as the last step of a headless job,
+after the agent process has exited. A session with no local state that still
+holds events is refused; nothing is fenced on age or inactivity.
+
+`status` reports one runtime's local backlog: how many events are queued and
+how many the upload gate holds, in the value-free buckets `no-fence`,
+`run-mismatch`, and `session-unbound`. A deferring `flush` prints the same
+buckets, plus an `other` count for events deferred by something other than the
+upload gate, such as a server rejection or an upload-ready event queued behind
+a held turn.
 
 For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
 native session file. Grok writes the final assistant response only after its

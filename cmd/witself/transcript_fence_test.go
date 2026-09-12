@@ -101,8 +101,15 @@ func TestTranscriptFenceCommandRefusesUnknownAndInvalidArguments(t *testing.T) {
 		code int
 	}{
 		{[]string{"--runtime", "codex", "--session", "unknown", "--run", prompt.RunID, "--turn", prompt.TurnID}, 1},
-		{[]string{"--runtime", "claude-code", "--session", "delegated", "--run", prompt.RunID, "--turn", prompt.TurnID}, 2},
+		{[]string{"--runtime", "not-a-runtime", "--session", "delegated", "--run", prompt.RunID, "--turn", prompt.TurnID}, 2},
+		// A known runtime is accepted as an argument and then refused by its
+		// own missing installation, not by the fence's flag parsing.
+		{[]string{"--runtime", "claude-code", "--session", "delegated", "--run", prompt.RunID, "--turn", prompt.TurnID}, 1},
 		{[]string{"--runtime", "codex", "--session", "delegated"}, 2},
+		{[]string{"--runtime", "codex", "--session", "delegated", "--latest", "--run", prompt.RunID, "--turn", prompt.TurnID}, 2},
+		{[]string{"--runtime", "codex", "--session", "delegated", "--latest", "--turn", prompt.TurnID}, 2},
+		{[]string{"--runtime", "codex", "--latest"}, 2},
+		{[]string{"--runtime", "not-a-runtime", "--session", "delegated", "--latest"}, 2},
 		{[]string{"--runtime", "codex", "--session", "delegated", "--run", prompt.RunID}, 2},
 		{[]string{"--runtime", "codex", "--session", "delegated", "--turn", prompt.TurnID}, 2},
 		{[]string{"--runtime", "codex", "--session", "delegated", "--run", " ", "--turn", prompt.TurnID}, 2},

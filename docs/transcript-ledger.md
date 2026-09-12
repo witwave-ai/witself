@@ -245,9 +245,10 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
   turn remains in the local outbox until a companion emits
   `witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id>`
   after the job completes, using the captured run and turn IDs pinned when
-  that job starts. This implements the companion-emitted fence option; the
-  operator-purge and liveness options remain undecided. The delegation
-  orchestrator must wire this call into job completion.
+  that job starts, or `--latest` when the launcher cannot pin them. This
+  implements the companion-emitted fence option; the operator-purge and
+  liveness options remain undecided. The delegation orchestrator must wire
+  this call into job completion.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
   persistence-boundary exclusion was merged on `main` by
   [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
@@ -267,12 +268,13 @@ error occurs. Individual network requests remain time-bounded. Detached
 hook-triggered flushers are deliberately short-lived; if one reaches its work
 window, the next hook retries the durable remainder.
 
-`witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id> [--reason job-completed]`
+`witself transcript fence --runtime RUNTIME --session <session_id> --run <run_id> --turn <turn_id> [--reason job-completed]`
 appends a synthetic `turn.completed` system event
 with body `delegation job completed`, `synthetic_fence: true`, and the reason
-in its data, then starts the normal flush. It requires an existing local Codex
-session with a matching open run and turn and uses the same hook enqueue and
-turn bookkeeping as a real Stop. The orchestrator must pin the captured run
+in its data, then starts the normal flush. `--runtime` accepts any runtime
+capture knows, so every headless lane can close its own jobs. It requires an
+existing local session with a matching bound run and uses the same hook enqueue
+and turn bookkeeping as a real Stop. The orchestrator must pin the captured run
 and turn IDs when the delegated job starts and reuse those exact IDs for every
 completion retry; it must not read the current IDs when completion arrives.
 A session-only fence is refused. Repeating the most recent synthetic completion
@@ -280,11 +282,79 @@ in the current run is a no-op, including after its events have flushed or
 subsequent prompts have opened newer turns. Once a later fence completes or a
 new run starts, older completions are rejected as stale. Other mismatched
 identities are refused without changing the current turn. Unknown sessions and
-sessions with no open turn are refused unless they are an idempotent repeat. Sensitive turns
+sessions with no open turn are refused unless they are an idempotent repeat.
+A turn the runtime carries in its own ids, which local state never opens, is
+fenced only while the upload gate still holds its events. Sensitive turns
 retain the sealed-tool suppression: pending content is redacted through the
 same path as Stop before the fence can release the turn. The synthetic marker
 is retained, but a sensitive turn's caller-provided reason is omitted. The
 command does not capture ephemeral sessions or recover missing assistant text.
+
+### Headless Job Completion And Resumed Runs
+
+A headless launcher that cannot pin ids runs
+`witself transcript fence --runtime cursor --session <session_id> --latest --reason job-completed`
+as the last step of the job, after the agent process exits. `--latest` derives
+the session's bound run from local capture state and closes every turn of that
+session whose queued events the upload gate still holds, including turns
+orphaned by an earlier resume. It is idempotent: with nothing held it makes no
+event and exits 0, including after the runtime's own SessionEnd has removed the
+session's local state, so a launcher may always call it once the agent process
+has exited. `--latest` and the pinned
+`--run`/`--turn` form are mutually exclusive. Nothing here is age- or
+inactivity-based; only a real completion signal from the launcher, the runtime,
+or a run rollover releases a turn.
+
+Resuming a provider session (`agent -p ... --resume <session_id>` for Cursor,
+and the equivalent for other runtimes) keeps the session id and starts a new
+run. Capture now closes the prior run before binding the new one: the first
+event of the restarted session enqueues one synthetic `turn.completed` event
+per still-held turn of the prior run, with body
+`run completed when the session restarted` and `synthetic_fence: true`. The
+reason names the restart the runtime reported in its session-start `source`:
+`resumed` (the default when a runtime sends no source) or `cleared`. A
+session-start with source `compact` is context compaction, which Claude Code
+can report in the middle of a running turn; it keeps the run and the open turn
+and fences nothing, so a sealed tool later in that turn still suppresses the
+prompt captured before compaction. Those terminal events carry the prior run's id, are written before
+the restarted run's first event, and never reorder or drop anything: both runs
+reach the ledger in capture order. The outbox format is unchanged and a
+rollover needs no new state field, because the events still held in the outbox
+are the durable record of what to close. The session-state file gains one
+additive field, `sealed_turns`: the run/turn pairs that handled sealed
+material, recorded before their redaction is attempted and kept across run
+rollover, so a fence can still close such a turn sealed when the redaction that
+would have marked its queued events failed.
+
+A rollover fence is best-effort in the capture path: if the outbox cannot be
+projected (an unreadable queued file, or one written under a different
+binding), the hook is still captured and the fence is skipped, so capture never
+stops on a flush-side problem. `transcript fence --latest` closes the prior run
+once that file is resolved or removed. A fence redacts a turn exactly when the
+hook path sealed that turn: one of the turn's own queued events already carries
+the sealed marker, or `sealed_turns` recorded it. The session's run-level
+sealed flag is never projected onto other held turns, because the hook path
+clears that flag at the next real prompt, so closing an older or later turn
+never rewrites content that no sealed tool touched. A sealed fence re-runs the
+turn's redaction, which retries one that failed at capture time.
+
+`witself transcript status --runtime RUNTIME` and every deferring
+`witself transcript flush` print the same value-free backlog buckets:
+
+- `no-fence`: the session's bound run is still waiting for a terminal event.
+- `run-mismatch`: the events belong to a run the session no longer binds, which
+  an older build orphaned on resume. `--latest` recovers them.
+- `session-unbound`: the session has no local state while events are still
+  held, so no local command can derive their missing terminal. These events
+  stay queued and value-free. Both fence entry points refuse such a session on
+  purpose, because publishing a
+  terminal for an identity this install can no longer prove is exactly the
+  age-based release that issue #335 rejected; how an operator retires that
+  backlog remains open there.
+
+The buckets are counts only. A flush that defers events for another reason,
+such as a server rejection or an upload-ready event queued behind a held turn,
+reports the remainder as `other`.
 
 Cursor's `beforeSubmitPrompt` hook wraps the visible prompt in one provider
 timestamp and `user_query` envelope. Witself removes that transport-only
