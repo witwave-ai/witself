@@ -101,10 +101,13 @@ func TestReadSealedPlanePostureMetricsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, state := range []string{"pending", "approved", "pending", "approved", "cancelled", "consumed", "expired"} {
-		created := time.Now().Add(-10 * time.Minute)
-		expires := time.Now().Add(20 * time.Minute)
+		// Ages are asserted against the server's statement_timestamp(), so the
+		// fixture must be anchored to the server clock too: a client-side
+		// time.Now() lets host/container clock skew floor a 600-second wait to
+		// 599 and flake the assertion below.
+		createdOffset, expiresOffset := "-10 minutes", "20 minutes"
 		if i == 2 || i == 3 {
-			created, expires = time.Now().Add(-time.Hour), time.Now().Add(-time.Minute)
+			createdOffset, expiresOffset = "-1 hour", "-1 minute"
 		}
 		// Fixture rows satisfy lifecycle CHECKs without needing client transfer
 		// crypto; posture reads must never inspect that opaque transfer material.
@@ -114,19 +117,20 @@ func TestReadSealedPlanePostureMetricsPostgres(t *testing.T) {
 			 lifecycle_state, created_at, expires_at, source_location_id,
 			 source_ephemeral_public_key, transfer_ciphertext, transfer_algorithm,
 			 consume_commitment, approved_at, consumed_at, cancelled_at, expired_at)
-		VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,$11,$12,
+		VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,
+			statement_timestamp() + $11::interval, statement_timestamp() + $12::interval,
 			CASE WHEN $10 IN ('approved','consumed') THEN $6 END,
 			CASE WHEN $10 = 'approved' THEN $7 END,
 			CASE WHEN $10 = 'approved' THEN decode(repeat('ab',64),'hex') END,
 			CASE WHEN $10 = 'approved' THEN $13 END,
 			CASE WHEN $10 = 'approved' THEN $9 END,
-			CASE WHEN $10 IN ('approved','consumed') THEN $11::timestamptz END,
-			CASE WHEN $10 = 'consumed' THEN $11::timestamptz END,
-			CASE WHEN $10 = 'cancelled' THEN $11::timestamptz END,
-			CASE WHEN $10 = 'expired' THEN $11::timestamptz END)`,
+			CASE WHEN $10 IN ('approved','consumed') THEN statement_timestamp() + $11::interval END,
+			CASE WHEN $10 = 'consumed' THEN statement_timestamp() + $11::interval END,
+			CASE WHEN $10 = 'cancelled' THEN statement_timestamp() + $11::interval END,
+			CASE WHEN $10 = 'expired' THEN statement_timestamp() + $11::interval END)`,
 			mustSecretTestID(t, "enr"), p.AccountID, p.RealmID, agent.ID, keyMeta.ID,
 			mustSecretTestID(t, "loc"), strings.Repeat("A", 43), VaultEnrollmentTargetKeyAlgorithm,
-			strings.Repeat("a", 64), state, created, expires, VaultEnrollmentTransferAlgorithm)
+			strings.Repeat("a", 64), state, createdOffset, expiresOffset, VaultEnrollmentTransferAlgorithm)
 	}
 	if got := read(); got.PendingEnrollments != 2 || got.OldestPendingEnrollmentSeconds < 600 || got.OldestPendingEnrollmentSeconds > 610 {
 		t.Fatalf("enrollment posture = %+v; want two unexpired waits, age 600..610 seconds", got)
