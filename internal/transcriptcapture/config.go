@@ -466,8 +466,12 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		return nil
 	}
 	if runtime == RuntimeDSH {
-		if hookMode != HookModeNone {
-			return errors.New("dsh hook_mode must be none")
+		// dsh mounts @deepseek-ai/dsh-hooks-claude-code as a user-scoped hook
+		// bridge. It has no administrator-managed hook surface at all, and
+		// hook_mode none remains loadable for a binding written before the
+		// bridge was mounted.
+		if hookMode == HookModeManaged {
+			return errors.New("dsh hook_mode must be none or user")
 		}
 		if runtimeCLICommand == "" {
 			return errors.New("runtime_cli_command is required for DeepSeek Harness")

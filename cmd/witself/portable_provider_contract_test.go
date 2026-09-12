@@ -392,6 +392,12 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 	if err := os.WriteFile(agentsPath, foreignInstructions, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A hook the operator configured for their own tooling must survive both
+	// install and uninstall untouched.
+	foreignHook := `{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"operator-notify"}]}]}}`
+	if err := os.WriteFile(filepath.Join(dshHome, dshHookConfigFileName), []byte(foreignHook+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	installArgs := fixture.installArgs(transcriptcapture.RuntimeDSH)
 	if code := runGenericProviderContractCLI(t, fixture.witselfExecutable, "install", installArgs...); code != 0 {
@@ -409,12 +415,14 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 	if err := validateDSHInstalledTopology(cfg); err != nil {
 		t.Fatal(err)
 	}
+	hookPath := filepath.Join(dshHome, dshHookConfigFileName)
 	if cfg.RuntimeCLICommand != fixture.provider.Path || cfg.RuntimeConfigRoot != dshHome ||
-		cfg.RuntimeMCPConfigPath != patchPath || cfg.HookMode != transcriptcapture.HookModeNone ||
-		cfg.RuntimeVersion != "0.1.5-rc.1" ||
+		cfg.RuntimeMCPConfigPath != patchPath || cfg.HookMode != transcriptcapture.HookModeUser ||
+		cfg.HookConfigPath != hookPath || cfg.RuntimeVersion != "0.1.5-rc.1" ||
 		cfg.MCPEnvironment["WITSELF_HOME"] != fixture.witselfHome {
 		t.Fatalf("persisted dsh binding = %#v", cfg)
 	}
+	assertDSHOwnedHookSet(t, hookPath, foreignHook)
 	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationHealthy)
 	expectedBlock, err := dshManagedPatchBlock(cfg)
 	if err != nil {
@@ -456,11 +464,82 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 	if current, err := os.ReadFile(agentsPath); err != nil || !bytes.Equal(current, foreignInstructions) {
 		t.Fatalf("uninstall did not restore the shared dsh instructions exactly: %q, %v", current, err)
 	}
+	assertDSHHooksRemoved(t, hookPath)
 	assertIntegrationConfigAbsent(t, transcriptcapture.RuntimeDSH)
 	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationNotInstalled)
 	// dsh has no `mcp add` surface; Witself owns the patch file directly, so the
 	// only provider invocations are read-only probes.
 	assertProviderMutationCounts(t, fixture.provider, "add", 0, "remove", 0)
+}
+
+// assertDSHOwnedHookSet proves install wrote exactly the five claude-code
+// shaped events the harness bridge offers, and left an operator's own handler
+// in place beside them.
+func assertDSHOwnedHookSet(t *testing.T, path, foreignCommand string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("installed dsh hooks are not valid JSON: %v\n%s", err, raw)
+	}
+	owned := map[string]string{}
+	foreign := 0
+	for event, groups := range document.Hooks {
+		for _, group := range groups {
+			for _, handler := range group.Hooks {
+				if !strings.Contains(handler.Command, " transcript hook --runtime dsh ") {
+					foreign++
+					continue
+				}
+				if handler.Type != "command" {
+					t.Fatalf("owned dsh %s handler type = %q", event, handler.Type)
+				}
+				owned[event] = handler.Command
+			}
+		}
+	}
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+		if owned[event] == "" {
+			t.Fatalf("installed dsh hooks omit %s:\n%s", event, raw)
+		}
+		delete(owned, event)
+	}
+	if len(owned) != 0 {
+		t.Fatalf("installed dsh hooks carry unexpected events %v:\n%s", owned, raw)
+	}
+	if foreign != 1 || !strings.Contains(string(raw), "operator-notify") {
+		t.Fatalf("install did not preserve the operator's own dsh hook:\n%s", raw)
+	}
+	if !strings.Contains(foreignCommand, "operator-notify") {
+		t.Fatalf("test fixture no longer configures the foreign hook it asserts")
+	}
+}
+
+// assertDSHHooksRemoved proves uninstall withdrew every owned handler while
+// leaving the operator's file and their own handler intact.
+func assertDSHHooksRemoved(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("uninstall must leave the operator's dsh hook file in place: %v", err)
+	}
+	if strings.Contains(string(raw), " transcript hook --runtime dsh ") {
+		t.Fatalf("uninstall left owned dsh handlers behind:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "operator-notify") {
+		t.Fatalf("uninstall did not preserve the operator's own dsh hook:\n%s", raw)
+	}
 }
 
 func assertPortableProviderVerification(

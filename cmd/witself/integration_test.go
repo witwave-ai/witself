@@ -101,7 +101,9 @@ func TestTranscriptHookSupportMatchesNativePlatformContract(t *testing.T) {
 		{platform: "linux", runtime: transcriptcapture.RuntimeOpenClaw, want: false},
 		{platform: "linux", runtime: transcriptcapture.RuntimeAntigravity, want: false},
 		{platform: "linux", runtime: transcriptcapture.RuntimeCopilot, want: false},
-		{platform: "darwin", runtime: transcriptcapture.RuntimeDSH, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeDSH, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeDSH, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeDSH, want: false},
 	} {
 		t.Run(tc.platform+"/"+tc.runtime, func(t *testing.T) {
 			if got := supportsTranscriptHooksForPlatform(tc.runtime, tc.platform); got != tc.want {

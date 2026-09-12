@@ -639,6 +639,13 @@ func hookEvents(runtime, mode string) []string {
 			"sessionStart", "beforeSubmitPrompt", "afterAgentResponse", "stop", "sessionEnd",
 			"subagentStart", "subagentStop", "preCompact",
 		}
+	case RuntimeDSH:
+		// @deepseek-ai/dsh-hooks-claude-code bridges claude-code command hooks
+		// onto the harness interception points. It offers no SessionEnd and no
+		// compaction point, and its subagent points report a single fixed
+		// agent_type, so transcript capture subscribes to the session, prompt,
+		// and turn-stopping points only.
+		events = []string{"SessionStart", "UserPromptSubmit", "Stop"}
 	}
 	// Messages mode still observes tool hooks as a privacy fence. Those hooks
 	// are not persisted as ordinary transcript entries, but they must be seen so
@@ -669,6 +676,8 @@ func hookEvents(runtime, mode string) []string {
 			events = append(events, "afterAgentThought")
 		}
 		return append(events, "preToolUse", "postToolUse", "postToolUseFailure")
+	case RuntimeDSH:
+		return append(events, "PreToolUse", "PostToolUse")
 	default:
 		return events
 	}
@@ -783,9 +792,16 @@ func hookSettingsPath(runtime string) (string, error) {
 		}
 		return filepath.Join(root, "hooks.json"), nil
 	case RuntimeDSH:
+		// dsh-home-paths expands a leading tilde itself, so the hook file has
+		// to land in the same tree the installed patch file names.
 		root := strings.TrimSpace(os.Getenv("DSH_HOME"))
-		if root == "" {
+		switch {
+		case root == "":
 			root = filepath.Join(home, ".dsh")
+		case root == "~":
+			root = home
+		case strings.HasPrefix(root, "~/") || strings.HasPrefix(root, `~\`):
+			root = filepath.Join(home, root[2:])
 		}
 		return filepath.Join(root, "hooks.json"), nil
 	default:

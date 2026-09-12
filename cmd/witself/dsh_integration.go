@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	dshPatchFileName       = "cordis.patch.yml"
-	dshPatchRowID          = "witself-mcp"
-	dshMCPClientPluginName = "@deepseek-ai/dsh-mcp-client"
-	dshMCPServerName       = "witself"
+	dshPatchFileName         = "cordis.patch.yml"
+	dshPatchRowID            = "witself-mcp"
+	dshHooksPatchRowID       = "witself-hooks"
+	dshMCPClientPluginName   = "@deepseek-ai/dsh-mcp-client"
+	dshHooksBridgePluginName = "@deepseek-ai/dsh-hooks-claude-code"
+	dshHookConfigFileName    = "hooks.json"
+	dshMCPServerName         = "witself"
 
 	// One fenced block, versioned in the marker itself. A file carrying the
 	// same fence name at another version was written by a different Witself
@@ -97,6 +100,20 @@ func dshPatchPathAt(configRoot string) (string, error) {
 	return filepath.Join(root, dshPatchFileName), nil
 }
 
+// dshHookConfigPathAt is the one hook document dsh's claude-code bridge reads.
+// The bridge requires an absolute configPath, so the patch row and the owned
+// hook file must always name the same canonical path under the config root.
+func dshHookConfigPathAt(configRoot string) (string, error) {
+	root, err := cleanCopilotAbsolutePath("DeepSeek Harness config root", configRoot)
+	if err != nil {
+		return "", err
+	}
+	if root != configRoot {
+		return "", errors.New("DeepSeek Harness config root must be canonical")
+	}
+	return filepath.Join(root, dshHookConfigFileName), nil
+}
+
 // captureDSHMCPEnvironment is the exact environment the managed block hands
 // to the MCP server. dsh spawns MCP children over a scrubbed environment that
 // drops every ambient DSH_* name, so DSH_HOME must travel in the block itself
@@ -169,6 +186,9 @@ func validateDSHCLISelection(runtimeCLI string, cfg transcriptcapture.Config) er
 	if cfg.RuntimeMCPConfigPath != filepath.Join(cfg.RuntimeConfigRoot, dshPatchFileName) {
 		return errors.New("DeepSeek Harness patch file path is not canonical for the installed config root")
 	}
+	if _, err := dshManagedHookRowPath(cfg); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -188,6 +208,11 @@ func validateDSHPreviousSelection(runtimeCLI string, desired, previous transcrip
 // dshManagedPatchBlock renders the single fenced block Witself owns. The
 // rendering is deterministic so verification can require byte-exact equality
 // without round-tripping foreign YAML, which would destroy `!!js` tags.
+//
+// The fence holds one `- insert:` entry with up to two rows: `witself-mcp`
+// always, and `witself-hooks` whenever transcript hooks are installed. Keeping
+// both rows in one fence means install, verification, and uninstall govern the
+// MCP client and the hook bridge as a single owned region.
 func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 	command, args, err := dshMCPInvocation(cfg)
 	if err != nil {
@@ -229,6 +254,10 @@ func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	hookConfigPath, err := dshManagedHookRowPath(cfg)
+	if err != nil {
+		return nil, err
+	}
 	var block bytes.Buffer
 	block.WriteString(dshPatchBlockBeginMarker + "\n")
 	block.WriteString("- insert:\n")
@@ -241,8 +270,42 @@ func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 	block.WriteString("        args: [" + strings.Join(quotedArgs, ", ") + "]\n")
 	block.WriteString("        env: {" + strings.Join(environment, ", ") + "}\n")
 	block.WriteString("        failOnStartupError: false\n")
+	if hookConfigPath != "" {
+		quotedBridge, err := dshQuoteYAMLScalar("DeepSeek Harness hook bridge plugin name", dshHooksBridgePluginName)
+		if err != nil {
+			return nil, err
+		}
+		quotedHookConfigPath, err := dshQuoteYAMLScalar("DeepSeek Harness hook config path", hookConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		block.WriteString("    - id: " + dshHooksPatchRowID + "\n")
+		block.WriteString("      name: " + quotedBridge + "\n")
+		block.WriteString("      config:\n")
+		block.WriteString("        configPath: " + quotedHookConfigPath + "\n")
+	}
 	block.WriteString(dshPatchBlockEndMarker)
 	return block.Bytes(), nil
+}
+
+// dshManagedHookRowPath returns the absolute hook config path the bridge row
+// must carry, or "" when this binding installs no transcript hooks. A binding
+// that claims user hooks without the canonical path is refused rather than
+// rendered with a path dsh would read from somewhere else.
+func dshManagedHookRowPath(cfg transcriptcapture.Config) (string, error) {
+	if cfg.HookMode != transcriptcapture.HookModeUser {
+		return "", nil
+	}
+	expected, err := dshHookConfigPathAt(cfg.RuntimeConfigRoot)
+	if err != nil {
+		return "", err
+	}
+	if cfg.HookConfigPath != expected {
+		return "", fmt.Errorf(
+			"DeepSeek Harness hook config path must be %s for the installed config root", expected,
+		)
+	}
+	return expected, nil
 }
 
 func dshMCPInvocation(cfg transcriptcapture.Config) (string, []string, error) {
@@ -935,7 +998,7 @@ func validateDSHPersistedTopologyWithProbe(cfg transcriptcapture.Config, probe b
 	if !bytes.Equal(snapshot.block(), expected) {
 		return fmt.Errorf("DeepSeek Harness patch file %s no longer matches the installed Witself managed block", snapshot.path)
 	}
-	if _, _, err := parseDSHManagedPatchBlock(expected); err != nil {
+	if _, err := parseDSHManagedPatchBlock(expected); err != nil {
 		return err
 	}
 	if probe {
@@ -954,6 +1017,14 @@ func validateDSHComposedConfig(cfg transcriptcapture.Config) error {
 	if err != nil || !integrationExecutableModeIsUsable(info) {
 		return nil
 	}
+	expected, err := dshManagedPatchBlock(cfg)
+	if err != nil {
+		return err
+	}
+	rows, err := parseDSHManagedPatchBlock(expected)
+	if err != nil {
+		return err
+	}
 	raw, err := runDSHDumpConfig(
 		cfg.RuntimeCLICommand, cfg.RuntimeConfigRoot, dshDumpConfigTimeout,
 		"--profile", "headless", "--dump-config",
@@ -961,11 +1032,13 @@ func validateDSHComposedConfig(cfg transcriptcapture.Config) error {
 	if err != nil {
 		return unavailableIntegrationTopology(fmt.Errorf("dump the DeepSeek Harness composed config: %w", err))
 	}
-	if !dshComposedConfigHasManagedRow(raw, dshPatchRowID, dshMCPClientPluginName) {
-		return fmt.Errorf(
-			"the DeepSeek Harness composed config does not mount row %s as %s; the home-level patch is not in effect",
-			dshPatchRowID, dshMCPClientPluginName,
-		)
+	for _, row := range rows {
+		if !dshComposedConfigHasManagedRow(raw, row.id, row.name) {
+			return fmt.Errorf(
+				"the DeepSeek Harness composed config does not mount row %s as %s; the home-level patch is not in effect",
+				row.id, row.name,
+			)
+		}
 	}
 	return nil
 }
@@ -994,49 +1067,71 @@ func validateDSHManagedInstructionsAt(configRoot string) error {
 	return nil
 }
 
+// dshPatchRow is one mounted plugin row inside the managed fence.
+type dshPatchRow struct {
+	id   string
+	name string
+}
+
 // parseDSHManagedPatchBlock validates the rendered block's YAML structure
-// without a generic round-trip and returns its row id and plugin name. Only
-// the exact shape Witself renders is accepted, so a malformed render is caught
-// before it reaches a user's profile tree.
-func parseDSHManagedPatchBlock(block []byte) (string, string, error) {
+// without a generic round-trip and returns its rows in order. Only the exact
+// shape Witself renders is accepted, so a malformed render is caught before it
+// reaches a user's profile tree.
+func parseDSHManagedPatchBlock(block []byte) ([]dshPatchRow, error) {
 	lines, _ := splitDSHPatchLines(block)
 	if len(lines) < 4 ||
 		strings.TrimRight(lines[0], " \t") != dshPatchBlockBeginMarker ||
 		strings.TrimRight(lines[len(lines)-1], " \t") != dshPatchBlockEndMarker {
-		return "", "", errors.New("the DeepSeek Harness managed block is not fenced by its exact markers")
+		return nil, errors.New("the DeepSeek Harness managed block is not fenced by its exact markers")
 	}
 	body := lines[1 : len(lines)-1]
 	if strings.TrimRight(body[0], " \t") != "- insert:" {
-		return "", "", errors.New("the DeepSeek Harness managed block must be one `- insert:` sequence entry")
+		return nil, errors.New("the DeepSeek Harness managed block must be one `- insert:` sequence entry")
 	}
-	id, name := "", ""
+	var rows []dshPatchRow
 	previousIndent := 0
 	for index, line := range body[1:] {
 		if strings.TrimSpace(line) == "" {
-			return "", "", errors.New("the DeepSeek Harness managed block must not contain blank lines")
+			return nil, errors.New("the DeepSeek Harness managed block must not contain blank lines")
 		}
 		if strings.ContainsRune(line, '\t') {
-			return "", "", errors.New("the DeepSeek Harness managed block must not contain tabs")
+			return nil, errors.New("the DeepSeek Harness managed block must not contain tabs")
 		}
 		key, value, indent, ok := parseDSHConfigLine(line)
 		if !ok || indent == 0 || indent%2 != 0 {
-			return "", "", fmt.Errorf("the DeepSeek Harness managed block line %d is not a valid YAML mapping entry", index+2)
+			return nil, fmt.Errorf("the DeepSeek Harness managed block line %d is not a valid YAML mapping entry", index+2)
 		}
 		if indent > previousIndent+2 && index != 0 {
-			return "", "", fmt.Errorf("the DeepSeek Harness managed block line %d skips an indentation level", index+2)
+			return nil, fmt.Errorf("the DeepSeek Harness managed block line %d skips an indentation level", index+2)
 		}
 		previousIndent = indent
 		switch key {
 		case "id":
-			id = value
+			if !dshLineStartsSequenceItem(line, indent) {
+				return nil, fmt.Errorf("the DeepSeek Harness managed block line %d must open a row", index+2)
+			}
+			rows = append(rows, dshPatchRow{id: value})
 		case "name":
-			name = value
+			if len(rows) == 0 || rows[len(rows)-1].name != "" {
+				return nil, fmt.Errorf("the DeepSeek Harness managed block line %d sets a name outside a row", index+2)
+			}
+			rows[len(rows)-1].name = value
 		}
 	}
-	if id == "" || name == "" {
-		return "", "", errors.New("the DeepSeek Harness managed block must set both id and name")
+	if len(rows) == 0 {
+		return nil, errors.New("the DeepSeek Harness managed block must mount at least one row")
 	}
-	return id, name, nil
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.id == "" || row.name == "" {
+			return nil, errors.New("the DeepSeek Harness managed block must set both id and name on every row")
+		}
+		if seen[row.id] {
+			return nil, fmt.Errorf("the DeepSeek Harness managed block mounts row %s more than once", row.id)
+		}
+		seen[row.id] = true
+	}
+	return rows, nil
 }
 
 // dshComposedConfigHasManagedRow scans a composed `--dump-config` tree for the

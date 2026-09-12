@@ -136,14 +136,62 @@ hooks and does not request that elevation. Native Windows Claude Code and Grok
 Build install no transcript hooks. Grok Build and Cursor use their user-scoped
 hook locations on macOS and Linux, including Cursor inside WSL as Linux.
 
-Transcript capture is scoped to those four runtimes. The OpenClaw, Antigravity,
-GitHub Copilot, and DeepSeek Harness preview integrations install MCP access and
-managed memory routing only: they record `hook_mode: none`, install no hooks,
-write nothing to `~/.witself/capture/outbox/`, and report
-`transcript capture: unavailable` at install. For DeepSeek Harness this is
-deliberate rather than pending discovery — its hook bridges pass no
-model-visible session context because `SessionStart` runs detached, so a hook
-could not carry the provenance this ledger requires.
+DeepSeek Harness captures transcripts on macOS and Linux through its
+user-scoped claude-code hook bridge; native Windows installs no hooks. The
+OpenClaw, Antigravity, and GitHub Copilot preview integrations install MCP
+access and managed memory routing only: they record `hook_mode: none`, install
+no hooks, write nothing to `~/.witself/capture/outbox/`, and report
+`transcript capture: unavailable` at install.
+
+DeepSeek Harness mounts `@deepseek-ai/dsh-hooks-claude-code` from the same
+fenced block in `$DSH_HOME/cordis.patch.yml` that mounts the MCP client, as a
+second `witself-hooks` row whose `configPath` names the owned
+`$DSH_HOME/hooks.json`. The bridge emits claude-code-shaped payloads for
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+Its `Stop` payload carries neither assistant text nor a transcript path, so the
+Stop event is captured value-free and marked pending native finalization, and
+flush resolves the turn from the installed binding's session store under
+`$DSH_HOME/sessions/`; an ambient `DSH_HOME` is used only without a loadable
+binding. The log artifact must be a real regular file no larger than 64 MiB,
+owned by the current user and reached only through directories with the same
+property; the project directory matching the hook's `cwd` wins, and an ambiguous
+session id leaves the event pending. The same 64 MiB cap applies to decoded JSONL,
+alongside a 500,000-record cap. Crossing either bound settles the affected Stop
+as a value-free completion with a fixed diagnostic, because a growing log will
+not become readable by retrying. Later answers in that oversized log therefore
+cannot be recovered by this bounded reader.
+
+Because the bridge carries no turn identity, capture seeds `dsh_turn_ordinal`
+from the log's existing user-sourced prompts on first SessionStart or resume.
+A local prompt digest validates the selected native prompt; a shifted ordinal
+recovers the latest matching prompt, and no match settles value-free. The digest
+stays in local state and pending events and is removed before upload. Native
+plugin and agent-instruction messages do not count as user prompts, even when
+the bridge emits UserPromptSubmit for their inbox batch. A Stop
+without a trusted ordinal uses its prompt digest; legacy events without either
+anchor follow the latest started turn, waiting if it is still open.
+
+The log's first record must be its own session header. Finalization requires the
+native `turn/end`; dsh writes it after synchronous Stop returns, so dsh Stop
+queues durably and starts a detached flusher without a foreground polling wait.
+Unchanged log artifacts reuse the previous projection during polling. Multiple
+user prompts inside one native turn own separate step segments. Multiple human
+messages in one pre-step inbox batch form one prompt. A local Stop ordinal splits
+plugin continuations at native Stop markers, counting multiple handler markers
+in one step only once. This keeps repeated Stops from duplicating answers or
+accounting. Reasoning blocks are
+excluded, and a failed final model attempt leaves the final answer empty instead
+of promoting preceding intermediate text.
+
+In `trace` and `raw` modes, earlier assistant text and missing tool records ride
+along as children of the Stop event. Recovery tracks tool ids and hook phases,
+so a captured call does not hide a missing result. A turn that exceeds the
+bounded tracking list records an overflow and recovers no tools. A sealed turn
+is never rehydrated. The log applies the hook plane's fences for Witself sealed
+tool names, MCP wrapper payloads naming a sealed tool, and shell payloads invoking
+the sealed CLI. Later tool payloads and assistant text remain sealed. Native dsh
+`subagent` and `subagent_fork` calls are conservatively omitted because parent
+relay output carries no trusted child sealing provenance.
 
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude
@@ -215,6 +263,7 @@ witself transcript flush --runtime codex
 witself transcript flush --runtime claude-code
 witself transcript flush --runtime grok-build
 witself transcript flush --runtime cursor
+witself transcript flush --runtime dsh
 ```
 
 Codex capture follows Codex's own persistence boundary: when a hook's
@@ -242,7 +291,8 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
 - [Issue #339](https://github.com/witwave-ai/witself/issues/339): Stop and
   SessionEnd hooks now attempt a best-effort foreground flush with a maximum
-  three-second budget before spawning the normal detached flusher. On macOS
+  three-second budget before spawning the normal detached flusher, except dsh
+  Stop, which must return before its native completion fence can land. On macOS
   and Linux the detached flusher starts in its own session and process group,
   with detached standard streams and no controlling terminal, so it survives
   the headless client exiting. Flush failures never fail the hook; undelivered
@@ -523,7 +573,7 @@ witself transcript append TRANSCRIPT_ID
 witself transcript list
 witself transcript show TRANSCRIPT_ID
 witself transcript tail TRANSCRIPT_ID --limit 20
-witself transcript flush --runtime codex|claude-code|grok-build|cursor
+witself transcript flush --runtime codex|claude-code|grok-build|cursor|dsh
 ```
 
 The installed stdio MCP server exposes read-only transcript tools through
