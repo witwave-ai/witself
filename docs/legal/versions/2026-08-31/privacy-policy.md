@@ -1,6 +1,6 @@
 # Witself Privacy Policy
 
-**Version 2026-09-04 · Effective 2026-09-04**
+**Version 2026-08-31 · Effective 2026-08-31**
 
 **Controller:** Witwave LLC for account, billing, and operational data. For
 content your agents store, you are the controller and Witwave processes it
@@ -45,10 +45,8 @@ cell architecture is multi-cloud: cells can run on different infrastructure
 providers, and the [DPA](data-processing-addendum.md)'s subprocessor list is
 the authoritative, change-notified record of which providers host tenant
 content. Currently all content cells run on Civo (Phoenix, Arizona, with a
-backup cell in New York). Control-plane account metadata is stored with
-Cloudflare on its global network. Account backup and evacuation archives are
-stored in Cloudflare R2 with provider-managed encryption at rest; sealed-plane
-secrets inside them remain client-encrypted. If
+backup cell in New York). Control-plane account metadata, encrypted
+backups, and archives are stored with Cloudflare on its global network. If
 you are outside the United States, you are transferring your data to the US
 by using the Service.
 
