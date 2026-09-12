@@ -132,7 +132,7 @@ func CapabilityFor(runtime string) Capability {
 			SessionHydration: Feature{Delivery: DeliveryGuidedMCPFallback,
 				Reason: "dsh hook bridges pass no model-visible session context (SessionStart runs detached)"},
 			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
-				Reason: "dsh transcript capture is not installed by the preview integration"},
+				Reason: "dsh has no validated direct prompt context injection contract"},
 		}
 	default:
 		return Capability{

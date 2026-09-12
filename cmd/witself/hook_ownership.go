@@ -132,6 +132,11 @@ func installRuntimeHooksOwned(cfg *transcriptcapture.Config, previous *transcrip
 		}
 	}
 	clearHookOwnership(cfg)
+	if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		// The patch renderer needs this durable path even when a hook write
+		// fails, so rollback can restore the prior exact MCP binding.
+		cfg.HookConfigPath = plannedConfigPath
+	}
 	var path string
 	touched := false
 	switch cfg.HookMode {
@@ -351,6 +356,13 @@ func userHooksOptionsFromConfig(cfg transcriptcapture.Config, executable string)
 	}
 	if cfg.HookConfigPath != "" {
 		opts.ConfigPath = cfg.HookConfigPath
+	} else if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		// Binding setup canonicalizes DSH_HOME, including existing symlinks.
+		// Recovery must use that root instead of the current shell's selector.
+		opts.ConfigPath, err = dshHookConfigPathAt(cfg.RuntimeConfigRoot)
+		if err != nil {
+			return transcriptcapture.UserHooksOptions{}, err
+		}
 	}
 	return opts, nil
 }

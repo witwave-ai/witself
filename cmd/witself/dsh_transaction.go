@@ -340,6 +340,31 @@ func syncDSHCommittedState(journal dshTransactionJournal) error {
 		{configPath, "DeepSeek Harness integration config"},
 		{routingPath, "DeepSeek Harness routing policy"},
 	}
+	hookBinding := binding
+	if journal.Operation == dshTransactionInstall {
+		// An install journal also closes after rollback. A refused hooks.json
+		// write may leave a foreign file or directory which neither the prior
+		// binding nor a rolled-back first install owns.
+		installed, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH)
+		switch {
+		case loadErr == nil && journal.Previous != nil && equalDSHTransactionConfig(installed, *journal.Previous):
+			hookBinding = journal.Previous
+		case errors.Is(loadErr, os.ErrNotExist) && journal.Previous == nil:
+			hookBinding = nil
+		case loadErr != nil:
+			return loadErr
+		}
+	}
+	if hookBinding != nil {
+		if hookPath, err := dshManagedHookRowPath(*hookBinding); err != nil {
+			return err
+		} else if hookPath != "" {
+			paths = append(paths, struct {
+				path  string
+				label string
+			}{hookPath, "DeepSeek Harness hook config"})
+		}
+	}
 	for _, state := range paths {
 		if err := syncIntegrationTransactionFileState(state.path, state.label); err != nil {
 			return err
@@ -436,13 +461,18 @@ func recoverDSHInstallTransaction(journal dshTransactionJournal) error {
 	if err := convergeDSHTransactionDesiredPatch(journal); err != nil {
 		return err
 	}
+	if err := recoverRuntimeHooksOwned(&desired, journal.Previous); err != nil {
+		return fmt.Errorf("recover DeepSeek Harness transcript hooks: %w", err)
+	}
 	if err := transcriptcapture.SaveConfig(desired); err != nil {
 		return err
 	}
 	// Recovery has no operator on the terminal; an unavailable probe must not
 	// leave the transaction journal pending forever.
-	_, err = validateDSHCommitTopology(desired)
-	return err
+	if _, err := validateDSHCommitTopology(desired); err != nil {
+		return err
+	}
+	return verifyRuntimeHooksOwned(desired)
 }
 
 func convergeDSHTransactionDesiredPatch(journal dshTransactionJournal) error {
@@ -520,6 +550,9 @@ func recoverDSHUninstallTransaction(journal dshTransactionJournal) error {
 		if removeErr != nil {
 			return fmt.Errorf("recover DeepSeek Harness patch removal (touched=%t): %w", touched, removeErr)
 		}
+	}
+	if _, err := removeRuntimeHooksOwned(previous); err != nil {
+		return fmt.Errorf("remove DeepSeek Harness transcript hooks: %w", err)
 	}
 	routing, err := dshManagedInstructionsSpecAt(previous.RuntimeConfigRoot)
 	if err != nil {

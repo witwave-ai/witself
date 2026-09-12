@@ -1,10 +1,11 @@
 # Live Runtime Memory Acceptance
 
 Status: executable four-runtime acceptance harness for production-readiness
-gate [#45](https://github.com/witwave-ai/witself/issues/45). The harness covers
-Codex, Claude Code, Cursor, and Grok Build. GitHub Copilot's phase-one
-guided-MCP adapter has no transcript hooks and remains outside this gate, as
-does Gemini.
+gate [#45](https://github.com/witwave-ai/witself/issues/45). The #45 gate
+covers Codex, Claude Code, Cursor, and Grok Build. The harness also accepts
+DeepSeek Harness, which has transcript hooks but is not part of that gate.
+GitHub Copilot's phase-one guided-MCP adapter has no transcript hooks and
+remains outside this gate, as does Gemini.
 
 Current #45 status: Claude Code and Codex are certified on Witself `v0.0.272`
 at commit `9dc2f3d` by runs `mra_2dqbqpx7rfbjkd65` and
@@ -49,6 +50,7 @@ The delivery claim remains capability-accurate:
 | Claude Code | automatic hook `additionalContext` | automatic hook `additionalContext` |
 | Cursor | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
 | Grok Build | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
+| DeepSeek Harness | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
 
 Guided means the active foreground client follows the installed always-on
 policy without the user asking it to search. It is not renamed automatic hook
@@ -190,7 +192,7 @@ draining (`~/.witself/capture/outbox/<runtime>/`) makes every
 transcript-based case fail at once even though the sessions behaved
 correctly. Check the outbox before a certification window.
 
-For headless stages, Stop and SessionEnd hooks now attempt a best-effort
+For headless stages outside dsh, Stop and SessionEnd hooks attempt a best-effort
 foreground flush for up to three seconds, then start a detached flusher in its
 own session on macOS and Linux so it survives `claude -p` or `codex exec`
 exiting ([#339](https://github.com/witwave-ai/witself/issues/339)). Once the
@@ -241,6 +243,22 @@ Stop hook returns, so the command finalizes any last local Stop event from the
 already-closed native session before verification. It launches neither Grok nor
 inference. Normal interactive use also retries automatically through the
 Stop-triggered one-shot flusher and every later Grok hook.
+
+### DeepSeek Harness acceptance leg
+
+Use a fresh synthetic dsh-bound subject, install the user hook bridge, and restart
+dsh so its composed profile contains both `witself-mcp` and `witself-hooks`.
+Prepare with `--runtime dsh`, then run the same six prompts and the separate
+checkpoint case using the real client. Session context and recall use managed
+instructions plus guided MCP; transcript hooks do not imply automatic hydration.
+
+After the stages, exit the client and run
+`witself transcript flush --runtime dsh` before `memory acceptance verify` with
+the same state file. dsh persists `turn/end` after synchronous Stop returns, so
+its Stop hook leaves a durable event and starts the detached flusher directly.
+The explicit post-client flush finalizes the final answer from the native log
+without starting dsh or inference. Retain sanitized dsh evidence separately;
+a passing dsh leg does not close the four-runtime #45 gate.
 
 Repeat with fresh provider-bound subject agents for `claude-code`, `cursor`,
 and `grok-build`. A #45 certification set consists of four `status: "pass"`

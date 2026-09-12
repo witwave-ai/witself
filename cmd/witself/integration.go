@@ -954,6 +954,12 @@ func installCmd(args []string) int {
 						return
 					}
 				}
+				if hooksTouched {
+					if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+						return
+					}
+				}
 				if memoryRouting.managed {
 					if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 						fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
@@ -991,6 +997,12 @@ func installCmd(args []string) int {
 			if mcpTouched {
 				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, nil, &cfg); rollbackErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
+					return
+				}
+			}
+			if hooksTouched {
+				if rollbackErr := restoreRuntimeHooksOwned(&cfg, nil); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
 					return
 				}
 			}
@@ -1203,8 +1215,8 @@ func installCmd(args []string) int {
 	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched || dshPatchPreTouched
 	var hookPath string
 	hooksTouched := false
-	// Phase-one OpenClaw, Antigravity, Copilot, and DeepSeek Harness integrations
-	// intentionally retain HookModeNone and install no transcript hooks.
+	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally
+	// retain HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
 		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
 	} else if previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeUser {
@@ -1295,6 +1307,11 @@ func installCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness topology: %v\n", err)
 			return 1
 		}
+		if err := verifyRuntimeHooksOwned(cfg); err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness hooks: %v\n", err)
+			return 1
+		}
 		if warning != "" {
 			fmt.Fprintf(os.Stderr, "witself: warning: %s\n", warning)
 		}
@@ -1362,7 +1379,7 @@ func installCmd(args []string) int {
 	} else if runtime == transcriptcapture.RuntimeCopilot {
 		fmt.Println("next: start a new GitHub Copilot CLI session to load the managed instructions and guided MCP fallback")
 	} else if runtime == transcriptcapture.RuntimeDSH {
-		fmt.Println("next: start a new DeepSeek Harness session to mount the patched MCP client and load the managed instructions and guided MCP fallback")
+		fmt.Println("next: start a new DeepSeek Harness session to mount the patched MCP client and hook bridge and load the managed instructions and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -2216,7 +2233,7 @@ func transcriptHook(args []string) int {
 	}
 	fs := flag.NewFlagSet("transcript hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
+	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor|dsh")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
@@ -2275,12 +2292,14 @@ func transcriptHook(args []string) int {
 		return 0
 	}
 	if os.Getenv("WITSELF_CAPTURE_NO_FLUSH") == "" {
-		if event.HookEvent == "Stop" || event.HookEvent == "SessionEnd" {
+		if (event.HookEvent == "Stop" && event.Runtime != transcriptcapture.RuntimeDSH) || event.HookEvent == "SessionEnd" {
 			// A one-shot runtime can exit immediately after its terminal hook.
 			// Deliver the common case before returning, then leave any retry or
 			// longer drain to a flusher independent of the runtime's lifetime.
 			_ = runHookForegroundFlush(*runtime)
 		}
+		// dsh appends turn/end only after its synchronous Stop returns. Keep
+		// that event durable and let the detached flusher wait for the fence.
 		if err := startBackgroundFlush(*runtime); err != nil {
 			fmt.Fprintf(os.Stderr, "witself capture: queued locally; background flush did not start: %v\n", err)
 		}
@@ -2554,7 +2573,26 @@ func transcriptFlush(args []string) int {
 	var conn agentConnection
 	connected := false
 	flushed := 0
-	for len(ready) > 0 {
+	for {
+		if len(ready) == 0 {
+			if !detached || runtimeName != transcriptcapture.RuntimeDSH {
+				break
+			}
+			var retried bool
+			pending, retried, err = waitDSHNativeFlushRetry(ctx, blockedTranscripts, heldPaths)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: retry native capture completion: %v\n", err)
+				return 1
+			}
+			if !retried {
+				break
+			}
+			ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts, heldPaths)
+			if deferredErr == nil && prepareErr != nil {
+				deferredErr = prepareErr
+			}
+			continue
+		}
 		if !connected {
 			conn, err = connectAgent(ctx, cfg.Account, cfg.Realm, cfg.Agent, cfg.Endpoint, cfg.TokenFile)
 			if err != nil {
@@ -3248,6 +3286,58 @@ func reopenRetryableBlockedTranscripts(
 	rememberCapturePaths(pending, seen)
 }
 
+// waitDSHNativeFlushRetry reopens only unfinished dsh native Stops whose
+// durable retry schedule is due. dsh cannot publish turn/end until every
+// synchronous Stop hook returns, so the detached process must make progress
+// without relying on a subsequent hook or a new outbox path. The finalizer's
+// persisted deadline bounds retries across process restarts.
+func waitDSHNativeFlushRetry(
+	ctx context.Context,
+	blocked, held map[string]error,
+) ([]transcriptcapture.PendingEvent, bool, error) {
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeDSH)
+	if err != nil {
+		return nil, false, err
+	}
+	var next time.Time
+	for _, candidate := range pending {
+		if _, exists := held[candidate.Path]; exists {
+			continue
+		}
+		reason, exists := blocked[candidate.Event.TranscriptExternalID()]
+		if !exists || reason != nil {
+			continue
+		}
+		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && (next.IsZero() || at.Before(next)) {
+			next = at
+		}
+	}
+	if next.IsZero() {
+		return pending, false, nil
+	}
+	timer := time.NewTimer(max(time.Until(next), 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return pending, false, ctx.Err()
+	case <-timer.C:
+	}
+	now := time.Now()
+	for _, candidate := range pending {
+		if _, exists := held[candidate.Path]; exists {
+			continue
+		}
+		transcriptID := candidate.Event.TranscriptExternalID()
+		if reason, exists := blocked[transcriptID]; !exists || reason != nil {
+			continue
+		}
+		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && !at.After(now) {
+			delete(blocked, transcriptID)
+		}
+	}
+	return pending, true, nil
+}
+
 func transcriptTail(args []string) int {
 	transcriptID := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -3418,7 +3508,8 @@ func supportsTranscriptHooksForPlatform(runtime, platform string) bool {
 		return true
 	case transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
-		transcriptcapture.RuntimeCursor:
+		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeDSH:
 		// Codex has a dedicated commandWindows contract. The other providers'
 		// hook command fields currently use POSIX shell quoting, so advertise
 		// their hook surface only where that execution contract is tested.

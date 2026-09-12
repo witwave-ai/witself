@@ -567,6 +567,9 @@ func incompletePersistedIntegrationBinding(runtimeName string, cfg transcriptcap
 		return "persisted integration record predates exact provider binding ownership; reinstall this integration"
 	}
 	if supportsTranscriptHooks(runtimeName) {
+		if runtimeName == transcriptcapture.RuntimeDSH && cfg.HookMode == transcriptcapture.HookModeNone {
+			return "persisted DeepSeek Harness integration predates transcript hooks; reinstall this integration to enable capture"
+		}
 		switch cfg.HookMode {
 		case transcriptcapture.HookModeUser:
 			if strings.TrimSpace(cfg.HookConfigPath) == "" {

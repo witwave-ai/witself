@@ -47,6 +47,7 @@ var supportedRuntimes = map[string]bool{
 	transcriptcapture.RuntimeClaudeCode: true,
 	transcriptcapture.RuntimeCursor:     true,
 	transcriptcapture.RuntimeGrokBuild:  true,
+	transcriptcapture.RuntimeDSH:        true,
 }
 
 // Identity is the value-free, token-derived principal retained in evidence.

@@ -179,12 +179,31 @@ func TestDSHConfigRequiresAndRoundTripsOwnedPatchBinding(t *testing.T) {
 		t.Fatalf("dsh config = %#v", loaded)
 	}
 
+	// The claude-code hook bridge is user-scoped, so a binding that owns
+	// transcript hooks must round-trip alongside the legacy hook-free one.
+	hooked := cfg
+	hooked.HookMode = HookModeUser
+	hooked.HookConfigPath = filepath.Join(configRoot, "hooks.json")
+	if err := SaveConfig(hooked); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadConfig(RuntimeDSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.HookMode != HookModeUser || loaded.HookConfigPath != hooked.HookConfigPath {
+		t.Fatalf("dsh user-hook config = %#v", loaded)
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, test := range []struct {
 		name string
 		edit func(*Config)
 		want string
 	}{
-		{"hooks", func(value *Config) { value.HookMode = HookModeUser }, "hook_mode must be none"},
+		{"managed hooks", func(value *Config) { value.HookMode = HookModeManaged }, "hook_mode must be none or user"},
 		{"missing CLI", func(value *Config) { value.RuntimeCLICommand = "" }, "runtime_cli_command is required"},
 		{"missing MCP command", func(value *Config) { value.MCPCommand = "" }, "mcp_command is required"},
 		{"missing root", func(value *Config) { value.RuntimeConfigRoot = "" }, "runtime_config_root is required"},

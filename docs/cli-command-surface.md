@@ -3890,6 +3890,14 @@ blocked. A later Grok hook retries automatically, while an explicit foreground
 flush after the client exits closes the final session without launching a
 client, inference, wrapper, or persistent runner.
 
+For DeepSeek Harness, `flush` resolves Stop events from the installed binding's
+native session log, validates their local prompt correlation, and waits for the
+matching native `turn/end`. dsh Stop hooks queue durably and start the detached
+flusher directly because synchronous foreground polling would delay the very
+fence they need. `witself transcript flush --runtime dsh` after the client exits
+provides a deterministic final delivery check. See the dsh capture and bounded
+log recovery contract in [transcript-ledger.md](transcript-ledger.md).
+
 Only finalized visible output should be appended. Raw hidden chain-of-thought
 and streaming chunks are out of contract. Small structured objects belong in
 `payload`; non-empty file artifacts are refused until portable object storage
@@ -3976,9 +3984,9 @@ for `uninstall all`.
 **Family status: implemented.**
 
 Install MCP access and managed memory routing for a supported local agent
-runtime. Codex, Claude Code, Grok Build, and Cursor also install transcript
-hooks; the OpenClaw, Antigravity, GitHub Copilot, and DeepSeek Harness previews
-do not:
+runtime. Codex, Claude Code, Grok Build, Cursor, and DeepSeek Harness also
+install transcript hooks; the OpenClaw, Antigravity, and GitHub Copilot
+previews do not:
 
 ```sh
 witself install codex
@@ -4160,19 +4168,23 @@ Witself transcript hooks. `witself install copilot --routing-only` refreshes
 only the exact-owned instruction file without invoking Copilot, resolving
 credentials, or changing the MCP binding.
 
-DeepSeek Harness phase 1 discovers `dsh` on `PATH` or uses `DSH_CLI_PATH` and
+DeepSeek Harness discovers `dsh` on `PATH` or uses `DSH_CLI_PATH` and
 records its `--version` output. The canonical runtime selector is `dsh`;
 `deepseek` and `deepseek-harness` are accepted aliases. dsh mounts MCP clients
 through profile patch composition rather than an `mcp add` subcommand, so
 install owns exactly one fenced block in the home-level patch file
 `$DSH_HOME/cordis.patch.yml` (normally under `~/.dsh`), delimited by
 `# witself:managed:begin dsh-runtime-integration v1` and its matching end
-marker. That block is an `insert` entry mounting `@deepseek-ai/dsh-mcp-client`
-as row `witself-mcp` with the stdio server name `witself`, the absolute Witself
+marker. That block is a single `insert` entry mounting two rows. Row
+`witself-mcp` mounts `@deepseek-ai/dsh-mcp-client`
+with the stdio server name `witself`, the absolute Witself
 executable, the exact agent identity and optional location, and exactly two
 non-secret environment variables: `DSH_HOME` (the installed config root, which
 dsh scrubs from every MCP child's ambient environment and therefore must
-travel in the block) and `WITSELF_HOME`. A `DSH_HOME` that begins with `~` is
+travel in the block) and `WITSELF_HOME`. Row `witself-hooks` mounts
+`@deepseek-ai/dsh-hooks-claude-code` with a `configPath` naming the owned
+`$DSH_HOME/hooks.json`, and is present only when this binding installs
+transcript hooks. A `DSH_HOME` that begins with `~` is
 expanded against the home directory exactly as dsh expands it. Because the
 patch is home-level, it applies to every profile: cli, headless, web, sdk,
 and acp.
@@ -4201,8 +4213,10 @@ refused and preserved instead of silently discarded; the operation lock
 serializes Witself against Witself only. Verification requires byte-exact block
 equality, a supported top-level shape, owner-only permissions, and, when the
 recorded CLI is executable, that `dsh --profile headless --dump-config`
-composes a row `witself-mcp` named `@deepseek-ai/dsh-mcp-client`; a composed
-tree without that row is reported as drift, and a probe that fails to run is
+composes every row the installed block renders — `witself-mcp` named
+`@deepseek-ai/dsh-mcp-client`, and `witself-hooks` named
+`@deepseek-ai/dsh-hooks-claude-code` when hooks are installed; a composed
+tree missing a row is reported as drift, and a probe that fails to run is
 reported as unavailable with dsh's own bounded stderr message. Install
 finalization treats an unavailable probe as a warning rather than a failure,
 because the block itself was written and verified byte for byte; only a
@@ -4215,11 +4229,16 @@ project `AGENTS.md`/`CLAUDE.md` chain into one instruction message under a
 64 KiB budget, so a very large project chain can crowd the routing block out
 of a session; the patched-in MCP server's own instructions still carry the
 policy. The verification probe boots dsh's headless profile, which can
-materialize `$DSH_HOME/profiles/headless` on a machine that never ran it. The
-`--capture`, `--managed-hooks`, and
-`--user-hooks` flags are rejected because phase 1 has no Witself transcript
-hooks. `witself install dsh --routing-only` refreshes only that instruction
-block without invoking dsh, resolving credentials, or changing the patch file.
+materialize `$DSH_HOME/profiles/headless` on a machine that never ran it.
+
+On macOS and Linux, install also owns the Witself handlers in
+`$DSH_HOME/hooks.json` and records `hook_mode: user`. `--capture` and
+`--user-hooks` are accepted; `--managed-hooks` is rejected because dsh has no
+administrator-managed hook surface. Unrelated entries in that file are
+preserved, and uninstall withdraws only the Witself handlers and the
+`witself-hooks` row. `witself install dsh --routing-only` refreshes only the
+instruction block without invoking dsh, resolving credentials, or changing the
+patch file or hooks.
 
 `--routing-only` atomically refreshes only the runtime's managed static
 instruction block. It does not resolve credentials, contact Witself, invoke a
@@ -4283,8 +4302,8 @@ DeepSeek Harness also reports `guided_mcp_fallback`. Its fenced block in the
 shared user-global `AGENTS.md` covers the full safety contract and directs the
 active agent to call the patched-in Witself MCP server's `self.show` and
 `memory.recall` tools. dsh hook bridges pass no model-visible session context
-because `SessionStart` runs detached, and transcript capture is not installed
-by the preview integration.
+because `SessionStart` runs detached. Its user hook bridge captures transcripts;
+that capability does not provide automatic model-visible hydration.
 
 The injected checkpoint is a point-in-time snapshot, not same-turn synthesis.
 The current prompt may still be flushing and the current assistant response does
@@ -4424,8 +4443,10 @@ deleting uncertain user-owned state. The value-free `0600`
 `.witself-copilot-operation.lock` remains under `COPILOT_HOME` as the stable
 cross-process fence for future install, uninstall, and routing-only operations.
 
-DeepSeek Harness uninstall removes only the fenced patch block and the exact
-recorded routing block. It never touches a foreign patch row or unrelated
+DeepSeek Harness uninstall removes only the fenced patch block, the exact
+recorded routing block, and the Witself handlers in the owned
+`$DSH_HOME/hooks.json`. It never touches a foreign patch row, a foreign hook
+entry, or unrelated
 `AGENTS.md` content, and a shared `AGENTS.md` that is a symlink into the
 operator's dotfiles is written and committed through its target. Because the
 patch file is Witself-owned

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,11 @@ const (
 	grokTranscriptPollInterval   = 50 * time.Millisecond
 	grokTranscriptMaxWait        = 2 * time.Second
 	codexAutoReviewModel         = "codex-auto-review"
+	// maxDSHTurnToolUseIDs bounds the dedup key one dsh turn's Stop event
+	// carries into session-log recovery. It is a session-state budget, not a
+	// limit on how many tools a turn may run: a turn that exceeds it records an
+	// overflow instead of forgetting ids.
+	maxDSHTurnToolUseIDs = 512
 )
 
 // ErrEphemeralSessionSkipped identifies a Codex hook whose session has no
@@ -218,6 +224,13 @@ type hookInput struct {
 	SubagentType         string          `json:"subagent_type"`
 	Error                json.RawMessage `json:"error"`
 	NativeHookEvent      string          `json:"-"`
+	DSHTurnOrdinal       int             `json:"-"`
+	DSHPromptSHA256      string          `json:"-"`
+	DSHPromptHookSeq     int64           `json:"-"`
+	DSHPromptAfterSeq    int64           `json:"-"`
+	DSHStopOrdinal       int             `json:"-"`
+	DSHToolUseIDs        []string        `json:"-"`
+	DSHToolUseOverflow   bool            `json:"-"`
 	SensitiveToolEvent   bool            `json:"-"`
 	SensitiveTurnContent bool            `json:"-"`
 	SyntheticFence       bool            `json:"-"`
@@ -239,6 +252,36 @@ type sessionState struct {
 	SensitiveTurn         bool            `json:"sensitive_turn,omitempty"`
 	SyntheticFencedTurnID string          `json:"synthetic_fenced_turn_id,omitempty"`
 	PendingFence          *Event          `json:"pending_fence,omitempty"`
+	// DSHTurnToolUseIDs lists the tool calls of the open dsh turn that its
+	// PreToolUse and PostToolUse hooks already captured. The Stop event carries
+	// the list so finalization can replay only the tool records the hook plane
+	// missed, long after this state may have moved on.
+	DSHTurnToolUseIDs []string `json:"dsh_turn_tool_use_ids,omitempty"`
+	// DSHTurnToolUseOverflow reports that the open dsh turn ran more tools than
+	// that list may hold. The list is the only dedup key finalization has, so an
+	// id it no longer holds would be replayed as a recovered child of an already
+	// captured tool event. Recovery of this turn's tool records is dropped
+	// instead of duplicated.
+	DSHTurnToolUseOverflow bool `json:"dsh_turn_tool_use_overflow,omitempty"`
+	// DSHTurnOrdinal counts native human messages since an observed start.
+	// Prompt hook sequence and record watermark also identify the occurrence
+	// when detached SessionStart arrived too late to establish an ordinal.
+	DSHTurnOrdinal int `json:"dsh_turn_ordinal,omitempty"`
+	// An ordinal is usable only after SessionStart anchored it to the native
+	// log. Without an occurrence anchor, digest recovery must be unambiguous.
+	DSHTurnOrdinalAnchored bool   `json:"dsh_turn_ordinal_anchored,omitempty"`
+	DSHPromptSHA256        string `json:"dsh_prompt_sha256,omitempty"`
+	DSHPromptHookSeq       int64  `json:"dsh_prompt_hook_seq,omitempty"`
+	DSHPromptAfterSeq      int64  `json:"dsh_prompt_after_seq,omitempty"`
+	DSHSessionStartSeen    bool   `json:"dsh_session_start_seen,omitempty"`
+	DSHStopCaptured        bool   `json:"dsh_stop_captured,omitempty"`
+	DSHLastPromptHookSeq   int64  `json:"dsh_last_prompt_hook_seq,omitempty"`
+	DSHStopOrdinal         int    `json:"dsh_stop_ordinal,omitempty"`
+	DSHSealedAtUnixMilli   int64  `json:"dsh_sealed_at_unix_milli,omitempty"`
+	// dsh's immutable header, unlike source:user, distinguishes delegated
+	// sessions. Root provenance is cached; inherited sessions remain omitted.
+	DSHSessionProvenRoot        bool `json:"dsh_session_proven_root,omitempty"`
+	DSHSessionCaptureSuppressed bool `json:"dsh_session_capture_suppressed,omitempty"`
 	// SealedTurns lists run/turn pairs that handled sealed material, recorded
 	// before their redaction is attempted. A fence consults it so a turn whose
 	// queued events never received the sealed marker, because that redaction
@@ -368,12 +411,17 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	if err := finishPendingFence(cfg.Runtime, input.SessionID, &state); err != nil {
 		return Event{}, err
 	}
+	freshState := state.RunID == ""
+	// dsh runs SessionStart detached; the first prompt can bind the run first.
+	// That first lifecycle hook acknowledges this binding instead of fencing it.
+	lateDSHStart := cfg.Runtime == RuntimeDSH && input.HookEventName == "SessionStart" &&
+		!freshState && (!state.DSHSessionStartSeen || (state.TurnID != "" && !state.DSHStopCaptured))
 	// Compaction restarts nothing: Claude Code reports it as a SessionStart
 	// in the middle of a still-running turn, and closing that turn early
 	// would release its queued prompt before a later sealed tool could
 	// suppress it. The session keeps its run and its open turn.
 	rebind := state.RunID == "" ||
-		(input.HookEventName == "SessionStart" && !sessionStartKeepsRun(input.Source))
+		(input.HookEventName == "SessionStart" && !sessionStartKeepsRun(input.Source) && !lateDSHStart)
 	if rebind {
 		if state.RunID != "" {
 			// A restarted provider session keeps its session id and starts a
@@ -409,15 +457,63 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 		state.RedactAllToolPayload = false
 		state.SensitiveTurn = false
 		state.SyntheticFencedTurnID = ""
+		if cfg.Runtime == RuntimeDSH {
+			state.DSHPromptSHA256 = ""
+			state.DSHPromptHookSeq, state.DSHPromptAfterSeq = 0, 0
+			state.DSHSealedAtUnixMilli = 0
+			state.DSHTurnToolUseIDs = nil
+			state.DSHTurnToolUseOverflow = false
+		}
+	}
+	dshContinuation := false
+	dshUserPrompt := input.Prompt
+	dshUserProven := false
+	var dshPromptHookSeq, dshPromptAfterSeq int64
+	if cfg.Runtime == RuntimeDSH && state.SensitiveTurn && state.DSHSealedAtUnixMilli == 0 {
+		// Legacy sealed state has no native ordering bound. Establish one
+		// conservatively instead of accepting an older buffered hook record.
+		state.DSHSealedAtUnixMilli = time.Now().UnixMilli()
+	}
+	if cfg.Runtime == RuntimeDSH && input.HookEventName == "UserPromptSubmit" {
+		wait := time.Duration(0)
+		if state.PromptCaptured || state.SensitiveTurn {
+			wait = dshSessionLogMaxWait
+		}
+		userPrompt, known, hookSeq := dshPromptProvenance(input.SessionID, input.CWD, input.Prompt, wait,
+			state.DSHLastPromptHookSeq, state.DSHSealedAtUnixMilli)
+		if known {
+			state.DSHLastPromptHookSeq = hookSeq
+			dshPromptHookSeq = hookSeq
+		}
+		dshPromptAfterSeq = dshPromptRecordWatermark(input.SessionID, input.CWD)
+		dshUserProven = known && userPrompt != ""
+		dshContinuation = (known && userPrompt == "") || (!known && state.SensitiveTurn)
+		if dshUserProven {
+			dshUserPrompt = userPrompt
+		}
 	}
 	// A new real user prompt is the only reliable cross-provider fence for a
 	// new turn. Clear the prior turn's sealed-content suppression before any
 	// tools for this turn can mark it again. Codex's nested approval review is
 	// normalized to a different event and therefore cannot reset this fence.
 	if input.HookEventName == "UserPromptSubmit" {
-		state.SensitiveTurn = false
+		// The dsh bridge loses source.kind. An unresolved inbox cannot prove
+		// a user authorized the next turn, including after a native turn/end.
+		if cfg.Runtime != RuntimeDSH || dshUserProven {
+			state.SensitiveTurn = false
+			if cfg.Runtime == RuntimeDSH {
+				state.DSHSealedAtUnixMilli = 0
+			}
+		}
+	}
+	if cfg.Runtime == RuntimeDSH {
+		protectDSHDelegation(&input, &state)
+		protectDSHSensitiveToolPayload(&input, &state)
 	}
 	protectSensitiveToolPayload(&input, &state)
+	if cfg.Runtime == RuntimeDSH && state.SensitiveTurn && state.DSHSealedAtUnixMilli == 0 {
+		state.DSHSealedAtUnixMilli = time.Now().UnixMilli()
+	}
 	// The session's sealed flag describes the turn the runtime is on and every
 	// turn after it. A fence may close a turn the runtime has already left, so
 	// that turn's own recorded suppression decides instead: redacting an
@@ -432,8 +528,78 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
+	if cfg.Runtime == RuntimeDSH && !input.SyntheticFence {
+		// The prompt ordinal and the turn's captured tool ids advance on the
+		// real hooks and travel with the turn's Stop event, because flush runs
+		// long after this session state may have moved on or been removed.
+		switch {
+		case input.HookEventName == "SessionStart":
+			// SessionStart precedes persistence of the next prompt. Missing or
+			// unavailable native history must never make the hook fail.
+			if !lateDSHStart && (freshState || input.Source == "resume") {
+				state.DSHTurnOrdinal, _ = countDSHSessionPrompts(input.SessionID, input.CWD)
+				state.DSHTurnOrdinalAnchored = true
+			}
+			state.DSHSessionStartSeen = true
+		case input.HookEventName == "UserPromptSubmit" && !dshContinuation:
+			state.DSHStopCaptured = false
+			state.DSHStopOrdinal = 0
+			if state.DSHTurnOrdinalAnchored {
+				// One bridge batch may contain several user records. The
+				// current native invocation proves the previous batch durable;
+				// refresh its count before naming this batch's first record.
+				if dshUserProven {
+					if count, countErr := countDSHSessionPrompts(input.SessionID, input.CWD); countErr == nil {
+						state.DSHTurnOrdinal = count
+					}
+				}
+				state.DSHTurnOrdinal++
+			}
+			state.DSHPromptSHA256 = ""
+			state.DSHPromptHookSeq, state.DSHPromptAfterSeq = dshPromptHookSeq, dshPromptAfterSeq
+			if !sealedTurn {
+				state.DSHPromptSHA256 = dshPromptSHA256(dshUserPrompt)
+			}
+			state.DSHTurnToolUseIDs = nil
+			state.DSHTurnToolUseOverflow = false
+		case isToolHookEvent(input.HookEventName) && input.ToolUseID != "":
+			toolKey := dshToolPhaseKey(input.ToolUseID, input.HookEventName)
+			switch {
+			case slices.Contains(state.DSHTurnToolUseIDs, toolKey):
+			case len(state.DSHTurnToolUseIDs) < maxDSHTurnToolUseIDs:
+				state.DSHTurnToolUseIDs = append(state.DSHTurnToolUseIDs, toolKey)
+			default:
+				// The local state file cannot grow without bound, and a turn
+				// this long has plainly not lost its tool events to a missing
+				// hook plane. Record the overflow rather than dropping ids that
+				// finalization would then replay as duplicates.
+				state.DSHTurnToolUseOverflow = true
+			}
+		case input.HookEventName == "Stop" || input.HookEventName == "StopFailure":
+			state.DSHStopCaptured = true
+			state.DSHStopOrdinal++
+			input.DSHStopOrdinal = state.DSHStopOrdinal
+			if state.DSHTurnOrdinalAnchored {
+				input.DSHTurnOrdinal = state.DSHTurnOrdinal
+			}
+			input.DSHPromptSHA256 = state.DSHPromptSHA256
+			input.DSHPromptHookSeq, input.DSHPromptAfterSeq = state.DSHPromptHookSeq, state.DSHPromptAfterSeq
+			input.DSHToolUseIDs = state.DSHTurnToolUseIDs
+			input.DSHToolUseOverflow = state.DSHTurnToolUseOverflow
+		}
+		if sealedTurn {
+			state.DSHPromptSHA256 = ""
+			input.DSHPromptSHA256 = ""
+			state.DSHPromptHookSeq, state.DSHPromptAfterSeq = 0, 0
+			input.DSHPromptHookSeq, input.DSHPromptAfterSeq = 0, 0
+		}
+	}
 	switch input.HookEventName {
 	case "UserPromptSubmit":
+		if cfg.Runtime == RuntimeDSH && dshContinuation {
+			turnID = state.TurnID
+			break
+		}
 		if turnID == "" {
 			turnID, err = id.New("turn")
 			if err != nil {
@@ -738,26 +904,27 @@ func isToolHookEvent(event string) bool {
 }
 
 func sensitiveSealedToolName(name string) bool {
-	compact := compactName(name)
-	for _, suffix := range []string{
+	return toolNameHasSuffix(name,
 		"witselfsecretcreate",
 		"witselfsecretreveal",
 		"witselfpasswordgenerate",
 		"witselftotpcode",
-	} {
-		if strings.HasSuffix(compact, suffix) {
-			return true
-		}
-	}
-	return false
+	)
 }
 
 func sensitiveWrappedToolName(name string) bool {
 	if sensitiveSealedToolName(name) {
 		return true
 	}
+	return toolNameHasSuffix(name, "secretcreate", "secretreveal", "passwordgenerate", "totpcode")
+}
+
+// toolNameHasSuffix matches normalized sealed-tool tokens without interpreting
+// runtime-specific identity suffixes. The dsh boundary handles its bridge's
+// rewritten spelling before entering these shared matchers.
+func toolNameHasSuffix(name string, suffixes ...string) bool {
 	compact := compactName(name)
-	for _, suffix := range []string{"secretcreate", "secretreveal", "passwordgenerate", "totpcode"} {
+	for _, suffix := range suffixes {
 		if strings.HasSuffix(compact, suffix) {
 			return true
 		}
@@ -1930,6 +2097,27 @@ func structuredEventData(input hookInput) json.RawMessage {
 	if input.PromptID != "" {
 		data["prompt_id"] = input.PromptID
 	}
+	if input.DSHTurnOrdinal > 0 {
+		data["dsh_turn_ordinal"] = input.DSHTurnOrdinal
+	}
+	if input.DSHPromptSHA256 != "" {
+		data["dsh_prompt_sha256"] = input.DSHPromptSHA256
+	}
+	if input.DSHPromptHookSeq > 0 {
+		data["dsh_prompt_hook_seq"] = input.DSHPromptHookSeq
+	}
+	if input.DSHPromptAfterSeq > 0 {
+		data["dsh_prompt_after_seq"] = input.DSHPromptAfterSeq
+	}
+	if input.DSHStopOrdinal > 0 {
+		data["dsh_stop_ordinal"] = input.DSHStopOrdinal
+	}
+	if len(input.DSHToolUseIDs) != 0 {
+		data["dsh_hooked_tool_use_ids"] = input.DSHToolUseIDs
+	}
+	if input.DSHToolUseOverflow {
+		data["dsh_hooked_tool_use_overflow"] = true
+	}
 	if input.Status != "" {
 		data["status"] = input.Status
 	}
@@ -2203,6 +2391,11 @@ func entryPayloadFits(payload map[string]any, key string, value any) bool {
 }
 
 func (e Event) entriesWithoutRecovered() []Entry {
+	if e.Runtime == RuntimeDSH {
+		// Prompt correlation is private local state, including for unresolved
+		// or operator-fenced events projected directly by a caller.
+		e.Data = withoutDSHNativeRetry(withoutDSHPromptDigest(e.Data))
+	}
 	chunks := splitUTF8(e.Body, entryBodyChunkSize)
 	if len(chunks) == 0 {
 		chunks = []string{""}
@@ -2531,6 +2724,9 @@ func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
 // The caller must hold the runtime flush lock. ready=false is a normal,
 // retryable state; a later hook or an explicit transcript flush will try again.
 func FinalizePending(pending PendingEvent) (finalized PendingEvent, ready bool, err error) {
+	if pending.Event.Runtime == RuntimeDSH {
+		return finalizePendingWithin(pending, dshSessionLogMaxWait, dshSessionLogPollInterval)
+	}
 	return finalizePendingWithin(pending, grokTranscriptMaxWait, grokTranscriptPollInterval)
 }
 
@@ -2539,12 +2735,17 @@ func finalizePendingWithin(
 	maxWait, pollInterval time.Duration,
 ) (finalized PendingEvent, ready bool, err error) {
 	event := pending.Event
-	if event.Runtime != RuntimeGrokBuild || event.HookEvent != "Stop" ||
-		event.Kind != "turn.completed" || event.Role != "system" {
+	if event.Runtime != RuntimeGrokBuild && event.Runtime != RuntimeDSH {
+		return pending, true, nil
+	}
+	if event.HookEvent != "Stop" || event.Kind != "turn.completed" || event.Role != "system" {
 		return pending, true, nil
 	}
 	if event.NativeTurnFinalized {
 		return pending, true, nil
+	}
+	if event.Runtime == RuntimeDSH {
+		return finalizePendingDSH(pending, event, maxWait, pollInterval)
 	}
 	if eventSyntheticFence(event.Data) {
 		// A companion fence is a value-free completion marker, not an
@@ -2614,6 +2815,242 @@ func finalizePendingWithin(
 		return pending, false, fmt.Errorf("persist finalized grok Stop event: %w", err)
 	}
 	return PendingEvent{Path: pending.Path, Event: event}, true, nil
+}
+
+// finalizePendingDSH resolves one DeepSeek Harness Stop event. The
+// claude-code hook bridge sends a Stop payload carrying no assistant text and
+// an empty transcript_path, so the turn's visible content exists only in the
+// session log the harness writes under its own session store. The log is
+// located from the session id, the hook's cwd, and the prompt ordinal the
+// event carries.
+func finalizePendingDSH(
+	pending PendingEvent, event Event, maxWait, pollInterval time.Duration,
+) (PendingEvent, bool, error) {
+	if eventSyntheticFence(event.Data) {
+		// A fence is a value-free completion marker for a turn the session no
+		// longer holds. It has no prompt of its own to rehydrate.
+		return pending, true, nil
+	}
+	if eventSealedContentOmitted(event.Data) {
+		// Never rehydrate a sealed turn: the harness log holds the same
+		// authorized revealed value the value-free Stop hook suppressed.
+		event.NativeTurnFinalized = true
+		return persistFinalizedDSHEvent(pending.Path, event)
+	}
+	var data struct {
+		Ordinal            int      `json:"dsh_turn_ordinal"`
+		PromptSHA256       string   `json:"dsh_prompt_sha256"`
+		PromptHookSeq      int64    `json:"dsh_prompt_hook_seq"`
+		PromptAfterSeq     int64    `json:"dsh_prompt_after_seq"`
+		StopOrdinal        int      `json:"dsh_stop_ordinal"`
+		HookedTool         []string `json:"dsh_hooked_tool_use_ids"`
+		HookedToolOverflow bool     `json:"dsh_hooked_tool_use_overflow"`
+	}
+	if len(event.Data) != 0 {
+		_ = json.Unmarshal(event.Data, &data)
+	}
+	pending, err := initDSHNativeRetry(pending)
+	if err != nil {
+		return pending, false, err
+	}
+	event = pending.Event
+	var retry dshNativeRetryState
+	_ = json.Unmarshal(event.Data, &retry)
+	maxWait = min(maxWait, max(time.Until(retry.Deadline), 0))
+	turn, err := readCompleteDSHTurnWithin(event.SessionID, event.CWD, data.Ordinal, maxWait, pollInterval,
+		dshTurnCorrelation{PromptSHA256: data.PromptSHA256, PromptHookSeq: data.PromptHookSeq, PromptAfterSeq: data.PromptAfterSeq, StopOrdinal: data.StopOrdinal})
+	if err != nil {
+		if !dshSessionLogBoundExceeded(err) {
+			return pending, false, err
+		}
+		// The log has already outgrown a bound this reader will not cross, and
+		// it only grows. Returning the error would block every later event of
+		// this session's transcript on a read that can never succeed, so settle
+		// this Stop event value-free and let the rest of the session upload.
+		event.NativeTurnFinalized = true
+		var details map[string]any
+		_ = json.Unmarshal(event.Data, &details)
+		if details == nil {
+			details = make(map[string]any)
+		}
+		details["dsh_native_finalization"] = "bound_exceeded"
+		event.Data, _ = json.Marshal(details)
+		return persistFinalizedDSHEvent(pending.Path, event)
+	}
+	if !turn.Complete {
+		pending, expired, err := finishDSHNativeRetry(pending)
+		if err != nil || !expired {
+			return pending, false, err
+		}
+		event = pending.Event
+		event.NativeTurnFinalized = true
+		event.Body, event.Model, event.ModelProvider = "", "", ""
+		event.ModelSource, event.ModelProviderSource = "", ""
+		event.RecoveredMessages, event.Raw = nil, nil
+		var details map[string]any
+		_ = json.Unmarshal(event.Data, &details)
+		if details == nil {
+			details = make(map[string]any)
+		}
+		delete(details, "usage")
+		details["dsh_native_finalization"] = "native_completion_timeout"
+		if turn.Unresolved {
+			details["dsh_native_finalization"] = "unresolved_prompt"
+		}
+		event.Data, _ = json.Marshal(details)
+		return persistFinalizedDSHEvent(pending.Path, event)
+	}
+
+	event.NativeTurnFinalized = true
+	if turn.Sealed {
+		event.Body, event.Raw, event.RecoveredMessages = "", nil, nil
+		event.Data = json.RawMessage(`{"sealed_content_omitted":true}`)
+		return persistFinalizedDSHEvent(pending.Path, event)
+	}
+	if event.CaptureMode == ModeTrace || event.CaptureMode == ModeRaw {
+		// The captured set travels on the event, not in the outbox: by the time
+		// this Stop event is resolvable its turn's tool events have usually
+		// already been uploaded and removed.
+		captured := make(map[string]bool, len(data.HookedTool))
+		for _, useID := range data.HookedTool {
+			captured[useID] = true
+		}
+		event.RecoveredMessages = dshRecoveredTurnSteps(event, turn, captured, data.HookedToolOverflow)
+	}
+	if body := turn.Body; body != "" {
+		event.Kind, event.Role, event.Body = "message.assistant", "assistant", body
+	}
+	if event.Model == "" && turn.Model != "" {
+		event.Model, event.ModelSource = turn.Model, "native_transcript"
+	}
+	if event.ModelProvider == "" && turn.Provider != "" {
+		event.ModelProvider, event.ModelProviderSource = turn.Provider, "native_transcript"
+	}
+	event.Data = mergeDSHTurnUsage(event.Data, turn.Usage)
+	return persistFinalizedDSHEvent(pending.Path, event)
+}
+
+func persistFinalizedDSHEvent(path string, event Event) (PendingEvent, bool, error) {
+	event.Data = withoutDSHNativeRetry(withoutDSHPromptDigest(event.Data))
+	if err := validatePendingRewritePath(path, event); err != nil {
+		return PendingEvent{Path: path, Event: event}, false, err
+	}
+	if err := writeJSONAtomic(path, event); err != nil {
+		return PendingEvent{Path: path, Event: event}, false,
+			fmt.Errorf("persist finalized dsh Stop event: %w", err)
+	}
+	return PendingEvent{Path: path, Event: event}, true, nil
+}
+
+func mergeDSHTurnUsage(raw json.RawMessage, totals dshTokenUsage) json.RawMessage {
+	if totals.empty() {
+		return raw
+	}
+	data := map[string]any{}
+	if len(raw) != 0 && json.Unmarshal(raw, &data) != nil {
+		return raw
+	}
+	if _, exists := data["usage"]; exists {
+		return raw
+	}
+	data["usage"] = compactMap(map[string]any{
+		"input_tokens":       totals.InputTokens,
+		"output_tokens":      totals.OutputTokens,
+		"cache_read_tokens":  totals.CacheReadTokens,
+		"cache_write_tokens": totals.CacheWriteTokens,
+	})
+	merged, err := json.Marshal(data)
+	if err != nil {
+		return raw
+	}
+	return merged
+}
+
+// dshRecoveredTurnSteps projects the turn's intermediate work as children of
+// the Stop event. Entries() emits them before the parent, so the ledger keeps
+// the order the harness ran them in.
+// capturedOverflowed reports that the dedup key is incomplete, so no tool record
+// of this turn can be told apart from one the hook plane already uploaded.
+func dshRecoveredTurnSteps(
+	event Event, turn dshSessionTurn, captured map[string]bool, capturedOverflowed bool,
+) []RecoveredMessage {
+	var recovered []RecoveredMessage
+	for index, step := range turn.Steps {
+		last := index == len(turn.Steps)-1
+		if !last && strings.TrimSpace(step.Text) != "" {
+			recovered = append(recovered, RecoveredMessage{
+				ID:        dshRecoveredID("evt", event.SessionID, event.TurnID, "thought", strconv.Itoa(step.Step)),
+				TurnID:    event.TurnID,
+				HookEvent: "AgentThought", NativeHookEvent: "sessionLogAssistantStep",
+				Kind: "agent.thought", Role: "system", Body: step.Text,
+				Data: dshRecoveredData(),
+			})
+		}
+		for _, call := range step.ToolCalls {
+			if capturedOverflowed || captured[call.CallID] || captured[dshToolPhaseKey(call.CallID, "PreToolUse")] {
+				continue
+			}
+			recovered = append(recovered, RecoveredMessage{
+				ID:        dshRecoveredID("evt", event.SessionID, event.TurnID, "tool-call", call.CallID),
+				TurnID:    event.TurnID,
+				HookEvent: "PreToolUse", NativeHookEvent: "sessionLogToolCall",
+				Kind: "tool.call", Role: "tool",
+				Body: toolBody(call.Name, call.CallID, dshJSONText(call.Arguments)),
+				Data: dshRecoveredData(),
+			})
+		}
+		for _, result := range step.ToolResults {
+			if capturedOverflowed || captured[result.CallID] || captured[dshToolPhaseKey(result.CallID, "PostToolUse")] {
+				continue
+			}
+			recovered = append(recovered, RecoveredMessage{
+				ID:        dshRecoveredID("evt", event.SessionID, event.TurnID, "tool-result", result.CallID),
+				TurnID:    event.TurnID,
+				HookEvent: "PostToolUse", NativeHookEvent: "sessionLogToolResult",
+				Kind: "tool.result", Role: "tool",
+				Body: toolBody(result.Name, result.CallID, dshJSONText(result.Body)),
+				Data: dshRecoveredData(),
+			})
+		}
+	}
+	return recovered
+}
+
+func dshRecoveredData() json.RawMessage {
+	return json.RawMessage(`{"source":"dsh_session_log","fallback":true}`)
+}
+
+func dshToolPhaseKey(useID, hook string) string {
+	return hook + "\x00" + useID
+}
+
+func withoutDSHPromptDigest(raw json.RawMessage) json.RawMessage {
+	var data map[string]json.RawMessage
+	if json.Unmarshal(raw, &data) != nil {
+		return nil
+	}
+	delete(data, "dsh_prompt_sha256")
+	delete(data, "dsh_prompt_hook_seq")
+	delete(data, "dsh_prompt_after_seq")
+	clean, _ := json.Marshal(data)
+	return clean
+}
+
+func dshJSONText(value string) json.RawMessage {
+	if value == "" {
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func dshRecoveredID(prefix, sessionID string, parts ...string) string {
+	value := "dsh\x00" + sessionID + "\x00" + strings.Join(parts, "\x00")
+	sum := sha256.Sum256([]byte(value))
+	return prefix + "_" + hex.EncodeToString(sum[:16])
 }
 
 func eventSealedContentOmitted(raw json.RawMessage) bool {

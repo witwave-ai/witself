@@ -147,15 +147,61 @@ func TestDSHManagedPatchBlockRendersExactMCPRow(t *testing.T) {
 			t.Fatalf("block is missing %q:\n%s", want, text)
 		}
 	}
-	id, name, err := parseDSHManagedPatchBlock(block)
+	rows, err := parseDSHManagedPatchBlock(block)
 	if err != nil {
 		t.Fatalf("rendered block is not valid YAML: %v", err)
 	}
-	if id != dshPatchRowID || name != dshMCPClientPluginName {
-		t.Fatalf("parsed row = %q/%q", id, name)
+	if len(rows) != 1 || rows[0].id != dshPatchRowID || rows[0].name != dshMCPClientPluginName {
+		t.Fatalf("parsed rows = %#v", rows)
 	}
 	if !strings.Contains(text, "'--runtime', 'dsh'") {
 		t.Fatalf("block does not pass --runtime dsh:\n%s", text)
+	}
+}
+
+// TestDSHManagedPatchBlockRendersHookBridgeRow proves the one managed fence
+// carries both mounted plugins when this binding owns transcript hooks: the
+// MCP server and the claude-code hook bridge that reads the owned hooks.json.
+func TestDSHManagedPatchBlockRendersHookBridgeRow(t *testing.T) {
+	cfg := configuredDSHTestConfig(t)
+	cfg.HookMode = transcriptcapture.HookModeUser
+	cfg.HookConfigPath = filepath.Join(cfg.RuntimeConfigRoot, dshHookConfigFileName)
+
+	block, err := dshManagedPatchBlock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(block)
+	if strings.Count(text, dshPatchBlockBeginMarker) != 1 || strings.Count(text, "- insert:") != 1 {
+		t.Fatalf("hook row must live in the same single fenced insert entry:\n%s", text)
+	}
+	for _, want := range []string{
+		"    - id: " + dshPatchRowID + "\n",
+		"    - id: " + dshHooksPatchRowID + "\n",
+		"      name: '" + dshHooksBridgePluginName + "'\n",
+		"        configPath: '" + cfg.HookConfigPath + "'\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("block is missing %q:\n%s", want, text)
+		}
+	}
+	rows, err := parseDSHManagedPatchBlock(block)
+	if err != nil {
+		t.Fatalf("rendered block is not valid YAML: %v", err)
+	}
+	want := []dshPatchRow{
+		{id: dshPatchRowID, name: dshMCPClientPluginName},
+		{id: dshHooksPatchRowID, name: dshHooksBridgePluginName},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("parsed rows = %#v, want %#v", rows, want)
+	}
+
+	// A hook path outside the installed config root would point dsh at a file
+	// this binding does not own.
+	cfg.HookConfigPath = filepath.Join(t.TempDir(), dshHookConfigFileName)
+	if _, err := dshManagedPatchBlock(cfg); err == nil {
+		t.Fatal("a foreign hook config path must be refused")
 	}
 }
 

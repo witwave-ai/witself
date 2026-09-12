@@ -14,6 +14,7 @@ require (
 	github.com/fyne-io/oksvg v0.2.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/klauspost/compress v1.19.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/muesli/reflow v0.3.0
 	github.com/muesli/termenv v0.16.0
