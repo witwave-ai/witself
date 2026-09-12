@@ -33,26 +33,28 @@ render = lambda do |values, *overrides|
   app ? YAML.safe_load(app.dig('spec', 'source', 'helm', 'values')) : {}
 end
 
-# The serving cell values and the PagerDuty fixture omit both opt-ins. Neither
-# may start paging for collector or sealed posture absence during chart rollout.
-[
-  File.join(root, '.gitops/cells/civo-sandbox-usw2-dev/values.yaml'),
-  File.join(chart, 'ci/monitoring-pagerduty-values.yaml'),
-].each do |values|
-  disabled = render.call(values)
-  abort "gated alerts rendered without an opt-in: #{values}" unless disabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_opt_ins
-  enabled = render.call(values, '--set', 'platform.monitoring.collectorAlerts.enabled=true')
-  abort 'collector opt-in did not preserve other rules and gates' unless enabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_sealed
-  enabled['additionalPrometheusRulesMap']['founder-open-plane'] = without_opt_ins
-  abort 'collector opt-in changed unrelated monitoring behavior' unless enabled == disabled
-  sealed = render.call(values, '--set', 'platform.monitoring.sealedPlaneAlerts.enabled=true')
-  abort 'sealed-plane opt-in did not preserve other rules and gates' unless sealed.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_collectors
-  sealed['additionalPrometheusRulesMap']['founder-open-plane'] = without_opt_ins
-  abort 'sealed-plane opt-in changed unrelated monitoring behavior' unless sealed == disabled
-  both = render.call(values, '--set', 'platform.monitoring.collectorAlerts.enabled=true',
-    '--set', 'platform.monitoring.sealedPlaneAlerts.enabled=true')
-  abort 'both opt-ins did not preserve the complete source rules' unless both.dig('additionalPrometheusRulesMap', 'founder-open-plane') == source
-end
+# The PagerDuty fixture omits both opt-ins so a chart-only rollout cannot page
+# on collector or sealed-posture absence. The serving cell opts in only the
+# sealed-plane group through its catalog switch; the collector group stays off
+# until WitselfIdentityCapacityAtLimit stops treating a Personal account's
+# single root operator seat as a capacity breach.
+pagerduty = File.join(chart, 'ci/monitoring-pagerduty-values.yaml')
+serving = File.join(root, '.gitops/cells/civo-sandbox-usw2-dev/values.yaml')
+disabled = render.call(pagerduty)
+abort "gated alerts rendered without an opt-in: #{pagerduty}" unless disabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_opt_ins
+enabled = render.call(pagerduty, '--set', 'platform.monitoring.collectorAlerts.enabled=true')
+abort 'collector opt-in did not preserve other rules and gates' unless enabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_sealed
+enabled['additionalPrometheusRulesMap']['founder-open-plane'] = without_opt_ins
+abort 'collector opt-in changed unrelated monitoring behavior' unless enabled == disabled
+sealed = render.call(pagerduty, '--set', 'platform.monitoring.sealedPlaneAlerts.enabled=true')
+abort 'sealed-plane opt-in did not preserve other rules and gates' unless sealed.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_collectors
+sealed['additionalPrometheusRulesMap']['founder-open-plane'] = without_opt_ins
+abort 'sealed-plane opt-in changed unrelated monitoring behavior' unless sealed == disabled
+both = render.call(pagerduty, '--set', 'platform.monitoring.collectorAlerts.enabled=true',
+  '--set', 'platform.monitoring.sealedPlaneAlerts.enabled=true')
+abort 'both opt-ins did not preserve the complete source rules' unless both.dig('additionalPrometheusRulesMap', 'founder-open-plane') == source
+serving_render = render.call(serving)
+abort 'serving cell must render the sealed-plane alerts and keep the collector group off' unless serving_render.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_collectors
 
 fixture = File.join(chart, 'ci/monitoring-values.yaml')
 enabled = render.call(fixture)

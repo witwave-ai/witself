@@ -191,6 +191,10 @@ platform:
     collectorAlerts:
       enabled: true
 {{- end }}
+{{- if .SealedPlaneAlerts }}
+    sealedPlaneAlerts:
+      enabled: true
+{{- end }}
     postgresql:
       enabled: true
     nodeExporter:

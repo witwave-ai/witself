@@ -66,3 +66,4 @@ cells:
       domain_documentation_only: true
       monitoring: true
       collector_alerts: false
+      sealed_plane_alerts: true
