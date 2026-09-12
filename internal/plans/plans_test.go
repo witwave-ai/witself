@@ -135,11 +135,12 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:                      0,
 			},
 			policies: map[string]int64{
-				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
-				AgentEmailRetentionDaysPolicy:      30,
-				MessageRetentionDaysPolicy:         30,
-				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:      30,
+				AgentEmailEntitlementVersionPolicy:    AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:         30,
+				CollaborationEntitlementVersionPolicy: CollaborationEntitlementVersion,
+				MessageRetentionDaysPolicy:            30,
+				MessagingEntitlementVersionPolicy:     MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:         30,
 			},
 			features: []string{"memory", "facts"},
 			summary:  "Limited and capped. Agent memory and facts for up to 10 agents in one realm. No support included.",
@@ -167,11 +168,12 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:                       100,
 			},
 			policies: map[string]int64{
-				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
-				AgentEmailRetentionDaysPolicy:      90,
-				MessageRetentionDaysPolicy:         90,
-				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:      90,
+				AgentEmailEntitlementVersionPolicy:    AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:         90,
+				CollaborationEntitlementVersionPolicy: CollaborationEntitlementVersion,
+				MessageRetentionDaysPolicy:            90,
+				MessagingEntitlementVersionPolicy:     MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:         90,
 			},
 			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
 			summary:  "Capped. Memory, facts, secrets, and collaboration for up to 100 agents in one realm, support included.",
@@ -198,11 +200,12 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:                       250,
 			},
 			policies: map[string]int64{
-				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
-				AgentEmailRetentionDaysPolicy:      365,
-				MessageRetentionDaysPolicy:         365,
-				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:      365,
+				AgentEmailEntitlementVersionPolicy:    AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:         365,
+				CollaborationEntitlementVersionPolicy: CollaborationEntitlementVersion,
+				MessageRetentionDaysPolicy:            365,
+				MessagingEntitlementVersionPolicy:     MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:         365,
 			},
 			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Everything in Professional for up to 100 agents per realm across 25 realms, at one flat monthly price.",
@@ -223,10 +226,11 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:                       1000,
 			},
 			policies: map[string]int64{
-				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
-				AgentEmailRetentionDaysPolicy:      365,
-				MessageRetentionDaysPolicy:         365,
-				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
+				AgentEmailEntitlementVersionPolicy:    AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:         365,
+				CollaborationEntitlementVersionPolicy: CollaborationEntitlementVersion,
+				MessageRetentionDaysPolicy:            365,
+				MessagingEntitlementVersionPolicy:     MessagingEntitlementVersion,
 			},
 			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Team with custom pricing and support; details to follow.",
@@ -263,6 +267,70 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	prices := c.Prices()
 	if len(prices) != 2 || prices["standard"] != 3000 || prices["team"] != 25000 {
 		t.Fatalf("Prices() = %v; want exactly standard 3000 and team 25000 while enterprise is unavailable", prices)
+	}
+}
+
+// The same catalog is embedded by Go and imported by the public plans Worker.
+// Pin both sides of adoption using the production snapshot hasher: every plan
+// now carries the collaboration marker (Free included so a paid-to-Free
+// downgrade can apply cleanly), and each plan's legacy pre-adoption digest is
+// preserved.
+func TestCanonicalCollaborationAdoptionSnapshotHashes(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHashes := map[string]struct {
+		legacy  string
+		adopted string
+	}{
+		Free: {
+			legacy:  "766fe9140c87c45f4352f22dd77ac846603998e54f3b60d0da442cbc6b61e992",
+			adopted: "270875a0b903a5c558524029ed478d4f99b42684015119133338c685428185e3",
+		},
+		"standard": {
+			legacy:  "1cc42daf8f24e867dceb25ad357f127e71a0f21dc54e3c086573b24175028fe7",
+			adopted: "c4ffba632edcd400f076a034db6a23f247c2dcb474cb8efec48a53de1b712021",
+		},
+		"team": {
+			legacy:  "fb100be7c00429447f273d593a31013ce7bdb2632b9d7df9e153e2920fc40eeb",
+			adopted: "c2fd4f1acf627b66b5e7dfbc207ab1e3c70527e7b59d4a78c2681cf4b899a1c8",
+		},
+		"enterprise": {
+			legacy:  "8a8cc6968656a13622082a2a7b2cb3b6306cce55f7e03b8cd8951bffdfb4065f",
+			adopted: "f659ee8b5ddfb989817ebd81604c2b27a72919c0890670baca595ad28abf2392",
+		},
+	}
+	if len(catalog.Plans) != len(wantHashes) {
+		t.Fatalf("catalog has %d plans; want %d pinned snapshot vectors", len(catalog.Plans), len(wantHashes))
+	}
+	for _, plan := range catalog.Plans {
+		t.Run(plan.ID, func(t *testing.T) {
+			want, ok := wantHashes[plan.ID]
+			if !ok {
+				t.Fatalf("catalog plan %q lacks pinned snapshot vectors", plan.ID)
+			}
+			version, adopted := plan.Policies[CollaborationEntitlementVersionPolicy]
+			if !adopted || version != CollaborationEntitlementVersion {
+				t.Fatalf("catalog plan %q must carry collaboration marker=%d (adopted=%t)", plan.ID, version, adopted)
+			}
+			if plan.HasFeature(CollaborationFeature) != plan.HasFeature(MessagingFeature) {
+				t.Fatalf("collaboration must remain granted iff messaging is granted: %v", plan.Features)
+			}
+			hash, err := SnapshotHash(plan.ID, plan.Limits, plan.Policies, plan.Features)
+			if err != nil || hash != want.adopted {
+				t.Fatalf("adopted snapshot hash=%s error=%v want=%s", hash, err, want.adopted)
+			}
+			legacyPolicies := maps.Clone(plan.Policies)
+			delete(legacyPolicies, CollaborationEntitlementVersionPolicy)
+			legacyHash, err := SnapshotHash(plan.ID, plan.Limits, legacyPolicies, plan.Features)
+			if err != nil || legacyHash != want.legacy {
+				t.Fatalf("legacy snapshot hash=%s error=%v want=%s", legacyHash, err, want.legacy)
+			}
+			if hash == legacyHash {
+				t.Fatalf("marker adoption must move the snapshot hash: current=%s legacy=%s", hash, legacyHash)
+			}
+		})
 	}
 }
 

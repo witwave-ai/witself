@@ -442,6 +442,7 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 			"policies":{
 				"agent_email_entitlement_version":1,
 				"agent_email_retention_days":30,
+				"collaboration_entitlement_version":1,
 				"message_retention_days":30,
 				"messaging_entitlement_version":1,
 				"transcript_retention_days":30
@@ -2447,24 +2448,28 @@ func (s *slowApplier) Apply(_ context.Context, accountID string, request ApplyRe
 
 func TestResolvedSnapshotCollaborationAdoptionIsExplicit(t *testing.T) {
 	h := newHarness(t, false)
+	// Free now carries the catalog collaboration marker so a paid-to-Free
+	// downgrade can apply cleanly; adoption is still explicit (the catalog
+	// declares it, the resolver never synthesises it). Messaging remains
+	// denied by grant so the override still ships through unchanged.
 	for _, tc := range []struct {
 		name     string
 		override *MessagingOverride
 		hash     string
 	}{
-		{"current free catalog", nil, "766fe9140c87c45f4352f22dd77ac846603998e54f3b60d0da442cbc6b61e992"},
-		{"existing messaging override", &MessagingOverride{Enabled: true}, "ce0396dbd11cfb6bf2183a8f7614912305401dbebf3ad7aaacb142bf0d577de0"},
+		{"current free catalog", nil, "270875a0b903a5c558524029ed478d4f99b42684015119133338c685428185e3"},
+		{"existing messaging override", &MessagingOverride{Enabled: true}, "61d135382b51a19e35ca5c4cae877d17de5559a2e90a0794271bb19ffb15f684"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot, err := h.m.resolveSnapshot(Record{AccountID: "acc_collaboration", Entitled: plans.Free, MessagingOverride: tc.override})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, present := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]; present {
-				t.Fatal("routine reconciliation adopted collaboration authority")
+			if snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] != plans.CollaborationEntitlementVersion {
+				t.Fatalf("Free must carry the catalog collaboration marker: %+v", snapshot.Policies)
 			}
 			if snapshot.Hash != tc.hash {
-				t.Fatalf("legacy resolved hash=%s want=%s", snapshot.Hash, tc.hash)
+				t.Fatalf("resolved hash=%s want=%s", snapshot.Hash, tc.hash)
 			}
 			if tc.override != nil && !slices.Contains(snapshot.Features, plans.MessagingFeature) {
 				t.Fatal("legacy messaging override was lost")
