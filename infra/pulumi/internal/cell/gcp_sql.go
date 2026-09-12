@@ -158,14 +158,14 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		return nil, err
 	}
 
-	dsn := pulumi.All(instance.PrivateIpAddress, pw.Result).ApplyT(func(a []interface{}) string {
+	dsn := pulumi.All(instance.PrivateIpAddress, pw.Result).ApplyT(func(a []any) string {
 		host, password := a[0].(string), a[1].(string)
 		return fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=require", dbUser, password, host, dbName)
 	}).(pulumi.StringOutput)
 
-	payload := pulumi.All(instance.PrivateIpAddress, pw.Result, dsn).ApplyT(func(a []interface{}) (string, error) {
+	payload := pulumi.All(instance.PrivateIpAddress, pw.Result, dsn).ApplyT(func(a []any) (string, error) {
 		host, password, conn := a[0].(string), a[1].(string), a[2].(string)
-		b, err := json.Marshal(map[string]interface{}{
+		b, err := json.Marshal(map[string]any{
 			"host":     host,
 			"port":     5432,
 			"username": dbUser,

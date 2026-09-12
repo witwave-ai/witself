@@ -33,7 +33,7 @@ func newCellCredentials(ctx *pulumi.Context) (*cellCredentials, error) {
 	}
 
 	payload := pulumi.All(provisionToken, backupToken).ApplyT(
-		func(values []interface{}) (string, error) {
+		func(values []any) (string, error) {
 			body, err := json.Marshal(map[string]string{
 				"token":        values[0].(string),
 				"backup_token": values[1].(string),

@@ -138,8 +138,8 @@ func provisionAzureSecret(ctx *pulumi.Context, resourceName string, c azureCell,
 }
 
 func azureDBPayload(db *azureDatabase) pulumi.StringOutput {
-	return pulumi.All(db.fqdn, db.password, db.dsn).ApplyT(func(a []interface{}) (string, error) {
-		b, err := json.Marshal(map[string]interface{}{
+	return pulumi.All(db.fqdn, db.password, db.dsn).ApplyT(func(a []any) (string, error) {
+		b, err := json.Marshal(map[string]any{
 			"host":     a[0].(string),
 			"port":     5432,
 			"username": "witself",

@@ -8441,7 +8441,7 @@ func validateImportedMemoryRetryShields(memoryID string, memory memoryImportScop
 
 // decodeImportRow preserves the exact spelling of every JSON number. In
 // particular, BIGINT counters such as change_seq must not pass through the
-// default interface{} float64 representation, which loses integer precision
+// default float64 representation for any values, which loses integer precision
 // above 2^53. Requiring EOF retains json.Unmarshal's one-value contract.
 func decodeImportRow(row []byte) (map[string]any, error) {
 	if err := rejectDuplicateJSONNames(row); err != nil {
