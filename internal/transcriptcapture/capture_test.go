@@ -1173,7 +1173,7 @@ func TestSensitiveTurnSuppressesUnknownFutureHookShape(t *testing.T) {
 		ToolInput:            json.RawMessage(`{"value":"` + canary + `"}`),
 		Error:                json.RawMessage(`{"message":"` + canary + `"}`),
 	}
-	protectSensitiveTurnContent(&input, &state)
+	protectSensitiveTurnContent(&input, state.SensitiveTurn)
 	if !input.SensitiveTurnContent || input.Prompt != "" || input.LastAssistantMessage != "" ||
 		input.Text != "" || input.Reason != "" || input.ErrorMessage != "" ||
 		len(input.ToolInput) != 0 || len(input.Error) != 0 {

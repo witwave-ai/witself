@@ -221,6 +221,9 @@ type hookInput struct {
 	SensitiveToolEvent   bool            `json:"-"`
 	SensitiveTurnContent bool            `json:"-"`
 	SyntheticFence       bool            `json:"-"`
+	FenceRunID           string          `json:"-"`
+	FenceSealedTurn      bool            `json:"-"`
+	FenceRunRollover     bool            `json:"-"`
 }
 
 type sessionState struct {
@@ -236,6 +239,43 @@ type sessionState struct {
 	SensitiveTurn         bool            `json:"sensitive_turn,omitempty"`
 	SyntheticFencedTurnID string          `json:"synthetic_fenced_turn_id,omitempty"`
 	PendingFence          *Event          `json:"pending_fence,omitempty"`
+	// SealedTurns lists run/turn pairs that handled sealed material, recorded
+	// before their redaction is attempted. A fence consults it so a turn whose
+	// queued events never received the sealed marker, because that redaction
+	// failed, is still closed sealed and redacted. It survives run rollover.
+	SealedTurns []string `json:"sealed_turns,omitempty"`
+}
+
+const maxSealedTurnRecords = 256
+
+func sealedTurnKey(runID, turnID string) string {
+	return runID + "\x00" + turnID
+}
+
+func (s *sessionState) rememberSealedTurn(runID, turnID string) {
+	if runID == "" || turnID == "" {
+		return
+	}
+	key := sealedTurnKey(runID, turnID)
+	for _, existing := range s.SealedTurns {
+		if existing == key {
+			return
+		}
+	}
+	s.SealedTurns = append(s.SealedTurns, key)
+	if len(s.SealedTurns) > maxSealedTurnRecords {
+		s.SealedTurns = s.SealedTurns[len(s.SealedTurns)-maxSealedTurnRecords:]
+	}
+}
+
+func (s sessionState) sealedTurnRecorded(runID, turnID string) bool {
+	key := sealedTurnKey(runID, turnID)
+	for _, existing := range s.SealedTurns {
+		if existing == key {
+			return true
+		}
+	}
+	return false
 }
 
 // EnqueueHook converts stdin from Codex or Claude into one local outbox event.
@@ -303,13 +343,14 @@ func EnqueueHookForBinding(runtime, expectedAccount, expectedRealm, expectedAgen
 		return Event{}, ErrEphemeralSessionSkipped
 	}
 
-	if cfg.Runtime == RuntimeCodex {
-		release, err := acquireSessionStateLock(cfg.Runtime, input.SessionID)
-		if err != nil {
-			return Event{}, err
-		}
-		defer release()
+	// Every runtime now reads and rewrites session state across a hook: run
+	// rollover fences the prior run from the same critical section, so the lock
+	// can no longer be Codex-only.
+	release, err := acquireSessionStateLock(cfg.Runtime, input.SessionID)
+	if err != nil {
+		return Event{}, err
 	}
+	defer release()
 	return enqueueHook(cfg, input, raw)
 }
 
@@ -327,7 +368,33 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 	if err := finishPendingFence(cfg.Runtime, input.SessionID, &state); err != nil {
 		return Event{}, err
 	}
-	if input.HookEventName == "SessionStart" || state.RunID == "" {
+	// Compaction restarts nothing: Claude Code reports it as a SessionStart
+	// in the middle of a still-running turn, and closing that turn early
+	// would release its queued prompt before a later sealed tool could
+	// suppress it. The session keeps its run and its open turn.
+	rebind := state.RunID == "" ||
+		(input.HookEventName == "SessionStart" && !sessionStartKeepsRun(input.Source))
+	if rebind {
+		if state.RunID != "" {
+			// A restarted provider session keeps its session id and starts a
+			// new run, whether it was resumed or cleared. Close the prior run
+			// first: nothing else will ever emit its terminal event, so
+			// without this its queued events would stay in the outbox under
+			// a run the session no longer binds.
+			//
+			// Capture never stops because the outbox cannot be projected. An
+			// unreadable or foreign queued file is a flush problem, and
+			// `transcript fence --latest` still closes the prior run once it is
+			// resolved, so a failed rollover fence skips rather than dropping
+			// this hook.
+			_, _ = fenceHeldTurns(cfg, input.SessionID, state, rolloverFenceReason(input.Source), true)
+			// Each fence saved the session state it observed. Reread it so this
+			// hook's rollover cannot overwrite that durable bookkeeping.
+			state, err = loadSessionState(cfg.Runtime, input.SessionID)
+			if err != nil {
+				return Event{}, err
+			}
+		}
 		state.RunID, err = id.New("run")
 		if err != nil {
 			return Event{}, err
@@ -351,7 +418,17 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 		state.SensitiveTurn = false
 	}
 	protectSensitiveToolPayload(&input, &state)
-	protectSensitiveTurnContent(&input, &state)
+	// The session's sealed flag describes the turn the runtime is on and every
+	// turn after it. A fence may close a turn the runtime has already left, so
+	// that turn's own recorded suppression decides instead: redacting an
+	// earlier turn would destroy content no sealed tool ever touched. Decide
+	// here, after this hook can still seal the open turn and before the switch
+	// below closes it.
+	sealedTurn := state.SensitiveTurn
+	if input.SyntheticFence && input.TurnID != "" && input.TurnID != state.TurnID {
+		sealedTurn = input.FenceSealedTurn
+	}
+	protectSensitiveTurnContent(&input, sealedTurn)
 	pinRunRuntimeVersion(&state, input.RuntimeVersion, cfg.RuntimeVersion)
 
 	turnID := strings.TrimSpace(input.TurnID)
@@ -384,7 +461,18 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 			turnID = state.TurnID
 		}
 	}
-	if state.SensitiveTurn && turnID != "" {
+	runID := state.RunID
+	if input.SyntheticFence && input.FenceRunID != "" {
+		// A launcher fence and a run rollover both close a run that the session
+		// may no longer bind. The terminal event belongs to that run, not to
+		// whichever run is current when the fence is written.
+		runID = input.FenceRunID
+	}
+	if sealedTurn && turnID != "" {
+		// Record the sealed turn before touching the outbox: if the redaction
+		// below fails, no queued event carries the sealed marker, and this
+		// record is what lets a later fence still close the turn sealed.
+		state.rememberSealedTurn(runID, turnID)
 		if err := RedactPendingTurn(cfg.Runtime, input.SessionID, turnID); err != nil {
 			// Preserve the fail-closed fence even if a local I/O problem prevents
 			// this hook from being queued. The next hook retries redaction, while
@@ -422,7 +510,7 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 		AgentName:            cfg.AgentName,
 		Location:             cfg.Location,
 		SessionID:            input.SessionID,
-		RunID:                state.RunID,
+		RunID:                runID,
 		TurnID:               turnID,
 		HookEvent:            input.HookEventName,
 		NativeHookEvent:      input.NativeHookEvent,
@@ -447,15 +535,21 @@ func enqueueHook(cfg Config, input hookInput, raw []byte) (Event, error) {
 		event.ReplyToEventID = state.PromptEventID
 	}
 	if input.HookEventName == "Stop" || input.HookEventName == "StopFailure" {
-		event.ReplyToEventID = state.PromptEventID
-		state.TurnID = ""
-		state.PromptEventID = ""
+		// A fence for a turn the session no longer holds open must not adopt
+		// another turn's prompt as its parent, or close the turn still running.
+		if !input.SyntheticFence || turnID == state.TurnID {
+			event.ReplyToEventID = state.PromptEventID
+			state.TurnID = ""
+			state.PromptEventID = ""
+		}
 	}
 	if input.SyntheticFence {
 		// Persist the exact event before closing the turn. A failed outbox write
 		// can then be retried with the same event identity and timestamp.
 		state.PendingFence = &event
-		state.SyntheticFencedTurnID = turnID
+		if runID == state.RunID {
+			state.SyntheticFencedTurnID = turnID
+		}
 	}
 	if err := saveSessionState(cfg.Runtime, input.SessionID, state); err != nil {
 		return Event{}, err
@@ -616,8 +710,8 @@ func protectSensitiveToolPayload(input *hookInput, state *sessionState) {
 // portable transcript by a later provider response hook. The user still sees
 // the provider's native response; only Witself capture is made value-free.
 // The fence is reset by the next real UserPromptSubmit in EnqueueHookForBinding.
-func protectSensitiveTurnContent(input *hookInput, state *sessionState) {
-	if input == nil || state == nil || !state.SensitiveTurn || isToolHookEvent(input.HookEventName) {
+func protectSensitiveTurnContent(input *hookInput, sealedTurn bool) {
+	if input == nil || !sealedTurn || isToolHookEvent(input.HookEventName) {
 		return
 	}
 	// Provider hook schemas evolve. Once a turn has handled sealed material,
@@ -1750,6 +1844,11 @@ func setEventContent(event *Event, input hookInput, raw []byte) {
 	case "Stop":
 		if input.SyntheticFence {
 			event.Kind, event.Role, event.Body = "turn.completed", "system", "delegation job completed"
+			// A sealed turn clears the reason before this runs, so the body of
+			// a rollover fence cannot be derived from it.
+			if input.FenceRunRollover {
+				event.Body = "run completed when the session restarted"
+			}
 		} else if input.LastAssistantMessage != "" {
 			event.Kind, event.Role, event.Body = "message.assistant", "assistant", input.LastAssistantMessage
 		} else {
@@ -2250,6 +2349,11 @@ func Pending(runtime string) ([]PendingEvent, error) {
 	out := make([]PendingEvent, 0, len(files))
 	for _, path := range files {
 		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			// A concurrent flush acknowledged and removed this event between
+			// the glob and the read. It is no longer pending.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -2442,6 +2546,12 @@ func finalizePendingWithin(
 	if event.NativeTurnFinalized {
 		return pending, true, nil
 	}
+	if eventSyntheticFence(event.Data) {
+		// A companion fence is a value-free completion marker, not an
+		// unresolved provider turn. It has no prompt id to correlate and must
+		// never be rehydrated from the native transcript.
+		return pending, true, nil
+	}
 	if eventSealedContentOmitted(event.Data) {
 		// Never rehydrate a sealed turn from Grok's native transcript: its final
 		// assistant chunk may contain the authorized revealed value that the
@@ -2511,6 +2621,13 @@ func eventSealedContentOmitted(raw json.RawMessage) bool {
 		Omitted bool `json:"sealed_content_omitted"`
 	}
 	return len(raw) != 0 && json.Unmarshal(raw, &data) == nil && data.Omitted
+}
+
+func eventSyntheticFence(raw json.RawMessage) bool {
+	var data struct {
+		SyntheticFence bool `json:"synthetic_fence"`
+	}
+	return len(raw) != 0 && json.Unmarshal(raw, &data) == nil && data.SyntheticFence
 }
 
 func validatePendingRewritePath(path string, event Event) error {
