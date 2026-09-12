@@ -125,7 +125,7 @@
     "CP_SIGNUP_OPEN": "true",
     // Deploy capable readers and clients before enabling admission checks.
     // Existing refusal/reservation checkpoints remain enforced when false.
-    "CP_SIGNUP_LEGAL_ENFORCEMENT": "false",
+    "CP_SIGNUP_LEGAL_ENFORCEMENT": "true",
     // Reviewed daily signup quotas (ratified 2026-08-29): 10 per IP, 500
     // global. The exact value 0 disables a quota and, with open signup
     // active, makes every invite-less signup fail closed at render time.

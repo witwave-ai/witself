@@ -188,8 +188,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
     throw new Error("generated config Worker runtime did not match");
   }
   if (!sameJSON(config.services, [{ binding: "LEGAL_DOCUMENTS", service: "witself-legal" }]) ||
-      config.vars?.CP_SIGNUP_LEGAL_ENFORCEMENT !== "false") {
-    throw new Error("generated config signup legal service or dark gate did not match");
+      config.vars?.CP_SIGNUP_LEGAL_ENFORCEMENT !== "true") {
+    throw new Error("generated config signup legal service or enabled gate did not match");
   }
   if (!sameJSON(config.secrets, { required: REQUIRED_SECRET_BINDINGS })) {
     throw new Error("generated config required secret contract did not match");
@@ -725,7 +725,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     expected.version === "0.0.240" && !bindings.has("LEGAL_DOCUMENTS") &&
     !bindings.has("CP_SIGNUP_LEGAL_ENFORCEMENT");
   if (!legacyLegalBindings) {
-    exactPlainBinding(bindings, "CP_SIGNUP_LEGAL_ENFORCEMENT", "false");
+    exactPlainBinding(bindings, "CP_SIGNUP_LEGAL_ENFORCEMENT", "true");
     const legal = bindings.get("LEGAL_DOCUMENTS");
     if (legal?.type !== "service" || legal.service !== "witself-legal" ||
         (legal.environment !== undefined && legal.environment !== "production") ||

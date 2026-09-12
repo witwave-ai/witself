@@ -2040,9 +2040,9 @@ function noProvisioning(setup) {
   assert.deepEqual(setup.service.calls, []); assert.deepEqual(setup.target.calls, []);
 }
 
-test("legal admission is dark by default and preserves consentless invited signup", async () => {
+test("legal admission requires exact true and preserves consentless invited signup", async () => {
   for (const enabled of [undefined, "false", "TRUE", "1"]) {
-    const setup = harness({ env: { CP_SIGNUP_LEGAL_ENFORCEMENT: enabled, LEGAL_DOCUMENTS: { fetch: () => assert.fail("dark legal read") } } });
+    const setup = harness({ env: { CP_SIGNUP_LEGAL_ENFORCEMENT: enabled, LEGAL_DOCUMENTS: { fetch: () => assert.fail("disabled legal read") } } });
     assert.equal((await setup.runtime.fetch(consentRequest())).status, 201);
     assertNoSignupSecretsOrPII(await setup.storage.get("account-signup"));
   }
