@@ -1080,7 +1080,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 		configure       func(*Config, error) func(Config) error
 	}{
 		{"registration", "register", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.RegisterVaultKey = func(_ context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
+			cfg.RegisterVaultKey = func(_ context.Context, p DomainPrincipal, _ RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
 				if p != principal {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1092,7 +1092,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "create", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.CreateVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			cfg.CreateVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, _ CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
 				if p != principal {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1104,7 +1104,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "approve", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.ApproveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in ApproveVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			cfg.ApproveVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, id string, _ ApproveVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1116,7 +1116,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "receive", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.ReceiveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, targetLocationID string) (VaultKeyEnrollmentTransfer, error) {
+			cfg.ReceiveVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, id string, targetLocationID string) (VaultKeyEnrollmentTransfer, error) {
 				if p != principal || id != "lifecycle_sealed_private" || targetLocationID != "location_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1128,7 +1128,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "consume", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.ConsumeVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in ConsumeVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			cfg.ConsumeVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, id string, _ ConsumeVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1140,7 +1140,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "cancel", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.CancelVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, id string, in CancelVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			cfg.CancelVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, id string, _ CancelVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1152,7 +1152,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"rotation", "start", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.StartVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, in StartVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			cfg.StartVaultKeyRotation = func(_ context.Context, p DomainPrincipal, _ StartVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
 				if p != principal {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1164,7 +1164,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"rotation", "stage", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.StageVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in StageVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			cfg.StageVaultKeyRotation = func(_ context.Context, p DomainPrincipal, id string, _ StageVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1176,7 +1176,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"rotation", "commit", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.CommitVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in CommitVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			cfg.CommitVaultKeyRotation = func(_ context.Context, p DomainPrincipal, id string, _ CommitVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1188,7 +1188,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"rotation", "cancel", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.CancelVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, id string, in CancelVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			cfg.CancelVaultKeyRotation = func(_ context.Context, p DomainPrincipal, id string, _ CancelVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
 				if p != principal || id != "lifecycle_sealed_private" {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
