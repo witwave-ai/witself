@@ -134,6 +134,13 @@ func runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace string) (managedIn
 	case transcriptcapture.RuntimeCopilot:
 		spec, err := copilotManagedInstructionsSpec()
 		return spec, "GitHub Copilot", true, err
+	case transcriptcapture.RuntimeDSH:
+		root, err := currentDSHConfigRoot()
+		if err != nil {
+			return managedInstructionsSpec{}, "DeepSeek Harness", true, err
+		}
+		spec, err := dshManagedInstructionsSpecAt(root)
+		return spec, "DeepSeek Harness", true, err
 	default:
 		return managedInstructionsSpec{}, "", false, fmt.Errorf("unsupported runtime %q", runtimeName)
 	}

@@ -73,6 +73,8 @@ func acquireProviderIntegrationOperationLock(runtimeName string) (func(), error)
 		return acquireAntigravityOperationLock()
 	case transcriptcapture.RuntimeCopilot:
 		return acquireCopilotOperationLock()
+	case transcriptcapture.RuntimeDSH:
+		return acquireDSHOperationLock()
 	case transcriptcapture.RuntimeOpenClaw:
 		root, err := openClawOperationLockRoot()
 		if err != nil {
@@ -147,6 +149,25 @@ func copilotOperationLockRoot() (string, error) {
 		return "", fmt.Errorf("read existing GitHub Copilot integration before locking: %w", err)
 	}
 	return currentCopilotConfigRoot()
+}
+
+func dshOperationLockRoot() (string, error) {
+	if installed, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH); err == nil {
+		if installed.RuntimeConfigRoot == "" {
+			return "", errors.New("installed DeepSeek Harness integration has no config root")
+		}
+		root, cleanErr := cleanCopilotAbsolutePath("installed DeepSeek Harness config root", installed.RuntimeConfigRoot)
+		if cleanErr != nil {
+			return "", cleanErr
+		}
+		if root != installed.RuntimeConfigRoot {
+			return "", errors.New("installed DeepSeek Harness config root is not canonical")
+		}
+		return root, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read existing DeepSeek Harness integration before locking: %w", err)
+	}
+	return currentDSHConfigRoot()
 }
 
 func openClawOperationLockRoot() (string, error) {

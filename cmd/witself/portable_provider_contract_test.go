@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -358,6 +359,108 @@ func TestProviderIntegrationContractCopilot(t *testing.T) {
 	assertIntegrationConfigAbsent(t, transcriptcapture.RuntimeCopilot)
 	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeCopilot, integrationVerificationNotInstalled)
 	assertProviderMutationCounts(t, fixture.provider, "add", 1, "remove", 1)
+}
+
+func TestProviderIntegrationContractDSH(t *testing.T) {
+	fixture := setupPortableProviderContract(t, "dsh")
+	t.Setenv("DSH_CLI_PATH", fixture.provider.Path)
+	dshHome := filepath.Join(fixture.home, ".dsh-contract")
+	t.Setenv("DSH_HOME", dshHome)
+	patchPath := filepath.Join(dshHome, dshPatchFileName)
+	// A freshly generated patch file plus a foreign row and a `!!js` tagged
+	// value. All of it must survive install, reinstall, and uninstall.
+	foreignPatch := "# dsh home patch\n" +
+		"- insert:\n" +
+		"    - id: operator-plugin\n" +
+		"      name: '@operator/plugin'\n" +
+		"      config:\n" +
+		"        factory: !!js/function >\n" +
+		"          function () { return 1 }\n"
+	if err := os.MkdirAll(dshHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// dsh generates this file itself, so start from a provider-typical mode and
+	// require install to tighten it end to end.
+	if err := os.WriteFile(patchPath, []byte(foreignPatch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(patchPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentsPath := filepath.Join(dshHome, dshMemoryRoutingFile)
+	foreignInstructions := []byte("# Operator dsh guidance\n")
+	if err := os.WriteFile(agentsPath, foreignInstructions, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	installArgs := fixture.installArgs(transcriptcapture.RuntimeDSH)
+	if code := runGenericProviderContractCLI(t, fixture.witselfExecutable, "install", installArgs...); code != 0 {
+		t.Fatalf("install code = %d", code)
+	}
+	if info, err := os.Lstat(patchPath); err != nil {
+		t.Fatal(err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("patch file permissions after install = %04o, want 0600", info.Mode().Perm())
+	}
+	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDSHInstalledTopology(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RuntimeCLICommand != fixture.provider.Path || cfg.RuntimeConfigRoot != dshHome ||
+		cfg.RuntimeMCPConfigPath != patchPath || cfg.HookMode != transcriptcapture.HookModeNone ||
+		cfg.RuntimeVersion != "0.1.5-rc.1" ||
+		cfg.MCPEnvironment["WITSELF_HOME"] != fixture.witselfHome {
+		t.Fatalf("persisted dsh binding = %#v", cfg)
+	}
+	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationHealthy)
+	expectedBlock, err := dshManagedPatchBlock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedPatch, err := os.ReadFile(patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(installedPatch, append(append([]byte(nil), foreignPatch...), append(bytes.Clone(expectedBlock), '\n')...)) {
+		t.Fatalf("installed dsh patch file = %q", installedPatch)
+	}
+	installedInstructions, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(installedInstructions, dshMemoryRoutingBlock) ||
+		!bytes.Contains(installedInstructions, foreignInstructions) {
+		t.Fatalf("installed dsh instructions = %q", installedInstructions)
+	}
+
+	if code := runGenericProviderContractCLI(t, fixture.witselfExecutable, "install", installArgs...); code != 0 {
+		t.Fatalf("reinstall code = %d", code)
+	}
+	if current, err := os.ReadFile(patchPath); err != nil || !bytes.Equal(current, installedPatch) {
+		t.Fatalf("reinstall changed the dsh patch file: %q, %v", current, err)
+	}
+	if current, err := os.ReadFile(agentsPath); err != nil || !bytes.Equal(current, installedInstructions) {
+		t.Fatalf("reinstall changed the dsh instructions: %q, %v", current, err)
+	}
+	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationHealthy)
+
+	if code := runGenericProviderContractCLI(t, fixture.witselfExecutable, "uninstall", transcriptcapture.RuntimeDSH); code != 0 {
+		t.Fatalf("uninstall code = %d", code)
+	}
+	if current, err := os.ReadFile(patchPath); err != nil || string(current) != foreignPatch {
+		t.Fatalf("uninstall did not restore the foreign dsh patch rows exactly: %q, %v", current, err)
+	}
+	if current, err := os.ReadFile(agentsPath); err != nil || !bytes.Equal(current, foreignInstructions) {
+		t.Fatalf("uninstall did not restore the shared dsh instructions exactly: %q, %v", current, err)
+	}
+	assertIntegrationConfigAbsent(t, transcriptcapture.RuntimeDSH)
+	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationNotInstalled)
+	// dsh has no `mcp add` surface; Witself owns the patch file directly, so the
+	// only provider invocations are read-only probes.
+	assertProviderMutationCounts(t, fixture.provider, "add", 0, "remove", 0)
 }
 
 func assertPortableProviderVerification(

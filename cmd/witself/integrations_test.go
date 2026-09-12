@@ -211,7 +211,7 @@ func TestIntegrationsJSONUsesStableRuntimeOrder(t *testing.T) {
 	if !reflect.DeepEqual(gotOrder, runtimes) {
 		t.Fatalf("runtime order = %v, want %v", gotOrder, runtimes)
 	}
-	wantSummary := integrationsSummary{Supported: 7, Detected: 3, Installed: 1, Attention: 2}
+	wantSummary := integrationsSummary{Supported: 8, Detected: 3, Installed: 1, Attention: 2}
 	if report.Summary != wantSummary {
 		t.Fatalf("summary = %#v, want %#v", report.Summary, wantSummary)
 	}
@@ -299,7 +299,7 @@ func TestIntegrationsVerifyClassifiesPersistedTopology(t *testing.T) {
 		Incomplete:   1,
 		Unavailable:  1,
 		Unsupported:  1,
-		NotInstalled: 1,
+		NotInstalled: 2,
 	}
 	if report.VerificationSummary == nil || *report.VerificationSummary != wantSummary {
 		t.Fatalf("verification summary = %#v, want %#v", report.VerificationSummary, wantSummary)
@@ -312,6 +312,7 @@ func TestIntegrationsVerifyClassifiesPersistedTopology(t *testing.T) {
 		transcriptcapture.RuntimeOpenClaw:    integrationVerificationDrifted,
 		transcriptcapture.RuntimeAntigravity: integrationVerificationNotInstalled,
 		transcriptcapture.RuntimeCopilot:     integrationVerificationHealthy,
+		transcriptcapture.RuntimeDSH:         integrationVerificationNotInstalled,
 	}
 	for _, runtimeStatus := range report.Runtimes {
 		if runtimeStatus.Verification == nil || runtimeStatus.Verification.State != wantStates[runtimeStatus.Runtime] {
@@ -331,7 +332,7 @@ func TestIntegrationsVerifyClassifiesPersistedTopology(t *testing.T) {
 	for _, want := range []string{
 		"HEALTH",
 		"openclaw verification drifted: default workspace changed",
-		"2 healthy, 1 drifted, 1 incomplete, 1 unavailable, 1 unsupported, 1 not installed",
+		"2 healthy, 1 drifted, 1 incomplete, 1 unavailable, 1 unsupported, 2 not installed",
 	} {
 		if !strings.Contains(human, want) {
 			t.Errorf("verification output missing %q:\n%s", want, human)
@@ -700,10 +701,65 @@ func TestInstallAllDryRunDoesNotMutateAndReportsRebind(t *testing.T) {
 	if mutations != 0 {
 		t.Fatalf("dry run performed %d install mutations", mutations)
 	}
-	for _, want := range []string{"codex", "would rebind", "openclaw", "would install", "2 planned, 0 failed, 5 skipped"} {
+	for _, want := range []string{"codex", "would rebind", "openclaw", "would install", "2 planned, 0 failed, 6 skipped"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, stdout)
 		}
+	}
+}
+
+func TestInstallAllIncludesDSHOnlyWhenItsCLIResolves(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		available   bool
+		wantPlanned string
+	}{
+		{"cli found", true, "2 planned, 0 failed, 6 skipped"},
+		{"cli missing", false, "1 planned, 0 failed, 7 skipped"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restoreIntegrationCatalogHooks(t)
+			// Codex keeps the bulk command from refusing an empty inventory, so
+			// the assertion isolates whether dsh itself is planned or skipped.
+			probeRuntimeForIntegrationCatalog = func(runtimeName string) integrationDetection {
+				switch {
+				case runtimeName == transcriptcapture.RuntimeCodex:
+					return integrationDetection{State: integrationDetectionAvailable, Executable: "/bin/codex"}
+				case runtimeName == transcriptcapture.RuntimeDSH && test.available:
+					return integrationDetection{
+						State:      integrationDetectionAvailable,
+						Executable: "/bin/dsh",
+						Version:    "0.1.5-rc.1",
+					}
+				default:
+					return integrationDetection{State: integrationDetectionNotFound}
+				}
+			}
+			loadIntegrationForCatalog = func(string) (transcriptcapture.Config, error) {
+				return transcriptcapture.Config{}, os.ErrNotExist
+			}
+			installOneIntegration = func([]string) int {
+				t.Fatal("dry run performed an install mutation")
+				return 1
+			}
+
+			stdout, stderr, code := captureIntegrationsCLI(t, func() int {
+				return installAllCmd([]string{"--agent", "bulk-agent", "--location", "home", "--dry-run"})
+			})
+			if code != 0 {
+				t.Fatalf("install all --dry-run code = %d, stderr = %q", code, stderr)
+			}
+			if !strings.Contains(stdout, test.wantPlanned) {
+				t.Fatalf("dry-run output missing %q:\n%s", test.wantPlanned, stdout)
+			}
+			wantRow := "dsh          not detected"
+			if test.available {
+				wantRow = "dsh          would install"
+			}
+			if !strings.Contains(stdout, wantRow) {
+				t.Fatalf("dry-run output missing %q:\n%s", wantRow, stdout)
+			}
+		})
 	}
 }
 
@@ -731,7 +787,7 @@ func TestBulkIntegrationJSONIsStableAndContainsNoProgressText(t *testing.T) {
 	if report.SchemaVersion != bulkIntegrationSchemaVersion || report.Operation != "install" || !report.DryRun {
 		t.Fatalf("bulk report metadata = %#v", report)
 	}
-	if report.Summary != (bulkIntegrationSummary{Succeeded: 1, Skipped: 6}) {
+	if report.Summary != (bulkIntegrationSummary{Succeeded: 1, Skipped: 7}) {
 		t.Fatalf("bulk report summary = %#v", report.Summary)
 	}
 	if strings.Contains(stdout, "installing ") || strings.Contains(stdout, "RUNTIME\t") {
@@ -829,7 +885,7 @@ func TestInstallAllContinuesAfterFailureAndForwardsCommonFlags(t *testing.T) {
 		"codex", "rebound",
 		"cursor", "failed",
 		"antigravity", "installed",
-		"2 succeeded, 1 failed, 4 skipped",
+		"2 succeeded, 1 failed, 5 skipped",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("install output missing %q:\n%s", want, stdout)
@@ -978,7 +1034,7 @@ func TestUninstallAllUsesInstalledRecordsAndContinuesAfterFailure(t *testing.T) 
 		"codex", "failed",
 		"cursor", "cannot read integration record",
 		"openclaw", "uninstalled",
-		"1 succeeded, 2 failed, 4 skipped",
+		"1 succeeded, 2 failed, 5 skipped",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, stdout)
@@ -1019,7 +1075,7 @@ func TestUninstallAllRecoversPendingUninstallWithoutIntegrationRecord(t *testing
 		t.Fatalf("uninstall calls = %v, want %v", calls, want)
 	}
 	if !strings.Contains(stdout, "openclaw") || !strings.Contains(stdout, "uninstalled") ||
-		!strings.Contains(stdout, "1 succeeded, 0 failed, 6 skipped") {
+		!strings.Contains(stdout, "1 succeeded, 0 failed, 7 skipped") {
 		t.Fatalf("unexpected pending-uninstall output:\n%s", stdout)
 	}
 }
@@ -1050,7 +1106,7 @@ func TestUninstallAllDryRunPlansPendingUninstallWithoutIntegrationRecord(t *test
 		t.Fatalf("uninstall all --dry-run code = %d, stderr = %q\n%s", code, stderr, stdout)
 	}
 	if !strings.Contains(stdout, "codex") || !strings.Contains(stdout, "would uninstall") ||
-		!strings.Contains(stdout, "1 planned, 0 failed, 6 skipped") {
+		!strings.Contains(stdout, "1 planned, 0 failed, 7 skipped") {
 		t.Fatalf("unexpected pending-uninstall dry-run output:\n%s", stdout)
 	}
 }
@@ -1079,7 +1135,7 @@ func TestUninstallAllDryRunDoesNotMutate(t *testing.T) {
 		t.Fatalf("dry run performed %d uninstall mutations", mutations)
 	}
 	if !strings.Contains(stdout, "openclaw") || !strings.Contains(stdout, "would uninstall") ||
-		!strings.Contains(stdout, "1 planned, 0 failed, 6 skipped") {
+		!strings.Contains(stdout, "1 planned, 0 failed, 7 skipped") {
 		t.Fatalf("unexpected uninstall dry-run output:\n%s", stdout)
 	}
 }

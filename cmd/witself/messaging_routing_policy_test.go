@@ -103,6 +103,7 @@ func TestMCPMessagingPolicyHasNoRetiredNotificationBridge(t *testing.T) {
 		transcriptcapture.RuntimeOpenClaw,
 		transcriptcapture.RuntimeAntigravity,
 		transcriptcapture.RuntimeCopilot,
+		transcriptcapture.RuntimeDSH,
 	} {
 		instructions := mcpInstructions(
 			runtimeName,

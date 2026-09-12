@@ -136,6 +136,15 @@ hooks and does not request that elevation. Native Windows Claude Code and Grok
 Build install no transcript hooks. Grok Build and Cursor use their user-scoped
 hook locations on macOS and Linux, including Cursor inside WSL as Linux.
 
+Transcript capture is scoped to those four runtimes. The OpenClaw, Antigravity,
+GitHub Copilot, and DeepSeek Harness preview integrations install MCP access and
+managed memory routing only: they record `hook_mode: none`, install no hooks,
+write nothing to `~/.witself/capture/outbox/`, and report
+`transcript capture: unavailable` at install. For DeepSeek Harness this is
+deliberate rather than pending discovery — its hook bridges pass no
+model-visible session context because `SessionStart` runs detached, so a hook
+could not carry the provenance this ledger requires.
+
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude
 Code receives an isolated drop-in at

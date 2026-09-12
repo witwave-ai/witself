@@ -2117,7 +2117,7 @@
       "id": "runtime-integrations",
       "name": "Agent runtime integrations",
       "area": "Integration",
-      "summary": "Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.",
+      "summary": "Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, GitHub Copilot, and DeepSeek Harness, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "docs": [

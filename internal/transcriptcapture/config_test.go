@@ -17,6 +17,7 @@ func TestSupportedRuntimesOrderAndMutationIsolation(t *testing.T) {
 		RuntimeOpenClaw,
 		RuntimeAntigravity,
 		RuntimeCopilot,
+		RuntimeDSH,
 	}
 
 	got := SupportedRuntimes()
@@ -118,6 +119,119 @@ func TestCopilotConfigRequiresAndRoundTripsOwnedUserBinding(t *testing.T) {
 				t.Fatalf("validation error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestDSHRuntimeAliasesAndRuntimeListError(t *testing.T) {
+	for _, alias := range []string{"dsh", "DSH", " dsh ", "deepseek", "deepseek-harness"} {
+		got, err := NormalizeRuntime(alias)
+		if err != nil || got != RuntimeDSH {
+			t.Fatalf("NormalizeRuntime(%q) = %q, %v; want %q", alias, got, err, RuntimeDSH)
+		}
+	}
+	_, err := NormalizeRuntime("not-a-runtime")
+	if err == nil {
+		t.Fatal("NormalizeRuntime accepted an unknown runtime")
+	}
+	for _, runtime := range SupportedRuntimes() {
+		if !strings.Contains(err.Error(), runtime) {
+			t.Fatalf("runtime list error %q omits %q", err.Error(), runtime)
+		}
+	}
+}
+
+func TestDSHConfigRequiresAndRoundTripsOwnedPatchBinding(t *testing.T) {
+	witselfHome := filepath.Join(t.TempDir(), ".witself")
+	t.Setenv("WITSELF_HOME", witselfHome)
+	loc, err := EnsureLocation("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configRoot := filepath.Join(string(filepath.Separator)+"Users", "test", ".dsh")
+	cfg := Config{
+		Runtime:              RuntimeDSH,
+		RuntimeVersion:       "0.1.5-rc.1",
+		RuntimeCLICommand:    filepath.Join(string(filepath.Separator)+"opt", "homebrew", "bin", "dsh"),
+		MCPCommand:           filepath.Join(string(filepath.Separator)+"opt", "homebrew", "bin", "witself"),
+		MCPEnvironment:       map[string]string{"DSH_HOME": configRoot, "WITSELF_HOME": witselfHome},
+		RuntimeConfigRoot:    configRoot,
+		RuntimeMCPConfigPath: filepath.Join(configRoot, "cordis.patch.yml"),
+		CaptureMode:          ModeRaw,
+		HookMode:             HookModeNone,
+		Account:              "default",
+		Realm:                "default",
+		Agent:                "dsh-test-bot",
+		AgentID:              "agent_dsh",
+		AgentName:            "dsh-test-bot",
+		Location:             loc,
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig("deepseek-harness")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Runtime != RuntimeDSH || loaded.HookMode != HookModeNone ||
+		loaded.RuntimeCLICommand != cfg.RuntimeCLICommand || loaded.MCPCommand != cfg.MCPCommand ||
+		loaded.MCPEnvironment["WITSELF_HOME"] != witselfHome || loaded.RuntimeConfigRoot != configRoot ||
+		loaded.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath {
+		t.Fatalf("dsh config = %#v", loaded)
+	}
+
+	for _, test := range []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{"hooks", func(value *Config) { value.HookMode = HookModeUser }, "hook_mode must be none"},
+		{"missing CLI", func(value *Config) { value.RuntimeCLICommand = "" }, "runtime_cli_command is required"},
+		{"missing MCP command", func(value *Config) { value.MCPCommand = "" }, "mcp_command is required"},
+		{"missing root", func(value *Config) { value.RuntimeConfigRoot = "" }, "runtime_config_root is required"},
+		{"extra env", func(value *Config) { value.MCPEnvironment["PATH"] = "/bin" }, "exactly DSH_HOME and WITSELF_HOME"},
+		{"relative home", func(value *Config) { value.MCPEnvironment["WITSELF_HOME"] = "relative" }, "clean absolute"},
+		{"missing dsh home", func(value *Config) { delete(value.MCPEnvironment, "DSH_HOME") }, "exactly DSH_HOME and WITSELF_HOME"},
+		{"foreign dsh home", func(value *Config) {
+			value.MCPEnvironment["DSH_HOME"] = filepath.Join(string(filepath.Separator)+"Users", "other", ".dsh")
+		}, "must equal runtime_config_root"},
+		{"patch path", func(value *Config) {
+			value.RuntimeMCPConfigPath = filepath.Join(configRoot, "settings.yaml")
+		}, "canonical DeepSeek Harness home patch file"},
+		{"workspace", func(value *Config) { value.RuntimeWorkspace = "/tmp/work" }, "not supported"},
+		{"plugin", func(value *Config) { value.RuntimePluginPath = "/tmp/plugin" }, "not supported"},
+		{"connect timeout", func(value *Config) { value.MCPConnectTimeoutSeconds = 30 }, "not supported"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cfg
+			candidate.MCPEnvironment = map[string]string{"DSH_HOME": configRoot, "WITSELF_HOME": witselfHome}
+			test.edit(&candidate)
+			if err := SaveConfig(candidate); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestDSHHookSettingsPathFollowsConfigRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DSH_HOME", "")
+	path, err := hookSettingsPath(RuntimeDSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".dsh", "hooks.json"); path != want {
+		t.Fatalf("default hooks path = %q, want %q", path, want)
+	}
+	root := filepath.Join(t.TempDir(), "dsh-home")
+	t.Setenv("DSH_HOME", root)
+	path, err = hookSettingsPath(RuntimeDSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "hooks.json"); path != want {
+		t.Fatalf("overridden hooks path = %q, want %q", path, want)
 	}
 }
 
