@@ -293,6 +293,131 @@ the cell refuses that operation before its canonical retirement fence exists.
 Explicit `--endpoint` plus `--token-file` remains the self-hosted path and
 directly deletes an empty realm while writing the same portable retired shape.
 
+## Deletion protection and break-glass
+
+Inventory version 1 accepts `deletion_protection` on each cell and in
+`defaults`: **cell record > defaults > true when absent**. It is independent
+of the existing `minimal` and `prod` sizing profiles; both are protected by
+default. There is no CLI override. Missing inventories and unrecorded cells
+remain protected, even with `-allow-unknown-cell`.
+
+```yaml
+version: 1
+defaults:
+  deletion_protection: true
+cells:
+  aws-production-usw2-primary:
+    cloud: aws
+    account_alias: production
+    region: us-west-2
+    role: primary
+    profile: prod
+    deletion_protection: true
+```
+
+`witself-infra config show -cell CELL` reports the effective value. The CLI
+passes it as `witself:deletionProtection` to the inline program, where absence
+also means true. `up` and `preview` do not edit the inventory. A false default
+is supported; use a cell-specific edit for an auditable break-glass target.
+
+### Provider primitives
+
+Names below are Pulumi logical names. The false column describes a cell that
+has never enabled protection; Azure's irreversible exception follows the table.
+
+| Provider/resource | Previous posture; `deletion_protection: false` | `deletion_protection: true` |
+| --- | --- | --- |
+| AWS RDS instance `witself` | `deletionProtection=false`; existing snapshot/backup policy unchanged | RDS `deletionProtection=true` and Pulumi `Protect` |
+| AWS Secrets Manager `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | Recovery window 0 for minimal/unknown profiles, 30 days for prod | Maximum 30-day recovery window; no `ForceDeleteWithoutRecovery`; Pulumi `Protect` |
+| GCP Cloud SQL instance `witself` | Both protection booleans false; `deletionPolicy=DELETE` | `deletionProtection=true` and `settings.deletionProtectionEnabled=true`; Pulumi `Protect` on instance and logical database |
+| GCP Secret Manager `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | `deletionProtection=false`, `deletionPolicy=DELETE`, no version-destruction delay | Provider-state `deletionProtection=true`, Pulumi `Protect`, and `versionDestroyTtl=2592000s` (30 days) |
+| Azure PostgreSQL Flexible Server `witself` | No management lock | `authorization.ManagementLockAtResourceLevel`, `CanNotDelete`, scoped to `Microsoft.DBforPostgreSQL/flexibleServers/<server>`; Pulumi `Protect` on server and logical database |
+| Azure Key Vault `cell` | Soft delete enabled, retention 7 days, purge protection unset | Purge protection enabled; same 7-day retention; Pulumi `Protect` |
+| Azure Key Vault secrets `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | Vault soft-delete policy, no Pulumi protection | Vault soft-delete/purge policy and Pulumi `Protect` on each secret |
+| Civo Kubernetes Secrets `civo-postgres-auth`, `witself-db`, `witself-bootstrap`, `witself-provision`, `witself-backup` | Kubernetes deletion; no provider recovery/purge primitive | Unchanged; the inventory destroy gate still applies to Civo |
+
+AWS and GCP create one version per secret. Versions remain replaceable for
+credential rotation; their parent stores are protected. GCP's
+`deletionProtection` is provider-enforced, not a Secret Manager API flag.
+Its destruction delay protects versions, not whole-secret deletion; there is
+no Azure-style purge protection. Civo PostgreSQL is managed through GitOps
+inside Kubernetes. State-backend KMS/Key Vault resources are outside the cell
+resource graph and this field.
+
+Azure purge protection **cannot be disabled once enabled**. False removes
+reversible protection while omitting and ignoring changes to
+`properties.enablePurgeProtection`. Break-glass permits soft deletion, not
+immediate purge or reuse of a retained vault name. Retention stays at 7 days
+because Azure permits setting it only at vault creation. See
+[Azure soft-delete and purge rules](https://learn.microsoft.com/en-us/azure/key-vault/general/soft-delete-overview).
+
+### Adopting protection without replacement
+
+For pinned AWS v6.83.4, GCP v9.36.0, and Azure Native v3.27.0 providers, **none
+of the selected changes requires replacement of a database or secret store**.
+Protection flags and recovery settings update in place; Azure adds a separate
+lock; Pulumi `Protect` changes state metadata. First adoption may show updates
+and an Azure lock create, so it is not necessarily a zero-change preview.
+Mocks do not prove a live-stack no-op; inspect the actual preview during an
+authorized rollout.
+
+CLI `preview` and the preview performed by `up` refuse database/store deletion
+or replacement while the effective field is true, including legacy resources
+whose old state has `protect=false`. The error lists the affected resource
+URNs. `up` applies the exact reviewed saved plan; its private temporary plan
+is removed afterward. With the field false, previous applied protection still
+blocks combining unprotection and replacement in one update.
+
+If a provider proposes replacement to enable protection, do not apply it.
+Use a provider-supported in-place protection operation, then
+`witself-infra refresh -cell CELL` and preview again. If no in-place operation
+exists, arrange a separately reviewed migration with backup/restore validation;
+this feature will not replace the store. Changing Azure retention is a separate
+migration decision, outside this field.
+
+Replacement behavior is documented by the pinned provider implementations:
+[AWS RDS update](https://github.com/hashicorp/terraform-provider-aws/blob/f7a3b98da589ab1d52756b0dcee0dbf2de83d635/internal/service/rds/instance.go#L2531),
+[AWS secret recovery/delete](https://github.com/hashicorp/terraform-provider-aws/blob/f7a3b98da589ab1d52756b0dcee0dbf2de83d635/internal/service/secretsmanager/secret.go#L369),
+[GCP SQL schema](https://github.com/hashicorp/terraform-provider-google-beta/blob/313c9ff796034d7dfe47057db24fb5d0d1af70e3/google-beta/services/sql/resource_sql_database_instance.go#L280),
+[GCP secret mutable settings](https://github.com/hashicorp/terraform-provider-google-beta/blob/313c9ff796034d7dfe47057db24fb5d0d1af70e3/google-beta/services/secretmanager/resource_secret_manager_secret.go#L381),
+and [Azure lock semantics](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources).
+The [Pulumi engine replacement check](https://github.com/pulumi/pulumi/blob/v3.260.0/pkg/resource/deploy/step_generator.go#L1951)
+explains why protection adoption also needs plan review. Synthetic engine-event
+tests cover that refusal because resource mocks do not execute provider diffs.
+
+### Two-step unprotect, then destroy or replace
+
+1. Record the break-glass decision in the operator's inventory
+   (`~/.witself/infra.yaml`, or the same `-config` path used to provision the
+   cell): edit **that cell** to `deletion_protection: false`. Keep the edit in
+   the normal inventory audit trail; there is no CLI bypass.
+2. Apply a **separate unprotect-only update**, retaining all other resource
+   inputs. Preview must remove Pulumi protection, disable RDS/Cloud SQL and GCP
+   secret protection/delay, restore AWS's profile recovery window, and remove
+   Azure's database lock. Azure purge protection remains enabled.
+
+   ```sh
+   witself-infra config show -cell CELL
+   witself-infra preview -cell CELL
+   witself-infra up -cell CELL
+   ```
+
+3. After that update succeeds, follow the evacuation, backup and typed-cell
+   confirmation procedure below, then run `witself-infra destroy -cell CELL`.
+   For replacement, make the intended resource change in a subsequent update.
+   Existing account and confirmation gates still apply.
+4. If the cell remains in service, restore `deletion_protection: true` on its
+   record and apply a separate update to re-enable protection.
+
+A protected destroy refuses before provider identity, credentials, placement
+reads or fleet operations and names the record edit and separate `up` required.
+Editing the record alone does not change applied protection: destroy also checks
+the exported stack state before fleet removal. Remaining Pulumi protection,
+native deletion flags, the Azure database lock, or the applied
+`deletionProtection: true` output cause refusal; unreadable or unsupported
+snapshots fail closed. Azure's irreversible purge protection and AWS's prod
+recovery window allow the subsequent soft-delete destroy.
+
 ## Decommission a cell and preserve its accounts
 
 `witself-infra destroy` is the fleet operator's counterpart to signup: it drains
@@ -300,6 +425,9 @@ the cell (stops placement), evacuates every account into a per-account archive
 in Cloudflare R2, then removes the cell from the fleet and tears down the AWS
 resources. The accounts wait in R2 as `archived — awaiting placement` until
 they are restored onto another cell.
+
+Before using this procedure, complete the separate unprotect update in
+[Deletion protection and break-glass](#deletion-protection-and-break-glass).
 
 ```sh
 witself-infra destroy \
@@ -310,17 +438,20 @@ witself-infra destroy \
   -domain cells.witself.witwave.ai
 ```
 
-Destroy safety runs three fail-closed guards in order before provider or Pulumi
-work. First, the exact cell/stack name must exist in the current
-`~/.witself/infra.yaml` inventory; `--allow-unknown-cell` is the explicit
-phantom-stack override. Second, the control plane must report zero live and
-zero archived accounts still placed on that cell; use `--force-with-accounts`
-to acknowledge known nonzero counts, or `--skip-account-check` when placement
-status cannot be checked (including an intentional self-hosted destroy with no
-control plane). Finally, an interactive operator must type the exact cell name;
-a non-interactive invocation must instead pass `--yes-cell=NAME`, with `NAME`
-exactly matching the target. The account flags do not imply `-destroy-accounts`,
-which remains the separate data-purge choice.
+Destroy safety runs four fail-closed guards before provider or Pulumi work.
+First, the exact cell/stack name must exist in the current
+`~/.witself/infra.yaml` inventory; `--allow-unknown-cell` overrides only that
+phantom-stack check. Second, effective `deletion_protection` must be false;
+there is no flag override, and an unrecorded cell remains protected. Third,
+the control plane must report zero live and zero archived accounts still
+placed on that cell; use `--force-with-accounts` to acknowledge known nonzero
+counts, or `--skip-account-check` when placement status cannot be checked
+(including an intentional self-hosted destroy with no control plane). Finally,
+an interactive operator must type the exact cell name; a non-interactive
+invocation must instead pass `--yes-cell=NAME`, with `NAME` exactly matching the
+target. The account flags do not imply `-destroy-accounts`, which remains the
+separate data-purge choice. After these guards, the CLI verifies the exported
+stack has applied unprotection before it drains or removes the cell.
 
 You'll see one line per account: `evacuated acc_… from <cell>` for real users,
 `reaped pending acc_… on <cell> (no archive)` for signups that hadn't yet

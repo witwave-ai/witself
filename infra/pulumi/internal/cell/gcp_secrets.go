@@ -28,7 +28,8 @@ func provisionGCPJSONSecret(ctx *pulumi.Context, resourceName string, c gcpCell,
 	secret, err := secretmanager.NewSecret(ctx, resourceName, &secretmanager.SecretArgs{
 		SecretId:           pulumi.String(secretID),
 		DeletionPolicy:     pulumi.String("DELETE"),
-		DeletionProtection: pulumi.Bool(false),
+		DeletionProtection: pulumi.Bool(c.deletionProtection),
+		VersionDestroyTtl:  gcpSecretVersionDestroyTTL(c.deletionProtection),
 		Labels:             gcpDefaultLabels(c),
 		Annotations: pulumi.StringMap{
 			"description": pulumi.String(description),
@@ -36,7 +37,7 @@ func provisionGCPJSONSecret(ctx *pulumi.Context, resourceName string, c gcpCell,
 		Replication: &secretmanager.SecretReplicationArgs{
 			Auto: &secretmanager.SecretReplicationAutoArgs{},
 		},
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{secretManagerAPI}))
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{secretManagerAPI}), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
 	}
@@ -113,4 +114,14 @@ func provisionGCPProvisionSecret(ctx *pulumi.Context, c gcpCell, prov *gcp.Provi
 	ctx.Export("provisionToken", pulumi.ToSecret(credentials.provisionToken))
 	ctx.Export("backupToken", pulumi.ToSecret(credentials.backupToken))
 	return secret, nil
+}
+
+// GCP supports recoverable delayed destruction of versions, not a soft-delete
+// window for the secret container. The provider and Pulumi protection guard
+// the container; this delay protects individual version destruction requests.
+func gcpSecretVersionDestroyTTL(protected bool) pulumi.StringPtrInput {
+	if protected {
+		return pulumi.String("2592000s") // 30 days.
+	}
+	return nil
 }

@@ -20,6 +20,9 @@
 package cell
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
@@ -30,68 +33,71 @@ const DefaultDomain = "cells.witself.witwave.ai"
 // awsCell carries the cell's identity + placement into the AWS provisioning code,
 // where it becomes the provider defaultTags and the resource name prefix.
 type awsCell struct {
-	name              string // composed cell name (= ctx.Stack())
-	profile           string // minimal | prod
-	cidr              string // VPC CIDR (/16)
-	accountAlias      string // free-text account label
-	region            string // real region, e.g. us-west-2
-	role              string // dev | prod | canary | ordinal
-	k8sVersion        string // EKS Kubernetes version
-	dbVersion         string // RDS PostgreSQL major version
-	argocd            bool   // install Argo CD (GitOps control plane) into the cluster
-	gitopsRepo        string // GitOps repo URL Argo's root app reconciles
-	gitopsPath        string // path in the repo for the root bootstrap chart
-	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
-	gitopsRevision    string // repo revision (branch/tag)
-	domain            string // optional parent domain for cell hostnames
-	cloudflareDNS     bool   // delegate the cell zone from Cloudflare when credentials are available
-	cellDomain        string // cloud-managed DNS zone for this cell
-	apiHost           string // API hostname inside the cell domain
-	tlsCertificateARN pulumi.StringOutput
-	bootstrapToken    pulumi.StringOutput
-	bootstrapTokenSet bool
+	deletionProtection bool
+	name               string // composed cell name (= ctx.Stack())
+	profile            string // minimal | prod
+	cidr               string // VPC CIDR (/16)
+	accountAlias       string // free-text account label
+	region             string // real region, e.g. us-west-2
+	role               string // dev | prod | canary | ordinal
+	k8sVersion         string // EKS Kubernetes version
+	dbVersion          string // RDS PostgreSQL major version
+	argocd             bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo         string // GitOps repo URL Argo's root app reconciles
+	gitopsPath         string // path in the repo for the root bootstrap chart
+	gitopsValuesPath   string // path in the repo for this cell's bootstrap values
+	gitopsRevision     string // repo revision (branch/tag)
+	domain             string // optional parent domain for cell hostnames
+	cloudflareDNS      bool   // delegate the cell zone from Cloudflare when credentials are available
+	cellDomain         string // cloud-managed DNS zone for this cell
+	apiHost            string // API hostname inside the cell domain
+	tlsCertificateARN  pulumi.StringOutput
+	bootstrapToken     pulumi.StringOutput
+	bootstrapTokenSet  bool
 }
 
 type gcpCell struct {
-	name              string // composed cell name (= ctx.Stack())
-	project           string // existing GCP project that can host multiple cell stacks
-	region            string // real region, e.g. us-west2
-	profile           string // minimal | prod
-	cidr              string // cell VPC CIDR (/16)
-	dbVersion         string // Cloud SQL PostgreSQL major version
-	accountAlias      string // free-text account label
-	role              string // dev | prod | canary | ordinal
-	argocd            bool   // install Argo CD (GitOps control plane) into the cluster
-	gitopsRepo        string // GitOps repo URL Argo's root app reconciles
-	gitopsPath        string // path in the repo for the root bootstrap chart
-	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
-	gitopsRevision    string // repo revision (branch/tag)
-	domain            string // optional parent domain for cell hostnames
-	cloudflareDNS     bool   // delegate the cell zone from Cloudflare when credentials are available
-	cellDomain        string // cloud-managed DNS zone for this cell
-	apiHost           string // API hostname inside the cell domain
-	bootstrapToken    pulumi.StringOutput
-	bootstrapTokenSet bool
+	deletionProtection bool
+	name               string // composed cell name (= ctx.Stack())
+	project            string // existing GCP project that can host multiple cell stacks
+	region             string // real region, e.g. us-west2
+	profile            string // minimal | prod
+	cidr               string // cell VPC CIDR (/16)
+	dbVersion          string // Cloud SQL PostgreSQL major version
+	accountAlias       string // free-text account label
+	role               string // dev | prod | canary | ordinal
+	argocd             bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo         string // GitOps repo URL Argo's root app reconciles
+	gitopsPath         string // path in the repo for the root bootstrap chart
+	gitopsValuesPath   string // path in the repo for this cell's bootstrap values
+	gitopsRevision     string // repo revision (branch/tag)
+	domain             string // optional parent domain for cell hostnames
+	cloudflareDNS      bool   // delegate the cell zone from Cloudflare when credentials are available
+	cellDomain         string // cloud-managed DNS zone for this cell
+	apiHost            string // API hostname inside the cell domain
+	bootstrapToken     pulumi.StringOutput
+	bootstrapTokenSet  bool
 }
 
 type azureCell struct {
-	name              string // composed cell name (= ctx.Stack())
-	region            string // real Azure region, e.g. eastus2
-	profile           string // minimal | prod
-	cidr              string // cell VNet CIDR (/16)
-	k8sVersion        string // AKS Kubernetes version
-	dbVersion         string // Azure Database for PostgreSQL major version
-	accountAlias      string // free-text account label
-	role              string // dev | prod | canary | ordinal
-	argocd            bool   // install Argo CD (GitOps control plane) into the cluster
-	gitopsRepo        string // GitOps repo URL Argo's root app reconciles
-	gitopsPath        string // path in the repo for the root bootstrap chart
-	gitopsValuesPath  string // path in the repo for this cell's bootstrap values
-	gitopsRevision    string // repo revision (branch/tag)
-	domain            string // parent domain for cloud-managed DNS delegation
-	cloudflareDNS     bool   // create NS delegation in Cloudflare when credentials are present
-	bootstrapToken    pulumi.StringOutput
-	bootstrapTokenSet bool
+	deletionProtection bool
+	name               string // composed cell name (= ctx.Stack())
+	region             string // real Azure region, e.g. eastus2
+	profile            string // minimal | prod
+	cidr               string // cell VNet CIDR (/16)
+	k8sVersion         string // AKS Kubernetes version
+	dbVersion          string // Azure Database for PostgreSQL major version
+	accountAlias       string // free-text account label
+	role               string // dev | prod | canary | ordinal
+	argocd             bool   // install Argo CD (GitOps control plane) into the cluster
+	gitopsRepo         string // GitOps repo URL Argo's root app reconciles
+	gitopsPath         string // path in the repo for the root bootstrap chart
+	gitopsValuesPath   string // path in the repo for this cell's bootstrap values
+	gitopsRevision     string // repo revision (branch/tag)
+	domain             string // parent domain for cloud-managed DNS delegation
+	cloudflareDNS      bool   // create NS delegation in Cloudflare when credentials are present
+	bootstrapToken     pulumi.StringOutput
+	bootstrapTokenSet  bool
 }
 
 type civoCell struct {
@@ -126,6 +132,12 @@ func Program(ctx *pulumi.Context) error {
 
 	cloud := w.Get("cloud")     // aws | gcp | azure | civo
 	profile := w.Get("profile") // minimal | prod
+	deletionProtection, err := w.TryBool("deletionProtection")
+	if errors.Is(err, config.ErrMissingVar) {
+		deletionProtection = true
+	} else if err != nil {
+		return fmt.Errorf("witself:deletionProtection must be a boolean: %w", err)
+	}
 	cidr := w.Get("cidr")
 	if cidr == "" {
 		cidr = "10.20.0.0/16"
@@ -163,67 +175,71 @@ func Program(ctx *pulumi.Context) error {
 	ctx.Export("cell", pulumi.String(cellName))
 	ctx.Export("cloud", pulumi.String(cloud))
 	ctx.Export("profile", pulumi.String(profile))
+	ctx.Export("deletionProtection", pulumi.Bool(deletionProtection))
 
 	switch cloud {
 	case "", "aws":
 		return provisionAWS(ctx, awsCell{
-			name:              cellName,
-			profile:           profile,
-			cidr:              cidr,
-			accountAlias:      w.Get("accountAlias"),
-			region:            a.Get("region"),
-			role:              w.Get("role"),
-			k8sVersion:        k8sVersion,
-			dbVersion:         dbVersion,
-			argocd:            argocd,
-			gitopsRepo:        gitopsRepo,
-			gitopsPath:        gitopsPath,
-			gitopsValuesPath:  gitopsValuesPath,
-			gitopsRevision:    gitopsRevision,
-			domain:            domain,
-			cloudflareDNS:     cloudflareDNS,
-			bootstrapToken:    w.GetSecret("bootstrapToken"),
-			bootstrapTokenSet: bootstrapTokenSet,
+			deletionProtection: deletionProtection,
+			name:               cellName,
+			profile:            profile,
+			cidr:               cidr,
+			accountAlias:       w.Get("accountAlias"),
+			region:             a.Get("region"),
+			role:               w.Get("role"),
+			k8sVersion:         k8sVersion,
+			dbVersion:          dbVersion,
+			argocd:             argocd,
+			gitopsRepo:         gitopsRepo,
+			gitopsPath:         gitopsPath,
+			gitopsValuesPath:   gitopsValuesPath,
+			gitopsRevision:     gitopsRevision,
+			domain:             domain,
+			cloudflareDNS:      cloudflareDNS,
+			bootstrapToken:     w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet:  bootstrapTokenSet,
 		})
 	case "gcp":
 		return provisionGCP(ctx, gcpCell{
-			name:              cellName,
-			project:           g.Get("project"),
-			region:            g.Get("region"),
-			profile:           profile,
-			cidr:              cidr,
-			dbVersion:         dbVersion,
-			accountAlias:      w.Get("accountAlias"),
-			role:              w.Get("role"),
-			argocd:            argocd,
-			gitopsRepo:        gitopsRepo,
-			gitopsPath:        gitopsPath,
-			gitopsValuesPath:  gitopsValuesPath,
-			gitopsRevision:    gitopsRevision,
-			domain:            domain,
-			cloudflareDNS:     cloudflareDNS,
-			bootstrapToken:    w.GetSecret("bootstrapToken"),
-			bootstrapTokenSet: bootstrapTokenSet,
+			deletionProtection: deletionProtection,
+			name:               cellName,
+			project:            g.Get("project"),
+			region:             g.Get("region"),
+			profile:            profile,
+			cidr:               cidr,
+			dbVersion:          dbVersion,
+			accountAlias:       w.Get("accountAlias"),
+			role:               w.Get("role"),
+			argocd:             argocd,
+			gitopsRepo:         gitopsRepo,
+			gitopsPath:         gitopsPath,
+			gitopsValuesPath:   gitopsValuesPath,
+			gitopsRevision:     gitopsRevision,
+			domain:             domain,
+			cloudflareDNS:      cloudflareDNS,
+			bootstrapToken:     w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet:  bootstrapTokenSet,
 		})
 	case "azure":
 		return provisionAzure(ctx, azureCell{
-			name:              cellName,
-			region:            az.Get("location"),
-			profile:           profile,
-			cidr:              cidr,
-			k8sVersion:        k8sVersion,
-			dbVersion:         dbVersion,
-			accountAlias:      w.Get("accountAlias"),
-			role:              w.Get("role"),
-			argocd:            argocd,
-			gitopsRepo:        gitopsRepo,
-			gitopsPath:        gitopsPath,
-			gitopsValuesPath:  gitopsValuesPath,
-			gitopsRevision:    gitopsRevision,
-			domain:            domain,
-			cloudflareDNS:     cloudflareDNS,
-			bootstrapToken:    w.GetSecret("bootstrapToken"),
-			bootstrapTokenSet: bootstrapTokenSet,
+			deletionProtection: deletionProtection,
+			name:               cellName,
+			region:             az.Get("location"),
+			profile:            profile,
+			cidr:               cidr,
+			k8sVersion:         k8sVersion,
+			dbVersion:          dbVersion,
+			accountAlias:       w.Get("accountAlias"),
+			role:               w.Get("role"),
+			argocd:             argocd,
+			gitopsRepo:         gitopsRepo,
+			gitopsPath:         gitopsPath,
+			gitopsValuesPath:   gitopsValuesPath,
+			gitopsRevision:     gitopsRevision,
+			domain:             domain,
+			cloudflareDNS:      cloudflareDNS,
+			bootstrapToken:     w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet:  bootstrapTokenSet,
 		})
 	case "civo":
 		nodeSize := w.Get("civoNodeSize")

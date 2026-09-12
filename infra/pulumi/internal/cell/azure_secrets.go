@@ -44,6 +44,16 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 		return nil, err
 	}
 
+	// Azure allows enabling purge protection in place, but never disabling it.
+	// Omit the property when unprotected, preserving an existing enabled value
+	// while allowing Pulumi protection to be removed for a soft-delete destroy.
+	var purgeProtection pulumi.BoolPtrInput
+	ignoreChanges := []string{"properties.accessPolicies"}
+	if c.deletionProtection {
+		purgeProtection = pulumi.Bool(true)
+	} else {
+		ignoreChanges = append(ignoreChanges, "properties.enablePurgeProtection")
+	}
 	vaultName := pulumi.Sprintf("witself-%s-kv", suffix.Hex)
 	vault, err := keyvault.NewVault(ctx, "cell", &keyvault.VaultArgs{
 		ResourceGroupName: net.resourceGroupName,
@@ -53,6 +63,7 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 			TenantId:                  pulumi.String(client.TenantId),
 			EnableRbacAuthorization:   pulumi.Bool(false),
 			EnableSoftDelete:          pulumi.Bool(true),
+			EnablePurgeProtection:     purgeProtection,
 			SoftDeleteRetentionInDays: pulumi.Int(7),
 			Sku: keyvault.SkuArgs{
 				Family: pulumi.String("A"),
@@ -78,7 +89,8 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 		Tags: azureResourceTags(c, rname(c.name, "secrets"), "secrets"),
 	},
 		pulumi.DependsOn([]pulumi.Resource{db.database}),
-		pulumi.IgnoreChanges([]string{"properties.accessPolicies"}),
+		pulumi.IgnoreChanges(ignoreChanges),
+		pulumi.Protect(c.deletionProtection),
 	)
 	if err != nil {
 		return nil, err
@@ -134,7 +146,7 @@ func provisionAzureSecret(ctx *pulumi.Context, resourceName string, c azureCell,
 			Value:       value,
 		},
 		Tags: azureResourceTags(c, secretName, component),
-	}, pulumi.DependsOn([]pulumi.Resource{vault}))
+	}, pulumi.DependsOn([]pulumi.Resource{vault}), pulumi.Protect(c.deletionProtection))
 }
 
 func azureDBPayload(db *azureDatabase) pulumi.StringOutput {

@@ -19,6 +19,7 @@ import (
 
 const configSkeleton = `# witself-infra cell inventory.
 # Precedence: explicit flag > cell entry > defaults > built-in default.
+# deletion_protection is inventory-only: cell entry > defaults > true.
 # References only — profile names, subscription/project IDs, token file
 # PATHS. Never paste credential values here; the loader rejects them.
 version: 1
@@ -27,6 +28,7 @@ defaults:
   # control_plane: https://self.witwave.ai
   # channel: stable
   # profile: minimal
+  # deletion_protection: true # Default when absent; no CLI override.
   # gitops:
   #   repo: https://github.com/witwave-ai/witself
   #   revision: main
@@ -38,6 +40,7 @@ cells: {}
   #   region: us-west-2
   #   role: dev
   #   argocd: true
+  #   deletion_protection: true # To destroy: record false, apply up, then destroy.
   #   security_context:
   #     aws:
   #       profile: witwave-sandbox
@@ -325,6 +328,11 @@ func configShow(fs *flag.FlagSet, configPath string) error {
 		_ = fs.Set("k8s-version", defaultK8sVersion(fs.Lookup("cloud").Value.String()))
 	}
 	fmt.Println("effective configuration for " + cellName + ":")
+	deletionProtection, err := loadCellDeletionProtection(cellName, configPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  deletion_protection: %t (inventory only)\n", deletionProtection)
 	names := make([]string, 0, 24)
 	fs.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
