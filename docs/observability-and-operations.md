@@ -300,11 +300,17 @@ contribute to both audit counters, so their sum is not a unique failure count.
 Use counter increases to detect failures across process restarts. Known limitation: a container that restarts inside the same pod and fails an audit insert before its first scrape presents the same labels and an equal counter value as the previous process, so that single failure is not distinguishable from the old series and is not alerted; a process-start signal is the tracked follow-up.
 
 The four identity-capacity and audit-append alerts are gated by
-`platform.monitoring.collectorAlerts.enabled`, which defaults to false. Keep
-the gate off until compatible server and worker binaries are deployed and
-their scrape metrics verified. Audit collector availability requires both the
-server and worker collectors to be present and healthy; identity capacity is
-collected only by the server.
+`platform.monitoring.collectorAlerts.enabled`, which defaults to false and is
+rendered from the cell catalog switch `collector_alerts`. Keep the gate off
+until compatible server and worker binaries are deployed and their scrape
+metrics verified. It also stays off on the serving cell for a semantic reason:
+`WitselfIdentityCapacityAtLimit` fires on any account whose usage equals its
+cap, and every Personal account holds its single root operator seat
+(`operator_seats` used = cap = 1), so the rule would page permanently; the
+rule must exclude structural minimums (or measure refused growth) before the
+group is enabled. Audit collector availability requires both the server and
+worker collectors to be present and healthy; identity capacity is collected
+only by the server.
 
 The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to

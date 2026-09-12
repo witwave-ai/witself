@@ -200,6 +200,8 @@ platform:
     enabled: true
     alerting:
       enabled: true
+    sealedPlaneAlerts:
+      enabled: true
     postgresql:
       enabled: true
     nodeExporter:

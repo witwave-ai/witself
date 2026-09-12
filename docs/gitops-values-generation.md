@@ -28,7 +28,7 @@ the same composed name as `witself-infra`
 | `gitops.repoURL`, `gitops.targetRevision` | Catalog `gitops` block |
 | `gitops.valuesPath` | Civo only: `.gitops/cells/<cell>/values.yaml` |
 | Cloud-family ingress, secrets, ExternalDNS/ESO, and platform add-on enablement | AWS / Azure / GCP family templates. Chart versions for cert-manager, external-dns, external-secrets, KEDA, and metrics-server come from [`.gitops/charts/platform/values.yaml`](../.gitops/charts/platform/values.yaml) and are **not** per-cell: every overlay emits those fleet defaults. A future per-cell platform chart pin needs a catalog field; it is not expressible in `values.yaml` by hand. Civo Postgres chart version comes from [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml) |
-| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` (the `platform.monitoring` block in the `civo-sandbox-usw2-dev` overlay, with `collectorAlerts.enabled` only when `collector_alerts` is true) |
+| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-usw2-dev` overlay, with `collectorAlerts.enabled` only when `collector_alerts` is true and `sealedPlaneAlerts.enabled` only when `sealed_plane_alerts` is true) |
 
 ### Pinned scalars that `scripts/roll-cell.sh` owns
 
@@ -60,9 +60,11 @@ are spliced in as rendered text, including comments and key order.
 Azure gateway / ExternalDNS comments are part of the Azure family template,
 not a per-cell overlay: both Azure cells share them.
 
-No current overlay has a sealed-plane switch. If one is added, it belongs in
-the per-cell overlay (or a new catalog switch plus family-template block),
-not in `roll-cell.sh`.
+The sealed-plane alert group is a catalog switch (`sealed_plane_alerts`)
+rendered in the serving-cell overlay next to `collector_alerts`, not a
+`roll-cell.sh` pin. Both switches take effect only through the
+`civo-sandbox-usw2-dev` overlay's `platform.monitoring` block, so setting them
+on a cell without that block (or without `monitoring: true`) renders nothing.
 
 ## Usage
 

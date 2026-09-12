@@ -41,6 +41,7 @@ type templateData struct {
 	DomainDocumentationOnly     bool
 	Monitoring                  bool
 	CollectorAlerts             bool
+	SealedPlaneAlerts           bool
 	Overlay                     string
 	overlayName                 string
 }

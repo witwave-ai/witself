@@ -82,6 +82,7 @@ func resolveCell(name string, cfg *Catalog) (templateData, error) {
 		DomainDocumentationOnly: entry.Switches.DomainDocumentationOnly,
 		Monitoring:              entry.Switches.Monitoring,
 		CollectorAlerts:         entry.Switches.CollectorAlerts,
+		SealedPlaneAlerts:       entry.Switches.SealedPlaneAlerts,
 		overlayName:             entry.Overlay,
 	}, nil
 }

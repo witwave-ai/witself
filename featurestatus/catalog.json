@@ -2237,7 +2237,7 @@
         },
         "observability": {
           "state": "pass",
-          "summary": "Value-free delivery/lifecycle metrics, cell posture gauges, sealed-plane SLOs, and five tested default-off alerts are implemented. Serving-cell activation requires the server release, series verification, then the alert values flip; source evidence does not claim live SLO attainment.",
+          "summary": "Value-free delivery/lifecycle metrics, cell posture gauges, sealed-plane SLOs, and five tested alerts are implemented; the alert gate is on for the serving cell via the sealed_plane_alerts catalog switch after v0.0.286 series verification.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",

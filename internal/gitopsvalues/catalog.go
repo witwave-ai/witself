@@ -66,6 +66,7 @@ type Switches struct {
 	GCPAgentEmailDark       bool   `yaml:"gcp_agent_email_dark,omitempty"`
 	Monitoring              bool   `yaml:"monitoring,omitempty"`
 	CollectorAlerts         bool   `yaml:"collector_alerts,omitempty"`
+	SealedPlaneAlerts       bool   `yaml:"sealed_plane_alerts,omitempty"`
 }
 
 func loadCatalog(root string) (*Catalog, error) {

@@ -3299,12 +3299,16 @@ in-cluster receiver path.
 
 The five `witself-sealed-plane` rules require both
 `platform.monitoring.alerting.enabled` and the separate, default-off
-`platform.monitoring.sealedPlaneAlerts.enabled`. Keep the sealed-plane gate off
-until a compatible server release is serving and its metrics are verified. The
-platform chart automatically syncs from its configured GitOps revision, so the
-release-before-rules merge order remains: ship the server metrics, roll the
-release train, verify the new series on the serving cell, then merge the rules
-and enable their gate in a separately reviewed serving-cell values change.
+`platform.monitoring.sealedPlaneAlerts.enabled`. The gate is rendered from the
+cell catalog switch `sealed_plane_alerts` (see
+[GitOps values generation](gitops-values-generation.md)); it is on for
+`civo-sandbox-usw2-dev` since v0.0.286 verified the posture, vault-lifecycle,
+and material-delivery series there, and off for every other cell. Keep a new
+cell's gate off until a compatible server release is serving and its metrics
+are verified. The platform chart automatically syncs from its configured GitOps
+revision, so the release-before-rules merge order remains: ship the server
+metrics, roll the release train, verify the new series on the serving cell,
+then enable the switch in a separately reviewed catalog change.
 Never flip the gate while posture metrics are absent: that condition pages after
 three minutes. The chart's safe default also protects an early rules sync.
 
@@ -3345,8 +3349,10 @@ approved enrollments before their expiry; expired records are excluded even if
 lazy cleanup has not run. Enrollment age has a documented review objective but
 no separate paging rule in this group.
 
-For a rule-only rollback, set `platform.monitoring.sealedPlaneAlerts.enabled`
-false. Other alert groups and the monitoring stack remain enabled. Keep any
+For a rule-only rollback, set the cell's `sealed_plane_alerts` catalog switch
+false and regenerate its values (the generator's drift test and generated-values
+tests pin the serving cell's expected state, so update them in the same
+change). Other alert groups and the monitoring stack remain enabled. Keep any
 diagnostic evidence value-free; credentials, ciphertext, wrapped keys, and
 client error details belong outside metric labels and public incident notes.
 
