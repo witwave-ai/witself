@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -137,6 +138,40 @@ func restoreRuntimeMCPBinding(runtimeName, runtimeCLI, executable string, previo
 			return fmt.Errorf("GitHub Copilot MCP server %s changed during rollback; refusing to replace it", previousName)
 		}
 		return registerCopilotMCP(runtimeCLI, *previous)
+	}
+	if runtimeName == transcriptcapture.RuntimeDSH {
+		if attempted == nil {
+			return errors.New("attempted DeepSeek Harness integration binding is required for safe MCP rollback")
+		}
+		attemptedBlock, err := dshManagedPatchBlock(*attempted)
+		if err != nil {
+			return err
+		}
+		snapshot, err := readDSHPatchSnapshot(attempted.RuntimeMCPConfigPath)
+		if err != nil {
+			return err
+		}
+		var previousBlock []byte
+		if previous != nil {
+			previousBlock, err = dshManagedPatchBlock(*previous)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(snapshot.block(), previousBlock) {
+				return nil
+			}
+		}
+		if snapshot.blockPresent() {
+			_ = attemptedBlock
+			if _, err := removeDSHPatchBlockWithSnapshot(*attempted, &snapshot); err != nil {
+				return err
+			}
+		}
+		if previous == nil {
+			return nil
+		}
+		_, err = installDSHPatchBlock(*previous)
+		return err
 	}
 	if isGenericProviderRuntime(runtimeName) {
 		return restoreGenericMCPBinding(runtimeCLI, previous, attempted)

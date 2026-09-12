@@ -644,7 +644,7 @@ Open gates:
 
 ### Agent runtime integrations
 
-Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.
+Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, GitHub Copilot, and DeepSeek Harness, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`

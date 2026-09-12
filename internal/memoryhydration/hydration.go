@@ -126,6 +126,14 @@ func CapabilityFor(runtime string) Capability {
 			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
 				Reason: "Copilot has no validated direct prompt context injection contract"},
 		}
+	case transcriptcapture.RuntimeDSH:
+		return Capability{
+			Runtime: runtime,
+			SessionHydration: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "dsh hook bridges pass no model-visible session context (SessionStart runs detached)"},
+			TaskRecall: Feature{Delivery: DeliveryGuidedMCPFallback,
+				Reason: "dsh transcript capture is not installed by the preview integration"},
+		}
 	default:
 		return Capability{
 			Runtime:          runtime,

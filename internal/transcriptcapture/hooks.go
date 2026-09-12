@@ -782,6 +782,12 @@ func hookSettingsPath(runtime string) (string, error) {
 			root = filepath.Join(home, ".cursor")
 		}
 		return filepath.Join(root, "hooks.json"), nil
+	case RuntimeDSH:
+		root := strings.TrimSpace(os.Getenv("DSH_HOME"))
+		if root == "" {
+			root = filepath.Join(home, ".dsh")
+		}
+		return filepath.Join(root, "hooks.json"), nil
 	default:
 		return "", fmt.Errorf("unsupported runtime %q", runtime)
 	}

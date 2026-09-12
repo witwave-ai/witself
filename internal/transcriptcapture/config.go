@@ -29,6 +29,7 @@ const (
 	RuntimeOpenClaw    = "openclaw"
 	RuntimeAntigravity = "antigravity"
 	RuntimeCopilot     = "copilot"
+	RuntimeDSH         = "dsh"
 	// HookEventCodexPermissionReview is Codex's normalized internal approval-review event.
 	HookEventCodexPermissionReview = "PermissionReview"
 
@@ -52,6 +53,7 @@ func SupportedRuntimes() []string {
 		RuntimeOpenClaw,
 		RuntimeAntigravity,
 		RuntimeCopilot,
+		RuntimeDSH,
 	}
 }
 
@@ -122,8 +124,10 @@ func NormalizeRuntime(runtime string) (string, error) {
 		return RuntimeAntigravity, nil
 	case "github-copilot", RuntimeCopilot:
 		return RuntimeCopilot, nil
+	case "deepseek", "deepseek-harness", RuntimeDSH:
+		return RuntimeDSH, nil
 	default:
-		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity, RuntimeCopilot)
+		return "", fmt.Errorf("runtime must be %s, %s, %s, %s, %s, %s, %s, or %s", RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity, RuntimeCopilot, RuntimeDSH)
 	}
 }
 
@@ -461,6 +465,30 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		}
 		return nil
 	}
+	if runtime == RuntimeDSH {
+		if hookMode != HookModeNone {
+			return errors.New("dsh hook_mode must be none")
+		}
+		if runtimeCLICommand == "" {
+			return errors.New("runtime_cli_command is required for DeepSeek Harness")
+		}
+		if mcpCommand == "" {
+			return errors.New("mcp_command is required for DeepSeek Harness")
+		}
+		if configRoot == "" {
+			return errors.New("runtime_config_root is required for DeepSeek Harness")
+		}
+		if mcpConfigPath != filepath.Join(configRoot, "cordis.patch.yml") {
+			return errors.New("runtime_mcp_config_path must be the canonical DeepSeek Harness home patch file under runtime_config_root")
+		}
+		if workspace != "" || strings.TrimSpace(runtimeAgentID) != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+			return errors.New("runtime workspace, agent, and plugin fields are not supported for DeepSeek Harness")
+		}
+		if mcpConnectTimeoutSeconds != 0 {
+			return errors.New("mcp_connect_timeout_seconds is not supported for DeepSeek Harness")
+		}
+		return validateDSHMCPEnvironment(mcpEnvironment, configRoot)
+	}
 	if runtime == RuntimeCodex || runtime == RuntimeClaudeCode || runtime == RuntimeGrokBuild || runtime == RuntimeCursor {
 		if pluginPath != "" || pluginSource != "" || pluginDigest != "" {
 			return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
@@ -535,6 +563,22 @@ func validateCopilotMCPEnvironment(environment map[string]string) error {
 	home := environment["WITSELF_HOME"]
 	if home == "" || len(home) > 4096 || strings.ContainsAny(home, "\x00\r\n") || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return errors.New("mcp_environment WITSELF_HOME must be a clean absolute path for Copilot")
+	}
+	return nil
+}
+
+func validateDSHMCPEnvironment(environment map[string]string, configRoot string) error {
+	if len(environment) != 2 {
+		return errors.New("mcp_environment must contain exactly DSH_HOME and WITSELF_HOME for DeepSeek Harness")
+	}
+	for _, key := range []string{"DSH_HOME", "WITSELF_HOME"} {
+		value := environment[key]
+		if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+			return fmt.Errorf("mcp_environment %s must be a clean absolute path for DeepSeek Harness", key)
+		}
+	}
+	if environment["DSH_HOME"] != configRoot {
+		return errors.New("mcp_environment DSH_HOME must equal runtime_config_root for DeepSeek Harness")
 	}
 	return nil
 }

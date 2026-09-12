@@ -232,6 +232,39 @@ func installCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		configRoot, rootErr := dshOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadDSHTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted DeepSeek Harness transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverDSHTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		recoveredRoot, recoveredRootErr := dshOperationLockRoot()
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root after recovery: %v\n", recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation")
+			return 1
+		}
+		if pendingOperation == dshTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "witself: recovered an interrupted DeepSeek Harness uninstall; rerun install so the current provider selector is locked before any new mutation")
+				return 1
+			}
+		}
+	}
 	if *routingOnly {
 		if runtime == transcriptcapture.RuntimeAntigravity {
 			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one transactionally managed integration unit")
@@ -293,6 +326,22 @@ func installCmd(args []string) int {
 				}
 				if currentRoot != installed.RuntimeConfigRoot {
 					fmt.Fprintf(os.Stderr, "witself: COPILOT_HOME changed from installed %s to %s; restore the installed value before refreshing routing\n", installed.RuntimeConfigRoot, currentRoot)
+					return 1
+				}
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			}
+		}
+		if runtime == transcriptcapture.RuntimeDSH {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				currentRoot, rootErr := currentDSHConfigRoot()
+				if rootErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+					return 1
+				}
+				if currentRoot != installed.RuntimeConfigRoot {
+					fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from installed %s to %s; restore the installed value before refreshing routing\n", installed.RuntimeConfigRoot, currentRoot)
 					return 1
 				}
 			} else if !errors.Is(loadErr, os.ErrNotExist) {
@@ -616,6 +665,28 @@ func installCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		if err := configureDSHBinding(&cfg, runtimeCLI, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: configure DeepSeek Harness integration: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: DeepSeek Harness CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeConfigRoot != cfg.RuntimeConfigRoot:
+				fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from %s to %s; restore the installed value before reinstalling or uninstall the existing integration first\n", previousConfig.RuntimeConfigRoot, cfg.RuntimeConfigRoot)
+				return 1
+			case previousConfig.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath:
+				fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness patch file path changed; uninstall the existing integration before reinstalling it")
+				return 1
+			case !equalDSHEnvironment(previousConfig.MCPEnvironment, cfg.MCPEnvironment):
+				fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed since DeepSeek Harness installation; restore it before reinstalling or uninstall the existing integration first")
+				return 1
+			}
+		}
+	}
 	if previousConfigErr == nil && previousConfig.HookMode != transcriptcapture.HookModeNone {
 		previousForHooks := &previousConfig
 		if genericPreviousBinding != nil {
@@ -697,6 +768,21 @@ func installCmd(args []string) int {
 		}
 		copilotJournal = &journal
 	}
+	var dshJournal *dshTransactionJournal
+	if runtime == transcriptcapture.RuntimeDSH {
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousCopy := previousConfigOriginal
+			previous = &previousCopy
+		}
+		desired := cfg
+		journal, journalErr := beginDSHTransaction(dshTransactionInstall, previous, &desired)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin DeepSeek Harness transaction: %v\n", journalErr)
+			return 1
+		}
+		dshJournal = &journal
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	if runtime == transcriptcapture.RuntimeCursor {
 		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
@@ -733,7 +819,8 @@ func installCmd(args []string) int {
 		}
 		genericProviderJournal = &journal
 	}
-	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot) ||
+	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot &&
+		runtime != transcriptcapture.RuntimeDSH) ||
 		errors.Is(previousConfigErr, os.ErrNotExist) {
 		if err := saveRuntimeIntegrationConfig(stagedConfig); err != nil {
 			journalCleared := antigravityJournal == nil
@@ -766,6 +853,11 @@ func installCmd(args []string) int {
 			if copilotJournal != nil {
 				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
+			if dshJournal != nil {
+				if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
@@ -803,6 +895,11 @@ func installCmd(args []string) int {
 		if copilotJournal != nil {
 			if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+			}
+		}
+		if dshJournal != nil {
+			if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -845,7 +942,8 @@ func installCmd(args []string) int {
 			}
 			return
 		}
-		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH {
 			if previousBinding != nil {
 				// Keep the newly installed policy in place until the previous exact
 				// MCP binding is restored. An older policy may not cover tools added
@@ -877,6 +975,11 @@ func installCmd(args []string) int {
 				if copilotJournal != nil {
 					if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 						fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+					}
+				}
+				if dshJournal != nil {
+					if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 					}
 				}
 				return
@@ -912,6 +1015,11 @@ func installCmd(args []string) int {
 			if copilotJournal != nil {
 				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
+			if dshJournal != nil {
+				if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 				}
 			}
 			return
@@ -1033,6 +1141,27 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	dshPatchPreTouched := false
+	var dshPatchPlan dshPatchInstallPlan
+	if runtime == transcriptcapture.RuntimeDSH {
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness transaction journal is missing before patch mutation")
+			return 1
+		}
+		if err = validateDSHTransactionProviderBefore(*dshJournal); err == nil {
+			dshPatchPlan, dshPatchPreTouched, err = prepareDSHPatchInstallPlan(runtimeCLI, cfg, previousBinding)
+		}
+		if err != nil {
+			if providerMutationUncertain(err) ||
+				(providerPreflightChanged(err) && dshPatchPreTouched) {
+				fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving DeepSeek Harness routing and transaction journal\n", err)
+				return 1
+			}
+			rollbackInstall(dshPatchPreTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+			return 1
+		}
+	}
 	var registerErr error
 	registerTouched := false
 	switch runtime {
@@ -1042,6 +1171,8 @@ func installCmd(args []string) int {
 		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
 	case transcriptcapture.RuntimeCopilot:
 		registerTouched, registerErr = registerCopilotMCPWithPlan(runtimeCLI, copilotMCPPlan)
+	case transcriptcapture.RuntimeDSH:
+		registerTouched, registerErr = installDSHPatchBlockWithPlan(dshPatchPlan)
 	case transcriptcapture.RuntimeCodex,
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
@@ -1057,6 +1188,8 @@ func installCmd(args []string) int {
 			mcpTouched = mcpTouched || openClawMCPPreTouched
 		case transcriptcapture.RuntimeCopilot:
 			mcpTouched = mcpTouched || copilotMCPPreTouched
+		case transcriptcapture.RuntimeDSH:
+			mcpTouched = mcpTouched || dshPatchPreTouched
 		}
 		if providerMutationUncertain(registerErr) ||
 			(providerPreflightChanged(registerErr) && mcpTouched) {
@@ -1067,11 +1200,11 @@ func installCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
-	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched
+	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched || dshPatchPreTouched
 	var hookPath string
 	hooksTouched := false
-	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally retain
-	// HookModeNone and install no transcript hooks.
+	// Phase-one OpenClaw, Antigravity, Copilot, and DeepSeek Harness integrations
+	// intentionally retain HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
 		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
 	} else if previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeUser {
@@ -1155,6 +1288,25 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		warning, err := validateDSHCommitTopology(cfg)
+		if err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness topology: %v\n", err)
+			return 1
+		}
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "witself: warning: %s\n", warning)
+		}
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: finalize DeepSeek Harness transaction: journal is missing")
+			return 1
+		}
+		if err := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", err)
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeAntigravity && previousBinding != nil &&
 		previousBinding.RuntimePluginSource != cfg.RuntimePluginSource {
 		if cleanupErr := removeAntigravitySourceBundle(*previousBinding); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
@@ -1209,6 +1361,8 @@ func installCmd(args []string) int {
 		fmt.Println("next: refresh MCP servers in Antigravity (or run /mcp in agy), then start a new task to load the managed plugin rule and guided MCP fallback")
 	} else if runtime == transcriptcapture.RuntimeCopilot {
 		fmt.Println("next: start a new GitHub Copilot CLI session to load the managed instructions and guided MCP fallback")
+	} else if runtime == transcriptcapture.RuntimeDSH {
+		fmt.Println("next: start a new DeepSeek Harness session to mount the patched MCP client and load the managed instructions and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -1406,6 +1560,32 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		configRoot, rootErr := dshOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadDSHTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted DeepSeek Harness transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverDSHTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if pendingOperation == dshTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH); errors.Is(loadErr, os.ErrNotExist) {
+				if !suppressIntegrationSuccessOutput {
+					fmt.Println("recovered and completed interrupted dsh uninstall; tokens and pending transcript events were preserved")
+				}
+				return 0
+			}
+		}
+	}
 	antigravityCurrentConfigRoot := ""
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		configRoot, rootErr := antigravityOperationLockRoot()
@@ -1493,6 +1673,26 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		currentRoot, rootErr := currentDSHConfigRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		if currentRoot != cfg.RuntimeConfigRoot {
+			fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from installed %s to %s; restore the installed value before uninstalling\n", cfg.RuntimeConfigRoot, currentRoot)
+			return 1
+		}
+		currentEnvironment, environmentErr := captureDSHMCPEnvironment()
+		if environmentErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness MCP environment: %v\n", environmentErr)
+			return 1
+		}
+		if !equalDSHEnvironment(currentEnvironment, cfg.MCPEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed from the installed DeepSeek Harness binding; restore it before uninstalling")
+			return 1
+		}
+	}
 	witselfExecutable := ""
 	var genericPersistedConfig *transcriptcapture.Config
 	if isGenericProviderRuntime(runtime) {
@@ -1550,6 +1750,7 @@ func uninstallCmd(args []string) int {
 	var antigravityJournal *antigravityTransactionJournal
 	var openClawJournal *openClawTransactionJournal
 	var copilotJournal *copilotTransactionJournal
+	var dshJournal *dshTransactionJournal
 	var genericProviderJournal *genericProviderTransactionJournal
 	if cfgErr == nil {
 		previous := cfg
@@ -1587,6 +1788,11 @@ func uninstallCmd(args []string) int {
 		// whichever binary or profile happens to win the current shell lookup.
 		runtimeCLI = cfg.RuntimeCLICommand
 		runtimeCLIErr = validateCopilotCLISelection(runtimeCLI, cfg)
+	case transcriptcapture.RuntimeDSH:
+		// The home-level patch file is an exact-owned file, so removal needs no
+		// provider CLI. Keep the persisted path as part of the durable binding and
+		// let uninstall succeed even if dsh itself was removed.
+		runtimeCLI = cfg.RuntimeCLICommand
 	case transcriptcapture.RuntimeCodex,
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
@@ -1595,7 +1801,8 @@ func uninstallCmd(args []string) int {
 	default:
 		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
 	}
-	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity && runtimeCLIErr != nil {
+	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity &&
+		runtime != transcriptcapture.RuntimeDSH && runtimeCLIErr != nil {
 		// Non-Cursor MCP registrations are owned by the runtime CLI. Preserve all
 		// local state so a later retry can remove the complete integration.
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
@@ -1621,11 +1828,12 @@ func uninstallCmd(args []string) int {
 		}
 		genericProviderJournal = &journal
 	}
-	// OpenClaw and Copilot retain their static policy until the exact
-	// credential-bound MCP registration is gone. Other runtimes retain the
-	// existing routing-first teardown, whose snapshot supports rollback.
+	// OpenClaw, Copilot, and DeepSeek Harness retain their static policy until
+	// the exact credential-bound MCP registration is gone. Other runtimes retain
+	// the existing routing-first teardown, whose snapshot supports rollback.
 	var memoryRouting runtimeMemoryRoutingSnapshot
-	if runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot {
+	if runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot &&
+		runtime != transcriptcapture.RuntimeDSH {
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -1651,7 +1859,8 @@ func uninstallCmd(args []string) int {
 		routingHandled := false
 		mcpRestoreAllowed := true
 		rollbackComplete := true
-		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot) && memoryRouting.managed {
+		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH) && memoryRouting.managed {
 			routingHandled = true
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
@@ -1686,6 +1895,11 @@ func uninstallCmd(args []string) int {
 		if copilotJournal != nil && rollbackComplete {
 			if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+			}
+		}
+		if dshJournal != nil && rollbackComplete {
+			if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 			}
 		}
 		if openClawJournal != nil && rollbackComplete {
@@ -1736,6 +1950,16 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 		copilotJournal = &journal
+	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		previous := cfg
+		journal, journalErr := beginDSHTransaction(dshTransactionUninstall, &previous, nil)
+		if journalErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: begin DeepSeek Harness transaction: %v\n", journalErr)
+			return 1
+		}
+		dshJournal = &journal
 	}
 	mcpMutationTouched := false
 	if runtime == transcriptcapture.RuntimeAntigravity {
@@ -1819,6 +2043,40 @@ func uninstallCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
+	} else if runtime == transcriptcapture.RuntimeDSH {
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness transaction journal is missing before patch removal")
+			return 1
+		}
+		if err := validateDSHTransactionProviderBefore(*dshJournal); err != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+		removalSnapshot, inspectErr := readDSHPatchSnapshot(cfg.RuntimeMCPConfigPath)
+		if inspectErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", inspectErr)
+			return 1
+		}
+		mcpTouched, removeErr := removeDSHPatchBlockWithSnapshot(cfg, &removalSnapshot)
+		if removeErr != nil {
+			if providerMutationUncertain(removeErr) {
+				fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v; preserving DeepSeek Harness routing and transaction journal\n", removeErr)
+				return 1
+			}
+			rollbackUninstall(hooksTouched, mcpTouched)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", removeErr)
+			return 1
+		}
+		mcpMutationTouched = mcpTouched
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			// Preserve the integration record when exact policy removal cannot be
+			// proven. MCP stays absent so no credential-bound tools lack policy.
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
 	} else if isGenericProviderRuntime(runtime) {
 		if err := unregisterGenericMCP(runtimeCLI, cfg); err != nil {
 			rollbackUninstall(true, true)
@@ -1844,7 +2102,8 @@ func uninstallCmd(args []string) int {
 		cursorPermissionTouched, err = cursorPermissionSnapshot.removeWitselfMCPPermission()
 		if err != nil {
 			mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
-			if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+			if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+				runtime == transcriptcapture.RuntimeDSH {
 				mcpTouched = mcpMutationTouched
 			}
 			rollbackUninstall(hooksTouched, mcpTouched)
@@ -1854,7 +2113,8 @@ func uninstallCmd(args []string) int {
 	}
 	if err := removeRuntimeIntegrationConfig(runtime); err != nil {
 		mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
-		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH {
 			mcpTouched = mcpMutationTouched
 		}
 		rollbackUninstall(hooksTouched, mcpTouched)
@@ -1884,6 +2144,16 @@ func uninstallCmd(args []string) int {
 		}
 		if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot transaction: %v\n", clearErr)
+			return 1
+		}
+	}
+	if runtime == transcriptcapture.RuntimeDSH && dshJournal != nil {
+		if recoveryErr := recoverDSHUninstallTransaction(*dshJournal); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", clearErr)
 			return 1
 		}
 	}
@@ -3291,6 +3561,15 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 			candidates = append(candidates, path)
 		}
 		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeDSH:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("DSH_CLI_PATH")))
+		if path, err := exec.LookPath("dsh"); err == nil {
+			candidates = append(candidates, path)
+		}
+		// dsh registers MCP servers through its profile patch files, not a `mcp
+		// add` subcommand, so the read-only version contract is the only probe
+		// that does not boot a profile or create a session.
+		probeArgs = []string{"--version"}
 	}
 	seen := map[string]bool{}
 	foundExistingCandidate := false

@@ -54,6 +54,8 @@ func run(args []string) error {
 		return runAntigravity(args)
 	case "copilot":
 		return runCopilot(args)
+	case "dsh":
+		return runDSH(args)
 	}
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Println("codex-cli 1.2.3")
@@ -224,6 +226,68 @@ func runAntigravity(args []string) error {
 	default:
 		return fmt.Errorf("unexpected Antigravity command: %v", args)
 	}
+}
+
+// runDSH models the two dsh contracts the preview integration relies on: the
+// version probe and the composed-profile dump. The dump is produced by reading
+// the home-level patch file the installer owns, so a test can prove that the
+// managed block actually reaches a composed profile.
+func runDSH(args []string) error {
+	root := os.Getenv("DSH_HOME")
+	if root == "" {
+		return errors.New("DSH_HOME is required")
+	}
+	switch {
+	case equalArgs(args, "--version"):
+		fmt.Println("0.1.5-rc.1")
+		return nil
+	case equalArgs(args, "--profile", "headless", "--dump-config"):
+		raw, err := os.ReadFile(filepath.Join(root, "cordis.patch.yml"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		fmt.Println("profile: headless")
+		fmt.Println("plugins:")
+		for _, row := range composedDSHRows(string(raw)) {
+			fmt.Printf("  - id: %s\n", row[0])
+			fmt.Printf("    name: %s\n", row[1])
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported dsh invocation %q", strings.Join(args, " "))
+}
+
+// composedDSHRows applies the one patch operation Witself emits: an `insert`
+// list of rows carrying an id and a name. Everything else is ignored the way a
+// composed tree ignores patches it cannot resolve.
+func composedDSHRows(document string) [][2]string {
+	rows := make([][2]string, 0, 4)
+	id, name := "", ""
+	inserting := false
+	for _, line := range strings.Split(document, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "- insert:":
+			inserting = true
+		case !inserting || trimmed == "" || strings.HasPrefix(trimmed, "#"):
+			continue
+		case strings.HasPrefix(trimmed, "- id:"):
+			id = unquoteDSHScalar(strings.TrimSpace(strings.TrimPrefix(trimmed, "- id:")))
+			name = ""
+		case strings.HasPrefix(trimmed, "name:") && id != "":
+			name = unquoteDSHScalar(strings.TrimSpace(strings.TrimPrefix(trimmed, "name:")))
+			rows = append(rows, [2]string{id, name})
+			id = ""
+		}
+	}
+	return rows
+}
+
+func unquoteDSHScalar(value string) string {
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	}
+	return value
 }
 
 func runCopilot(args []string) error {

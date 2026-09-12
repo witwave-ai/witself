@@ -101,6 +101,7 @@ func TestTranscriptHookSupportMatchesNativePlatformContract(t *testing.T) {
 		{platform: "linux", runtime: transcriptcapture.RuntimeOpenClaw, want: false},
 		{platform: "linux", runtime: transcriptcapture.RuntimeAntigravity, want: false},
 		{platform: "linux", runtime: transcriptcapture.RuntimeCopilot, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeDSH, want: false},
 	} {
 		t.Run(tc.platform+"/"+tc.runtime, func(t *testing.T) {
 			if got := supportsTranscriptHooksForPlatform(tc.runtime, tc.platform); got != tc.want {
@@ -422,7 +423,7 @@ func TestInferInstallAgentRequiresOnlyAmbiguousChoice(t *testing.T) {
 }
 
 func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
-	got, err := runtimeTargets("claude,codex,grok,cursor,agy,github-copilot,claude-code,antigravity,copilot")
+	got, err := runtimeTargets("claude,codex,grok,cursor,agy,github-copilot,claude-code,antigravity,copilot,deepseek,dsh,deepseek-harness")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +434,7 @@ func TestRuntimeTargetsNormalizeAliasesAndPreserveOrder(t *testing.T) {
 		transcriptcapture.RuntimeCursor,
 		transcriptcapture.RuntimeAntigravity,
 		transcriptcapture.RuntimeCopilot,
+		transcriptcapture.RuntimeDSH,
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("targets = %v, want %v", got, want)
@@ -926,6 +928,7 @@ func TestDetectRuntimeVersion(t *testing.T) {
 		{"cursor", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "", "2026.07.16-899851b"},
 		{"cursor diagnostic", transcriptcapture.RuntimeCursor, "2026.07.16-899851b", "[0716/234658.202288:ERROR:electron] failure", "2026.07.16-899851b"},
 		{"copilot", transcriptcapture.RuntimeCopilot, "GitHub Copilot CLI 1.0.73.", "", "1.0.73"},
+		{"dsh prerelease", transcriptcapture.RuntimeDSH, "0.1.5-rc.1\n", "", "0.1.5-rc.1"},
 		{"fallback", transcriptcapture.RuntimeCodex, "development-build", "", "development-build"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
