@@ -271,7 +271,6 @@ func TestMessageRequestClientRankedLifecyclePostgres(t *testing.T) {
 		agentID string
 		key     string
 	}{{bob.ID, "race-select-bob"}, {charlie.ID, "race-select-charlie"}} {
-		selection := selection
 		wait.Add(1)
 		go func() {
 			defer wait.Done()

@@ -51,7 +51,6 @@ func TestPerceptualContinuityCrossArchitectureGoldens(t *testing.T) {
 		t, fixtures[0].fingerprint, fixtures[1].fingerprint)
 
 	for _, fixture := range fixtures {
-		fixture := fixture
 		t.Run(fixture.name, func(t *testing.T) {
 			fingerprint := fixture.fingerprint
 			if len(fingerprint) != PerceptualContinuityFingerprintBytes {

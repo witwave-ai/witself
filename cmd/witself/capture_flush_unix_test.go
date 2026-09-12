@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,8 +76,8 @@ func TestBackgroundCaptureFlushSurvivesParentExitAndHangup(t *testing.T) {
 	// process group as its final hook finishes.
 	parent.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	err := parent.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
 		t.Fatalf("short-lived parent exit = %v, want SIGHUP", err)
 	}
 	status, ok := exitErr.Sys().(syscall.WaitStatus)

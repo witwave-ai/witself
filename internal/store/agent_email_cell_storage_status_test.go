@@ -27,7 +27,6 @@ func TestValidateAgentEmailCellStorageStatus(t *testing.T) {
 		{name: "roots exceed rows", mutate: func(s *AgentEmailCellStorageStatus) { s.RootRows = 3 }, want: "usage counters"},
 		{name: "invalid limits", mutate: func(s *AgentEmailCellStorageStatus) { s.AdmissionBytes = s.HardBytes }, want: "invalid limits"},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			candidate := valid

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -60,8 +61,11 @@ func TestAgentEmailAccountBoundsMigrationPostgres(t *testing.T) {
 		account.AccountID,
 	); err == nil {
 		t.Fatal("schema 90 accepted realm debt without a realm")
-	} else if _, ok := err.(*pgconn.PgError); !ok {
-		t.Fatalf("invalid realm debt error = %T %v", err, err)
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			t.Fatalf("invalid realm debt error = %T %v", err, err)
+		}
 	}
 	if _, err := st.pool.Exec(ctx, `DELETE FROM realms WHERE account_id=$1 AND id=$2`,
 		account.AccountID, firstRealm.ID,

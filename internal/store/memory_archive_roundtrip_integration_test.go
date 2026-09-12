@@ -84,8 +84,6 @@ func TestNarrativeMemoryManagedCloudConformance(t *testing.T) {
 
 	for _, source := range targets {
 		for _, destination := range targets {
-			source := source
-			destination := destination
 			passed := t.Run(source.name+"_to_"+destination.name, func(t *testing.T) {
 				reporter := memoryArchiveTestReporter(t)
 				if certificationMode {

@@ -37,7 +37,7 @@ func legalCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "  DOCUMENT: terms | privacy | acceptable-use | dpa | refunds")
 	}
 	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
+		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2

@@ -459,7 +459,6 @@ func TestAgentEmailRetentionReplicasUseDifferentLanesPostgres(t *testing.T) {
 	start := make(chan struct{})
 	var workers sync.WaitGroup
 	for _, claim := range []agentEmailRetentionLaneClaim{*firstClaim, *secondClaim} {
-		claim := claim
 		workers.Add(1)
 		go func() {
 			defer workers.Done()

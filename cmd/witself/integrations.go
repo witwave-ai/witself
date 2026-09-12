@@ -234,7 +234,6 @@ func collectIntegrationsReportWithVerification(verify bool) integrationsReport {
 	statuses := make([]integrationRuntimeStatus, len(runtimes))
 	var wait sync.WaitGroup
 	for index, runtimeName := range runtimes {
-		index, runtimeName := index, runtimeName
 		wait.Add(1)
 		go func() {
 			defer wait.Done()

@@ -210,7 +210,6 @@ func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
 			},
 		},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil).ServeHTTP(

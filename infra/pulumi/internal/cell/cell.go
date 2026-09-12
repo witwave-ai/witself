@@ -1,7 +1,7 @@
 // Package cell is the Witself cell: the inline Pulumi program that
 // witself-infra provisions. A cell is one complete, isolated Witself stack in a
-// single cloud account/region (witself-server + Postgres + pgvector, the
-// sealed-plane KMS, object storage, and ingress). The same program provisions a
+// single cloud account/region (witself-server + Postgres + pgvector,
+// object storage, and ingress). The same program provisions a
 // self-hoster's single cell and each cell in the Witself Cloud fleet; what
 // differs is who runs it (a human vs CI) and the stack config, never the code.
 //
@@ -16,7 +16,7 @@
 //	slice 2 — [done] AWS substrate: dedicated VPC + RDS Postgres (private subnets)
 //	slice 3 — install the OCI chart (oci://ghcr.io/witwave-ai/charts/witself-server)
 //	slice 4 — ingress: cloud-native L7 LB (ALB / GKE Ingress / App Gateway) via GitOps
-//	slice 5 — sealed-plane KMS (prod profile), IRSA, NAT/egress, GCP
+//	slice 5 — prod-profile hardening: IRSA, NAT/egress, GCP
 package cell
 
 import (

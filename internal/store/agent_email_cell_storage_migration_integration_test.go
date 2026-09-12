@@ -148,7 +148,6 @@ func TestAgentEmailCellStorageCapacityAndRecoveryPostgres(t *testing.T) {
 	errorsByID := make([]error, len(ids))
 	var group sync.WaitGroup
 	for index, messageID := range ids {
-		index, messageID := index, messageID
 		group.Add(1)
 		go func() {
 			defer group.Done()

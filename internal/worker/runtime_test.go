@@ -281,7 +281,6 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		"agent_email_retention",
 		"account_purge",
 	} {
-		name := name
 		if err := registry.Register(Job{
 			Name: name,
 			Run: func(ctx context.Context) error {

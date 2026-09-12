@@ -490,7 +490,11 @@ func TestAutoRunPendingPersistsBoundedValueFreeBackoff(t *testing.T) {
 		t.Fatalf("recovered status = %#v", status)
 	}
 
-	if got := NewAutoWorkError("secret_value", errors.New("detail")).(*AutoWorkError).Code; got != AutoFailureWorker {
+	var autoErr *AutoWorkError
+	if !errors.As(NewAutoWorkError("secret_value", errors.New("detail")), &autoErr) {
+		t.Fatalf("NewAutoWorkError did not return *AutoWorkError")
+	}
+	if got := autoErr.Code; got != AutoFailureWorker {
 		t.Fatalf("unrecognized failure code = %q, want %q", got, AutoFailureWorker)
 	}
 	if got := autoFailureBackoff(100); got != maxAutoFailureBackoff {

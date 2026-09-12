@@ -52,7 +52,6 @@ func TestAgentEmailOutboundMigrationDowngradePostgres(t *testing.T) {
 		{name: "provider event graph", checkTable: "agent_email_outbound_provider_events"},
 		{name: "recipient suppression", checkTable: "agent_email_outbound_recipient_suppressions"},
 	} {
-		test := test
 		t.Run(test.name+" refuses downgrade", func(t *testing.T) {
 			ctx := context.Background()
 			st, dsn := newMigrationTestStore(t, baseDSN)

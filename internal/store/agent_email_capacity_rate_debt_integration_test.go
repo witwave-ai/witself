@@ -199,7 +199,6 @@ func TestAgentEmailCellStorageRefusalsPreserveRateDebtPostgres(t *testing.T) {
 		errs := make([]error, 2)
 		var group sync.WaitGroup
 		for index := range results {
-			index := index
 			group.Add(1)
 			go func() {
 				defer group.Done()

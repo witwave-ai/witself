@@ -90,7 +90,6 @@ func stubSignedRelease(
 		_, _ = w.Write(tarball)
 	})
 	for name, content := range signingAssets {
-		name, content := name, content
 		mux.HandleFunc(fmt.Sprintf("/%s/%s", tag, name), func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write(content)
 		})
