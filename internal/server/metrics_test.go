@@ -1029,7 +1029,7 @@ func TestRuntimeMetricsObserveSecretMaterialDeliveriesWithBoundedLabels(t *testi
 	var nextErr error
 	calls := 0
 	cfg := metrics.instrumentConfig(Config{
-		AccessSecretField: func(ctx context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
+		AccessSecretField: func(_ context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
 			calls++
 			if p != principal || secretID != "secret_sealed_private" || fieldID != "field_sealed_private" || in.IdempotencyKey != "request_sealed_private" {
 				t.Fatal("delivery wrapper changed operation arguments")
@@ -1080,7 +1080,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 		configure       func(*Config, error) func(Config) error
 	}{
 		{"registration", "register", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.RegisterVaultKey = func(ctx context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
+			cfg.RegisterVaultKey = func(_ context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
 				if p != principal {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
@@ -1092,7 +1092,7 @@ func TestRuntimeMetricsClassifyVaultLifecycleConflicts(t *testing.T) {
 			}
 		}},
 		{"enrollment", "create", func(cfg *Config, nextErr error) func(Config) error {
-			cfg.CreateVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			cfg.CreateVaultKeyEnrollment = func(_ context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
 				if p != principal {
 					t.Fatal("lifecycle wrapper changed arguments")
 				}
