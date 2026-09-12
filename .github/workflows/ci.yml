@@ -509,6 +509,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.16.4
@@ -537,6 +542,11 @@ jobs:
 
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
+
+      - name: gitops cell values drift check
+        run: |
+          bash scripts/gitops-cell-values.sh --check
+          bash scripts/test-gitops-cell-values.sh
 
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh

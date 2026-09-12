@@ -1,0 +1,68 @@
+# Fleet cell config for .gitops/cells/<cell>/values.yaml generation.
+# See docs/gitops-values-generation.md. This file is the source of truth for
+# identity, host overrides, and enablement switches. It is not an Argo CD
+# values file.
+schema: witself.gitops-cells.v1
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: main
+defaults:
+  account_alias: sandbox
+  role: dev
+  domain_parent: cells.witself.witwave.ai
+cells:
+  aws-sandbox-use1-dev:
+    cloud: aws
+    region: us-east-1
+    switches:
+      aws_zone_type: public
+  aws-sandbox-usw2-dev:
+    cloud: aws
+    region: us-west-2
+  azure-sandbox-use2-dev:
+    cloud: azure
+    region: eastus2
+    acme_email: scott@witwave.ai
+  azure-sandbox-usw2-dev:
+    cloud: azure
+    region: westus2
+    acme_email: scott@witwave.ai
+  gcp-sandbox-use1-dev:
+    cloud: gcp
+    region: us-east1
+    gcp_project: witself-sandbox
+    switches:
+      gcp_managed_ha: true
+      gcp_worker_jobs: true
+      gcp_fact_deletion: true
+      gcp_avatar_compaction: true
+      gcp_agent_email_dark: true
+  gcp-sandbox-usw2-dev:
+    cloud: gcp
+    region: us-west2
+    gcp_project: witself-sandbox
+  civo-sandbox-use1-backup:
+    cloud: civo
+    region: nyc1
+    role: backup
+    # Checked-in DNS names are documentation only; Pulumi replaces them.
+    domain: cells.witself.witwave.ai
+    overlay: civo-sandbox-use1-backup.yaml.tmpl
+    switches:
+      domain_documentation_only: true
+  civo-sandbox-use1-dev:
+    cloud: civo
+    region: nyc1
+    domain: cells.witself.witwave.ai
+    overlay: civo-sandbox-use1-dev.yaml.tmpl
+    switches:
+      domain_documentation_only: true
+  civo-sandbox-usw2-dev:
+    cloud: civo
+    region: phx1
+    domain: cells.witself.witwave.ai
+    overlay: civo-sandbox-usw2-dev.yaml.tmpl
+    switches:
+      domain_documentation_only: true
+      monitoring: true
+      collector_alerts: false

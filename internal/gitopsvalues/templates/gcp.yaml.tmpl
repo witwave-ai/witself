@@ -1,0 +1,179 @@
+cell:
+  name: {{.Name}}
+  cloud: {{.Cloud}}
+  accountAlias: {{.AccountAlias}}
+  region: {{.Region}}
+  role: {{.Role}}
+  domain: {{.Domain}}
+  apiHost: {{.APIHost}}
+gitops:
+  repoURL: {{.RepoURL}}
+  targetRevision: {{.TargetRevision}}
+apps:
+  witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: {{.ChartVersion}}
+    imageTag: {{.ImageTag}}
+{{- if .GCPWorkerJobs }}
+    worker:
+      enabled: true
+      replicaCount: 2
+      avatarStyleRollout:
+        enabled: true
+        batchSize: 100
+        interval: 2s
+        batchTimeout: 30s
+      messageRetention:
+        enabled: true
+        mode: enforce
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
+      agentEmailRetention:
+        enabled: true
+        mode: enforce
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
+      transcriptRetention:
+        enabled: true
+        mode: enforce
+        batchSize: 100
+        interval: 5m
+        batchTimeout: 2m
+{{- end }}
+{{- if .GCPFactDeletion }}
+    factDeletionEnabled: true
+{{- end }}
+{{- if .GCPAgentEmailDark }}
+    # The legacy literal-realm receive path is retired. Keep both receive modes
+    # dark until this cell is upgraded and production receive is explicitly
+    # configured with an immutable account-cohort Secret.
+    agentEmail:
+      receivePilot:
+        enabled: false
+      receiveProduction:
+        enabled: false
+{{- end }}
+{{- if .GCPAvatarCompaction }}
+    # Phase B enabled compaction after every schema-54-compatible v186 server
+    # pod replaced the old writers.
+    avatarPayloadCompactionEnabled: true
+{{- end }}
+    backendKind: managed
+{{- if .GCPManagedHA }}
+    replicaCount: 2
+    minReadySeconds: 10
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+    lifecycle:
+      # Keep the process serving while GKE removes its NEG endpoint and the
+      # external Application Load Balancer drains established connections.
+      preStopSleepSeconds: 120
+    terminationGracePeriodSeconds: 210
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: witself-server
+            app.kubernetes.io/instance: witself-server
+{{- end }}
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: true
+      managedCertificateName: witself-api
+      backendConfigName: witself-server
+{{- if .GCPManagedHA }}
+      backendConfig:
+        connectionDraining:
+          drainingTimeoutSec: 60
+{{- end }}
+      frontendConfig:
+        enabled: true
+        name: witself-api
+        redirectToHttps:
+          enabled: true
+          responseCodeName: PERMANENT_REDIRECT
+      staticIPName: witself-{{.Name}}-api
+      annotations:
+        external-dns.alpha.kubernetes.io/hostname: {{.APIHost}}
+      hosts:
+        - host: {{.APIHost}}
+          paths:
+            - path: /*
+              pathType: ImplementationSpecific
+    secrets:
+      bootstrap:
+        enabled: true
+        remoteKey: witself-{{.Name}}-bootstrap-operator-token
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+        refreshInterval: 1h
+        storeName: gcp
+      database:
+        enabled: true
+        remoteKey: witself-{{.Name}}-db
+        targetName: witself-db
+        urlKey: dsn
+        refreshInterval: 1h
+        storeName: gcp
+      provision:
+        enabled: true
+        remoteKey: witself-{{.Name}}-provision-token
+        targetName: witself-provision
+        tokenKey: token
+        refreshInterval: 1h
+        storeName: gcp
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: {{.CertManagerChartVersion}}
+    namespace: cert-manager
+  externalDNS:
+    enabled: true
+    chartVersion: {{.ExternalDNSChartVersion}}
+    namespace: external-dns
+    serviceAccountName: external-dns
+    serviceAccountAnnotations:
+      iam.gke.io/gcp-service-account: ws-dns-{{.Name}}@{{.GCPProject}}.iam.gserviceaccount.com
+    domainFilters:
+      - {{.Domain}}
+    txtOwnerId: {{.Name}}
+    provider:
+      name: google
+    extraArgs:
+      google-project: {{.GCPProject}}
+      google-zone-visibility: public
+  externalSecrets:
+    enabled: true
+    chartVersion: {{.ExternalSecretsChartVersion}}
+    namespace: external-secrets
+    storeName: gcp
+    serviceAccountName: external-secrets
+    serviceAccountAnnotations:
+      iam.gke.io/gcp-service-account: ws-eso-{{.Name}}@{{.GCPProject}}.iam.gserviceaccount.com
+    gcpProjectID: {{.GCPProject}}
+  keda:
+    enabled: true
+    chartVersion: {{.KEDAChartVersion}}
+    namespace: keda
+    ignoreDeploymentResourceDifferences: true
+  metricsServer:
+    enabled: false
+    chartVersion: {{.MetricsServerChartVersion}}
+    namespace: kube-system
+    replicas: 1
