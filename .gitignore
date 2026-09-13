@@ -8,6 +8,16 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Agent-runtime scaffolding that delegation launchers and headless agents write
+# into a worktree (per-worktree permission files, project-local config). None of
+# it is project source, and a linked worktree ignores its own info/exclude, so a
+# `git add -A` would otherwise commit it. .claude/ is project-owned and stays
+# tracked.
+.cursor/
+.grok/
+.codex/
+.dsh/
+
 # Go (implementation to come — see docs/scaffold-readiness.md)
 /bin/
 /dist/
