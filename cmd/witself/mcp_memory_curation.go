@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -367,7 +369,7 @@ type mcpMemoryCurationProposeFactAction struct {
 	ValidFrom   string                      `json:"valid_from,omitempty" jsonschema:"optional RFC3339 start of real-world validity"`
 	ValidUntil  string                      `json:"valid_until,omitempty" jsonschema:"optional RFC3339 end of real-world validity"`
 	Reason      string                      `json:"reason,omitempty" jsonschema:"bounded proposal reason"`
-	Evidence    []mcpMemoryCurationEvidence `json:"evidence" jsonschema:"one or more exact frozen-input evidence references; required for fact proposals"`
+	Evidence    []mcpMemoryCurationEvidence `json:"evidence" jsonschema:"required for fact proposals; must contain 1-32 provenance rows referencing frozen inputs"`
 }
 
 type mcpMemoryCurationCreateSnapshot struct {
@@ -414,21 +416,21 @@ type mcpMemoryCurationLineageRelation struct {
 }
 
 type mcpMemoryCurationEvidence struct {
-	InputEvidenceID     string                             `json:"input_evidence_id,omitempty" jsonschema:"exact materialized evidence input id"`
-	Type                string                             `json:"type" jsonschema:"transcript, memory, message, import, or another supported evidence type"`
-	Role                string                             `json:"role,omitempty" jsonschema:"supports, contradicts, or context"`
-	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable; a resolved row requires resolved_kind plus exactly one matching source field"`
-	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator"`
-	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"REQUIRED whenever resolution_state is resolved: transcript, memory, message, import_artifact, or artifact; must name the populated source field (source_transcript_id with a sequence range, source_memory, source_message_id, source_import_locator, or artifact_excerpt)"`
-	SourceTranscriptID  string                             `json:"source_transcript_id,omitempty" jsonschema:"exact frozen transcript id"`
-	SourceSequenceFrom  int64                              `json:"source_sequence_from,omitempty" jsonschema:"first exact frozen transcript sequence"`
-	SourceSequenceUntil int64                              `json:"source_sequence_until,omitempty" jsonschema:"last exact frozen transcript sequence"`
-	SourceMemory        *mcpMemoryCurationVersionReference `json:"source_memory,omitempty" jsonschema:"exact immutable source memory version"`
-	SourceMessageID     string                             `json:"source_message_id,omitempty" jsonschema:"exact source message id"`
-	SourceImportLocator string                             `json:"source_import_locator,omitempty" jsonschema:"exact import source locator"`
-	ArtifactExcerpt     string                             `json:"artifact_excerpt,omitempty" jsonschema:"canonical base64 artifact excerpt"`
+	InputEvidenceID     string                             `json:"input_evidence_id,omitempty" jsonschema:"exact materialized evidence input id; when present reproduce that row exactly after normalization; the id alone proves no authenticity and backend membership, equality and owner access checks remain mandatory"`
+	Type                string                             `json:"type" jsonschema:"supported evidence label; blank defaults to conversation; need not equal resolved_kind"`
+	Role                string                             `json:"role,omitempty" jsonschema:"supports (default), contradicts, or context"`
+	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable; pending and unavailable require input_evidence_id and exact reproduction of a materialized evidence input row; direct evidence without input_evidence_id must be resolved transcript or memory"`
+	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator copied exactly from the materialized input_evidence_id row"`
+	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"REQUIRED whenever resolution_state is resolved; never inferred from type: transcript, memory, message, import_artifact, or artifact; requires exactly one matching source: source_transcript_id with a sequence range, source_memory, source_message_id, source_import_locator, or artifact_excerpt; message, import_artifact and artifact require input_evidence_id and exact reproduction of a materialized evidence input row"`
+	SourceTranscriptID  string                             `json:"source_transcript_id,omitempty" jsonschema:"source transcript id; direct evidence requires contiguous frozen transcript coverage checked by the backend; with input_evidence_id reproduce the materialized row exactly"`
+	SourceSequenceFrom  int64                              `json:"source_sequence_from,omitempty" jsonschema:"positive first inclusive transcript sequence"`
+	SourceSequenceUntil int64                              `json:"source_sequence_until,omitempty" jsonschema:"last inclusive transcript sequence; at least source_sequence_from and at most 10000 greater"`
+	SourceMemory        *mcpMemoryCurationVersionReference `json:"source_memory,omitempty" jsonschema:"exact immutable source memory version or prior-create local_ref at version 1; backend checks frozen membership and owner access"`
+	SourceMessageID     string                             `json:"source_message_id,omitempty" jsonschema:"exact source message id copied from the materialized input_evidence_id row"`
+	SourceImportLocator string                             `json:"source_import_locator,omitempty" jsonschema:"exact import source locator copied from the materialized input_evidence_id row"`
+	ArtifactExcerpt     string                             `json:"artifact_excerpt,omitempty" jsonschema:"base64 artifact excerpt copied from the materialized input_evidence_id row"`
 	ArtifactSensitive   bool                               `json:"artifact_sensitive,omitempty" jsonschema:"artifact excerpt contains sensitive material"`
-	TerminalReasonCode  string                             `json:"terminal_reason_code,omitempty" jsonschema:"bounded reason for unavailable evidence"`
+	TerminalReasonCode  string                             `json:"terminal_reason_code,omitempty" jsonschema:"bounded unavailable reason copied exactly from the materialized input_evidence_id row"`
 	SourceDigest        string                             `json:"source_digest,omitempty" jsonschema:"exact source digest when available"`
 }
 
@@ -441,34 +443,131 @@ type mcpMemoryCurationPlanInput struct {
 
 const mcpMemoryCurationPlanInvalidCode = "memory_curation_plan_invalid"
 
-// validateMCPMemoryCurationPlanEvidence keeps action-dependent evidence counts
-// actionable at the MCP boundary. Separate create/replace schema types expose
-// required versus optional presence; this check adds the exact bounded count.
-// Return only a stable code, an action index, and a field contract; never echo
-// client-authored memory or evidence content.
+// validateMCPMemoryCurationPlanEvidence checks deterministic evidence contracts
+// without normalizing the submitted draft or fetching frozen inputs. Envelope
+// validation and provenance authorization remain backend responsibilities.
+// Diagnostics contain only fixed contracts and array indices, never input values.
 func validateMCPMemoryCurationPlanEvidence(draft mcpMemoryCurationPlanDraft) error {
 	for index, action := range draft.Actions {
-		switch action.Operation {
+		// Validate the selected operation's matching payload even when extra
+		// payloads are present. Only absent matching payloads are deferred.
+		var evidence []mcpMemoryCurationEvidence
+		var field, countContract string
+		var minimumEvidence int
+		switch strings.TrimSpace(action.Operation) {
 		case "create":
 			if action.Create == nil {
 				continue
 			}
-			if count := len(action.Create.Snapshot.Evidence); count < 1 || count > 32 {
-				return fmt.Errorf(
-					"%s: actions[%d].create.snapshot.evidence must contain 1-32 rows",
-					mcpMemoryCurationPlanInvalidCode, index,
-				)
-			}
+			evidence = action.Create.Snapshot.Evidence
+			field, countContract = "create.snapshot.evidence", "must contain 1-32 rows"
+			minimumEvidence = 1
 		case "replace":
-			if action.Replace != nil && len(action.Replace.Snapshot.Evidence) > 32 {
-				return fmt.Errorf(
-					"%s: actions[%d].replace.snapshot.evidence may contain at most 32 rows",
-					mcpMemoryCurationPlanInvalidCode, index,
-				)
+			if action.Replace == nil {
+				continue
+			}
+			evidence = action.Replace.Snapshot.Evidence
+			field, countContract = "replace.snapshot.evidence", "may contain at most 32 rows"
+		case "propose_fact":
+			if action.ProposeFact == nil {
+				continue
+			}
+			evidence = action.ProposeFact.Evidence
+			field, countContract = "propose_fact.evidence", "must contain 1-32 rows"
+			minimumEvidence = 1
+		default:
+			continue
+		}
+		if len(evidence) < minimumEvidence || len(evidence) > 32 {
+			return fmt.Errorf("%s: actions[%d].%s %s", mcpMemoryCurationPlanInvalidCode, index, field, countContract)
+		}
+		for evidenceIndex, row := range evidence {
+			if contract := mcpMemoryCurationEvidenceContract(row); contract != "" {
+				return fmt.Errorf("%s: actions[%d].%s[%d].%s",
+					mcpMemoryCurationPlanInvalidCode, index, field, evidenceIndex, contract)
 			}
 		}
 	}
 	return nil
+}
+
+var mcpMemoryCurationEvidenceTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
+
+// Return only literal field contracts. Match normalizeMemoryCurationEvidence,
+// normalizeMemoryEvidenceInput and authorizeEvidence, including their trimming
+// and complete-source counting. Do not reuse capture's different input contract.
+func mcpMemoryCurationEvidenceContract(row mcpMemoryCurationEvidence) string {
+	if kind := strings.TrimSpace(row.Type); kind != "" && !mcpMemoryCurationEvidenceTypePattern.MatchString(kind) {
+		return "type must be a supported evidence label"
+	}
+	switch strings.TrimSpace(row.Role) {
+	case "", "supports", "contradicts", "context":
+	default:
+		return "role must be supports, contradicts, or context"
+	}
+	state, kind := strings.TrimSpace(row.ResolutionState), strings.TrimSpace(row.ResolvedKind)
+	locator, reason := strings.TrimSpace(row.ExternalLocator), strings.TrimSpace(row.TerminalReasonCode)
+	transcriptID := strings.TrimSpace(row.SourceTranscriptID)
+	messageID, importLocator := strings.TrimSpace(row.SourceMessageID), strings.TrimSpace(row.SourceImportLocator)
+	if len(locator) > 2048 || len(importLocator) > 2048 {
+		return "external_locator and source_import_locator must contain at most 2048 bytes each"
+	}
+	if digest := strings.ToLower(strings.TrimSpace(row.SourceDigest)); digest != "" && !factCandidateRevisionPattern.MatchString(digest) {
+		return "source_digest must be a SHA-256 hex digest"
+	}
+	// StdEncoding matches the server's JSON []byte decoder, including CR/LF
+	// acceptance. Do not trim, canonicalize, or include decoder errors in output.
+	artifact, err := base64.StdEncoding.DecodeString(row.ArtifactExcerpt)
+	if err != nil || len(artifact) > 65536 {
+		return "artifact_excerpt must be base64 encoding at most 65536 bytes"
+	}
+	memory := row.SourceMemory != nil
+	if memory {
+		ref := row.SourceMemory
+		memoryID, localRef := strings.TrimSpace(ref.MemoryID), strings.TrimSpace(ref.LocalRef)
+		if ref.Version < 1 || (memoryID == "") == (localRef == "") {
+			return "source_memory requires exactly one memory_id or local_ref and a positive version"
+		}
+		if localRef != "" && ref.Version != 1 {
+			return "source_memory.version must be 1 for local_ref"
+		}
+	}
+	transcript := transcriptID != "" && row.SourceSequenceFrom > 0 && row.SourceSequenceUntil >= row.SourceSequenceFrom
+	if transcript && row.SourceSequenceUntil-row.SourceSequenceFrom > 10000 {
+		return "source_sequence_until must be at most 10000 greater than source_sequence_from"
+	}
+	// Incomplete transcript fields do not count as a source in the canonical
+	// normalizer. Preserve those legacy combinations when another kind is used.
+	sources := boolCount(transcript, memory, messageID != "", importLocator != "", len(artifact) > 0)
+	switch state {
+	case "pending":
+		if locator == "" || kind != "" || sources != 0 || reason != "" {
+			return "resolution_state pending requires only external_locator"
+		}
+	case "unavailable":
+		if reason == "" || len(reason) > 128 || locator != "" || kind != "" || sources != 0 {
+			return "resolution_state unavailable requires only terminal_reason_code containing 1-128 bytes"
+		}
+	case "resolved":
+		if kind == "transcript" && !transcript {
+			return "source_transcript_id, source_sequence_from and source_sequence_until require an id and positive ordered range"
+		}
+		if locator != "" || reason != "" || sources != 1 {
+			return "resolution_state resolved requires exactly one complete source and no external_locator or terminal_reason_code"
+		}
+		kindMatchesSource := (kind == "transcript" && transcript) || (kind == "memory" && memory) ||
+			(kind == "message" && messageID != "") || (kind == "import_artifact" && importLocator != "") ||
+			(kind == "artifact" && len(artifact) > 0)
+		if !kindMatchesSource {
+			return "resolved_kind must explicitly match source_transcript_id, source_memory, source_message_id, source_import_locator, or artifact_excerpt"
+		}
+	default:
+		return "resolution_state must be resolved, pending, or unavailable"
+	}
+	if strings.TrimSpace(row.InputEvidenceID) == "" && (state != "resolved" || (kind != "transcript" && kind != "memory")) {
+		return "input_evidence_id is required unless resolution_state is resolved and resolved_kind is transcript or memory"
+	}
+	return ""
 }
 
 type mcpMemoryCurationPlanGetInput struct {
@@ -950,7 +1049,7 @@ func registerMemoryCurationMCPTools(server *mcp.Server, runtimeName string, back
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.curation.plan"),
-		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal. Every create.snapshot.evidence is required and must contain 1-32 rows; replace.snapshot.evidence is optional additive provenance with at most 32 rows. A lineage relation such as derived_from does not replace snapshot evidence. Never place credentials, secret values, private keys, TOTP seeds, or generated codes in an open-plane memory/fact plan; sensitive=true is not a sealed-secret substitute. Use an empty plan for that material. When no input merits durable memory, submit the exact empty plan draft={\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}. Retrieve and review the accepted normalized result with curation.plan.get before applying it so reviewed cursors advance." + mcpMemoryCurationUntrustedDataWarning,
+		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal. Every create.snapshot.evidence is required and must contain 1-32 rows; replace.snapshot.evidence is optional additive provenance with at most 32 rows; propose_fact.evidence is required and must contain 1-32 rows. Direct evidence without input_evidence_id must be resolved transcript or memory provenance. Pending, unavailable, and resolved message/import_artifact/artifact evidence require input_evidence_id and exact reproduction of a materialized evidence input row. The MCP checks deterministic shape only; frozen membership, exact equality, owner access and contiguous frozen transcript coverage remain backend checks. A lineage relation such as derived_from does not replace snapshot evidence. Never place credentials, secret values, private keys, TOTP seeds, or generated codes in an open-plane memory/fact plan; sensitive=true is not a sealed-secret substitute. Use an empty plan for that material. When no input merits durable memory, submit the exact empty plan draft={\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}. Retrieve and review the accepted normalized result with curation.plan.get before applying it so reviewed cursors advance." + mcpMemoryCurationUntrustedDataWarning,
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryCurationPlanInput) (*mcp.CallToolResult, mcpMemoryCurationPlanOutput, error) {
 		if in.RunID == "" || in.FencingGeneration < 1 || in.IdempotencyKey == "" ||
