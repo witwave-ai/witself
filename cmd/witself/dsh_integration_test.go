@@ -407,7 +407,7 @@ func TestDSHPatchInstallRefusesForeignAndTamperedFiles(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("install error = %v, want %q", err, test.want)
 			}
-			if err != nil && !strings.Contains(err.Error(), cfg.RuntimeMCPConfigPath) {
+			if !strings.Contains(err.Error(), cfg.RuntimeMCPConfigPath) {
 				t.Fatalf("refusal does not name the patch file: %v", err)
 			}
 			if got := readDSHPatchFile(t, cfg.RuntimeMCPConfigPath); got != test.content {
