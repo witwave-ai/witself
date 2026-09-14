@@ -1,6 +1,7 @@
 package transcriptcapture
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -194,6 +195,44 @@ func TestDSHConfigRequiresAndRoundTripsOwnedPatchBinding(t *testing.T) {
 	if loaded.HookMode != HookModeUser || loaded.HookConfigPath != hooked.HookConfigPath {
 		t.Fatalf("dsh user-hook config = %#v", loaded)
 	}
+	// The compatibility capability is persisted only on the new dedicated layout.
+	hooked.HookConfigPath = filepath.Join(configRoot, DSHDedicatedHooksFilename)
+	hooked.DSHLegacyHookBridge = true
+	if err := SaveConfig(hooked); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadConfig(RuntimeDSH)
+	if err != nil || !loaded.DSHLegacyHookBridge {
+		t.Fatal("dedicated compatibility flag did not round trip")
+	}
+	for _, mutation := range []func(*Config){
+		func(c *Config) { c.HookMode = HookModeNone },
+		func(c *Config) { c.Runtime = RuntimeClaudeCode },
+		func(c *Config) { c.HookConfigPath = filepath.Join(configRoot, "hooks.json") },
+		func(c *Config) { c.HookConfigPath = "" },
+	} {
+		candidate := hooked
+		candidate.SchemaVersion = SchemaVersion
+		mutation(&candidate)
+		if err := SaveConfig(candidate); err == nil {
+			t.Fatal("invalid compatibility capability accepted on save")
+		}
+		path, err := ConfigPath(RuntimeDSH)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(RuntimeDSH); err == nil {
+			t.Fatal("invalid compatibility capability accepted on load")
+		}
+	}
+
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}

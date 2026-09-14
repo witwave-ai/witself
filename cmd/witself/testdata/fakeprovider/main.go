@@ -246,48 +246,33 @@ func runDSH(args []string) error {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		fmt.Println("profile: headless")
-		fmt.Println("plugins:")
-		for _, row := range composedDSHRows(string(raw)) {
-			fmt.Printf("  - id: %s\n", row[0])
-			fmt.Printf("    name: %s\n", row[1])
-		}
+		fmt.Print(composedDSHTree(string(raw)))
 		return nil
 	}
 	return fmt.Errorf("unsupported dsh invocation %q", strings.Join(args, " "))
 }
 
-// composedDSHRows applies the one patch operation Witself emits: an `insert`
-// list of rows carrying an id and a name. Everything else is ignored the way a
-// composed tree ignores patches it cannot resolve.
-func composedDSHRows(document string) [][2]string {
-	rows := make([][2]string, 0, 4)
-	id, name := "", ""
+// This synthetic provider implements only literal top-level insert lists.
+// Preserve full rows and inert !!js bytes so boundary checks see config fields.
+func composedDSHTree(document string) string {
+	var result strings.Builder
 	inserting := false
 	for _, line := range strings.Split(document, "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "- insert:":
+		if line == "- insert:" {
 			inserting = true
-		case !inserting || trimmed == "" || strings.HasPrefix(trimmed, "#"):
 			continue
-		case strings.HasPrefix(trimmed, "- id:"):
-			id = unquoteDSHScalar(strings.TrimSpace(strings.TrimPrefix(trimmed, "- id:")))
-			name = ""
-		case strings.HasPrefix(trimmed, "name:") && id != "":
-			name = unquoteDSHScalar(strings.TrimSpace(strings.TrimPrefix(trimmed, "name:")))
-			rows = append(rows, [2]string{id, name})
-			id = ""
+		}
+		if strings.HasPrefix(line, "- ") {
+			inserting = false
+		}
+		if inserting && strings.HasPrefix(line, "    ") {
+			result.WriteString(strings.TrimPrefix(line, "    ") + "\n")
 		}
 	}
-	return rows
-}
-
-func unquoteDSHScalar(value string) string {
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	if result.Len() == 0 {
+		return "[]\n"
 	}
-	return value
+	return result.String()
 }
 
 func runCopilot(args []string) error {

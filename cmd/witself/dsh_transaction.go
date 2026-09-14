@@ -50,6 +50,8 @@ func dshTransactionPath(configRoot string) string {
 }
 
 func beginDSHTransaction(operation string, previous, desired *transcriptcapture.Config) (dshTransactionJournal, error) {
+	previous = cloneDSHTransactionConfig(previous)
+	desired = cloneDSHTransactionConfig(desired)
 	binding := desired
 	if binding == nil {
 		binding = previous
@@ -86,6 +88,17 @@ func beginDSHTransaction(operation string, previous, desired *transcriptcapture.
 		}
 	}
 
+	if err := validateDSHBridgeTransition(previous, desired); err != nil {
+		return dshTransactionJournal{}, err
+	}
+	if operation == dshTransactionInstall {
+		if err := preflightDSHHooksTransaction(desired, previous); err != nil {
+			return dshTransactionJournal{}, err
+		}
+		if _, err := checkDSHLegacyBridgeSelection(*desired, previous); err != nil {
+			return dshTransactionJournal{}, err
+		}
+	}
 	before, err := readDSHPatchSnapshot(binding.RuntimeMCPConfigPath)
 	if err != nil {
 		return dshTransactionJournal{}, fmt.Errorf("snapshot DeepSeek Harness patch file: %w", err)
@@ -114,9 +127,28 @@ func cloneDSHTransactionConfig(cfg *transcriptcapture.Config) *transcriptcapture
 		return nil
 	}
 	configCopy := *cfg
+	// Legacy v1 journals/configs omitted the path. Hydrate only the old path;
+	// new defaults must never reinterpret their patch or deletion capability.
+	if configCopy.Runtime == transcriptcapture.RuntimeDSH && configCopy.HookMode == transcriptcapture.HookModeUser && configCopy.HookConfigPath == "" {
+		configCopy.HookConfigPath = filepath.Join(configCopy.RuntimeConfigRoot, dshHookConfigFileName)
+	}
 	configCopy.MCPEnvironment = cloneCopilotEnvironment(cfg.MCPEnvironment)
 	configCopy.ManagedPermissions = append([]string(nil), cfg.ManagedPermissions...)
 	return &configCopy
+}
+
+func validateDSHBridgeTransition(previous, desired *transcriptcapture.Config) error {
+	if desired == nil || !dshUsesDedicatedHooks(*desired) {
+		return nil
+	}
+	if previous == nil || previous.HookMode != transcriptcapture.HookModeUser {
+		if desired.DSHLegacyHookBridge {
+			return errors.New("fresh DeepSeek Harness hooks cannot acquire a legacy bridge")
+		}
+	} else if dshUsesDedicatedHooks(*previous) && previous.DSHLegacyHookBridge != desired.DSHLegacyHookBridge {
+		return errors.New("DeepSeek Harness rebind must retain its recorded legacy bridge selection")
+	}
+	return nil
 }
 
 func validateDSHTransactionConfig(cfg transcriptcapture.Config) error {
@@ -247,6 +279,8 @@ func loadDSHTransactionJournalFile(configRoot string) (dshTransactionJournal, in
 	if _, err := hex.DecodeString(journal.ID); err != nil {
 		return dshTransactionJournal{}, fileSnapshot, errors.New("invalid DeepSeek Harness transaction id")
 	}
+	journal.Previous = cloneDSHTransactionConfig(journal.Previous)
+	journal.Desired = cloneDSHTransactionConfig(journal.Desired)
 	if err := validateDSHTransactionJournal(configRoot, journal); err != nil {
 		return dshTransactionJournal{}, fileSnapshot, err
 	}
@@ -254,6 +288,9 @@ func loadDSHTransactionJournalFile(configRoot string) (dshTransactionJournal, in
 }
 
 func validateDSHTransactionJournal(configRoot string, journal dshTransactionJournal) error {
+	if err := validateDSHBridgeTransition(journal.Previous, journal.Desired); err != nil {
+		return err
+	}
 	switch journal.Operation {
 	case dshTransactionInstall:
 		if journal.Desired == nil {
@@ -293,6 +330,8 @@ func clearDSHTransaction(configRoot string, expected dshTransactionJournal) erro
 	if err != nil {
 		return err
 	}
+	expected.Previous = cloneDSHTransactionConfig(expected.Previous)
+	expected.Desired = cloneDSHTransactionConfig(expected.Desired)
 	currentRaw, currentErr := json.Marshal(current)
 	expectedRaw, expectedErr := json.Marshal(expected)
 	if currentErr != nil || expectedErr != nil || !bytes.Equal(currentRaw, expectedRaw) {
@@ -306,6 +345,8 @@ func clearDSHTransaction(configRoot string, expected dshTransactionJournal) erro
 	}
 	return syncDSHTransactionRoot(configRoot)
 }
+
+var dshSyncCommittedFileForTest func(string) error
 
 func syncDSHCommittedState(journal dshTransactionJournal) error {
 	binding := journal.Desired
@@ -365,7 +406,36 @@ func syncDSHCommittedState(journal dshTransactionJournal) error {
 			}{hookPath, "DeepSeek Harness hook config"})
 		}
 	}
+	// Migration and hook removal change two documents. Sync both file states
+	// (or their containing directory when absent), including after rollback.
+	for _, candidate := range []*transcriptcapture.Config{journal.Previous, journal.Desired} {
+		if candidate == nil || candidate.HookMode != transcriptcapture.HookModeUser {
+			continue
+		}
+		path, err := dshManagedHookRowPath(*candidate)
+		if err != nil {
+			return err
+		}
+		if candidate == journal.Desired && hookBinding != binding {
+			// A refused, untouched foreign target is outside rollback ownership.
+			if _, err := os.Lstat(path); err == nil && (hookBinding == nil || hookBinding.HookConfigPath != path) {
+				continue
+			}
+		}
+		found := false
+		for _, state := range paths {
+			found = found || state.path == path
+		}
+		if !found {
+			paths = append(paths, struct{ path, label string }{path, "DeepSeek Harness hook config"})
+		}
+	}
 	for _, state := range paths {
+		if dshSyncCommittedFileForTest != nil {
+			if err := dshSyncCommittedFileForTest(state.path); err != nil {
+				return err
+			}
+		}
 		if err := syncIntegrationTransactionFileState(state.path, state.label); err != nil {
 			return err
 		}
@@ -458,11 +528,20 @@ func recoverDSHInstallTransaction(journal dshTransactionJournal) error {
 	if _, err := installManagedInstructions(routing); err != nil {
 		return fmt.Errorf("install DeepSeek Harness memory routing instructions: %w", err)
 	}
-	if err := convergeDSHTransactionDesiredPatch(journal); err != nil {
+	// Inspect provider drift before touching either hook file, then establish
+	// complete hook ownership before the private executor is published.
+	snapshot, err := readDSHPatchSnapshot(desired.RuntimeMCPConfigPath)
+	if err != nil {
+		return err
+	}
+	if err := validateDSHRecoveryPatch(journal, snapshot); err != nil {
 		return err
 	}
 	if err := recoverRuntimeHooksOwned(&desired, journal.Previous); err != nil {
 		return fmt.Errorf("recover DeepSeek Harness transcript hooks: %w", err)
+	}
+	if err := convergeDSHTransactionDesiredPatch(journal); err != nil {
+		return err
 	}
 	if err := transcriptcapture.SaveConfig(desired); err != nil {
 		return err
@@ -475,13 +554,9 @@ func recoverDSHInstallTransaction(journal dshTransactionJournal) error {
 	return verifyRuntimeHooksOwned(desired)
 }
 
-func convergeDSHTransactionDesiredPatch(journal dshTransactionJournal) error {
-	desired := *journal.Desired
-	desiredBlock, err := dshManagedPatchBlock(desired)
-	if err != nil {
-		return err
-	}
-	snapshot, err := readDSHPatchSnapshot(desired.RuntimeMCPConfigPath)
+// Validate both provider regions before any hook mutation during recovery.
+func validateDSHRecoveryPatch(journal dshTransactionJournal, snapshot dshPatchSnapshot) error {
+	desiredBlock, err := dshManagedPatchBlock(*journal.Desired)
 	if err != nil {
 		return err
 	}
@@ -501,6 +576,22 @@ func convergeDSHTransactionDesiredPatch(journal dshTransactionJournal) error {
 			return errors.New("the DeepSeek Harness managed block changed to a foreign binding during interrupted recovery")
 		}
 	}
+	return nil
+}
+
+func convergeDSHTransactionDesiredPatch(journal dshTransactionJournal) error {
+	desired := *journal.Desired
+	desiredBlock, err := dshManagedPatchBlock(desired)
+	if err != nil {
+		return err
+	}
+	snapshot, err := readDSHPatchSnapshot(desired.RuntimeMCPConfigPath)
+	if err != nil {
+		return err
+	}
+	if err := validateDSHRecoveryPatch(journal, snapshot); err != nil {
+		return err
+	}
 	claim := journal.Previous
 	if snapshot.blockPresent() && bytes.Equal(snapshot.block(), desiredBlock) {
 		// The interrupted install already wrote exactly this block; claim it
@@ -511,6 +602,7 @@ func convergeDSHTransactionDesiredPatch(journal dshTransactionJournal) error {
 	if err != nil {
 		return err
 	}
+	plan.previous = cloneDSHTransactionConfig(journal.Previous)
 	touched, err := installDSHPatchBlockWithPlan(plan)
 	if err != nil {
 		return fmt.Errorf("recover desired DeepSeek Harness patch block (touched=%t): %w", touched, err)
@@ -580,6 +672,8 @@ func recoverDSHUninstallTransaction(journal dshTransactionJournal) error {
 // SaveConfig stamps schema_version and installed_at, so a journaled desired
 // binding never marshals identically to the config it produced.
 func equalDSHTransactionConfig(left, right transcriptcapture.Config) bool {
+	left = *cloneDSHTransactionConfig(&left)
+	right = *cloneDSHTransactionConfig(&right)
 	left.SchemaVersion, right.SchemaVersion = "", ""
 	left.InstalledAt, right.InstalledAt = time.Time{}, time.Time{}
 	leftRaw, leftErr := json.Marshal(left)

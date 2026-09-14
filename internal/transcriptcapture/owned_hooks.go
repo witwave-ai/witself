@@ -15,7 +15,7 @@ import (
 // UserHooksOptions is the complete, durable ownership identity for one
 // user-scoped hook installation. ConfigPath is deliberately explicit: refresh,
 // verification, and removal must not follow a later CODEX_HOME,
-// CLAUDE_CONFIG_DIR, GROK_HOME, or CURSOR_CONFIG_DIR value.
+// CLAUDE_CONFIG_DIR, GROK_HOME, CURSOR_CONFIG_DIR, or DSH_HOME value.
 type UserHooksOptions struct {
 	Platform    string
 	Runtime     string
@@ -73,6 +73,9 @@ func InstallOwnedHooks(desired UserHooksOptions, previous *UserHooksOptions) (Ho
 	if previous != nil {
 		normalized, normalizeErr := normalizeUserHooksOptions(*previous)
 		if normalizeErr != nil {
+			if isDSHDedicatedHookConfig(desired) {
+				return HookMutation{}, errors.New("normalize previous DSH hook ownership: invalid binding")
+			}
 			return HookMutation{}, fmt.Errorf("normalize previous hook ownership: %w", normalizeErr)
 		}
 		previous = &normalized
@@ -85,8 +88,8 @@ func InstallOwnedHooks(desired UserHooksOptions, previous *UserHooksOptions) (Ho
 	if err != nil {
 		return HookMutation{}, err
 	}
-	if desired.Runtime == RuntimeGrokBuild {
-		return installOwnedGrokHooks(desired, previous, snapshot)
+	if usesExclusiveHookDocument(desired) {
+		return installOwnedExclusiveHooks(desired, previous, snapshot)
 	}
 
 	root := map[string]any{}
@@ -94,6 +97,19 @@ func InstallOwnedHooks(desired UserHooksOptions, previous *UserHooksOptions) (Ho
 		root, err = parseHookConfigRoot(desired.ConfigPath, snapshot.raw)
 		if err != nil {
 			return HookMutation{}, err
+		}
+	}
+	// DSH selects root.hooks over bare events. Validate the very snapshot used
+	// by CAS: an earlier inspection cannot authorize masking an operator edit.
+	if desired.Runtime == RuntimeDSH {
+		if _, wrapped := root["hooks"]; !wrapped {
+			remaining, err := inspectDSHBareLegacyHooks(root)
+			if err != nil {
+				return HookMutation{}, err
+			}
+			if remaining {
+				return HookMutation{}, errors.New("install DSH hooks: wrapping would mask bare operator hooks; preserving recovery state")
+			}
 		}
 	}
 	before := cloneHookDocument(root)
@@ -145,26 +161,28 @@ func RemoveOwnedHooks(installed UserHooksOptions) (HookMutation, error) {
 	if !snapshot.exists {
 		return HookMutation{Path: installed.ConfigPath}, nil
 	}
-	if installed.Runtime == RuntimeGrokBuild {
-		root, err := parseHookConfigRoot(installed.ConfigPath, snapshot.raw)
+	if usesExclusiveHookDocument(installed) {
+		root, err := parseOwnedHookConfigRoot(installed, snapshot.raw)
 		if err != nil {
 			return HookMutation{}, err
 		}
-		exact, exactErr := exactGrokHookDocument(root, installed)
+		exact, exactErr := matchesExactHookDocument(root, installed)
 		if exactErr != nil {
 			return HookMutation{}, exactErr
 		}
 		if !exact {
-			return HookMutation{}, fmt.Errorf("hook config %s is not the exact persisted Grok hook binding; refusing to remove it", installed.ConfigPath)
+			return HookMutation{}, fmt.Errorf("hook config %s is not the exact persisted %s hook binding; refusing to remove it", installed.ConfigPath, exclusiveHookProvider(installed))
 		}
 		if err := removeHookFileCAS(installed.ConfigPath, snapshot); err != nil {
 			return HookMutation{}, err
 		}
-		_ = os.Remove(filepath.Dir(installed.ConfigPath))
+		if installed.Runtime == RuntimeGrokBuild {
+			_ = os.Remove(filepath.Dir(installed.ConfigPath))
+		}
 		return HookMutation{Path: installed.ConfigPath, Touched: true}, nil
 	}
 
-	root, err := parseHookConfigRoot(installed.ConfigPath, snapshot.raw)
+	root, err := parseOwnedHookConfigRoot(installed, snapshot.raw)
 	if err != nil {
 		return HookMutation{}, err
 	}
@@ -223,17 +241,17 @@ func VerifyOwnedHooks(installed UserHooksOptions) error {
 	if !snapshot.exists {
 		return fmt.Errorf("owned hook config %s is missing", installed.ConfigPath)
 	}
-	root, err := parseHookConfigRoot(installed.ConfigPath, snapshot.raw)
+	root, err := parseOwnedHookConfigRoot(installed, snapshot.raw)
 	if err != nil {
 		return err
 	}
-	if installed.Runtime == RuntimeGrokBuild {
-		exact, exactErr := exactGrokHookDocument(root, installed)
+	if usesExclusiveHookDocument(installed) {
+		exact, exactErr := matchesExactHookDocument(root, installed)
 		if exactErr != nil {
 			return exactErr
 		}
 		if !exact {
-			return fmt.Errorf("the Grok hook config %s differs from the exact persisted binding", installed.ConfigPath)
+			return fmt.Errorf("the %s hook config %s differs from the exact persisted binding", exclusiveHookProvider(installed), installed.ConfigPath)
 		}
 		return nil
 	}
@@ -280,6 +298,9 @@ func normalizeUserHooksOptions(opts UserHooksOptions) (UserHooksOptions, error) 
 		return UserHooksOptions{}, errors.New("hook account, realm, and agent are required")
 	}
 	if opts.Location != "" && !locationNamePattern.MatchString(opts.Location) {
+		if isDSHDedicatedHookConfig(opts) {
+			return UserHooksOptions{}, errors.New("invalid DSH hook location")
+		}
 		return UserHooksOptions{}, fmt.Errorf("invalid hook location %q", opts.Location)
 	}
 	if err := validateHookWitselfHome(opts.Platform, opts.WitselfHome); err != nil {
@@ -302,7 +323,26 @@ func normalizeUserHooksOptions(opts UserHooksOptions) (UserHooksOptions, error) 
 	return opts, nil
 }
 
-func installOwnedGrokHooks(desired UserHooksOptions, previous *UserHooksOptions, snapshot hookFileSnapshot) (HookMutation, error) {
+func usesExclusiveHookDocument(opts UserHooksOptions) bool {
+	return opts.Runtime == RuntimeGrokBuild || isDSHDedicatedHookConfig(opts)
+}
+
+func exclusiveHookProvider(opts UserHooksOptions) string {
+	if opts.Runtime == RuntimeDSH {
+		return "DSH"
+	}
+	return "Grok"
+}
+
+func parseOwnedHookConfigRoot(opts UserHooksOptions, raw []byte) (map[string]any, error) {
+	root, err := parseHookConfigRoot(opts.ConfigPath, raw)
+	if err != nil && isDSHDedicatedHookConfig(opts) {
+		return nil, errors.New("parse dedicated DSH hook config: invalid JSON object")
+	}
+	return root, err
+}
+
+func installOwnedExclusiveHooks(desired UserHooksOptions, previous *UserHooksOptions, snapshot hookFileSnapshot) (HookMutation, error) {
 	desiredRoot, err := exactHookDocument(desired)
 	if err != nil {
 		return HookMutation{}, err
@@ -313,19 +353,19 @@ func installOwnedGrokHooks(desired UserHooksOptions, previous *UserHooksOptions,
 		}
 		return HookMutation{Path: desired.ConfigPath, Touched: true}, nil
 	}
-	current, err := parseHookConfigRoot(desired.ConfigPath, snapshot.raw)
+	current, err := parseOwnedHookConfigRoot(desired, snapshot.raw)
 	if err != nil {
 		return HookMutation{}, err
 	}
 	if previous == nil {
-		return HookMutation{}, fmt.Errorf("dedicated Grok hook file %s already exists without a durable Witself ownership record; refusing to claim it", desired.ConfigPath)
+		return HookMutation{}, fmt.Errorf("dedicated %s hook file %s already exists without a durable Witself ownership record; refusing to claim it", exclusiveHookProvider(desired), desired.ConfigPath)
 	}
-	exactPrevious, err := exactGrokHookDocument(current, *previous)
+	exactPrevious, err := matchesExactHookDocument(current, *previous)
 	if err != nil {
 		return HookMutation{}, err
 	}
 	if !exactPrevious {
-		return HookMutation{}, fmt.Errorf("dedicated Grok hook file %s does not match the exact prior persisted binding", desired.ConfigPath)
+		return HookMutation{}, fmt.Errorf("dedicated %s hook file %s does not match the exact prior persisted binding", exclusiveHookProvider(desired), desired.ConfigPath)
 	}
 	if hookJSONEquivalent(current, desiredRoot) {
 		return HookMutation{Path: desired.ConfigPath}, nil
@@ -361,7 +401,7 @@ func exactHookDocument(opts UserHooksOptions) (map[string]any, error) {
 	return map[string]any{"hooks": hooks}, nil
 }
 
-func exactGrokHookDocument(root map[string]any, opts UserHooksOptions) (bool, error) {
+func matchesExactHookDocument(root map[string]any, opts UserHooksOptions) (bool, error) {
 	expected, err := exactHookDocument(opts)
 	if err != nil {
 		return false, err
