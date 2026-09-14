@@ -1,6 +1,6 @@
 module github.com/witwave-ai/witself/infra/pulumi
 
-go 1.26.6
+go 1.27.1
 
 require (
 	cloud.google.com/go/kms v1.33.0

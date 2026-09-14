@@ -118,13 +118,164 @@ func TestEventRefusals(t *testing.T) {
 		t.Fatal("nonzero process passed")
 	}
 }
+func TestEventOutputTypeCompatibility(t *testing.T) {
+	spec := specs()[0]
+	for _, kind := range []struct{ name, field string }{
+		{"legacy omission", ""},
+		{"empty", `,"OutputType":""`},
+		{"frame", `,"OutputType":"frame"`},
+		{"error", `,"OutputType":"error"`},
+		{"error-continue", `,"OutputType":"error-continue"`},
+	} {
+		for _, scope := range []string{"package", "test"} {
+			t.Run(kind.name+"/"+scope, func(t *testing.T) {
+				test := ""
+				if scope == "test" {
+					test = spec.tests[0].Name
+				}
+				input := events(spec, "linux-x64")
+				raw := eventBytes(input[:2])
+				raw = append(raw, []byte(fmt.Sprintf(`{"Action":"output","Package":%q,"Test":%q,"Output":"ordinary output\n"%s}`+"\n", packageName, test, kind.field))...)
+				raw = append(raw, eventBytes(input[2:])...)
+				cancelled := 0
+				stream := newEventStream(spec, "linux-x64", func() { cancelled++ })
+				for _, b := range raw { // Metadata may cross any write boundary.
+					_, _ = stream.Write([]byte{b})
+				}
+				results, reason := stream.finish(0)
+				if reason != "none" || cancelled != 0 {
+					t.Fatalf("documented output rejected: %s, cancellations %d", reason, cancelled)
+				}
+				for _, result := range results {
+					if result.Status != "passed" {
+						t.Fatal("output classification changed passing terminal result")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestEventOutputTypeRefusals(t *testing.T) {
+	spec := specs()[0]
+	type refusal struct{ name, action, fields string }
+	cases := []refusal{}
+	for _, value := range []string{`null`, `true`, `false`, `0`, `1.5`, `[]`, `["frame"]`, `{}`, `{"kind":"frame"}`, `"unknown"`, `"Frame"`, `"error_continue"`, `" frame"`, `"frame "`} {
+		cases = append(cases, refusal{"value/" + value, "output", `,"OutputType":` + value})
+	}
+	for _, alias := range []string{"outputType", "Outputtype", "outputtype", "OUTPUTTYPE"} {
+		cases = append(cases,
+			refusal{"alias/" + alias, "output", fmt.Sprintf(`,%q:"frame"`, alias)},
+			refusal{"alias with canonical/" + alias, "output", fmt.Sprintf(`,"OutputType":"frame",%q:"error"`, alias)},
+		)
+	}
+	for _, fields := range []string{
+		`,"OutputType":"frame","OutputType":"frame"`,
+		`,"OutputType":"frame","OutputType":"error"`,
+		`,"OutputType":"error","OutputType":"frame"`,
+		`,"OutputType":"frame","Output\u0054ype":"frame"`,
+	} {
+		cases = append(cases, refusal{"duplicate/" + fields, "output", fields})
+	}
+	for _, key := range []string{"Key", "Value", "Path", "Unknown"} {
+		cases = append(cases, refusal{"unrelated/" + key, "output", fmt.Sprintf(`,"OutputType":"frame",%q:"synthetic"`, key)})
+	}
+	for _, action := range []string{"", "start", "run", "pause", "cont", "pass", "fail", "skip", "unknown"} {
+		for _, kind := range []string{"", "frame", "error", "error-continue"} {
+			cases = append(cases, refusal{"action/" + action + "/" + kind, action, fmt.Sprintf(`,"OutputType":%q`, kind)})
+		}
+	}
+	for _, tc := range cases {
+		for _, scope := range []string{"package", "test"} {
+			t.Run(tc.name+"/"+scope, func(t *testing.T) {
+				test := ""
+				if scope == "test" {
+					test = spec.tests[0].Name
+				}
+				cancelled := 0
+				stream := newEventStream(spec, "linux-x64", func() { cancelled++ })
+				_, _ = stream.Write(eventBytes(events(spec, "linux-x64")[:2]))
+				raw := []byte(fmt.Sprintf(`{"Action":%q,"Package":%q,"Test":%q%s}`+"\n", tc.action, packageName, test, tc.fields))
+				if n, err := stream.Write(raw); err != nil || n != len(raw) {
+					t.Fatal("rejected output did not remain drainable")
+				}
+				if stream.failure != "malformed_stream" || cancelled != 1 || len(stream.buffer) != 0 {
+					t.Fatal("invalid metadata did not cancel immediately and discard input")
+				}
+				_, _ = stream.Write(eventBytes(events(spec, "linux-x64")))
+				if _, reason := stream.finish(0); reason != "malformed_stream" || cancelled != 1 || len(stream.buffer) != 0 {
+					t.Fatal("later events revived rejected stream or repeated cancellation")
+				}
+			})
+		}
+	}
+}
+
+func TestEventOutputTypeHasNoTerminalAuthority(t *testing.T) {
+	spec := specs()[0]
+	for _, kind := range []string{"frame", "error", "error-continue"} {
+		for _, tc := range []struct {
+			name, reason, status string
+			exit                 int
+			change               func([]testEvent) []testEvent
+		}{
+			{"pass", "none", "passed", 0, func(in []testEvent) []testEvent { return in }},
+			{"failed test", "test_failed", "failed", 0, func(in []testEvent) []testEvent { in[2].Action = "fail"; return in }},
+			{"failed package", "package_failed", "passed", 0, func(in []testEvent) []testEvent { in[len(in)-1].Action = "fail"; return in }},
+			{"missing test terminal", "incomplete_events", "incomplete", 0, func(in []testEvent) []testEvent { return append(in[:2], in[3:]...) }},
+			{"missing selected test", "missing_test", "passed", 0, func(in []testEvent) []testEvent { return append(in[:3], in[5:]...) }},
+			{"missing package terminal", "incomplete_events", "passed", 0, func(in []testEvent) []testEvent { return in[:len(in)-1] }},
+			{"nonzero exit", "process_failed", "passed", 7, func(in []testEvent) []testEvent { return in }},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				input := tc.change(events(spec, "linux-x64"))
+				output := []testEvent{
+					{Action: "output", Package: packageName, Test: spec.tests[0].Name, OutputType: kind, Output: "--- PASS: synthetic\n--- FAIL: synthetic\n"},
+					{Action: "output", Package: packageName, OutputType: kind, Output: "PASS\nFAIL\n"},
+				}
+				input = append(input[:2], append(output, input[2:]...)...)
+				stream := newEventStream(spec, "linux-x64", nil)
+				_, _ = stream.Write(eventBytes(input))
+				results, reason := stream.finish(tc.exit)
+				if reason != tc.reason || results[0].Status != tc.status {
+					t.Fatalf("got %s/%s, want %s/%s", reason, results[0].Status, tc.reason, tc.status)
+				}
+			})
+		}
+	}
+}
+
 func TestWindowsCursorRequiresExactReason(t *testing.T) {
 	spec := specs()[1]
+	for _, outputType := range []string{"", "frame", "error", "error-continue"} {
+		t.Run("output type/"+outputType, func(t *testing.T) {
+			input := events(spec, "windows-x64")
+			for n := range input {
+				if input[n].Action == "output" {
+					input[n].OutputType = outputType
+				}
+			}
+			stream := newEventStream(spec, "windows-x64", nil)
+			_, _ = stream.Write(eventBytes(input))
+			results, reason := stream.finish(0)
+			if reason != "none" {
+				t.Fatal(reason)
+			}
+			for _, result := range results {
+				if result.Provider == "cursor" && (result.Status != "not_applicable" || result.FailureCategory != "cursor_native_windows_unsupported") {
+					t.Fatal("output classification changed Windows skip contract")
+				}
+			}
+		})
+	}
 	for _, kind := range []string{"wrong reason", "pass instead of skip", "missing skip"} {
 		t.Run(kind, func(t *testing.T) {
 			input := events(spec, "windows-x64")
 			for n := range input {
 				if input[n].Test == "TestProviderIntegrationContractCursor" {
+					if input[n].Action == "output" {
+						input[n].OutputType = "frame"
+					}
 					if input[n].Action == "output" && kind == "wrong reason" {
 						input[n].Output = "private unrelated skip\n"
 					}
@@ -150,7 +301,13 @@ func TestWindowsCursorRequiresExactReason(t *testing.T) {
 func TestRawOutputDoesNotEscape(t *testing.T) {
 	spec := specs()[0]
 	in := events(spec, "linux-x64")
-	in = append(in[:2], append([]testEvent{{Action: "output", Package: packageName, Test: spec.tests[0].Name, Output: "PRIVATE_SENTINEL /private/home/runtime token=SECRET_VALUE\n"}}, in[2:]...)...)
+	output := []testEvent{}
+	for _, kind := range []string{"", "frame", "error", "error-continue"} {
+		for _, test := range []string{"", spec.tests[0].Name} {
+			output = append(output, testEvent{Action: "output", Package: packageName, Test: test, OutputType: kind, Output: "PRIVATE_SENTINEL /private/home/runtime token=SECRET_VALUE\n"})
+		}
+	}
+	in = append(in[:2], append(output, in[2:]...)...)
 	s := newEventStream(spec, "linux-x64", nil)
 	_, _ = s.Write(eventBytes(in))
 	results, reason := s.finish(0)
@@ -158,7 +315,7 @@ func TestRawOutputDoesNotEscape(t *testing.T) {
 		t.Fatal(reason)
 	}
 	b := marshal(t, results)
-	for _, bad := range []string{"PRIVATE_SENTINEL", "/private/", "SECRET_VALUE", "Output"} {
+	for _, bad := range []string{"PRIVATE_SENTINEL", "/private/", "SECRET_VALUE", "Output", "OutputType", "frame", "error", "error-continue"} {
 		if bytes.Contains(b, []byte(bad)) {
 			t.Fatal("raw output leaked")
 		}

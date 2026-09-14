@@ -26,6 +26,10 @@ linters:
     - sqlclosecheck
     - staticcheck
     - unused
+  settings:
+    govet:
+      enable:
+        - nilness
 
 formatters:
   enable:

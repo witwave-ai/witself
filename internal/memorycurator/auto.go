@@ -413,7 +413,7 @@ func (s AutoStore) Inspect() (AutoInspection, error) {
 	case err == nil:
 		inspection.Configured, inspection.Config = true, config
 	case errors.Is(err, os.ErrNotExist):
-	case err != nil:
+	default:
 		return AutoInspection{}, err
 	}
 	defaultState := AutoStateDisabled

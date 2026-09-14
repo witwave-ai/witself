@@ -20,6 +20,7 @@ type testEvent struct {
 	Test        string  `json:"Test"`
 	Elapsed     float64 `json:"Elapsed"`
 	Output      string  `json:"Output"`
+	OutputType  string  `json:"OutputType,omitempty"`
 	FailedBuild string  `json:"FailedBuild"`
 }
 type testState struct {
@@ -101,7 +102,7 @@ func (s *eventStream) consume(raw []byte) {
 	}
 	for key := range keys {
 		switch key {
-		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "FailedBuild":
+		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "OutputType", "FailedBuild":
 		default:
 			s.reject("malformed_stream")
 			return
@@ -112,6 +113,22 @@ func (s *eventStream) consume(raw []byte) {
 	if d.Decode(&event) != nil || !json.Valid(raw) || event.Package != packageName || len(event.Test) > 512 || event.Elapsed < 0 {
 		s.reject("malformed_stream")
 		return
+	}
+	if outputType, present := keys["OutputType"]; present {
+		// Go 1.27 test2json documents this optional output classification.
+		// JSON null otherwise decodes into a string's zero value. Presence,
+		// including an empty string, is valid only on output events.
+		if event.Action != "output" || bytes.Equal(bytes.TrimSpace(outputType), []byte("null")) {
+			s.reject("malformed_stream")
+			return
+		}
+		switch event.OutputType {
+		case "", "frame", "error", "error-continue":
+		default:
+			s.reject("malformed_stream")
+			return
+		}
+		// Classification has no terminal-result authority and is never retained.
 	}
 	if event.Time != "" { // Go may use a local offset; only the runner's UTC times are published.
 		if _, err := parseEventTime(event.Time); err != nil {

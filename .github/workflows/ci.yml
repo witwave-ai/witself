@@ -97,7 +97,7 @@ jobs:
 
       - name: golangci-lint
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
           golangci-lint run ./...
 
       - name: Cloudflare agent-email Worker gates
@@ -207,7 +207,7 @@ jobs:
         run: cd infra/pulumi && go mod tidy -diff
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
       # infra/pulumi is a NESTED module: ./... from the repo root never
       # descends into it, so without this step its tests run nowhere.

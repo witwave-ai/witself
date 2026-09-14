@@ -12,7 +12,7 @@ ENDPOINT      := http://localhost:8080
 
 # Pin golangci-lint to the same version ci.yml installs so `make check`
 # and CI can never disagree about what clean means.
-GOLANGCI_LINT_VERSION := v2.12.2
+GOLANGCI_LINT_VERSION := v2.13.2
 
 # Keep the vulnerability scanner identical locally and in CI; upgrade these
 # pins together so the gate cannot float between runs.

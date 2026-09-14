@@ -183,22 +183,26 @@ not establish this runtime proof; no deployment was performed in this slice.
 
 ## Go Baseline
 
-Witself should use the latest stable Go release. As of August 14, 2026, the
-current stable Go release is `go1.26.6`.
+Witself should use the latest stable Go release. As of September 14, 2026, the
+current stable Go release is `go1.27.1`.
 
-Initial module settings when code starts:
+Current root-module settings:
 
 ```text
 module github.com/witwave-ai/witself
 
-go 1.26
+go 1.27.0
 
-toolchain go1.26.6
+toolchain go1.27.1
 ```
 
-Refresh this baseline before first implementation and before each release. If a
-new stable Go release exists, update the toolchain baseline and rerun the full
-test and release smoke path before publishing.
+The nested `infra/pulumi` module declares `go 1.27.1`. CI and release jobs select
+Go from the relevant module's `go.mod`; the control-plane source-build image uses
+`golang:1.27.1`. The CLI and server runtime images copy GoReleaser-built binaries.
+
+Refresh these baselines together before each release. If a new stable Go release
+exists, update the toolchain baseline and rerun the full test and release smoke
+path before publishing.
 
 ## Go Module Policy
 
@@ -213,13 +217,12 @@ test and release smoke path before publishing.
 - Avoid vendoring dependencies by default.
 - Keep dependencies current deliberately through reviewable updates.
 
-The initial module bootstrap, once the first Go package exists, should look like:
+To update the existing modules to the current baseline:
 
 ```sh
-go mod init github.com/witwave-ai/witself
-go mod edit -go=1.26
-go mod edit -toolchain=go1.26.6
-go mod tidy
+go mod edit -go=1.27.0
+go mod edit -toolchain=go1.27.1
+(cd infra/pulumi && go mod edit -go=1.27.1)
 ```
 
 ## Expected Checks
