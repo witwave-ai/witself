@@ -207,9 +207,8 @@ func validateDSHPrivateComposedConfig(raw []byte, cfg transcriptcapture.Config) 
 			if fields["<<"] != nil {
 				return false
 			}
-			isolation := map[string]*yaml.Node{}
 			if n := fields["isolate"]; n != nil {
-				isolation, ok = dshNodeMap(n)
+				isolation, ok := dshNodeMap(n)
 				if !ok {
 					return false
 				}

@@ -462,9 +462,10 @@ func TestInspectDSHLegacyHooksWrappedPrecedence(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			opts := dshOwnedHooksTestOptions(t, "hooks.json")
 			hooks := map[string]any{}
-			if name == "operator" {
+			switch name {
+			case "operator":
 				hooks["Stop"] = []any{dshOperatorHookTestEntry()}
-			} else if name == "exact prior" {
+			case "exact prior":
 				if err := addExactOwnedHookSet(hooks, opts); err != nil {
 					t.Fatal("could not construct exact prior hook set")
 				}
