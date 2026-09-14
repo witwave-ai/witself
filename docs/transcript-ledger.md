@@ -143,11 +143,70 @@ access and managed memory routing only: they record `hook_mode: none`, install
 no hooks, write nothing to `~/.witself/capture/outbox/`, and report
 `transcript capture: unavailable` at install.
 
-DeepSeek Harness mounts `@deepseek-ai/dsh-hooks-claude-code` from the same
-fenced block in `$DSH_HOME/cordis.patch.yml` that mounts the MCP client, as a
-second `witself-hooks` row whose `configPath` names the owned
-`$DSH_HOME/hooks.json`. The bridge emits claude-code-shaped payloads for
-`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+DeepSeek Harness keeps the v1 managed fence in
+`$DSH_HOME/cordis.patch.yml`. Fresh user-hook installs add `witself-hooks-policy`,
+`witself-hooks-shell`, and `witself-hooks` beside the unchanged `witself-mcp` row.
+The capture policy uses literal `workspace-write` with the canonical persisted
+`WITSELF_HOME` as its workspace root. The private shell and hook bridge share the
+reserved `witself-capture-shell` label; the policy and shell share
+`witself-capture-policy`. Policy `systemPrompt: true` and shell `settings: true`
+isolation prevent duplicate context/settings registration. The root policy,
+ordinary shell, and tools retain their existing scope; capture adds no
+unsandboxed executor.
+
+The private bridge reads only the canonical `$DSH_HOME/witself-hooks.json`.
+Witself must own the **complete document**, including every event and handler;
+foreign commands, metadata, or mixed handler sets are refused. An existing file
+cannot be claimed by first install even if it matches the desired commands. A
+previous binding or a durable recovery journal supplies the exact ownership
+capability. Fresh installs leave unrelated `$DSH_HOME/hooks.json` untouched and
+do not mount it.
+
+Legacy configs and v1 journals retain the old MCP plus ordinary hook bridge
+rendering. An omitted legacy `hook_config_path` resolves explicitly to
+`hooks.json`. Reinstall migrates a legacy user-hook binding by establishing the
+dedicated document, then removing only its exact prior Witself handlers from the
+shared file. Remaining operator handlers retain an ordinary root-policy bridge,
+`witself-hooks-legacy`. The persisted `dsh_legacy_hook_bridge` boolean records this
+choice; identity rebinds carry it without deriving a new choice from live foreign
+commands. Only legacy user-hook migration can initially acquire it. Bare event
+maps containing Witself markers are a supported refusal because the shared-file
+remover cannot safely subtract them. Foreign-only bare maps can migrate without
+rewriting. Shared-document install and restore inspect the same parsed snapshot
+used by their CAS write and refuse to wrap nonempty supported bare events,
+because the old bridge would then mask those events. Malformed or marker-bearing
+bare events also receive a value-free refusal. A late rollback refusal leaves
+the journal pending for safe forward recovery.
+
+The installer rechecks the legacy choice before mutation and publication. It
+validates dedicated ownership before publishing private rows, including during
+recovery and rollback. Recovery reconciles both documents even when the dedicated
+file already verifies. Journals contain prior/desired owned bindings, not raw
+foreign commands; both changed hook-file states enter durability closure before
+journal removal. Ownership drift or incomplete rollback leaves recovery pending.
+Uninstall removes all managed bridge/provider rows and the exact owned hook set;
+it preserves operator hooks. MCP-only bindings remain supported.
+
+A composed-config check parses the final `--dump-config` YAML as bounded,
+non-evaluating nodes. It verifies active managed IDs, exact private isolation and
+literal policy/path fields, compatibility selection, and reserved-label consumers
+in loader entries/groups. Unresolved executable Include entries cause verification
+refusal because the dump does not expose their effective children from backing
+files or patches. The check recognizes `cordis:include`, the full
+`@deepseek-ai/cordis-plugin-include` name, and direct absolute, relative, or file-URL paths to
+that package's `lib/index.js` after non-evaluating path normalization. All such
+carriers are refused, including disabled ones; unrelated nested config data is
+preserved. The check does not classify every arbitrary custom plugin or symlink
+alias, load referenced files, or evaluate or rewrite foreign `!!js` content.
+This verifies the supported configuration boundary; plugin startup,
+operating-system confinement, and live capture require separate evidence.
+An unavailable provider is reported separately.
+OS acceptance must independently prove private storage writes and ordinary
+session denial; fake executor tests cannot prove sandbox enforcement. Live
+capture still requires the real client and transcript acceptance evidence.
+
+The bridge emits claude-code-shaped payloads for `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
 Its `Stop` payload carries neither assistant text nor a transcript path, so the
 Stop event is captured value-free and marked pending native finalization, and
 flush resolves the turn from the installed binding's session store under

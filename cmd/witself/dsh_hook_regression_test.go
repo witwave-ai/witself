@@ -32,8 +32,8 @@ func TestDSHRefusedHookWritePreservesRollbackOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := installDSHPatchBlockWithPlan(plan); err != nil {
-		t.Fatal(err)
+	if touched, err := installDSHPatchBlockWithPlan(plan); err == nil || touched {
+		t.Fatal("private bridge must refuse publication before hook ownership")
 	}
 	// A foreign directory is a deterministic refused write with no mutation.
 	if err := os.Mkdir(desired.HookConfigPath, 0o700); err != nil {
@@ -96,8 +96,8 @@ func TestDSHRefusedFirstHookWriteClearsRollbackJournal(t *testing.T) {
 	if err := transcriptcapture.SaveConfig(desired); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := installDSHPatchBlock(desired); err != nil {
-		t.Fatal(err)
+	if touched, err := installDSHPatchBlock(desired); err == nil || touched {
+		t.Fatal("private bridge must refuse publication before hook ownership")
 	}
 	if err := os.Mkdir(desired.HookConfigPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestDSHHookRecoveryUsesJournaledHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DSH_HOME", previous.RuntimeConfigRoot)
-	stubDSHDumpConfig(t, dshComposedFixture()+"  - id: "+dshHooksPatchRowID+"\n    name: '"+dshHooksBridgePluginName+"'\n", nil)
+	stubDSHDumpConfig(t, dshPrivateComposedFixture(t, desired), nil)
 	if err := recoverDSHTransaction(root); err != nil {
 		t.Fatalf("recovery must finish when the installed selector is restored: %v", err)
 	}

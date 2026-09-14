@@ -415,14 +415,20 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 	if err := validateDSHInstalledTopology(cfg); err != nil {
 		t.Fatal(err)
 	}
-	hookPath := filepath.Join(dshHome, dshHookConfigFileName)
+	hookPath := filepath.Join(dshHome, transcriptcapture.DSHDedicatedHooksFilename)
 	if cfg.RuntimeCLICommand != fixture.provider.Path || cfg.RuntimeConfigRoot != dshHome ||
 		cfg.RuntimeMCPConfigPath != patchPath || cfg.HookMode != transcriptcapture.HookModeUser ||
 		cfg.HookConfigPath != hookPath || cfg.RuntimeVersion != "0.1.5-rc.1" ||
 		cfg.MCPEnvironment["WITSELF_HOME"] != fixture.witselfHome {
 		t.Fatalf("persisted dsh binding = %#v", cfg)
 	}
-	assertDSHOwnedHookSet(t, hookPath, foreignHook)
+	assertDSHOwnedHookSet(t, hookPath)
+	if cfg.DSHLegacyHookBridge {
+		t.Fatal("fresh install mounted unrelated legacy hooks")
+	}
+	if current, err := os.ReadFile(filepath.Join(dshHome, dshHookConfigFileName)); err != nil || string(current) != foreignHook+"\n" {
+		t.Fatal("fresh install changed unrelated hooks")
+	}
 	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationHealthy)
 	expectedBlock, err := dshManagedPatchBlock(cfg)
 	if err != nil {
@@ -464,7 +470,10 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 	if current, err := os.ReadFile(agentsPath); err != nil || !bytes.Equal(current, foreignInstructions) {
 		t.Fatalf("uninstall did not restore the shared dsh instructions exactly: %q, %v", current, err)
 	}
-	assertDSHHooksRemoved(t, hookPath)
+	if _, err := os.Lstat(hookPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("dedicated hooks survived uninstall")
+	}
+	assertDSHHooksRemoved(t, filepath.Join(dshHome, dshHookConfigFileName))
 	assertIntegrationConfigAbsent(t, transcriptcapture.RuntimeDSH)
 	assertPortableProviderVerification(t, fixture, transcriptcapture.RuntimeDSH, integrationVerificationNotInstalled)
 	// dsh has no `mcp add` surface; Witself owns the patch file directly, so the
@@ -473,9 +482,8 @@ func TestProviderIntegrationContractDSH(t *testing.T) {
 }
 
 // assertDSHOwnedHookSet proves install wrote exactly the five claude-code
-// shaped events the harness bridge offers, and left an operator's own handler
-// in place beside them.
-func assertDSHOwnedHookSet(t *testing.T, path, foreignCommand string) {
+// shaped events the harness bridge offers, without foreign commands.
+func assertDSHOwnedHookSet(t *testing.T, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -518,11 +526,8 @@ func assertDSHOwnedHookSet(t *testing.T, path, foreignCommand string) {
 	if len(owned) != 0 {
 		t.Fatalf("installed dsh hooks carry unexpected events %v:\n%s", owned, raw)
 	}
-	if foreign != 1 || !strings.Contains(string(raw), "operator-notify") {
-		t.Fatalf("install did not preserve the operator's own dsh hook:\n%s", raw)
-	}
-	if !strings.Contains(foreignCommand, "operator-notify") {
-		t.Fatalf("test fixture no longer configures the foreign hook it asserts")
+	if foreign != 0 {
+		t.Fatal("dedicated hook document contains foreign handlers")
 	}
 }
 

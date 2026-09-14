@@ -88,6 +88,7 @@ type Config struct {
 	RuntimePluginDigest      string            `json:"runtime_plugin_digest,omitempty"`
 	CaptureMode              string            `json:"capture_mode"`
 	HookMode                 string            `json:"hook_mode"`
+	DSHLegacyHookBridge      bool              `json:"dsh_legacy_hook_bridge,omitempty"`
 	HookConfigPath           string            `json:"hook_config_path,omitempty"`
 	HookManagedDir           string            `json:"hook_managed_dir,omitempty"`
 	HookRunnerPath           string            `json:"hook_runner_path,omitempty"`
@@ -240,6 +241,9 @@ func SaveConfig(cfg Config) error {
 	cfg.HookRunnerPath = strings.TrimSpace(cfg.HookRunnerPath)
 	cfg.HookRunnerDigest = strings.TrimSpace(cfg.HookRunnerDigest)
 	cfg.HookPolicyDigest = strings.TrimSpace(cfg.HookPolicyDigest)
+	if err := validateDSHLegacyHookBridge(cfg, runtime, hookMode); err != nil {
+		return err
+	}
 	if err := validateHookOwnershipFields(runtime, hookMode, cfg.HookConfigPath, cfg.HookManagedDir, cfg.HookRunnerPath, cfg.HookRunnerDigest, cfg.HookPolicyDigest); err != nil {
 		return err
 	}
@@ -311,6 +315,9 @@ func LoadConfig(runtime string) (Config, error) {
 	cfg.HookRunnerPath = strings.TrimSpace(cfg.HookRunnerPath)
 	cfg.HookRunnerDigest = strings.TrimSpace(cfg.HookRunnerDigest)
 	cfg.HookPolicyDigest = strings.TrimSpace(cfg.HookPolicyDigest)
+	if err := validateDSHLegacyHookBridge(cfg, runtime, cfg.HookMode); err != nil {
+		return Config{}, err
+	}
 	if err := validateHookOwnershipFields(runtime, cfg.HookMode, cfg.HookConfigPath, cfg.HookManagedDir, cfg.HookRunnerPath, cfg.HookRunnerDigest, cfg.HookPolicyDigest); err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
@@ -318,6 +325,16 @@ func LoadConfig(runtime string) (Config, error) {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// The bridge is a capability acquired only by explicit legacy migration.
+// Its path is derived from RuntimeConfigRoot, never an independent selector.
+func validateDSHLegacyHookBridge(cfg Config, runtime, hookMode string) error {
+	if cfg.DSHLegacyHookBridge && (runtime != RuntimeDSH || hookMode != HookModeUser ||
+		cfg.RuntimeConfigRoot == "" || cfg.HookConfigPath != filepath.Join(cfg.RuntimeConfigRoot, DSHDedicatedHooksFilename)) {
+		return errors.New("dsh_legacy_hook_bridge requires the dedicated dsh user-hook layout")
+	}
+	return nil
 }
 
 func validateHookOwnershipFields(runtime, hookMode, configPath, managedDir, runnerPath, runnerDigest, policyDigest string) error {

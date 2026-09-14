@@ -265,6 +265,102 @@ func TestOwnedDSHHooksKeepSharedDocuments(t *testing.T) {
 	}
 }
 
+func TestOwnedDSHSharedHooksRefuseNewBareSnapshot(t *testing.T) {
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SubagentStart", "SubagentStop"} {
+		for _, shape := range []string{"foreign", "malformed", "marker"} {
+			t.Run(event+"/"+shape, func(t *testing.T) {
+				opts := dshOwnedHooksTestOptions(t, "hooks.json")
+				writeDSHHookTestDocument(t, opts.ConfigPath, map[string]any{"hooks": map[string]any{}})
+				if remaining, err := InspectDSHLegacyHooks(opts.ConfigPath, &opts); err != nil || remaining {
+					t.Fatal("initial wrapped snapshot did not pass inspection")
+				}
+				var value any = []any{dshOperatorHookTestEntry()}
+				switch shape {
+				case "malformed":
+					value = dshHookErrorCanary
+				case "marker":
+					value = []any{map[string]any{"command": "operator" + hookCommandMarker + "dsh " + dshHookErrorCanary}}
+				}
+				// An operator replaces the separately inspected document. Both first
+				// install and restoration must validate their own new snapshot.
+				raw := writeDSHHookTestDocument(t, opts.ConfigPath, map[string]any{event: value})
+				if err := os.Chmod(opts.ConfigPath, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.Stat(opts.ConfigPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, prior := range []*UserHooksOptions{nil, &opts} {
+					mutation, err := InstallOwnedHooks(opts, prior)
+					if err == nil || mutation.Touched {
+						t.Fatal("mutation wrapped a newly encountered bare event map")
+					}
+					if strings.Contains(err.Error(), dshHookErrorCanary) || strings.Contains(err.Error(), opts.ConfigPath) {
+						t.Fatal("bare event refusal reflected submitted values")
+					}
+					assertDSHLegacyHookTestBytes(t, opts.ConfigPath, raw)
+					after, err := os.Stat(opts.ConfigPath)
+					if err != nil || after.Mode() != before.Mode() || !os.SameFile(before, after) {
+						t.Fatal("bare event refusal changed file mode or identity")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestOwnedDSHSharedHooksWrappingCompatibility(t *testing.T) {
+	for name, root := range map[string]map[string]any{
+		"empty map": {},
+		"empty events": {"SessionStart": []any{}, "UserPromptSubmit": []any{}, "PreToolUse": []any{},
+			"PostToolUse": []any{}, "Stop": []any{}, "SubagentStart": []any{}, "SubagentStop": []any{}},
+		"metadata": {"metadata": []any{dshOperatorHookTestEntry()}},
+		"wrapped precedence": {"hooks": map[string]any{"Stop": []any{dshOperatorHookTestEntry()}},
+			"Stop": dshHookErrorCanary},
+		"other runtime": {"Stop": []any{dshOperatorHookTestEntry()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := dshOwnedHooksTestOptions(t, "hooks.json")
+			if name == "other runtime" {
+				opts.Runtime = RuntimeClaudeCode
+			}
+			writeDSHHookTestDocument(t, opts.ConfigPath, root)
+			if mutation, err := InstallOwnedHooks(opts, nil); err != nil || !mutation.Touched {
+				t.Fatal("compatible shared document was refused")
+			}
+			if err := VerifyOwnedHooks(opts); err != nil {
+				t.Fatal("compatible shared binding did not verify")
+			}
+			if _, err := RemoveOwnedHooks(opts); err != nil {
+				t.Fatal(err)
+			}
+			if len(root) == 0 {
+				if _, err := os.Stat(opts.ConfigPath); !os.IsNotExist(err) {
+					t.Fatal("owned-only shared document was not removed")
+				}
+			} else if !hookJSONEquivalent(readDSHHookTestDocument(t, opts.ConfigPath), root) {
+				t.Fatal("compatible shared content was not preserved")
+			}
+		})
+	}
+}
+
+func TestOwnedDSHSharedHookCASRefusesLaterBareMap(t *testing.T) {
+	opts := dshOwnedHooksTestOptions(t, "hooks.json")
+	writeDSHHookTestDocument(t, opts.ConfigPath, map[string]any{"hooks": map[string]any{}})
+	var later []byte
+	ownedHookBeforeMutationForTest = func(path string) {
+		ownedHookBeforeMutationForTest = nil
+		later = writeDSHHookTestDocument(t, path, map[string]any{"Stop": []any{dshOperatorHookTestEntry()}})
+	}
+	t.Cleanup(func() { ownedHookBeforeMutationForTest = nil })
+	if mutation, err := InstallOwnedHooks(opts, &opts); err == nil || mutation.Touched || !strings.Contains(err.Error(), "changed concurrently") {
+		t.Fatal("shared hook CAS did not refuse a later operator snapshot")
+	}
+	assertDSHLegacyHookTestBytes(t, opts.ConfigPath, later)
+}
+
 func TestInspectDSHLegacyHooksEmptyAndOwnedStates(t *testing.T) {
 	opts := dshOwnedHooksTestOptions(t, "hooks.json")
 	for _, prior := range []*UserHooksOptions{nil, &opts} {

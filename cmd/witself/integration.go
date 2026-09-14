@@ -945,6 +945,13 @@ func installCmd(args []string) int {
 		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
 			runtime == transcriptcapture.RuntimeDSH {
 			if previousBinding != nil {
+				if runtime == transcriptcapture.RuntimeDSH && hooksTouched {
+					if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+						return
+					}
+					hooksTouched = false
+				}
 				// Keep the newly installed policy in place until the previous exact
 				// MCP binding is restored. An older policy may not cover tools added
 				// by the attempted binding if MCP rollback itself fails.
@@ -1174,6 +1181,21 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	var hookPath string
+	hooksTouched := false
+	if runtime == transcriptcapture.RuntimeDSH {
+		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		if err != nil {
+			var selectionChanged *dshHookSelectionChangedError
+			if !hooksTouched || errors.As(err, &selectionChanged) {
+				fmt.Fprintf(os.Stderr, "witself: install hooks: %v; preserving DeepSeek Harness transaction journal\n", err)
+				return 1
+			}
+			rollbackInstall(false, hooksTouched)
+			fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
+			return 1
+		}
+	}
 	var registerErr error
 	registerTouched := false
 	switch runtime {
@@ -1203,22 +1225,27 @@ func installCmd(args []string) int {
 		case transcriptcapture.RuntimeDSH:
 			mcpTouched = mcpTouched || dshPatchPreTouched
 		}
+		var dshSelectionChanged *dshHookSelectionChangedError
+		if runtime == transcriptcapture.RuntimeDSH && errors.As(registerErr, &dshSelectionChanged) {
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving DeepSeek Harness transaction journal\n", registerErr)
+			return 1
+		}
 		if providerMutationUncertain(registerErr) ||
 			(providerPreflightChanged(registerErr) && mcpTouched) {
 			fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving %s routing and integration recovery state\n", registerErr, integrationDisplayName(runtime))
 			return 1
 		}
-		rollbackInstall(mcpTouched, false)
+		rollbackInstall(mcpTouched, hooksTouched)
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
 	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched || dshPatchPreTouched
-	var hookPath string
-	hooksTouched := false
 	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally
 	// retain HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
-		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		if runtime != transcriptcapture.RuntimeDSH {
+			hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		}
 	} else if previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeUser {
 		// A prior release could serialize an untested POSIX hook command for a
 		// native Windows Claude or Grok profile. When upgrading to the MCP-only
@@ -1891,6 +1918,13 @@ func uninstallCmd(args []string) int {
 				rollbackComplete = false
 			}
 		}
+		if runtime == transcriptcapture.RuntimeDSH && hooksTouched && previousBinding != nil {
+			if rollbackErr := restoreRuntimeHooksOwned(nil, previousBinding); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+				return
+			}
+			hooksTouched = false
+		}
 		if mcpTouched && mcpRestoreAllowed && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
 			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, previousBinding); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v\n", rollbackErr)
@@ -1933,7 +1967,10 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
-	hooksTouched, err := removeRuntimeHooksOwned(cfg)
+	hooksTouched := false
+	if runtime != transcriptcapture.RuntimeDSH {
+		hooksTouched, err = removeRuntimeHooksOwned(cfg)
+	}
 	if err != nil {
 		rollbackUninstall(hooksTouched, false)
 		fmt.Fprintf(os.Stderr, "witself: remove runtime hooks: %v\n", err)
@@ -2087,6 +2124,12 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 		mcpMutationTouched = mcpTouched
+		hooksTouched, err = removeRuntimeHooksOwned(cfg)
+		if err != nil {
+			// Ownership drift cannot authorize reactivating a private bridge.
+			fmt.Fprintf(os.Stderr, "witself: remove runtime hooks: %v; preserving DeepSeek Harness transaction journal\n", err)
+			return 1
+		}
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
 			// Preserve the integration record when exact policy removal cannot be

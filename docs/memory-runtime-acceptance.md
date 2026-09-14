@@ -246,10 +246,40 @@ Stop-triggered one-shot flusher and every later Grok hook.
 
 ### DeepSeek Harness acceptance leg
 
-Use a fresh synthetic dsh-bound subject, install the user hook bridge, and restart
-dsh so its composed profile contains both `witself-mcp` and `witself-hooks`.
-Prepare with `--runtime dsh`, then run the same six prompts and the separate
-checkpoint case using the real client. Session context and recall use managed
+Offline installer tests and no-model probes require temporary `HOME`, `DSH_HOME`,
+and `WITSELF_HOME`. Live acceptance uses its separately authorized fresh synthetic
+runtime binding; install the dedicated user-hook layout and restart dsh for that
+binding. Retain three distinct evidence layers:
+
+1. Installer/configuration: the final composed tree contains active
+   `witself-mcp`, `witself-hooks-policy`, `witself-hooks-shell`, and `witself-hooks`
+   rows with exact isolation labels, literal `workspace-write`, canonical
+   persisted storage root, and exclusive `witself-hooks.json`. A fresh install
+   leaves unrelated `hooks.json` untouched and unmounted. Exercise legacy-only
+   and mixed legacy migration, identity rebind, repeat install, removal,
+   interrupted recovery, and rollback. Mixed migration retains exactly one
+   `witself-hooks-legacy` bridge on the ordinary root policy; old v1 journals keep
+   their old path/rendering. Preserve foreign patch bytes, including `!!js`.
+   An unresolved executable Include causes verification refusal because the
+   dump does not expose its effective children, including backing-file entries
+   and inserted patches. Recognized carriers include `cordis:include`,
+   `@deepseek-ai/cordis-plugin-include`, and direct absolute, relative, or file-URL paths to that
+   package's `lib/index.js`. This inspection cannot classify arbitrary custom
+   plugins or symlink aliases without executing or resolving them.
+2. Plugin/OS enforcement: use an independently authorized no-model composition
+   probe with installed providers and disposable homes. Await `loader.await()`
+   **and optional child fibers** so injection failures cannot be missed. Verify
+   required entries are active, private hooks can write storage, ordinary tool
+   sessions cannot write that storage, and the root policy/executor survive
+   removal. A fake shell result or successful dump is insufficient. The dump
+   renderer composes YAML with source comments; it neither instantiates plugins
+   nor evaluates `!!js`. Record the tested OS; macOS enforcement evidence does
+   not certify Linux or Windows.
+3. Live capture: prepare with `--runtime dsh`, then run the same six prompts and
+   the separate checkpoint case using the real client. Require actual uploaded
+   transcript and memory evidence from that binding.
+
+Session context and recall use managed
 instructions plus guided MCP; transcript hooks do not imply automatic hydration.
 
 After the stages, exit the client and run

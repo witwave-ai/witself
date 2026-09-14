@@ -99,6 +99,19 @@ func InstallOwnedHooks(desired UserHooksOptions, previous *UserHooksOptions) (Ho
 			return HookMutation{}, err
 		}
 	}
+	// DSH selects root.hooks over bare events. Validate the very snapshot used
+	// by CAS: an earlier inspection cannot authorize masking an operator edit.
+	if desired.Runtime == RuntimeDSH {
+		if _, wrapped := root["hooks"]; !wrapped {
+			remaining, err := inspectDSHBareLegacyHooks(root)
+			if err != nil {
+				return HookMutation{}, err
+			}
+			if remaining {
+				return HookMutation{}, errors.New("install DSH hooks: wrapping would mask bare operator hooks; preserving recovery state")
+			}
+		}
+	}
 	before := cloneHookDocument(root)
 	hooks, err := sharedHookMap(root, desired.ConfigPath)
 	if err != nil {

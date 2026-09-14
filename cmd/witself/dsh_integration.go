@@ -22,6 +22,13 @@ const (
 	dshPatchFileName         = "cordis.patch.yml"
 	dshPatchRowID            = "witself-mcp"
 	dshHooksPatchRowID       = "witself-hooks"
+	dshHooksPolicyRowID      = "witself-hooks-policy"
+	dshHooksShellRowID       = "witself-hooks-shell"
+	dshLegacyHooksRowID      = "witself-hooks-legacy"
+	dshHooksPolicyPlugin     = "@deepseek-ai/dsh-sandbox-policy"
+	dshHooksShellPlugin      = "@deepseek-ai/dsh-bash-sandbox"
+	dshCapturePolicy         = "witself-capture-policy"
+	dshCaptureShell          = "witself-capture-shell"
 	dshMCPClientPluginName   = "@deepseek-ai/dsh-mcp-client"
 	dshHooksBridgePluginName = "@deepseek-ai/dsh-hooks-claude-code"
 	dshHookConfigFileName    = "hooks.json"
@@ -100,7 +107,7 @@ func dshPatchPathAt(configRoot string) (string, error) {
 	return filepath.Join(root, dshPatchFileName), nil
 }
 
-// dshHookConfigPathAt is the one hook document dsh's claude-code bridge reads.
+// dshHookConfigPathAt is the exclusive document for new DSH installations.
 // The bridge requires an absolute configPath, so the patch row and the owned
 // hook file must always name the same canonical path under the config root.
 func dshHookConfigPathAt(configRoot string) (string, error) {
@@ -111,7 +118,7 @@ func dshHookConfigPathAt(configRoot string) (string, error) {
 	if root != configRoot {
 		return "", errors.New("DeepSeek Harness config root must be canonical")
 	}
-	return filepath.Join(root, dshHookConfigFileName), nil
+	return filepath.Join(root, transcriptcapture.DSHDedicatedHooksFilename), nil
 }
 
 // captureDSHMCPEnvironment is the exact environment the managed block hands
@@ -209,10 +216,9 @@ func validateDSHPreviousSelection(runtimeCLI string, desired, previous transcrip
 // rendering is deterministic so verification can require byte-exact equality
 // without round-tripping foreign YAML, which would destroy `!!js` tags.
 //
-// The fence holds one `- insert:` entry with up to two rows: `witself-mcp`
-// always, and `witself-hooks` whenever transcript hooks are installed. Keeping
-// both rows in one fence means install, verification, and uninstall govern the
-// MCP client and the hook bridge as a single owned region.
+// The v1 fence retains old journal rendering for legacy paths. Dedicated paths
+// add a private policy and shell, plus a root-policy bridge only when migration
+// recorded remaining operator hooks. All rows share one owned region.
 func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 	command, args, err := dshMCPInvocation(cfg)
 	if err != nil {
@@ -279,10 +285,34 @@ func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if dshUsesDedicatedHooks(cfg) {
+			quotedHome, err := dshQuoteYAMLScalar("DeepSeek Harness capture root", cfg.MCPEnvironment["WITSELF_HOME"])
+			if err != nil {
+				return nil, err
+			}
+			block.WriteString("    - id: " + dshHooksPolicyRowID + "\n")
+			block.WriteString("      name: '" + dshHooksPolicyPlugin + "'\n")
+			block.WriteString("      isolate:\n        sandboxPolicy: " + dshCapturePolicy + "\n        systemPrompt: true\n")
+			block.WriteString("      config:\n        mode: workspace-write\n        workspaceRoot: " + quotedHome + "\n")
+			block.WriteString("    - id: " + dshHooksShellRowID + "\n")
+			block.WriteString("      name: '" + dshHooksShellPlugin + "'\n")
+			block.WriteString("      isolate:\n        shell: " + dshCaptureShell + "\n        sandboxPolicy: " + dshCapturePolicy + "\n        settings: true\n")
+		}
 		block.WriteString("    - id: " + dshHooksPatchRowID + "\n")
 		block.WriteString("      name: " + quotedBridge + "\n")
+		if dshUsesDedicatedHooks(cfg) {
+			block.WriteString("      isolate:\n        shell: " + dshCaptureShell + "\n")
+		}
 		block.WriteString("      config:\n")
 		block.WriteString("        configPath: " + quotedHookConfigPath + "\n")
+		if cfg.DSHLegacyHookBridge {
+			legacyPath, err := dshQuoteYAMLScalar("DeepSeek Harness legacy hook path", filepath.Join(cfg.RuntimeConfigRoot, dshHookConfigFileName))
+			if err != nil {
+				return nil, err
+			}
+			block.WriteString("    - id: " + dshLegacyHooksRowID + "\n")
+			block.WriteString("      name: " + quotedBridge + "\n      config:\n        configPath: " + legacyPath + "\n")
+		}
 	}
 	block.WriteString(dshPatchBlockEndMarker)
 	return block.Bytes(), nil
@@ -293,12 +323,19 @@ func dshManagedPatchBlock(cfg transcriptcapture.Config) ([]byte, error) {
 // that claims user hooks without the canonical path is refused rather than
 // rendered with a path dsh would read from somewhere else.
 func dshManagedHookRowPath(cfg transcriptcapture.Config) (string, error) {
+	if cfg.DSHLegacyHookBridge && !dshUsesDedicatedHooks(cfg) {
+		return "", errors.New("DeepSeek Harness compatibility bridge requires dedicated user hooks")
+	}
 	if cfg.HookMode != transcriptcapture.HookModeUser {
 		return "", nil
 	}
 	expected, err := dshHookConfigPathAt(cfg.RuntimeConfigRoot)
 	if err != nil {
 		return "", err
+	}
+	legacy := filepath.Join(cfg.RuntimeConfigRoot, dshHookConfigFileName)
+	if cfg.HookConfigPath == "" || cfg.HookConfigPath == legacy {
+		return legacy, nil
 	}
 	if cfg.HookConfigPath != expected {
 		return "", fmt.Errorf(
@@ -487,8 +524,8 @@ func classifyDSHPatchLayout(snapshot *dshPatchSnapshot) error {
 			snapshot.blockEnd = index
 		case strings.HasPrefix(trimmed, dshPatchBlockBeginPrefix) || strings.HasPrefix(trimmed, dshPatchBlockEndPrefix):
 			return fmt.Errorf(
-				"DeepSeek Harness patch file %s carries a Witself managed block at another version (%q); refusing to modify it",
-				snapshot.path, trimmed,
+				"DeepSeek Harness patch file %s carries a Witself managed block at another version; refusing to modify it",
+				snapshot.path,
 			)
 		}
 	}
@@ -605,6 +642,7 @@ func planDSHPatchRemoval(snapshot dshPatchSnapshot) ([]byte, error) {
 }
 
 type dshPatchInstallPlan struct {
+	previous      *transcriptcapture.Config
 	desired       transcriptcapture.Config
 	block         []byte
 	expected      dshPatchSnapshot
@@ -652,7 +690,7 @@ func prepareDSHPatchInstallPlan(runtimeCLI string, desired transcriptcapture.Con
 	writeRequired := !bytes.Equal(snapshot.block(), block) ||
 		(snapshot.exists && !integrationFileModeMatches(snapshot.mode, dshPatchFileMode))
 	return dshPatchInstallPlan{
-		desired: desired, block: block, expected: snapshot,
+		desired: desired, previous: cloneDSHTransactionConfig(previous), block: block, expected: snapshot,
 		writeRequired: writeRequired,
 	}, false, nil
 }
@@ -666,6 +704,14 @@ func installDSHPatchBlock(cfg transcriptcapture.Config) (bool, error) {
 }
 
 func installDSHPatchBlockWithPlan(plan dshPatchInstallPlan) (bool, error) {
+	if _, err := checkDSHLegacyBridgeSelection(plan.desired, plan.previous); err != nil {
+		return false, err
+	}
+	if dshUsesDedicatedHooks(plan.desired) {
+		if err := verifyRuntimeHooksOwned(plan.desired); err != nil {
+			return false, err
+		}
+	}
 	before, err := readDSHPatchSnapshot(plan.desired.RuntimeMCPConfigPath)
 	if err != nil {
 		return false, err
@@ -682,7 +728,15 @@ func installDSHPatchBlockWithPlan(plan dshPatchInstallPlan) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := writeDSHPatchFileAtomic(before, updated); err != nil {
+	if err := writeDSHPatchFileAtomicChecked(before, updated, func() error {
+		if _, err := checkDSHLegacyBridgeSelection(plan.desired, plan.previous); err != nil {
+			return err
+		}
+		if dshUsesDedicatedHooks(plan.desired) {
+			return verifyRuntimeHooksOwned(plan.desired)
+		}
+		return nil
+	}); err != nil {
 		// A restored preimage means nothing was committed, so the operation is
 		// retryable rather than an unattributable mutation.
 		var changed *providerPreflightChangedError
@@ -800,6 +854,10 @@ var dshPatchBeforeMutationForTest func()
 // and report success, so the replacement keeps the displaced inode and proves
 // it is the exact preimage the plan was built from before committing.
 func writeDSHPatchFileAtomic(before dshPatchSnapshot, data []byte) error {
+	return writeDSHPatchFileAtomicChecked(before, data, nil)
+}
+
+func writeDSHPatchFileAtomicChecked(before dshPatchSnapshot, data []byte, beforePublish func() error) error {
 	directory := filepath.Dir(before.path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", directory, err)
@@ -816,6 +874,11 @@ func writeDSHPatchFileAtomic(before dshPatchSnapshot, data []byte) error {
 	}()
 	if dshPatchBeforeMutationForTest != nil {
 		dshPatchBeforeMutationForTest()
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return &providerPreflightChangedError{err: err}
+		}
 	}
 	if !before.exists {
 		// A no-replace rename refuses to clobber a file that appeared since the
@@ -998,6 +1061,11 @@ func validateDSHPersistedTopologyWithProbe(cfg transcriptcapture.Config, probe b
 	if !bytes.Equal(snapshot.block(), expected) {
 		return fmt.Errorf("DeepSeek Harness patch file %s no longer matches the installed Witself managed block", snapshot.path)
 	}
+	if dshUsesDedicatedHooks(cfg) {
+		if err := verifyRuntimeHooksOwned(cfg); err != nil {
+			return err
+		}
+	}
 	if _, err := parseDSHManagedPatchBlock(expected); err != nil {
 		return err
 	}
@@ -1015,6 +1083,9 @@ func validateDSHPersistedTopologyWithProbe(cfg transcriptcapture.Config, probe b
 func validateDSHComposedConfig(cfg transcriptcapture.Config) error {
 	info, err := os.Stat(cfg.RuntimeCLICommand)
 	if err != nil || !integrationExecutableModeIsUsable(info) {
+		if dshUsesDedicatedHooks(cfg) {
+			return unavailableIntegrationTopology(errors.New("DeepSeek Harness composed-config provider is unavailable"))
+		}
 		return nil
 	}
 	expected, err := dshManagedPatchBlock(cfg)
@@ -1030,7 +1101,15 @@ func validateDSHComposedConfig(cfg transcriptcapture.Config) error {
 		"--profile", "headless", "--dump-config",
 	)
 	if err != nil {
+		if dshUsesDedicatedHooks(cfg) {
+			// Provider parse errors can quote foreign tagged content. Keep the
+			// private boundary diagnostic value-free, including stderr failures.
+			return unavailableIntegrationTopology(errors.New("DeepSeek Harness composed-config probe failed; private capture composition is unverified"))
+		}
 		return unavailableIntegrationTopology(fmt.Errorf("dump the DeepSeek Harness composed config: %w", err))
+	}
+	if dshUsesDedicatedHooks(cfg) {
+		return validateDSHPrivateComposedConfig(raw, cfg)
 	}
 	for _, row := range rows {
 		if !dshComposedConfigHasManagedRow(raw, row.id, row.name) {
