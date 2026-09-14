@@ -192,6 +192,13 @@ func TestRejectDuplicateJSONKeysPreservesErrorContracts(t *testing.T) {
 	}{
 		{name: "object", raw: `{ `, want: "unterminated JSON object"},
 		{name: "array", raw: `[ `, want: "unterminated JSON array"},
+		{name: "object after value", raw: `{"a":1 `, want: "unterminated JSON object"},
+		{name: "array after value", raw: `[1 `, want: "unterminated JSON array"},
+		{name: "nested array", raw: `{"a":[ `, want: "unterminated JSON array"},
+		{name: "object comma", raw: `{"a":1, `, want: "EOF"},
+		{name: "array comma", raw: `[1, `, want: "EOF"},
+		{name: "partial value", raw: `[tru`, want: "unexpected EOF"},
+		{name: "mismatched closer", raw: `[1 }`, want: "unterminated JSON array"},
 		{name: "malformed second value", raw: `{} {`, want: "multiple JSON values are not allowed"},
 	}
 	for _, test := range tests {
