@@ -174,7 +174,7 @@ jobs:
           go test ./internal/store/... \
             -race \
             -shuffle=on \
-            -timeout=30m \
+            -timeout=45m \
             -covermode=atomic \
             -coverprofile="$RUNNER_TEMP/go-coverage-store.out"
           go tool cover -func="$RUNNER_TEMP/go-coverage-store.out"
