@@ -331,7 +331,7 @@ func (s *Store) CreateCuratorToken(
 		tokID, accountID, agentID, hashToken(rawToken), expiresAt, displayName, accessProfile); err != nil {
 		return "", "", "", time.Time{}, fmt.Errorf("store curator token: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbAgentTokenMinted,
 		Metadata: map[string]any{
@@ -436,7 +436,7 @@ func (s *Store) CreateOperatorToken(ctx context.Context, accountID, operatorID, 
 	if expiresAt != nil {
 		eventMeta["expires_at"] = expiresAt.Format(time.RFC3339)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOperator, ActorID: operatorID,
 		Verb: VerbOperatorTokenMinted, Metadata: eventMeta,
 	}); err != nil {
@@ -488,7 +488,7 @@ func (s *Store) CreateAgentToken(ctx context.Context, accountID, actorOperatorID
 		tokID, accountID, agentID, hashToken(agtTok)); err != nil {
 		return "", "", "", fmt.Errorf("store agent token: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbAgentTokenMinted,
 		Metadata: map[string]any{
@@ -557,7 +557,7 @@ func (s *Store) RevokeToken(ctx context.Context, accountID, actorOperatorID, tok
 	if agID != nil {
 		revMeta["agent_id"] = *agID
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorOwner, ActorID: actorOperatorID,
 		Verb: VerbTokenRevoked, Metadata: revMeta,
 	}); err != nil {

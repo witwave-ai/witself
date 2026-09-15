@@ -399,8 +399,10 @@ the `server_side_decrypt` flag) identifying actor/target/purpose/outcome without
 requires an audit `reason` for operator/admin and cross-agent use; redacts plaintext from
 logs/errors/analytics/support/audit; and is distinguishable in API/CLI/MCP/audit. The MCP
 `--no-value-tools` switch disables `secret.reveal` / `totp.code` / value-returning
-`reference.resolve` entirely; `--read-only` disables mutations. Both paths still emit
-`witself_secret_reveals_total`.
+`reference.resolve` entirely; `--read-only` disables mutations. The current ADR 0003 implementation instead emits
+`witself_secret_material_deliveries_total` for server-observed ciphertext
+delivery calls; it cannot observe client decryption. See
+[Sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos).
 
 The intellectually honest reclassification: for managed token-only realms the
 `server_side_decrypt` exception is the everyday path, run at default frequency, not a rare

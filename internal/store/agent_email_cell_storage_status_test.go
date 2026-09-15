@@ -2,9 +2,10 @@ package store
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestValidateAgentEmailCellStorageStatus(t *testing.T) {
@@ -26,7 +27,6 @@ func TestValidateAgentEmailCellStorageStatus(t *testing.T) {
 		{name: "roots exceed rows", mutate: func(s *AgentEmailCellStorageStatus) { s.RootRows = 3 }, want: "usage counters"},
 		{name: "invalid limits", mutate: func(s *AgentEmailCellStorageStatus) { s.AdmissionBytes = s.HardBytes }, want: "invalid limits"},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			candidate := valid
@@ -40,10 +40,7 @@ func TestValidateAgentEmailCellStorageStatus(t *testing.T) {
 }
 
 func TestReadAgentEmailCellStorageStatusPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 91)
 	status, err := st.ReadAgentEmailCellStorageStatus(context.Background())

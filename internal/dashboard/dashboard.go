@@ -4,7 +4,8 @@
 // token: self digests, transcripts, and fact lists use observational reads,
 // the enforced-plan card is rebuilt from the self digest's closed
 // cell-applied entitlement block,
-// messages use the passive metadata-only list, receive-only email uses only
+// messages use a passive metadata-only list and explicit recipient-only body
+// previews through the observational peek API, receive-only email uses only
 // its address and passive metadata list, and sent email uses only the bounded
 // owner outbox list (both email directions have strict browser allow-lists),
 // broad memory and fact reads stay redacted (a sensitive fact value appears
@@ -206,6 +207,9 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /api/memories/{id}", secure(cfg, session, memoryHandler(cfg)))
 	mux.Handle("GET /api/memories/{id}/history", secure(cfg, session, memoryHistoryHandler(cfg)))
 	mux.Handle("GET /api/messages", secure(cfg, session, messagesHandler(cfg)))
+	// A method-free registration keeps every refusal behind the same local
+	// security boundary; the handler rejects HEAD and every non-GET method.
+	mux.Handle("/api/messages/{id}/body", secure(cfg, session, messageBodyHandler(cfg)))
 	mux.Handle("GET /api/email/address", secure(cfg, session, agentEmailAddressHandler(cfg)))
 	mux.Handle("GET /api/email/status", secure(cfg, session, agentEmailStatusHandler(cfg)))
 	mux.Handle("GET /api/email/sent", secure(cfg, session, agentEmailSentHandler(cfg)))

@@ -98,8 +98,9 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		WriteKubeconfig: pulumi.Bool(true),
 	}
 	// Omission means "latest stable" in Civo's API. An explicit
-	// -k8s-version pins a reproducible K3s version and participates in
-	// Pulumi previews/upgrades like the AWS and Azure versions do.
+	// k8s_version cell record (or -k8s-version) passes the Civo API name
+	// verbatim, e.g. 1.35.0-k3s1. Pin the running version only after a
+	// no-change preview; a differing version follows the upgrade runbook.
 	if c.k8sVersion != "" {
 		clusterArgs.KubernetesVersion = pulumi.String(c.k8sVersion)
 	}

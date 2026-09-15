@@ -4,6 +4,7 @@ import {
 } from "./account-lifecycle-fence.mjs";
 import {
   abortOperation,
+  acknowledgeAbortOperation,
   acknowledgeStep,
   bootstrapArchivedState,
   bootstrapLiveState,
@@ -20,6 +21,7 @@ import {
   nextLifecycleStep,
   quarantineRestoreOperation,
   replaceArchivedLocation,
+  requestAbortOperation,
   validateLifecycleState,
 } from "./account-lifecycle-state.mjs";
 import {
@@ -1049,6 +1051,9 @@ export class DurableAccountLifecycle {
       return this.runClose(state, input);
     }
     const result = await this.runMove(state);
+    if (result.aborted === true) {
+      fail("pre-archive export was aborted; cleanup completed", 502);
+    }
     if (finishEvacuationBeforeRestore) {
       return this.run(input);
     }
@@ -1434,6 +1439,17 @@ export class DurableAccountLifecycle {
   async runMove(initialState) {
     let state = initialState;
     while (state.operation) {
+      // Abort owns the original source/object fence but no longer needs an
+      // incoming reservation. In particular, never renew a released target
+      // before retrying deletion of a proven-aborted candidate.
+      if (
+        ["abort_requested", "abort_cleanup_pending"].includes(
+          state.operation.phase,
+        )
+      ) {
+        state = await this.resumePreArchiveAbort(state);
+        continue;
+      }
       if (
         state.operation.kind === "restore" &&
         ["claimed", "target_reserved"].includes(
@@ -1510,6 +1526,9 @@ export class DurableAccountLifecycle {
       }
     }
     return {
+      ...(state.last_completed?.outcome === "aborted"
+        ? { aborted: true }
+        : {}),
       ...(state.last_completed?.outcome === "reaped"
         ? { reaped: true }
         : {}),
@@ -1824,12 +1843,12 @@ export class DurableAccountLifecycle {
         placementPolicy,
       });
     } catch (error) {
-      // Before durable archive authority exists, give the source back only
-      // after its exact abort receipt is durably recorded. Cleanup follows
-      // that receipt. Always delete the attempt-unique full object key: R2
+      // Before durable archive authority exists, persist abort intent before
+      // giving the source back, then persist its exact receipt before cleanup.
+      // Always delete the attempt-unique full object key: R2
       // multipart complete may have committed the object before its response
       // was lost, in which case the streaming helper never returned success.
-      await this.abortPreArchive(state, cell, error);
+      await this.abortPreArchive(state, error);
       throw error;
     }
 
@@ -1848,15 +1867,47 @@ export class DurableAccountLifecycle {
     return this.saveState(state);
   }
 
-  async abortPreArchive(state, cell, originalError) {
-    const operation = state.operation;
-    if (
-      !operation ||
-      !["evacuate", "move"].includes(operation.kind) ||
-      !["claimed", "source_suspended"].includes(operation.phase)
-    ) {
-      return;
+  async abortPreArchive(state, originalError) {
+    state = requestAbortOperation(state, {
+      operation_id: state.operation.operation_id,
+    });
+    // Source resumption must never precede durable abort intent. A lost save
+    // acknowledgement is resolved by reloading, not by retrying the export.
+    await this.scheduleWakeup();
+    state = await this.saveState(state);
+    return this.resumePreArchiveAbort(state, originalError);
+  }
+
+  async resumePreArchiveAbort(state, originalError = null) {
+    validateLifecycleState(state);
+    await this.scheduleWakeup();
+    if (state.operation.phase === "abort_requested") {
+      state = await this.abortSource(state, originalError);
     }
+    if (state.operation.phase !== "abort_cleanup_pending") {
+      fail("no proven pre-archive abort cleanup is pending", 500);
+    }
+    const operation = state.operation;
+    await this.env.ARCHIVES.delete(operation.archive.object);
+    await this.releaseTargetReservation(operation);
+    state = abortOperation(state, {
+      operation_id: operation.operation_id,
+    });
+    await this.saveState(state);
+    if (typeof this.storage.deleteAlarm === "function") {
+      await this.storage.deleteAlarm().catch(() => {});
+    }
+    return state;
+  }
+
+  async abortSource(state, originalError) {
+    const operation = state.operation;
+    const cell = await this.cell(operation.source_cell, {
+      evacuationProtocol: true,
+      expectedRegistrationID: operation.source_registration_id,
+    });
+    const originalMessage = originalError?.message ??
+      "pre-archive export was aborted";
     let response;
     try {
       response = await this.fetchImpl(
@@ -1875,7 +1926,7 @@ export class DurableAccountLifecycle {
       );
     } catch (abortError) {
       fail(
-        `${String(originalError?.message ?? originalError)}; abort outcome is ambiguous: ${String(abortError?.message ?? abortError)}`,
+        `${originalMessage}; abort outcome is ambiguous: ${String(abortError?.message ?? abortError)}`,
         502,
         { cause: originalError },
       );
@@ -1883,7 +1934,7 @@ export class DurableAccountLifecycle {
     const { text, body } = await responseBody(response);
     if (!response.ok) {
       fail(
-        `${String(originalError?.message ?? originalError)}; abort failed ${response.status}: ${text.slice(0, 200)}`,
+        `${originalMessage}; abort failed ${response.status}: ${text.slice(0, 200)}`,
         502,
         { cause: originalError },
       );
@@ -1893,17 +1944,11 @@ export class DurableAccountLifecycle {
       this.accountId,
       operation.evacuation_id,
     );
-    await this.env.ARCHIVES.delete(operation.archive.object).catch(
-      () => {},
-    );
-    await this.releaseTargetReservation(operation);
-    state = abortOperation(state, {
+    state = acknowledgeAbortOperation(state, {
       operation_id: operation.operation_id,
+      receipt: body,
     });
-    await this.saveState(state);
-    if (typeof this.storage.deleteAlarm === "function") {
-      await this.storage.deleteAlarm().catch(() => {});
-    }
+    return this.saveState(state);
   }
 
   async importTarget(state) {

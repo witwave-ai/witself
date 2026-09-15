@@ -733,7 +733,7 @@ func TestMemoryPermanentDeleteRequiresPreviewGuardsAndDirectUserAuthority(t *tes
 	}
 }
 
-func TestMemoryCapabilityRequiresCompleteSurface(t *testing.T) {
+func TestMemoryCapabilityReportsRegisteredSurface(t *testing.T) {
 	auth := memoryTestAuth()
 	complete := Config{
 		AuthenticatePrincipal: auth,
@@ -795,7 +795,7 @@ func TestMemoryCapabilityRequiresCompleteSurface(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Features["memories"].Supported || out.Features["memories"].Reason != "not_implemented" {
+	if !out.Features["memories"].Supported || out.Features["memories"].Reason != "" {
 		t.Fatalf("partial memories capability = %#v", out.Features["memories"])
 	}
 	if !out.Features["memory_recall"].Supported || out.Features["memory_supersede"].Supported || !out.Features["memory_permanent_delete"].Supported {

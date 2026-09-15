@@ -457,6 +457,7 @@
       appendEntries(transcriptID, page.entries || []);
     });
     source.addEventListener("messages", function (event) {
+      if (state.eventSource !== source) { return; }
       var pages;
       try { pages = JSON.parse(event.data); } catch (_) { return; }
       var changedIn = mergeMessages(pages.inbox, "received");
@@ -549,8 +550,19 @@
     });
   }
 
+  // Every visit owns its Overview, fact, memory and transcript reads, including the same URL.
+  var overviewViewGeneration = 0;
+  var factViewGeneration = 0;
+  var memoryViewGeneration = 0;
+  var transcriptViewGeneration = 0;
+
   function route() {
+    overviewViewGeneration++;
+    factViewGeneration++;
+    memoryViewGeneration++;
+    transcriptViewGeneration++;
     var viewGeneration = invalidateEmailView();
+    invalidateMessageBodyView();
     var current = parseHash();
     setNav(current.section);
     if (current.section === "transcripts" && current.id) { return viewTranscript(current.id, current.query); }
@@ -709,18 +721,24 @@
   }
 
   function viewOverview() {
+    var generation = overviewViewGeneration;
     breadcrumb([{ label: "overview" }]);
     openEvents(null);
     fetchJSON("/api/self").then(function (self) {
+      if (generation !== overviewViewGeneration) { return; }
       renderHeader(self);
       renderOverview(self);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === overviewViewGeneration) { showError(err); }
+    });
   }
 
   function viewTranscripts() {
+    var generation = transcriptViewGeneration;
     breadcrumb([{ label: "transcripts" }]);
     openEvents(null);
     fetchJSON("/api/transcripts").then(function (body) {
+      if (generation !== transcriptViewGeneration) { return; }
       var rows = (body.transcripts || []).map(function (transcript) {
         return '<div class="row"><span class="grow"><a href="#/transcripts/' + esc(transcript.id) + '">' +
           esc(transcript.title || transcript.external_id || transcript.id) + "</a></span>" +
@@ -730,7 +748,9 @@
       $("view").innerHTML = '<div class="panel"><h2>transcripts</h2>' + filterInputHTML("transcripts") +
         '<div class="list">' + (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
       bindFilter("transcripts");
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === transcriptViewGeneration) { showError(err); }
+    });
   }
 
   // parseJSONObjectBody returns the parsed object only when body is a JSON
@@ -791,12 +811,14 @@
   }
 
   function viewTranscript(id, query) {
+    var generation = transcriptViewGeneration;
     breadcrumb([{ label: "transcripts", href: "#/transcripts" }, { label: id }]);
     var from = parseInt(query.from, 10) || 0;
     var until = parseInt(query.to, 10) || from;
     var path = "/api/transcripts/" + encodeURIComponent(id);
     path += from > 0 ? "?after_sequence=" + Math.max(0, from - 1) + "&limit=500" : "?tail=true&limit=200";
     fetchJSON(path).then(function (page) {
+      if (generation !== transcriptViewGeneration) { return; }
       var entries = page.entries || [];
       var highest = 0;
       var rows = entries.map(function (entry) {
@@ -811,7 +833,9 @@
       var anchor = document.querySelector(".entry.anchored");
       if (anchor) { anchor.scrollIntoView({ block: "center" }); }
       openEvents(id, highest);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === transcriptViewGeneration) { showError(err); }
+    });
   }
 
   // --- facts ------------------------------------------------------------
@@ -886,28 +910,42 @@
   }
 
   function viewFacts() {
+    var generation = factViewGeneration;
     breadcrumb([{ label: "facts" }]);
     openEvents(null, 0, false, false, true);
     fetchJSON("/api/facts?limit=100").then(function (body) {
+      if (generation !== factViewGeneration) { return; }
       mergeFacts(body.facts);
       renderFactsList(body.facts || []);
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === factViewGeneration) { showError(err); }
+    });
   }
 
   function viewFact(id) {
+    var generation = factViewGeneration;
     breadcrumb([{ label: "facts", href: "#/facts" }, { label: id }]);
     openEvents(null);
     var load = state.facts[id] ? Promise.resolve() :
-      fetchJSON("/api/facts?limit=100").then(function (body) { mergeFacts(body.facts); });
+      fetchJSON("/api/facts?limit=100").then(function (body) {
+        if (generation !== factViewGeneration) { return; }
+        mergeFacts(body.facts);
+      });
     load.then(function () {
+      if (generation !== factViewGeneration) { return; }
       var fact = state.facts[id];
       if (!fact) { throw new Error("fact " + id + " is not in the redacted inventory"); }
       // subject/predicate let the proxy prove the fact non-sensitive before
       // forwarding assertion values; without proof it locks the history.
       return fetchJSON("/api/facts/" + encodeURIComponent(id) + "/history?subject=" +
         encodeURIComponent(fact.subject) + "&predicate=" + encodeURIComponent(fact.predicate))
-        .then(function (body) { renderFact(fact, body.assertions || []); });
-    }).catch(showError);
+        .then(function (body) {
+          if (generation !== factViewGeneration) { return; }
+          renderFact(fact, body.assertions || []);
+        });
+    }).catch(function (err) {
+      if (generation === factViewGeneration) { showError(err); }
+    });
   }
 
   function renderFact(fact, assertions) {
@@ -1011,9 +1049,15 @@
   }
 
   function viewMemories() {
+    var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories" }]);
     openEvents(null, 0, false, true);
-    fetchJSON("/api/memories?limit=100").then(renderMemoriesList).catch(showError);
+    fetchJSON("/api/memories?limit=100").then(function (page) {
+      if (generation !== memoryViewGeneration) { return; }
+      renderMemoriesList(page);
+    }).catch(function (err) {
+      if (generation === memoryViewGeneration) { showError(err); }
+    });
   }
 
   function evidenceHTML(evidence) {
@@ -1033,12 +1077,14 @@
   }
 
   function viewMemory(id) {
+    var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories", href: "#/memories" }, { label: id }]);
     openEvents(null);
     Promise.all([
       fetchJSON("/api/memories/" + encodeURIComponent(id)),
       fetchJSON("/api/memories/" + encodeURIComponent(id) + "/history?limit=50"),
     ]).then(function (results) {
+      if (generation !== memoryViewGeneration) { return; }
       var memory = results[0].memory || {};
       var versions = results[1].versions || [];
       var content = memory.redacted ? "[sensitive value redacted]" : (memory.content || "");
@@ -1064,7 +1110,9 @@
         (evidenceHTML(memory.evidence) || '<div class="empty">no evidence rows</div>') + "</div></div>" +
         '<div class="panel"><h2>version history</h2><div class="list">' +
         (history || '<div class="empty">no versions</div>') + "</div></div>";
-    }).catch(showError);
+    }).catch(function (err) {
+      if (generation === memoryViewGeneration) { showError(err); }
+    });
   }
 
   // --- secrets ----------------------------------------------------------
@@ -1630,7 +1678,8 @@
   // Thread-grouped view of the realm-local mailbox built strictly from the
   // passive metadata-only list (/api/messages, upstream GET /v1/messages).
   // The dashboard never calls :read or :listen, and the passive list never
-  // carries bodies, so bubbles render metadata only. The upstream cursor
+  // carries bodies. A received body is fetched only by its explicit control
+  // and lives in the current detail DOM, never in state.messages. The upstream cursor
   // pages only backward in time; live updates re-poll the first page of each
   // direction and this side dedupes by message id.
   function mergeMessages(list, dir) {
@@ -1701,6 +1750,7 @@
   }
 
   function renderConversationList() {
+    invalidateMessageBodyView();
     var rows = buildThreads().map(function (thread) {
       return '<div class="row"><span class="grow"><a href="#/conversations/' + esc(encodeURIComponent(thread.key)) + '">' + esc(thread.label) + "</a>" +
         (thread.unread ? ' <span class="unread">' + esc(thread.unread) + "</span>" : "") + "</span>" +
@@ -1729,33 +1779,185 @@
     return '<div class="bubble ' + (msg._dir === "sent" ? "sent" : "received") + '">' +
       (head.length ? '<div class="bubble-head">' + head.join(" ") + "</div>" : "") +
       (msg.subject ? '<div class="subject">' + esc(msg.subject) + "</div>" : "") +
-      '<div class="nobody">[body not shown]</div>' +
+      (msg._dir === "received" ? '<div class="message-preview" data-message-id="' + esc(msg.id) + '" data-body-state="hidden">' +
+        '<button type="button" class="message-body-toggle" aria-expanded="false">Show body</button>' +
+        '<div class="message-body-status nobody" role="status">[body not shown]</div>' +
+        '<div class="message-body-content" hidden></div></div>' : '<div class="nobody">[body not shown]</div>') +
       '<div class="meta mono">' + esc(meta.join(" \u00b7 ")) + "</div></div>";
   }
 
   function renderConversation(key) {
+    var view = $("view");
+    var previous = Object.create(null);
+    if (messageBodyView && messageBodyView.key === key) {
+      view.querySelectorAll(".message-preview").forEach(function (node) {
+        previous[node.getAttribute("data-message-id")] = node;
+      });
+    } else {
+      invalidateMessageBodyView();
+      messageBodyView = { key: key };
+    }
     var thread = null;
     buildThreads().forEach(function (candidate) { if (candidate.key === key) { thread = candidate; } });
     var bubbles = thread ? thread.messages.map(bubbleHTML).join("") : "";
     $("view").innerHTML = '<div class="panel"><h2>' + esc(thread ? thread.label : key) +
-      ' <span class="badge">metadata only</span></h2>' +
-      '<div class="thread-note">message bodies are not passively readable yet &mdash; the only body read today (:read) marks messages read. ' +
-      "a server-side observational body read is a planned follow-up.</div>" +
+      ' <span class="badge">read-only</span></h2>' +
+      '<div class="thread-note">Received bodies stay hidden until you choose Show body. Viewing does not mark a message read or acknowledged.</div>' +
       '<div class="bubbles">' + (bubbles || '<div class="empty">no messages in this thread</div>') + "</div></div>";
-    var view = $("view");
+    // Retain only preview nodes still represented in this same detail view.
+    // A metadata refresh must neither refetch bodies nor move their values
+    // into the metadata cache. Removed nodes are cleared before release.
+    view.querySelectorAll(".message-preview").forEach(function (node) {
+      var id = node.getAttribute("data-message-id");
+      if (previous[id]) {
+        node.replaceWith(previous[id]);
+        delete previous[id];
+      }
+    });
+    Object.keys(previous).forEach(function (id) { setMessageBodyPreview(previous[id], "hidden"); });
+    if (messageBodyPending && !view.contains(messageBodyPending.node)) { cancelMessageBodyRequest(); }
+    updateMessageBodyButtons();
     view.scrollTop = view.scrollHeight;
   }
 
+  // At most one active body fetch exists. The token holds only request
+  // ownership and DOM references, never a retained body or payload cache.
+  var messageBodyView = null;
+  var messageBodyPending = null;
+  var conversationViewSerial = 0;
+
+  function setMessageBodyPreview(node, mode, body) {
+    var button = node.querySelector(".message-body-toggle");
+    var content = node.querySelector(".message-body-content");
+    var status = node.querySelector(".message-body-status");
+    node.setAttribute("data-body-state", mode);
+    button.textContent = mode === "shown" || mode === "loading" ? "Hide body" : "Show body";
+    button.setAttribute("aria-expanded", mode === "shown" || mode === "loading" ? "true" : "false");
+    content.textContent = mode === "shown" ? body : "";
+    content.hidden = mode !== "shown";
+    status.textContent = mode === "loading" ? "Loading body…" :
+      (mode === "unavailable" ? "Body unavailable." : (mode === "hidden" ? "[body not shown]" : ""));
+  }
+
+  function updateMessageBodyButtons() {
+    $("view").querySelectorAll(".message-preview").forEach(function (node) {
+      var mode = node.getAttribute("data-body-state");
+      node.querySelector(".message-body-toggle").disabled = mode === "unavailable" ||
+        (mode === "hidden" && messageBodyPending !== null);
+    });
+  }
+
+  function cancelMessageBodyRequest() {
+    if (!messageBodyPending) { return; }
+    var pending = messageBodyPending;
+    messageBodyPending = null;
+    clearTimeout(pending.timer);
+    pending.controller.abort();
+  }
+
+  function invalidateMessageBodyView() {
+    conversationViewSerial++;
+    messageBodyView = null;
+    cancelMessageBodyRequest();
+    $("view").querySelectorAll(".message-preview").forEach(function (node) {
+      setMessageBodyPreview(node, "hidden");
+    });
+    updateMessageBodyButtons();
+  }
+
+  function currentMessageBodyRequest(pending) {
+    var current = parseHash();
+    return messageBodyPending === pending && messageBodyView === pending.view &&
+      current.section === "conversations" && current.id && decodeURIComponent(current.id) === pending.view.key &&
+      $("view").contains(pending.node);
+  }
+
+  function finishMessageBodyRequest(pending) {
+    clearTimeout(pending.timer);
+    if (messageBodyPending === pending) { messageBodyPending = null; }
+  }
+
+  function onMessageBodyClick(event) {
+    var target = event.target;
+    var button = target && target.closest ? target.closest(".message-body-toggle") : null;
+    if (!button || !$("view").contains(button) || button.disabled || !messageBodyView) { return; }
+    var node = button.closest(".message-preview");
+    var current = parseHash();
+    if (!node || current.section !== "conversations" || !current.id || decodeURIComponent(current.id) !== messageBodyView.key) { return; }
+    var id = node.getAttribute("data-message-id");
+    // Inbox and outbox copies of the same id remain separate. A sent-only
+    // entry can never gain an eligible control through a shared id.
+    var metadata = state.messages["received " + id];
+    if (!metadata || metadata._dir !== "received" || threadKey(metadata) !== messageBodyView.key) { return; }
+    var mode = node.getAttribute("data-body-state");
+    if (mode === "shown" || mode === "loading") {
+      if (messageBodyPending && messageBodyPending.node === node) { cancelMessageBodyRequest(); }
+      setMessageBodyPreview(node, "hidden");
+      updateMessageBodyButtons();
+      return;
+    }
+    if (mode !== "hidden" || messageBodyPending) { return; }
+    var pending = { node: node, view: messageBodyView, controller: new AbortController(), timer: null };
+    messageBodyPending = pending;
+    setMessageBodyPreview(node, "loading");
+    updateMessageBodyButtons();
+    pending.timer = setTimeout(function () {
+      var current = currentMessageBodyRequest(pending);
+      finishMessageBodyRequest(pending);
+      pending.controller.abort();
+      if (current) { setMessageBodyPreview(node, "unavailable"); }
+      updateMessageBodyButtons();
+    }, 10000);
+    return fetch("/api/messages/" + encodeURIComponent(id) + "/body", {
+      method: "GET", credentials: "same-origin", cache: "no-store", signal: pending.controller.signal,
+    }).then(function (response) {
+      if (!response.ok) { throw new Error("body unavailable"); }
+      return response.json();
+    }).then(function (body) {
+      if (!currentMessageBodyRequest(pending)) {
+        finishMessageBodyRequest(pending);
+        updateMessageBodyButtons();
+        return;
+      }
+      if (!body || Array.isArray(body) || Object.keys(body).length !== 1 ||
+          typeof body.body !== "string" || new TextEncoder().encode(body.body).length > 65536) {
+        throw new Error("body unavailable");
+      }
+      finishMessageBodyRequest(pending);
+      setMessageBodyPreview(node, "shown", body.body);
+      updateMessageBodyButtons();
+    }).catch(function () {
+      if (!currentMessageBodyRequest(pending)) {
+        finishMessageBodyRequest(pending);
+        updateMessageBodyButtons();
+        return;
+      }
+      finishMessageBodyRequest(pending);
+      setMessageBodyPreview(node, "unavailable");
+      updateMessageBodyButtons();
+    });
+  }
+
   function viewConversations() {
+    invalidateMessageBodyView();
+    var serial = conversationViewSerial;
     breadcrumb([{ label: "conversations" }]);
     openEvents(null, 0, true);
-    fetchMessages().then(renderConversationList).catch(showError);
+    return fetchMessages().then(function () {
+      var current = parseHash();
+      if (serial === conversationViewSerial && current.section === "conversations" && !current.id) { renderConversationList(); }
+    }).catch(function (err) { if (serial === conversationViewSerial) { showError(err); } });
   }
 
   function viewConversation(key) {
+    invalidateMessageBodyView();
+    var owner = messageBodyView = { key: key };
     breadcrumb([{ label: "conversations", href: "#/conversations" }, { label: key }]);
     openEvents(null, 0, true);
-    fetchMessages().then(function () { renderConversation(key); }).catch(showError);
+    return fetchMessages().then(function () {
+      var current = parseHash();
+      if (messageBodyView === owner && current.section === "conversations" && current.id && decodeURIComponent(current.id) === key) { renderConversation(key); }
+    }).catch(function (err) { if (messageBodyView === owner) { showError(err); } });
   }
 
   // --- boot -------------------------------------------------------------
@@ -1764,6 +1966,10 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       state: state,
+      route: route,
+      mergeMessages: mergeMessages,
+      renderConversation: renderConversation,
+      onMessageBodyClick: onMessageBodyClick,
       invalidateEmailView: invalidateEmailView,
       probeEmailMailbox: probeEmailMailbox,
       refreshEmail: refreshEmail,
@@ -1794,6 +2000,7 @@
   initTheme();
   $("status-addr").textContent = window.location.host;
   $("view").addEventListener("click", onRevealClick);
+  $("view").addEventListener("click", onMessageBodyClick);
   window.addEventListener("hashchange", route);
   route();
 })();

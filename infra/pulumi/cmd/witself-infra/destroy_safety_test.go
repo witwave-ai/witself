@@ -215,7 +215,7 @@ func TestDestroyNonInteractiveYesCellMustMatchExactly(t *testing.T) {
 }
 
 func TestDestroySafetyGuardOrder(t *testing.T) {
-	path := writeConfig(t, sampleConfig)
+	path := writeConfig(t, strings.Replace(sampleConfig, "    role: dev\n", "    role: dev\n    deletion_protection: false\n", 1))
 	reader := &fakePlacementStatusReader{status: fleet.PlacementStatus{
 		Cells: []fleet.PlacementStatusCell{{Name: destroyTestCell, AccountCount: 1}},
 	}}

@@ -796,7 +796,7 @@ func TestMessageProcessingRejectsDurationOverflowBeforeCallingBackend(t *testing
 	}
 }
 
-func TestMessageProcessingCapabilityRequiresCompleteSurface(t *testing.T) {
+func TestMessageProcessingCapabilityReportsRegisteredSurface(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{Kind: PrincipalKindAgent}, true, nil
 	}
@@ -823,7 +823,7 @@ func TestMessageProcessingCapabilityRequiresCompleteSurface(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
 		t.Fatal(err)
 	}
-	if feature := caps.Features["message_processing"]; feature.Supported || feature.Reason != "not_implemented" {
+	if feature := caps.Features["message_processing"]; !feature.Supported || feature.Reason != "" {
 		t.Fatalf("partial message_processing capability = %+v", feature)
 	}
 }

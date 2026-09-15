@@ -514,6 +514,8 @@ jq -e '
   .spec.template.spec.enableServiceLinks == false and
   (.spec.template.spec.containers | length == 1)
 ' "$work_dir/state/job-created.json" >/dev/null
+ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
+  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev "$FAKE_EXPECTED_NAMESPACE"
 jq -e '
   .spec.template.spec.containers[0] as $runner |
   $runner.image == "ghcr.io/witwave-ai/images/witself-server:0.0.249" and

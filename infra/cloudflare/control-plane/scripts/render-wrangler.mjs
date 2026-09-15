@@ -75,6 +75,10 @@ function committedPlainTextVar(name) {
   return matches[0][1];
 }
 
+if (committedPlainTextVar("CP_SIGNUP_LEGAL_ENFORCEMENT") !== "true") {
+  throw new Error("committed CP_SIGNUP_LEGAL_ENFORCEMENT must be exactly true");
+}
+
 if (committedPlainTextVar("CP_SIGNUP_OPEN") === "true" &&
     (parseSignupLimit(committedPlainTextVar(
       "CP_SIGNUP_DAILY_LIMIT_PER_IP",

@@ -138,7 +138,7 @@ type MessageProcessing struct {
 }
 
 // Message is one direct realm-local agent message plus the recipient's state.
-// Body and Payload are empty on list results and populated only by send/read.
+// Body and Payload are empty on list results and populated only by send/read/peek.
 type Message struct {
 	ID                  string            `json:"id"`
 	AccountID           string            `json:"account_id"`
@@ -327,6 +327,46 @@ func requireMessagingEnabled(ctx context.Context, tx pgx.Tx, accountID string) e
 	}
 	if !enabled {
 		return &FeatureNotEnabledError{Feature: plans.MessagingFeature}
+	}
+	return nil
+}
+
+// CollaborationEnabledForPlanSnapshot is the shared effective mutation and
+// self-projection policy. Legacy snapshots keep collaboration only while
+// messaging is enabled; present but invalid authority never becomes legacy.
+func CollaborationEnabledForPlanSnapshot(appliedAt *time.Time, policies map[string]int64, features []string) bool {
+	version, governed := policies[plans.CollaborationEntitlementVersionPolicy]
+	if governed && (appliedAt == nil || version != plans.CollaborationEntitlementVersion ||
+		!slices.Contains(features, plans.CollaborationFeature)) {
+		return false
+	}
+	return MessagingEnabledForPlanSnapshot(appliedAt, policies, features)
+}
+
+// requireCollaborationEnabled preserves the messaging refusal and account
+// status precedence. Both reads use the same transaction's account share lock,
+// so neither a plan update nor a feature transition can interleave the gates.
+func requireCollaborationEnabled(ctx context.Context, tx pgx.Tx, accountID string) error {
+	if err := requireMessagingEnabled(ctx, tx, accountID); err != nil {
+		return err
+	}
+	var policiesJSON, featuresJSON []byte
+	var appliedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT plan_policies, plan_features, plan_applied_at
+		FROM accounts WHERE id=$1 FOR SHARE`, accountID).
+		Scan(&policiesJSON, &featuresJSON, &appliedAt); err != nil {
+		return fmt.Errorf("lock account for collaboration: %w", err)
+	}
+	var policies map[string]int64
+	var features []string
+	if err := json.Unmarshal(policiesJSON, &policies); err != nil {
+		return fmt.Errorf("decode plan policies for collaboration: %w", err)
+	}
+	if err := json.Unmarshal(featuresJSON, &features); err != nil {
+		return fmt.Errorf("decode plan features for collaboration: %w", err)
+	}
+	if !CollaborationEnabledForPlanSnapshot(appliedAt, policies, features) {
+		return &FeatureNotEnabledError{Feature: plans.CollaborationFeature}
 	}
 	return nil
 }
@@ -547,7 +587,7 @@ func (s *Store) ClaimMessage(ctx context.Context, p Principal, messageID string,
 		FailureCount: msg.Processing.FailureCount,
 		ClaimID:      claimID, LeaseExpiresAt: &leaseExpiresAt,
 	}
-	if err := logMessageProcessingEvent(ctx, tx, VerbMessageProcessingClaimed, p.ID, msg, ""); err != nil {
+	if err := s.logMessageProcessingEvent(ctx, tx, VerbMessageProcessingClaimed, p.ID, msg, ""); err != nil {
 		return Message{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -614,7 +654,7 @@ func (s *Store) RenewMessageClaim(ctx context.Context, p Principal, messageID st
 		return Message{}, fmt.Errorf("renew message claim: %w", err)
 	}
 	msg.Processing.LeaseExpiresAt = &leaseExpiresAt
-	if err := logMessageProcessingEvent(ctx, tx, VerbMessageProcessingRenewed, p.ID, msg, ""); err != nil {
+	if err := s.logMessageProcessingEvent(ctx, tx, VerbMessageProcessingRenewed, p.ID, msg, ""); err != nil {
 		return Message{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -686,7 +726,7 @@ func (s *Store) ReleaseMessageClaim(ctx context.Context, p Principal, messageID 
 		State: MessageProcessingAvailable, Generation: fence.ProcessingGeneration,
 		FailureCount: failureCount,
 	}
-	if err := logMessageProcessingEvent(ctx, tx, VerbMessageProcessingReleased, p.ID, msg, ""); err != nil {
+	if err := s.logMessageProcessingEvent(ctx, tx, VerbMessageProcessingReleased, p.ID, msg, ""); err != nil {
 		return Message{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -828,7 +868,7 @@ func (s *Store) CompleteMessage(ctx context.Context, p Principal, messageID stri
 		FailureCount: parent.Processing.FailureCount,
 		ClaimID:      fence.ClaimID, CompletedAt: &completedAt, ResultMessageID: result.ID,
 	}
-	if err := logMessageProcessingEvent(ctx, tx, VerbMessageProcessingCompleted, p.ID, parent, result.ID); err != nil {
+	if err := s.logMessageProcessingEvent(ctx, tx, VerbMessageProcessingCompleted, p.ID, parent, result.ID); err != nil {
 		return CompleteMessageResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1033,7 +1073,7 @@ func (s *Store) insertMessageTargetsTx(
 		// the per-recipient delivered events below retain the complete snapshot.
 		sentEvent.To.ID = targets[0].agent.ID
 	}
-	if err := logMessageEvent(ctx, tx, VerbMessageSent, ActorAgent, p.ID, sentEvent); err != nil {
+	if err := s.logMessageEvent(ctx, tx, VerbMessageSent, ActorAgent, p.ID, sentEvent); err != nil {
 		return Message{}, err
 	}
 	for _, target := range targets {
@@ -1043,7 +1083,7 @@ func (s *Store) insertMessageTargetsTx(
 		if target.state == MessageDeliveryFailed {
 			deliveryVerb = VerbMessageDeliveryFailed
 		}
-		if err := logMessageEvent(ctx, tx, deliveryVerb, ActorSystem, "", deliveryMessage); err != nil {
+		if err := s.logMessageEvent(ctx, tx, deliveryVerb, ActorSystem, "", deliveryMessage); err != nil {
 			return Message{}, err
 		}
 	}
@@ -1177,6 +1217,41 @@ func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFil
 	return MessagePage{Messages: out, NextCursor: next}, nil
 }
 
+// PeekMessage returns recipient-visible content without changing delivery,
+// processing, audit, or usage state. It revalidates and locks the live caller
+// scope just like the other messaging reads, but never transitions the delivery.
+func (s *Store) PeekMessage(ctx context.Context, p Principal, messageID string) (Message, error) {
+	if p.Kind != PrincipalAgent {
+		return Message{}, ErrMessageForbidden
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return Message{}, fmt.Errorf("%w: message id is required", ErrMessageInputInvalid)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Message{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
+		return Message{}, err
+	}
+	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
+		return Message{}, err
+	}
+	msg, err := messageDeliveryByScopedID(ctx, tx, p.AccountID, p.RealmID, p.ID, messageID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("peek message delivery: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Message{}, err
+	}
+	return redactMessageProcessingFence(msg), nil
+}
+
 // ReadMessage returns content to the recipient and idempotently marks it read.
 func (s *Store) ReadMessage(ctx context.Context, p Principal, messageID string) (Message, error) {
 	return s.transitionMessage(ctx, p, strings.TrimSpace(messageID), false)
@@ -1247,12 +1322,12 @@ func (s *Store) transitionMessage(ctx context.Context, p Principal, messageID st
 	auditMessage := msg
 	auditMessage.To.ID = p.ID
 	if wasUnread {
-		if err := logMessageEvent(ctx, tx, VerbMessageRead, ActorAgent, p.ID, auditMessage); err != nil {
+		if err := s.logMessageEvent(ctx, tx, VerbMessageRead, ActorAgent, p.ID, auditMessage); err != nil {
 			return Message{}, err
 		}
 	}
 	if ack && wasUnacked {
-		if err := logMessageEvent(ctx, tx, VerbMessageAcked, ActorAgent, p.ID, auditMessage); err != nil {
+		if err := s.logMessageEvent(ctx, tx, VerbMessageAcked, ActorAgent, p.ID, auditMessage); err != nil {
 			return Message{}, err
 		}
 	}
@@ -1897,14 +1972,14 @@ func readState(readAt, ackedAt *time.Time) string {
 	return MessageReadUnread
 }
 
-func logMessageEvent(ctx context.Context, tx pgx.Tx, verb, actorKind, actorID string, msg Message) error {
-	return logEventTx(ctx, tx, EventInput{
+func (s *Store) logMessageEvent(ctx context.Context, tx pgx.Tx, verb, actorKind, actorID string, msg Message) error {
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: msg.AccountID, ActorKind: actorKind, ActorID: actorID,
 		Verb: verb, Metadata: messageEventMetadata(msg),
 	})
 }
 
-func logMessageProcessingEvent(ctx context.Context, tx pgx.Tx, verb, actorID string, msg Message, resultMessageID string) error {
+func (s *Store) logMessageProcessingEvent(ctx context.Context, tx pgx.Tx, verb, actorID string, msg Message, resultMessageID string) error {
 	metadata := messageEventMetadata(msg)
 	metadata["recipient_agent_id"] = actorID
 	metadata["processing_generation"] = strconv.FormatInt(msg.Processing.Generation, 10)
@@ -1912,7 +1987,7 @@ func logMessageProcessingEvent(ctx context.Context, tx pgx.Tx, verb, actorID str
 	if resultMessageID != "" {
 		metadata["result_message_id"] = resultMessageID
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: msg.AccountID, ActorKind: ActorAgent, ActorID: actorID,
 		Verb: verb, Metadata: metadata,
 	})

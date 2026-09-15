@@ -2,17 +2,15 @@ package store
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailReceiveControlSchema59BackfillPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 59)

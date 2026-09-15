@@ -2,18 +2,17 @@ package store
 
 import (
 	"context"
-	"os"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailAccountBoundsMigrationPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 89)
@@ -62,8 +61,11 @@ func TestAgentEmailAccountBoundsMigrationPostgres(t *testing.T) {
 		account.AccountID,
 	); err == nil {
 		t.Fatal("schema 90 accepted realm debt without a realm")
-	} else if _, ok := err.(*pgconn.PgError); !ok {
-		t.Fatalf("invalid realm debt error = %T %v", err, err)
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			t.Fatalf("invalid realm debt error = %T %v", err, err)
+		}
 	}
 	if _, err := st.pool.Exec(ctx, `DELETE FROM realms WHERE account_id=$1 AND id=$2`,
 		account.AccountID, firstRealm.ID,

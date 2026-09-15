@@ -613,3 +613,21 @@ func TestCapabilitiesNeverAdvertiseUnsafeBillingEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanSnapshotRecordCollaborationRequiresFence(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := PlanSnapshotRecord{AccountID: "acct_1", Plan: "custom", Limits: map[string]int64{}, Policies: map[string]int64{plans.CollaborationEntitlementVersionPolicy: 1}, Features: []string{plans.MessagingFeature}, AppliedAt: &now}
+	if validPlanSnapshotRecord(snapshot, "acct_1") {
+		t.Fatal("accepted unfenced collaboration authority")
+	}
+	snapshot.Revision = 1
+	var err error
+	snapshot.SnapshotHash, err = plans.SnapshotHash(snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features)
+	if err != nil || !validPlanSnapshotRecord(snapshot, "acct_1") {
+		t.Fatalf("governed record refused: %v", err)
+	}
+	snapshot.AppliedAt = nil
+	if validPlanSnapshotRecord(snapshot, "acct_1") {
+		t.Fatal("accepted governed record without applied time")
+	}
+}

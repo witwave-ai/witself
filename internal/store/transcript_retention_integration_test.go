@@ -4,18 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -346,10 +344,7 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 }
 
 func TestTranscriptRetentionBatchIsFairAndOldestFirstAcrossAccountsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -469,10 +464,7 @@ func TestTranscriptRetentionBatchIsFairAndOldestFirstAcrossAccountsPostgres(t *t
 }
 
 func TestTranscriptRetentionHeldBacklogUsesBoundedPersistentScanPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -573,10 +565,7 @@ func TestTranscriptRetentionHeldBacklogUsesBoundedPersistentScanPostgres(t *test
 }
 
 func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -753,10 +742,7 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 }
 
 func TestTranscriptRetentionSweepClaimSkipsBusyReplicaPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -836,10 +822,7 @@ func TestTranscriptRetentionSweepClaimSkipsBusyReplicaPostgres(t *testing.T) {
 }
 
 func TestTranscriptRetentionLaneMigrationHandsOffScheduledCadencePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	migrationTestUpTo(t, schemaDSN, 65)
@@ -1095,10 +1078,7 @@ func TestTranscriptRetentionLaneMigrationHandsOffScheduledCadencePostgres(t *tes
 }
 
 func TestTranscriptRetentionWorkersClaimDifferentLanesConcurrentlyPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	firstStore, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := firstStore.Migrate(); err != nil {
@@ -1214,10 +1194,7 @@ func TestTranscriptRetentionWorkersClaimDifferentLanesConcurrentlyPostgres(t *te
 }
 
 func TestTranscriptRetentionBusyLaneDoesNotBlockAnotherPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	lockingStore, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := lockingStore.Migrate(); err != nil {
@@ -1305,10 +1282,7 @@ func TestTranscriptRetentionBusyLaneDoesNotBlockAnotherPostgres(t *testing.T) {
 }
 
 func TestTranscriptRetentionWorkerRefusesIncompleteLaneSetPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -1413,10 +1387,7 @@ func enableTranscriptRetentionAndCreateExpired(
 }
 
 func TestTranscriptRetentionPrunedRunCannotReplayPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	source := captureHardeningMemory(ctx, t, st, p,
 		"source retained after transcript pruning", "retention-replay-source")

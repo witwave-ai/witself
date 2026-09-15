@@ -590,3 +590,169 @@ self-only agent routes:
 
 The CLI mirrors those operations with `witself avatar ...`; all generated SVG
 payloads are file inputs or MCP values, never shell arguments.
+
+## Live acceptance record
+
+The `live-avatar-acceptance` gate requires a retained, value-free observation
+from [`scripts/run-avatar-acceptance.sh`](../scripts/run-avatar-acceptance.sh).
+The script exercises a freshly minted synthetic agent and the shipped account
+archive formats. Offline contract tests support the harness; they do not close
+the live gate. The placeholder below remains pending until an operator runs the
+live legs and retains the resulting record.
+
+Certification is pinned to the release observed at run time. The script reads
+the routed serving cell's and control plane's `/v1/version` plus `witself
+version`, and requires version and commit to match across all three. The
+backlog's original `v0.0.272` target is superseded; the expected pair when this
+procedure was prepared was `v0.0.275`,
+but that expectation is not live evidence. A mismatch produces a rehearsal
+record with `certification_eligible=false` and a nonzero exit unless
+`--rehearsal` was explicitly selected. An explicit rehearsal never certifies
+and still performs the lifecycle and backup mutations. Repeat the acceptance
+for a later release train, or retain it only as evidence for the recorded
+`evidence_release`.
+
+### Operator procedure
+
+The live runner needs Bash, `jq`, `curl`, `tar`, `gzip`, `shasum`, Git, `mktemp`,
+standard Unix utilities, the matched `witself` CLI, an existing account binding
+with its operator credential, the acceptance realm ID, and a fleet-token file.
+The synthetic agent name must be fresh: the script creates the agent and writes
+its new token to a private file. Never
+substitute a real agent. The reset retires its first lineage, and lowering its
+retained-payload count limit to four irreversibly compacts eligible history.
+
+Before the live run, authorize the manual backup operation with the operator.
+`POST /v1/backups:run` writes one additional account archive to R2 and is
+billing-bearing. The script warns before requesting it. To avoid that manual
+write, use the separate [rollback-only restore-drill procedure](backup-and-recovery.md#rollback-only-restore-drills)
+after a scheduled generation captures the completed synthetic lifecycle; the
+single-run harness does not select an existing backup. A backup created before
+this agent's lifecycle cannot prove its archive portability.
+
+After the self archive checks, the harness reads the account's durable current
+backup job and committed catalog. The requested job must have a strictly later
+minute-slot ID than every job in that observation. A reused slot, explicit
+existing-object recovery, or missing or mismatched current-job authority fails
+the leg before any restore drill. The script makes only one manual backup
+request; inspect a failed run before starting again with a fresh synthetic
+agent. Scheduled retries of the newly observed job remain bounded to 420 seconds
+after the manual response. A manifest's `exported_at` can follow acquisition of
+an older database snapshot, so it is not the freshness proof.
+
+Use an empty private workspace outside every Git worktree. The runner creates
+it if absent, sets it to `0700`, and removes its private temporary child on exit,
+leaving the work directory empty. The output path must not exist, its parent
+must exist, and that parent must also be outside every Git worktree. The runner
+uses `umask 077` and writes a `0600` record. `witself export` contains the
+**whole account**, including other agents' data. The runner inspects only the
+manifest, checksums, and avatar table rows needed for this agent; it deletes
+the archive after inspection and on exit. Do not retain raw CLI responses,
+archive files, tokens, SVGs, or specifications as evidence.
+
+After setting `ACCEPTANCE_REALM_ID`, `ACCEPTANCE_AGENT_NAME`,
+`ACCEPTANCE_CONTROL_PLANE`, `ACCEPTANCE_FLEET_TOKEN_FILE`, `ACCEPTANCE_WORK`, and
+`ACCEPTANCE_RECORD` to operator-selected values:
+
+```sh
+bash scripts/run-avatar-acceptance.sh \
+  --account evac-a \
+  --realm-id "$ACCEPTANCE_REALM_ID" \
+  --agent "$ACCEPTANCE_AGENT_NAME" \
+  --control-plane "$ACCEPTANCE_CONTROL_PLANE" \
+  --fleet-token-file "$ACCEPTANCE_FLEET_TOKEN_FILE" \
+  --drill-cell civo-sandbox-use1-backup \
+  --work "$ACCEPTANCE_WORK" \
+  --out "$ACCEPTANCE_RECORD" \
+  --redact-check
+
+bash scripts/run-avatar-acceptance.sh \
+  --out "$ACCEPTANCE_RECORD" --redact-check
+```
+
+The second command only validates a retained local record. The live command
+rejects every other drill-cell name. The control plane must also confirm that
+`civo-sandbox-use1-backup` is registered for backup validation and is not
+accepting accounts. The script checks that the account's directory route is
+unchanged after the drill.
+
+Every mutation uses an exact profile revision and a fresh idempotency key.
+Activation retries one revision conflict after a fresh `avatar show`; a pending
+proposal or another lifecycle deviation fails the corresponding leg. Polling
+is bounded. An interrupted run is not resumed by replaying old proposal keys:
+inspect its existing agent separately, then start a new acceptance run with a
+fresh synthetic name and private workspace.
+
+### Required observations
+
+| Leg | Evidence required |
+| --- | --- |
+| L1 | Fresh profile has no active or proposed version, initial generation/placeholder state, `agent_self_managed` policy, and lineage 1. |
+| L2 | Read the selected style's human reference and prepare one synthetic SVG and structured specification locally. |
+| L3 | Propose parentless version 1 and activate the returned exact version. |
+| L4 | Propose and activate version 2 with version 1 as its parent and unchanged SVG geometry. |
+| L5 | Observe version 1 as rollback-eligible, then roll back to it. |
+| L6 | Propose version 3, reject it through the operator route, and observe its rejected state. |
+| L7 | Activate version 4, reset to lineage 2, then propose and activate parentless version 5. |
+| L8 | Set the synthetic agent's retained-payload count limit to four; observe quota compaction and the compacted parent's retained-child continuity boundary. |
+| L9 | Walk history with `--limit 2` and exclusive `--before-version` using each `next_before_version`; prove all five versions appear once. |
+| L10 | Download and verify the shipped self archive; compare the synthetic avatar rows and active pointer with live reads, including content equality only as booleans. |
+| L11 | Fence a new backup job against the post-L10 durable job/catalog observation, wait for that exact current job's committed generation, and require a restore drill acknowledgement with `validated=true` and `validated_at`; verify unchanged routing. |
+
+The built-in reference is a deterministic fixture, so acceptance needs no image
+generation. Its unlocked layer receives a bounded nonvisual addition, shared
+by every proposal, so the parent payload exceeds the continuity-fingerprint
+storage size without changing the portrait. A smaller payload can legitimately
+skip parent compaction under the no-storage-growth rule and compact a leaf
+instead; that would not exercise the retained-child boundary required here.
+The record retains the boundary check as a boolean and contains no fixture or
+fingerprint bytes.
+
+The archive leg uses `witself export --account BINDING --out FILE`, which
+downloads `GET /v1/export` using the account operator credential. The CLI
+verifies the gzip/tar archive's `manifest.json`, ordered
+`<table>/000001.ndjson` chunks, and trailing `checksums.json` before publishing
+the file. Acceptance requires `purpose=self`, the observed server version,
+and the avatar table streams. It checks this agent's profile, versions,
+activations, rejection, and reset rows against the lifecycle, lineage,
+compaction state, and active pointer. SVG digest equality is recorded only as a
+boolean, never as a hash value.
+
+There is no shipped customer `witself import`. The operator account-move import
+accepts paired evacuation archives, and committed non-backup store import
+requires an account archived as suspended or closed. It cannot commit this
+active account's self export. The separate backup leg uses
+`POST /v1/backups:restore-drill` to invoke the drill cell's
+`POST /v1/accounts/{id}:validate-backup`; `ValidateAccountBackup` exercises the
+semantic import and deferred constraints, then rolls back all imported rows.
+The retained claim is **validated by rollback-only restore drill**. Committed
+restore remains an operator recovery procedure and is not certified here.
+
+### Retained record
+
+The JSON `schema_version` is `witself.avatar-acceptance.v1`. Its allowlisted
+fields are `run_id`, `status`, `certification_eligible`, release metadata
+(`version`, `commit`, `date`) in `witself` and `cli`, the stable cell-name string
+`cell`, stable `account_id`, `realm_id`, and `agent_id`, and the following bounded
+evidence:
+
+- `legs`: each leg's `name`, `passed`, fixed value-free `detail`, `versions`,
+  `profile_revision`, `lineage_generation`, and timestamp `at`.
+- `archive`: `schema_version`, avatar `row_counts`, and boolean `matches`.
+- `backup`: `backup_id`, `validated_at`, and `drill_cell`.
+
+The record contains no SVG, prompts, descriptions, visual specifications,
+hashes, provenance, raw idempotency keys, tokens, endpoints, local paths, or
+other account content. `--redact-check` is mandatory and rejects prohibited
+content before the final record is accepted. Retain only a successful record
+with every leg passed and `certification_eligible=true`. Keep a failed or
+rehearsal record private for diagnosis; neither closes the gate.
+
+After retaining the live record here, the operator can update the catalog's
+rollout-canary status, evidence paths, `evidence_release`, and `evidence_scope`,
+remove the live acceptance and payload-compaction open gates supported by the
+record, and regenerate `docs/feature-status.md` with `make feature-status`.
+Until then both gates remain open; no live acceptance result is implied by
+this procedure or its offline test coverage.
+
+<!-- acceptance-record: pending live run -->

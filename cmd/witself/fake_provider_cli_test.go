@@ -21,6 +21,7 @@ var providerCLIPathOverrideEnvironment = []string{
 	"OPENCLAW_CLI_PATH",
 	"ANTIGRAVITY_CLI_PATH",
 	"COPILOT_CLI_PATH",
+	"DSH_CLI_PATH",
 }
 
 func clearProviderCLIPathOverridesForTest(t *testing.T) {

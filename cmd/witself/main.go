@@ -22,7 +22,6 @@ import (
 	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/legacyrunnercleanup"
-	"github.com/witwave-ai/witself/internal/legal"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/textsafe"
@@ -177,6 +176,8 @@ func run(args []string) int {
 		return emailDomainCmd(args[1:])
 	case "integrations":
 		return integrationsCmd(args[1:])
+	case "integration":
+		return integrationCmd(args[1:])
 	case "install":
 		return installCmd(args[1:])
 	case "uninstall":
@@ -2494,14 +2495,10 @@ func accountForget(args []string) int {
 // bootstrap uses — and remembers it under a local name so later commands are
 // just `witself realm create --account NAME ...`.
 func accountCreate(args []string) int {
-	return accountCreateWithLegalVersions(
-		args, legal.TermsVersion, legal.PrivacyVersion,
-	)
+	return accountCreateWithContext(context.Background(), args)
 }
 
-func accountCreateWithLegalVersions(
-	args []string, currentTermsVersion, currentPrivacyVersion string,
-) int {
+func accountCreateWithContext(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	email := fs.String("email", "", "account owner email")
@@ -2533,7 +2530,7 @@ func accountCreateWithLegalVersions(
 	if errors.Is(journalErr, local.ErrAccountProvisionJournalUnavailable) {
 		// Claim the local name BEFORE creating anything remote: a taken name
 		// must not strand a freshly provisioned account's only credential.
-		if err := local.Available(localName); err != nil {
+		if err := local.AvailableAccountProvisionName(localName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
@@ -2542,27 +2539,35 @@ func accountCreateWithLegalVersions(
 		return 1
 	}
 
-	// --accept-terms records consent to the compiled-in current legal
-	// versions. Consent participates in the durable request fingerprint so a
-	// resumed or replayed journal keeps binding the exact same consent. On a
-	// resume, the journal's accepted versions override newly compiled versions;
-	// the dark default (flag absent) leaves the fingerprint input byte-identical
-	// to older CLIs.
+	// A new consentful signup selects the versions served by its own control
+	// plane. Existing journals always replay their exact accepted versions;
+	// neither a later --accept-terms nor changed legal pages may rewrite an
+	// ambiguous request. Consentless legacy requests keep their fingerprint.
 	consentTermsVersion, consentPrivacyVersion := "", ""
-	if journalErr == nil && existingJournal.AcceptedTermsVersion != "" {
+	legalBase := ""
+	if journalErr == nil {
 		consentTermsVersion = existingJournal.AcceptedTermsVersion
 		consentPrivacyVersion = existingJournal.AcceptedPrivacyVersion
 	} else if *acceptTerms {
-		consentTermsVersion = currentTermsVersion
-		consentPrivacyVersion = currentPrivacyVersion
+		var err error
+		legalBase, err = signupLegalBase(*endpoint)
+		if err == nil {
+			consentTermsVersion, consentPrivacyVersion, err = signupLegalVersions(ctx, legalBase)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: fetch current legal versions: %v\n", err)
+			return 1
+		}
 	}
 	if consentTermsVersion != "" {
-		// Say exactly which texts the consent record will name; the pages
-		// are the authoritative copies and `witself legal` reads them here.
-		fmt.Printf("recording consent to Terms of Service v%s and Privacy Policy v%s\n",
-			consentTermsVersion, consentPrivacyVersion)
-		fmt.Printf("  %s/terms · %s/privacy · read in-terminal: witself legal terms\n",
-			legal.BaseURL, legal.BaseURL)
+		if journalErr == nil {
+			fmt.Printf("resuming recorded consent to Terms of Service v%s and Privacy Policy v%s\n",
+				consentTermsVersion, consentPrivacyVersion)
+		} else {
+			fmt.Printf("recording consent to Terms of Service v%s and Privacy Policy v%s\n",
+				consentTermsVersion, consentPrivacyVersion)
+			fmt.Printf("  %s/terms · %s/privacy\n", legalBase, legalBase)
+		}
 	}
 	requestFingerprint, err := client.AccountCreateRequestFingerprint(
 		*endpoint, localName, *email, *invite, *displayName,
@@ -2625,17 +2630,36 @@ func accountCreateWithLegalVersions(
 	// Recheck after journal publication. Another process can have created a
 	// local binding between the initial availability check and the stable
 	// provision-id election; no remote mutation occurs on that conflict.
-	if err := local.Available(localName); err != nil {
+	if err := local.AvailableAccountProvisionName(localName); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 
-	ctx := context.Background()
+	if journal.LegalRefusal != nil {
+		journal, err = resumeAccountLegalReconsent(ctx, localName, *endpoint, *email, *invite, *displayName, *acceptTerms, journal)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: resume legal acceptance: %v\n", err)
+			return 1
+		}
+		requestFingerprint = journal.RequestFingerprint
+		consentTermsVersion = journal.AcceptedTermsVersion
+		consentPrivacyVersion = journal.AcceptedPrivacyVersion
+	}
+
 	acct, err := client.CreateAccountExact(
 		ctx, *endpoint, *email, *invite, *displayName, journal.ProvisionID,
 		*challenge, consentTermsVersion, consentPrivacyVersion,
 	)
 	if err != nil {
+		var legalErr *client.SignupLegalRefusalError
+		if errors.As(err, &legalErr) {
+			if _, saveErr := local.RecordAccountProvisionLegalRefusal(localName, journal, legalErr.Refusal); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: save legal refusal for safe recovery: %v\n", saveErr)
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, "witself: legal acceptance changed; the refused signup is saved. Review the current documents and rerun the same account create command with --accept-terms")
+			return 1
+		}
 		var challengeErr *client.SignupChallengeError
 		if errors.As(err, &challengeErr) {
 			fmt.Fprintf(
@@ -2962,6 +2986,7 @@ func usageCmd(args []string) int {
 	sinceRaw := fs.String("since", "30d", "report start (RFC3339 or duration such as 30d or 24h)")
 	untilRaw := fs.String("until", "", "report end (RFC3339; default: now)")
 	groupBy := fs.String("group-by", "day", "time bucket: hour or day")
+	allowTruncation := fs.Bool("allow-truncation", false, "allow partial usage results when the server row cap is exceeded")
 	var dimensions csvListFlag
 	fs.Var(&dimensions, "dimension", "usage dimension (repeatable or comma-separated)")
 	jsonOut := jsonFlag(fs)
@@ -2999,6 +3024,7 @@ func usageCmd(args []string) int {
 	}
 	report, err := client.GetUsage(ctx, conn.Endpoint, conn.Token, client.UsageQuery{
 		Since: since, Until: until, Bucket: *groupBy, Dimensions: dimensions,
+		AllowTruncation: *allowTruncation,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -3016,6 +3042,9 @@ func usageCmd(args []string) int {
 	if conn.AgentName != "" && report.AgentName != "" && report.AgentName != conn.AgentName {
 		fmt.Fprintf(os.Stderr, "witself: agent token belongs to agent %q, not %q\n", report.AgentName, conn.AgentName)
 		return 1
+	}
+	if report.Truncated {
+		fmt.Fprintln(os.Stderr, "WARNING: truncated: true; usage totals cover returned points only; narrow --since/--until, use a coarser --group-by, or filter --dimension")
 	}
 	if *jsonOut {
 		return printJSON(report)
@@ -3939,7 +3968,7 @@ func factUpcoming(args []string) int {
 
 func transcriptCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail ...")
+		fmt.Fprintln(os.Stderr, "usage: witself transcript create|append|list|show|tail|hook|flush|fence|status ...")
 		return 2
 	}
 	switch args[0] {
@@ -3957,6 +3986,10 @@ func transcriptCmd(args []string) int {
 		return transcriptHook(args[1:])
 	case "flush":
 		return transcriptFlush(args[1:])
+	case "fence":
+		return transcriptFence(args[1:])
+	case "status":
+		return transcriptStatus(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself transcript: unknown subcommand %q\n", args[0])
 		return 2
@@ -4219,6 +4252,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	cliout.Line(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
 	cliout.Line(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
+	cliout.Line(w, "  witself integration status --runtime RUNTIME  Show recent local hydration evidence")
 	cliout.Line(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
 	cliout.Line(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
 	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")

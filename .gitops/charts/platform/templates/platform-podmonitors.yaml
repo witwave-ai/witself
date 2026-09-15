@@ -1,0 +1,64 @@
+{{- if .Values.platform.monitoring.enabled }}
+{{- $monitoring := .Values.platform.monitoring -}}
+{{- if and $monitoring.certManager.enabled .Values.platform.certManager.enabled }}
+# Keep the PodMonitor in the namespace already admitted by Prometheus; its
+# target namespace selector is independent of podMonitorNamespaceSelector.
+# cert-manager v1.20.3 exposes http-metrics (9402) on the existing controller.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: witself-cert-manager
+  namespace: {{ $monitoring.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    release: {{ $monitoring.releaseName | quote }}
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.platform.certManager.namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: cert-manager
+      app.kubernetes.io/name: cert-manager
+      app.kubernetes.io/component: controller
+  podMetricsEndpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 30s
+{{- end }}
+{{- if $monitoring.argocd.enabled }}
+{{- range $component := list "application-controller" "repo-server" "server" }}
+---
+# argo-cd 10.0.1 exposes metrics on every existing pod independently of its
+# optional metrics Services: controller 8082, repo-server 8084, server 8083.
+# Its ingress policies admit controller/repo metrics from all namespaces and
+# all server ingress, so Prometheus needs no additional NetworkPolicy.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: witself-argocd-{{ $component }}
+  namespace: {{ $monitoring.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    release: {{ $monitoring.releaseName | quote }}
+    witself.io/cell: {{ required "cell.name is required" $.Values.cell.name | quote }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: argocd
+      app.kubernetes.io/name: argocd-{{ $component }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+{{- end }}
+{{- end }}
+{{- end }}

@@ -3,9 +3,10 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // The assistant write path, end to end against Postgres: an assistant reply
@@ -13,10 +14,7 @@ import (
 // operating admin handle, swings the ticket to awaiting_customer, and sets
 // first_response_at — the AI's first answer IS the SLA first response.
 func TestReplyAdminTicketAsAssistantPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

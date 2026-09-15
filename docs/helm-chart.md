@@ -148,6 +148,21 @@ The chart must not bundle or configure any model or embedding provider. Client
 inference is outside the pod and outside the chart; see
 [memory-model.md](memory-model.md).
 
+Support ticket admission uses `support.ticketRateLimit: 10` and
+`support.ticketRateWindow: 60s`, rendered as `WITSELF_SUPPORT_TICKET_RATE_LIMIT`
+and `WITSELF_SUPPORT_TICKET_RATE_WINDOW` in the API ConfigMap. These are shared
+per-account new-ticket bounds; replies and reads remain available. The server
+validates limits of 1–1,000 tickets and windows of 1 second–24 hours.
+
+`worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` in the
+worker ConfigMap. It defaults to `enabled: false`, `after: 720h`,
+`batchSize: 100`, `interval: 1h`, and `batchTimeout: 10s`. Process startup
+validates ages of 24–8,760 hours, batches of 1–100 tickets, intervals of
+1 minute–24 hours, and timeouts of 1 second–5 minutes. The bounded sweep
+resolves stale `awaiting_customer` tickets only after a human reply, retains
+their threads, and allows a later customer reply to reopen them. The
+1-business-day human first-response promise is unchanged.
+
 ## PostgreSQL Canonical Store
 
 Witself's system of record is PostgreSQL. The current recall contract uses

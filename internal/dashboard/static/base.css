@@ -336,6 +336,19 @@ select {
 .bubble .kind { font-family: var(--font-mono); color: var(--fg-dim); }
 .bubble .subject { font-weight: 600; }
 .bubble .nobody { color: var(--fg-dim); font-style: italic; font-size: 0.85rem; }
+.message-preview { margin: 0.3rem 0; }
+.message-body-toggle {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.message-body-toggle:disabled { opacity: 0.6; cursor: default; }
+.message-body-content { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
 .bubble .meta { color: var(--fg-dim); font-size: 0.75rem; }
 
 /* Status bar */

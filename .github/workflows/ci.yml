@@ -13,44 +13,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Keep this required check named exactly go. Mirror these Go jobs in
+  # release.yml; every parallel gate must succeed before this check is green.
   go:
+    name: go
+    if: ${{ always() }}
+    needs: [go-rest, go-store, go-infra, provider-contract-evidence]
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
+    permissions:
+      contents: read
+    steps:
+      - name: Require all Go gates
         env:
-          POSTGRES_USER: witself
-          POSTGRES_PASSWORD: witself
-          POSTGRES_DB: witself
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U witself -d witself"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-    env:
-      # Keep the production-backed store tests in the normal CI gate. Without
-      # this DSN they intentionally skip, which can hide PostgreSQL semantics.
-      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+          GO_REST_RESULT: ${{ needs.go-rest.result }}
+          GO_STORE_RESULT: ${{ needs.go-store.result }}
+          GO_INFRA_RESULT: ${{ needs.go-infra.result }}
+          PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}
+        run: |
+          for result in "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "A required Go gate did not succeed: $result" >&2
+              exit 1
+            fi
+          done
+
+  go-rest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: |
-            go.sum
-            infra/pulumi/go.sum
+          cache-dependency-path: go.sum
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
       - name: go mod tidy
-        run: |
-          go mod tidy -diff
-          (cd infra/pulumi && go mod tidy -diff)
+        run: go mod tidy -diff
 
       - name: gofmt
         run: |
@@ -65,44 +69,35 @@ jobs:
       - name: build
         run: go build ./...
 
-      - name: test
-        # The PostgreSQL integration suite deliberately serializes schema
-        # migrations behind one advisory lock. The full race build now sits
-        # close to 20 minutes on a noisy hosted runner, so keep a bounded but
-        # non-flaky margin for the lock queue.
+      - name: test non-store
+        shell: bash
         env:
           WITSELF_TEST_REQUIRE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_NODE: "1"
         run: |
-          go test ./... \
+          # Keep package discovery in a checked pipeline: a failed go list
+          # must fail this gate, not leave a partial package list to test.
+          go list ./... | grep -vE '/internal/store(/|$)' > "$RUNNER_TEMP/go-test-packages.txt"
+          mapfile -t packages < "$RUNNER_TEMP/go-test-packages.txt"
+          go test "${packages[@]}" \
             -race \
             -shuffle=on \
             -timeout=30m \
             -covermode=atomic \
-            -coverprofile="$RUNNER_TEMP/go-coverage.out"
-          go tool cover -func="$RUNNER_TEMP/go-coverage.out"
+            -coverprofile="$RUNNER_TEMP/go-coverage-rest.out"
+          go tool cover -func="$RUNNER_TEMP/go-coverage-rest.out"
 
-      - name: Upload Go coverage
+      - name: Upload Go non-store coverage
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
-          name: go-coverage
-          path: ${{ runner.temp }}/go-coverage.out
+          name: go-coverage-rest
+          path: ${{ runner.temp }}/go-coverage-rest.out
           if-no-files-found: error
 
       - name: golangci-lint
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          golangci-lint run ./...
-
-      # infra/pulumi is a NESTED module: ./... from the repo root never
-      # descends into it, so without this step its tests run nowhere.
-      - name: infra module gates
-        run: |
-          cd infra/pulumi
-          go vet ./...
-          go build ./...
-          go test ./...
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
           golangci-lint run ./...
 
       - name: Cloudflare agent-email Worker gates
@@ -134,6 +129,96 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
+  go-store:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: witself
+          POSTGRES_PASSWORD: witself
+          POSTGRES_DB: witself
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U witself -d witself"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Keep the production-backed store tests in the normal CI gate. Without
+      # this DSN they intentionally skip, which can hide PostgreSQL semantics.
+      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: test store
+        # The PostgreSQL integration suite deliberately serializes schema
+        # migrations behind one advisory lock. Keep a bounded margin for
+        # the lock queue even though this suite now has its own runner.
+        env:
+          WITSELF_TEST_REQUIRE_DATABASE: "1"
+          WITSELF_TEST_REQUIRE_NODE: "1"
+        run: |
+          go test ./internal/store/... \
+            -race \
+            -shuffle=on \
+            -timeout=30m \
+            -covermode=atomic \
+            -coverprofile="$RUNNER_TEMP/go-coverage-store.out"
+          go tool cover -func="$RUNNER_TEMP/go-coverage-store.out"
+
+      - name: Upload Go store coverage
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: go-coverage-store
+          path: ${{ runner.temp }}/go-coverage-store.out
+          if-no-files-found: error
+
+  go-infra:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: infra/pulumi/go.mod
+          cache: true
+          cache-dependency-path: infra/pulumi/go.sum
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: go mod tidy
+        run: cd infra/pulumi && go mod tidy -diff
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+
+      # infra/pulumi is a NESTED module: ./... from the repo root never
+      # descends into it, so without this step its tests run nowhere.
+      - name: infra module gates
+        run: |
+          cd infra/pulumi
+          go vet ./...
+          go build ./...
+          go test ./...
+          golangci-lint run ./...
+
   release-config:
     runs-on: ubuntu-latest
     steps:
@@ -141,7 +226,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
@@ -169,6 +254,9 @@ jobs:
       - name: Test complete release asset-count contract
         run: bash scripts/test-release-artifact-contract.sh
 
+      - name: Test provider evidence workflow contract
+        run: bash scripts/test-provider-contract-workflow.sh
+
       - name: Test Homebrew tap publisher
         run: bash scripts/test-publish-homebrew-formulas.sh
 
@@ -186,7 +274,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -197,8 +285,8 @@ jobs:
   # Prove the provider installation transaction on every native platform we
   # advertise. These tests use a portable fake runtime and disposable homes;
   # they need no vendor account and never touch a developer's real profile.
-  # Real-client/model acceptance is a separate scheduled or manual release
-  # gate documented in docs/provider-integration-certification.md.
+  # Retained fixture evidence does not establish real-client/model acceptance;
+  # those separate gates are documented in provider-integration-certification.
   provider-integration-contract:
     name: provider integration / ${{ matrix.target }}
     strategy:
@@ -221,7 +309,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -230,7 +318,11 @@ jobs:
         run: go env GOOS GOARCH
 
       - name: Build native Witself client
-        run: go build ./cmd/witself
+        shell: bash
+        run: |
+          executable_suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi
+          go build -o "$RUNNER_TEMP/witself-native-smoke$executable_suffix" ./cmd/witself
 
       - name: Install GoReleaser for exact client artifact gate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
@@ -296,6 +388,13 @@ jobs:
           -run '^(TestLocalLockFile|TestAutoLockPlatform|TestAutoLockIdentity|TestRegistryClaimLock|TestPIDRunning|TestCapturePlatform|TestReplaceFileAtomic)'
           -count=1
 
+      - name: Native signup journal and recovery
+        if: runner.os == 'Windows'
+        run: >-
+          go test -json ./internal/local ./cmd/witself
+          -run '^(TestWindowsAccountProvisionJournalSyncBoundary|TestAccountProvisionJournalLifecycle|TestAccountProvisionBeginResyncsAmbiguousPromotionBeforeReturningCandidate|TestAccountCreateResumesAmbiguousProvisionWithSameID|TestAccountCreateSuccessfulSuccessorSavesCredentialAndRecoversOffline|TestAccountCreatePendingReconsentRequiresDurabilityBeforeRemoteRegistration|TestAccountProvisionWindowsPrivateCreationBeforeWrite|TestAccountProvisionWindowsPrivateDescriptorPolicy|TestAccountProvisionWindowsPrivateHandleRejectsUnsafeACLWithoutRepair|TestAccountProvisionWindowsPrivateCreationPreservesExistingObjects|TestAccountProvisionWindowsPrivateHandleIdentityFences|TestAccountProvisionWindowsPrivateHandleRejectsReparsePath|TestWindowsAccountProvisionMissingParentRefusesWithoutMutation|TestWindowsAccountProvisionReparseParentRefusesWithoutMutation|TestWindowsAccountProvisionUnsafeExistingHomeIsNotRepaired|TestWindowsAccountProvisionFixedAnchorDurabilityReplay|TestWindowsAccountProvisionExistingLockReestablishesPublication|TestWindowsAccountProvisionTemporaryDeletionBindsIdentity|TestWindowsAccountProvisionRetainedAncestorsBlockReplacement|TestWindowsAccountProvisionAvailabilityRejectsUnsafeConfigWithoutRepair|TestWindowsAccountProvisionTemporaryCreationIsPrivateBeforeWrite)$'
+          -count=1
+
       - name: Managed instruction platform primitives
         run: >-
           go test ./cmd/witself
@@ -308,35 +407,80 @@ jobs:
           -run '^TestCodexHooksWindows'
           -count=1
 
-      - name: Codex provider installation contract
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodex|TestProviderIntegrationContractCodexRollbackRestoresPriorInstall)$'
-          -count=1
-
-      - name: Credential-free provider lifecycle contracts
-        run: >-
-          go test ./cmd/witself
-          -run '^TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot)$'
-          -count=1
-
-      - name: Installed release binary provider acceptance
-        if: runner.os != 'Windows'
+      - name: Run provider contracts and retain sanitized outcomes
+        shell: bash
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}/witself-installed
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          PROVIDER_TARGET: ${{ matrix.target }}
+        run: |
+          executable_suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then executable_suffix=".exe"; fi
+          reporter="$RUNNER_TEMP/provider-contract-evidence$executable_suffix"
+          go build -o "$reporter" ./tools/provider-contract-evidence
+          release_tag=""
+          "$reporter" run \
+            --output "$RUNNER_TEMP/provider-contract-$PROVIDER_TARGET.json" \
+            --target "$PROVIDER_TARGET" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow ci \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag" \
+            --binary "$RUNNER_TEMP/witself-installed$executable_suffix" --dist dist
 
-      - name: Installed release binary provider acceptance
-        if: runner.os == 'Windows'
+      - name: Upload sanitized provider cell
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-cell-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  provider-contract-evidence:
+    needs: [provider-integration-contract]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require every native provider job
         env:
-          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}\witself-installed.exe
-        run: >-
-          go test ./cmd/witself
-          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
-          -count=1
+          NATIVE_RESULT: ${{ needs.provider-integration-contract.result }}
+        run: test "$NATIVE_RESULT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download this attempt's provider cells
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: provider-contract-cell-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-cells
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Validate complete provider matrix
+        run: |
+          release_tag=""
+          go run ./tools/provider-contract-evidence aggregate \
+            --input-dir "$RUNNER_TEMP/provider-contract-cells" \
+            --output "$RUNNER_TEMP/provider-contract-evidence.json" \
+            --markdown "$RUNNER_TEMP/provider-contract-evidence.md" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow ci \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-ref "$GITHUB_REF" --release-tag "$release_tag"
+          cat "$RUNNER_TEMP/provider-contract-evidence.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload validated provider matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: provider-contract-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/provider-contract-evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   avatar-renderer-portability:
     strategy:
@@ -346,7 +490,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -365,16 +509,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.16.4
 
       - name: install kubeconform
+        timeout-minutes: 4
         env:
           KUBECONFORM_VERSION: v0.8.0
           KUBECONFORM_LINUX_AMD64_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
         run: |
-          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSLO --retry 3 --retry-all-errors --retry-delay 1 \
+            --connect-timeout 10 --max-time 60 --retry-max-time 120 \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
           echo "${KUBECONFORM_LINUX_AMD64_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
           tar -xzf kubeconform-linux-amd64.tar.gz
           sudo install kubeconform /usr/local/bin/
@@ -391,13 +543,24 @@ jobs:
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
 
+      - name: gitops cell values drift check
+        run: |
+          bash scripts/gitops-cell-values.sh --check
+          bash scripts/test-gitops-cell-values.sh
+
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh
+
+      - name: memory load quality workflow contract checks
+        run: bash scripts/test-memory-load-quality-workflow.sh
 
       - name: monitoring rollout capability checks
         run: |
           bash scripts/test-monitoring-rollout.sh
           bash scripts/test-monitoring-alert-canary.sh
+
+      - name: avatar acceptance offline contract checks
+        run: bash scripts/test-avatar-acceptance.sh
 
       - name: billing transition rollout preflight checks
         run: bash scripts/test-billing-transition-rollout-preflight.sh

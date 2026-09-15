@@ -12,11 +12,17 @@ ENDPOINT      := http://localhost:8080
 
 # Pin golangci-lint to the same version ci.yml installs so `make check`
 # and CI can never disagree about what clean means.
-GOLANGCI_LINT_VERSION := v2.12.2
+GOLANGCI_LINT_VERSION := v2.13.2
 
 # Keep the vulnerability scanner identical locally and in CI; upgrade these
 # pins together so the gate cannot float between runs.
 GOVULNCHECK_VERSION := v1.7.0
+
+DASHBOARD_ACCEPTANCE_OUT ?= evidence/dashboard-acceptance
+
+# Operators may override the timeout for store integration tests and the full
+# root-module test run, where Go applies the limit to every package.
+STORE_TEST_TIMEOUT ?= 30m
 
 MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
 MEMORY_LOAD_QUALITY_SEED        ?= 20260717
@@ -97,7 +103,15 @@ MEMORY_CONCURRENCY_LOAD_COMMIT                    ?= $(shell git rev-parse HEAD)
 MEMORY_CONCURRENCY_LOAD_PROVIDER                  ?= local
 MEMORY_CONCURRENCY_LOAD_HARDWARE                  ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load feature-status build check check-go-mod-tidy govulncheck check-infra
+# A fixed relevance corpus has no workload knobs. Empty output uses the
+# harness's private, process-specific default path.
+MEMORY_RELEVANCE_RESULTS  ?=
+MEMORY_RELEVANCE_RELEASE  ?= $(shell git describe --tags --always --dirty)
+MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
+MEMORY_RELEVANCE_PROVIDER ?= local
+MEMORY_RELEVANCE_HARDWARE ?= unspecified
+
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status gitops-cell-values build check check-go-mod-tidy govulncheck check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -133,6 +147,26 @@ build: ## Build every ./cmd/... binary into ./bin, including the server and work
 test: ## Run the Go tests
 	go test ./...
 
+dashboard-acceptance: ## Run the release's headless Agent Console acceptance on this host (Node 22)
+	@set -eu; \
+		dashboard_acceptance_tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/witself-dashboard-acceptance.XXXXXX")"; \
+		trap 'rm -rf "$$dashboard_acceptance_tmp"' EXIT HUP INT TERM; \
+		dashboard_acceptance_exe="$$(go env GOEXE)"; \
+		go build -o "$$dashboard_acceptance_tmp/witself$$dashboard_acceptance_exe" ./cmd/witself; \
+		go build -o "$$dashboard_acceptance_tmp/dashboard-stub-cell$$dashboard_acceptance_exe" ./internal/dashboard/cmd/dashboard-stub-cell; \
+		npm --prefix scripts/dashboard-acceptance ci; \
+		(cd scripts/dashboard-acceptance && node --test && \
+			if [ "$$(go env GOOS)" = linux ]; then \
+				npx playwright install --with-deps chromium; \
+			else \
+				npx playwright install chromium; \
+			fi); \
+		rm -rf evidence/dashboard-acceptance; \
+		node scripts/dashboard-acceptance/run.mjs \
+			--witself "$$dashboard_acceptance_tmp/witself$$dashboard_acceptance_exe" \
+			--stub-cell "$$dashboard_acceptance_tmp/dashboard-stub-cell$$dashboard_acceptance_exe" \
+			--out "$(DASHBOARD_ACCEPTANCE_OUT)"
+
 test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable database
 	@set -eu; \
 		integration_db="witself_test_$$(date -u +%Y%m%d%H%M%S)_$$$$"; \
@@ -142,7 +176,7 @@ test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable
 		trap cleanup_integration_db EXIT HUP INT TERM; \
 		docker compose exec -T postgres createdb -U witself "$$integration_db"; \
 		WITSELF_TEST_DATABASE_URL="postgres://witself:witself@localhost:5432/$$integration_db?sslmode=disable" \
-			go test ./internal/store -count=1 -timeout=30m
+			go test ./internal/store -count=1 -timeout=$(STORE_TEST_TIMEOUT)
 
 test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
 	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \
@@ -275,8 +309,25 @@ test-memory-concurrency-load: ## Run the opt-in concurrent-agent and tenant-isol
 		printf 'sanitized result: pid-scoped path reported by the harness\n'; \
 	fi
 
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE := 1
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_RESULTS := $(MEMORY_RELEVANCE_RESULTS)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_RELEASE := $(MEMORY_RELEVANCE_RELEASE)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_COMMIT := $(MEMORY_RELEVANCE_COMMIT)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_PROVIDER := $(MEMORY_RELEVANCE_PROVIDER)
+test-memory-relevance: export WITSELF_MEMORY_RELEVANCE_HARDWARE_TIER := $(MEMORY_RELEVANCE_HARDWARE)
+test-memory-relevance: ## Measure the fixed synthetic lexical relevance corpus
+	@test -n "$$WITSELF_TEST_DATABASE_URL" || { \
+		echo "WITSELF_TEST_DATABASE_URL is required (use a dedicated test database principal)"; \
+		exit 2; \
+	}
+	@go test ./internal/store -run '^TestNarrativeMemoryRelevancePostgres$$' \
+			-count=1 -v -timeout 10m
+
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
+
+gitops-cell-values: ## Generate per-cell GitOps values overlays from cell config
+	bash scripts/gitops-cell-values.sh --write
 
 check-go-mod-tidy: ## Verify both Go modules are tidy without modifying them
 	go mod tidy -diff
@@ -286,6 +337,8 @@ govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 check: ## Run CI's exact local gate set — run before every push
+	bash scripts/check-conflict-markers.sh
+	bash scripts/test-conflict-markers.sh
 	$(MAKE) check-go-mod-tidy
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
@@ -293,7 +346,7 @@ check: ## Run CI's exact local gate set — run before every push
 	fi
 	go vet ./...
 	go build ./...
-	go test ./... -race -shuffle=on -timeout=30m
+	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra
@@ -316,5 +369,13 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-agent-email-cell-smoke.sh
 	npm --prefix infra/cloudflare/control-plane test
 	npm --prefix infra/cloudflare/control-plane run bundle:check
+	bash scripts/test-helm-rollout.sh
+	bash scripts/gitops-cell-values.sh --check
+	bash scripts/test-gitops-cell-values.sh
+	bash scripts/test-roll-cell-gate.sh
+	bash scripts/test-memory-load-quality-workflow.sh
+	bash scripts/test-provider-contract-workflow.sh
+	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-monitoring-rollout.sh
+	bash scripts/test-avatar-acceptance.sh
 	@echo "check-infra: infra gates green"

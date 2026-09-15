@@ -342,6 +342,7 @@ test("invite authority failures never echo the invite code", async () => {
 });
 
 function harness({
+  provisionID = PROVISION,
   storage = new Storage(),
   directory,
   service = new CellService(),
@@ -361,7 +362,7 @@ function harness({
   let placements = 0;
   let inviteReservations = 0;
   const runtime = new DurableAccountSignup(
-    { id: { name: `provision:${PROVISION}` }, storage },
+    { id: { name: `provision:${provisionID}` }, storage },
     { DIRECTORY: directory, ...envOverrides },
     {
       fetch: (url, init) => service.fetch(url, init),
@@ -413,6 +414,227 @@ function assertNoSignupSecretsOrPII(state) {
   assert.equal(Object.hasOwn(state, "origin"), false);
   assert.equal(Object.hasOwn(state.account ?? {}, "email"), false);
 }
+
+function historicalInitializedCheckpoint() {
+  return {
+    schema_version: "witself.signup.v1",
+    revision: 0,
+    phase: "initialized",
+    provision_id: PROVISION,
+    request_fingerprint:
+      "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+    cell: null,
+    account: null,
+    created_at: "2026-07-25T12:00:00.000Z",
+    email_attempted: false,
+    verification_email_sent: false,
+  };
+}
+
+test("malformed stored signup envelopes fail closed without side effects", async (t) => {
+  const initial = historicalInitializedCheckpoint();
+  const cases = [
+    ["stored null", null],
+    ["stored false", false],
+    ["stored zero", 0],
+    ["stored empty string", ""],
+    ["stored string", "checkpoint-value-must-not-escape"],
+    ["stored array", []],
+    ["missing schema", { ...initial, schema_version: undefined }],
+    ["unknown schema", { ...initial, schema_version: "witself.signup.v2" }],
+    ["malformed schema", { ...initial, schema_version: ["witself.signup.v1"] }],
+    ["missing phase", { ...initial, phase: undefined }],
+    ["unknown phase", { ...initial, phase: "legal_rejected" }],
+    ["inherited constructor phase", { ...initial, phase: "constructor" }],
+    ["inherited toString phase", { ...initial, phase: "toString" }],
+    ["inherited prototype phase", { ...initial, phase: "__proto__" }],
+    ["numeric phase", { ...initial, phase: 0 }],
+    ["array phase", { ...initial, phase: ["initialized"] }],
+    ["missing revision", { ...initial, revision: undefined }],
+    ["null revision", { ...initial, revision: null }],
+    ["string revision", { ...initial, revision: "0" }],
+    ["negative revision", { ...initial, revision: -1 }],
+    ["fractional revision", { ...initial, revision: 0.5 }],
+    ["unsafe revision", { ...initial, revision: Number.MAX_SAFE_INTEGER + 1 }],
+    ["nonfinite revision", { ...initial, revision: Infinity }],
+    ["NaN revision", { ...initial, revision: NaN }],
+    ["unknown schema before fingerprint conflict", {
+      ...initial,
+      schema_version: "witself.signup.v2",
+      request_fingerprint: "different-request-fingerprint",
+    }],
+  ];
+  for (const [name, state] of cases) {
+    await t.test(name, async () => {
+      const storage = new Storage();
+      await storage.put("account-signup", state);
+      const before = structuredClone(storage.values);
+      const callbacks = [];
+      const setup = harness({
+        storage,
+        env: {
+          CP_SIGNUP_TURNSTILE_ENABLED: "true",
+          CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture-secret",
+          CP_SIGNUP_DAILY_LIMIT_PER_IP: "1",
+          CP_SIGNUP_DAILY_LIMIT_GLOBAL: "1",
+        },
+        verifyTurnstile: async () => {
+          callbacks.push("turnstile");
+          return { ok: true };
+        },
+        consumeCounter: async () => {
+          callbacks.push("counter");
+          return { allowed: true };
+        },
+        sendVerification: async () => {
+          callbacks.push("email");
+          return false;
+        },
+      });
+      const directoryBefore = structuredClone(setup.directory.values);
+
+      const response = await setup.runtime.fetch(signupRequest());
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), {
+        schema_version: "witself.v0",
+        error: "account signup checkpoint is invalid",
+      });
+      assert.deepEqual(callbacks, []);
+      assert.equal(setup.inviteReservations(), 0);
+      assert.equal(setup.placements(), 0);
+      assert.deepEqual(setup.target.calls, []);
+      assert.deepEqual(setup.service.calls, []);
+      assert.equal(setup.service.receipts.size, 0);
+      assert.deepEqual(storage.values, before);
+      assert.deepEqual(setup.directory.values, directoryBefore);
+    });
+  }
+});
+
+test("an absent signup checkpoint still creates one exact account", async () => {
+  const setup = harness();
+  assert.equal(await setup.storage.get("account-signup"), undefined);
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(setup.service.receipts.size, 1);
+  assert.equal(setup.storage.values.get("account-signup").phase, "completed");
+});
+
+test("historical initialized signup retains its exact fingerprint and revision", async () => {
+  const storage = new Storage();
+  const state = historicalInitializedCheckpoint();
+  await storage.put("account-signup", state);
+  storage.failPhaseOnce = "invite_reserved";
+  const setup = harness({ storage });
+
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 500);
+  assert.equal(setup.inviteReservations(), 1);
+  assert.deepEqual(storage.values.get("account-signup"), state);
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(setup.service.receipts.size, 1);
+});
+
+test("every historical signup phase resumes after its committed checkpoint", async (t) => {
+  const phases = [
+    "abuse_preflight",
+    "initialized",
+    "invite_reserved",
+    "cell_selected",
+    "protocol_verified",
+    "target_reserved",
+    "cell_acknowledged",
+    "target_attached",
+    "pending_projected",
+    "route_projected",
+    "resident_promoted",
+    "completed",
+  ];
+  for (const mode of ["dark", "counters", "challenge-and-counters"]) {
+    for (const phase of phases) {
+      if (mode === "dark" && phase === "abuse_preflight") continue;
+      await t.test(`${mode}: ${phase}`, async () => {
+        class CrashAfterCheckpointStorage extends Storage {
+          async put(key, value) {
+            await super.put(key, value);
+            if (key === "account-signup" && value.phase === this.stopPhase) {
+              this.stopPhase = null;
+              throw new Error("simulated crash after committed checkpoint");
+            }
+          }
+        }
+        const storage = new CrashAfterCheckpointStorage();
+        storage.stopPhase = phase;
+        let verifications = 0;
+        let counterCalls = 0;
+        let emails = 0;
+        const options = {
+          storage,
+          env: mode === "dark" ? {} : {
+            CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+            CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+            ...(mode === "challenge-and-counters" ? {
+              CP_SIGNUP_TURNSTILE_ENABLED: "true",
+              CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture-secret",
+            } : {}),
+          },
+          verifyTurnstile: async () => {
+            verifications++;
+            return { ok: true };
+          },
+          consumeCounter: async () => {
+            counterCalls++;
+            return { allowed: true };
+          },
+          sendVerification: async () => {
+            emails++;
+            return true;
+          },
+        };
+        const setup = harness(options);
+        const first = await setup.runtime.fetch(signupRequest());
+        assert.equal(first.status, 500);
+        const checkpoint = await storage.get("account-signup");
+        assert.equal(checkpoint.phase, phase);
+        assert.equal(
+          Object.hasOwn(checkpoint, "turnstile_verified"),
+          mode === "challenge-and-counters",
+        );
+        assert.equal(
+          Object.hasOwn(checkpoint, "signup_ip_scope"),
+          phase === "abuse_preflight",
+        );
+
+        // A new runtime reads only the durable checkpoint; external receipts
+        // retain exactly the side effects completed before the simulated crash.
+        const resumed = harness({
+          ...options,
+          directory: setup.directory,
+          service: setup.service,
+          target: setup.target,
+        });
+        assert.equal((await resumed.runtime.fetch(signupRequest())).status, 201);
+        const completed = await storage.get("account-signup");
+        assert.equal(completed.phase, "completed");
+        assert.equal(completed.provision_id, checkpoint.provision_id);
+        assert.equal(completed.request_fingerprint, checkpoint.request_fingerprint);
+        assert.equal(completed.verification_email_sent, true);
+        assert.equal(setup.placements() + resumed.placements(), 1);
+        assert.equal(setup.inviteReservations() + resumed.inviteReservations(), 1);
+        assert.equal(setup.service.receipts.size, 1);
+        assert.equal(verifications, mode === "challenge-and-counters" ? 1 : 0);
+        assert.equal(counterCalls, mode === "dark" ? 0 : 2);
+        assert.equal(emails, 1);
+
+        // Completed states with persisted email intent/results also remain
+        // exact replays, without another email, quota use, or state write.
+        assert.equal((await resumed.runtime.fetch(signupRequest())).status, 201);
+        assert.deepEqual(await storage.get("account-signup"), completed);
+        assert.equal(emails, 1);
+        assert.equal(counterCalls, mode === "dark" ? 0 : 2);
+      });
+    }
+  }
+});
 
 test("lost committed cell response replays the same provision on the same cell", async () => {
   const service = new CellService();
@@ -1765,4 +1987,405 @@ test("counter consume is accepted only by the signup-counter role", async () => 
   const denied = await authority.fetch(input("counter-b"));
   assert.equal((await denied.json()).allowed, false);
   assert.equal(storage.values.has("account-signup"), false);
+});
+
+
+function legalManifest(terms = "terms-v2", privacy = "privacy-v2") {
+  return Response.json({ terms: { version: terms, path: "/legal/terms" }, privacy: { version: privacy, path: "/legal/privacy" } });
+}
+function consentRequest(fields = {}) {
+  return signupRequest({ consent_terms_version: "terms-v1", consent_privacy_version: "privacy-v1", ...fields });
+}
+function successorRequest(refusal, candidateID = "successor-one", fields = {}) {
+  return { schema_version: "witself.signup-reconsent.v1", refusal, transition_id: "transition-one",
+    candidate: { provision_id: candidateID, consent_terms_version: "terms-v2", consent_privacy_version: "privacy-v2" },
+    email: "person@example.com", display_name: "Person", invite: INVITE, ...fields };
+}
+function transitionRequest(input) {
+  return new Request("https://account-signup.internal/legal/reconsent", {
+    method: "POST", body: JSON.stringify(input), headers: { "Content-Type": "application/json" },
+  });
+}
+function legalCluster({ controls = false } = {}) {
+  const nodes = new Map();
+  let legalReads = 0, challenges = 0, counterCalls = 0;
+  const counterUses = new Map();
+  const authority = { response: () => legalManifest() };
+  const binding = { idFromName: (name) => name, get: (name) => ({ fetch: (request) => node(name.slice("provision:".length)).runtime.fetch(request) }) };
+  const env = { CP_SIGNUP_LEGAL_ENFORCEMENT: "true", ACCOUNT_SIGNUP: binding,
+    LEGAL_DOCUMENTS: { fetch: async (request) => {
+      legalReads++; assert.equal(request.url, "https://legal.internal/legal/versions.json");
+      assert.equal(request.redirect, "error"); return authority.response(request);
+    } },
+    ...(controls ? { CP_SIGNUP_TURNSTILE_ENABLED: "true", CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "1", CP_SIGNUP_DAILY_LIMIT_GLOBAL: "1" } : {}),
+  };
+  function node(provisionID = PROVISION) {
+    if (!nodes.has(provisionID)) nodes.set(provisionID, harness({ provisionID, env,
+      verifyTurnstile: async () => { challenges++; return { ok: true }; },
+      consumeCounter: async ({ scope, provision_id, limit }) => {
+        counterCalls++;
+        const old = counterUses.get(scope);
+        if (old && old !== provision_id) return { allowed: false };
+        counterUses.set(scope, provision_id);
+        return { allowed: true, count: 1, limit, day: "2026-09-10", replayed: !!old };
+      },
+    }));
+    return nodes.get(provisionID);
+  }
+  return { node, nodes, authority, env, counters: () => ({ legalReads, challenges, counterCalls }) };
+}
+function noProvisioning(setup) {
+  assert.equal(setup.inviteReservations(), 0); assert.equal(setup.placements(), 0);
+  assert.deepEqual(setup.service.calls, []); assert.deepEqual(setup.target.calls, []);
+}
+
+test("legal admission requires exact true and preserves consentless invited signup", async () => {
+  for (const enabled of [undefined, "false", "TRUE", "1"]) {
+    const setup = harness({ env: { CP_SIGNUP_LEGAL_ENFORCEMENT: enabled, LEGAL_DOCUMENTS: { fetch: () => assert.fail("disabled legal read") } } });
+    assert.equal((await setup.runtime.fetch(consentRequest())).status, 201);
+    assertNoSignupSecretsOrPII(await setup.storage.get("account-signup"));
+  }
+  const cluster = legalCluster();
+  assert.equal((await cluster.node().runtime.fetch(signupRequest())).status, 201);
+  assert.equal(cluster.counters().legalReads, 0);
+});
+
+test("fresh legal refusal is durable, private, value-free and terminal before all provisioning", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const first = await setup.runtime.fetch(consentRequest());
+  assert.equal(first.status, 409); assert.equal(first.headers.get("Cache-Control"), "private, no-store");
+  const refusal = await first.json();
+  assert.equal(refusal.code, "signup_legal_stale"); assert.equal(refusal.required_terms_version, "terms-v2");
+  const state = await setup.storage.get("account-signup");
+  assert.equal(state.phase, "legal_rejected"); assertNoSignupSecretsOrPII(state); noProvisioning(setup);
+  setup.runtime.env.CP_SIGNUP_LEGAL_ENFORCEMENT = "false";
+  cluster.authority.response = () => { throw new Error("private upstream value"); };
+  assert.deepEqual(await (await setup.runtime.fetch(consentRequest())).json(), refusal);
+  assert.equal(cluster.counters().legalReads, 1);
+  assert.equal((await setup.runtime.fetch(consentRequest({ email: "changed@example.com" }))).status, 409);
+  assert.deepEqual(await setup.storage.get("account-signup"), state); noProvisioning(setup);
+});
+
+test("current served consent admits once and admitted recovery needs no legal service", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const fields = { consent_terms_version: "terms-v2", consent_privacy_version: "privacy-v2" };
+  assert.equal((await setup.runtime.fetch(consentRequest(fields))).status, 201);
+  const state = await setup.storage.get("account-signup");
+  assert.equal(state.phase, "completed"); assert.match(state.legal_admission.manifest_sha256, /^[0-9a-f]{64}$/);
+  assertNoSignupSecretsOrPII(state);
+  cluster.authority.response = () => { throw new Error("unavailable"); };
+  assert.equal((await setup.runtime.fetch(consentRequest(fields))).status, 201);
+  assert.equal(cluster.counters().legalReads, 1);
+});
+
+test("authority failures preserve a pending checkpoint without claiming durable refusal", async (t) => {
+  for (const [name, response] of [
+    ["down", () => { throw new Error("private upstream"); }],
+    ["status", () => new Response("private upstream", { status: 503 })],
+    ["redirect", () => new Response(null, { status: 302, headers: { Location: "https://other.invalid" } })],
+    ["duplicate", () => new Response('{"terms":{},"ter\\u006ds":{}}')],
+    ["truncated", () => new Response('{"terms":')],
+    ["oversized", () => new Response(" ".repeat(65537))],
+    ["bad-utf8", () => new Response(new Uint8Array([0xff]))],
+    ["wrong-path", () => Response.json({ terms: { version: "v2", path: "/elsewhere" }, privacy: { version: "v2", path: "/legal/privacy" } })],
+  ]) await t.test(name, async () => {
+    const cluster = legalCluster({ controls: true }); const setup = cluster.node();
+    cluster.authority.response = response;
+    const first = await setup.runtime.fetch(consentRequest());
+    assert.equal(first.status, 503); assert.deepEqual(await first.json(), { schema_version: "witself.v0", error: "signup legal authority is unavailable" });
+    const state = await setup.storage.get("account-signup");
+    assert.equal(state.phase, "legal_pending"); assert.equal(state.legal_refusal, undefined); assertNoSignupSecretsOrPII(state); noProvisioning(setup);
+    cluster.authority.response = () => legalManifest("terms-v1", "privacy-v1");
+    assert.equal((await setup.runtime.fetch(consentRequest({ source_ip: "changed" }))).status, 201);
+    assert.deepEqual(cluster.counters(), { legalReads: 2, challenges: 1, counterCalls: 2 });
+  });
+});
+
+test("one trusted successor inherits one completed challenge and both limit-one counter receipts", async () => {
+  const cluster = legalCluster({ controls: true }); const original = cluster.node();
+  const refusal = await (await original.runtime.fetch(consentRequest())).json();
+  const transition = successorRequest(refusal);
+  const ack = await original.runtime.fetch(transitionRequest(transition));
+  assert.equal(ack.status, 200); assert.equal((await ack.json()).candidate.provision_id, "successor-one");
+  assert.deepEqual(cluster.counters(), { legalReads: 1, challenges: 1, counterCalls: 2 });
+  const successor = cluster.node("successor-one");
+  assert.equal((await successor.runtime.fetch(consentRequest({ ...transition.candidate, source_ip: "new network" }))).status, 201);
+  assertNoSignupSecretsOrPII(await original.storage.get("account-signup"));
+  assertNoSignupSecretsOrPII(await successor.storage.get("account-signup"));
+  assert.deepEqual(cluster.counters(), { legalReads: 2, challenges: 1, counterCalls: 2 });
+  cluster.authority.response = () => { throw new Error("down"); };
+  assert.equal((await original.runtime.fetch(transitionRequest(transition))).status, 200);
+  assert.deepEqual(await (await original.runtime.fetch(consentRequest())).json(), refusal);
+});
+
+test("second legal publication between selection and registration reserves the same now-stale candidate", async () => {
+  const cluster = legalCluster({ controls: true }); const original = cluster.node();
+  const refusal = await (await original.runtime.fetch(consentRequest())).json();
+  const transition = successorRequest(refusal);
+  cluster.authority.response = () => legalManifest("terms-v3", "privacy-v3");
+  assert.equal((await original.runtime.fetch(transitionRequest(transition))).status, 200);
+  const successor = cluster.node("successor-one");
+  const refusedAgain = await successor.runtime.fetch(consentRequest(transition.candidate));
+  assert.equal(refusedAgain.status, 409); const nextRefusal = await refusedAgain.json();
+  assert.equal(nextRefusal.required_terms_version, "terms-v3"); noProvisioning(successor);
+  const next = successorRequest(nextRefusal, "successor-two", { transition_id: "transition-two",
+    candidate: { provision_id: "successor-two", consent_terms_version: "terms-v3", consent_privacy_version: "privacy-v3" } });
+  assert.equal((await successor.runtime.fetch(transitionRequest(next))).status, 200);
+  assert.equal((await cluster.node("successor-two").runtime.fetch(consentRequest(next.candidate))).status, 201);
+  assert.deepEqual(cluster.counters(), { legalReads: 3, challenges: 1, counterCalls: 2 });
+});
+
+test("re-consent elects one candidate and rejects changed core, self-target, occupied and opposing targets", async () => {
+  const cluster = legalCluster(); const original = cluster.node();
+  const refusal = await (await original.runtime.fetch(consentRequest())).json();
+  for (const fields of [{ email: "other@example.com" }, { display_name: "Other" }, { invite: "other-invite" }]) {
+    assert.equal((await original.runtime.fetch(transitionRequest(successorRequest(refusal, "candidate", fields)))).status, 409);
+  }
+  assert.equal((await original.runtime.fetch(transitionRequest(successorRequest(refusal, PROVISION)))).status, 400);
+  const candidates = await Promise.all(["winner-a", "winner-b"].map((id) => original.runtime.fetch(transitionRequest(successorRequest(refusal, id)))));
+  assert.deepEqual(candidates.map((v) => v.status).sort(), [200, 409]);
+  assert.equal([...cluster.nodes.values()].filter((v) => v.storage.values.get("account-signup")?.phase === "legal_reserved").length, 1);
+
+  const opposing = legalCluster();
+  const a = opposing.node("attempt-a"), b = opposing.node("attempt-b");
+  const ar = await (await a.runtime.fetch(consentRequest({ provision_id: "attempt-a" }))).json();
+  const br = await (await b.runtime.fetch(consentRequest({ provision_id: "attempt-b" }))).json();
+  const outcomes = await Promise.all([
+    a.runtime.fetch(transitionRequest(successorRequest(ar, "attempt-b"))),
+    b.runtime.fetch(transitionRequest(successorRequest(br, "attempt-a"))),
+  ]);
+  assert.deepEqual(outcomes.map((v) => v.status), [409, 409]); noProvisioning(a); noProvisioning(b);
+});
+
+test("refusal, preparation, reservation and registration replay through before/after durable write crashes", async (t) => {
+  for (const boundary of ["legal_pending", "legal_rejected", "prepared", "legal_reserved", "registered"]) {
+    for (const after of [false, true]) await t.test(`${boundary}: ${after ? "after" : "before"}`, async () => {
+      const cluster = legalCluster({ controls: true }); const original = cluster.node(); const candidate = cluster.node("successor-one");
+      const target = boundary === "legal_reserved" ? candidate : original;
+      const put = target.storage.put.bind(target.storage); let armed = true;
+      target.storage.put = async (key, state) => {
+        const hit = state.phase === boundary || (boundary === "prepared" && state.legal_successor?.registered === false) ||
+          (boundary === "registered" && state.legal_successor?.registered === true);
+        if (hit && armed) {
+          armed = false; if (after) await put(key, state);
+          throw new Error("simulated durable write failure");
+        }
+        return put(key, state);
+      };
+      let initial = await original.runtime.fetch(consentRequest());
+      if (["legal_pending", "legal_rejected"].includes(boundary)) {
+        assert.equal(initial.status, 500); initial = await original.runtime.fetch(consentRequest());
+      }
+      assert.equal(initial.status, 409); const refusal = await initial.json();
+      const transition = successorRequest(refusal);
+      let ack = await original.runtime.fetch(transitionRequest(transition));
+      if (!["legal_pending", "legal_rejected"].includes(boundary)) {
+        assert.ok(ack.status >= 500); ack = await original.runtime.fetch(transitionRequest(transition));
+      }
+      assert.equal(ack.status, 200);
+      assert.equal((await candidate.runtime.fetch(consentRequest(transition.candidate))).status, 201);
+      assert.equal(cluster.counters().challenges, 1);
+      assert.equal(cluster.counters().counterCalls, boundary === "legal_pending" && !after ? 4 : 2);
+      assert.equal(original.service.calls.length, 0); assert.equal(candidate.service.receipts.size, 1);
+    });
+  }
+});
+
+test("reserved lineage never trusts public abuse flags or bypasses changed policy", async () => {
+  const cluster = legalCluster({ controls: true }); const original = cluster.node();
+  const refusal = await (await original.runtime.fetch(consentRequest())).json();
+  const transition = successorRequest(refusal);
+  assert.equal((await original.runtime.fetch(transitionRequest({ ...transition, turnstile_verified: true }))).status, 400);
+  assert.equal((await original.runtime.fetch(transitionRequest(transition))).status, 200);
+  const candidate = cluster.node("successor-one");
+  candidate.runtime.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL = "2";
+  candidate.runtime.env.CP_SIGNUP_LEGAL_ENFORCEMENT = "false";
+  assert.equal((await candidate.runtime.fetch(consentRequest({ ...transition.candidate, turnstile_verified: true, legal_abuse: {} }))).status, 503);
+  noProvisioning(candidate);
+  const state = await candidate.storage.get("account-signup");
+  state.legal_abuse.global = null;
+  candidate.storage.values.set("account-signup", state);
+  assert.equal((await candidate.runtime.fetch(consentRequest(transition.candidate))).status, 500);
+});
+
+test("every admitted historical checkpoint bypasses new legal enforcement after restart", async (t) => {
+  for (const phase of ["initialized", "invite_reserved", "cell_selected", "protocol_verified", "target_reserved",
+    "cell_acknowledged", "target_attached", "pending_projected", "route_projected", "resident_promoted", "completed"]) {
+    await t.test(phase, async () => {
+      const setup = harness(); const put = setup.storage.put.bind(setup.storage); let armed = true;
+      setup.storage.put = async (key, state) => {
+        await put(key, state);
+        if (armed && state.phase === phase) { armed = false; throw new Error("crash after historical admission"); }
+      };
+      assert.equal((await setup.runtime.fetch(consentRequest())).status, 500);
+      assert.equal((await setup.storage.get("account-signup")).phase, phase);
+      const resumed = harness({ storage: setup.storage, directory: setup.directory, service: setup.service, target: setup.target,
+        env: { CP_SIGNUP_LEGAL_ENFORCEMENT: "true", LEGAL_DOCUMENTS: { fetch: () => assert.fail("admitted legal lookup") } } });
+      assert.equal((await resumed.runtime.fetch(consentRequest())).status, 201);
+      assert.equal(setup.service.receipts.size, 1);
+    });
+  }
+});
+
+test("initialized write is the legal admission boundary before or after a crash", async (t) => {
+  for (const after of [false, true]) await t.test(String(after), async () => {
+    const cluster = legalCluster({ controls: true }); const setup = cluster.node();
+    cluster.authority.response = () => legalManifest("terms-v1", "privacy-v1");
+    const put = setup.storage.put.bind(setup.storage); let armed = true;
+    setup.storage.put = async (key, state) => {
+      if (armed && state.phase === "initialized") {
+        armed = false; if (after) await put(key, state); throw new Error("admission write interrupted");
+      }
+      return put(key, state);
+    };
+    assert.equal((await setup.runtime.fetch(consentRequest())).status, 500); noProvisioning(setup);
+    cluster.authority.response = () => legalManifest("terms-v2", "privacy-v2");
+    assert.equal((await setup.runtime.fetch(consentRequest())).status, after ? 201 : 409);
+    assert.deepEqual(cluster.counters(), { legalReads: after ? 1 : 2, challenges: 1, counterCalls: 2 });
+  });
+});
+
+test("canceled canonical read cannot admit later when the service eventually responds", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  let resolve, reading;
+  const started = new Promise((r) => { reading = r; });
+  cluster.authority.response = () => new Promise((r) => { resolve = r; reading(); });
+  const controller = new AbortController();
+  const pending = setup.runtime.fetch(new Request(consentRequest(), { signal: controller.signal }));
+  await started; controller.abort();
+  const response = await pending;
+  assert.equal(response.status, 503);
+  const before = await setup.storage.get("account-signup"); assert.equal(before.phase, "legal_pending");
+  resolve(legalManifest("terms-v1", "privacy-v1"));
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(await setup.storage.get("account-signup"), before); noProvisioning(setup);
+});
+
+test("non-string manifest labels never persist an unusable terminal refusal", async (t) => {
+  for (const version of [123, true, {}, ["v2"], null]) await t.test(JSON.stringify(version), async () => {
+    const cluster = legalCluster(); const setup = cluster.node();
+    cluster.authority.response = () => Response.json({ terms: { version, path: "/legal/terms" }, privacy: { version: "v2", path: "/legal/privacy" } });
+    assert.equal((await setup.runtime.fetch(consentRequest())).status, 503);
+    const state = await setup.storage.get("account-signup");
+    assert.equal(state.phase, "legal_pending"); assert.equal(state.legal_refusal, undefined); noProvisioning(setup);
+    cluster.authority.response = () => legalManifest("terms-v1", "privacy-v1");
+    assert.equal((await setup.runtime.fetch(consentRequest())).status, 201);
+  });
+});
+
+test("new request-size bound does not retroactively reject an admitted large historical core", async () => {
+  const setup = harness(); const email = "a".repeat(33000) + "@example.com";
+  const put = setup.storage.put.bind(setup.storage); let armed = true;
+  setup.storage.put = async (key, state) => {
+    await put(key, state);
+    if (armed && state.phase === "initialized") { armed = false; throw new Error("crash after admission"); }
+  };
+  assert.equal((await setup.runtime.fetch(consentRequest({ email }))).status, 500);
+  const resumed = harness({ storage: setup.storage, env: { CP_SIGNUP_LEGAL_ENFORCEMENT: "true",
+    LEGAL_DOCUMENTS: { fetch: () => assert.fail("historical legal lookup") } } });
+  assert.equal((await resumed.runtime.fetch(consentRequest({ email }))).status, 201);
+});
+
+test("an unproven newly enabled challenge preserves the historical preflight for recovery", async () => {
+  const storage = new Storage(); let first = true;
+  const setup = harness({ storage, env: { CP_SIGNUP_DAILY_LIMIT_PER_IP: "1", CP_SIGNUP_DAILY_LIMIT_GLOBAL: "1" },
+    consumeCounter: async () => { if (first) { first = false; throw new Error("ambiguous old counter"); }
+      return { allowed: true, count: 1, limit: 1, day: "2026-09-10" }; } });
+  assert.equal((await setup.runtime.fetch(consentRequest())).status, 500);
+  const before = await storage.get("account-signup"); assert.equal(before.phase, "abuse_preflight");
+  Object.assign(setup.runtime.env, { CP_SIGNUP_LEGAL_ENFORCEMENT: "true", CP_SIGNUP_TURNSTILE_ENABLED: "true",
+    CP_SIGNUP_TURNSTILE_SECRET_KEY: "fixture", LEGAL_DOCUMENTS: { fetch: () => assert.fail("unproven policy read") } });
+  assert.equal((await setup.runtime.fetch(consentRequest())).status, 503);
+  assert.deepEqual(await storage.get("account-signup"), before); noProvisioning(setup);
+});
+
+test("a canceled reservation-header wait preserves its elected candidate and cannot finalize late", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const refusal = await (await setup.runtime.fetch(consentRequest())).json(); const transition = successorRequest(refusal);
+  const binding = setup.runtime.env.ACCOUNT_SIGNUP; let release, started;
+  const waiting = new Promise((r) => { started = r; });
+  setup.runtime.env.ACCOUNT_SIGNUP = { idFromName: (name) => name, get: () => ({ fetch: () => new Promise((r) => { release = r; started(); }) }) };
+  const controller = new AbortController();
+  const response = setup.runtime.fetch(new Request(transitionRequest(transition), { signal: controller.signal }));
+  await waiting; controller.abort();
+  assert.ok((await response).status >= 500);
+  const before = await setup.storage.get("account-signup"); assert.equal(before.legal_successor.registered, false);
+  release(Response.json({ status: "registered" })); await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(await setup.storage.get("account-signup"), before); noProvisioning(setup);
+  setup.runtime.env.ACCOUNT_SIGNUP = binding;
+  assert.equal((await setup.runtime.fetch(transitionRequest(transition))).status, 200);
+});
+
+
+test("a maximum invariant core accepts every bounded successor ID and legal pair", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const core = { email: "a@example.com", display_name: "Person", invite: INVITE };
+  core.email = "a".repeat(32768 - new TextEncoder().encode(JSON.stringify(core)).length) + core.email;
+  assert.equal(new TextEncoder().encode(JSON.stringify(core)).length, 32768);
+  const response = await setup.runtime.fetch(consentRequest(core));
+  assert.equal(response.status, 409); const refusal = await response.json();
+  const candidate = { provision_id: "c".repeat(128), consent_terms_version: "t".repeat(64), consent_privacy_version: "p".repeat(64) };
+  const request = successorRequest(refusal, candidate.provision_id, { email: core.email, candidate });
+  assert.equal((await setup.runtime.fetch(transitionRequest(request))).status, 200);
+  noProvisioning(setup);
+  cluster.authority.response = () => legalManifest(candidate.consent_terms_version, candidate.consent_privacy_version);
+  const successor = cluster.node(candidate.provision_id);
+  assert.equal((await successor.runtime.fetch(consentRequest({ ...core, ...candidate }))).status, 201);
+  assert.equal(successor.service.receipts.size, 1);
+});
+
+test("oversized invariant core and lone surrogates fail before fresh admission or candidate election", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  for (const email of ["a".repeat(33000) + "@example.com", "<&>".repeat(1900) + "@example.com", "\ud800@example.com"]) {
+    assert.equal((await setup.runtime.fetch(consentRequest({ email }))).status, 400);
+    assert.equal(await setup.storage.get("account-signup"), undefined);
+  }
+  assert.deepEqual(cluster.counters(), { legalReads: 0, challenges: 0, counterCalls: 0 }); noProvisioning(setup);
+  const refusal = await (await setup.runtime.fetch(consentRequest())).json();
+  const before = await setup.storage.get("account-signup");
+  assert.equal((await setup.runtime.fetch(transitionRequest(successorRequest(refusal, "candidate", { email: "a".repeat(33000) + "@example.com" })))).status, 400);
+  assert.deepEqual(await setup.storage.get("account-signup"), before);
+  assert.equal(cluster.nodes.has("candidate"), false); noProvisioning(setup);
+});
+
+test("unchanged Go-normalized FEFF input reconsents through the original CP-normalized core", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const fields = { email: "\ufeffperson@example.com", display_name: "\ufeffPerson\ufeff" };
+  const refusal = await (await setup.runtime.fetch(consentRequest(fields))).json();
+  assert.equal(refusal.code, "signup_legal_stale");
+  const transition = successorRequest(refusal, "feff-successor", fields);
+  assert.equal((await setup.runtime.fetch(transitionRequest(transition))).status, 200);
+  const successor = cluster.node("feff-successor");
+  assert.equal((await successor.runtime.fetch(consentRequest({ ...fields, ...transition.candidate }))).status, 201);
+  assert.equal(successor.service.receipts.get("feff-successor").request.email, "person@example.com");
+  noProvisioning(setup);
+});
+
+test("oversized incoming core cannot hide behind normalization before admission or election", async () => {
+  const cluster = legalCluster(); const setup = cluster.node();
+  const email = "\ufeff".repeat(11000) + "person@example.com";
+  assert.equal(email.trim(), "person@example.com");
+  assert.equal((await setup.runtime.fetch(consentRequest({ email }))).status, 400);
+  assert.equal(await setup.storage.get("account-signup"), undefined); noProvisioning(setup);
+  const refusal = await (await setup.runtime.fetch(consentRequest())).json();
+  const before = await setup.storage.get("account-signup");
+  assert.equal((await setup.runtime.fetch(transitionRequest(successorRequest(refusal, "oversized-wire", { email })))).status, 400);
+  assert.deepEqual(await setup.storage.get("account-signup"), before);
+  assert.equal(cluster.nodes.has("oversized-wire"), false);
+  // A terminal exact canonical replay keeps the original refusal even when
+  // another wire representation is larger; it creates no new attempt.
+  assert.deepEqual(await (await setup.runtime.fetch(consentRequest({ email }))).json(), refusal);
+});
+
+test("fresh legal wire bounds retain omitted and null display defaults and open invite omission", async () => {
+  for (const display_name of [undefined, null, ""]) {
+    const cluster = legalCluster(); const setup = cluster.node();
+    assert.equal((await setup.runtime.fetch(consentRequest({ display_name }))).status, 409);
+    noProvisioning(setup);
+  }
+  const cluster = legalCluster({ controls: true }); const setup = cluster.node();
+  setup.runtime.env.CP_SIGNUP_OPEN = "true";
+  assert.equal((await setup.runtime.fetch(consentRequest({ invite: undefined }))).status, 409);
+  noProvisioning(setup);
 });

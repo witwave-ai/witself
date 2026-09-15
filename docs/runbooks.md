@@ -293,6 +293,131 @@ the cell refuses that operation before its canonical retirement fence exists.
 Explicit `--endpoint` plus `--token-file` remains the self-hosted path and
 directly deletes an empty realm while writing the same portable retired shape.
 
+## Deletion protection and break-glass
+
+Inventory version 1 accepts `deletion_protection` on each cell and in
+`defaults`: **cell record > defaults > true when absent**. It is independent
+of the existing `minimal` and `prod` sizing profiles; both are protected by
+default. There is no CLI override. Missing inventories and unrecorded cells
+remain protected, even with `-allow-unknown-cell`.
+
+```yaml
+version: 1
+defaults:
+  deletion_protection: true
+cells:
+  aws-production-usw2-primary:
+    cloud: aws
+    account_alias: production
+    region: us-west-2
+    role: primary
+    profile: prod
+    deletion_protection: true
+```
+
+`witself-infra config show -cell CELL` reports the effective value. The CLI
+passes it as `witself:deletionProtection` to the inline program, where absence
+also means true. `up` and `preview` do not edit the inventory. A false default
+is supported; use a cell-specific edit for an auditable break-glass target.
+
+### Provider primitives
+
+Names below are Pulumi logical names. The false column describes a cell that
+has never enabled protection; Azure's irreversible exception follows the table.
+
+| Provider/resource | Previous posture; `deletion_protection: false` | `deletion_protection: true` |
+| --- | --- | --- |
+| AWS RDS instance `witself` | `deletionProtection=false`; existing snapshot/backup policy unchanged | RDS `deletionProtection=true` and Pulumi `Protect` |
+| AWS Secrets Manager `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | Recovery window 0 for minimal/unknown profiles, 30 days for prod | Maximum 30-day recovery window; no `ForceDeleteWithoutRecovery`; Pulumi `Protect` |
+| GCP Cloud SQL instance `witself` | Both protection booleans false; `deletionPolicy=DELETE` | `deletionProtection=true` and `settings.deletionProtectionEnabled=true`; Pulumi `Protect` on instance and logical database |
+| GCP Secret Manager `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | `deletionProtection=false`, `deletionPolicy=DELETE`, no version-destruction delay | Provider-state `deletionProtection=true`, Pulumi `Protect`, and `versionDestroyTtl=2592000s` (30 days) |
+| Azure PostgreSQL Flexible Server `witself` | No management lock | `authorization.ManagementLockAtResourceLevel`, `CanNotDelete`, scoped to `Microsoft.DBforPostgreSQL/flexibleServers/<server>`; Pulumi `Protect` on server and logical database |
+| Azure Key Vault `cell` | Soft delete enabled, retention 7 days, purge protection unset | Purge protection enabled; same 7-day retention; Pulumi `Protect` |
+| Azure Key Vault secrets `witself-db`, `witself-bootstrap-token`, `witself-provision-token` | Vault soft-delete policy, no Pulumi protection | Vault soft-delete/purge policy and Pulumi `Protect` on each secret |
+| Civo Kubernetes Secrets `civo-postgres-auth`, `witself-db`, `witself-bootstrap`, `witself-provision`, `witself-backup` | Kubernetes deletion; no provider recovery/purge primitive | Unchanged; the inventory destroy gate still applies to Civo |
+
+AWS and GCP create one version per secret. Versions remain replaceable for
+credential rotation; their parent stores are protected. GCP's
+`deletionProtection` is provider-enforced, not a Secret Manager API flag.
+Its destruction delay protects versions, not whole-secret deletion; there is
+no Azure-style purge protection. Civo PostgreSQL is managed through GitOps
+inside Kubernetes. State-backend KMS/Key Vault resources are outside the cell
+resource graph and this field.
+
+Azure purge protection **cannot be disabled once enabled**. False removes
+reversible protection while omitting and ignoring changes to
+`properties.enablePurgeProtection`. Break-glass permits soft deletion, not
+immediate purge or reuse of a retained vault name. Retention stays at 7 days
+because Azure permits setting it only at vault creation. See
+[Azure soft-delete and purge rules](https://learn.microsoft.com/en-us/azure/key-vault/general/soft-delete-overview).
+
+### Adopting protection without replacement
+
+For pinned AWS v6.83.4, GCP v9.36.0, and Azure Native v3.27.0 providers, **none
+of the selected changes requires replacement of a database or secret store**.
+Protection flags and recovery settings update in place; Azure adds a separate
+lock; Pulumi `Protect` changes state metadata. First adoption may show updates
+and an Azure lock create, so it is not necessarily a zero-change preview.
+Mocks do not prove a live-stack no-op; inspect the actual preview during an
+authorized rollout.
+
+CLI `preview` and the preview performed by `up` refuse database/store deletion
+or replacement while the effective field is true, including legacy resources
+whose old state has `protect=false`. The error lists the affected resource
+URNs. `up` applies the exact reviewed saved plan; its private temporary plan
+is removed afterward. With the field false, previous applied protection still
+blocks combining unprotection and replacement in one update.
+
+If a provider proposes replacement to enable protection, do not apply it.
+Use a provider-supported in-place protection operation, then
+`witself-infra refresh -cell CELL` and preview again. If no in-place operation
+exists, arrange a separately reviewed migration with backup/restore validation;
+this feature will not replace the store. Changing Azure retention is a separate
+migration decision, outside this field.
+
+Replacement behavior is documented by the pinned provider implementations:
+[AWS RDS update](https://github.com/hashicorp/terraform-provider-aws/blob/f7a3b98da589ab1d52756b0dcee0dbf2de83d635/internal/service/rds/instance.go#L2531),
+[AWS secret recovery/delete](https://github.com/hashicorp/terraform-provider-aws/blob/f7a3b98da589ab1d52756b0dcee0dbf2de83d635/internal/service/secretsmanager/secret.go#L369),
+[GCP SQL schema](https://github.com/hashicorp/terraform-provider-google-beta/blob/313c9ff796034d7dfe47057db24fb5d0d1af70e3/google-beta/services/sql/resource_sql_database_instance.go#L280),
+[GCP secret mutable settings](https://github.com/hashicorp/terraform-provider-google-beta/blob/313c9ff796034d7dfe47057db24fb5d0d1af70e3/google-beta/services/secretmanager/resource_secret_manager_secret.go#L381),
+and [Azure lock semantics](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources).
+The [Pulumi engine replacement check](https://github.com/pulumi/pulumi/blob/v3.260.0/pkg/resource/deploy/step_generator.go#L1951)
+explains why protection adoption also needs plan review. Synthetic engine-event
+tests cover that refusal because resource mocks do not execute provider diffs.
+
+### Two-step unprotect, then destroy or replace
+
+1. Record the break-glass decision in the operator's inventory
+   (`~/.witself/infra.yaml`, or the same `-config` path used to provision the
+   cell): edit **that cell** to `deletion_protection: false`. Keep the edit in
+   the normal inventory audit trail; there is no CLI bypass.
+2. Apply a **separate unprotect-only update**, retaining all other resource
+   inputs. Preview must remove Pulumi protection, disable RDS/Cloud SQL and GCP
+   secret protection/delay, restore AWS's profile recovery window, and remove
+   Azure's database lock. Azure purge protection remains enabled.
+
+   ```sh
+   witself-infra config show -cell CELL
+   witself-infra preview -cell CELL
+   witself-infra up -cell CELL
+   ```
+
+3. After that update succeeds, follow the evacuation, backup and typed-cell
+   confirmation procedure below, then run `witself-infra destroy -cell CELL`.
+   For replacement, make the intended resource change in a subsequent update.
+   Existing account and confirmation gates still apply.
+4. If the cell remains in service, restore `deletion_protection: true` on its
+   record and apply a separate update to re-enable protection.
+
+A protected destroy refuses before provider identity, credentials, placement
+reads or fleet operations and names the record edit and separate `up` required.
+Editing the record alone does not change applied protection: destroy also checks
+the exported stack state before fleet removal. Remaining Pulumi protection,
+native deletion flags, the Azure database lock, or the applied
+`deletionProtection: true` output cause refusal; unreadable or unsupported
+snapshots fail closed. Azure's irreversible purge protection and AWS's prod
+recovery window allow the subsequent soft-delete destroy.
+
 ## Decommission a cell and preserve its accounts
 
 `witself-infra destroy` is the fleet operator's counterpart to signup: it drains
@@ -300,6 +425,9 @@ the cell (stops placement), evacuates every account into a per-account archive
 in Cloudflare R2, then removes the cell from the fleet and tears down the AWS
 resources. The accounts wait in R2 as `archived — awaiting placement` until
 they are restored onto another cell.
+
+Before using this procedure, complete the separate unprotect update in
+[Deletion protection and break-glass](#deletion-protection-and-break-glass).
 
 ```sh
 witself-infra destroy \
@@ -310,17 +438,20 @@ witself-infra destroy \
   -domain cells.witself.witwave.ai
 ```
 
-Destroy safety runs three fail-closed guards in order before provider or Pulumi
-work. First, the exact cell/stack name must exist in the current
-`~/.witself/infra.yaml` inventory; `--allow-unknown-cell` is the explicit
-phantom-stack override. Second, the control plane must report zero live and
-zero archived accounts still placed on that cell; use `--force-with-accounts`
-to acknowledge known nonzero counts, or `--skip-account-check` when placement
-status cannot be checked (including an intentional self-hosted destroy with no
-control plane). Finally, an interactive operator must type the exact cell name;
-a non-interactive invocation must instead pass `--yes-cell=NAME`, with `NAME`
-exactly matching the target. The account flags do not imply `-destroy-accounts`,
-which remains the separate data-purge choice.
+Destroy safety runs four fail-closed guards before provider or Pulumi work.
+First, the exact cell/stack name must exist in the current
+`~/.witself/infra.yaml` inventory; `--allow-unknown-cell` overrides only that
+phantom-stack check. Second, effective `deletion_protection` must be false;
+there is no flag override, and an unrecorded cell remains protected. Third,
+the control plane must report zero live and zero archived accounts still
+placed on that cell; use `--force-with-accounts` to acknowledge known nonzero
+counts, or `--skip-account-check` when placement status cannot be checked
+(including an intentional self-hosted destroy with no control plane). Finally,
+an interactive operator must type the exact cell name; a non-interactive
+invocation must instead pass `--yes-cell=NAME`, with `NAME` exactly matching the
+target. The account flags do not imply `-destroy-accounts`, which remains the
+separate data-purge choice. After these guards, the CLI verifies the exported
+stack has applied unprotection before it drains or removes the cell.
 
 You'll see one line per account: `evacuated acc_… from <cell>` for real users,
 `reaped pending acc_… on <cell> (no archive)` for signups that hadn't yet
@@ -353,8 +484,20 @@ stale incomplete multipart uploads for every prefix. The production
 limit. Do not remove or narrow that rule: a Worker terminated before it can
 record the multipart upload id cannot abort that upload itself. If multipart
 completion is ambiguous before archive authority is committed, the Worker
-first obtains an exact source abort receipt and then best-effort deletes the
-attempt-unique completed object key.
+persists `abort_requested` before requesting the exact source abort, then
+persists its receipt in `abort_cleanup_pending` before deleting only that
+attempt-unique completed object key. The alarm retries deletion and exact
+target-reservation release before retiring the operation; it never re-exports
+after durable abort intent. The original live route remains authoritative.
+
+Once either abort phase is written, the supported rollback floor is a Worker
+that understands both `abort_requested` and `abort_cleanup_pending`. Older
+readers, including v0.0.283, reject these phases and retain the alarm and object,
+but cannot finish cleanup and may renew a move's target reservation. An
+emergency older rollback therefore pauses cleanup and can block further
+lifecycle operations: restore a compatible reader, and never rewrite the
+phase backward or clear its alarm. This does not authorize scanning or deleting
+older orphan candidates, authoritative waiting archives, or closed archives.
 
 Sandbox override: add `-destroy-accounts` to skip the archive step entirely
 and force-purge the directory entries. This is an explicit acknowledgment
@@ -366,6 +509,35 @@ While the archives sit in R2 you can verify state at any time:
 witself account status --account <name>          # says "archived — awaiting placement"
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
+
+## PostgreSQL image pin: how to re-pin
+
+Read the running PostgreSQL container's image ID using the reviewed cell's
+explicit kubeconfig/context:
+
+```sh
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n witself \
+  get pod witself-postgresql-0 \
+  -o jsonpath='{.spec.containers[?(@.name=="postgresql")].image}{"\n"}{.status.containerStatuses[?(@.name=="postgresql")].imageID}{"\n"}'
+```
+
+Copy the `sha256:…` suffix from that container's `imageID` into
+`apps.civoPostgres.image.digest` in `.gitops/cells/<cell>/values.yaml`; omit any
+runtime prefix or repository before `@`. Keep `image.registry` and
+`image.repository` matched to the running image (currently
+`registry-1.docker.io` and `bitnami/postgresql`). Render the apps chart with that
+cell file and review the nested PostgreSQL image values before merging.
+Update the reviewed digest expectation in `scripts/test-helm-rollout.sh` and
+run that rendering gate with the new pin.
+An empty digest returns to tag-based resolution; it is not a rollback pin.
+
+A pin of the current image preserves content, but the changed image reference
+updates the StatefulSet pod template and can roll PostgreSQL. Verify readiness
+and the resulting image ID after sync. Re-pin the rollback-only
+`civo-sandbox-use1-backup` first, verify it, and review the serving
+`civo-sandbox-usw2-dev` separately. Their current digests differ; copying one
+cell's digest to the other is a separate image-alignment change, not merely
+recording its current image.
 
 ## Back up both reviewed Civo databases before a migration
 
@@ -417,6 +589,270 @@ file untouched on any nonzero exit, or when no verifier binary is executable
 that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
+
+## Two-wave roll (automated)
+
+Run `scripts/roll-train.sh` from a local operator checkout with access to both
+cells. It rolls `civo-sandbox-use1-backup` first, verifies that wave, then rolls
+the serving cell `civo-sandbox-usw2-dev`. The operator's kube contexts must be
+named `witself-<full-cell-directory-name>`. This runs locally because verifying
+Argo CD convergence requires those kube contexts; no GitHub Actions cell
+kubeconfig or new secret is needed.
+
+```text
+scripts/roll-train.sh VERSION
+  [--no-schema-change | --backup-evidence DIR [--backup-evidence DIR]]
+  [--cells BACKUP,SERVING] [--serving-url URL] [--workdir DIR]
+  [--ci-timeout SECONDS] [--argo-timeout SECONDS]
+  [--poll-interval SECONDS] [--dry-run]
+scripts/roll-train.sh --help
+```
+
+Use a numeric `VERSION` such as `0.0.300`, without the release tag's `v` prefix.
+Review the local plan first; dry-run performs local reads only, creates no
+files, and makes no network requests:
+
+```sh
+scripts/roll-train.sh "$VERSION" --dry-run
+```
+
+For a release that cannot advance the database schema, supply the explicit
+attestation. Set `SERVING_URL` to the serving cell's live HTTPS base URL:
+
+```sh
+scripts/roll-train.sh "$VERSION" --no-schema-change \
+  --serving-url "$SERVING_URL"
+```
+
+For a schema-changing release, complete the two-database backup procedure
+above, then pass both verified artifact directories. The existing
+`roll-cell.sh` backup-evidence gate runs for each wave:
+
+```sh
+scripts/roll-train.sh "$VERSION" \
+  --backup-evidence "$BACKUP_CELL_EVIDENCE_DIR" \
+  --backup-evidence "$SERVING_CELL_EVIDENCE_DIR" \
+  --serving-url "$SERVING_URL"
+```
+
+The host needs Bash, Git, authenticated `gh`, `jq`, Mike Farah's `yq`,
+`kubectl`, and `curl`, plus a configured Git author for signed-off commits.
+The backup-evidence route also requires the verifier described above and
+accepts only the default ordered cell pair: the verifier checks
+those two databases. Custom `--cells` pairs require `--no-schema-change`.
+The script checks `gh auth status`, namespace access to `argocd` in each context
+with a 20-second request timeout, a published `v<VERSION>` release, and a
+successful latest `release.yml` run on that tag. Before starting the train,
+the serving `/v1/version` must be strictly lower than `VERSION`. Its URL
+defaults to the serving cell values' `apiHost`; pass `--serving-url` when the
+live host differs, as it can for Civo values overridden by infrastructure.
+
+Each wave starts a separate worktree from an exact fetched `origin/main` commit.
+Before editing, both desired `chartVersion` and `imageTag` must be strictly
+lower than the target. The cell's live Argo revision, deployment image tags,
+pod image tags, and running container image tags must be valid numeric versions
+no newer than the target. Already or partly pinned cells require manual
+inspection; the train does not resume them automatically.
+Verification covers the server deployment and, when enabled, the worker
+deployment, and the version guard refuses a downgrade of either.
+It then runs `roll-cell.sh`,
+commits and pushes a branch, and creates a PR recording the wave and schema
+attestation or evidence gate. It waits for all required PR checks to pass,
+verifies the head OID and `main` base, re-fetches the selected cell's values to
+reject concurrent changes, and repeats the live version checks before
+squash-merging with `--match-head-commit`. Both pin lines must change under
+standard text-merge semantics, so a newer pin arriving after the final read
+conflicts at merge. It then requires successful `ci.yml` on that exact
+merge commit. Argo Application `witself-server` in namespace `argocd` must
+report `Synced`, `Healthy`, and sync revision `VERSION`; the selected
+server/worker pod list must be nonempty, with Running, Ready, nonterminating
+pods and ready running containers whose desired and reported images end in
+`:<VERSION>`. Deployments must have observed their current generation and all
+desired replicas updated, ready, and available; the live pod count must match
+those replicas. Only after these checks does it remove that wave's worktree
+and branch and proceed to the next wave.
+
+The default cells are
+`--cells civo-sandbox-use1-backup,civo-sandbox-usw2-dev`, in that order.
+`--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
+with a unique directory per run; the primary checkout need not be clean.
+Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
+1,200 seconds for Argo convergence, polling every 15 seconds. Any failed
+step stops the train and preserves the current wave's worktree for inspection
+(a cleanup failure may leave it detached after branch deletion). There is no
+automatic resume or rollback; inspect the PR,
+GitOps pins, CI, and live state before continuing manually. The script never
+force-pushes. After the serving wave, it prints and verifies the serving
+`/v1/version`, then prints `witself-infra health --json` if that binary is
+available.
+
+The manual rollout remains the fallback: use `scripts/roll-cell.sh` with the
+same attestation or backup evidence, create and merge a reviewed PR for the
+backup cell, verify post-merge CI and Argo/pod convergence, then repeat those
+steps for the serving cell. Keep the backup gate and wave order when
+recovering from a partially completed train.
+
+Every live read binds to the Argo Application's `witself.io/cell` label: an
+aliased or misconfigured kube context that returns another cell's Application
+stops the train with an "unexpected cell identity" diagnostic instead of
+certifying that cell's workloads.
+
+## K3s minor upgrade (Civo)
+
+Keep the desired K3s version in each cell's `k8s_version` field in the
+operator's `~/.witself/infra.yaml` (inventory `version: 1`), alongside
+`civo_node_size`. It is a cell field, outside the nested Civo credential
+context. A command-line `-k8s-version` overrides the record for that invocation;
+`up` and `preview` do not save that override. An absent cell field can inherit
+`defaults.k8s_version`. If the effective version is empty after merging flags,
+the cell record, and defaults, no `KubernetesVersion` input is sent and Civo
+chooses its default on creation. Once pinned, keep the field in the record for every
+subsequent operation.
+
+The reviewed baseline on 2026-09-04 is kubelet `v1.35.0+k3s1` on both cells.
+Its Civo API pin is **`1.35.0-k3s1`**. The
+[Pulumi Civo v2.4.8 `KubernetesClusterArgs.KubernetesVersion` field](https://github.com/pulumi/pulumi-civo/blob/v2.4.8/sdk/go/civo/kubernetesCluster.go)
+is an optional string input. Civo's
+[versions API](https://www.civo.com/api/kubernetes#list-available-versions)
+distinguishes `version` (`1.20.0+k3s1`), `label` (`v1.20.0+k3s1`), and
+`flat_version` (`1.20.0-k3s1`); its cluster examples use the flattened form for
+`kubernetes_version`. The
+[Civo CLI versions command](https://github.com/civo/cli/blob/master/cmd/kubernetes/kubernetes_list_version.go)
+displays the label as `Name` and the version as `K8s version`, so its display
+can contain `v` and `+` even though the pin uses the flattened API form.
+Recheck `civo kubernetes versions --region REGION` and the existing cluster's
+version in its actual recorded Civo region before choosing a target; the
+legacy cell names do not determine Civo region codes.
+
+Add only these fields to the existing records; this fragment is not a
+replacement inventory:
+
+```yaml
+cells:
+  civo-sandbox-use1-backup:
+    k8s_version: "1.35.0-k3s1"
+  civo-sandbox-usw2-dev:
+    k8s_version: "1.35.0-k3s1"
+```
+
+**First establish the no-op proof.** Use `witself-infra` built from the
+reviewed checkout, with the existing inventory, credentials, backend, and
+`state_dir`. After adding the current-version pins, run:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+```
+
+`preview` runs Pulumi Preview without applying cloud changes. Pinning to the
+**currently running** version must preview as **no changes** for each existing
+stack. Preserve that output in the private change record. A successful exit
+alone is insufficient: any proposed update, create, delete, or replacement
+blocks the no-op claim and must be investigated before `up`. Preview uses the
+stack's recorded state, so compare it with live Civo and node versions;
+suspected stale state must be reconciled separately. A differing pin is an
+upgrade request and must follow the procedure below, even if the application
+release stays the same. A lower version is not a supported upgrade.
+
+Before an upgrade:
+
+- Create fresh encrypted PostgreSQL backups and successful disposable restore
+  evidence for both cells using
+  [Civo PostgreSQL pre-migration backup](backup-and-recovery.md#civo-postgresql-pre-migration-backup).
+  Use each cell's retained application release as the evidence target; this
+  operation changes K3s, not the application/schema release. Verify the
+  artifacts and checksums with `witself-admin backup-evidence verify`, using
+  `--cell CELL --release VERSION --max-age 24h` for each artifact directory.
+  This runbook requires evidence from the current maintenance window and at
+  most 24 hours old; recreate it if the window slips. Retain the exact backup
+  IDs, checksums, age identity access, and a reviewed rebuild/restore plan.
+- Require all nodes Ready, the Argo bootstrap and child Applications
+  `Synced`/`Healthy`, and normal external health and alerts. Record the current
+  `/v1/version` response for each cell and the serving endpoint. No database
+  schema rollout or other application/infra rollout may be in flight; keep
+  those release pins fixed throughout this upgrade.
+- Review the target K3s release notes, removed Kubernetes APIs, and compatibility
+  of Argo CD, CNI, CSI, ingress, and monitoring. Upgrade one minor at a time,
+  using a version available in both cells' actual Civo regions. Schedule a
+  maintenance window that permits a PostgreSQL or application interruption.
+- Review node-pool capacity, pod placement, disruption budgets, and PVC
+  attachment behavior. The current standalone PostgreSQL does not become
+  highly available merely because a pool has two workers.
+
+Upgrade **`civo-sandbox-use1-backup` first**, keeping it
+`backup_validation_target=true`, `accepting=false`, and free of registered
+accounts. Change only its `k8s_version` to the reviewed target, then run:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+# Only after reviewing the expected Kubernetes version update:
+witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
+```
+
+Require the preview to show the intended Kubernetes version update with no
+unrelated change or cluster, pool, network, firewall, or storage replacement.
+Civo owns the cluster upgrade and its worker-node rollout; this Pulumi program
+sets a cluster version and does not implement a node-pool rolling controller.
+The public API/CLI contract does not specify a one-node-at-a-time guarantee,
+surge capacity, or automatic drain/PDB handling. Confirm the actual rolling
+behavior for the selected release with Civo before the maintenance window,
+and observe every pool through completion. Do not substitute node recycling:
+[Civo documents that recycling deletes and recreates a node without draining it](https://www.civo.com/docs/kubernetes/advanced/managing-node-pools#recycling-nodes).
+An API acknowledgement or `up` success is not proof that every kubelet and
+workload has converged.
+
+For the backup cell, then again for the serving cell, use its explicit
+owner-only kubeconfig and context to verify:
+
+```sh
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" get nodes -o wide
+kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" \
+  -n argocd get applications.argoproj.io \
+  -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status
+witself-infra cell-health -config "$HOME/.witself/infra.yaml" -cell "$CELL"
+curl --fail --silent --show-error "https://${CELL_API_HOST}/v1/version"
+```
+
+Set `CELL`, `CELL_KUBECONFIG`, and `CELL_CONTEXT` for the cell under review and
+take `CELL_API_HOST` from that stack's `apiHost` output. Every expected worker
+must be Ready and report the target kubelet version; inspect all pools, not
+just the first node. All Argo Applications must return to `Synced`/`Healthy`.
+`/v1/version` must retain the recorded application release and commit. Its
+`schema_version` is the API envelope version, not the database migration level;
+confirm the database schema still matches the pre-upgrade backup evidence.
+PostgreSQL, PVCs, and application pods must be healthy. `cell-health` includes
+the provider's stored `kubernetesVersion` output; `health --json` is the
+separate endpoint/probe summary. Neither replaces the live node-version check.
+Verify alert silence after any maintenance suppression expires: no new or
+unresolved actionable alerts, working scrapes, and a healthy external probe
+and watchdog. The intentionally firing `WitselfWatchdog` is expected; missing
+monitoring is not successful alert silence. Observe at least 30 minutes of
+healthy service after convergence before advancing.
+
+Only after all backup-cell checks pass, change the serving cell's
+`k8s_version` to the same target and repeat preview, review, apply, and the
+entire verification/observation period:
+
+```sh
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+# Only after reviewing the expected Kubernetes version update:
+witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+```
+
+Also recheck the public serving `/v1/version` and external availability after
+the serving cell converges. Preserve both preview/apply results and the
+before/after node, Argo, application, and alert evidence.
+
+**Rollback means rebuild from backup evidence. Civo does not downgrade K3s.**
+The [Civo update API](https://www.civo.com/api/kubernetes#updating-a-cluster)
+explicitly excludes downgrades; reverting `k8s_version` and running `up` is
+not recovery. Stop before upgrading the next cell if any gate fails. Recover
+through the separately reviewed procedure: coordinate a serving write freeze,
+provision a new destination at a Civo-supported compatible version, restore
+the verified encrypted database evidence with the matching application/schema,
+validate it, and then coordinate routing/reclassification. Record the possible
+loss of writes since the backup and retain the failed cluster until recovery
+is accepted. The isolated backup cell is not an automatic serving failover.
 
 ## Move and stage the `witmail.net` managed-email domain
 
@@ -2765,7 +3201,9 @@ in one parent commit.
    In the third GitOps change, set the immutable Secret names/keys and enable
    `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
    `witself_alert=true` incident route, the `witself_watchdog=true` dead-man
-   route, and the thirteen bounded rules to converge.
+   route, and the enabled subset of the 27 committed bounded incident rules to
+   converge. Four collector rules and five sealed-plane rules have separate
+   default-off gates; `WitselfWatchdog` is the separate heartbeat rule.
    Confirm zero
    `prometheus_rule_evaluation_failures_total`, the schema-91 logical storage
    gauges are present, and PostgreSQL PVC capacity/available metrics match the
@@ -2798,6 +3236,53 @@ in one parent commit.
 6. Observe normal rules and storage growth for the declared acceptance window.
    Update the canonical feature-status catalog only in a later evidence PR.
 
+The hydration rules ship with the platform chart's existing alerting gate.
+First roll the server/client release and confirm self-digest counters and
+histograms on the serving cell after authenticated reads; then roll the rules
+through a separate cell-GitOps PR. No hydration metric-absence rule is present.
+The error threshold (>5% over five minutes, >0.05 reads/second, for ten minutes),
+latency threshold (five-minute p95 >1.5 seconds for ten minutes), and elision
+threshold (at least 50% over five minutes for thirty minutes) are provisional
+and need a serving-cell baseline. The traffic floor may suppress error alerts
+on a quiet cell. Retain separate firing/resolved receiver evidence before
+closing live hydration alert acceptance; local promtool success alone does
+not provide that evidence.
+
+| Hydration alert | First diagnostic step |
+| --- | --- |
+| `WitselfSelfDigestErrorRatioHigh` | Compare `witself_self_digest_reads_total` rates by closed `surface` and `result`; check authentication/refusal behavior and self-loader/database health. Failures include 4xx and 5xx; metrics contain no error text or tenant identity. |
+| `WitselfSelfDigestSlow` | Inspect `witself_self_digest_read_duration_seconds_bucket` by surface and compare server/database latency. The histogram ends at the server and cannot measure client network or hook deadlines. |
+| `WitselfSelfDigestElisionRatioHigh` | Compare the elided read share and `witself_self_digest_elided_entries` histogram. It counts digest byte trimming plus exact store-selection omissions only when `include_counts=true`. Count-disabled pagination hints still set `elided=true`, but their unknown omitted-entry counts are excluded from the histogram; zero does not prove a complete digest. Elision is a bounded-context signal, not proof of failed injection. |
+
+For client-only failures, run `witself integration status --runtime codex` or
+`--runtime claude-code` on the affected machine. Its recent value-free ledger
+summary covers attempts, injections, failures, p95 latency, and elision; no
+recent ledger is unknown rather than healthy. Optional runtime-acceptance
+`hydration` evidence covers only `prepared_at..verified_at`, with maximum
+latency and output-rejection counts. Inspect `timeout`, `self_error`,
+`binding_mismatch`, `recall_degraded`, `output_rejected`, and `config_error`
+outcomes without copying prompts, contexts, tokens, or error text. The ledger
+is not scraped and does not establish which acceptance stage received
+context. Scheduling the authenticated `~/.witself/mra-claude-code.sh` and
+`~/.witself/mra-codex.sh` legs remains Claude-driven operator work; no cron,
+launchd, or CI job is added here. Cursor and Grok legs remain Scott's runtimes.
+Freshness/staleness alerts and live provider regression evidence remain open.
+
+The four identity-capacity and audit-append alerts default
+off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
+until compatible server and worker binaries are deployed, then verify the
+metrics on both scrape targets before enabling it in a separate rollout.
+Existing alert routing and other rules are independent of this gate.
+
+First diagnostics once these collector alerts are enabled:
+
+| Alert | First diagnostic step |
+| --- | --- |
+| `WitselfIdentityCapacityMetricsUnavailable` | Check the server scrape target and `witself_identity_capacity_metrics_up`; if the target is healthy but the collector is 0, inspect database reachability and the read-only query's two-second timeout. Error text is intentionally absent from metrics. |
+| `WitselfIdentityCapacityAtLimit` | Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify whether realms, agents per realm, or operator seats block creation. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
+| `WitselfAuditAppendMetricsUnavailable` | Every server and worker replica must expose a healthy collector: compare `witself_up` and `witself_worker_up` with `witself_audit_append_metrics_up` on `namespace`, `pod`, and `container`. A missing collector from any replica, absence of either role's collectors, or any collector value below 1 fires the alert. Verify each process-local audit failure reader is wired and succeeding. |
+| `WitselfAuditAppendFailures` | Compare ten-minute increases in the server's `witself_audit_append_total{result="error",reason="error"}` and both server and worker `witself_audit_append_tx_failures_total` series, then inspect database insert failures in protected process logs. Nonzero counters without the same series in the ten-minutes-ago view also alert, covering startup failures before the first scrape; this can conservatively repeat an alert after a scrape gap. Both counters reset on process restart; a standalone insert failure can affect both, while input-validation errors are excluded from the transaction counter. A successful worker batch can still contain an earlier rolled-back audit failure, so its generic job-failure counter alone is insufficient. |
+
 Rollback alert routing first by setting `platform.monitoring.alerting.enabled`
 false, then roll back the ServiceMonitor/NetworkPolicy change. After the child
 Application has synchronized once, do **not** use
@@ -2809,6 +3294,67 @@ approved deletion. A one-node cluster loss can also remove this alerting plane,
 so production acceptance requires the external dead-man above (the
 `WitselfWatchdog` heartbeat and its outside monitor) in addition to the
 in-cluster receiver path.
+
+### Sealed-plane alerts
+
+The five `witself-sealed-plane` rules require both
+`platform.monitoring.alerting.enabled` and the separate, default-off
+`platform.monitoring.sealedPlaneAlerts.enabled`. The gate is rendered from the
+cell catalog switch `sealed_plane_alerts` (see
+[GitOps values generation](gitops-values-generation.md)); it is on for
+`civo-sandbox-usw2-dev` since v0.0.286 verified the posture, vault-lifecycle,
+and material-delivery series there, and off for every other cell. Keep a new
+cell's gate off until a compatible server release is serving and its metrics
+are verified. The platform chart automatically syncs from its configured GitOps
+revision, so the release-before-rules merge order remains: ship the server
+metrics, roll the release train, verify the new series on the serving cell,
+then enable the switch in a separately reviewed catalog change.
+Never flip the gate while posture metrics are absent: that condition pages after
+three minutes. The chart's safe default also protects an early rules sync.
+
+Verify `witself_sealed_plane_posture_metrics_up=1` and all five posture gauges
+across multiple scrapes. Verify `witself_secret_material_deliveries_total` and
+`witself_vault_lifecycle_operations_total` after an authorized operation has
+created their process-local series; an idle process need not have a counter
+series. Review the [sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos)
+before interpreting these signals. A material delivery means the server returned
+ciphertext and its wrapped key after authorization. It does not establish that
+the client decrypted or used the material. No account, agent, secret, or field
+identifier appears in these rules or their metrics.
+
+| Alert | Trigger and first diagnostic step |
+| --- | --- |
+| `WitselfSealedPlanePostureMetricsUnavailable` | Critical after the collector is absent or its maximum `_up` is below 1 for 3 minutes. Check the server release and scrape target, then database reachability and the posture query timeout. A failed read suppresses the posture gauges; missing gauges are not healthy zeroes. |
+| `WitselfSecretMaterialDeliveryErrorRatio` | Warning when delivery `result="error"` exceeds 5% over 10 minutes, with total traffic above 0.01 requests/second, for 10 minutes. Inspect protected server logs for database and audit-append failures. The `conflict`, `forbidden`, `not_found`, and `invalid` result classes count as non-error outcomes for the availability SLO; inspect them separately when diagnosing a failed client workflow. |
+| `WitselfVaultRotationFenceConflicts` | Warning when rotation `result="conflict"` calls exceed a combined budget of 5 over 15 minutes for 5 minutes, summing reset-adjusted observed increases across all series and any new-series count not already included in those increases. Compare the bounded `operation` classes (`start`, `stage`, `commit`, `cancel`) and inspect the authenticated rotation's current fence and staged progress. The class includes state/key and idempotency conflicts; it does not prove every conflict was a stale fence. Resume the existing rotation through the supported workflow after resolving ownership; do not clear fences or rotate keys from an alert alone. |
+| `WitselfVaultRotationStuckOpen` | Warning when the oldest open rotation exceeds 86,400 seconds for 15 minutes. Inspect active rotation state and missing staging acknowledgements through an authorized client. A long-running client-owned rotation needs an explicit resume or cancel decision; no backend job completes it automatically. |
+| `WitselfSecretMaterialDeliveryVolumeAnomaly` | Warning when aggregate delivery attempts exceed 1/second over 15 minutes, or `witself_secret_material_max_agent_deliveries_15m` exceeds 120, for 15 minutes. Compare bounded result and field-kind classes, recent workload changes, and authenticated audit evidence. The SQL gauge is the single maximum count of best-effort successful `secret_read` usage events across account/agent pairs, so it may undercount delivered material and cannot identify an agent. |
+
+The rotation conflict alert always includes each series' reset-adjusted observed
+increase, preserving observed conflicts if a newly started counter resets during
+the alert hold. Until a series has a fifteen-minute-old observation, it also adds
+any positive difference between its current count and that increase, or its full
+current count if there are too few samples to calculate an increase. These
+contributions are summed before checking the budget, so conflicts split between
+established and newly started replicas can exceed the combined budget without
+counting an observed increase twice. Counting newly observed series can
+conservatively repeat an alert after a scrape gap that removes the older observation.
+
+The conflict and volume ceilings are provisional: there is no established
+production sealed-plane volume baseline. Tune them against reviewed normal
+traffic after activation; retain warning severity for these signals. Use
+`witself_vault_pending_enrollments` and
+`witself_vault_oldest_pending_enrollment_seconds` to investigate pending or
+approved enrollments before their expiry; expired records are excluded even if
+lazy cleanup has not run. Enrollment age has a documented review objective but
+no separate paging rule in this group.
+
+For a rule-only rollback, set the cell's `sealed_plane_alerts` catalog switch
+false and regenerate its values (the generator's drift test and generated-values
+tests pin the serving cell's expected state, so update them in the same
+change). Other alert groups and the monitoring stack remain enabled. Keep any
+diagnostic evidence value-free; credentials, ciphertext, wrapped keys, and
+client error details belong outside metric labels and public incident notes.
 
 ## Incident communications
 
@@ -2830,3 +3376,50 @@ points customers here.
    (security@witwave.ai, [security-policy.md](security-policy.md)) and get a
    public issue only after the disclosure decision, under the same value-free
    rules.
+
+## Entitlement delivery monitoring
+
+These alerts diagnose the CP-to-cell acknowledgement path without changing
+billing or bypassing capacity checks. First distinguish the reported state:
+explicit `enabled=0` is disabled; missing, invalid or unavailable observations
+are not successful delivery. Confirm the monitoring capability and rule gate
+were intentionally rolled out before treating a missing new metric family as
+an account incident. No activation is performed by the monitoring code.
+
+For `WitselfEntitlementDeliveryMetricsUnavailable`, inspect the existing public
+probe scrape and the closed snapshot-state gauge. The probe endpoint's own
+HTTP failure is covered by existing probe alerts. If probes remain healthy,
+check Worker checkpoint-read/persistence availability through existing
+operator procedures; never paste cursor documents, account identifiers,
+credentials or error bodies into alerts or public incident reports.
+
+For `WitselfEntitlementDeliverySchedulerStale`, compare the fixed last page
+acknowledgement timestamp with current time. It is not a latest-attempt
+heartbeat: unacknowledged, partial, malformed or unavailable CP responses do
+not refresh it. Inspect the existing authenticated lifecycle status and safe
+Worker diagnostics. Do not manually advance or reset its private directory
+cursor to make the alert clear.
+
+For `WitselfEntitlementDeliveryCycleIncomplete`, inspect coverage and cycle
+start/completion timestamps. A legacy or invalid midcycle checkpoint must
+finish that unmeasured tail and then complete a fresh traversal. Large fleets
+need one five-minute tick per directory page. When both completion and current
+start timestamps are zero, the start is unknown and sustained incomplete
+coverage alerts after 15 minutes. A measured first traversal or a previous
+completion uses the six-hour budget plus 15 minutes; the threshold is an
+operational budget, not a promised individual entitlement delay. Monitoring
+page/size bounds or repeated cursors can make coverage unavailable even while
+ordinary reconciliation continues. Concurrent, eventually consistent KV
+writes may expose older coherent checkpoints; do not interpret them as a
+transactional fleet snapshot.
+
+For `WitselfEntitlementDeliveryGap`, examine pending and failed observations
+separately. Pending means the CP has not recorded the exact desired snapshot
+acknowledgement, including never-delivered requests, lost acknowledgements and
+blocked downgrades. Failed includes an unknown current delivery result even
+when stored revisions previously matched. Use existing authorized admin
+inspection to compare desired/applied revision and hash for the affected
+account; preserve the CP as entitlement authority. Do not force an apply,
+override a plan, change billing, or bypass a fit check as monitoring remediation.
+A later completely measured healthy traversal clears the gap. Its 30-minute
+persistence is aggregate observation persistence, not the age of one account.

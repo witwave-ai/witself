@@ -7,6 +7,12 @@ apps_chart="$repo_root/.gitops/charts/apps"
 monitoring_values="$platform_chart/ci/monitoring-values.yaml"
 rules="$platform_chart/files/founder-open-plane.rules.yaml"
 rule_tests="$platform_chart/testdata/founder-open-plane.rules.test.yaml"
+postgresql_rules="$platform_chart/files/postgresql.rules.yaml"
+postgresql_rule_tests="$platform_chart/testdata/postgresql.rules.test.yaml"
+probe_rules="$platform_chart/files/uptime-probes.rules.yaml"
+probe_rule_tests="$platform_chart/testdata/uptime-probes.rules.test.yaml"
+delivery_rules="$platform_chart/files/entitlement-delivery.rules.yaml"
+delivery_rule_tests="$platform_chart/testdata/entitlement-delivery.rules.test.yaml"
 chart_version="87.6.0"
 chart_sha256="e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5"
 chart_repo="https://prometheus-community.github.io/helm-charts"
@@ -38,6 +44,11 @@ esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# Keep downloaded chart metadata inside this run, including in restricted
+# worktrees whose normal Helm cache/config directories are read-only.
+export HELM_CACHE_HOME="$tmp/helm-cache"
+export HELM_REPOSITORY_CACHE="$tmp/helm-cache/repository"
+export HELM_REPOSITORY_CONFIG="$tmp/helm-repositories.yaml"
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -77,6 +88,7 @@ fi
 
 helm lint "$platform_chart" --values "$monitoring_values" >/dev/null
 helm lint "$apps_chart" >/dev/null
+ruby "$repo_root/scripts/testdata/test-monitoring-collector-alerts.rb" "$repo_root"
 
 default_render="$tmp/platform-default.yaml"
 enabled_render="$tmp/platform-enabled.yaml"
@@ -140,6 +152,46 @@ chart_archive="$tmp/${chart_name}-${chart_version}.tgz"
 }
 helm template witself-monitoring "$chart_archive" \
   --namespace monitoring --include-crds --values "$child_values" >"$child_render"
+
+# Probe scraping and its rules stay default-off, even when alerting is enabled.
+# The serving cell opts in without adding any receiver credentials.
+ruby -ryaml -e '
+  values = YAML.load_file(ARGV[0])
+  abort "probe scrape enabled by default" if values.dig("prometheus", "prometheusSpec", "additionalScrapeConfigs")
+  abort "probe rules enabled by default" if values.dig("additionalPrometheusRulesMap", "uptime-probes")
+  abort "entitlement delivery rules enabled by default" if values.dig("additionalPrometheusRulesMap", "entitlement-delivery")
+' "$child_values"
+helm template witself-platform "$platform_chart" \
+  --values "$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml" >"$tmp/probes-platform.yaml"
+ruby -ryaml -e '
+  app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+  abort "serving-cell monitoring Application missing" unless app
+  print app.dig("spec", "source", "helm", "values")
+' <"$tmp/probes-platform.yaml" >"$tmp/probes-values.yaml"
+helm template witself-monitoring "$chart_archive" \
+  --namespace monitoring --values "$tmp/probes-values.yaml" >"$tmp/probes-child.yaml"
+ruby -ryaml -rbase64 -e '
+  docs = YAML.load_stream(File.read(ARGV[0])).compact
+  prometheus = docs.find { |doc| doc["kind"] == "Prometheus" }
+  source = prometheus&.dig("spec", "additionalScrapeConfigs")
+  abort "probe scrape reference missing" unless source
+  secret = docs.find { |doc| doc["kind"] == "Secret" && doc.dig("metadata", "name") == source["name"] }
+  config = secret&.dig("data", source["key"])
+  abort "probe scrape configuration missing" unless config
+  jobs = YAML.safe_load(Base64.strict_decode64(config), aliases: false)
+  expected = [{"job_name" => "witself-probes", "scheme" => "https", "metrics_path" => "/metrics/probes", "scrape_interval" => "60s", "static_configs" => [{"targets" => ["self.witwave.ai:443"]}]}]
+  abort "probe scrape is not the exact public unauthenticated job" unless jobs == expected
+  delivery = docs.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-entitlement-delivery" } }
+  abort "serving-cell entitlement delivery rule is not unique and selected" unless delivery.length == 1 && delivery[0].dig("metadata", "namespace") == "monitoring" && delivery[0].dig("metadata", "labels", "release") == "witself-monitoring"
+  abort "serving-cell entitlement delivery rules differ from their tested source" unless delivery[0]["spec"] == YAML.load_file(ARGV[2])
+  rules = docs.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-uptime-probes" } }
+  abort "probe rules missing or duplicated" unless rules.length == 1
+  abort "probe rules are outside Prometheus selection" unless rules[0].dig("metadata", "namespace") == "monitoring" && rules[0].dig("metadata", "labels", "release") == "witself-monitoring"
+  actual_rules = rules[0].dig("spec", "groups", 0, "rules")
+  abort "probe rules differ from their tested source" unless actual_rules == YAML.load_file(ARGV[1]).dig("groups", 0, "rules")
+  alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
+  abort "probe rollout changed receiver mounts" unless alertmanager.dig("spec", "secrets").sort == %w[witself-monitoring-deadman-v1 witself-monitoring-pagerduty-v1]
+' "$tmp/probes-child.yaml" "$probe_rules" "$delivery_rules"
 
 helm template witself-platform "$platform_chart" \
   --set cell.name=monitoring-ci \
@@ -517,8 +569,89 @@ assert_receiver_combination() {
 assert_receiver_combination webhook witself-deadman-v1
 assert_receiver_combination pagerduty ""
 
+assert_postgresql_rules() {
+  expected="$1"
+  shift
+  helm template witself-platform "$platform_chart" \
+    --values "$monitoring_values" \
+    --set cell.cloud=civo \
+    --set platform.monitoring.postgresql.enabled=true \
+    --set apps.civoPostgres.enabled=true \
+    --set apps.civoPostgres.metrics.enabled=true \
+    "$@" >"$tmp/postgresql-platform.yaml"
+  ruby -ryaml -e '
+    app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+    values = app ? YAML.safe_load(app.dig("spec", "source", "helm", "values")) : {}
+    rules = values.dig("additionalPrometheusRulesMap", "postgresql")
+    abort "unexpected PostgreSQL rule gate result" unless !rules.nil? == (ARGV[0] == "present")
+    if rules
+      abort "PostgreSQL rules differ from their source file" unless rules == YAML.safe_load(File.read(ARGV[1]))
+      File.write(ARGV[2], YAML.dump(values))
+    end
+  ' "$expected" "$postgresql_rules" "$tmp/postgresql-child-values.yaml" <"$tmp/postgresql-platform.yaml"
+}
+
+# Check each independent opt-in, including the default-off PostgreSQL knob.
+assert_postgresql_rules absent --set platform.monitoring.postgresql.enabled=false
+assert_postgresql_rules absent --set apps.civoPostgres.metrics.enabled=false
+assert_postgresql_rules absent --set apps.civoPostgres.enabled=false
+assert_postgresql_rules absent --set cell.cloud=aws
+assert_postgresql_rules absent --set platform.monitoring.alerting.enabled=false
+assert_postgresql_rules absent --set platform.monitoring.enabled=false
+assert_postgresql_rules present
+helm template witself-monitoring "$chart_archive" \
+  --namespace monitoring --values "$tmp/postgresql-child-values.yaml" >"$tmp/postgresql-child.yaml"
+ruby -ryaml -e '
+  docs = YAML.load_stream(STDIN.read).compact
+  rule = docs.find { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-postgresql" } }
+  abort "PostgreSQL PrometheusRule missing from child chart" unless rule
+  abort "PostgreSQL PrometheusRule is not selected by this Prometheus release" unless rule.dig("metadata", "labels", "release") == "witself-monitoring"
+  abort "PostgreSQL rule count changed" unless rule.dig("spec", "groups").flat_map { |group| group["rules"] }.length == 5
+' <"$tmp/postgresql-child.yaml"
 
 "$promtool_bin" check rules "$rules"
 "$promtool_bin" test rules "$rule_tests"
+"$promtool_bin" check rules "$postgresql_rules"
+"$promtool_bin" test rules "$postgresql_rule_tests"
+
+ruby "$repo_root/scripts/testdata/monitoring-extensions.rb" "$repo_root" "$tmp" "$chart_archive"
+ruby "$repo_root/scripts/testdata/test-monitoring-platform-rules.rb" \
+  "$tmp/monitoring-extensions-child.yaml" "$promtool_bin" "$tmp"
+"$promtool_bin" check rules "$probe_rules"
+"$promtool_bin" test rules "$probe_rule_tests"
+
+assert_delivery_rules() {
+  local expected="$1"
+  shift
+  helm template witself-platform "$platform_chart" --values "$monitoring_values" \
+    --set platform.monitoring.uptimeProbes.enabled=true \
+    --set platform.monitoring.entitlementDelivery.enabled=true "$@" >"$tmp/delivery-platform.yaml"
+  ruby -ryaml -e '
+    docs = YAML.load_stream(File.read(ARGV[0])).compact
+    app = docs.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+    values = app ? YAML.safe_load(app.dig("spec", "source", "helm", "values"), aliases: false) : {}
+    rules = values.dig("additionalPrometheusRulesMap", "entitlement-delivery")
+    if ARGV[2] == "present"
+      abort "entitlement delivery source differs or is absent" unless rules == YAML.load_file(ARGV[1])
+      File.write(ARGV[3], YAML.dump(values))
+    else
+      abort "entitlement delivery gate ignored" if rules
+    end
+  ' "$tmp/delivery-platform.yaml" "$delivery_rules" "$expected" "$tmp/delivery-values.yaml"
+}
+assert_delivery_rules absent --set platform.monitoring.entitlementDelivery.enabled=false
+assert_delivery_rules absent --set platform.monitoring.uptimeProbes.enabled=false
+assert_delivery_rules absent --set platform.monitoring.alerting.enabled=false
+assert_delivery_rules absent --set platform.monitoring.enabled=false
+assert_delivery_rules present
+helm template witself-monitoring "$chart_archive" --namespace monitoring \
+  --values "$tmp/delivery-values.yaml" >"$tmp/delivery-child.yaml"
+ruby -ryaml -e '
+  rules = YAML.load_stream(File.read(ARGV[0])).compact.select { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-entitlement-delivery" } }
+  abort "entitlement delivery rule is not unique and selected" unless rules.length == 1 && rules[0].dig("metadata", "namespace") == "monitoring" && rules[0].dig("metadata", "labels", "release") == "witself-monitoring"
+  abort "entitlement delivery rendered source changed" unless rules[0]["spec"] == YAML.load_file(ARGV[1])
+' "$tmp/delivery-child.yaml" "$delivery_rules"
+"$promtool_bin" check rules "$delivery_rules"
+"$promtool_bin" test rules "$delivery_rule_tests"
 
 echo "monitoring rollout capability checks passed"

@@ -71,6 +71,30 @@ activation ordering remain separate rollout gates; transcript retention's
 disabled-to-preview sequence is in
 [Transcript Retention](transcript-retention.md#control-plane-lifecycle-rollout).
 
+Synthetic uptime probes use a dedicated `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` Cron Trigger and the
+existing `DIRECTORY` KV binding. The ordinary CP deploy installs this trigger,
+the scheduled cell probe handler, and the public, uncached `/metrics/probes`
+endpoint. After deploy, verify that the Worker has exactly two Cron Triggers:
+`*/5 * * * *` for maintenance and `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` for probes (minutes 1, 6,
+through 56 UTC). The deployment verifier pins both expressions. The handler
+dispatches each cron to its own work; separate invocations give probes their
+own six-connection budget, even if cron timings overlap. The four-worker probe
+pool leaves headroom for KV operations. No new namespace or secret needs
+operator setup. The container-reaching CP `/v1/version` probe is disabled by the plain variable
+`CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED: "false"`, pinned in the template and
+both generated-config and deployed-version verification. It is omitted from
+results and metrics while disabled. The serving cell's scrape job and alert
+rules arrive through its
+normal GitOps sync, with `platform.monitoring.uptimeProbes.enabled` default off
+and enabled only in `civo-sandbox-usw2-dev`. No probe-specific `deploy:plans`
+step is needed. See [Synthetic uptime probes](observability-and-operations.md#synthetic-uptime-probes)
+for targets, result fields, alert routing, and the existing-plan cost rationale.
+Cell probes remain active without warming the CP container. Future CP-target
+activation requires a reviewed cost decision because the five-minute probe
+would prevent the container's ten-minute idle shutdown. Flip the template's
+plain variable and both verifier pins together in source, then use the normal
+CP deploy; do not add a secret or change the gate out of band.
+
 The managed outbound agent-email sending adapter is a third, separately gated
 Cloudflare deployment. The tag workflow validates its committed lockfile,
 tests, and Worker bundle but intentionally does not provision its Email Sending
@@ -91,6 +115,39 @@ service; a migration failure prevents that process from serving. A rollout is
 therefore not complete until the replacement pods are Ready and report the
 expected build from `/v1/version`. This startup behavior must be considered
 before any future explicit migration Job is introduced.
+
+### Cloudflare Worker Dependencies
+
+Wrangler is pinned once in
+[`infra/cloudflare/wrangler-version.json`](../infra/cloudflare/wrangler-version.json)
+(currently `4.128.0`). Every Worker's gate checks its installed Wrangler and all
+four exact manifest pins against that file. To bump, update the shared version
+and run `npm install --save-dev --save-exact wrangler@<version>` in each of
+`infra/cloudflare/{control-plane,agent-email,agent-email-send,support-email-intake}`;
+retain all four manifest and lockfile changes. Then run `npm ci`, `npm test`, and
+`npm run bundle:check` in each directory, followed by `make check-infra` for the
+remaining infrastructure gates. Dependabot groups Wrangler updates across these
+four directories into one weekly PR; update the shared version file in that PR
+before merging, because Dependabot does not update this custom JSON file.
+
+Container SDK evaluation (2026-09-05): the control-plane manifest already uses
+`@cloudflare/containers: ^0.3.7`, locked to `0.3.7`, after merged PR #349
+(`e5a86ae`) upgraded it from `^0.0.28`; this Wrangler change leaves it untouched.
+`npm view @cloudflare/containers version` reports `0.3.7` as latest. The
+[upstream changelog](https://github.com/cloudflare/containers/blob/main/CHANGELOG.md)
+highlights bridge-relevant changes since `0.0.28`: port-readiness and concurrent
+cold-start fixes, response-body activity tracking and bodyless-response fixes,
+subclass sleep timeout handling, and startup/stop-state race fixes through
+`0.3.7`. The separate SDK follow-up must retain sandbox deployment evidence for
+the existing upgrade and any later candidate: deploy the exact Worker/container
+build to isolated Cloudflare resources; verify `/v1/version`, concurrent cold
+requests through `getContainer(..., "singleton").fetch()` to port 8080,
+streamed and bodyless responses with preserved status/headers, the ten-minute
+idle sleep and wake cycle, and `destroy()` plus `startAndWaitForPorts()` applying
+fresh allowlisted environment values before lifecycle activation succeeds.
+Exercise startup failure/recovery and rollback to the prior build without
+losing Durable Object state. Local mocked bridge tests and bundle checks do
+not establish this runtime proof; no deployment was performed in this slice.
 
 ## Goals
 
@@ -126,22 +183,26 @@ before any future explicit migration Job is introduced.
 
 ## Go Baseline
 
-Witself should use the latest stable Go release. As of August 14, 2026, the
-current stable Go release is `go1.26.6`.
+Witself should use the latest stable Go release. As of September 14, 2026, the
+current stable Go release is `go1.27.1`.
 
-Initial module settings when code starts:
+Current root-module settings:
 
 ```text
 module github.com/witwave-ai/witself
 
-go 1.26
+go 1.27.0
 
-toolchain go1.26.6
+toolchain go1.27.1
 ```
 
-Refresh this baseline before first implementation and before each release. If a
-new stable Go release exists, update the toolchain baseline and rerun the full
-test and release smoke path before publishing.
+The nested `infra/pulumi` module declares `go 1.27.1`. CI and release jobs select
+Go from the relevant module's `go.mod`; the control-plane source-build image uses
+`golang:1.27.1`. The CLI and server runtime images copy GoReleaser-built binaries.
+
+Refresh these baselines together before each release. If a new stable Go release
+exists, update the toolchain baseline and rerun the full test and release smoke
+path before publishing.
 
 ## Go Module Policy
 
@@ -156,13 +217,12 @@ test and release smoke path before publishing.
 - Avoid vendoring dependencies by default.
 - Keep dependencies current deliberately through reviewable updates.
 
-The initial module bootstrap, once the first Go package exists, should look like:
+To update the existing modules to the current baseline:
 
 ```sh
-go mod init github.com/witwave-ai/witself
-go mod edit -go=1.26
-go mod edit -toolchain=go1.26.6
-go mod tidy
+go mod edit -go=1.27.0
+go mod edit -toolchain=go1.27.1
+(cd infra/pulumi && go mod edit -go=1.27.1)
 ```
 
 ## Expected Checks
@@ -264,6 +324,9 @@ The implemented release action owns:
   `witself-infra`, and the operator-only `witself-control-plane` evidence
   binary.
 - Generating SHA256 checksums.
+- Retaining the five native provider fixture reports and their validated
+  aggregate, and including `provider-contract-evidence.json` in tagged release
+  assets and the signed checksum manifest.
 - Signing the checksum manifest into a keyless Sigstore bundle, while retaining
   the detached `.sig` and `.pem` assets required by older updaters.
 - Generating archive SBOMs and container SBOM attestations.
@@ -296,6 +359,13 @@ credential-free installer-to-provider contract evidence, not real-client or
 authenticated model acceptance. Smoke tests against artifacts from an actual
 published GitHub Release remain a separate post-publication check. See
 [provider-integration-certification.md](provider-integration-certification.md).
+
+Provider reports and aggregation are bound to one workflow run and attempt.
+After a failure, rerun the entire workflow so all five reports belong to the
+new attempt. The tagged JSON describes tested snapshot inputs and records the
+publishing tag separately; it does not claim real-vendor/model acceptance or
+execution of the final public archive bytes. Snapshot packaging omits the JSON
+asset, while manual dispatch retains the aggregate as an Actions artifact.
 
 Required workflow permissions:
 
@@ -356,13 +426,17 @@ Current release artifacts include:
   plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
   assets for older `witself-admin` updaters.
 - Per-archive SBOMs.
+- `provider-contract-evidence.json`, containing the validated native fixture
+  matrix for the tagged release workflow.
 - Build-provenance attestations for release archives.
 
 The stable release inventory is fail-closed at exactly 25 executable archives,
-25 per-archive SPDX SBOMs, and four checksum/signing assets (`checksums.txt`,
-its Sigstore bundle, compatibility certificate, and detached signature): 54
-nonempty GitHub Release assets total. `checksums.txt` binds all 50 archive and
-SBOM payloads, and GitHub build provenance covers all 25 archives. The
+25 per-archive SPDX SBOMs, one provider contract JSON and four checksum/signing
+assets (`checksums.txt`, its Sigstore bundle, compatibility certificate, and
+detached signature): 55 nonempty GitHub Release assets total. `checksums.txt`
+binds all 51 archive, SBOM and provider evidence payloads, and GitHub build
+provenance continues to cover the 25 archives. The JSON is covered by the
+checksum signature, not by an archive provenance attestation. The
 `witself-control-plane` executable is the only command stamped with the full
 40-hex release commit because billing inventory capture compares that exact
 identity; the other commands retain their historical short-commit output.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,13 +14,11 @@ import (
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, baseDSN)
 	destination, _ := newMigrationTestStore(t, baseDSN)

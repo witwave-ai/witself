@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 type messageRequestHardeningFixture struct {
@@ -76,10 +76,7 @@ func waitForDatabaseDeadline(
 
 func newMessageRequestHardeningFixture(t *testing.T, names ...string) *messageRequestHardeningFixture {
 	t.Helper()
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	t.Cleanup(cancel)
 	st, err := Open(ctx, dsn)

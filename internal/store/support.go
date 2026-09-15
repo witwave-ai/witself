@@ -253,6 +253,10 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	if planRevision > 0 && !planHasSupport {
 		return Ticket{}, TicketMessage{}, ErrSupportNotIncluded
 	}
+	admittedAt, err := s.admitSupportTicketTx(ctx, tx, in.AccountID)
+	if err != nil {
+		return Ticket{}, TicketMessage{}, err
+	}
 
 	// Decide the actor_kind for the audit event. Owner if root or
 	// account_owner role; plain operator otherwise. The
@@ -275,15 +279,15 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	err = tx.QueryRow(ctx,
 		`INSERT INTO support_tickets
 		   (id, account_id, opened_by_kind, opened_by_id,
-		    subject, category, state, priority, last_message_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		    subject, category, state, priority, last_message_id, opened_at, last_activity_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 		 RETURNING id, account_id, opened_at, opened_by_kind, opened_by_id,
 		           subject, category, state, priority,
 		           first_response_at, resolved_at, closed_at,
 		           last_activity_at, COALESCE(last_message_id, ''),
 		           correlation, metadata`,
 		ticketID, in.AccountID, openedByKind, in.OperatorID,
-		subject, category, TicketStateAwaitingAdmin, priority, msgID,
+		subject, category, TicketStateAwaitingAdmin, priority, msgID, admittedAt,
 	).Scan(&t.ID, &t.AccountID, &t.OpenedAt, &t.OpenedByKind, &t.OpenedByID,
 		&t.Subject, &t.Category, &t.State, &t.Priority,
 		&t.FirstResponseAt, &t.ResolvedAt, &t.ClosedAt,
@@ -298,11 +302,11 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	var m TicketMessage
 	err = tx.QueryRow(ctx,
 		`INSERT INTO support_ticket_messages
-		   (id, ticket_id, account_id, author_kind, author_id, body)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		   (id, ticket_id, account_id, author_kind, author_id, body, posted_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, ticket_id, account_id, posted_at, author_kind,
 		           COALESCE(author_id, ''), body, attachments, metadata`,
-		msgID, ticketID, in.AccountID, openedByKind, in.OperatorID, body,
+		msgID, ticketID, in.AccountID, openedByKind, in.OperatorID, body, admittedAt,
 	).Scan(&m.ID, &m.TicketID, &m.AccountID, &m.PostedAt, &m.AuthorKind,
 		&m.AuthorID, &m.Body, &m.Attachments, &m.Metadata)
 	if err != nil {
@@ -312,7 +316,7 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	// Audit trail: the opener's row in account_events. Subject travels
 	// on the event so an owner's audit view has meaningful text
 	// without pulling the ticket body.
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: openedByKind, ActorID: in.OperatorID,
 		Verb: VerbSupportTicketOpened,
@@ -543,7 +547,7 @@ func (s *Store) ReplyToTicket(ctx context.Context, accountID, operatorID, ticket
 		return TicketMessage{}, fmt.Errorf("advance ticket state: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID,
 		ActorKind: authorKind, ActorID: operatorID,
 		Verb: VerbSupportTicketReplied,
@@ -672,7 +676,7 @@ func (s *Store) ChangeTicketState(ctx context.Context, in ChangeTicketStateInput
 		meta["state_from"] = currentState
 		meta["state_to"] = in.NewState
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: actorKind, ActorID: in.OperatorID,
 		Verb: verb, Metadata: meta,
@@ -925,7 +929,7 @@ func (s *Store) ReplyAdminTicket(ctx context.Context, in ReplyAdminInput) (Ticke
 		return TicketMessage{}, fmt.Errorf("advance ticket state (admin reply): %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbSupportTicketReplied,
@@ -1033,7 +1037,7 @@ func (s *Store) ChangeAdminTicketState(ctx context.Context, in ChangeAdminStateI
 		meta["state_from"] = currentState
 		meta["state_to"] = in.NewState
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      verb,
@@ -1257,7 +1261,7 @@ func (s *Store) RetriageTicketAdmin(
 		// A no-op re-triage (same values) skips both write and event —
 		// idempotent, and re-triage never bumps last_activity_at either way
 		// (it is not customer-visible activity).
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: in.AccountID,
 			ActorKind: ActorControlPlane,
 			Verb:      VerbSupportTicketRetriaged,
@@ -1386,7 +1390,7 @@ func (s *Store) SetSupportPolicyAdmin(ctx context.Context, in SetSupportPolicyAd
 		return SetSupportPolicyAdminResult{}, fmt.Errorf("update support_policy: %w", err)
 	}
 
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: in.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbAccountSupportPolicyChanged,

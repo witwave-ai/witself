@@ -28,7 +28,6 @@ func TestValidateAgentEmailCellStorageLimits(t *testing.T) {
 		{name: "row order", admissionBytes: 1, admissionRows: 2, hardBytes: 2, hardRows: 1, wantError: "smaller than"},
 		{name: "representation bound", admissionBytes: maximumAgentEmailCellStorageLimit + 1, admissionRows: 1, hardBytes: maximumAgentEmailCellStorageLimit + 1, hardRows: 1, wantError: "between 1"},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			err := validateAgentEmailCellStorageLimits(

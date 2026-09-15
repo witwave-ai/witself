@@ -28,6 +28,7 @@ type fakeCurationMCPBackend struct {
 	cursor          string
 	limit           int
 	renew           client.RenewMemoryCurationInput
+	planCalls       int
 	plan            client.PlanMemoryCurationInput
 	apply           client.ApplyMemoryCurationInput
 	cancel          client.FinishMemoryCurationInput
@@ -108,6 +109,7 @@ func (b *fakeCurationMCPBackend) RenewMemoryCuration(_ context.Context, in clien
 }
 
 func (b *fakeCurationMCPBackend) PlanMemoryCuration(_ context.Context, in client.PlanMemoryCurationInput) (client.PlanMemoryCurationResult, error) {
+	b.planCalls++
 	b.plan = in
 	return client.PlanMemoryCurationResult{Run: b.runOutput(in.RunID), Plan: json.RawMessage(`{"schema":"witself.memory-plan.v1","plan_revision":1,"actions":[]}`)}, nil
 }
@@ -613,6 +615,12 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 	for _, want := range []string{
 		"create.snapshot.evidence is required and must contain 1-32 rows",
 		"replace.snapshot.evidence is optional additive provenance with at most 32 rows",
+		"propose_fact.evidence is required and must contain 1-32 rows",
+		"Direct evidence without input_evidence_id must be resolved transcript or memory",
+		"Pending, unavailable, and resolved message/import_artifact/artifact evidence require input_evidence_id",
+		"exact reproduction of a materialized evidence input row",
+		"MCP checks deterministic shape only",
+		"frozen membership, exact equality, owner access and contiguous frozen transcript coverage remain backend checks",
 		"derived_from does not replace snapshot evidence",
 	} {
 		if !strings.Contains(planTool.Description, want) {
@@ -683,6 +691,24 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 	for _, field := range []string{"input_evidence_id", "source_transcript_id", "source_memory"} {
 		requireMCPObjectProperty(t, root, evidence, field)
 	}
+	if description, _ := requireMCPObjectProperty(t, root, proposal, "evidence")["description"].(string); !strings.Contains(description, "1-32") {
+		t.Error("fact evidence schema omitted row bounds")
+	}
+	for field, rules := range map[string][]string{
+		"input_evidence_id":    {"reproduce that row exactly after normalization", "id alone proves no authenticity", "backend membership, equality and owner access"},
+		"resolution_state":     {"pending and unavailable require input_evidence_id", "exact reproduction", "direct evidence without input_evidence_id must be resolved transcript or memory"},
+		"resolved_kind":        {"REQUIRED", "never inferred from type", "message, import_artifact and artifact require input_evidence_id"},
+		"source_transcript_id": {"contiguous frozen transcript coverage checked by the backend", "reproduce the materialized row exactly"},
+		"source_memory":        {"immutable", "local_ref at version 1", "backend checks frozen membership and owner access"},
+		"type":                 {"blank defaults to conversation", "need not equal resolved_kind"},
+	} {
+		description, _ := requireMCPObjectProperty(t, root, evidence, field)["description"].(string)
+		for _, rule := range rules {
+			if !strings.Contains(description, rule) {
+				t.Errorf("%s schema omitted %q", field, rule)
+			}
+		}
+	}
 
 	callCurationTool(ctx, t, clientSession, "witself.memory.curation.plan", map[string]any{
 		"run_id": "mrun_1", "fencing_generation": 4, "idempotency_key": "complete-plan-key",
@@ -694,7 +720,7 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 					"create": map[string]any{"local_ref": "new_decision", "snapshot": map[string]any{
 						"content": "Use PostgreSQL", "kind": "decision",
 						"evidence": []map[string]any{{
-							"type": "transcript", "resolution_state": "resolved",
+							"type": "transcript", "resolution_state": "resolved", "resolved_kind": "transcript",
 							"source_transcript_id": "trn_1", "source_sequence_from": 2, "source_sequence_until": 4,
 						}},
 					}},
@@ -726,7 +752,7 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 					"propose_fact": map[string]any{
 						"subject": "self", "predicate": "preferences/database", "value": "postgresql",
 						"evidence": []map[string]any{{
-							"type": "transcript", "resolution_state": "resolved",
+							"type": "transcript", "resolution_state": "resolved", "resolved_kind": "transcript",
 							"source_transcript_id": "trn_1", "source_sequence_from": 2, "source_sequence_until": 4,
 						}},
 					},

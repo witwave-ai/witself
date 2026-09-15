@@ -1,6 +1,8 @@
 # Witself CLI Command Surface
 
-Status: draft target contract with implemented slices labeled below.
+Status: implemented [command family inventory](#command-family-status) plus
+a target contract with implemented slices labeled below. Family markers do not
+promote target subcommands or flags to shipped behavior.
 
 Sealed-plane implementation amendment (accepted 2026-07-23): the current
 client-custodied vertical implements `vault key init|status`, `vault key enroll
@@ -56,6 +58,110 @@ The implemented CLI command is `witself`. The backend binary stays
 `witself://` reference scheme, `WITSELF_` environment variables, and the
 `witself.*` MCP tool names are unchanged. Every example below uses `witself`;
 `ws` remains available as a permanent alias.
+
+## Command Family Status
+
+Reviewed against the CLI dispatch and merged source history on 2026-09-04.
+`implemented` means the binary dispatches that top-level family; it does not
+mean every proposed subcommand or flag in this design contract is shipped, or
+that every deployment enables its backend feature. `target` means there is no
+dispatch entry: all commands in that family below are roadmap only.
+
+The implemented slices called out below and the current CLI help describe
+shipped syntax. For example, `auth` currently implements only `login`, `mcp`
+only `serve`, and `totp` only `show` and `code`; the other proposed verbs in
+those families remain targets. The global flag, environment, output, and exit
+code sections also retain target contracts unless explicitly identified as
+implemented. Customer examples are in [Workflow Scripts](workflow-scripts.md).
+The retained collaboration workflow is
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh),
+with the binding interface, nine legs, and value-free record contract in
+[Retained canary](autonomous-realm-messaging.md#retained-canary).
+
+Each command-family section repeats its marker as `Family status`; nested
+command headings inherit that family status. An implemented family does not
+mark its proposed verbs or flags implemented. The test checks those section
+markers and requires a section for every dispatched customer family.
+
+This marker table is checked by `TestCommandSurfaceDispatchMarkers` against
+[the customer dispatch](../cmd/witself/main.go) and
+[the admin dispatch](../cmd/witself-admin/main.go). It includes help/version
+aliases and the internal `_managed-hooks` family so additions and removals
+cannot silently escape the check. `_managed-hooks` is runtime integration
+plumbing, not a customer workflow.
+
+<!-- BEGIN COMMAND FAMILY STATUS -->
+
+| Binary | Family | Marker | Aliases |
+|---|---|---|---|
+| `witself` | `_managed-hooks` | implemented | — |
+| `witself` | `account` | implemented | — |
+| `witself` | `agent` | implemented | — |
+| `witself` | `audit` | target | — |
+| `witself` | `auth` | implemented | — |
+| `witself` | `avatar` | implemented | — |
+| `witself` | `billing` | implemented | — |
+| `witself` | `bootstrap-instructions` | target | — |
+| `witself` | `capabilities` | target | — |
+| `witself` | `completion` | target | — |
+| `witself` | `config` | target | — |
+| `witself` | `dashboard` | implemented | — |
+| `witself` | `digest` | target | — |
+| `witself` | `email` | implemented | — |
+| `witself` | `email-domain` | implemented | — |
+| `witself` | `export` | implemented | — |
+| `witself` | `fact` | implemented | — |
+| `witself` | `federation` | target | — |
+| `witself` | `gen-bootstrap-token` | implemented | — |
+| `witself` | `group` | target | — |
+| `witself` | `help` | implemented | `--help`, `-h` |
+| `witself` | `import` | target | — |
+| `witself` | `ingest` | target | — |
+| `witself` | `install` | implemented | — |
+| `witself` | `integrations` | implemented | — |
+| `witself` | `integration` | implemented | — |
+| `witself` | `legal` | implemented | — |
+| `witself` | `mcp` | implemented | — |
+| `witself` | `memory` | implemented | — |
+| `witself` | `message` | implemented | — |
+| `witself` | `operator` | implemented | — |
+| `witself` | `password` | implemented | — |
+| `witself` | `plan` | implemented | — |
+| `witself` | `policy` | target | — |
+| `witself` | `realm` | implemented | — |
+| `witself` | `reference` | target | — |
+| `witself` | `remember` | target | — |
+| `witself` | `run` | target | — |
+| `witself` | `secret` | implemented | — |
+| `witself` | `self` | implemented | — |
+| `witself` | `session` | target | — |
+| `witself` | `setup` | target | — |
+| `witself` | `support` | target | — |
+| `witself` | `token` | implemented | — |
+| `witself` | `totp` | implemented | — |
+| `witself` | `transcript` | implemented | — |
+| `witself` | `uninstall` | implemented | — |
+| `witself` | `usage` | implemented | — |
+| `witself` | `vault` | implemented | — |
+| `witself` | `version` | implemented | `--version`, `-v` |
+| `witself` | `whoami` | target | — |
+| `witself-admin` | `account` | implemented | — |
+| `witself-admin` | `admin` | implemented | — |
+| `witself-admin` | `backup-evidence` | implemented | — |
+| `witself-admin` | `cells` | implemented | — |
+| `witself-admin` | `dashboard` | implemented | `tui` |
+| `witself-admin` | `email-alias` | implemented | — |
+| `witself-admin` | `email-domain` | implemented | — |
+| `witself-admin` | `events` | implemented | — |
+| `witself-admin` | `help` | implemented | `--help`, `-h` |
+| `witself-admin` | `invite` | implemented | — |
+| `witself-admin` | `placement` | implemented | — |
+| `witself-admin` | `settings` | implemented | — |
+| `witself-admin` | `ticket` | implemented | — |
+| `witself-admin` | `version` | implemented | `--version`, `-v` |
+| `witself-admin` | `whoami` | implemented | — |
+
+<!-- END COMMAND FAMILY STATUS -->
 
 ## Design Goals
 
@@ -224,6 +330,92 @@ Rules:
   and produce an audit event when audit is available.
 - AI-assisted account management must use the same commands and credentials as
   human operators; it should not require a separate AI-only backend.
+
+### Operator cell registry repair (implemented)
+
+The implemented `witself-admin cells` surface inspects and repairs existing
+control-plane registrations. The complete operator command reference is
+[witself-admin.md](witself-admin.md).
+
+```sh
+witself-admin cells list                                      # implemented
+witself-admin cells show CELL                                 # implemented
+witself-admin cells register CELL --cell-endpoint HTTPS_URL    # implemented
+witself-admin cells drain CELL                                # implemented
+witself-admin cells undrain CELL                              # implemented
+witself-admin cells deregister CELL --yes --yes-cell CELL      # implemented
+```
+
+`list` uses the admin-token view at `GET /v1/admin/cells`. The other verbs use
+the fleet token (`--fleet-token`, its `--token` alias, `--token-file`,
+`WITSELF_FLEET_TOKEN`, or managed `fleet.token`), and support `--endpoint` and
+`--json`. `show` finds the exact registration in `GET /v1/cells`; `register`
+upserts through `POST /v1/cells`. `drain` and `undrain` send only
+`accepting=false` or `accepting=true` through `PATCH /v1/cells/{name}`. The
+coordinator changes its authoritative accepting field without replaying
+registry metadata. Draining stops new placements and retains existing
+accounts. Backup validation targets cannot be undrained. Older control planes
+that lack PATCH are refused without an upsert fallback. Repair endpoints
+must be HTTP or HTTPS origins without a base path, credentials, query, or
+fragment, whether supplied by flag or environment.
+
+`register` defaults to `accepting=false`, keeping the entry drained until an
+explicit `--accepting=true` registration or `undrain`.
+
+`deregister` requires `--yes` plus an exact typed cell name at the terminal or
+`--yes-cell CELL` for unattended use. It sends only safe
+`DELETE /v1/cells/{name}`. The control plane refuses deletion until the cell
+is drained and has no remaining account directory entries; the CLI preserves
+the refusal text. These repair verbs expose neither `--force` nor a purge path.
+
+### Operator control-plane settings (implemented)
+
+The implemented `witself-admin settings` surface provides scriptable
+placement-runner, pending-account reaper, and default placement-strategy
+configuration. See [the settings reference](witself-admin.md#settings) for
+the complete verb-to-route table and output contracts.
+
+```sh
+witself-admin settings show --json
+witself-admin settings placement-runner show
+witself-admin settings placement-runner enable --yes
+witself-admin settings placement-runner disable --yes
+witself-admin settings placement-runner set --restore-batch 4 --yes
+witself-admin settings placement-runner run --yes --json
+witself-admin settings reaper show
+witself-admin settings reaper enable --ttl-minutes 60 --yes
+witself-admin settings reaper disable --yes
+witself-admin settings placement show
+witself-admin settings placement set --strategy weighted --yes
+witself-admin settings placement set --strategy pinned --pinned-cell CELL --yes
+```
+
+All verbs use the fleet token (`--fleet-token`, its `--token` alias,
+`--token-file`, `WITSELF_FLEET_TOKEN`, or managed `fleet.token`) and support
+`--endpoint` and `--json`. `show` reads all three configurations; individual
+`show` verbs GET `/v1/placement-runner`, `/v1/reaper`, or `/v1/placement`.
+Configuration writes POST to the matching route and require `--yes` before
+any request. JSON wraps the authoritative configuration in `placement_runner`,
+`reaper`, or `placement`, alongside `schema_version: "witself.v0"`.
+
+Runner `set` sends only explicitly supplied `--restore-archives`,
+`--restore-batch`, `--restore-any-region`, `--rebalance`, and
+`--rebalance-batch` flags; `enable` and `disable` change only `enabled`.
+Runner `run` POSTs `/v1/placement:run` with the same optional overrides and a
+ten-minute timeout. It performs a manual pass even when the scheduled runner
+is disabled, without saving its overrides, and exits `1` after printing the
+complete result if a restore or rebalance step failed or any account in
+`restored` or `rebalanced` has `ok: false`, even in an HTTP-success response.
+Remaining work after a successful bounded batch is not an error. Enabling or
+running it may move live or archived accounts.
+
+Reaper enablement requires finite `--ttl-minutes` of at least `1`, accepts
+fractional minutes such as `1.5`, and prints a stderr reminder that cells must
+serve `:reap` first. Reads and output preserve fractional values. The reaper
+closes accounts that never activated within that window. Placement strategy is `weighted` or
+`pinned`; pinned placement requires a valid `--pinned-cell` name. Invalid
+arguments and missing `--yes` fail before any request. These verbs expose no
+`--force` or direct restore, rebalance, purge, or evacuation commands.
 
 ### Operator-only signup invite administration
 
@@ -442,53 +634,59 @@ an action-filtered page contains that many events.
 
 ## Command Tree
 
+This is the broader target tree, not an installed-command reference. Use the
+[family markers](#command-family-status), implemented slices, and current CLI
+help to distinguish shipped commands from proposed extensions.
+
 ```text
 witself
   version
-  capabilities
-  whoami
+  capabilities  # target; not implemented
+  whoami  # target; not implemented
   auth login|logout|status|whoami
-  setup
+  setup  # target; not implemented
   account create|show|update|members|invite|remove|set-role|close
   operator list|create|delete
   realm create|list|show|use|rename|delete|members|init|status
   realm export|import                     # target; not implemented
   billing show|invoices|payments|portal|setup
-  support create|list|show|comment|close
-  remember
+  support create|list|show|comment|close  # target; not implemented
+  remember  # target; not implemented
   self show|card
   usage
-  session start|end                       # target; not implemented
+  session start|end  # target; not implemented
   memory status|capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
-  digest emit                             # target; not implemented
-  ingest
-  bootstrap-instructions
+  digest emit  # target; not implemented
+  ingest  # target; not implemented
+  bootstrap-instructions  # target; not implemented
   fact status|set|get|list|delete
   password generate
   secret create|status|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
-  run
+  run  # target; not implemented
   totp enroll|code|show|delete
-  policy create|list|show|delete|test
-  group create|list|show|add-member|remove-member|delete
+  policy create|list|show|delete|test  # target; not implemented
+  group create|list|show|add-member|remove-member|delete  # target; not implemented
   integrations
   install RUNTIME[,RUNTIME...]|all
   uninstall RUNTIME[,RUNTIME...]|all
-  transcript create|append|list|show|tail|flush
+  transcript create|append|list|show|tail|flush|fence|status
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
-  federation peers|card
-  reference parse|resolve
+  federation peers|card  # target; not implemented
+  reference parse|resolve  # target; not implemented
   agent create|list|peers|show|rename|copy|disable|enable|delete
   token create|list|revoke|rotate
-  audit list|show
+  audit list|show  # target; not implemented
   export
   mcp serve|tools
   dashboard serve|status|stop
-  config get|set|list|unset
-  completion
+  config get|set|list|unset  # target; not implemented
+  completion  # target; not implemented
 ```
 
-## Current Lifecycle Slice
+## `witself operator`
+
+**Family status: implemented.**
 
 The current self-hosted implementation includes the first operator lifecycle
 commands:
@@ -535,7 +733,27 @@ witself token revoke --endpoint URL --token-file OPERATOR_TOKEN --token TOKEN_ID
 The create/delete/revoke policy for currently implemented resources is tracked
 in [resource-lifecycle.md](resource-lifecycle.md).
 
+## `witself help`
+
+**Family status: implemented.**
+
+Print the top-level command help. `--help` and `-h` are aliases.
+
+## `witself gen-bootstrap-token`
+
+**Family status: implemented.**
+
+Generate an operator bootstrap token locally for a server's initial setup.
+
+## `witself legal`
+
+**Family status: implemented.**
+
+List published legal documents and versions, or read one selected document.
+
 ## `witself version`
+
+**Family status: implemented.**
 
 Print the CLI version and build metadata.
 
@@ -551,6 +769,8 @@ Flags:
 | `--short` | Print only the version string in human mode. |
 
 ## `witself capabilities`
+
+**Family status: target; not implemented.**
 
 Show the active backend kind, version, supported features, unavailable features,
 limits, and endpoint context.
@@ -594,6 +814,8 @@ not change those server capability flags.
 
 ## `witself whoami`
 
+**Family status: target; not implemented.**
+
 Show the current realm, profile, and principal, with `primary` facts surfaced
 first as identity anchors. This is the top-level convenience alias for
 `auth whoami`.
@@ -606,6 +828,8 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. Default: true for agent tokens. |
 
 ## `witself auth`
+
+**Family status: implemented.**
 
 Manage authentication to the managed service or active local profile.
 
@@ -675,6 +899,8 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. |
 
 ## `witself setup`
+
+**Family status: target; not implemented.**
 
 Create or connect everything needed for agents to start using Witself managed
 service or a self-hosted Witself backend. This is the end-to-end bootstrap path
@@ -801,6 +1027,8 @@ plus the hosted provider session result from
 [json-contracts.md](json-contracts.md).
 
 ## `witself account`
+
+**Family status: implemented.**
 
 Manage the Witself managed-service customer account from the CLI. The CLI is the
 primary control plane for customer account details, human operators/admins,
@@ -951,6 +1179,8 @@ Flags:
 | `--yes` | Skip confirmation. |
 
 ## `witself realm`
+
+**Family status: implemented.**
 
 Manage realms. A realm is the operator-owned container for a group of named
 agents. It holds agents, agent-owned and group-owned memories and facts,
@@ -1159,7 +1389,9 @@ Flags:
 | `--yes` | Skip confirmation for replacement. |
 | `--reason TEXT` | Audit reason. |
 
-## `witself plan` (implemented)
+## `witself plan`
+
+**Family status: implemented.**
 
 Inspect the managed-service plan catalog and the current account's effective
 plan policy. These commands talk to the control plane. They report catalog
@@ -1224,7 +1456,9 @@ usage/limit aggregation, payment-method CRUD, hosted-session inspection, and
 crypto payments remain the target billing contract. Crypto payment rails are
 roadmap-only and are not implemented.
 
-## `witself billing` (partially implemented)
+## `witself billing`
+
+**Family status: implemented.**
 
 Manage managed-service billing, usage, plans, payment methods, and invoices from
 the CLI. Billing attaches at the account level, and usage rolls up by realm. The
@@ -1634,6 +1868,8 @@ Flags:
 
 ## `witself support`
 
+**Family status: target; not implemented.**
+
 Create and manage support tickets from the CLI.
 
 Support commands must not attach memory content, fact values, message bodies or
@@ -1707,7 +1943,9 @@ Flags:
 | `--dry-run` | Show planned close action without closing the ticket. |
 | `--yes` | Skip confirmation. |
 
-## `witself remember` (deferred)
+## `witself remember`
+
+**Family status: target; not implemented.**
 
 The current CLI does not expose this unified convenience command. Natural-
 language routing is an integration responsibility: an atomic durable assertion
@@ -1720,6 +1958,8 @@ Witself operations and must not move classification or inference into the
 backend. See [Agent Memory Routing](agent-memory-routing.md).
 
 ## `witself self show`
+
+**Family status: implemented.**
 
 Show the always-loaded self-digest: a bounded view of who the agent is plus an
 authenticated, value-free `memory_checkpoint` and content-free
@@ -1774,6 +2014,8 @@ Flags:
 | `--json` | Emit `{ identity, primary_facts[], salient_memories[], memory_checkpoint, message_checkpoint, index, elided }`. |
 
 ## `witself self card`
+
+**Family status: implemented.**
 
 Show a presentation-only identity card for the token-bound agent. This command
 does not widen either backend contract: it composes an identity-only
@@ -1830,6 +2072,8 @@ Flags:
 
 ## `witself usage`
 
+**Family status: implemented.**
+
 Show fast hourly or daily product-usage totals for the authenticated agent. V0
 is deliberately self-scoped: an agent token cannot select another agent, and
 an operator token cannot use this command for account-wide aggregation.
@@ -1852,7 +2096,18 @@ witself usage --account default --agent scott \
 | `--until TIMESTAMP` | RFC3339 window end. Default: now. |
 | `--dimension DIMENSION` | Filter a usage dimension. Repeatable; comma-separated values also work. |
 | `--group-by hour\|day` | UTC rollup size. Default: `day`. |
-| `--json` | Emit identity scope, window, points, and whole-window totals. |
+| `--allow-truncation` | Opt in to partial results above the 10,000-point cap. Default: disabled. |
+| `--json` | Emit identity scope, window, points, totals for returned points, and `truncated`. |
+
+Reports return at most 10,000 points. Without `--allow-truncation`, a query
+exceeding that cap fails with HTTP 422 (`usage_query_too_large`), and the CLI
+prints the server's message: narrow `--since`/`--until`, use a coarser
+`--group-by`, or opt in. Only `--allow-truncation` sends `allow_truncation=1`.
+When an opted-in report is partial, both text and JSON modes prominently warn
+`truncated: true` on stderr; JSON also includes `"truncated": true`. Totals then
+cover only the returned points.
+See the [usage report contract](json-contracts.md#usage-report) for the closed
+dimension vocabulary and query bounds.
 
 Initial transcript dimensions are `transcript_created`,
 `transcript_entry_write`, `transcript_entry_read`, and
@@ -1860,7 +2115,9 @@ Initial transcript dimensions are `transcript_created`,
 future realm/account billing commands aggregate from the same portable event
 ledger subject to operator permissions.
 
-## `witself session` (target; not implemented)
+## `witself session`
+
+**Family status: target; not implemented.**
 
 Bootstrap and flush long-running, multi-session work. `session start` hydrates
 identity, open goals, and last progress in one round-trip; `session end` persists
@@ -1907,6 +2164,8 @@ Flags:
 `session.ended`.
 
 ## `witself memory`
+
+**Family status: implemented.**
 
 Manage memories. A memory is free-form self-content owned by an agent (or, in
 the group case, by a security group). It is one of the two first-class identity
@@ -2419,7 +2678,9 @@ an exact client-authored plan; see
 validates and applies the plan but does not decide what to merge, split, or
 supersede.
 
-## `witself digest emit` (target; not implemented)
+## `witself digest emit`
+
+**Family status: target; not implemented.**
 
 Render the self-digest as a CLAUDE.md / AGENTS.md fragment for file-load agent
 harnesses. This is the outbound half of the two-way file bridge: it makes
@@ -2446,7 +2707,9 @@ Flags:
 | `--max-bytes N` | Hard cap on the emitted fragment size. |
 | `-o, --out PATH` | Write the fragment to a file instead of stdout. |
 
-## `witself ingest` (target; not implemented)
+## `witself ingest`
+
+**Family status: target; not implemented.**
 
 Ingest existing agent context files into Witself: the inbound half of the file
 bridge. `ingest` parses CLAUDE.md / AGENTS.md / GEMINI.md, routing kv-shaped
@@ -2476,7 +2739,9 @@ in `--read-only` MCP mode.
 
 <a id="witself-bootstrap-instructions"></a>
 
-## `witself bootstrap-instructions` (target; not implemented)
+## `witself bootstrap-instructions`
+
+**Family status: target; not implemented.**
 
 Print the paste-able teaching stanza that installs the Witself usage habit
 (recall before relevant work, capture after durable learning, and curate through
@@ -2503,6 +2768,8 @@ To install the stanza directly into a project's AGENTS.md as part of bootstrap,
 [`witself setup`](#witself-setup)).
 
 ## `witself fact`
+
+**Family status: implemented.**
 
 Manage facts. A fact is a name→value pair: the canonical, queryable identity
 card for an agent (or, in the group case, a security group). Facts are deterministic
@@ -2665,7 +2932,9 @@ direct-write/proposal retry keys cannot resurrect deleted content. `fact set
 address; it requires a fresh mutation key and does not inherit the old usage
 rank.
 
-## `witself vault key` (implemented)
+## `witself vault key`
+
+**Family status: implemented.**
 
 The key lifecycle remains a local-client ceremony. It is intentionally CLI-only
 and is not exposed over MCP. Pairing secrets and recovery passphrases use the
@@ -2764,6 +3033,8 @@ suspended account. Realm deletion already requires its agents to be removed.
 
 ## `witself password generate`
 
+**Family status: implemented.**
+
 Generate a password or passphrase. This is a sealed-plane utility used most often
 to populate a sensitive secret field (see `secret create --generate-sensitive`),
 but it also works standalone. Generated values are returned to the caller and are
@@ -2794,6 +3065,8 @@ Flags:
 | `--count N` | Generate N values. Default: `1`. |
 
 ## `witself secret`
+
+**Family status: implemented.**
 
 Manage stored secrets: the sealed plane of Witself. A secret can be a login, API
 key, token, private key, certificate bundle, connection string, or arbitrary
@@ -3176,6 +3449,8 @@ self-digest, or plaintext-exported.
 
 ## `witself run`
 
+**Family status: target; not implemented.**
+
 Run a subprocess with selected secret references resolved only for that process
 lifetime. This is the safer path when an agent or human needs credentials for a
 CLI tool, test suite, deploy script, or MCP server without printing the values.
@@ -3198,6 +3473,8 @@ Flags:
 | `--reason TEXT` | Audit reason for resolving references. |
 
 ## `witself totp`
+
+**Family status: implemented.**
 
 Make Witself the authenticator application for accounts that use TOTP 2FA. A TOTP
 enrollment stores its seed as high-value sealed material in the same plane as
@@ -3285,6 +3562,8 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 
 ## `witself policy`
+
+**Family status: target; not implemented.**
 
 Manage cross-agent access policies. Authorization for cross-agent identity
 access is default-deny: with no matching `allow` policy, cross-agent access is
@@ -3420,6 +3699,8 @@ Flags:
 
 ## `witself group`
 
+**Family status: target; not implemented.**
+
 Manage security groups. A security group is a named set of agents within a
 realm. It is both a policy subject and a policy target, and it can own
 group-scoped shared memories and facts (collective memory). Membership is managed by operators
@@ -3511,6 +3792,8 @@ Flags:
 
 ## `witself transcript`
 
+**Family status: implemented.**
+
 Record the visible interaction between a user and an AI system. A transcript is
 an append-only enterprise ledger, not an addressed A2A mailbox. The agent token
 is the token-derived recorder; `role` is recorded data. Account operator tokens
@@ -3534,6 +3817,11 @@ witself transcript list --account default
 witself transcript show trn_123 --account default --json
 witself transcript tail trn_123 --account default --agent scott --limit 20
 witself transcript flush --runtime codex
+witself transcript status --runtime cursor
+witself transcript fence --runtime codex --session delegated-session-id \
+  --run captured-run-id --turn captured-turn-id --reason job-completed
+witself transcript fence --runtime cursor --session headless-session-id \
+  --latest --reason job-completed
 ```
 
 `create` accepts `--title`, `--external-id`, and `--metadata-file` (a bounded
@@ -3551,6 +3839,47 @@ returns a concrete delivery error; it does not stop merely because a large
 valid backlog takes longer than the detached hook flusher's bounded work
 window.
 
+`fence` is the companion completion command for a delegated job whose runtime
+emits no terminal hook. It requires `--session` and a `--runtime` that capture
+knows (`codex`, `claude-code`, `grok-build`, `cursor`, `openclaw`,
+`antigravity`, or `copilot`), plus either the pinned `--run` and `--turn` pair
+or `--latest`; the two forms are mutually exclusive and `--reason` defaults to
+`job-completed`. With the pinned form the orchestrator must pin the captured run
+and turn IDs when the job starts and reuse those exact IDs for every completion
+retry. Reading the current IDs when completion arrives can select a resumed
+job's turn and is unsafe; a session-only fence is refused. It appends a
+synthetic `turn.completed` system event with body
+`delegation job completed` and data
+containing `synthetic_fence: true` and the reason, through the normal hook
+enqueue path, then starts the normal flush. An existing local session and
+matching bound run are required. A repeat for the most recent synthetic
+completion in the current run is a no-op even after upload or subsequent
+prompts. Once a later fence completes or a new run starts, older completions
+are rejected as stale. Other mismatched identities, sessions without a held
+turn, and unknown sessions are refused without changing the current turn.
+Sensitive-turn redaction runs
+exactly as for Stop before the turn becomes upload-ready, retaining the
+synthetic marker while omitting the caller-provided reason. Ephemeral Codex
+sessions remain excluded. This command does not recover missing assistant text
+or install an orchestrator callback.
+
+`--latest` is the headless-launcher form for a runtime that carries its own
+turn ids, so local state never opens a turn to pin. It derives the session's
+bound run from local capture state and fences every turn of that session whose
+events the upload gate still holds, including turns orphaned by an earlier
+resume. It reports how many turns it closed, is a no-op when nothing is held
+(including after the runtime's own SessionEnd removed the session's local
+state), and is safe to run unconditionally as the last step of a headless job,
+after the agent process has exited. A session with no local state that still
+holds events is refused; nothing is fenced on age or inactivity.
+
+`status` reports one runtime's local backlog: how many events are queued and
+how many the upload gate holds, in the value-free buckets `no-fence`,
+`run-mismatch`, and `session-unbound`. A deferring `flush` prints the same
+buckets, plus an `other` count for events deferred by something other than the
+upload gate, such as a server rejection or an upload-ready event queued behind
+a held turn.
+
 For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
 native session file. Grok writes the final assistant response only after its
 synchronous Stop hook returns, so Witself requires the exact matching native
@@ -3560,6 +3889,14 @@ causes a nonzero flush result; later events for other transcripts are not
 blocked. A later Grok hook retries automatically, while an explicit foreground
 flush after the client exits closes the final session without launching a
 client, inference, wrapper, or persistent runner.
+
+For DeepSeek Harness, `flush` resolves Stop events from the installed binding's
+native session log, validates their local prompt correlation, and waits for the
+matching native `turn/end`. dsh Stop hooks queue durably and start the detached
+flusher directly because synchronous foreground polling would delay the very
+fence they need. `witself transcript flush --runtime dsh` after the client exits
+provides a deterministic final delivery check. See the dsh capture and bounded
+log recovery contract in [transcript-ledger.md](transcript-ledger.md).
 
 Only finalized visible output should be appended. Raw hidden chain-of-thought
 and streaming chunks are out of contract. Small structured objects belong in
@@ -3574,7 +3911,27 @@ raw prompt payloads for recovered messages. Witself preserves the body
 unchanged when that envelope is malformed, nested, repeated, or has any extra
 bytes; no other runtime uses this normalization.
 
+## `witself integration`
+
+**Family status: implemented.**
+
+Inspect value-free hydration evidence from this machine's local ledger:
+
+```sh
+witself integration status --runtime codex
+witself integration status --runtime claude-code
+```
+
+The summary covers the last 24 hours: attempts, injections, failures, p95
+latency in milliseconds, and elision count. Missing recent observations report
+`no recent hydration`; an unreadable ledger reports `local ledger unavailable`.
+This command reads local state only. It does not contact a server, change an
+installation, or prove that a runtime consumed the prepared context. See
+[Context Hydration](context-hydration.md) for the bounded ledger contract.
+
 ## `witself integrations`
+
+**Family status: implemented.**
 
 List the agent runtimes supported by this Witself build and report local
 detection separately from Witself installation state:
@@ -3616,11 +3973,20 @@ current MCP capability probe. The `github-copilot` alias resolves to that same
 integration. Copilot is included in both the detected target set for `install
 all` and the installed target set for `uninstall all`.
 
+DeepSeek Harness is reported under its canonical `dsh` runtime name and is
+detected when a `dsh` executable resolves. The `deepseek` and
+`deepseek-harness` aliases resolve to that same integration, which is included
+in both the detected target set for `install all` and the installed target set
+for `uninstall all`.
+
 ## `witself install`
 
+**Family status: implemented.**
+
 Install MCP access and managed memory routing for a supported local agent
-runtime. Codex, Claude Code, Grok Build, and Cursor also install transcript
-hooks; the OpenClaw, Antigravity, and GitHub Copilot previews do not:
+runtime. Codex, Claude Code, Grok Build, Cursor, and DeepSeek Harness also
+install transcript hooks; the OpenClaw, Antigravity, and GitHub Copilot
+previews do not:
 
 ```sh
 witself install codex
@@ -3631,6 +3997,8 @@ witself install openclaw
 witself install antigravity
 witself install copilot
 witself install copilot --routing-only
+witself install dsh
+witself install dsh --routing-only
 witself install all --agent scott --location home --dry-run
 witself install all --agent scott --location home
 witself install all --agent scott --location home --json
@@ -3800,6 +4168,78 @@ Witself transcript hooks. `witself install copilot --routing-only` refreshes
 only the exact-owned instruction file without invoking Copilot, resolving
 credentials, or changing the MCP binding.
 
+DeepSeek Harness discovers `dsh` on `PATH` or uses `DSH_CLI_PATH` and
+records its `--version` output. The canonical runtime selector is `dsh`;
+`deepseek` and `deepseek-harness` are accepted aliases. dsh mounts MCP clients
+through profile patch composition rather than an `mcp add` subcommand, so
+install owns exactly one fenced block in the home-level patch file
+`$DSH_HOME/cordis.patch.yml` (normally under `~/.dsh`), delimited by
+`# witself:managed:begin dsh-runtime-integration v1` and its matching end
+marker. That block is a single `insert` entry mounting two rows. Row
+`witself-mcp` mounts `@deepseek-ai/dsh-mcp-client`
+with the stdio server name `witself`, the absolute Witself
+executable, the exact agent identity and optional location, and exactly two
+non-secret environment variables: `DSH_HOME` (the installed config root, which
+dsh scrubs from every MCP child's ambient environment and therefore must
+travel in the block) and `WITSELF_HOME`. Row `witself-hooks` mounts
+`@deepseek-ai/dsh-hooks-claude-code` with a `configPath` naming the owned
+`$DSH_HOME/hooks.json`, and is present only when this binding installs
+transcript hooks. A `DSH_HOME` that begins with `~` is
+expanded against the home directory exactly as dsh expands it. Because the
+patch is home-level, it applies to every profile: cli, headless, web, sdk,
+and acp.
+
+Witself never round-trips the patch file through a YAML serializer, so `!!js`
+tagged expressions and every other foreign byte survive install, reinstall, and
+uninstall. A missing file is created containing only the managed block; a
+freshly generated `[]` placeholder is replaced in place with the comments above
+it retained; a block-style list gains the block appended after its last row.
+Any other top-level shape — a non-empty flow-style array, a mapping, or
+unparsable content — is refused with an error naming the path, whether or not
+a managed fence is already present. The fence at the current version is
+Witself's own region whatever its inner bytes say: install replaces it even
+without an integration record or after an editor re-quoted its rows, and
+uninstall deletes exactly the fenced block and restores `[]` when no foreign
+rows remain, succeeding even from a shape install would refuse, so no operator
+is ever locked in. A managed fence at another version, a duplicated fence, and
+a truncated fence are all refused rather than rewritten.
+
+Because this file names the command, arguments, and environment dsh executes,
+Witself holds it at owner-only `0600`, tightening a wider provider- or
+operator-created mode on install and reporting a wider mode as drift. Every
+replacement retains the displaced file and proves it is the exact preimage the
+plan was built from before committing, so a concurrent dsh or editor write is
+refused and preserved instead of silently discarded; the operation lock
+serializes Witself against Witself only. Verification requires byte-exact block
+equality, a supported top-level shape, owner-only permissions, and, when the
+recorded CLI is executable, that `dsh --profile headless --dump-config`
+composes every row the installed block renders — `witself-mcp` named
+`@deepseek-ai/dsh-mcp-client`, and `witself-hooks` named
+`@deepseek-ai/dsh-hooks-claude-code` when hooks are installed; a composed
+tree missing a row is reported as drift, and a probe that fails to run is
+reported as unavailable with dsh's own bounded stderr message. Install
+finalization treats an unavailable probe as a warning rather than a failure,
+because the block itself was written and verified byte for byte; only a
+composed tree that omits the row rolls the install back. `mcp serve` never
+runs the probe: it verifies the selectors and the owned files, so a session
+start does not boot dsh's Node runtime a second time. Managed memory routing lives in one fenced block inside the shared
+`$DSH_HOME/AGENTS.md`, which dsh loads on a session's first request; uninstall
+removes the block and keeps the file. dsh renders the user-global file and the
+project `AGENTS.md`/`CLAUDE.md` chain into one instruction message under a
+64 KiB budget, so a very large project chain can crowd the routing block out
+of a session; the patched-in MCP server's own instructions still carry the
+policy. The verification probe boots dsh's headless profile, which can
+materialize `$DSH_HOME/profiles/headless` on a machine that never ran it.
+
+On macOS and Linux, install also owns the Witself handlers in
+`$DSH_HOME/hooks.json` and records `hook_mode: user`. `--capture` and
+`--user-hooks` are accepted; `--managed-hooks` is rejected because dsh has no
+administrator-managed hook surface. Unrelated entries in that file are
+preserved, and uninstall withdraws only the Witself handlers and the
+`witself-hooks` row. `witself install dsh --routing-only` refreshes only the
+instruction block without invoking dsh, resolving credentials, or changing the
+patch file or hooks.
+
 `--routing-only` atomically refreshes only the runtime's managed static
 instruction block. It does not resolve credentials, contact Witself, invoke a
 provider CLI, change the integration binding, register MCP, or install/remove
@@ -3858,6 +4298,13 @@ to call the collision-resistant Witself MCP server's `self.show` and
 `memory.recall` tools. Copilot transcript hooks and direct prompt-context
 injection are not installed in phase 1.
 
+DeepSeek Harness also reports `guided_mcp_fallback`. Its fenced block in the
+shared user-global `AGENTS.md` covers the full safety contract and directs the
+active agent to call the patched-in Witself MCP server's `self.show` and
+`memory.recall` tools. dsh hook bridges pass no model-visible session context
+because `SessionStart` runs detached. Its user hook bridge captures transcripts;
+that capability does not provide automatic model-visible hydration.
+
 The injected checkpoint is a point-in-time snapshot, not same-turn synthesis.
 The current prompt may still be flushing and the current assistant response does
 not yet exist, so that evidence can be reviewed on a later interaction. Runtime
@@ -3893,6 +4340,12 @@ drift prevents credential-bound tools from being exposed. It also requires the
 exact current managed instruction content; stale, missing, unmarked, or
 extra-content instructions prevent server startup.
 
+DeepSeek Harness loads the policy from the fenced Witself block in
+`$DSH_HOME/AGENTS.md`. Before every `mcp serve --runtime dsh` startup, Witself
+verifies `DSH_HOME`, `WITSELF_HOME`, and the byte-exact managed patch block,
+and requires the exact current managed instruction content; drift in any owned
+surface prevents credential-bound tools from being exposed.
+
 Administrator-managed hooks are the macOS and Linux default for Codex and
 Claude Code while identity and MCP registration remain user-scoped. The command
 prompts for administrator access only for that system policy write. Codex uses
@@ -3908,6 +4361,12 @@ unrelated hooks are not disabled. On macOS and Linux, pass `--user-hooks` to
 use Codex or Claude user settings instead; Codex asks for one-time approval
 through `/hooks` in that mode.
 
+## `witself uninstall`
+
+**Family status: implemented.**
+
+Remove installed runtime integrations while preserving user data.
+
 ```sh
 witself uninstall codex
 witself uninstall claude
@@ -3916,6 +4375,7 @@ witself uninstall cursor
 witself uninstall openclaw
 witself uninstall antigravity
 witself uninstall copilot
+witself uninstall dsh
 witself uninstall all --dry-run
 witself uninstall all
 witself uninstall all --json
@@ -3983,7 +4443,28 @@ deleting uncertain user-owned state. The value-free `0600`
 `.witself-copilot-operation.lock` remains under `COPILOT_HOME` as the stable
 cross-process fence for future install, uninstall, and routing-only operations.
 
+DeepSeek Harness uninstall removes only the fenced patch block, the exact
+recorded routing block, and the Witself handlers in the owned
+`$DSH_HOME/hooks.json`. It never touches a foreign patch row, a foreign hook
+entry, or unrelated
+`AGENTS.md` content, and a shared `AGENTS.md` that is a symlink into the
+operator's dotfiles is written and committed through its target. Because the
+patch file is Witself-owned
+rather than provider-mutated, uninstall succeeds even when `dsh` has been
+removed from the machine. A `.witself-dsh-operation.lock` remains under
+`DSH_HOME` as the stable cross-process fence for future install, uninstall, and
+routing-only operations.
+
+## `witself _managed-hooks`
+
+**Family status: implemented.**
+
+Internal helper for administrator-managed runtime hook installation and
+removal, invoked by the integration commands.
+
 ## `witself message`
+
+**Family status: implemented.**
 
 Exchange durable messages with other agents and groups. Messaging is fully in
 scope for v0: a mailbox/queue model with at-least-once delivery, per-recipient
@@ -4375,7 +4856,17 @@ agent system-cancels its open requests and live claims. Deleting a candidate
 declines a pending response and cancels that agent's live claims while retaining
 historical offers. There is no first-offer or first-eligible fallback.
 
+[`scripts/run-collaboration-canary.sh`](../scripts/run-collaboration-canary.sh)
+composes these request verbs and ordinary question/result delivery into the
+offer, assignment, failed-result retry, escalation, and acknowledgement workflow.
+See [Retained canary](autonomous-realm-messaging.md#retained-canary) for its
+explicit two-agent binding interface, `witself.collaboration-canary.v1` evidence,
+and pending Founder-realm live record. Its offline companion is
+[`scripts/test-collaboration-canary.sh`](../scripts/test-collaboration-canary.sh).
+
 ## `witself email`
+
+**Family status: implemented.**
 
 External email for an agent, with receive and send independently gated.
 Catalog entitlement, effective account policy, cell enrollment, edge routing,
@@ -4490,7 +4981,16 @@ installed foreground policy handles at most one
 pending Witself messaging-or-email lane per turn after user work; there is no
 email runner or wake service.
 
+## `witself email-domain`
+
+**Family status: implemented.**
+
+Request an organization-owned inbound email domain with `request`, or inspect
+the account's domain requests with `list`.
+
 ## `witself federation`
+
+**Family status: target; not implemented.**
 
 Manage the realm's cross-realm federation: the deny-by-default allow-list of
 peer realms the realm accepts messages from, and the signed realm card the realm
@@ -4589,6 +5089,8 @@ Flags:
 
 ## `witself reference`
 
+**Family status: target; not implemented.**
+
 Parse and resolve `witself://` identity references. References let memories,
 facts, messages, scripts, config files, and MCP tools point at identity data
 without copying it. Reference resolution enforces the same authorization as a
@@ -4654,6 +5156,8 @@ Flags:
 | `--reason TEXT` | Audit reason for cross-agent or operator resolution. |
 
 ## `witself agent`
+
+**Family status: implemented.**
 
 Manage agent principals. Billing rolls up to the realm, but identity and
 permissions are per agent. Operators can manage the full lifecycle of named
@@ -4809,6 +5313,8 @@ Flags:
 
 ## `witself token`
 
+**Family status: implemented.**
+
 Manage agent or operator tokens.
 
 V0 agent tokens are durable by default. They do not expire unless `--ttl` or
@@ -4893,6 +5399,8 @@ Flags:
 
 ## `witself audit`
 
+**Family status: target; not implemented.**
+
 Inspect audit records.
 
 ### `witself audit list`
@@ -4928,6 +5436,8 @@ Flags:
 
 ## `witself export`
 
+**Family status: implemented.**
+
 Download a whole-account logical archive from the account's current cell. The
 command authenticates with the selected managed account's operator credential,
 calls `GET /v1/export`, and verifies the `self` manifest plus every trailing
@@ -4958,11 +5468,17 @@ Flags:
 | `--out FILE` | Write the verified `.tar.gz` archive to this file. |
 | `--force` | Replace an existing output file after verification. |
 
+## `witself import`
+
+**Family status: target; not implemented.**
+
 There is no customer `witself import` command. The server-side archive import is
 a provision-token-authorized account-evacuation primitive for operators moving
-accounts between cells; it is not a customer CLI counterpart to this command.
+accounts between cells; it is not a customer CLI counterpart to `witself export`.
 
 ## `witself mcp`
+
+**Family status: implemented.**
 
 Expose Witself to MCP-compatible agent runtimes.
 
@@ -5047,6 +5563,8 @@ Flags:
 
 ## `witself config`
 
+**Family status: target; not implemented.**
+
 Manage local CLI configuration.
 
 ### `witself config get KEY`
@@ -5091,6 +5609,8 @@ Flags:
 
 ## `witself completion`
 
+**Family status: target; not implemented.**
+
 Generate shell completion scripts.
 
 ```sh
@@ -5107,6 +5627,8 @@ Flags:
 | `--install` | Install completion for the current shell when supported. |
 
 ## `witself avatar`
+
+**Family status: implemented.**
 
 The avatar CLI mirrors the self and account-operator lifecycle without putting
 SVG or structured visual specifications in shell arguments:
@@ -5208,6 +5730,8 @@ under `agent_self_managed`; otherwise an account operator uses `avatar operator
 reset`. It is not a permanent purge command.
 
 ## `witself dashboard`
+
+**Family status: implemented.**
 
 Serve the local, content-read-only Agent Console over the agent's own `/v1`
 read surface. The command remains `witself dashboard`; the presentation
@@ -5365,6 +5889,10 @@ Flags:
 | `--json` | Print JSON instead of a summary. |
 
 ## First Implementation Slice
+
+This is a target implementation sequence, not a shipped-command checklist.
+The [family markers](#command-family-status) and explicitly implemented slices
+above determine present availability.
 
 The first CLI slice should validate the managed-service command shape while
 using the local mock/development backend only as scaffolding where needed. The

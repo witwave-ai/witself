@@ -913,6 +913,9 @@ test("atomic plan apply rejects malformed targets before any authority or cell c
       ...target,
       policies: { agent_email_retention_days: 30.5 },
     }],
+    ["unsupported collaboration marker", withSnapshotHash({ ...target, policies: { collaboration_entitlement_version: 2 } })],
+    ["zero collaboration marker", withSnapshotHash({ ...target, policies: { collaboration_entitlement_version: 0 } })],
+    ["non-integer collaboration marker", withSnapshotHash({ ...target, policies: { collaboration_entitlement_version: 1.5 } })],
     ["unsupported policy value", {
       ...target,
       policies: { agent_email_entitlement_version: 2 },
@@ -979,4 +982,43 @@ test("atomic plan apply streams and rejects an undeclared oversized body", async
   );
   assert.equal(response.status, 413);
   assert.equal(pulls, 2);
+});
+
+test("collaboration authority survives exact bridge apply and hash verification", async () => {
+  const governed = withSnapshotHash({ ...target, policies: { collaboration_entitlement_version: 1 }, features: ["messaging"] });
+  const events = [];
+  const env = environment();
+  env.AGENT_EMAIL_DOMAINS = authorityNamespace("domain", events, undefined, governed);
+  env.REALM_EMAIL_ALIASES = authorityNamespace("alias", events, undefined, governed);
+  const response = await handleInternalBridgeRequest(
+    request({ schema_version: "witself.v0", target: governed }), env,
+    async (_url, init) => {
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(init.body)).target, governed);
+      events.push("cell");
+      return Response.json(appliedResult(governed));
+    },
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual((await response.json()).applied_snapshot.policies, { collaboration_entitlement_version: 1 });
+  assert.deepEqual(events, ["domain:prepare", "alias:prepare", "cell", "alias:complete", "domain:complete"]);
+  const stripped = { ...governed, policies: {} };
+  const refused = await handleInternalBridgeRequest(
+    request({ schema_version: "witself.v0", target: stripped }), env,
+    async () => assert.fail("stripped authority reached cell"),
+  );
+  assert.equal(refused.status, 400);
+});
+
+test("unfenced collaboration current snapshot cannot drive bridge recovery", async () => {
+  const env = environment();
+  const events = [];
+  env.AGENT_EMAIL_DOMAINS = authorityNamespace("domain", events);
+  env.REALM_EMAIL_ALIASES = authorityNamespace("alias", events);
+  const response = await handleInternalBridgeRequest(request(), env, async () => {
+    const blocked = blockedResult();
+    blocked.current_snapshot = { ...currentSnapshot, revision: 0, snapshot_hash: "", policies: { collaboration_entitlement_version: 1 } };
+    return Response.json(blocked);
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(events, ["domain:prepare", "alias:prepare"]);
 });

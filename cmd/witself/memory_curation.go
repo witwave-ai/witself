@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -661,7 +662,7 @@ func readMemoryVersionReferences(path string) ([]client.MemoryVersionReference, 
 	if err := decoder.Decode(&out); err != nil {
 		return nil, err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = fmt.Errorf("multiple JSON values")
 		}

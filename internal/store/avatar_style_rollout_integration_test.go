@@ -5,13 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func drainAvatarStyleRolloutsForTest(ctx context.Context, t *testing.T, st *Store, batchSize int) {
@@ -29,10 +29,7 @@ func drainAvatarStyleRolloutsForTest(ctx context.Context, t *testing.T, st *Stor
 }
 
 func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -301,10 +298,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 }
 
 func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -380,10 +374,7 @@ func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testi
 }
 
 func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -443,10 +434,7 @@ func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testin
 }
 
 func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -518,10 +506,7 @@ func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testin
 }
 
 func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -611,10 +596,7 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 }
 
 func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -659,7 +641,8 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 		SELECT status,failure_count,retry_after,last_failure_code,
 		       processed_profile_count,batch_count
 		  FROM avatar_style_rollout_jobs
-		 WHERE account_id=$1 AND realm_id=$2`, provisioned.AccountID, realm.ID).Scan(
+		 WHERE account_id=$1 AND realm_id=$2
+		 FOR UPDATE`, provisioned.AccountID, realm.ID).Scan(
 		&status, &failures, &retryAfter, &failureCode, &processed, &batches); err != nil {
 		t.Fatal(err)
 	}
@@ -676,10 +659,7 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 }
 
 func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -745,10 +725,7 @@ func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) 
 }
 
 func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -792,10 +769,7 @@ func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *tes
 }
 
 func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

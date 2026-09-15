@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailSuppressionRetentionDaysIsBounded(t *testing.T) {
@@ -29,10 +29,7 @@ func TestAgentEmailSuppressionRetentionDaysIsBounded(t *testing.T) {
 }
 
 func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -259,10 +256,7 @@ func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
 }
 
 func TestAgentEmailRetentionRotatesKindsUnderSustainedInboundBacklogPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -412,10 +406,7 @@ func TestAgentEmailRetentionRotatesKindsUnderSustainedInboundBacklogPostgres(t *
 }
 
 func TestAgentEmailOutboundRetainedReplyAndClaimArchiveRoundTripPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	source, _ := newMigrationTestStore(t, baseDSN)

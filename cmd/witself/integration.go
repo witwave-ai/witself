@@ -24,14 +24,15 @@ import (
 )
 
 const (
-	maxHookInputBytes             = 16 * 1024 * 1024
-	captureDetachedFlushEnv       = "WITSELF_CAPTURE_DETACHED_FLUSH"
-	detachedFlushMaxDuration      = 2 * time.Minute
-	foregroundFlushLockMaxWait    = detachedFlushMaxDuration + 30*time.Second
-	foregroundFlushLockPollPeriod = 50 * time.Millisecond
-	maxCaptureAppendRequestBytes  = 7 * 1024 * 1024
-	maxCaptureAppendBatchEntries  = 100
-	maxCaptureFlushSliceEvents    = 256
+	maxHookInputBytes              = 16 * 1024 * 1024
+	captureDetachedFlushEnv        = "WITSELF_CAPTURE_DETACHED_FLUSH"
+	detachedFlushMaxDuration       = 2 * time.Minute
+	hookForegroundFlushMaxDuration = 3 * time.Second
+	foregroundFlushLockMaxWait     = detachedFlushMaxDuration + 30*time.Second
+	foregroundFlushLockPollPeriod  = 50 * time.Millisecond
+	maxCaptureAppendRequestBytes   = 7 * 1024 * 1024
+	maxCaptureAppendBatchEntries   = 100
+	maxCaptureFlushSliceEvents     = 256
 )
 
 // GUI-backed runtime CLIs can take several seconds to cold-start before their
@@ -231,6 +232,39 @@ func installCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		configRoot, rootErr := dshOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadDSHTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted DeepSeek Harness transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverDSHTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		recoveredRoot, recoveredRootErr := dshOperationLockRoot()
+		if recoveredRootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root after recovery: %v\n", recoveredRootErr)
+			return 1
+		}
+		if recoveredRoot != configRoot {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness recovery changed the provider lock root; rerun install so the current provider selector is locked before any new mutation")
+			return 1
+		}
+		if pendingOperation == dshTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH); errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "witself: recovered an interrupted DeepSeek Harness uninstall; rerun install so the current provider selector is locked before any new mutation")
+				return 1
+			}
+		}
+	}
 	if *routingOnly {
 		if runtime == transcriptcapture.RuntimeAntigravity {
 			fmt.Fprintln(os.Stderr, "witself: --routing-only is not supported for antigravity because its MCP binding and always-on routing policy are one transactionally managed integration unit")
@@ -292,6 +326,22 @@ func installCmd(args []string) int {
 				}
 				if currentRoot != installed.RuntimeConfigRoot {
 					fmt.Fprintf(os.Stderr, "witself: COPILOT_HOME changed from installed %s to %s; restore the installed value before refreshing routing\n", installed.RuntimeConfigRoot, currentRoot)
+					return 1
+				}
+			} else if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "witself: read existing integration: %v\n", loadErr)
+				return 1
+			}
+		}
+		if runtime == transcriptcapture.RuntimeDSH {
+			if installed, loadErr := transcriptcapture.LoadConfig(runtime); loadErr == nil {
+				currentRoot, rootErr := currentDSHConfigRoot()
+				if rootErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+					return 1
+				}
+				if currentRoot != installed.RuntimeConfigRoot {
+					fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from installed %s to %s; restore the installed value before refreshing routing\n", installed.RuntimeConfigRoot, currentRoot)
 					return 1
 				}
 			} else if !errors.Is(loadErr, os.ErrNotExist) {
@@ -615,6 +665,28 @@ func installCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		if err := configureDSHBinding(&cfg, runtimeCLI, witselfExecutable); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: configure DeepSeek Harness integration: %v\n", err)
+			return 1
+		}
+		if previousConfigErr == nil {
+			switch {
+			case previousConfig.RuntimeCLICommand != cfg.RuntimeCLICommand:
+				fmt.Fprintf(os.Stderr, "witself: DeepSeek Harness CLI changed from %s to %s; uninstall the existing integration before reinstalling it\n", previousConfig.RuntimeCLICommand, cfg.RuntimeCLICommand)
+				return 1
+			case previousConfig.RuntimeConfigRoot != cfg.RuntimeConfigRoot:
+				fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from %s to %s; restore the installed value before reinstalling or uninstall the existing integration first\n", previousConfig.RuntimeConfigRoot, cfg.RuntimeConfigRoot)
+				return 1
+			case previousConfig.RuntimeMCPConfigPath != cfg.RuntimeMCPConfigPath:
+				fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness patch file path changed; uninstall the existing integration before reinstalling it")
+				return 1
+			case !equalDSHEnvironment(previousConfig.MCPEnvironment, cfg.MCPEnvironment):
+				fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed since DeepSeek Harness installation; restore it before reinstalling or uninstall the existing integration first")
+				return 1
+			}
+		}
+	}
 	if previousConfigErr == nil && previousConfig.HookMode != transcriptcapture.HookModeNone {
 		previousForHooks := &previousConfig
 		if genericPreviousBinding != nil {
@@ -696,6 +768,21 @@ func installCmd(args []string) int {
 		}
 		copilotJournal = &journal
 	}
+	var dshJournal *dshTransactionJournal
+	if runtime == transcriptcapture.RuntimeDSH {
+		var previous *transcriptcapture.Config
+		if previousConfigErr == nil {
+			previousCopy := previousConfigOriginal
+			previous = &previousCopy
+		}
+		desired := cfg
+		journal, journalErr := beginDSHTransaction(dshTransactionInstall, previous, &desired)
+		if journalErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: begin DeepSeek Harness transaction: %v\n", journalErr)
+			return 1
+		}
+		dshJournal = &journal
+	}
 	var cursorPermissionSnapshot cursorCLIConfigSnapshot
 	if runtime == transcriptcapture.RuntimeCursor {
 		cursorPermissionSnapshot, err = snapshotCursorCLIConfig()
@@ -732,7 +819,8 @@ func installCmd(args []string) int {
 		}
 		genericProviderJournal = &journal
 	}
-	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot) ||
+	if (runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot &&
+		runtime != transcriptcapture.RuntimeDSH) ||
 		errors.Is(previousConfigErr, os.ErrNotExist) {
 		if err := saveRuntimeIntegrationConfig(stagedConfig); err != nil {
 			journalCleared := antigravityJournal == nil
@@ -765,6 +853,11 @@ func installCmd(args []string) int {
 			if copilotJournal != nil {
 				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
+			if dshJournal != nil {
+				if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "witself: save integration: %v\n", err)
@@ -802,6 +895,11 @@ func installCmd(args []string) int {
 		if copilotJournal != nil {
 			if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+			}
+		}
+		if dshJournal != nil {
+			if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -844,14 +942,28 @@ func installCmd(args []string) int {
 			}
 			return
 		}
-		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH {
 			if previousBinding != nil {
+				if runtime == transcriptcapture.RuntimeDSH && hooksTouched {
+					if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+						return
+					}
+					hooksTouched = false
+				}
 				// Keep the newly installed policy in place until the previous exact
 				// MCP binding is restored. An older policy may not cover tools added
 				// by the attempted binding if MCP rollback itself fails.
 				if mcpTouched {
 					if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, &cfg); rollbackErr != nil {
 						fmt.Fprintf(os.Stderr, "witself: warning: restore MCP registration: %v; preserving current %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
+						return
+					}
+				}
+				if hooksTouched {
+					if rollbackErr := restoreRuntimeHooksOwned(&cfg, previousBinding); rollbackErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
 						return
 					}
 				}
@@ -878,6 +990,11 @@ func installCmd(args []string) int {
 						fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
 					}
 				}
+				if dshJournal != nil {
+					if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+						fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
+					}
+				}
 				return
 			}
 
@@ -887,6 +1004,12 @@ func installCmd(args []string) int {
 			if mcpTouched {
 				if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, nil, &cfg); rollbackErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: remove attempted MCP registration: %v; preserving %s routing and integration recovery state\n", rollbackErr, integrationDisplayName(runtime))
+					return
+				}
+			}
+			if hooksTouched {
+				if rollbackErr := restoreRuntimeHooksOwned(&cfg, nil); rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
 					return
 				}
 			}
@@ -911,6 +1034,11 @@ func installCmd(args []string) int {
 			if copilotJournal != nil {
 				if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 					fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
+				}
+			}
+			if dshJournal != nil {
+				if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+					fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
 				}
 			}
 			return
@@ -1032,6 +1160,42 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	dshPatchPreTouched := false
+	var dshPatchPlan dshPatchInstallPlan
+	if runtime == transcriptcapture.RuntimeDSH {
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness transaction journal is missing before patch mutation")
+			return 1
+		}
+		if err = validateDSHTransactionProviderBefore(*dshJournal); err == nil {
+			dshPatchPlan, dshPatchPreTouched, err = prepareDSHPatchInstallPlan(runtimeCLI, cfg, previousBinding)
+		}
+		if err != nil {
+			if providerMutationUncertain(err) ||
+				(providerPreflightChanged(err) && dshPatchPreTouched) {
+				fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving DeepSeek Harness routing and transaction journal\n", err)
+				return 1
+			}
+			rollbackInstall(dshPatchPreTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", err)
+			return 1
+		}
+	}
+	var hookPath string
+	hooksTouched := false
+	if runtime == transcriptcapture.RuntimeDSH {
+		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		if err != nil {
+			var selectionChanged *dshHookSelectionChangedError
+			if !hooksTouched || errors.As(err, &selectionChanged) {
+				fmt.Fprintf(os.Stderr, "witself: install hooks: %v; preserving DeepSeek Harness transaction journal\n", err)
+				return 1
+			}
+			rollbackInstall(false, hooksTouched)
+			fmt.Fprintf(os.Stderr, "witself: install hooks: %v\n", err)
+			return 1
+		}
+	}
 	var registerErr error
 	registerTouched := false
 	switch runtime {
@@ -1041,6 +1205,8 @@ func installCmd(args []string) int {
 		registerTouched, registerErr = installAntigravityPlugin(cfg, previousBinding)
 	case transcriptcapture.RuntimeCopilot:
 		registerTouched, registerErr = registerCopilotMCPWithPlan(runtimeCLI, copilotMCPPlan)
+	case transcriptcapture.RuntimeDSH:
+		registerTouched, registerErr = installDSHPatchBlockWithPlan(dshPatchPlan)
 	case transcriptcapture.RuntimeCodex,
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
@@ -1056,23 +1222,30 @@ func installCmd(args []string) int {
 			mcpTouched = mcpTouched || openClawMCPPreTouched
 		case transcriptcapture.RuntimeCopilot:
 			mcpTouched = mcpTouched || copilotMCPPreTouched
+		case transcriptcapture.RuntimeDSH:
+			mcpTouched = mcpTouched || dshPatchPreTouched
+		}
+		var dshSelectionChanged *dshHookSelectionChangedError
+		if runtime == transcriptcapture.RuntimeDSH && errors.As(registerErr, &dshSelectionChanged) {
+			fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving DeepSeek Harness transaction journal\n", registerErr)
+			return 1
 		}
 		if providerMutationUncertain(registerErr) ||
 			(providerPreflightChanged(registerErr) && mcpTouched) {
 			fmt.Fprintf(os.Stderr, "witself: register MCP: %v; preserving %s routing and integration recovery state\n", registerErr, integrationDisplayName(runtime))
 			return 1
 		}
-		rollbackInstall(mcpTouched, false)
+		rollbackInstall(mcpTouched, hooksTouched)
 		fmt.Fprintf(os.Stderr, "witself: register MCP: %v\n", registerErr)
 		return 1
 	}
-	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched
-	var hookPath string
-	hooksTouched := false
-	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally retain
-	// HookModeNone and install no transcript hooks.
+	registerTouched = registerTouched || openClawMCPPreTouched || copilotMCPPreTouched || dshPatchPreTouched
+	// Phase-one OpenClaw, Antigravity, and Copilot integrations intentionally
+	// retain HookModeNone and install no transcript hooks.
 	if supportsTranscriptHooks(runtime) {
-		hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		if runtime != transcriptcapture.RuntimeDSH {
+			hookPath, hooksTouched, err = installRuntimeHooksOwned(&cfg, previousBinding)
+		}
 	} else if previousConfigErr == nil && previousConfig.HookMode == transcriptcapture.HookModeUser {
 		// A prior release could serialize an untested POSIX hook command for a
 		// native Windows Claude or Grok profile. When upgrading to the MCP-only
@@ -1154,6 +1327,30 @@ func installCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		warning, err := validateDSHCommitTopology(cfg)
+		if err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness topology: %v\n", err)
+			return 1
+		}
+		if err := verifyRuntimeHooksOwned(cfg); err != nil {
+			rollbackInstall(registerTouched, true)
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness hooks: %v\n", err)
+			return 1
+		}
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "witself: warning: %s\n", warning)
+		}
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: finalize DeepSeek Harness transaction: journal is missing")
+			return 1
+		}
+		if err := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", err)
+			return 1
+		}
+	}
 	if runtime == transcriptcapture.RuntimeAntigravity && previousBinding != nil &&
 		previousBinding.RuntimePluginSource != cfg.RuntimePluginSource {
 		if cleanupErr := removeAntigravitySourceBundle(*previousBinding); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
@@ -1208,6 +1405,8 @@ func installCmd(args []string) int {
 		fmt.Println("next: refresh MCP servers in Antigravity (or run /mcp in agy), then start a new task to load the managed plugin rule and guided MCP fallback")
 	} else if runtime == transcriptcapture.RuntimeCopilot {
 		fmt.Println("next: start a new GitHub Copilot CLI session to load the managed instructions and guided MCP fallback")
+	} else if runtime == transcriptcapture.RuntimeDSH {
+		fmt.Println("next: start a new DeepSeek Harness session to mount the patched MCP client and hook bridge and load the managed instructions and guided MCP fallback")
 	} else if memoryRouting.managed {
 		fmt.Printf("next: restart %s and start a new task to load the managed memory-routing instructions; global user hooks require no project trust\n", memoryRouting.displayName)
 	} else {
@@ -1405,6 +1604,32 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		configRoot, rootErr := dshOperationLockRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		pendingOperation := ""
+		if pending, pendingErr := loadDSHTransactionJournal(configRoot); pendingErr == nil {
+			pendingOperation = pending.Operation
+		} else if !errors.Is(pendingErr, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "witself: inspect interrupted DeepSeek Harness transaction: %v\n", pendingErr)
+			return 1
+		}
+		if recoveryErr := recoverDSHTransaction(configRoot); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: recover interrupted DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if pendingOperation == dshTransactionUninstall {
+			if _, loadErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeDSH); errors.Is(loadErr, os.ErrNotExist) {
+				if !suppressIntegrationSuccessOutput {
+					fmt.Println("recovered and completed interrupted dsh uninstall; tokens and pending transcript events were preserved")
+				}
+				return 0
+			}
+		}
+	}
 	antigravityCurrentConfigRoot := ""
 	if runtime == transcriptcapture.RuntimeAntigravity {
 		configRoot, rootErr := antigravityOperationLockRoot()
@@ -1492,6 +1717,26 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		currentRoot, rootErr := currentDSHConfigRoot()
+		if rootErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness config root: %v\n", rootErr)
+			return 1
+		}
+		if currentRoot != cfg.RuntimeConfigRoot {
+			fmt.Fprintf(os.Stderr, "witself: DSH_HOME changed from installed %s to %s; restore the installed value before uninstalling\n", cfg.RuntimeConfigRoot, currentRoot)
+			return 1
+		}
+		currentEnvironment, environmentErr := captureDSHMCPEnvironment()
+		if environmentErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: resolve DeepSeek Harness MCP environment: %v\n", environmentErr)
+			return 1
+		}
+		if !equalDSHEnvironment(currentEnvironment, cfg.MCPEnvironment) {
+			fmt.Fprintln(os.Stderr, "witself: WITSELF_HOME changed from the installed DeepSeek Harness binding; restore it before uninstalling")
+			return 1
+		}
+	}
 	witselfExecutable := ""
 	var genericPersistedConfig *transcriptcapture.Config
 	if isGenericProviderRuntime(runtime) {
@@ -1549,6 +1794,7 @@ func uninstallCmd(args []string) int {
 	var antigravityJournal *antigravityTransactionJournal
 	var openClawJournal *openClawTransactionJournal
 	var copilotJournal *copilotTransactionJournal
+	var dshJournal *dshTransactionJournal
 	var genericProviderJournal *genericProviderTransactionJournal
 	if cfgErr == nil {
 		previous := cfg
@@ -1586,6 +1832,11 @@ func uninstallCmd(args []string) int {
 		// whichever binary or profile happens to win the current shell lookup.
 		runtimeCLI = cfg.RuntimeCLICommand
 		runtimeCLIErr = validateCopilotCLISelection(runtimeCLI, cfg)
+	case transcriptcapture.RuntimeDSH:
+		// The home-level patch file is an exact-owned file, so removal needs no
+		// provider CLI. Keep the persisted path as part of the durable binding and
+		// let uninstall succeed even if dsh itself was removed.
+		runtimeCLI = cfg.RuntimeCLICommand
 	case transcriptcapture.RuntimeCodex,
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
@@ -1594,7 +1845,8 @@ func uninstallCmd(args []string) int {
 	default:
 		runtimeCLI, runtimeCLIErr = findRuntimeCLI(runtime)
 	}
-	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity && runtimeCLIErr != nil {
+	if runtime != transcriptcapture.RuntimeCursor && runtime != transcriptcapture.RuntimeAntigravity &&
+		runtime != transcriptcapture.RuntimeDSH && runtimeCLIErr != nil {
 		// Non-Cursor MCP registrations are owned by the runtime CLI. Preserve all
 		// local state so a later retry can remove the complete integration.
 		fmt.Fprintf(os.Stderr, "witself: cannot remove MCP registration: %v\n", runtimeCLIErr)
@@ -1620,11 +1872,12 @@ func uninstallCmd(args []string) int {
 		}
 		genericProviderJournal = &journal
 	}
-	// OpenClaw and Copilot retain their static policy until the exact
-	// credential-bound MCP registration is gone. Other runtimes retain the
-	// existing routing-first teardown, whose snapshot supports rollback.
+	// OpenClaw, Copilot, and DeepSeek Harness retain their static policy until
+	// the exact credential-bound MCP registration is gone. Other runtimes retain
+	// the existing routing-first teardown, whose snapshot supports rollback.
 	var memoryRouting runtimeMemoryRoutingSnapshot
-	if runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot {
+	if runtime != transcriptcapture.RuntimeOpenClaw && runtime != transcriptcapture.RuntimeCopilot &&
+		runtime != transcriptcapture.RuntimeDSH {
 		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -1650,7 +1903,8 @@ func uninstallCmd(args []string) int {
 		routingHandled := false
 		mcpRestoreAllowed := true
 		rollbackComplete := true
-		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot) && memoryRouting.managed {
+		if (runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH) && memoryRouting.managed {
 			routingHandled = true
 			if rollbackErr := memoryRouting.restore(); rollbackErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore %s memory routing instructions: %v\n", memoryRouting.displayName, rollbackErr)
@@ -1663,6 +1917,13 @@ func uninstallCmd(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: warning: restore Cursor CLI permissions: %v\n", rollbackErr)
 				rollbackComplete = false
 			}
+		}
+		if runtime == transcriptcapture.RuntimeDSH && hooksTouched && previousBinding != nil {
+			if rollbackErr := restoreRuntimeHooksOwned(nil, previousBinding); rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: restore runtime hooks: %v; preserving integration recovery state\n", rollbackErr)
+				return
+			}
+			hooksTouched = false
 		}
 		if mcpTouched && mcpRestoreAllowed && previousBinding != nil && (runtimeCLIErr == nil || runtime == transcriptcapture.RuntimeCursor) {
 			if rollbackErr := restoreRuntimeMCPBinding(runtime, runtimeCLI, witselfExecutable, previousBinding, previousBinding); rollbackErr != nil {
@@ -1687,6 +1948,11 @@ func uninstallCmd(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: warning: clear failed GitHub Copilot transaction: %v\n", clearErr)
 			}
 		}
+		if dshJournal != nil && rollbackComplete {
+			if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "witself: warning: clear failed DeepSeek Harness transaction: %v\n", clearErr)
+			}
+		}
 		if openClawJournal != nil && rollbackComplete {
 			configRoot, rootErr := openClawTransactionRootFromConfig(cfg)
 			if rootErr != nil {
@@ -1701,7 +1967,10 @@ func uninstallCmd(args []string) int {
 			}
 		}
 	}
-	hooksTouched, err := removeRuntimeHooksOwned(cfg)
+	hooksTouched := false
+	if runtime != transcriptcapture.RuntimeDSH {
+		hooksTouched, err = removeRuntimeHooksOwned(cfg)
+	}
 	if err != nil {
 		rollbackUninstall(hooksTouched, false)
 		fmt.Fprintf(os.Stderr, "witself: remove runtime hooks: %v\n", err)
@@ -1735,6 +2004,16 @@ func uninstallCmd(args []string) int {
 			return 1
 		}
 		copilotJournal = &journal
+	}
+	if runtime == transcriptcapture.RuntimeDSH {
+		previous := cfg
+		journal, journalErr := beginDSHTransaction(dshTransactionUninstall, &previous, nil)
+		if journalErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: begin DeepSeek Harness transaction: %v\n", journalErr)
+			return 1
+		}
+		dshJournal = &journal
 	}
 	mcpMutationTouched := false
 	if runtime == transcriptcapture.RuntimeAntigravity {
@@ -1818,6 +2097,46 @@ func uninstallCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 			return 1
 		}
+	} else if runtime == transcriptcapture.RuntimeDSH {
+		if dshJournal == nil {
+			fmt.Fprintln(os.Stderr, "witself: DeepSeek Harness transaction journal is missing before patch removal")
+			return 1
+		}
+		if err := validateDSHTransactionProviderBefore(*dshJournal); err != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", err)
+			return 1
+		}
+		removalSnapshot, inspectErr := readDSHPatchSnapshot(cfg.RuntimeMCPConfigPath)
+		if inspectErr != nil {
+			rollbackUninstall(hooksTouched, false)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", inspectErr)
+			return 1
+		}
+		mcpTouched, removeErr := removeDSHPatchBlockWithSnapshot(cfg, &removalSnapshot)
+		if removeErr != nil {
+			if providerMutationUncertain(removeErr) {
+				fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v; preserving DeepSeek Harness routing and transaction journal\n", removeErr)
+				return 1
+			}
+			rollbackUninstall(hooksTouched, mcpTouched)
+			fmt.Fprintf(os.Stderr, "witself: unregister MCP: %v\n", removeErr)
+			return 1
+		}
+		mcpMutationTouched = mcpTouched
+		hooksTouched, err = removeRuntimeHooksOwned(cfg)
+		if err != nil {
+			// Ownership drift cannot authorize reactivating a private bridge.
+			fmt.Fprintf(os.Stderr, "witself: remove runtime hooks: %v; preserving DeepSeek Harness transaction journal\n", err)
+			return 1
+		}
+		memoryRouting, err = removeRuntimeMemoryRoutingInstructionsAt(runtime, cfg.RuntimeWorkspace)
+		if err != nil {
+			// Preserve the integration record when exact policy removal cannot be
+			// proven. MCP stays absent so no credential-bound tools lack policy.
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
 	} else if isGenericProviderRuntime(runtime) {
 		if err := unregisterGenericMCP(runtimeCLI, cfg); err != nil {
 			rollbackUninstall(true, true)
@@ -1843,7 +2162,8 @@ func uninstallCmd(args []string) int {
 		cursorPermissionTouched, err = cursorPermissionSnapshot.removeWitselfMCPPermission()
 		if err != nil {
 			mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
-			if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+			if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+				runtime == transcriptcapture.RuntimeDSH {
 				mcpTouched = mcpMutationTouched
 			}
 			rollbackUninstall(hooksTouched, mcpTouched)
@@ -1853,7 +2173,8 @@ func uninstallCmd(args []string) int {
 	}
 	if err := removeRuntimeIntegrationConfig(runtime); err != nil {
 		mcpTouched := runtime == transcriptcapture.RuntimeCursor || runtimeCLIErr == nil
-		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot {
+		if runtime == transcriptcapture.RuntimeOpenClaw || runtime == transcriptcapture.RuntimeCopilot ||
+			runtime == transcriptcapture.RuntimeDSH {
 			mcpTouched = mcpMutationTouched
 		}
 		rollbackUninstall(hooksTouched, mcpTouched)
@@ -1883,6 +2204,16 @@ func uninstallCmd(args []string) int {
 		}
 		if clearErr := clearCopilotTransaction(cfg.RuntimeConfigRoot, *copilotJournal); clearErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize GitHub Copilot transaction: %v\n", clearErr)
+			return 1
+		}
+	}
+	if runtime == transcriptcapture.RuntimeDSH && dshJournal != nil {
+		if recoveryErr := recoverDSHUninstallTransaction(*dshJournal); recoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", recoveryErr)
+			return 1
+		}
+		if clearErr := clearDSHTransaction(cfg.RuntimeConfigRoot, *dshJournal); clearErr != nil {
+			fmt.Fprintf(os.Stderr, "witself: finalize DeepSeek Harness transaction: %v\n", clearErr)
 			return 1
 		}
 	}
@@ -1935,6 +2266,7 @@ func runtimeTargets(value string) ([]string, error) {
 }
 
 func transcriptHook(args []string) int {
+	started := time.Now()
 	// Curator processes intentionally inherit provider/runtime credentials so
 	// they can run local inference, but their own hooks must not feed the
 	// resulting synthesis conversation back into the transcript ledger. That
@@ -1944,7 +2276,7 @@ func transcriptHook(args []string) int {
 	}
 	fs := flag.NewFlagSet("transcript hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
+	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor|dsh")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
@@ -1954,6 +2286,11 @@ func transcriptHook(args []string) int {
 		return 0
 	}
 	if foreignGrokCompatibilityHook(*runtime, os.Getenv(grokHookEventEnv)) {
+		return 0
+	}
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
+	if err != nil || len(raw) > maxHookInputBytes {
+		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
 		return 0
 	}
 	if strings.TrimSpace(*witselfHome) != "" {
@@ -1979,6 +2316,7 @@ func transcriptHook(args []string) int {
 		}()
 		installed, loadErr := transcriptcapture.LoadConfig(*runtime)
 		if loadErr != nil {
+			recordHydrationSetupFailure(*runtime, raw, *account, *realm, *agent, *location, started)
 			fmt.Fprintf(os.Stderr, "witself capture: verify WITSELF_HOME binding: %v\n", loadErr)
 			return 0
 		}
@@ -1987,20 +2325,24 @@ func transcriptHook(args []string) int {
 			return 0
 		}
 	}
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxHookInputBytes+1))
-	if err != nil || len(raw) > maxHookInputBytes {
-		fmt.Fprintln(os.Stderr, "witself capture: hook input could not be queued")
-		return 0
-	}
 	event, err := transcriptcapture.EnqueueHookForBinding(*runtime, *account, *realm, *agent, *location, raw)
 	if errors.Is(err, transcriptcapture.ErrEphemeralSessionSkipped) {
 		return 0
 	}
 	if err != nil {
+		recordHydrationSetupFailure(*runtime, raw, *account, *realm, *agent, *location, started)
 		fmt.Fprintf(os.Stderr, "witself capture: %v\n", err)
 		return 0
 	}
 	if os.Getenv("WITSELF_CAPTURE_NO_FLUSH") == "" {
+		if (event.HookEvent == "Stop" && event.Runtime != transcriptcapture.RuntimeDSH) || event.HookEvent == "SessionEnd" {
+			// A one-shot runtime can exit immediately after its terminal hook.
+			// Deliver the common case before returning, then leave any retry or
+			// longer drain to a flusher independent of the runtime's lifetime.
+			_ = runHookForegroundFlush(*runtime)
+		}
+		// dsh appends turn/end only after its synchronous Stop returns. Keep
+		// that event durable and let the detached flusher wait for the fence.
 		if err := startBackgroundFlush(*runtime); err != nil {
 			fmt.Fprintf(os.Stderr, "witself capture: queued locally; background flush did not start: %v\n", err)
 		}
@@ -2019,9 +2361,47 @@ func transcriptHook(args []string) int {
 	return 0
 }
 
+// recordHydrationSetupFailure covers failures before capture can return a
+// normalized event. Only native automatic lifecycle names are eligible; raw
+// input and binding selectors never enter the observation.
+func recordHydrationSetupFailure(runtime string, raw []byte, account, realm, agent, location string, started time.Time) {
+	runtimeName, err := transcriptcapture.NormalizeRuntime(runtime)
+	if err != nil {
+		return
+	}
+	var input struct {
+		HookEventName  string `json:"hook_event_name"`
+		SessionID      string `json:"session_id"`
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if json.Unmarshal(raw, &input) != nil || input.SessionID == "" ||
+		(runtimeName == transcriptcapture.RuntimeCodex && strings.TrimSpace(input.TranscriptPath) == "") {
+		return
+	}
+	capability := memoryhydration.CapabilityFor(runtimeName)
+	eligible := (input.HookEventName == memoryhydration.EventSessionStart && capability.SessionHydration.Automatic) ||
+		(input.HookEventName == memoryhydration.EventUserPromptSubmit && capability.TaskRecall.Automatic)
+	if !eligible {
+		return
+	}
+	outcome := memoryhydration.OutcomeConfigError
+	if cfg, err := transcriptcapture.LoadConfig(runtimeName); err == nil {
+		for _, pair := range [][2]string{{account, cfg.Account}, {realm, cfg.Realm}, {agent, cfg.Agent}, {location, cfg.Location.Name}} {
+			if expected := strings.TrimSpace(pair[0]); expected != "" && expected != pair[1] {
+				outcome = memoryhydration.OutcomeBindingMismatch
+				break
+			}
+		}
+	}
+	_ = memoryhydration.AppendObservation(runtimeName, memoryhydration.NewObservation(memoryhydration.Result{
+		Outcome: outcome, Elapsed: time.Since(started),
+	}))
+}
+
 type installedHydrationSource struct {
-	cfg  transcriptcapture.Config
-	conn *agentConnection
+	cfg     transcriptcapture.Config
+	conn    *agentConnection
+	surface string
 }
 
 func (s *installedHydrationSource) connect(ctx context.Context) (agentConnection, error) {
@@ -2041,6 +2421,7 @@ func (s *installedHydrationSource) Self(ctx context.Context, opts client.SelfOpt
 	if err != nil {
 		return client.SelfDigest{}, err
 	}
+	opts.HydrationSurface = s.surface
 	return client.GetSelf(ctx, conn.Endpoint, conn.Token, opts)
 }
 
@@ -2059,21 +2440,83 @@ func (s *installedHydrationSource) Recall(ctx context.Context, in client.MemoryR
 // automaticHydrationHook uses the exact installed identity and emits context
 // only for runtime/event pairs with a documented model-visible hook channel.
 // Execute owns the short deadline and the renderer's byte/sensitivity bounds.
-func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) ([]byte, error) {
+func automaticHydrationHook(ctx context.Context, event transcriptcapture.Event) (output []byte, err error) {
+	started := time.Now()
+	capability := memoryhydration.CapabilityFor(event.Runtime)
+	eligible := (event.HookEvent == memoryhydration.EventSessionStart && capability.SessionHydration.Automatic) ||
+		(event.HookEvent == memoryhydration.EventUserPromptSubmit && capability.TaskRecall.Automatic)
+	result := memoryhydration.Result{Outcome: memoryhydration.OutcomeConfigError}
+	defer func() {
+		if eligible {
+			result.Elapsed = time.Since(started)
+			// Observation persistence is best effort and must never interfere
+			// with output delivery or the hook's fail-open exit contract.
+			_ = memoryhydration.AppendObservation(event.Runtime, memoryhydration.NewObservation(result))
+		}
+	}()
 	cfg, err := transcriptcapture.LoadConfig(event.Runtime)
 	if err != nil {
 		return nil, err
 	}
-	result, err := memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
+	surface := "session"
+	if event.HookEvent == memoryhydration.EventUserPromptSubmit {
+		surface = "prompt"
+	}
+	result, err = memoryhydration.Execute(ctx, memoryhydration.Config{}, memoryhydration.Binding{
 		AccountID: cfg.AccountID, RealmID: cfg.RealmID, RealmName: cfg.Realm,
 		AgentID: cfg.AgentID, AgentName: cfg.AgentName,
 	}, memoryhydration.Request{
 		Runtime: event.Runtime, Event: event.HookEvent, Prompt: event.Body,
-	}, &installedHydrationSource{cfg: cfg})
+	}, &installedHydrationSource{cfg: cfg, surface: surface})
 	if err != nil || !result.Injected {
 		return nil, err
 	}
-	return memoryhydration.HookOutput(event.Runtime, event.HookEvent, result.Context)
+	return hydrationHookOutput(event.Runtime, event.HookEvent, &result)
+}
+
+func hydrationHookOutput(runtime, event string, result *memoryhydration.Result) ([]byte, error) {
+	output, err := memoryhydration.HookOutput(runtime, event, result.Context)
+	if err != nil {
+		result.Outcome = memoryhydration.OutcomeOutputRejected
+		result.Injected = false
+	}
+	return output, err
+}
+
+func integrationCmd(args []string) int {
+	if len(args) == 0 || args[0] != "status" {
+		fmt.Fprintln(os.Stderr, "usage: witself integration status --runtime RUNTIME")
+		if commandHelpRequested(args) {
+			return 0
+		}
+		return 2
+	}
+	fs := flag.NewFlagSet("integration status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself integration status --runtime RUNTIME")
+	runtime := fs.String("runtime", "", "installed runtime name")
+	if parsed, code := parseCommandFlags(fs, args[1:]); !parsed {
+		return code
+	}
+	runtimeName, err := transcriptcapture.NormalizeRuntime(*runtime)
+	if err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself integration status --runtime RUNTIME")
+		return 2
+	}
+	now := time.Now().UTC()
+	observations, err := memoryhydration.ReadObservations(runtimeName, now.Add(-24*time.Hour), now)
+	if err != nil {
+		fmt.Println("memory hydration: local ledger unavailable")
+		return 0
+	}
+	summary := memoryhydration.SummarizeObservations(observations)
+	if summary.Attempts == 0 {
+		fmt.Println("memory hydration: no recent hydration (last 24h)")
+		return 0
+	}
+	fmt.Printf("memory hydration (last 24h): attempts=%d injected=%d failures=%d p95_latency_ms=%.1f elided_count=%d\n",
+		summary.Attempts, summary.Injected, summary.Failures, summary.P95LatencyMS, summary.ElidedCount)
+	return 0
 }
 
 func transcriptFlush(args []string) int {
@@ -2142,7 +2585,7 @@ func transcriptFlush(args []string) int {
 		}
 		deferred := countBlockedCaptureEvents(remaining, nil, heldPaths)
 		if quarantined > 0 || deferred > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined)
+			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined, remaining)
 		}
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		if deferred > 0 {
@@ -2154,7 +2597,7 @@ func transcriptFlush(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		if quarantined > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined)
+			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined, nil)
 			writeSkippedEphemeralSessionSummary(runtimeName)
 		}
 		return 1
@@ -2173,7 +2616,26 @@ func transcriptFlush(args []string) int {
 	var conn agentConnection
 	connected := false
 	flushed := 0
-	for len(ready) > 0 {
+	for {
+		if len(ready) == 0 {
+			if !detached || runtimeName != transcriptcapture.RuntimeDSH {
+				break
+			}
+			var retried bool
+			pending, retried, err = waitDSHNativeFlushRetry(ctx, blockedTranscripts, heldPaths)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself: retry native capture completion: %v\n", err)
+				return 1
+			}
+			if !retried {
+				break
+			}
+			ready, prepareErr = prepareTranscriptFlushEvents(pending, cfg, blockedTranscripts, heldPaths)
+			if deferredErr == nil && prepareErr != nil {
+				deferredErr = prepareErr
+			}
+			continue
+		}
 		if !connected {
 			conn, err = connectAgent(ctx, cfg.Account, cfg.Realm, cfg.Agent, cfg.Endpoint, cfg.TokenFile)
 			if err != nil {
@@ -2366,11 +2828,11 @@ func transcriptFlush(args []string) int {
 		if deferredErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
 		}
-		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined)
+		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined, remaining)
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		return 1
 	}
-	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined)
+	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined, remaining)
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
 }
@@ -2455,10 +2917,15 @@ func partitionEphemeralCodex(
 	return remaining, len(moved)
 }
 
-func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined int) {
+func writeTranscriptFlushSummary(
+	runtime string,
+	flushed, deferred, quarantined int,
+	remaining []transcriptcapture.PendingEvent,
+) {
 	if deferred > 0 {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)",
 			flushed, runtime, deferred)
+		writeDeferredBuckets(runtime, deferred, remaining)
 	} else {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)", flushed, runtime)
 	}
@@ -2466,6 +2933,61 @@ func writeTranscriptFlushSummary(runtime string, flushed, deferred, quarantined 
 		fmt.Fprintf(os.Stderr, "; quarantined %d ephemeral event(s)", quarantined)
 	}
 	fmt.Fprintln(os.Stderr)
+}
+
+// writeDeferredBuckets shows the backlog's shape, not its content. Events the
+// upload gate holds are attributed to a missing terminal, an orphaned run, or a
+// session with no local state; anything deferred for another reason, such as a
+// server rejection, is reported as the remainder.
+func writeDeferredBuckets(runtime string, deferred int, remaining []transcriptcapture.PendingEvent) {
+	summary, err := transcriptcapture.SummarizeDeferred(runtime, remaining)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, " (%s %d, %s %d, %s %d",
+		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
+		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
+		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	if other := deferred - summary.Total(); other > 0 {
+		fmt.Fprintf(os.Stderr, ", other %d", other)
+	}
+	fmt.Fprint(os.Stderr, ")")
+}
+
+const transcriptStatusUsage = "usage: witself transcript status --runtime RUNTIME"
+
+// transcriptStatus reports the local capture backlog for one runtime, using the
+// same value-free buckets that a flush prints when it defers work.
+func transcriptStatus(args []string) int {
+	fs := flag.NewFlagSet("transcript status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, transcriptStatusUsage)
+	runtime := fs.String("runtime", "", "capture runtime (codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot)")
+	if parsed, code := parseCommandFlags(fs, args); !parsed {
+		return code
+	}
+	runtimeName, err := transcriptcapture.NormalizeRuntime(*runtime)
+	if err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, transcriptStatusUsage)
+		return 2
+	}
+	pending, err := transcriptcapture.Pending(runtimeName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
+		return 1
+	}
+	summary, err := transcriptcapture.SummarizeDeferred(runtimeName, pending)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read capture state: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%s capture: %d queued event(s); deferred %d (%s %d, %s %d, %s %d)\n",
+		runtimeName, len(pending), summary.Total(),
+		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
+		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
+		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	writeSkippedEphemeralSessionSummary(runtimeName)
+	return 0
 }
 
 func writeSkippedEphemeralSessionSummary(runtime string) {
@@ -2567,6 +3089,8 @@ func prepareTranscriptFlushEvents(
 		if !readiness.UploadReady(pendingEvent) {
 			// A prompt and its turn stay local until a terminal fence reveals
 			// whether a later sealed tool requires synchronous suppression.
+			// Durable completion keeps partially rejected turns ready after the
+			// terminal file is acknowledged, but holds stale unredacted snapshots.
 			// A later hook creates a new outbox path and reopens this retryable
 			// transcript through the normal background-flush logic.
 			blocked[transcriptID] = nil
@@ -2590,31 +3114,7 @@ func prepareTranscriptFlushEvents(
 }
 
 func captureEventBindingError(event transcriptcapture.Event, cfg transcriptcapture.Config) error {
-	legacyEventContext := event.AccountID == "" && event.RealmID == "" &&
-		event.AgentID != "" && event.AgentID == cfg.AgentID &&
-		event.Location.ID != "" && event.Location.ID == cfg.Location.ID
-	accountMatches := stableCaptureIdentityMatches(event.AccountID, cfg.AccountID, event.Account, cfg.Account, legacyEventContext)
-	realmMatches := stableCaptureIdentityMatches(event.RealmID, cfg.RealmID, event.Realm, cfg.Realm, legacyEventContext)
-	agentMatches := stableCaptureIdentityMatches(event.AgentID, cfg.AgentID,
-		event.Agent+"\x00"+event.AgentName, cfg.Agent+"\x00"+cfg.AgentName, false)
-	if event.Runtime != cfg.Runtime || !accountMatches || !realmMatches || !agentMatches ||
-		event.Location.ID != cfg.Location.ID {
-		return errors.New("queued transcript identity does not match the installed runtime binding")
-	}
-	return nil
-}
-
-func stableCaptureIdentityMatches(eventID, configID, eventName, configName string, allowLegacyEvent bool) bool {
-	if eventID != "" && configID != "" {
-		return eventID == configID
-	}
-	if eventID == "" && configID == "" {
-		return eventName == configName
-	}
-	if eventID == "" && configID != "" && allowLegacyEvent {
-		return eventName == configName
-	}
-	return false
+	return transcriptcapture.EventBindingError(event, cfg)
 }
 
 func hasUnblockedCaptureEvent(pending []transcriptcapture.PendingEvent, blocked, held map[string]error) bool {
@@ -2829,6 +3329,58 @@ func reopenRetryableBlockedTranscripts(
 	rememberCapturePaths(pending, seen)
 }
 
+// waitDSHNativeFlushRetry reopens only unfinished dsh native Stops whose
+// durable retry schedule is due. dsh cannot publish turn/end until every
+// synchronous Stop hook returns, so the detached process must make progress
+// without relying on a subsequent hook or a new outbox path. The finalizer's
+// persisted deadline bounds retries across process restarts.
+func waitDSHNativeFlushRetry(
+	ctx context.Context,
+	blocked, held map[string]error,
+) ([]transcriptcapture.PendingEvent, bool, error) {
+	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeDSH)
+	if err != nil {
+		return nil, false, err
+	}
+	var next time.Time
+	for _, candidate := range pending {
+		if _, exists := held[candidate.Path]; exists {
+			continue
+		}
+		reason, exists := blocked[candidate.Event.TranscriptExternalID()]
+		if !exists || reason != nil {
+			continue
+		}
+		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && (next.IsZero() || at.Before(next)) {
+			next = at
+		}
+	}
+	if next.IsZero() {
+		return pending, false, nil
+	}
+	timer := time.NewTimer(max(time.Until(next), 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return pending, false, ctx.Err()
+	case <-timer.C:
+	}
+	now := time.Now()
+	for _, candidate := range pending {
+		if _, exists := held[candidate.Path]; exists {
+			continue
+		}
+		transcriptID := candidate.Event.TranscriptExternalID()
+		if reason, exists := blocked[transcriptID]; !exists || reason != nil {
+			continue
+		}
+		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && !at.After(now) {
+			delete(blocked, transcriptID)
+		}
+	}
+	return pending, true, nil
+}
+
 func transcriptTail(args []string) int {
 	transcriptID := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -2886,15 +3438,34 @@ func transcriptTail(args []string) int {
 	return 0
 }
 
+// runHookForegroundFlush bounds the entire optional delivery attempt, including
+// lock acquisition and native transcript finalization. Running the existing
+// flush command keeps its delivery and redaction rules identical; an explicit
+// manual foreground flush retains its full, unbounded drain semantics.
+func runHookForegroundFlush(runtime string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), hookForegroundFlushMaxDuration)
+	defer cancel()
+	executable, err := currentExecutablePath()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, executable, "transcript", "flush", "--runtime", runtime)
+	// Nil standard streams connect directly to os.DevNull, with no parent-owned
+	// pipes or copy goroutines. Clear an inherited detached flag so this attempt
+	// uses the normal foreground drain while its outer deadline bounds it.
+	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=")
+	return cmd.Run()
+}
+
 func startBackgroundFlush(runtime string) error {
 	executable, err := currentExecutablePath()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(executable, "transcript", "flush", "--runtime", runtime)
-	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	// Nil standard streams use os.DevNull directly. io.Discard would create
+	// pipes whose readers disappear as soon as the hook process exits.
+	detachCaptureFlush(cmd)
 	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=1")
 	if err := cmd.Start(); err != nil {
 		return err
@@ -2980,7 +3551,8 @@ func supportsTranscriptHooksForPlatform(runtime, platform string) bool {
 		return true
 	case transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
-		transcriptcapture.RuntimeCursor:
+		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeDSH:
 		// Codex has a dedicated commandWindows contract. The other providers'
 		// hook command fields currently use POSIX shell quoting, so advertise
 		// their hook surface only where that execution contract is tested.
@@ -3123,6 +3695,15 @@ func findRuntimeCLIWithEnvironment(runtime string, environment map[string]string
 			candidates = append(candidates, path)
 		}
 		probeArgs = []string{"mcp", "add", "--help"}
+	case transcriptcapture.RuntimeDSH:
+		candidates = append(candidates, strings.TrimSpace(os.Getenv("DSH_CLI_PATH")))
+		if path, err := exec.LookPath("dsh"); err == nil {
+			candidates = append(candidates, path)
+		}
+		// dsh registers MCP servers through its profile patch files, not a `mcp
+		// add` subcommand, so the read-only version contract is the only probe
+		// that does not boot a profile or create a session.
+		probeArgs = []string{"--version"}
 	}
 	seen := map[string]bool{}
 	foundExistingCandidate := false

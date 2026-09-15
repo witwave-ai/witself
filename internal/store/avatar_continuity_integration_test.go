@@ -3,19 +3,16 @@ package store
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAvatarSameStyleSelfContinuityOperatorOverrideAndStyleMigrationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

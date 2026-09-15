@@ -28,53 +28,24 @@ updates:
           - patch
 
   - package-ecosystem: npm
-    directory: "/infra/cloudflare/agent-email"
+    directories:
+      - "/infra/cloudflare/agent-email"
+      - "/infra/cloudflare/agent-email-send"
+      - "/infra/cloudflare/control-plane"
+      - "/infra/cloudflare/support-email-intake"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      wrangler:
+        group-by: dependency-name
+        patterns:
+          - wrangler
       minor-and-patch:
         patterns:
           - "*"
-        update-types:
-          - minor
-          - patch
-
-  - package-ecosystem: npm
-    directory: "/infra/cloudflare/agent-email-send"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-
-  - package-ecosystem: npm
-    directory: "/infra/cloudflare/control-plane"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-
-  - package-ecosystem: npm
-    directory: "/infra/cloudflare/support-email-intake"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      minor-and-patch:
-        patterns:
-          - "*"
+        exclude-patterns:
+          - wrangler
         update-types:
           - minor
           - patch

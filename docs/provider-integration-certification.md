@@ -199,20 +199,128 @@ model-tested only after its own real-client evidence passes. Cursor on Windows
 remains WSL-only unless the vendor publishes a supported native Agent CLI
 contract.
 
-## Planned release evidence
+## Retained contract evidence
 
-Before any cell is advertised as model-tested, the release certification job
-will emit one value-free JSON record per cell containing:
+The CI and release workflows run the existing provider fixtures through
+`tools/provider-contract-evidence`. Each native job emits a sanitized JSON
+record and retains it for 90 days as
+`provider-contract-cell-<target>-<run-id>-<run-attempt>`. The required aggregate
+job accepts exactly five target reports from the same repository, workflow,
+source ref, full commit, run ID and run attempt. Its artifact is
+`provider-contract-matrix-<run-id>-<run-attempt>` and its job summary shows the
+derived provider/platform matrix.
 
-- Witself version and commit;
-- runtime name and version;
-- operating system and architecture;
-- installation method;
-- contract, client, and model test results;
-- start and completion timestamps; and
-- a bounded failure category when a gate does not pass.
+The report preserves the three source-Codex, source-portable and
+installed-snapshot phases: 75 expected top-level test outcomes, comprising
+73 passes and two explicit native-Windows Cursor exceptions. The resulting
+35 provider/platform cells contain 34 applicable cells. Missing tests,
+unexpected skips, failures, malformed reports and mixed attempts fail the
+gate. Rerun the **entire workflow** after a failed attempt; rerunning only
+failed jobs cannot reuse earlier successful cells as evidence for the new
+attempt. A setup failure may leave no report; missing evidence fails closed.
 
-The record contains no credentials, tokens, prompts, model responses, home
-paths, or configuration contents. Generating these records and the public
-support matrix is a release-gate task; the initial pull-request harness does
-not claim to emit them yet.
+Each record includes the actual tested checkout commit and native target,
+timestamps, bounded failure categories, snapshot archive/version/checksum and
+installed-binary hash/commit identity. A pull-request checkout may be GitHub's
+synthetic merge commit, which differs from the author's branch head. Source
+phases and installed-snapshot phases remain separate. Provider executables
+are fixtures: vendor versions are unobserved, and real-client and model
+acceptance remain `not_run`. No credentials, tokens, prompts, model responses,
+home paths, configuration contents or raw test output enter these artifacts.
+
+A successful **tagged release** includes the validated aggregate as
+`provider-contract-evidence.json`. Its digest appears in the signed
+`checksums.txt`: the release contains 25 archives, 25 archive SBOMs, this JSON
+and four checksum/signing files (55 assets, 51 checksummed payloads). The
+existing 25 archive provenance attestations continue to cover archives only;
+the JSON is authenticated through the checksum signature. Both local and
+published artifact verification require its exact publishing tag, full source
+commit, repository and workflow run/attempt identity.
+
+The publishing tag is recorded separately from the provider-tested snapshot
+version. The final public archives are built separately: this evidence does
+**not** claim that their bytes ran through the provider fixtures. Archive
+snapshot builds, including Homebrew/control-plane verification and manual
+release dispatch, omit the aggregate JSON from their checksum/publication
+configuration. Manual dispatch still retains the validated Actions aggregate.
+
+Real-vendor/model certification, scheduled execution with regression alerting,
+and verification of final published binaries remain separate release-gate
+work. This contract report alone does not establish any of those claims.
+
+### Published fixture result: v0.0.278
+
+[Release v0.0.278](https://github.com/witwave-ai/witself/releases/tag/v0.0.278)
+publishes [provider-contract-evidence.json](https://github.com/witwave-ai/witself/releases/download/v0.0.278/provider-contract-evidence.json)
+with the following recorded identity:
+
+| Field | Recorded value |
+| --- | --- |
+| Schema | `witself.provider-contract.matrix.v1` |
+| Repository | `witwave-ai/witself` |
+| Source ref | `refs/tags/v0.0.278` |
+| Tested source commit | [`0f10ad899732d91226c872e73581b7ece8963b50`](https://github.com/witwave-ai/witself/commit/0f10ad899732d91226c872e73581b7ece8963b50) |
+| Workflow / run / attempt | [`release` / `34092395686` / `1`](https://github.com/witwave-ai/witself/actions/runs/34092395686/attempts/1) |
+| Report generated at | `2026-09-07T06:56:35.065136719Z` |
+| Report SHA-256 | `fc3852459ac0acc22286761ae5face262fac391644f5a6605ee78d41d7ce9470` |
+
+That exact report digest is listed in the release's signed
+[checksums.txt](https://github.com/witwave-ai/witself/releases/download/v0.0.278/checksums.txt).
+The checksum signature authenticates the report bytes; the archive provenance
+attestations cover the archives only. Signing does not certify vendor clients
+or model behavior.
+
+The five native targets recorded 75 expected test outcomes: 73 `passed` and
+two `not_applicable` native-Windows Cursor outcomes. The table below reproduces
+all 35 provider/platform rows, including each `contract_result`. Source,
+installed-snapshot and contract results are `passed` for all 34 applicable
+rows. Cursor on native Windows is `not_applicable`, with reason
+`cursor_native_windows_unsupported`; this result does not add a tested WSL
+target. Every client and model result is `not_run`.
+
+Provider executables were fixtures and vendor versions were `unobserved`.
+Installed-snapshot results concern the recorded GoReleaser snapshots, not the
+separately built final published archive bytes. Every native cell records
+`published_bytes_tested: false`. This is evidence for the release commit above;
+this documentation update does not record a new provider execution.
+
+| Provider | Target | Source | Installed snapshot | Contract | Client | Model |
+| --- | --- | --- | --- | --- | --- | --- |
+| codex | linux-x64 | passed | passed | passed | not_run | not_run |
+| claude-code | linux-x64 | passed | passed | passed | not_run | not_run |
+| grok-build | linux-x64 | passed | passed | passed | not_run | not_run |
+| cursor | linux-x64 | passed | passed | passed | not_run | not_run |
+| openclaw | linux-x64 | passed | passed | passed | not_run | not_run |
+| antigravity | linux-x64 | passed | passed | passed | not_run | not_run |
+| copilot | linux-x64 | passed | passed | passed | not_run | not_run |
+| codex | linux-arm64 | passed | passed | passed | not_run | not_run |
+| claude-code | linux-arm64 | passed | passed | passed | not_run | not_run |
+| grok-build | linux-arm64 | passed | passed | passed | not_run | not_run |
+| cursor | linux-arm64 | passed | passed | passed | not_run | not_run |
+| openclaw | linux-arm64 | passed | passed | passed | not_run | not_run |
+| antigravity | linux-arm64 | passed | passed | passed | not_run | not_run |
+| copilot | linux-arm64 | passed | passed | passed | not_run | not_run |
+| codex | macos-intel | passed | passed | passed | not_run | not_run |
+| claude-code | macos-intel | passed | passed | passed | not_run | not_run |
+| grok-build | macos-intel | passed | passed | passed | not_run | not_run |
+| cursor | macos-intel | passed | passed | passed | not_run | not_run |
+| openclaw | macos-intel | passed | passed | passed | not_run | not_run |
+| antigravity | macos-intel | passed | passed | passed | not_run | not_run |
+| copilot | macos-intel | passed | passed | passed | not_run | not_run |
+| codex | macos-arm64 | passed | passed | passed | not_run | not_run |
+| claude-code | macos-arm64 | passed | passed | passed | not_run | not_run |
+| grok-build | macos-arm64 | passed | passed | passed | not_run | not_run |
+| cursor | macos-arm64 | passed | passed | passed | not_run | not_run |
+| openclaw | macos-arm64 | passed | passed | passed | not_run | not_run |
+| antigravity | macos-arm64 | passed | passed | passed | not_run | not_run |
+| copilot | macos-arm64 | passed | passed | passed | not_run | not_run |
+| codex | windows-x64 | passed | passed | passed | not_run | not_run |
+| claude-code | windows-x64 | passed | passed | passed | not_run | not_run |
+| grok-build | windows-x64 | passed | passed | passed | not_run | not_run |
+| cursor | windows-x64 | not_applicable | not_applicable | not_applicable | not_run | not_run |
+| openclaw | windows-x64 | passed | passed | passed | not_run | not_run |
+| antigravity | windows-x64 | passed | passed | passed | not_run | not_run |
+| copilot | windows-x64 | passed | passed | passed | not_run | not_run |
+
+Real-client/model acceptance, recurring execution with regression alerting,
+and provider-fixture verification of final published binaries remain open.

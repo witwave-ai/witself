@@ -1,0 +1,607 @@
+rule_files:
+  - ../files/uptime-probes.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: target failures preserve the failing target and require ten minutes
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_up{target="healthy-cell"}'
+        values: 1+0x20
+      - series: 'witself_probe_up{target="failed-cell"}'
+        values: 0+0x10 1+0x9
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: failed-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for failed-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 11m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+  - name: repeated stale scrapes preserve target outage detection and genuine recovery clears it
+    interval: 1m
+    input_series:
+      # Every fifth scrape fails; the target stays down until a healthy sample at 20m.
+      - series: 'witself_probe_up{target="failed-cell"}'
+        values: 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 1 stale 1+0x3
+      - series: 'witself_probe_up{target="healthy-cell"}'
+        values: 1 1 1 1 stale 1 1 1 1 stale 1 1 1 1 stale 1 1 1 1 stale 1 stale 1+0x3
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1 1 1 1 0 1 1 1 1 0 1 1 1 1 0 1 1 1 1 0 1 0 1+0x3
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: failed-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for failed-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 14m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: failed-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for failed-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 19m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: failed-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for failed-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 19m
+        alertname: WitselfProbeScrapeDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+  - name: target outage lookback expires after five minutes without observations
+    interval: 1m
+    input_series:
+      # Last failure at 10m leaves the window at 15m; new failures start at 17m.
+      - series: 'witself_probe_up{target="missing-cell"}'
+        values: 0+0x10 stale _ _ _ _ _ 0+0x10
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: missing-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for missing-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 14m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: missing-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for missing-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 15m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: missing-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for missing-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+  - name: healthy observation during scrape gaps resets a pending target outage
+    interval: 1m
+    input_series:
+      # Recovery at 7m resets the timer even with stale scrapes around it.
+      - series: 'witself_probe_up{target="recovering-cell"}'
+        values: 0+0x5 stale 1 stale 0+0x10
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: recovering-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for recovering-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+  - name: missing cron waits fifteen minutes plus ten sustained minutes and recovers
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_last_check_timestamp_seconds{target="stale-cell"}'
+        values: 0+0x26 1620+60x3
+      - series: 'witself_probe_last_check_timestamp_seconds{target="fresh-cell"}'
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfProbeStale
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfProbeStale
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfProbeStale
+        exp_alerts:
+          - exp_labels:
+              target: stale-cell
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe has no recent check for stale-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 27m
+        alertname: WitselfProbeStale
+        exp_alerts: []
+  - name: probe scrape failure is job scoped and requires fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x15 1+0x4
+      - series: 'up{job="unrelated",instance="other"}'
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfProbeScrapeDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeScrapeDown
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane synthetic uptime metrics endpoint is unreachable from the cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 16m
+        alertname: WitselfProbeScrapeDown
+        exp_alerts: []
+  - name: never-run scheduler alerts without any target series and recovers
+    interval: 1m
+    input_series:
+      - series: witself_probe_scheduler_last_run_timestamp_seconds
+        values: 0+0x26 1620+60x3
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no recent run.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 27m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+  - name: scheduler stopping after an empty run alerts without target series and recovers
+    interval: 1m
+    input_series:
+      - series: witself_probe_scheduler_last_run_timestamp_seconds
+        values: 0+60x5 300+0x26 1980+60x2
+      - series: witself_probe_scheduler_target_count
+        values: 0+0x32 1+0x2
+      - series: witself_probe_directory_ok
+        values: 1+0x35
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no recent run.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 33m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+  - name: directory failures require fifteen minutes and recover independently of the scheduler
+    interval: 1m
+    input_series:
+      - series: witself_probe_directory_ok
+        values: 0+0x15 1+0x4
+      - series: witself_probe_scheduler_last_run_timestamp_seconds
+        values: 0+60x20
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfProbeDirectoryUnavailable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeDirectoryUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler cannot read the cell directory.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 16m
+        alertname: WitselfProbeDirectoryUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+  - name: missing snapshot targets require fifteen minutes and recover with persisted results
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_scheduler_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x20
+      - series: 'witself_probe_snapshot_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x15 1+0x4
+      # An existing target sample keeps absent() false to exercise the zero-count branch.
+      - series: 'witself_probe_up{job="witself-probes",instance="self.witwave.ai:443",target="registered-cell"}'
+        values: 1+0x20
+      - series: 'witself_probe_scheduler_target_count{job="witself-probes",instance="healthy.example:443"}'
+        values: 1+0x20
+      - series: 'witself_probe_snapshot_target_count{job="witself-probes",instance="healthy.example:443"}'
+        values: 1+0x20
+      - series: 'witself_probe_up{job="witself-probes",instance="healthy.example:443",target="healthy-cell"}'
+        values: 1+0x20
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The scheduler reports registered targets but no probe results are exposed (persistence failure or stalled writes).
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 16m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+  - name: absent target samples match scheduler scrape labels and recover after fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_scheduler_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x20
+      # Snapshot entries can exist without any completed target observations.
+      - series: 'witself_probe_snapshot_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x20
+      - series: 'witself_probe_up{job="witself-probes",instance="self.witwave.ai:443",target="registered-cell"}'
+        values: _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 1+0x4
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The scheduler reports registered targets but no probe results are exposed (persistence failure or stalled writes).
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 16m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+  - name: missing results do not alert when the scheduler has no registered targets
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_scheduler_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x30
+      - series: 'witself_probe_snapshot_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfProbeResultsMissing
+        exp_alerts: []
+  - name: thirteen failed document writes preserve an empty run heartbeat and alert until persistence recovers
+    interval: 1m
+    input_series:
+      # The last persisted empty run is at 5m. Thirteen five-minute cron ticks
+      # from 10m through 70m fail their one document write despite a readable
+      # directory and successful metrics scrapes. The persisted heartbeat stays 300.
+      - series: 'witself_probe_scheduler_last_run_timestamp_seconds{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+60x5 300+0x64 4260+60x4
+      - series: 'witself_probe_scheduler_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x70 1+0x4
+      - series: 'witself_probe_snapshot_target_count{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x70 1+0x4
+      - series: 'witself_probe_directory_ok{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x75
+      - series: 'witself_probe_last_write_ok{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x75
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x75
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no recent run.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 70m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no recent run.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 71m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: WitselfProbeScrapeDown
+        exp_alerts: []
+  - name: empty directory requires thirty minutes and recovers when a cell registers
+    interval: 1m
+    input_series:
+      - series: witself_probe_scheduler_target_count
+        values: 0+0x30 1+0x4
+      - series: witself_probe_directory_ok
+        values: 1+0x35
+      - series: witself_probe_scheduler_last_run_timestamp_seconds
+        values: 0+60x35
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: WitselfProbeNoTargets
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfProbeNoTargets
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no cell targets.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 31m
+        alertname: WitselfProbeNoTargets
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfProbeDirectoryUnavailable
+        exp_alerts: []
+  - name: never-checked skipped probes aggregate without a target-down alert and recover
+    interval: 1m
+    input_series:
+      - series: 'witself_probe_skipped{target="queued-cell-a"}'
+        values: 1+0x15 stale
+      - series: 'witself_probe_skipped{target="queued-cell-b"}'
+        values: 1+0x15 stale
+      - series: 'witself_probe_up{target="healthy-cell"}'
+        values: 1+0x20
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probes are being skipped because the run budget is exhausted.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 16m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+  - name: repeated skips preserve the last failed observation and pending or firing alerts until recovery
+    interval: 1m
+    input_series:
+      # The check fails at 0m, then every run from 5m through 30m skips this cell.
+      # A completed successful check at 31m replaces all retained observations.
+      - series: 'witself_probe_up{target="retained-cell"}'
+        values: 0+0x30 1+0x4
+      - series: 'witself_probe_last_check_timestamp_seconds{target="retained-cell"}'
+        values: 0+0x30 1860+60x4
+      - series: 'witself_probe_skipped{target="retained-cell"}'
+        values: _ _ _ _ _ 1+0x25 stale
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: retained-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for retained-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 30m
+        alertname: WitselfProbeTargetDown
+        exp_alerts:
+          - exp_labels:
+              target: retained-cell
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe failed for retained-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 31m
+        alertname: WitselfProbeTargetDown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfProbeStale
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfProbeStale
+        exp_alerts:
+          - exp_labels:
+              target: retained-cell
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe has no recent check for retained-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 30m
+        alertname: WitselfProbeStale
+        exp_alerts:
+          - exp_labels:
+              target: retained-cell
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe has no recent check for retained-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 31m
+        alertname: WitselfProbeStale
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probes are being skipped because the run budget is exhausted.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 31m
+        alertname: WitselfProbeBudgetExhausted
+        exp_alerts: []
+  - name: repeated stale scrapes preserve stale-scheduler and stale-target detection and a fresh run clears them
+    interval: 1m
+    input_series:
+      # Cron stopped after one run at t=0; every fifth scrape fails, so the frozen
+      # timestamps repeat with a staleness gap that must not reset the pending alerts.
+      - series: 'witself_probe_scheduler_last_run_timestamp_seconds'
+        values: 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 1800+0x5
+      - series: 'witself_probe_last_check_timestamp_seconds{target="failed-cell"}'
+        values: 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 0 0 0 0 stale 1800+0x5
+      - series: 'witself_probe_last_check_timestamp_seconds{target="healthy-cell"}'
+        values: 0+60x35
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: The synthetic uptime probe scheduler has no recent run.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 27m
+        alertname: WitselfProbeStale
+        exp_alerts:
+          - exp_labels:
+              target: failed-cell
+              severity: warning
+              service: synthetic-probes
+              witself_alert: "true"
+            exp_annotations:
+              summary: Synthetic uptime probe has no recent check for failed-cell.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 31m
+        alertname: WitselfProbeSchedulerStale
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: WitselfProbeStale
+        exp_alerts: []

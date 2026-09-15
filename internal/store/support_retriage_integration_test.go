@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // Re-triage against Postgres: category/priority rewrite with a full audit
@@ -15,10 +16,7 @@ import (
 // metadata, not conversation — state, first_response_at, and
 // last_activity_at must be untouched.
 func TestRetriageTicketAdminPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

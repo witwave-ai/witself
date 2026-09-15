@@ -3,18 +3,16 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // The SLO read against Postgres: empty queue reads zero/zero, an unanswered
 // ticket counts with a positive age, and the first fleet-side reply clears it.
 func TestReadSupportSLOMetricsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

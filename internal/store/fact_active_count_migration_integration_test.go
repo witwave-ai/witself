@@ -5,18 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestActiveFactCountSchema76And77BackfillDownAndInvariantPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -209,10 +206,7 @@ func TestActiveFactCountSchema76And77BackfillDownAndInvariantPostgres(t *testing
 }
 
 func TestActiveFactCountArchiveRestoreIsDerivedAndPreservesOverLimitPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

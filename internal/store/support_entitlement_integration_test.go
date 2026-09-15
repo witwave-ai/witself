@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // The plan entitlement gate on OpenTicket against Postgres: a plan without
@@ -16,10 +16,7 @@ import (
 // cell never received a snapshot (legacy zero-value plan) is not locked out.
 // The operator kill-switch stays independent and is not exercised here.
 func TestOpenTicketPlanEntitlementPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

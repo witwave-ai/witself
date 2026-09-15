@@ -165,6 +165,134 @@ convergence, and verify that every old writer has drained. Enable compaction
 only in a later config-only commit; the nested chart checksum must then restart
 every server pod. Do not combine that Phase-B flip with an image or chart pin.
 
+## Civo deployment hardening
+
+The apps chart exposes these PostgreSQL controls without changing other cells:
+
+| Value under `apps.civoPostgres` | Default and effect |
+| --- | --- |
+| `image.registry`, `image.repository`, `image.tag`, `image.digest` | Empty fields are omitted, inheriting Bitnami's image. A nonempty digest pins content and takes precedence over the tag. |
+| `allowInsecureImages` | `false`, omitted from child values. Set `true` only for reviewed mirrors to forward `global.security.allowInsecureImages`; this skips Bitnami's image verification for all child containers, including an enabled exporter. |
+| `metrics.enabled` | `false`; enables the Bitnami exporter sidecar when selected. |
+| `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | `false`, `30s`, and `release: witself-monitoring`. Enable discovery only with metrics and an installed Prometheus Operator. |
+| `networkPolicy.enabled`, `.allowExternal` | Both `true`, matching Bitnami 18.8.0: ingress to PostgreSQL from any source and open egress. `enabled: false` removes the policy. `enabled: true` with `allowExternal: false` selects the strict policy below. |
+
+These keys were verified against the official OCI PostgreSQL chart **18.8.0**
+(`helm show values oci://registry-1.docker.io/bitnamicharts/postgresql --version 18.8.0`),
+its README parameter table, and templates. Its actual policy keys are
+`primary.networkPolicy.*`. The built-in restrictive policy retains generic
+`witself-postgresql-client: "true"` peers, so strict mode disables that policy
+and uses Bitnami `extraDeploy` to render a replacement with the **same name**.
+This avoids retaining a second policy whose allowances would be additive.
+Port 5432 admits the `witself-server` and `witself-worker` pod selectors
+from the configured Witself namespace (both cells use `witself`), plus
+`app.kubernetes.io/name: prometheus` pods in `monitoring`. Exporter port 9187,
+when enabled, admits only those Prometheus pods. PostgreSQL egress stays open.
+The same Witself namespace also admits the supported email operation Jobs on
+5432: `witself-agent-email-operation`/`one-shot` pods labeled for `backfill` or
+`canary-manifest`, and `witself-agent-email-receipt-proof`/`operator-proof` pods
+managed by `witself-operator` and labeled for that exact cell.
+The ServiceMonitor is created in the PostgreSQL namespace (`witself`); the
+platform Prometheus selects `release: witself-monitoring` monitors in `witself`
+and `monitoring`, matching the existing server/worker ServiceMonitors.
+
+Run `bash scripts/test-civo-postgres-chart.sh` to verify registry/repository
+overrides against PostgreSQL 18.8.0, including rejection without the mirror
+opt-in. The gate fetches the official OCI chart; set
+`WITSELF_TEST_POSTGRESQL_CHART` to an already downloaded 18.8.0 chart to reuse it.
+
+Batch A landed in `de7423f` (PR #367) and activated
+**`civo-sandbox-use1-backup` first**, retaining its rollback-only role.
+It pins its existing PostgreSQL content digest, restricts PostgreSQL
+ingress, enables config-only avatar compaction after all writers reached
+0.0.273, and installs the resource Metrics API via
+`platform.metricsServer.enabled`. It leaves PostgreSQL metrics disabled because
+this cell has no monitoring stack. Keep replicas, PDBs, and topology unchanged
+on its single node; `minAvailable: 1` with one server replica blocks node drains.
+Metrics Server inherits two colocatable replicas (200m CPU/400Mi total requests);
+verify node headroom and readiness after sync.
+The image contents stay the same, but replacing `:latest` with `@sha256:…`
+changes the StatefulSet pod template and can restart PostgreSQL. Compaction
+changes the server ConfigMap checksum, restarts pods, and reruns digest backfill.
+
+The operator-reported batch-A result on 2026-09-05 was all Argo Applications
+Synced/Healthy after recovery. The digest reference change restarted PostgreSQL;
+the single server replica crash-looped four times on database connection
+failures for about one minute, then recovered. Workers reconnected without
+restarting, `kubectl top` worked, and node memory usage was 84% on the 2.3-GiB
+node.
+
+Batch B prepares **`civo-sandbox-usw2-dev`**, the two-node serving cell with an
+existing monitoring stack and PagerDuty receiver. Its desired state has two
+server replicas and the existing two workers, each with a `minAvailable: 1`
+PDB and hostname topology spread (`maxSkew: 1`, `ScheduleAnyway`). This avoids
+the chart's zone constraint on the single-zone cell while allowing placement
+when capacity is uneven. Resource Metrics API installation inherits the same
+two Metrics Server replicas as the backup cell, requesting 100m CPU/200Mi each
+with no CPU/memory limits. Avatar compaction is enabled as a config-only change
+after all writers reached 0.0.273.
+
+The serving cell pins its own running PostgreSQL digest from its values file;
+it deliberately does not align with the backup cell's different digest. Strict
+ingress retains the monitoring-namespace Prometheus access to exporter port
+9187. The exporter and its `release: witself-monitoring` ServiceMonitor are
+enabled, together with `platform.monitoring.postgresql.enabled`; the database
+rule group renders only when that default-off switch and PostgreSQL metrics
+are enabled. The exporter inherits Bitnami's `nano` preset: requests of
+100m CPU/128Mi and limits of 150m CPU/192Mi. The new rules use the existing
+incident receiver.
+
+Although the PostgreSQL image content is unchanged, the tag-to-digest reference
+change and exporter sidecar activation change one StatefulSet pod template,
+causing **one PostgreSQL restart**. Both server replicas are expected to
+crash-loop for about one minute while PostgreSQL restarts. Two replicas and
+PDBs do not prevent this shared database outage. These are prepared rollout
+settings, not evidence of a completed serving-cell deployment. After sync,
+verify PostgreSQL identity/readiness, server and worker connectivity, strict
+ingress denial, compaction/backfill, Metrics API readiness, and exporter
+scrape/rule health before accepting the rollout.
+
+Both Applications retain the batch-A bootstrap retry
+policy (20 attempts, 10s backoff, factor 2, maximum 2m) and foreground pruning;
+automated deployment on merge remains in place, without a sync window.
+
+Server/worker egress allow-list plumbing is deferred: cells consume released
+OCI server charts, so new templates would require a chart release and cell pin
+updates. This batch changes neither server chart versions nor egress behavior.
+
+## Serving-cell monitoring extensions
+
+The platform chart's monitoring extensions are default off and enabled only
+in `civo-sandbox-usw2-dev`. All controls below are under `platform.monitoring`
+and require its `enabled` switch. Alert rules also require `alerting.enabled`.
+
+| Knob | Shared default | Effect |
+| --- | --- | --- |
+| `nodeExporter.enabled` | `false` | Enable the upstream node-exporter DaemonSet and ServiceMonitor. |
+| `nodeExporter.resources` | Requests 20m CPU/32Mi; limits 100m CPU/64Mi | Budget for each node-exporter pod. |
+| `kubelet.cadvisor` | `false` | Enable `/metrics/cadvisor` on the existing kubelet ServiceMonitor; retain upstream probes/resource defaults. |
+| `defaultRules.enabled` | `false` | Enable only the curated `node-exporter`, `kubernetes-apps`, and `kubernetes-resources` groups, the local filesystem replacement, minimal recording prerequisites, and Prometheus PVC alert. Node alerts also require `nodeExporter.enabled`. |
+| `certManager.enabled` | `false` | Scrape the existing cert-manager controller and enable the certificate-expiry alert; requires `platform.certManager.enabled`. |
+| `argocd.enabled` | `false` | Scrape the existing Argo CD controller, repo-server, and server, and enable the application health/sync alert. |
+
+The cert-manager and Argo CD PodMonitors live in `monitoring` and select pods
+in their target namespaces. They retain the existing Prometheus monitor
+namespace admission and release-label selector, and require no new metrics
+Services or exporter workloads. The pinned upstream NetworkPolicies permit
+the scrapes. The only workload addition is one node-exporter pod per node:
+two pods total request 40m CPU/64Mi and are limited to 200m CPU/128Mi.
+
+Both `civo-sandbox-usw2-dev` and `civo-sandbox-use1-backup` now set
+`apps.witselfServer.civoIngress.acme.email: support@witwave.ai`. cert-manager updates or
+re-registers the ACME contact on the next issuance; this config-only change
+does not force issuance. The backup platform render stays byte-identical and
+has no monitoring resources; the backup apps render changes only its ACME
+email line. See the
+[monitoring runbook](../docs/observability-and-operations.md#serving-cell-monitoring-extensions)
+for the exact alert inventory, scrape ports, ACME follow-up, and the narrow
+node-2 capacity fit calculated from the supplied snapshot. These desired-state
+changes do not establish live scrape, alert-delivery, or scheduling acceptance.
+
 ## Notes
 
 - This repo is **public**, and the root app points at the `main` branch, so Argo

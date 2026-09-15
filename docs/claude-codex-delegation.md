@@ -1,7 +1,7 @@
 # Claude-to-Codex delegation
 
 Witself's production-readiness work uses Claude Code as the orchestrator and
-Codex (GPT-5.6 Sol) as a delegated implementer and reviewer. The integration
+Codex (GPT-6 Astra) as a delegated implementer and reviewer. The integration
 is the official OpenAI **Codex plugin for Claude Code**
 (`openai/codex-plugin-cc`), which runs Codex through the local Codex app
 server and works from the Claude Code desktop app and the CLI without any
@@ -21,7 +21,9 @@ claude plugin install codex@openai-codex
 
 Then, in a fresh Claude Code session, `/codex:setup` should report `ready`.
 Model and reasoning depth come from `~/.codex/config.toml` — `model =
-"gpt-5.6-sol"` (the highest model) and `model_reasoning_effort = "ultra"` (the
+"gpt-6-astra"` (the highest model; it requires codex-cli 0.153.3 or newer —
+older CLIs are rejected by the API with a 400 "requires a newer version of
+Codex") and `model_reasoning_effort = "ultra"` (the
 deepest level; the ladder is `minimal < low < medium < high < xhigh < max <
 ultra`). Delegated jobs deliberately do not pass `--effort`, because the
 plugin's flag caps at `xhigh` and would downgrade the `ultra` config default;
@@ -78,7 +80,7 @@ data to be verified against the actual worktree.
 - During a repository gate, every concurrent review agent must be strictly
   read-only. A reviewer that edits the same worktree invalidates the exact
   snapshot being gated.
-- Codex CLI `0.149` or newer is the operational floor for the app-server
+- Codex CLI `0.153.3` or newer is the operational floor for the app-server (the `gpt-6-astra` model is rejected by older CLIs)
   integration; verify both `codex --version` and `codex app-server --help`
   during setup.
 - The delegated Codex sandbox cannot bind loopback sockets. Claude reruns

@@ -237,7 +237,6 @@ func probeAutomationHealth(ctx context.Context, targets []automationHealthTarget
 	semaphore := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for i, target := range targets {
-		i, target := i, target
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

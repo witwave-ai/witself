@@ -23,6 +23,27 @@ apps:
     # Preserve the existing Bitnami footprint unless a measured cell-specific
     # working set requires a larger preset.
     resourcesPreset: nano
+    # Empty fields inherit the upstream image (including its unpinned tag).
+    image:
+      registry: ""
+      repository: ""
+      tag: ""
+      digest: ""
+    # Explicit opt-in for reviewed mirrors: skips the child chart's image
+    # verification for all containers, including an enabled metrics exporter.
+    allowInsecureImages: false
+    metrics:
+      enabled: false
+      serviceMonitor:
+        enabled: false
+        interval: 30s
+        labels:
+          release: witself-monitoring
+    # Match Bitnami 18.8.0 defaults: ingress to 5432 from any source,
+    # egress open. Restrictive mode replaces its generic client allowance.
+    networkPolicy:
+      enabled: true
+      allowExternal: true
   witselfServer:
     enabled: true
     namespace: witself

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestNarrativeMemoryArchiveCellMovePostgres proves that an account archive
@@ -25,10 +26,7 @@ import (
 // the archive; successful destination recall proves it was rebuilt from the
 // imported canonical content.
 func TestNarrativeMemoryArchiveCellMovePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	runNarrativeMemoryArchiveCellMovePostgres(
 		t, dsn, dsn, "local-postgres", "local-postgres",
 	)
@@ -86,8 +84,6 @@ func TestNarrativeMemoryManagedCloudConformance(t *testing.T) {
 
 	for _, source := range targets {
 		for _, destination := range targets {
-			source := source
-			destination := destination
 			passed := t.Run(source.name+"_to_"+destination.name, func(t *testing.T) {
 				reporter := memoryArchiveTestReporter(t)
 				if certificationMode {

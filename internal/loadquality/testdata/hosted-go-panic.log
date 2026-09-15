@@ -1,0 +1,19 @@
+panic: offline stack fixture [recovered, repanicked]
+
+goroutine 20 [running]:
+testing.tRunner.func1.2({0x1009753a0, 0x1009c1750})
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:1974 +0x1a0
+testing.tRunner.func1()
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:1977 +0x318
+panic({0x1009753a0?, 0x1009c1750?})
+	/opt/hostedtoolcache/go/1.26.6/x64/src/runtime/panic.go:860 +0x12c
+github.com/witwave-ai/witself/internal/loadquality.TestManifestStackCapturePanic.func1({0x8c0f0957448?, 0x100668e10?})
+	/home/runner/work/witself/witself/internal/loadquality/manifest_stack_capture_test.go:4 +0x2c
+github.com/witwave-ai/witself/internal/loadquality.ParseOptions(0x8c0f098ef58?)
+	/home/runner/work/witself/witself/internal/loadquality/loadquality.go:301 +0x68
+github.com/witwave-ai/witself/internal/loadquality.TestManifestStackCapturePanic(0x8c0f0a92248?)
+	/home/runner/work/witself/witself/internal/loadquality/manifest_stack_capture_test.go:4 +0x24
+testing.tRunner(0x8c0f0a92248, 0x1009bfed8)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2036 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2101 +0x3a8

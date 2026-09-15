@@ -3,9 +3,10 @@ set -euo pipefail
 
 readonly expected_archive_count=25
 readonly expected_sbom_count=25
-readonly expected_checksum_entry_count=50
-readonly expected_release_asset_count=54
+readonly expected_checksum_entry_count=51
+readonly expected_release_asset_count=55
 readonly expected_provenance_subject_count=25
+readonly provider_evidence_name=provider-contract-evidence.json
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -14,6 +15,9 @@ usage() {
 usage:
   verify-release-artifact-contract.sh local DIST_DIR VERSION FULL_COMMIT
   verify-release-artifact-contract.sh published DIST_DIR TAG REPOSITORY FULL_COMMIT
+
+Both modes require GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT
+from the publishing workflow, independently of the evidence contents.
 EOF
   exit 2
 }
@@ -38,7 +42,7 @@ published_commit=${5:-}
   exit 1
 }
 
-for dependency in jq tar unzip; do
+for dependency in go jq tar unzip; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "error: $dependency is required" >&2
     exit 1
@@ -60,6 +64,57 @@ sha256_file() {
     echo "error: sha256sum or shasum is required" >&2
     return 1
   fi
+}
+
+validate_provider_contract_evidence() {
+  local version=$1
+  local full_commit=$2
+  [[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ &&
+     ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]*$ &&
+     ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]*$ ]] || {
+    echo "error: trusted publishing workflow repository, run ID and attempt are required" >&2
+    exit 1
+  }
+  [[ -f $dist_dir/$provider_evidence_name && -s $dist_dir/$provider_evidence_name &&
+     ! -L $dist_dir/$provider_evidence_name ]] || {
+    echo "error: provider contract evidence must be a nonempty regular file" >&2
+    exit 1
+  }
+  # The shared validator owns the closed schema and complete native matrix.
+  # Expected identity comes from release arguments and trusted workflow context,
+  # never from the downloaded evidence that is being checked.
+  if ! (
+    cd "$repo_root"
+    go run ./tools/provider-contract-evidence validate-release \
+      --input "$dist_dir/$provider_evidence_name" \
+      --version "$version" \
+      --commit "$full_commit" \
+      --repository "$GITHUB_REPOSITORY" \
+      --run-id "$GITHUB_RUN_ID" \
+      --run-attempt "$GITHUB_RUN_ATTEMPT"
+  ); then
+    echo "error: provider contract evidence did not match the publishing release" >&2
+    exit 1
+  fi
+}
+
+validate_provider_evidence_checksum() {
+  local manifest_sha actual_sha
+  manifest_sha=$(awk -v name="$provider_evidence_name" '
+    $2 == name {
+      if (NF != 2 || $1 !~ /^[0-9a-f]+$/ || length($1) != 64) exit 1
+      count++; digest = $1
+    }
+    END { if (count != 1) exit 1; print digest }
+  ' "$dist_dir/checksums.txt") || {
+    echo "error: checksums.txt must contain exactly one provider evidence digest" >&2
+    exit 1
+  }
+  actual_sha=$(sha256_file "$dist_dir/$provider_evidence_name")
+  [[ $manifest_sha == "$actual_sha" ]] || {
+    echo "error: checksum mismatch for $provider_evidence_name" >&2
+    exit 1
+  }
 }
 
 write_expected_archive_names() {
@@ -85,7 +140,8 @@ write_local_public_asset_names() {
     checksums.txt \
     checksums.txt.pem \
     checksums.txt.sig \
-    checksums.txt.sigstore.json
+    checksums.txt.sigstore.json \
+    "$provider_evidence_name"
 }
 
 expected_binary_for_archive() {
@@ -118,6 +174,7 @@ validate_local_release() {
       exit 1
     }
   done
+  validate_provider_contract_evidence "$version" "$full_commit"
 
   write_expected_archive_names "$version" | LC_ALL=C sort >"$work_dir/expected-archives"
   jq -er '
@@ -147,8 +204,10 @@ validate_local_release() {
     exit 1
   }
 
-  cat "$work_dir/expected-archives" "$work_dir/expected-sboms" | LC_ALL=C sort \
-    >"$work_dir/expected-checksum-names"
+  {
+    cat "$work_dir/expected-archives" "$work_dir/expected-sboms"
+    printf '%s\n' "$provider_evidence_name"
+  } | LC_ALL=C sort >"$work_dir/expected-checksum-names"
   awk '
     NF != 2 || $1 !~ /^[0-9a-f]+$/ || length($1) != 64 { exit 1 }
     { print $2 }
@@ -159,9 +218,10 @@ validate_local_release() {
   if [[ $(wc -l <"$work_dir/actual-checksum-names" | tr -d '[:space:]') != "$expected_checksum_entry_count" ]] ||
      [[ $(LC_ALL=C sort -u "$work_dir/actual-checksum-names" | wc -l | tr -d '[:space:]') != "$expected_checksum_entry_count" ]] ||
      ! cmp -s "$work_dir/expected-checksum-names" "$work_dir/actual-checksum-names"; then
-      echo "error: checksums.txt did not contain the exact 50 archive and SBOM payloads" >&2
+      echo "error: checksums.txt did not contain the exact 51 archive, SBOM and provider evidence payloads" >&2
       exit 1
   fi
+  validate_provider_evidence_checksum
 
   local archive archive_name binary members member_mode manifest_sha actual_sha sbom
   while IFS= read -r archive_name; do
@@ -243,10 +303,16 @@ validate_published_release() {
     echo "error: published release commit must be full lowercase 40-hex" >&2
     exit 1
   }
+  [[ $repository == "${GITHUB_REPOSITORY:-}" ]] || {
+    echo "error: release repository did not match the trusted publishing workflow" >&2
+    exit 1
+  }
+  local version=${tag#v}
+  validate_provider_contract_evidence "$version" "$full_commit"
+  validate_provider_evidence_checksum
   command -v gh >/dev/null 2>&1 || { echo "error: gh is required" >&2; exit 1; }
   command -v git >/dev/null 2>&1 || { echo "error: git is required" >&2; exit 1; }
 
-  local version=${tag#v}
   local tag_commit checkout_commit
   tag_commit=$(gh api "repos/$repository/commits/$tag" --jq .sha)
   [[ $tag_commit == "$full_commit" ]] || {
@@ -260,16 +326,16 @@ validate_published_release() {
   }
   write_local_public_asset_names "$version" | LC_ALL=C sort >"$work_dir/expected-assets"
   gh api "repos/$repository/releases/tags/$tag" >"$work_dir/release.json"
-  jq -er --arg tag "$tag" '
+  jq -er --arg tag "$tag" --argjson expected "$expected_release_asset_count" '
     if .tag_name != $tag or .draft != false or .prerelease != false
       then error("release was not the requested stable publication")
       else .assets
-    | if length == 54
-        and ([.[].name] | unique | length) == 54
+    | if length == $expected
+        and ([.[].name] | unique | length) == $expected
         and all(.[]; .size > 0)
         and all(.[]; .digest | test("^sha256:[0-9a-f]{64}$"))
       then .[] | [.name, (.size | tostring), .digest] | @tsv
-      else error("expected 54 unique nonempty release assets")
+      else error("expected \($expected) unique nonempty release assets")
       end
     end
   ' "$work_dir/release.json" | LC_ALL=C sort >"$work_dir/published-assets"

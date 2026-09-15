@@ -234,7 +234,6 @@ func collectIntegrationsReportWithVerification(verify bool) integrationsReport {
 	statuses := make([]integrationRuntimeStatus, len(runtimes))
 	var wait sync.WaitGroup
 	for index, runtimeName := range runtimes {
-		index, runtimeName := index, runtimeName
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -453,6 +452,28 @@ func pendingIntegrationTransaction(runtimeName string, persisted *transcriptcapt
 		} else {
 			return "", false, err
 		}
+	case transcriptcapture.RuntimeDSH:
+		configRoot := ""
+		var err error
+		if persisted != nil {
+			configRoot = persisted.RuntimeConfigRoot
+			if configRoot == "" {
+				err = errors.New("persisted DeepSeek Harness integration does not pin its config root")
+			}
+		} else {
+			configRoot, err = currentDSHConfigRoot()
+		}
+		if err != nil {
+			return "", false, err
+		}
+		journal, err := loadDSHTransactionJournal(configRoot)
+		if err == nil {
+			operation = journal.Operation
+		} else if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		} else {
+			return "", false, err
+		}
 	default:
 		return "", false, fmt.Errorf("unsupported integration runtime %q", runtimeName)
 	}
@@ -546,6 +567,9 @@ func incompletePersistedIntegrationBinding(runtimeName string, cfg transcriptcap
 		return "persisted integration record predates exact provider binding ownership; reinstall this integration"
 	}
 	if supportsTranscriptHooks(runtimeName) {
+		if runtimeName == transcriptcapture.RuntimeDSH && cfg.HookMode == transcriptcapture.HookModeNone {
+			return "persisted DeepSeek Harness integration predates transcript hooks; reinstall this integration to enable capture"
+		}
 		switch cfg.HookMode {
 		case transcriptcapture.HookModeUser:
 			if strings.TrimSpace(cfg.HookConfigPath) == "" {
@@ -569,6 +593,12 @@ func incompletePersistedIntegrationBinding(runtimeName string, cfg transcriptcap
 			strings.TrimSpace(cfg.RuntimeWorkspace) == "" ||
 			strings.TrimSpace(cfg.RuntimeAgentID) == "") {
 		return "persisted OpenClaw integration does not pin its exact CLI, namespace, agent, workspace, and MCP binding; reinstall this integration"
+	}
+	if runtimeName == transcriptcapture.RuntimeDSH &&
+		(strings.TrimSpace(cfg.RuntimeConfigRoot) == "" ||
+			strings.TrimSpace(cfg.RuntimeMCPConfigPath) == "" ||
+			strings.TrimSpace(cfg.MCPEnvironment["WITSELF_HOME"]) == "") {
+		return "persisted DeepSeek Harness integration does not pin its exact config root, patch file, and MCP binding; reinstall this integration"
 	}
 	return ""
 }
@@ -629,6 +659,8 @@ func validateInstalledIntegrationTopology(runtimeName string, cfg transcriptcapt
 			return errors.New("WITSELF_HOME changed from the installed GitHub Copilot binding")
 		}
 		providerErr = validateCopilotInstalledTopology(cfg)
+	case transcriptcapture.RuntimeDSH:
+		providerErr = validateDSHInstalledTopology(cfg)
 	default:
 		return fmt.Errorf("unsupported integration runtime %q", runtimeName)
 	}
@@ -748,6 +780,8 @@ func integrationDisplayName(runtimeName string) string {
 		return "Antigravity"
 	case transcriptcapture.RuntimeCopilot:
 		return "GitHub Copilot"
+	case transcriptcapture.RuntimeDSH:
+		return "DeepSeek Harness"
 	default:
 		return runtimeName
 	}

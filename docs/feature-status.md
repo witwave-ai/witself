@@ -19,32 +19,32 @@ A feature being implemented does not mean it is generally available. A plan enti
 
 | Feature | Area | Implementation | Managed rollout | Readiness | Gates | Open gates |
 |---|---|---|---|---|---:|---:|
-| [Cross-agent access policies and security groups](#access-policy-security-groups) | Authorization | `specified` | `not started` | **not ready** | 0/7 pass | 4 |
+| [Cross-agent access policies and security groups](#access-policy-security-groups) | Authorization | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
 | [Account lifecycle and movement](#account-lifecycle) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 2 |
-| [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `general` | **conditional** | 5/7 pass | 2 |
 | [Agent avatars](#agent-avatars) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
-| [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
-| [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **conditional** | 5/6 pass | 1 |
+| [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
+| [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **accepted** | 6/6 pass | 0 |
 | [Agent email receive](#agent-email-receive) | Email | `implemented` | `limited` | **conditional** | 4/7 pass | 4 |
 | [Agent email send](#agent-email-send) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 4 |
 | [Agent self, context, and foreground hydration](#agent-self-context) | Agent experience | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Account audit trail and retention](#audit-trail-retention) | Governance | `building` | `limited` | **not ready** | 0/7 pass | 4 |
-| [Billing and plan transitions](#billing-plan-transitions) | Commercial | `building` | `dark` | **not ready** | 2/7 pass | 5 |
+| [Billing and plan transitions](#billing-plan-transitions) | Commercial | `implemented` | `general` | **conditional** | 2/7 pass | 4 |
 | [Custom inbound email domains](#custom-email-domains) | Email | `building` | `dark` | **not ready** | 2/7 pass | 6 |
-| [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
-| [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 0/7 pass | 4 |
-| [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
+| [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
+| [Plans, limits, and account overrides](#plan-enforcement) | Commercial | `implemented` | `general` | **conditional** | 6/7 pass | 2 |
 | [Realm email aliases](#realm-email-aliases) | Email | `implemented` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Realm-local messaging](#realm-messaging) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
-| [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
-| [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 2/7 pass | 4 |
+| [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
+| [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 3/7 pass | 3 |
 | [Self-hosted Witself](#self-hosting) | Deployment | `implemented` | `not applicable` | **conditional** | 0/7 pass | 5 |
 | [Transcripts and retention](#transcripts) | Core data | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
-| [Usage metering and customer reporting](#usage-metering) | Commercial | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
+| [Usage metering and customer reporting](#usage-metering) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 
 ## Feature details
 
@@ -52,7 +52,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 
 ### Cross-agent access policies and security groups
 
-Default-deny, realm-local cross-agent memory and fact policy plus group-owned identity are specified in detail, but the policy engine, group lifecycle, enforcement, and operational surfaces are not implemented.
+Current agent ownership, account operator roles, and curator profiles are reconciled with the wire contracts. Cross-agent memory/fact policy, security groups, and group-owned identity remain targets without an evaluator or lifecycle implementation.
 
 - Implementation: `specified`
 - Managed rollout: `not started`
@@ -61,17 +61,16 @@ Default-deny, realm-local cross-agent memory and fact policy plus group-owned id
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **CONDITIONAL** | Policy, permission, group, membership, collective-memory, and default-deny behavior are specified but have no store, API, CLI, or MCP implementation. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go) |
-| Entitlement / policy | **CONDITIONAL** | The intended realm-local authority and operator override are documented, but no runtime evaluator enforces them. [access-policy.md](../docs/access-policy.md) |
-| Bounds / abuse | **CONDITIONAL** | Default deny, non-nesting, guarded membership, filters, and audit requirements are designed but not executable protections. [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md) |
+| Behavior | **CONDITIONAL** | Policy evaluation, permissions, group membership, and collective ownership require final contracts and store/API/CLI/MCP implementation; capabilities report policies and groups as not implemented. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go) |
+| Entitlement / policy | **CONDITIONAL** | Cross-agent authority and operator permissions remain target decisions; current account roles and agent ownership do not provide a policy evaluator or blanket override. [access-policy.md](../docs/access-policy.md) |
+| Bounds / abuse | **CONDITIONAL** | Membership administration, permission filters, mutation previews, precedence, and audit protections require settled contracts and executable enforcement. [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md) |
 | Observability | **CONDITIONAL** | Planned value-free decision and membership audit signals have no metrics, dashboards, SLOs, or alert path. [access-policy.md](../docs/access-policy.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
-| Recovery | **CONDITIONAL** | Membership rollback, policy invalidation, archive/import, and crash recovery remain design requirements rather than tested behavior. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
+| Recovery | **CONDITIONAL** | Group deletion, ownership recovery, membership rollback, invalidation, archive/import, and crash recovery remain target work without tested behavior. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
 | Rollout / canaries | **CONDITIONAL** | No managed cohort, dark gate, migration, or release canary exists for this specified feature. [access-policy.md](../docs/access-policy.md) |
-| Docs / support | **CONDITIONAL** | The design is extensive, but contracts must be reconciled with the current client-custodied vault, fact deletion, collaboration, and plan surfaces before implementation. [access-policy.md](../docs/access-policy.md), [security-groups.md](../docs/security-groups.md) |
+| Docs / support | **PASS** | access-policy-contract-reconciliation is complete: docs pin principals, account/realm scoping, credential wire shapes, and agent-owned fact/memory access, and label policy/groups and future authority as targets. [main.go](../cmd/witself/main.go), [access-policy.md](../docs/access-policy.md), [api-contract.md](../docs/api-contract.md), [security-groups.md](../docs/security-groups.md), [server.go](../internal/server/server.go), [auth.go](../internal/store/auth.go) |
 
 Open gates:
 
-- `access-policy-contract-reconciliation` (docs / support): Reconcile the drafts with current memory, fact, collaboration, vault, and authorization contracts and pin the versioned wire shapes. ([tracking/evidence](../docs/api-contract.md))
 - `access-policy-core-implementation` (behavior, bounds / abuse, entitlement / policy): Implement the policy evaluator, security-group lifecycle, transactional membership, collective ownership, authorization hooks, audit, API, CLI, MCP, and hostile-input tests. ([tracking/evidence](../docs/security-groups.md))
 - `access-policy-operations` (observability, recovery): Add bounded decision metrics, invalidation and backlog alerts, archive/import, rollback, and crash-recovery drills without exposing identity content. ([tracking/evidence](../docs/observability-and-operations.md))
 - `access-policy-release-canary` (rollout / canaries): Ship behind a dark account cohort and retain allow, deny, membership-revocation, rollback, and cross-agent isolation canaries before widening. ([tracking/evidence](../docs/access-policy.md))
@@ -80,7 +79,7 @@ Open gates:
 
 ### Account lifecycle and movement
 
-Activation, suspension, closure with dark 30-day-grace erasure, archive/import, and account evacuation/placement are implemented; serving-cell monitoring is accepted; broad movement stays frozen until destination-cell monitoring and multi-cell drills complete; realm placement and dual-write cutover stay out of scope.
+Activation, suspension, closure with enforced 30-day-grace erasure, customer account export, operator archive/import, and evacuation are implemented. Serving-cell monitoring is accepted; broad movement awaits destination monitoring and multi-cell drills. Realm placement and dual-write cutover remain out of scope.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
@@ -89,12 +88,12 @@ Activation, suspension, closure with dark 30-day-grace erasure, archive/import, 
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **PASS** | Lifecycle transitions, archive/import, evacuation fences, and resumable control-plane state have transactional and crash-recovery coverage. [deployment-cells.md](../docs/deployment-cells.md), [account_purge_integration_test.go](../internal/store/account_purge_integration_test.go), [evacuation_integration_test.go](../internal/store/evacuation_integration_test.go) |
+| Behavior | **PASS** | Lifecycle transitions, enforced closed-account purge, witself export via GET /v1/export, and operator evacuation/import are implemented. Customer exports use a read-only snapshot and CLI checksum verification without suspending the account. [export.go](../cmd/witself/export.go), [deployment-cells.md](../docs/deployment-cells.md), [export_self_test.go](../internal/server/export_self_test.go), [account_purge_integration_test.go](../internal/store/account_purge_integration_test.go), [evacuation_integration_test.go](../internal/store/evacuation_integration_test.go), [export.go](../internal/store/export.go), [self_export_integration_test.go](../internal/store/self_export_integration_test.go) |
 | Entitlement / policy | **PASS** | Owner and fleet-admin operations are separated, suspended accounts fail closed, and placement eligibility is controlled centrally. [authorization-and-roles.md](../docs/authorization-and-roles.md), [deployment-cells.md](../docs/deployment-cells.md) |
 | Bounds / abuse | **PASS** | Exact-id idempotency, mutation fences, bounded batches, lifecycle receipts, and target-cell validation constrain concurrent movement. [deployment-cells.md](../docs/deployment-cells.md), [evacuation_integration_test.go](../internal/store/evacuation_integration_test.go) |
 | Observability | **CONDITIONAL** | Continuous Prometheus scraping, PVC metrics, Alertmanager routing, and a tested PagerDuty/dead-man receiver are deployed and accepted on the serving cell; other accepting and backup cells remain unmonitored, which still gates broad movement. [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
 | Recovery | **CONDITIONAL** | Archive integrity and backup restore are exercised, but directed multi-cell movement and sealed-state recovery still need a retained production drill. [backup-and-recovery.md](../docs/backup-and-recovery.md), [deployment-cells.md](../docs/deployment-cells.md) |
-| Rollout / canaries | **CONDITIONAL** | The placement runner is intentionally paused; widening requires every accepting destination to meet schema, headroom, and monitoring gates. [deployment-cells.md](../docs/deployment-cells.md), [runbooks.md](../docs/runbooks.md) |
+| Rollout / canaries | **CONDITIONAL** | Account purge is enabled in enforce mode on both cells after preview review (#313), with the 720h grace unchanged. Placement remains paused until accepting destinations meet schema, headroom, monitoring, and movement-drill gates. [values.yaml](../.gitops/cells/civo-sandbox-use1-backup/values.yaml), [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [deployment-cells.md](../docs/deployment-cells.md), [launch-readiness.md](../docs/launch-readiness.md), [runbooks.md](../docs/runbooks.md) |
 | Docs / support | **PASS** | Lifecycle, backup, movement, freeze, and operator recovery procedures are documented. [backup-and-recovery.md](../docs/backup-and-recovery.md), [deployment-cells.md](../docs/deployment-cells.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
@@ -106,28 +105,27 @@ Open gates:
 
 ### Managed account onboarding and recovery
 
-Invite-gated signup, cell placement, email verification and resend, credential recovery, CAS-guarded email change and undo, and crash-safe CLI provisioning are implemented and contract-tested for managed accounts; abuse controls are implemented dark with keyed enablement, and release acceptance remains limited.
+Open CLI signup with Turnstile and daily quotas of 10 per IP and 500 globally has been live since 2026-08-29 (#295). Placement, verification/resend, recovery, email change/undo, and crash-safe provisioning are implemented; broader recovery canaries and operational alerts remain open.
 
 - Implementation: `implemented`
-- Managed rollout: `limited`
+- Managed rollout: `general`
 - Readiness: **conditional**
 - Detailed docs: [cli-command-surface.md](../docs/cli-command-surface.md), [runbooks.md](../docs/runbooks.md), [signup-abuse-hardening.md](../docs/signup-abuse-hardening.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **PASS** | Signup, exact invite consumption, pending-account projection, resumable CLI setup, and the verification, resend, recovery, email change, and undo handlers all have direct Worker contract tests, plus a cell-side expected_current CAS on email change. [account_create_recovery_test.go](../cmd/witself/account_create_recovery_test.go), [index.js](../infra/cloudflare/control-plane/src/index.js), [account-signup-runtime.test.mjs](../infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs), [signup-lifecycle-recovery.test.mjs](../infra/cloudflare/control-plane/test/signup-lifecycle-recovery.test.mjs), [signup-lifecycle-verification.test.mjs](../infra/cloudflare/control-plane/test/signup-lifecycle-verification.test.mjs) |
-| Entitlement / policy | **PASS** | Managed signup requires an authorized invite, self-hosted operation has no signup, and account identity and cell placement remain control-plane authoritative. [runbooks.md](../docs/runbooks.md), [account-signup-runtime.mjs](../infra/cloudflare/control-plane/src/account-signup-runtime.mjs) |
-| Bounds / abuse | **CONDITIONAL** | Inputs, invite use, verification and recovery state, retries, and pending-account lifetime are bounded, and durable signup abuse controls (Turnstile break-glass, per-IP and global daily quotas, edge IP rate limits) are implemented dark: committed limits are 0, Turnstile secrets absent, enablement keyed. [signup-abuse-hardening.md](../docs/signup-abuse-hardening.md), [account-signup-runtime.mjs](../infra/cloudflare/control-plane/src/account-signup-runtime.mjs), [signup-counters.mjs](../infra/cloudflare/control-plane/src/signup-counters.mjs), [signup-abuse.test.mjs](../infra/cloudflare/control-plane/test/signup-abuse.test.mjs) |
+| Entitlement / policy | **PASS** | Managed invite-less signup is open behind Turnstile, positive daily quotas, and explicit Terms/Privacy consent. Invites remain supported; self-hosted operation has no signup. Account identity and placement remain control-plane authoritative. [runbooks.md](../docs/runbooks.md), [account-signup-runtime.mjs](../infra/cloudflare/control-plane/src/account-signup-runtime.mjs), [wrangler.template.jsonc](../infra/cloudflare/control-plane/wrangler.template.jsonc) |
+| Bounds / abuse | **PASS** | Open signup enforces Turnstile, durable daily quotas of 10 per IP and 500 globally, edge IP rate limits, bounded pending state, and retry controls. Zero quotas fail closed for invite-less signup; setting CP_SIGNUP_OPEN=false restores invite-only signup. [signup-abuse-hardening.md](../docs/signup-abuse-hardening.md), [account-signup-runtime.mjs](../infra/cloudflare/control-plane/src/account-signup-runtime.mjs), [signup-counters.mjs](../infra/cloudflare/control-plane/src/signup-counters.mjs), [deploy-config.test.mjs](../infra/cloudflare/control-plane/test/deploy-config.test.mjs), [signup-abuse.test.mjs](../infra/cloudflare/control-plane/test/signup-abuse.test.mjs), [wrangler.template.jsonc](../infra/cloudflare/control-plane/wrangler.template.jsonc) |
 | Observability | **CONDITIONAL** | Durable phases and value-free logs are inspectable, and a tested external receiver now exists on the monitoring plane, but continuous signup funnel, delivery, pending-age, recovery-failure, and abuse signals are not yet connected to it. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [account-signup-runtime.mjs](../infra/cloudflare/control-plane/src/account-signup-runtime.mjs) |
 | Recovery | **PASS** | Durable signup phases, exact idempotency, target-cell acknowledgements, retry-safe CLI state, and the credential-recovery and email-change undo interruption/replay paths are directly tested, including CAS-guarded forward changes. [account_create_recovery_test.go](../cmd/witself/account_create_recovery_test.go), [index.js](../infra/cloudflare/control-plane/src/index.js), [signup-lifecycle-recovery.test.mjs](../infra/cloudflare/control-plane/test/signup-lifecycle-recovery.test.mjs), [email_change_cas_integration_test.go](../internal/store/email_change_cas_integration_test.go) |
-| Rollout / canaries | **CONDITIONAL** | Signup remains invite-gated and the repository does not retain a current release-specific end-to-end signup, verification, recovery, and undo canary. [runbooks.md](../docs/runbooks.md) |
-| Docs / support | **PASS** | Customer setup, pending verification, resend, credential recovery, email change, undo, and incomplete-signup cleanup are documented. [cli-command-surface.md](../docs/cli-command-surface.md), [runbooks.md](../docs/runbooks.md) |
+| Rollout / canaries | **CONDITIONAL** | Open signup activation is recorded for 2026-08-29 (#295). Retained current-release invite-less signup through active/verified status, resend, recovery, email-change undo, crash-resume, and cleanup canaries remain incomplete. [launch-readiness.md](../docs/launch-readiness.md), [runbooks.md](../docs/runbooks.md), [commit #e2a4c2b6507c263bbc7f68eb3a0ddfcd5940a4fb](https://github.com/witwave-ai/witself/commit/e2a4c2b6507c263bbc7f68eb3a0ddfcd5940a4fb), [wrangler.template.jsonc](../infra/cloudflare/control-plane/wrangler.template.jsonc) |
+| Docs / support | **PASS** | Customer setup and recovery are documented. Five legal pages were ratified as Version 2026-08-31 (#309/#311); witself legal reads them, and signup records the accepted Terms and Privacy versions. [legal.go](../cmd/witself/legal.go), [cli-command-surface.md](../docs/cli-command-surface.md), [launch-readiness.md](../docs/launch-readiness.md), [privacy-policy.md](../docs/legal/privacy-policy.md), [terms-of-service.md](../docs/legal/terms-of-service.md), [runbooks.md](../docs/runbooks.md), [legal.go](../internal/legal/legal.go), [index.js](../web/legal/index.js) |
 
 Open gates:
 
-- `signup-abuse-limits` (bounds / abuse): Enable the implemented-dark signup abuse controls: mint the Turnstile widget and provide its keys, choose positive per-IP and global daily limits, and land the keyed activation change. ([tracking/evidence](../docs/signup-abuse-hardening.md))
 - `signup-operations-alerting` (observability): Connect value-free phase, delivery, pending-age, recovery, and abuse signals to continuous dashboards and a tested external receiver. ([tracking/evidence](../docs/observability-and-operations.md))
-- `signup-release-canary` (rollout / canaries): Retain a current invite-through-active-account canary plus resend, recovery, email-change undo, crash-resume, and cleanup evidence before widening signup. ([tracking/evidence](../docs/runbooks.md))
+- `signup-release-canary` (rollout / canaries): Retain current-release invite-less signup through active/verified status, resend, recovery, email-change undo, crash-resume, and cleanup evidence; open signup and its Turnstile/quota activation are already recorded. ([tracking/evidence](../docs/runbooks.md))
 
 <a id="agent-avatars"></a>
 
@@ -145,14 +143,14 @@ Versioned portable SVG identity, autonomy policy, style rollout, continuity guar
 | Behavior | **PASS** | Proposal, activation, evolution, reset, rollback, style, archive, and continuity behavior are implemented across store, API, CLI, and MCP. [agent-avatars.md](../docs/agent-avatars.md), [avatar_quota_integration_test.go](../internal/store/avatar_quota_integration_test.go) |
 | Entitlement / policy | **PASS** | Agent-self-managed, agent-proposes, and operator-only autonomy policies are enforced with exact revisions and immutable history. [agent-avatars.md](../docs/agent-avatars.md) |
 | Bounds / abuse | **PASS** | SVG sanitization, structural continuity checks, bounded canonical rendering, quota accounting, and fail-closed cleanup protect storage and identity. [agent-avatars.md](../docs/agent-avatars.md), [continuity.go](../internal/avatar/continuity.go) |
-| Observability | **CONDITIONAL** | Lifecycle metrics and audit events exist and the serving cell now has an end-to-end tested production alert path (server and generic worker-job alerts routed to PagerDuty with a dead-man heartbeat), but no avatar-specific alert rules or SLO exist. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [agent-avatars.md](../docs/agent-avatars.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **CONDITIONAL** | The accepted serving-cell alert path exists. #357 adds a tested avatar generation-failure report-rate rule from HTTP metrics. Live loading proof, lifecycle/compaction/quota alerts, and an avatar SLO remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [agent-avatars.md](../docs/agent-avatars.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [metrics.go](../internal/server/metrics.go) |
 | Recovery | **PASS** | Immutable versions, rollback, reset, archive/import, and deterministic placeholders provide recovery paths without deleting history. [agent-avatars.md](../docs/agent-avatars.md), [backup-and-recovery.md](../docs/backup-and-recovery.md) |
 | Rollout / canaries | **CONDITIONAL** | Bounded style rollout is active with the worker, while payload compaction remains off and no release-specific live acceptance record is retained. [values.yaml](../charts/witself-server/values.yaml), [agent-avatars.md](../docs/agent-avatars.md) |
 | Docs / support | **PASS** | The identity model, autonomy rules, lifecycle, continuity, safety boundaries, and operator surfaces are documented. [agent-avatars.md](../docs/agent-avatars.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
-- `avatar-operations-alerting` (observability): Define an avatar SLO and add avatar-specific alert rules for lifecycle, failure, compaction, and quota metrics; the tested external alert receiver already exists. ([tracking/evidence](../docs/observability-and-operations.md))
+- `avatar-operations-alerting` (observability): Retain live proof for the #357 generation-failure report-rate rule; define an avatar SLO and add lifecycle, compaction, and quota alerts on actual metrics. ([tracking/evidence](../docs/observability-and-operations.md))
 - `live-avatar-acceptance` (rollout / canaries): Retain a release-specific live lifecycle and archive/restore acceptance record. ([tracking/evidence](../docs/agent-avatars.md))
 - `payload-compaction` (rollout / canaries): Activate and verify payload compaction before cleanup-dependent mutations can be generally available. ([tracking/evidence](../docs/agent-avatars.md))
 
@@ -166,12 +164,13 @@ Same-realm open requests, offers, assignment, results, claims, and foreground pr
 - Managed rollout: `limited`
 - Readiness: **conditional**
 - Plan feature keys: `collaboration`
+- Plan policy keys: `collaboration_entitlement_version`
 - Detailed docs: [agent-collaboration.md](../docs/agent-collaboration.md), [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **PASS** | Request, offer, selection, assignment, result, claim, acknowledge, release, and escalation state machines are implemented and tested. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [message_request_hardening_integration_test.go](../internal/store/message_request_hardening_integration_test.go) |
-| Entitlement / policy | **CONDITIONAL** | Same-realm authority and claim fences are enforced, but request-graph operations currently check messaging rather than the separately cataloged collaboration feature key. [billing-and-limits.md](../docs/billing-and-limits.md), [message_feature_gate_integration_test.go](../internal/store/message_feature_gate_integration_test.go) |
+| Entitlement / policy | **PASS** | Every messaging-enabled catalog plan adopts collaboration entitlement v1. All nine request mutations independently require collaboration; PostgreSQL tests cover typed denials, successful transitions, and marker-free legacy access. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [plans_test.go](../internal/plans/plans_test.go), [message_feature_gate_integration_test.go](../internal/store/message_feature_gate_integration_test.go), [plans.json](../web/plans/plans.json) |
 | Bounds / abuse | **PASS** | Bounded payloads, claim leases, deterministic failure escalation, request state transitions, and messaging rate limits constrain work. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [inter-agent-messaging.md](../docs/inter-agent-messaging.md) |
 | Observability | **CONDITIONAL** | Value-free message and worker metrics are continuously scraped with live PagerDuty alert routing and a tested receiver; generic worker-job alerts cover the workers, but no request-graph-specific alert rules exist. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
 | Recovery | **PASS** | Durable canonical mailboxes, exact claim fences, retryable releases, request history, and archive/import preserve work across failures. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [backup-and-recovery.md](../docs/backup-and-recovery.md) |
@@ -180,7 +179,6 @@ Same-realm open requests, offers, assignment, results, claims, and foreground pr
 
 Open gates:
 
-- `collaboration-entitlement-enforcement` (entitlement / policy): Define collaboration as bundled metadata or independently enforce its plan key on request-graph operations without breaking existing snapshots. ([tracking/evidence](../internal/store/message_feature_gate_integration_test.go))
 - `current-live-request-canary` (rollout / canaries): Retain a current-release offer, assignment, result, retry, and escalation canary. ([tracking/evidence](../docs/autonomous-realm-messaging.md))
 - `external-alert-path` (observability): Add request-graph and message-family alert rules to the live rule set; continuous scrape, generic worker-job alerts, and the tested PagerDuty/dead-man receiver are already in place. ([tracking/evidence](../docs/observability-and-operations.md))
 
@@ -192,7 +190,8 @@ The loopback-only per-agent Agent Console is `witself dashboard`, with passive o
 
 - Implementation: `implemented`
 - Managed rollout: `not applicable`
-- Readiness: **conditional**
+- Readiness: **accepted**
+- Retained release/cohort evidence: `v0.0.275` — Release run 33999426386: dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (stub cell, headless Chromium, seven panels, redaction canary), retained 90 days.
 - Detailed docs: [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [api-routes.md](../docs/api-routes.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md)
 
 | Gate | State | Current evidence and conclusion |
@@ -202,12 +201,10 @@ The loopback-only per-agent Agent Console is `witself dashboard`, with passive o
 | Bounds / abuse | **PASS** | Loopback binding, host checks, process-local credentials, method/body caps, CSP, bounded pages, sanitized SVG, a double allow-listed entitlement projection, and strict email projections that remove ids, bodies, provider payloads, billing fields, and action targets constrain the browser boundary. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go), [self_test.go](../internal/server/self_test.go) |
 | Observability | **N/A** | This is an operator-started local foreground process, not an always-on managed service; status, startup errors, and foreground logs are its explicit operator surface. |
 | Recovery | **PASS** | Per-process registry claims, stale-process detection, conservative stop behavior, transactional preference persistence, and process-local credentials make crash and restart recovery bounded. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [registry_test.go](../internal/dashboard/registry_test.go), [dashboard_preferences_integration_test.go](../internal/store/dashboard_preferences_integration_test.go) |
-| Rollout / canaries | **CONDITIONAL** | The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for all seven panels, cell-applied entitlement states, both email directions, and disabled or unavailable states. [release.yml](../.github/workflows/release.yml), [agent-console.md](../docs/agent-console.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
+| Rollout / canaries | **PASS** | Release v0.0.275 retained dashboard-acceptance artifacts for ubuntu-latest, macos-15 and windows-latest (run 33999426386, 90 days): headless Chromium proved the bare-URL 401, token-to-cookie handoff, all seven panels, no console or request errors, an absent redaction canary, then status and stop. [release.yml](../.github/workflows/release.yml), [agent-console.md](../docs/agent-console.md), [run.mjs](../scripts/dashboard-acceptance/run.mjs) |
 | Docs / support | **PASS** | The command, presentation matrix, cell-applied entitlement schema and compatibility states, domain-ownership boundary, local lifecycle, received/sent email projections, and distinction from the fleet-admin TUI and any future hosted console are documented. [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
 
-Open gates:
-
-- `dashboard-release-acceptance` (rollout / canaries): Retain current cross-platform release acceptance for serve, status, stop, browser authentication, all seven panels, cell-applied entitlement states, independent received/sent email metadata, live updates, strict redaction, and graceful disabled or unavailable states. ([tracking/evidence](../docs/agent-console.md))
+Open gates: none.
 
 <a id="agent-email-receive"></a>
 
@@ -218,7 +215,7 @@ Inbound email on witmail.net is a production service for the exact Founder cohor
 - Implementation: `implemented`
 - Managed rollout: `limited`
 - Readiness: **conditional**
-- Retained release/cohort evidence: `v0.0.258` — Exact Founder receive deployment at v0.0.258/schema 93 on both cells with restore-verified pre-migration backups; edge attested at 0.0.259 with relay-v2/DMARC gates dark; the fresh real-mail canary evidence remains operator-retained.
+- Retained release/cohort evidence: `v0.0.262` — Founder receive with schema-93-or-later support; #294 records v0.0.262 edge relay v2 and DMARC rejection live on 2026-08-29, with attested dkim=pass and delivered dmarc=none probes. Full claim/read/ack/retention acceptance remains open.
 - Plan feature keys: `agent_email_receive`
 - Plan limit keys: `agent_email_attachment_storage_bytes`, `agent_email_max_raw_bytes`, `agent_email_received_bytes_per_realm_minute`, `agent_email_received_bytes_per_recipient_minute`, `agent_email_received_bytes_per_sender_minute`, `agent_email_received_per_realm_minute`, `agent_email_received_per_recipient_minute`, `agent_email_received_per_sender_minute`
 - Plan policy keys: `agent_email_entitlement_version`, `agent_email_retention_days`
@@ -228,18 +225,18 @@ Inbound email on witmail.net is a production service for the exact Founder cohor
 |---|---|---|
 | Behavior | **PASS** | Canonical delivery, disabled-account discard, durable storage, listen/claim/read/ack/release, retention, and move-safe routing are implemented and tested. [agent-email.md](../docs/agent-email.md), [test-agent-email-cell-smoke.sh](../scripts/test-agent-email-cell-smoke.sh) |
 | Entitlement / policy | **PASS** | Personal is disabled, paid-plan policy is resolved per account, Founder is explicitly allowlisted, and clients need no reinstall when policy changes. [agent-email.md](../docs/agent-email.md), [billing-and-limits.md](../docs/billing-and-limits.md) |
-| Bounds / abuse | **CONDITIONAL** | Raw-size, byte, sender, recipient, realm, account, storage-ledger, root-count, and hard-row ceilings are enforced, and advisory edge-attested SPF/DKIM/DMARC verdict recording plus dark DMARC rejection landed; trusted sender authentication, spam classification, and provider-wide pressure handling remain incomplete. [agent-email.md](../docs/agent-email.md), [threat-model.md](../docs/threat-model.md) |
+| Bounds / abuse | **CONDITIONAL** | Size, rate, storage-ledger, root-count, and row ceilings are enforced. Relay v2 records edge-attested SPF/DKIM/DMARC results; trusted-header dmarc=fail rejection is live (#294). Verdicts do not authorize client actions; spam/reputation, edge preflight, and provider backpressure remain incomplete. [agent-email.md](../docs/agent-email.md), [threat-model.md](../docs/threat-model.md), [authenticity.mjs](../infra/cloudflare/agent-email/src/authenticity.mjs), [index.js](../infra/cloudflare/agent-email/src/index.js) |
 | Observability | **PASS** | Workers Observability, cell metrics, storage gauges, health, logs, and audits exist; continuous logical-ledger and PVC capacity alerts route to a tested PagerDuty receiver with a dead-man heartbeat on the serving cell. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [agent-email.md](../docs/agent-email.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
 | Recovery | **CONDITIONAL** | Route journals, signed projections, retry-safe ingress, claims, retention, archive/import, and restore-verified pre-migration backups are implemented; a populated schema-93 email account move and restore drill remains required. [agent-email.md](../docs/agent-email.md), [backup-and-recovery.md](../docs/backup-and-recovery.md) |
-| Rollout / canaries | **CONDITIONAL** | Release v0.0.258 (schema 93) is live on both cells for the Founder cohort with the edge attested at 0.0.259 and all relay-v2/DMARC gates dark, but broad-plan enrollment and a repo-recorded fresh real-mail canary remain open. [agent-email.md](../docs/agent-email.md), [launch-readiness.md](../docs/launch-readiness.md), [tag #v0.0.258](https://github.com/witwave-ai/witself/releases/tag/v0.0.258) |
+| Rollout / canaries | **CONDITIONAL** | Founder receive is live; #294 records v0.0.262 relay v2 and DMARC rejection with real attested dkim=pass and correctly delivered dmarc=none mail. Broader plan enrollment and full claim/read/ack/retention canaries remain open. [agent-email.md](../docs/agent-email.md), [launch-readiness.md](../docs/launch-readiness.md), [commit #cca1ebcacb189f4153b6e106c3ebe13ca4ac6eb0](https://github.com/witwave-ai/witself/commit/cca1ebcacb189f4153b6e106c3ebe13ca4ac6eb0) |
 | Docs / support | **PASS** | Architecture, account behavior, addresses, bounds, operations, routing, recovery, security, and rollout state are documented as production rather than pilot. [agent-email.md](../docs/agent-email.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
 - `disabled-account-edge-preflight` (bounds / abuse): Add signed disposition/preflight so mail for disabled accounts is rejected before raw MIME is buffered or relayed. ([tracking/evidence](../docs/agent-email.md))
 - `email-move-recovery-canary` (recovery): Move and restore populated schema-93 email state, including inbound (with edge-attested verdict columns), accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal. ([tracking/evidence](../docs/cell-worker.md))
-- `fresh-real-mail-canary` (rollout / canaries): Retain a v0.0.253-or-later real inbound mail canary through claim, read, acknowledge, and retention accounting. ([tracking/evidence](../docs/agent-email.md))
-- `inbound-abuse-classification` (bounds / abuse): Define and verify sender authentication, spam/reputation policy, and provider-wide backpressure before cohort expansion. ([tracking/evidence](../docs/threat-model.md))
+- `fresh-real-mail-canary` (rollout / canaries): Retain a current-release real inbound canary through claim, read, acknowledge, and retention accounting, and verify broader plan enrollment; #294 already records live relay-v2 and DMARC probe delivery. ([tracking/evidence](../docs/agent-email.md))
+- `inbound-abuse-classification` (bounds / abuse): Define and verify spam/reputation policy and provider-wide backpressure before cohort expansion; edge-attested authentication results and trusted-header DMARC failure rejection are already live. ([tracking/evidence](../docs/threat-model.md))
 
 <a id="agent-email-send"></a>
 
@@ -288,21 +285,21 @@ The bounded self digest, self card, identity and capacity projections, memory, m
 | Behavior | **PASS** | Self show, self card, bounded facts and memories, capacities, value-free checkpoints, elision, filters, and installed hook hydration are implemented and tested. [context-hydration.md](../docs/context-hydration.md), [self_test.go](../internal/server/self_test.go) |
 | Entitlement / policy | **PASS** | Identity is token-derived, broad sensitive values stay redacted, checkpoints are content-free, and disabled messaging or email is represented without changing the installed client toolset. [context-hydration.md](../docs/context-hydration.md), [threat-model.md](../docs/threat-model.md) |
 | Bounds / abuse | **PASS** | Fact, memory, snippet, tag, checkpoint, output, hook-time, and rendered-context bounds prevent the digest from becoming an unbounded prompt or value-bearing control channel. [context-hydration.md](../docs/context-hydration.md), [self_test.go](../internal/server/self_test.go) |
-| Observability | **CONDITIONAL** | Integration verification and value-free hook state exist without recurring hydration-success, latency, staleness, truncation, or provider-regression alerts. [observability-and-operations.md](../docs/observability-and-operations.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
+| Observability | **CONDITIONAL** | Server self-digest success, latency, and elision metrics plus tested alert rules exist; local hook ledgers and optional acceptance evidence cover client outcomes. Live alert acceptance, staleness alerts, and scheduled signed-in provider regression remain pending. [observability-and-operations.md](../docs/observability-and-operations.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Recovery | **PASS** | The self projection is rebuilt from canonical rows, hook installation is transactional, unavailable optional sections fail open, and installed guidance provides an MCP fallback. [context-hydration.md](../docs/context-hydration.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Rollout / canaries | **CONDITIONAL** | Core self reads are released, but automatic model-visible delivery and foreground checkpoint handling lack current signed-in acceptance across every advertised runtime and operating system. [context-hydration.md](../docs/context-hydration.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Docs / support | **PASS** | Digest shape, privacy boundary, runtime differences, hook behavior, checkpoint semantics, foreground processing, and future file bridge are documented. [context-hydration.md](../docs/context-hydration.md), [mcp-tools.md](../docs/mcp-tools.md) |
 
 Open gates:
 
-- `self-hydration-operations` (observability): Add recurring value-free hydration success, latency, staleness, truncation, and provider-regression evidence with a tested alert path. ([tracking/evidence](../docs/observability-and-operations.md))
+- `self-hydration-operations` (observability): Server hydration evidence and tested alert rules exist; local ledgers and optional acceptance evidence record client outcomes. Retain live alert acceptance, add staleness alerts, and schedule signed-in Claude/Codex regression; Cursor/Grok remain operator-run. ([tracking/evidence](../docs/observability-and-operations.md))
 - `self-hydration-runtime-acceptance` (rollout / canaries): Retain signed-in acceptance for automatic and guided hydration, every checkpoint, disabled-feature transitions, and MCP fallback across the supported runtime matrix. ([tracking/evidence](../docs/provider-integration-certification.md))
 
 <a id="audit-trail-retention"></a>
 
 ### Account audit trail and retention
 
-The value-free account event registry, durable audit rows, owner-facing account events API and CLI, filtering, pagination, and authorization are implemented; retention modes, scheduled cleanup, export, and plan policy remain a building slice.
+The value-free account event registry, durable rows, owner API/CLI, filters, pagination, and authorization are implemented; whole-account witself export includes audit rows. Dedicated audit export, retention modes, scheduled cleanup, and plan policy remain a building slice.
 
 - Implementation: `building`
 - Managed rollout: `limited`
@@ -311,49 +308,49 @@ The value-free account event registry, durable audit rows, owner-facing account 
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **CONDITIONAL** | Event append, registry validation, account list, filters, pagination, and authorization work; delete, archive, hold, status, export, and scheduled retention do not. [audit-retention.md](../docs/audit-retention.md), [events_test.go](../internal/store/events_test.go) |
+| Behavior | **CONDITIONAL** | Event append, registry validation, account list, filters, pagination, and authorization work. Whole-account exports include account_events; dedicated audit export/status, delete/archive/hold modes, and scheduled retention remain unimplemented. [audit-retention.md](../docs/audit-retention.md), [events_test.go](../internal/store/events_test.go), [export.go](../internal/store/export.go) |
 | Entitlement / policy | **CONDITIONAL** | Account-scoped read authorization is enforced, but the specified per-plan retention policy, operator modes, and legal-hold authority are not represented in the canonical plan contract. [audit-retention.md](../docs/audit-retention.md), [plans.json](../web/plans/plans.json) |
 | Bounds / abuse | **CONDITIONAL** | Event shape, metadata, labels, filters, time range, and pages are bounded and value-free; live audit volume remains unbounded because no retention worker or storage ceiling is implemented. [audit-retention.md](../docs/audit-retention.md), [events.go](../internal/store/events.go) |
 | Observability | **CONDITIONAL** | Audit is itself inspectable, but append failures, registry drift, backlog, oldest-row age, storage growth, export, and retention health have no continuous SLO and alert path. [audit-retention.md](../docs/audit-retention.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
-| Recovery | **CONDITIONAL** | Canonical rows survive ordinary database backup and account movement, while the specified archive, hold, export, and retention-failure recovery paths are not implemented or drilled. [audit-retention.md](../docs/audit-retention.md), [backup-and-recovery.md](../docs/backup-and-recovery.md) |
+| Recovery | **CONDITIONAL** | Canonical audit rows survive database backup, account movement, and customer account export. Dedicated audit archive/hold/export and retention-failure recovery paths remain unimplemented or undrilled. [audit-retention.md](../docs/audit-retention.md), [backup-and-recovery.md](../docs/backup-and-recovery.md), [export.go](../internal/store/export.go) |
 | Rollout / canaries | **CONDITIONAL** | The account events surface is released, but there is no dark retention worker, selected retention cohort, or release-specific append, query, expiry, archive, and hold canary. [audit-retention.md](../docs/audit-retention.md) |
-| Docs / support | **CONDITIONAL** | Unimplemented defaults, modes, export, and commands are still presented as decisions, and the data-retention policy describes the 365-day audit default, delete/archive/hold modes, and audit.retention.swept sweep as code-enforced although no audit sweeper, Helm audit-retention value, or plan audit key exists. [audit-retention.md](../docs/audit-retention.md), [data-retention-policy.md](../docs/data-retention-policy.md) |
+| Docs / support | **CONDITIONAL** | The audit contract labels retention and dedicated audit export as target-only, but data-retention-policy still describes a 365-day default, delete/archive/hold modes, and audit.retention.swept as enforced without an audit sweeper, Helm value, or plan key. [audit-retention.md](../docs/audit-retention.md), [data-retention-policy.md](../docs/data-retention-policy.md) |
 
 Open gates:
 
-- `audit-doc-reconciliation` (docs / support): Separate the implemented account-events core from target retention, export, hold, metering, and command behavior throughout the audit contract. ([tracking/evidence](../docs/audit-retention.md))
+- `audit-doc-reconciliation` (docs / support): Reconcile data-retention-policy with the implemented account-events core and target-only dedicated audit export, retention, hold, and metering contract; whole-account export already includes audit rows. ([tracking/evidence](../docs/audit-retention.md))
 - `audit-operations-alerting` (observability): Connect append failures, registry drift, backlog, oldest age, storage, export, and retention health to continuous metrics and a tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
 - `audit-retention-enforcement` (behavior, bounds / abuse, entitlement / policy, rollout / canaries): Add a canonical retention policy, bounded worker, delete/archive/hold modes, storage safety, admin override, tests, dark cohort, and expiry canary. ([tracking/evidence](../docs/audit-retention.md))
-- `audit-retention-recovery` (recovery): Implement and drill audit export, archive verification, hold preservation, interrupted sweep recovery, account movement, and restore reconciliation. ([tracking/evidence](../docs/backup-and-recovery.md))
+- `audit-retention-recovery` (recovery): Implement and drill dedicated audit export, archive verification, hold preservation, and interrupted sweep recovery; reconcile those semantics with existing whole-account export and restore. ([tracking/evidence](../docs/backup-and-recovery.md))
 
 <a id="billing-plan-transitions"></a>
 
 ### Billing and plan transitions
 
-The dark Stripe stack is code-complete: free-to-paid checkout for Professional and Team, exact Professional-to-Personal downgrade, a paid-to-paid contact-path guard, Stripe Tax, a fail-closed GA gate, a dunning contract test, and a refund runbook behind an empty cohort; charging and webhooks stay dark pending cutover.
+Managed Stripe billing is generally available since 2026-08-31 (#307/#308, v0.0.267), with Professional/Team checkout, webhook entitlement updates, Professional-to-Personal downgrade, and live Stripe Tax. Paid-to-paid execution, Enterprise, automated dunning/refund mutations, and recovery follow-ons remain open.
 
-- Implementation: `building`
-- Managed rollout: `dark`
-- Readiness: **not ready**
+- Implementation: `implemented`
+- Managed rollout: `general`
+- Readiness: **conditional**
+- Retained release/cohort evidence: `v0.0.267` — GA activation recorded in #308 after #307 bridged the flag; #306 retains zero-dollar Checkout, signed webhook-to-entitlement, paid invoice, period-end downgrade, and live Tax proof. This is launch evidence, not a fresh health check.
 - Detailed docs: [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **CONDITIONAL** | Free-to-paid preview, setup, checkout, and apply for Professional and Team plus Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; paid-to-paid upgrades refuse to a contact path; Enterprise, paid-to-paid execution, dunning, and refund mutations remain out. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_mutations_test.go](../internal/billing/lifecycle/billing_mutations_test.go), [dunning_contract_test.go](../internal/billing/lifecycle/dunning_contract_test.go), [stripe_test.go](../internal/billing/stripe/stripe_test.go) |
 | Entitlement / policy | **PASS** | The control plane owns billing truth and resolves immutable cell snapshots; plan and account overrides remain separate and auditable. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
-| Bounds / abuse | **CONDITIONAL** | Idempotency, exact provider cancellation, recovery fencing, a complete fenced count-only R2 collector with a canonical capture wrapper, and exact-reader preflight exist; receipt retention, operator terminalization, and retained production cutover proof remain incomplete. [billing_rollout_inventory_test.go](../cmd/witself-control-plane/billing_rollout_inventory_test.go), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [billing-rollout-source-fence.test.mjs](../infra/cloudflare/control-plane/test/billing-rollout-source-fence.test.mjs), [rollout_inventory_test.go](../internal/billing/lifecycle/rollout_inventory_test.go), [billing-transition-rollout-preflight.sh](../scripts/billing-transition-rollout-preflight.sh), [capture-billing-rollout-inventory.sh](../scripts/capture-billing-rollout-inventory.sh), [test-billing-transition-rollout-preflight.sh](../scripts/test-billing-transition-rollout-preflight.sh), [test-capture-billing-rollout-inventory.sh](../scripts/test-capture-billing-rollout-inventory.sh) |
-| Observability | **CONDITIONAL** | Value-free billing state, receipts, usage, and reconciler metrics exist, and a live PagerDuty-routed production alert stack now runs on the prod cell; none of its 14 rules cover billing, and billing-specific alerts, provider event dashboards, and billing support escalation remain unconnected. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [billing-and-limits.md](../docs/billing-and-limits.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
-| Recovery | **CONDITIONAL** | Crash-resumable mutation recovery and failed/recovered projection exist, the dunning contract is pinned by a hermetic test, and refunds have an operator runbook; a real-provider activation/forward-fix drill, restore reconciliation, dunning/collection mutations, and ambiguous-old-work terminalization remain unproven. [billing-and-limits.md](../docs/billing-and-limits.md), [refund-runbook.md](../docs/refund-runbook.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go), [dunning_contract_test.go](../internal/billing/lifecycle/dunning_contract_test.go) |
-| Rollout / canaries | **CONDITIONAL** | The transition stack stays dark behind an empty cohort and a fail-closed GA gate; owned HTTPS return routes run on the control-plane Worker and the six CP_STRIPE_* secrets are staged dark per the launch plan, but no end-to-end transition proof is retained and charging and webhooks stay disabled until the keyed cutover. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-return-pages.md](../docs/billing-return-pages.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [launch-readiness.md](../docs/launch-readiness.md), [billing-return-pages.mjs](../infra/cloudflare/control-plane/src/billing-return-pages.mjs), [stage-stripe-live-secrets.sh](../scripts/stage-stripe-live-secrets.sh), [test-billing-transition-rollout-preflight.sh](../scripts/test-billing-transition-rollout-preflight.sh) |
+| Bounds / abuse | **CONDITIONAL** | Exact idempotency, provider cancellation, recovery fences, and count-only rollout preflight exist; the one-time production cutover is complete. Completed-receipt retention and deterministic-failure terminalization remain incomplete. [main.go](../cmd/witself-control-plane/main.go), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [bridge.mjs](../infra/cloudflare/control-plane/src/bridge.mjs), [rollout_inventory_test.go](../internal/billing/lifecycle/rollout_inventory_test.go), [billing-transition-rollout-preflight.sh](../scripts/billing-transition-rollout-preflight.sh), [capture-billing-rollout-inventory.sh](../scripts/capture-billing-rollout-inventory.sh) |
+| Observability | **CONDITIONAL** | Value-free billing state, receipts, usage, and reconciler metrics exist. The accepted serving-cell PagerDuty/dead-man path is live; the rule pack still has no billing-specific rule, and provider-event dashboards and billing escalation integration remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [billing-and-limits.md](../docs/billing-and-limits.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Recovery | **CONDITIONAL** | Crash-resumable mutation recovery and the dunning contract are tested; refunds have an operator runbook. Live Checkout, webhook, invoice, and downgrade proof is retained. Restore reconciliation, forward-fix drills, and deterministic-failure terminalization remain open. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [refund-runbook.md](../docs/refund-runbook.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go), [dunning_contract_test.go](../internal/billing/lifecycle/dunning_contract_test.go) |
+| Rollout / canaries | **CONDITIONAL** | General availability at v0.0.267 is recorded with an empty allowlist and no test clock. Retained live proof covers zero-dollar Checkout, signed webhook-to-entitlement, paid invoice, period-end downgrade, and Stripe Tax; a nonzero customer-charge proof remains outstanding. [main.go](../cmd/witself-control-plane/main.go), [billing-and-limits.md](../docs/billing-and-limits.md), [billing-return-pages.md](../docs/billing-return-pages.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [launch-readiness.md](../docs/launch-readiness.md), [commit #c0d319bbcfea3a348bb52c802674a83a0c75435c](https://github.com/witwave-ai/witself/commit/c0d319bbcfea3a348bb52c802674a83a0c75435c), [commit #f5ec4e62601ef119c6f868330060702c58cdfa65](https://github.com/witwave-ai/witself/commit/f5ec4e62601ef119c6f868330060702c58cdfa65), [billing-return-pages.mjs](../infra/cloudflare/control-plane/src/billing-return-pages.mjs) |
 | Docs / support | **PASS** | Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, the canonical wrapper-owned prior/drain/BEFORE/scan/AFTER ceremony, quarantine, forward-fix-only cutover, and remaining provider gates are documented. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [refund-runbook.md](../docs/refund-runbook.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
-- `billing-operations` (observability, recovery): Connect billing metrics, alerts, receipt retention, support escalation, and operator recovery. ([tracking/evidence](../docs/billing-and-limits.md))
+- `billing-operations` (observability, recovery): Connect billing-specific metrics, alerts, provider-event dashboards, and support escalation; retain restore reconciliation and a forward-fix drill on the current provider-target lineage. ([tracking/evidence](../docs/billing-and-limits.md))
 - `billing-safety-completion` (bounds / abuse, recovery): Complete bounded completed-receipt retention and operator terminalization of deterministic provider failures without clearing ambiguous work. ([tracking/evidence](../docs/billing-and-limits.md))
-- `billing-v254-exclusive-cutover` (bounds / abuse, recovery, rollout / canaries): Execute the fenced complete R2 inventory against the exact production authority; bind the exact-reader release, application, and image; prove an empty cohort, zero writers, and zero hazards; fully drain v0.0.254; forbid rollback; retain cutover and forward-fix evidence. ([tracking/evidence](../docs/billing-transition-rollout.md))
 - `full-lifecycle-reconciliation` (behavior, recovery): Complete Enterprise transitions, paid-to-paid execution and compensation (subscription schedules beyond the contact-path guard), automated dunning policy or collection mutations, refund mutations, and restore reconciliation. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/33))
-- `stripe-sandbox-acceptance` (rollout / canaries): Return surfaces, portal, webhook endpoint, and CP_STRIPE_* secrets are staged dark; run the keyed cutover (provider/mode/lifecycle keys, allowlist, Stripe Tax) atop the reviewed atomic orchestrator and retain one transition and forward-fix proof; Enterprise, paid-to-paid, and refunds stay excluded. ([tracking/evidence](../docs/billing-transition-rollout.md))
+- `nonzero-charge-reconciliation` (rollout / canaries): Retain the first nonzero customer-charge reconciliation proof; zero-dollar live Checkout, webhook, invoice, downgrade, Tax activation, and GA cutover are already recorded. ([tracking/evidence](../docs/billing-transition-rollout.md))
 
 <a id="custom-email-domains"></a>
 
@@ -391,7 +388,7 @@ Open gates:
 
 ### Durable facts
 
-Stable subjects, immutable assertions, candidates, typed values, primary resolution, guarded permanent deletion, archive/import, and per-agent fact limits are implemented; advanced conflict and cross-agent policy remain later work.
+Stable subjects, immutable resolved assertions, candidates, typed values, guarded permanent deletion, archive/import, per-agent fact limits, and documented advanced fact policy are implemented. Cross-agent and group fact access remain deferred to the access-policy rock.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
@@ -402,19 +399,18 @@ Stable subjects, immutable assertions, candidates, typed values, primary resolut
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **PASS** | Subject resolution, assertions, candidates, review, primary selection, typed values, deletion preview/apply, and archive/import are implemented across store, API, CLI, and MCP. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
+| Behavior | **PASS** | Subject resolution, resolved assertions, candidates, conflict-fenced review, typed values, deletion preview/apply, and archive/import are implemented. Stored primary flags and promotion/demotion are targets. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact.go](../internal/store/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go) |
 | Entitlement / policy | **PASS** | Per-agent stored_fact limits and owner-authorized sensitive reveal and permanent deletion boundaries are enforced. [billing-and-limits.md](../docs/billing-and-limits.md), [fact-service.md](../docs/fact-service.md) |
 | Bounds / abuse | **PASS** | Typed-value validation, stable addresses, active-fact counting, revision fences, candidate bounds, and value-safe usage records bound the service. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
-| Observability | **CONDITIONAL** | Value-free usage and audit records exist, and the shared external alert path (PagerDuty + dead-man on the serving cell) is now live and canary-tested; fact-specific SLOs and fact metrics wired to that path are still not retained. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **CONDITIONAL** | Value-free usage/audit records and the accepted serving-cell alert path exist. #357 adds a tested fact DELETE 5xx-ratio rule from HTTP metrics; live loading proof, broader fact-operation instrumentation, and SLOs remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [metrics.go](../internal/server/metrics.go) |
 | Recovery | **PASS** | Immutable assertion history, candidate review, reversible changes, archive/import, and explicit permanent-delete fencing provide recovery semantics. [backup-and-recovery.md](../docs/backup-and-recovery.md), [fact-service.md](../docs/fact-service.md) |
-| Rollout / canaries | **CONDITIONAL** | Core behavior is in released code, while the guarded permanent-delete path remains disabled in the active managed cohort and lacks current live acceptance evidence. [fact-service.md](../docs/fact-service.md), [runbooks.md](../docs/runbooks.md) |
-| Docs / support | **CONDITIONAL** | Core facts and deletion are documented, but advanced conflict authority, predicate registries, reminder delivery, and cross-agent policy remain explicitly unresolved. [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md) |
+| Rollout / canaries | **CONDITIONAL** | Core behavior is released and permanent fact deletion is enabled on both cells (#312). Retained current-release preview/apply/isolation acceptance remains open. [values.yaml](../.gitops/cells/civo-sandbox-use1-backup/values.yaml), [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [fact-service.md](../docs/fact-service.md), [launch-readiness.md](../docs/launch-readiness.md), [runbooks.md](../docs/runbooks.md) |
+| Docs / support | **PASS** | Core and advanced fact policy are documented in facts-model.md and reconciled with store, routes, and CLI/MCP. Cross-agent and group fact access remain deferred to the access-policy rock. [mcp.go](../cmd/witself/mcp.go), [access-policy.md](../docs/access-policy.md), [fact-service.md](../docs/fact-service.md), [facts-model.md](../docs/facts-model.md), [fact.go](../internal/server/fact.go), [fact_candidate.go](../internal/store/fact_candidate.go), [fact_temporal.go](../internal/store/fact_temporal.go), [fact_value_type.go](../internal/store/fact_value_type.go) |
 
 Open gates:
 
-- `advanced-fact-policy` (docs / support): Resolve authority/conflict policy, predicate registries, reminder delivery, and cross-agent fact access before declaring the broader model complete. ([tracking/evidence](../docs/facts-model.md))
-- `fact-delete-canary` (rollout / canaries): Enable the guarded path for a selected cohort and retain a current preview/apply/isolation canary. ([tracking/evidence](../docs/fact-service.md))
-- `fact-operations` (observability): Define fact SLOs and connect value-free metrics to the shared external alert path. ([tracking/evidence](../docs/observability-and-operations.md))
+- `fact-delete-canary` (rollout / canaries): Retain a current-release preview/apply/isolation canary for permanent deletion; #312 already enabled the guarded path on both cells. ([tracking/evidence](../docs/fact-service.md))
+- `fact-operations` (observability): Retain live proof for the #357 DELETE failure-ratio rule, define fact SLOs, and instrument remaining fact operations on the shared alert path. ([tracking/evidence](../docs/observability-and-operations.md))
 
 <a id="fleet-deployment-recovery"></a>
 
@@ -433,14 +429,14 @@ Signed releases, immutable images, Helm/GitOps cells, schema checks, encrypted r
 | Behavior | **PASS** | Build, sign, attest, publish, render, migrate, health-check, archive, backup, restore validation, and GitOps convergence paths are implemented. [backup-and-recovery.md](../docs/backup-and-recovery.md), [release-and-build.md](../docs/release-and-build.md) |
 | Entitlement / policy | **PASS** | Control-plane placement authority, accepting-cell policy, cohort gates, schema compatibility, and fleet-admin boundaries are explicit. [deployment-cells.md](../docs/deployment-cells.md), [governance-and-support.md](../docs/governance-and-support.md) |
 | Bounds / abuse | **PASS** | Immutable digests, migration locks, bounded workers, schema floors, placement freezes, exact cohorts, encrypted artifact permissions, and a fail-closed roll-cell gate that verifies pre-migration backup evidence before any values edit constrain rollout risk. [backup_evidence_cmd.go](../cmd/witself-admin/backup_evidence_cmd.go), [deployment-cells.md](../docs/deployment-cells.md), [release-and-build.md](../docs/release-and-build.md) |
-| Observability | **CONDITIONAL** | The serving cell runs continuous kube-prometheus-stack scraping with server/worker ServiceMonitors, PVC metrics, 14 alert rules, PagerDuty routing, and a dead-man watchdog, accepted via alert-canary and dead-man lapse proofs; the backup validation cell and any future accepting cell remain outside the monitored plane. [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **CONDITIONAL** | Serving-cell scraping, PVC metrics, routing, and PagerDuty/dead-man rollout (#264-#266) was accepted in #267. The chart now has 19 rules, including five product-family rules with promtool tests (#357); their live loading and backup/future-cell monitoring still need retained proof. [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [commit #50976cadc1816c1a2f37a92e2a818cb0218a1eac](https://github.com/witwave-ai/witself/commit/50976cadc1816c1a2f37a92e2a818cb0218a1eac) |
 | Recovery | **CONDITIONAL** | Encrypted pre-migration backups and disposable restore validation exist; provider PITR, committed production restore, and multi-cell movement drills remain incomplete. [backup_evidence_cmd.go](../cmd/witself-admin/backup_evidence_cmd.go), [backup-and-recovery.md](../docs/backup-and-recovery.md), [deployment-cells.md](../docs/deployment-cells.md) |
 | Rollout / canaries | **CONDITIONAL** | v0.0.258 passed release and waved dual-cell rolls with restore-verified pre-migration backup evidence for both cells, converging both Civo cells at schema 93 with control plane and edge attested at 0.0.259; the backup cell remains a non-accepting validation target and placement stays paused. [deployment-cells.md](../docs/deployment-cells.md), [tag #v0.0.258](https://github.com/witwave-ai/witself/releases/tag/v0.0.258) |
 | Docs / support | **PASS** | Release, GitOps, migration, backup, restore, cell movement, and incident procedures are documented. [backup-and-recovery.md](../docs/backup-and-recovery.md), [deployment-cells.md](../docs/deployment-cells.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
-- `continuous-platform-alerting` (observability): Extend continuous monitoring and alert coverage to the backup validation cell and every future accepting cell; the serving-cell metrics, routing, and receiver chain is deployed and accepted. ([tracking/evidence](../docs/observability-and-operations.md))
+- `continuous-platform-alerting` (observability): Retain live loading and evaluation evidence for the five #357 rules, and extend monitoring to the backup and future accepting cells; serving-cell scraping, routing, and receiver acceptance are already recorded. ([tracking/evidence](../docs/observability-and-operations.md))
 - `provider-pitr-drill` (recovery): Enable and retain provider PITR plus a committed production-grade restore rehearsal. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/68))
 - `schema-converged-movement` (rollout / canaries): Upgrade every possible accepting destination, verify capacity monitoring, and complete a directed move before resuming placement. ([tracking/evidence](../docs/deployment-cells.md))
 
@@ -475,19 +471,19 @@ Open gates:
 
 ### Managed support
 
-Support tickets, messages, transitions, tenant and fleet-admin surfaces, audit, and archive/import ship with a published policy, plan-entitlement admission enforcement, and a live first-response breach alert; the AI responder and support@ intake stay dark; intake-rate controls and a rollout canary stay limited.
+Support tickets, audit, archive/import, plan-entitlement admission, per-account creation limits, and first-response breach alerts are implemented. Awaiting-customer age-out defaults off; the AI responder and support@ intake stay dark, and a rollout canary remains open.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
 - Readiness: **conditional**
 - Plan feature keys: `support`
-- Detailed docs: [api-routes.md](../docs/api-routes.md), [cli-command-surface.md](../docs/cli-command-surface.md), [governance-and-support.md](../docs/governance-and-support.md), [self-host-support.md](../docs/self-host-support.md), [support-policy.md](../docs/support-policy.md), [support-runner.md](../docs/support-runner.md)
+- Detailed docs: [api-routes.md](../docs/api-routes.md), [cli-command-surface.md](../docs/cli-command-surface.md), [governance-and-support.md](../docs/governance-and-support.md), [self-host-support.md](../docs/self-host-support.md), [support-admission-age-out-evidence.md](../docs/support-admission-age-out-evidence.md), [support-policy.md](../docs/support-policy.md), [support-runner.md](../docs/support-runner.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **PASS** | Ticket open, list, show, reply, close, bounded state transitions, tenant CLI/API, fleet-admin CLI/TUI, audit, and archive/import are implemented and tested. [api-routes.md](../docs/api-routes.md), [support_test.go](../internal/store/support_test.go) |
 | Entitlement / policy | **PASS** | Support is a plan entitlement enforced at ticket admission: an applied plan snapshot without the support feature cannot open tickets, pre-snapshot accounts are not locked out, and support_policy stays an independent audited fleet-operator switch; Personal carries no support feature and the policy documents this. [support-policy.md](../docs/support-policy.md), [support_entitlement_test.go](../internal/server/support_entitlement_test.go), [support.go](../internal/store/support.go), [support_entitlement_integration_test.go](../internal/store/support_entitlement_integration_test.go), [plans.json](../web/plans/plans.json) |
-| Bounds / abuse | **CONDITIONAL** | Subjects, bodies, pages, roles, states, and value exposure are bounded; ticket retention is defined by the dark closed-account purge, and the dark support@ channel adds sender rate limits, DMARC-matched senders, and bounded fan-out; in-product intake-rate controls, an age-out sweep, and attachment handling are absent. [data-retention-policy.md](../docs/data-retention-policy.md), [security-policy.md](../docs/security-policy.md), [index.js](../infra/cloudflare/support-email-intake/src/index.js), [support.go](../internal/store/support.go), [support_email.go](../internal/store/support_email.go) |
+| Bounds / abuse | **CONDITIONAL** | Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge deletes tickets after the 30-day closure grace. API/CLI ticket creation is rate-limited per account; a default-off bounded worker resolves stale awaiting-customer tickets after a human reply. Attachment handling remains absent. [values.yaml](../.gitops/cells/civo-sandbox-usw2-dev/values.yaml), [data-retention-policy.md](../docs/data-retention-policy.md), [security-policy.md](../docs/security-policy.md), [support-admission-age-out-evidence.md](../docs/support-admission-age-out-evidence.md), [index.js](../infra/cloudflare/support-email-intake/src/index.js), [support.go](../internal/store/support.go), [support_email.go](../internal/store/support_email.go), [support_limits_test.go](../internal/store/support_limits_test.go) |
 | Observability | **PASS** | Value-free first-response SLO gauges (unanswered tickets, oldest unanswered age, and an up guard) render on every cell, and the WitselfSupportFirstResponseBreach rule rides the live PagerDuty-routed monitoring stack with serving-cell verification recorded in the launch plan; the admin TUI exposes ticket state and age. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [tui_model.go](../cmd/witself-admin/tui_model.go), [launch-readiness.md](../docs/launch-readiness.md), [metrics.go](../internal/server/metrics.go), [support_slo_integration_test.go](../internal/store/support_slo_integration_test.go) |
 | Recovery | **PASS** | Tickets and messages are durable, audited, included in account archive/import, and remain available for administrator continuity across account-policy changes. [backup-and-recovery.md](../docs/backup-and-recovery.md), [support_test.go](../internal/store/support_test.go) |
 | Rollout / canaries | **CONDITIONAL** | The support surface is implemented, but there is no retained plan-entitlement canary, selected support cohort declaration, or production SLA launch evidence. [billing-and-limits.md](../docs/billing-and-limits.md), [governance-and-support.md](../docs/governance-and-support.md) |
@@ -495,7 +491,7 @@ Support tickets, messages, transitions, tenant and fleet-admin surfaces, audit, 
 
 Open gates:
 
-- `support-abuse-retention` (bounds / abuse): Add in-product ticket-creation intake-rate controls, any bounded ticket age-out sweep, and bounded evidence-attachment handling; the email channel's dark rate limiting and the purge-path retention landed. ([tracking/evidence](../internal/store/support.go))
+- `support-abuse-retention` (bounds / abuse): Add bounded evidence-attachment handling; per-account API/CLI rate limiting and a default-off bounded awaiting-customer age-out worker are implemented. ([tracking/evidence](../internal/store/support.go))
 - `support-rollout-canary` (rollout / canaries): Run a selected-account case from intake through escalation, resolution, export, retention, and customer closure before advertising the benefit. ([tracking/evidence](../docs/governance-and-support.md))
 
 <a id="narrative-memory"></a>
@@ -533,7 +529,7 @@ Open gates:
 
 ### Managed operator authentication
 
-Browser PKCE, device-code fallback, secure local session custody, revocation, and managed operator authorization are specified, while the current CLI implements only bootstrap-token-file exchange and agent-token flows.
+Managed account create/adopt, bootstrap exchange, account roles, and token mint/revoke are implemented. Hosted browser PKCE, device-code sessions, refresh, logout, and OS credential-store custody remain targets.
 
 - Implementation: `specified`
 - Managed rollout: `not started`
@@ -544,15 +540,14 @@ Browser PKCE, device-code fallback, secure local session custody, revocation, an
 |---|---|---|
 | Behavior | **CONDITIONAL** | The hosted browser, callback, device-code, status, refresh, logout, and revocation flows are specified but not implemented in the CLI or control plane. [main.go](../cmd/witself/main.go), [operator-auth.md](../docs/operator-auth.md) |
 | Entitlement / policy | **CONDITIONAL** | Operator roles and scopes are documented, but a managed human session does not yet carry and refresh that authorization contract. [authorization-and-roles.md](../docs/authorization-and-roles.md), [operator-auth.md](../docs/operator-auth.md) |
-| Bounds / abuse | **CONDITIONAL** | PKCE, short-lived codes, no-password CLI handling, revocation, and secure local storage are design requirements without executable replay, phishing, callback, or device-code abuse tests. [operator-auth.md](../docs/operator-auth.md), [threat-model.md](../docs/threat-model.md) |
+| Bounds / abuse | **CONDITIONAL** | PKCE, short-lived codes, hosted-session revocation, and OS credential-store custody remain targets without executable replay, phishing, callback, or device-code abuse tests; ordinary token revocation already exists. [operator-auth.md](../docs/operator-auth.md), [threat-model.md](../docs/threat-model.md) |
 | Observability | **CONDITIONAL** | No value-free login, refresh, revocation, callback, device-code, or abuse metrics and alert path exist for the target managed flow. [observability-and-operations.md](../docs/observability-and-operations.md), [operator-auth.md](../docs/operator-auth.md) |
-| Recovery | **CONDITIONAL** | Session revocation, credential-store fallback, lost-device recovery, and provider outage behavior are specified but not implemented or drilled. [operator-auth.md](../docs/operator-auth.md) |
+| Recovery | **CONDITIONAL** | Hosted-session revocation, credential-store fallback, lost-device recovery, and provider outage behavior remain target work requiring contracts, implementation, and drills. [operator-auth.md](../docs/operator-auth.md) |
 | Rollout / canaries | **CONDITIONAL** | No dark managed cohort, hosted callback, device-code, multi-platform credential-store, or revocation canary exists. [operator-auth.md](../docs/operator-auth.md) |
-| Docs / support | **CONDITIONAL** | The target is documented, but policy and security-group dependencies plus the current bootstrap-only command boundary need an implementation-ready contract pass. [operator-auth.md](../docs/operator-auth.md) |
+| Docs / support | **PASS** | operator-auth-contract-reconciliation is complete: onboarding, roles, bootstrap/whoami wire shapes, and current CLI token lifecycle are pinned; hosted sessions and policy/group authority remain explicit targets. [main.go](../cmd/witself/main.go), [api-contract.md](../docs/api-contract.md), [operator-auth.md](../docs/operator-auth.md), [server.go](../internal/server/server.go), [auth.go](../internal/store/auth.go), [operator.go](../internal/store/operator.go) |
 
 Open gates:
 
-- `operator-auth-contract-reconciliation` (docs / support): Reconcile the target with current account onboarding, implemented roles, unimplemented policies/groups, CLI commands, hosted endpoints, and credential-store support. ([tracking/evidence](../docs/operator-auth.md))
 - `operator-auth-core-implementation` (behavior, bounds / abuse, entitlement / policy, recovery): Implement hosted PKCE and device-code sessions, refresh, revocation, secure local custody, lost-device recovery, authorization propagation, and hostile-flow tests. ([tracking/evidence](../docs/operator-auth.md))
 - `operator-auth-operations` (observability): Add value-free login, callback, device-code, refresh, revocation, failure, and abuse metrics with SLOs and a tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
 - `operator-auth-release-canary` (rollout / canaries): Ship behind a dark operator cohort and retain browser, headless, refresh, revoke, lost-device, and cross-platform credential-store acceptance. ([tracking/evidence](../docs/operator-auth.md))
@@ -561,10 +556,10 @@ Open gates:
 
 ### Plans, limits, and account overrides
 
-A validated catalog defines Personal, Professional, Team, and Enterprise pricing direction, entitlements, limits, and policies; the control plane resolves account snapshots and cells enforce them with audited per-account overrides.
+Personal, Professional, and Team are available through general self-service billing; Enterprise remains contact-only. The validated plan catalog defines prices, entitlements, limits, and policies; the control plane resolves snapshots and cells enforce them with audited account overrides.
 
 - Implementation: `implemented`
-- Managed rollout: `limited`
+- Managed rollout: `general`
 - Readiness: **conditional**
 - Detailed docs: [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json)
 
@@ -573,16 +568,15 @@ A validated catalog defines Personal, Professional, Team, and Enterprise pricing
 | Behavior | **PASS** | Catalog load, pricing projection, account plan state, effective snapshots, limit resolution, overrides, and admin inspection are implemented and tested. [billing-and-limits.md](../docs/billing-and-limits.md), [plans_test.go](../internal/plans/plans_test.go) |
 | Entitlement / policy | **PASS** | Plans remain global control-plane truth while cells store only resolved account behavior; per-account overrides change operation without rewriting price or plan identity. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
 | Bounds / abuse | **PASS** | Commercial limits are bounded by independent platform ceilings, missing keys have explicit unlimited semantics, and invalid zero or oversized policies fail closed. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.go](../internal/plans/plans.go) |
-| Observability | **CONDITIONAL** | Usage events, current policy views, and admin surfaces exist; there is no unified entitlement-drift dashboard or alert path. [billing-and-limits.md](../docs/billing-and-limits.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **PASS** | Authoritative CP reconciliation results expose value-free pending and unverified delivery observations over complete traversals, with explicit unavailable/stale states and separately gated default-off alerts; live rollout remains an operator step. [entitlement-delivery.rules.yaml](../.gitops/charts/platform/files/entitlement-delivery.rules.yaml), [billing-and-limits.md](../docs/billing-and-limits.md), [entitlement-delivery-metrics.test.mjs](../infra/cloudflare/control-plane/test/entitlement-delivery-metrics.test.mjs), [plan_lifecycle_test.go](../internal/cpserver/plan_lifecycle_test.go) |
 | Recovery | **PASS** | Resolved snapshots, version floors, overrides, usage events, and account archive/import preserve policy state across retries and movement. [backup-and-recovery.md](../docs/backup-and-recovery.md), [billing-and-limits.md](../docs/billing-and-limits.md) |
-| Rollout / canaries | **CONDITIONAL** | Personal, Professional, and Team are catalog-available with ratified operator seats (Personal 1, Professional 3, Team 25) and Team's flat $250 monthly price; Enterprise remains unavailable (contact-only), and repository state alone cannot prove each live account override. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
+| Rollout / canaries | **CONDITIONAL** | Professional and Team checkout is generally available (#307/#308); operator seats remain 1/3/25 for Personal/Professional/Team. Enterprise is contact-only. Broader dependent-feature enrollment and current per-account override acceptance remain open. [billing-and-limits.md](../docs/billing-and-limits.md), [launch-readiness.md](../docs/launch-readiness.md), [plans.json](../web/plans/plans.json) |
 | Docs / support | **PASS** | Pricing direction, limits, retention, account overrides, authority split, and unavailable-plan behavior are documented. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
 
 Open gates:
 
-- `entitlement-drift-monitoring` (observability): Add a value-free control-plane versus cell snapshot drift view and alert. ([tracking/evidence](../docs/billing-and-limits.md))
-- `professional-purchase-readiness` (rollout / canaries): Reconcile the Professional and Team catalog-purchasable flags with dark billing, limited inbound email enrollment, and support-policy enforcement before customer checkout opens. ([tracking/evidence](../web/plans/plans.json))
-- `team-enterprise-activation` (rollout / canaries): Keep Enterprise unavailable until its dependent features and billing transitions meet this scorecard's gates, and reconcile Team's 2026-08-24 purchasable flip (made after the paid-to-paid guard, seat enforcement, and flat pricing merged) with the still-dark billing cutover. ([tracking/evidence](../web/plans/plans.json))
+- `enterprise-activation` (rollout / canaries): Keep Enterprise unavailable until its dependent features and billing transitions meet their gates; Professional and Team customer checkout is already generally available. ([tracking/evidence](../web/plans/plans.json))
+- `paid-plan-feature-acceptance` (rollout / canaries): Verify broader paid-plan email enrollment and current per-account overrides against resolved snapshots; checkout availability and support entitlement enforcement are already implemented. ([tracking/evidence](../web/plans/plans.json))
 
 <a id="realm-email-aliases"></a>
 
@@ -636,21 +630,21 @@ Durable same-realm direct and fan-out messaging, mailbox claims, retention, acco
 | Behavior | **PASS** | Send, list, fan-out, listen, claim, acknowledge, release, escalation, disabled behavior, and whole-thread retention are implemented and tested. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [inter-agent-messaging.md](../docs/inter-agent-messaging.md) |
 | Entitlement / policy | **PASS** | Personal is disabled; enabled plans and account overrides take effect without reinstall, and same-realm authority fails closed. [billing-and-limits.md](../docs/billing-and-limits.md), [inter-agent-messaging.md](../docs/inter-agent-messaging.md) |
 | Bounds / abuse | **PASS** | Payload, fan-out, per-agent, per-realm, per-recipient, claim, retry, escalation, and retention bounds are enforced with independent platform ceilings. [inter-agent-messaging.md](../docs/inter-agent-messaging.md), [message-retention.md](../docs/message-retention.md) |
-| Observability | **CONDITIONAL** | Value-free mailbox, rate, retention, claim, and worker metrics are continuously scraped on the serving cell with a tested PagerDuty and dead-man alert path, but no message-specific alert rules or SLO cover mailbox backlog, rates, claims, or retention. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
+| Observability | **CONDITIONAL** | The accepted serving-cell alert path covers generic worker health. #357 adds a tested message-retention scan-cap pressure rule. Mailbox depth and claim/lease counters are not exposed; their instrumentation, SLOs, and live rule-loading proof remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [metrics.go](../internal/worker/metrics.go) |
 | Recovery | **PASS** | Canonical PostgreSQL mailboxes, claim fences, retry releases, escalations, provenance holds, archive/import, and retention cursors preserve work. [backup-and-recovery.md](../docs/backup-and-recovery.md), [message-retention.md](../docs/message-retention.md) |
 | Rollout / canaries | **CONDITIONAL** | The same-realm core has retained operational evidence, while this combined capability is limited because the managed message-retention worker remains disabled and lacks a current canary. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [message-retention.md](../docs/message-retention.md) |
 | Docs / support | **PASS** | Supported behavior, disabled semantics, rate limits, retention, foreground processing, and non-goals are documented. [autonomous-realm-messaging.md](../docs/autonomous-realm-messaging.md), [inter-agent-messaging.md](../docs/inter-agent-messaging.md), [message-retention.md](../docs/message-retention.md) |
 
 Open gates:
 
-- `continuous-message-alerting` (observability): Add message-specific alert rules (mailbox backlog, rate, claim, failure, retention) to the live founder-open-plane rule set; the continuous scrape and tested PagerDuty/dead-man receiver already exist. ([tracking/evidence](../docs/observability-and-operations.md))
+- `continuous-message-alerting` (observability): Retain live proof for the #357 retention scan-cap pressure rule; add missing mailbox-depth and claim/lease metrics and message-specific SLO alerts. Generic worker failures already reach the tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
 - `message-retention-rollout` (rollout / canaries): Enable enforce mode for a selected cohort and retain expiry, provenance-hold, and worker-fairness canaries. ([tracking/evidence](../docs/message-retention.md))
 
 <a id="runtime-integrations"></a>
 
 ### Agent runtime integrations
 
-Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.
+Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, GitHub Copilot, and DeepSeek Harness, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
@@ -664,12 +658,11 @@ Transactional MCP and routing installers exist for Codex, Claude Code, Grok Buil
 | Bounds / abuse | **PASS** | Exact ownership markers, path validation, collision-resistant IDs, bounded hooks, transactional backups, and no-value modes constrain installer risk. [provider-integration-certification.md](../docs/provider-integration-certification.md), [threat-model.md](../docs/threat-model.md) |
 | Observability | **CONDITIONAL** | Verification JSON and sanitized acceptance evidence schemas exist, but no recurring provider acceptance job or alerting surface is active. [memory-runtime-acceptance.md](../docs/memory-runtime-acceptance.md), [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Recovery | **PASS** | Install journals, pre-edit backups, rollback, exact ownership, idempotent reinstall, and conservative uninstall protect client configuration. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
-| Rollout / canaries | **CONDITIONAL** | Contract tests are strong, but only the Codex contract gate crosses MCP stdio and no provider cell is advertised model-tested with a current signed-in record. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
+| Rollout / canaries | **CONDITIONAL** | v0.0.278 publishes fixture evidence authenticated by signed checksums for 35 provider/platform cells; only the Codex contract crosses MCP stdio, and real-client/model acceptance remains not_run. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 | Docs / support | **PASS** | The per-runtime capability matrix, hooks, preview limitations, ownership, verification, and certification boundary are documented. [provider-integration-certification.md](../docs/provider-integration-certification.md) |
 
 Open gates:
 
-- `retained-provider-evidence` (rollout / canaries): Publish retained release JSON and the public support-matrix result from the existing credential-free provider contract gates. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/45))
 - `runtime-acceptance-operations` (observability): Run provider acceptance on a recurring cadence and alert on capability regressions without retaining credentials or private prompt content. ([tracking/evidence](../docs/provider-integration-certification.md))
 - `signed-in-runtime-matrix` (rollout / canaries): Complete current signed-in model acceptance for every advertised runtime and operating-system capability cell. ([tracking/evidence](../docs/provider-integration-certification.md))
 
@@ -691,7 +684,7 @@ The client-custodied agent vault, ciphertext-only backend, secret lifecycle, gua
 | Behavior | **CONDITIONAL** | Enrollment, create, search, show, reveal, archive, restore, delete, password, TOTP, recovery, and rotation exist; secret update and runtime injection are not complete. [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md), [secret-model.md](../docs/secret-model.md) |
 | Entitlement / policy | **PASS** | Personal has zero secret capacity, paid plans have per-agent caps, and only the active agent client can decrypt value fields under explicit reveal policy. [billing-and-limits.md](../docs/billing-and-limits.md), [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md) |
 | Bounds / abuse | **PASS** | Ciphertext-only storage, local AVK binding, size limits, field bounds, reveal audit, no-value mode, rotation fences, and excluded exports constrain exposure. [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md), [secret-size-and-attachments.md](../docs/secret-size-and-attachments.md) |
-| Observability | **CONDITIONAL** | Value-free audit and lifecycle state exist and a tested external escalation path (PagerDuty plus dead-man) is live on the serving cell, but sealed-plane SLOs and anomaly alerts are still not defined or connected to it. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
+| Observability | **PASS** | Value-free delivery/lifecycle metrics, cell posture gauges, sealed-plane SLOs, and five tested alerts are implemented; the alert gate is on for the serving cell via the sealed_plane_alerts catalog switch after v0.0.286 series verification. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [observability-and-operations.md](../docs/observability-and-operations.md), [runbooks.md](../docs/runbooks.md), [metrics.go](../internal/server/metrics.go), [metrics_test.go](../internal/server/metrics_test.go), [sealed_plane_posture.go](../internal/store/sealed_plane_posture.go), [sealed_plane_posture_integration_test.go](../internal/store/sealed_plane_posture_integration_test.go) |
 | Recovery | **CONDITIONAL** | Client recovery, rotation, encrypted archive/import, and fail-closed vault binding exist; cross-cloud movement and loss/recovery drills remain incomplete. [backup-and-recovery.md](../docs/backup-and-recovery.md), [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md) |
 | Rollout / canaries | **CONDITIONAL** | The implemented slice is released, but four-runtime and multi-cloud acceptance evidence is incomplete and advanced operations remain unavailable. [provider-integration-certification.md](../docs/provider-integration-certification.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
 | Docs / support | **CONDITIONAL** | The authoritative AVK design is documented, while older KMS/server-decryption language remains in historical documents and needs consistency cleanup. [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
@@ -701,7 +694,6 @@ Open gates:
 - `advanced-secret-operations` (behavior): Implement secret update, local runtime injection, grants/group ownership, and irreversible tombstone purge with matching policy and tests. ([tracking/evidence](../docs/secret-model.md))
 - `sealed-doc-consistency` (docs / support): Remove or clearly label stale KMS and server-decryption claims that conflict with the client-custodied AVK architecture. ([tracking/evidence](../docs/sealed-plane-acceptance.md))
 - `sealed-live-certification` (recovery, rollout / canaries): Complete four-runtime reveal/TOTP recovery and multi-cloud archive/movement drills with sanitized evidence. ([tracking/evidence](../docs/sealed-plane-acceptance.md))
-- `sealed-operations-alerting` (observability): Define sealed-plane SLOs and add sealed-plane alert rules for enrollment, reveal, recovery, rotation, and anomaly signals; the tested external escalation path (PagerDuty plus dead-man) already exists. ([tracking/evidence](../docs/observability-and-operations.md))
 
 <a id="self-hosting"></a>
 
@@ -717,7 +709,7 @@ The portable server, startup migrations, Helm chart, capability contract, Postgr
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **CONDITIONAL** | Portable server, startup migrations, Helm, and Pulumi cell paths exist, but the complete fresh-install, upgrade, and optional-feature matrix is not retained across supported substrates. [README.md](../charts/witself-server/README.md), [README.md](../infra/pulumi/README.md) |
-| Entitlement / policy | **CONDITIONAL** | Backend-kind and capability contracts distinguish managed-only dependencies, but the current capabilities response marks implemented facts unsupported and omits documented optional-feature flags. [values.yaml](../charts/witself-server/values.yaml), [api-contract.md](../docs/api-contract.md), [self-hosting.md](../docs/self-hosting.md), [server.go](../internal/server/server.go) |
+| Entitlement / policy | **CONDITIONAL** | Backend-kind and capability contracts distinguish managed-only dependencies. Facts and other payload families are checked against registered routes, including partial wiring and authentication prerequisites. Reconciliation of additional documented optional-feature flags remains open. [values.yaml](../charts/witself-server/values.yaml), [api-contract.md](../docs/api-contract.md), [self-hosting.md](../docs/self-hosting.md), [capabilities_test.go](../internal/server/capabilities_test.go), [server.go](../internal/server/server.go) |
 | Bounds / abuse | **CONDITIONAL** | The chart has hardened workload defaults and bounded application controls, while production capacity profiles, ingress policy, and operator-owned abuse protections are not certified end to end. [README.md](../charts/witself-server/README.md), [self-hosting.md](../docs/self-hosting.md) |
 | Observability | **CONDITIONAL** | Metrics, health endpoints, structured logs, and worker status exist, but the preview does not deliver a verified continuous scrape, PVC metrics, Alertmanager routing, dashboard, and tested external receiver. [observability-and-operations.md](../docs/observability-and-operations.md), [self-hosting.md](../docs/self-hosting.md) |
 | Recovery | **CONDITIONAL** | Migration, backup, archive/import, and infrastructure recovery guidance exist without a retained operator-owned PostgreSQL restore and full deployment recovery drill. [backup-and-recovery.md](../docs/backup-and-recovery.md), [self-hosting.md](../docs/self-hosting.md) |
@@ -726,7 +718,7 @@ The portable server, startup migrations, Helm chart, capability contract, Postgr
 
 Open gates:
 
-- `self-host-capability-reconciliation` (entitlement / policy): Make the capabilities response accurately describe implemented facts and every supported optional feature, then pin it against server routes and Helm values. ([tracking/evidence](../internal/server/server.go))
+- `self-host-capability-reconciliation` (entitlement / policy): Reconcile additional documented optional-feature flags with implemented support. Facts and existing payload families now match registered routes; the Helm chart has no separate product capability list. ([tracking/evidence](../internal/server/server.go))
 - `self-host-doc-consistency` (docs / support): Reconcile self-host and server-command history with startup migrations, gen-bootstrap-token plus auth login, Pulumi, current capabilities, and the released client-custodied vault. ([tracking/evidence](../docs/server-command-surface.md))
 - `self-host-production-hardening` (behavior, bounds / abuse, observability): Certify hardened production values, ingress and abuse controls, database and storage capacity, continuous monitoring, alerts, and every supported optional feature. ([tracking/evidence](../docs/self-host-support.md))
 - `self-host-recovery-drill` (recovery): Retain a fresh PostgreSQL backup restore, migration failure, worker restart, archive/import, and client-vault recovery drill on operator-owned infrastructure. ([tracking/evidence](../docs/backup-and-recovery.md))
@@ -749,14 +741,14 @@ The transcript ledger, durable local hook outbox, normalized supported-runtime c
 | Behavior | **CONDITIONAL** | Append, read, tail, durable hook flush, NUL-safe normalized events (capture sanitizes unstorable content; residual Postgres errors map to typed 400s), usage rollups, retention preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; evidence materialization is still unimplemented. [transcript-ledger.md](../docs/transcript-ledger.md), [transcript-retention.md](../docs/transcript-retention.md), [nulsafe.go](../internal/nulsafe/nulsafe.go), [transcript_nulsafe_test.go](../internal/store/transcript_nulsafe_test.go) |
 | Entitlement / policy | **PASS** | Catalog defaults are 30, 90, 365, and indefinite by plan; resolved cell snapshots and audited account overrides control behavior without changing price or plan. [billing-and-limits.md](../docs/billing-and-limits.md), [transcript-retention.md](../docs/transcript-retention.md) |
 | Bounds / abuse | **PASS** | Payload, outbox, retry, page, claim, batch, cursor, time, worker lane, and defensive retention bounds constrain capture and cleanup. [transcript-ledger.md](../docs/transcript-ledger.md), [transcript-retention.md](../docs/transcript-retention.md) |
-| Observability | **CONDITIONAL** | Capture, outbox, retention, failure, and worker metrics exist, and the serving cell has continuous scrape, alert routing, and a canary-tested PagerDuty/dead-man receiver whose generic error-ratio rule caught the NUL capture incident; transcript-outbox and retention-backlog alert rules are still not wired. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [transcript-retention.md](../docs/transcript-retention.md) |
+| Observability | **CONDITIONAL** | The serving-cell scrape and receiver are accepted. #357 adds tested entries:batch rejection-ratio and retention scan-cap pressure rules. Client-outbox metrics are not exposed; live loading proof, outbox instrumentation, and retention age/throughput SLOs remain open. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [launch-readiness.md](../docs/launch-readiness.md), [observability-and-operations.md](../docs/observability-and-operations.md), [transcript-retention.md](../docs/transcript-retention.md), [metrics.go](../internal/server/metrics.go), [metrics.go](../internal/worker/metrics.go) |
 | Recovery | **PASS** | Durable local outbox, idempotent append, SKIP LOCKED cleanup, cursors, provenance holds, archive/import, and preview mode support safe retries and recovery. [backup-and-recovery.md](../docs/backup-and-recovery.md), [transcript-retention.md](../docs/transcript-retention.md) |
 | Rollout / canaries | **CONDITIONAL** | The worker is deployable and tested, but transcript retention remains disabled/preview in the active managed cell and lacks an enforce-mode canary. [values.yaml](../charts/witself-server/values.yaml), [transcript-retention.md](../docs/transcript-retention.md) |
 | Docs / support | **PASS** | Capture support, platform differences, ledger, policy semantics, evidence safety, worker scaling, metrics, and rollout are documented. [transcript-ledger.md](../docs/transcript-ledger.md), [transcript-retention.md](../docs/transcript-retention.md) |
 
 Open gates:
 
-- `continuous-retention-alerting` (observability): Connect outbox and retention backlog, failure, age, and throughput metrics to a tested external alert receiver. ([tracking/evidence](../docs/observability-and-operations.md))
+- `continuous-retention-alerting` (observability): Retain live proof for the #357 batch-rejection and retention scan-cap pressure rules; add client-outbox instrumentation and define retention age/throughput SLOs on the accepted alert path. ([tracking/evidence](../docs/observability-and-operations.md))
 - `evidence-materialization` (behavior): Implement the documented path that materializes durable evidence so resolved transcript holds can be released. ([tracking/evidence](../docs/transcript-retention.md))
 - `retention-enforce-canary` (rollout / canaries): Enable enforce mode for a selected account and retain expiry, evidence-hold, crash, and multi-worker fairness evidence. ([tracking/evidence](../docs/transcript-retention.md))
 
@@ -775,7 +767,7 @@ Immutable value-free usage events, hourly and daily rollups, time and dimension 
 |---|---|---|
 | Behavior | **PASS** | Event append, canonical dimensions, hourly and daily rollups, time windows, grouping, filters, JSON output, API, and CLI reporting are implemented and tested. [usage_test.go](../internal/server/usage_test.go), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Entitlement / policy | **PASS** | Only an active agent token may read its own rollups in the current slice; account, realm, and cross-agent reporting are not silently exposed. [transcript-ledger.md](../docs/transcript-ledger.md), [usage_test.go](../internal/server/usage_test.go) |
-| Bounds / abuse | **CONDITIONAL** | Events are value-free and query windows and groups are validated, but usage dimensions are extensible and the current report query has no result-row cap or pagination. [transcript-ledger.md](../docs/transcript-ledger.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
+| Bounds / abuse | **PASS** | Reviewed PostgreSQL boundary, hostile-import, and high-cardinality evidence verifies the 10,000-point cap, explicit truncation, and totals over returned points. New event and query dimensions use a closed vocabulary; valid historical archive dimensions remain importable. [transcript-ledger.md](../docs/transcript-ledger.md), [usage-query-bounds-evidence.md](../docs/usage-query-bounds-evidence.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Observability | **CONDITIONAL** | Usage can be queried, but append failures, rollup lag, missing intervals, reconciliation drift, and storage growth lack continuous SLOs and alerts. [observability-and-operations.md](../docs/observability-and-operations.md), [transcript-ledger.md](../docs/transcript-ledger.md) |
 | Recovery | **PASS** | Immutable events, deterministic buckets, canonical database backup, and semantic validation of events and rollups on account archive/import provide a verified restore path. [backup-and-recovery.md](../docs/backup-and-recovery.md), [usage_integration_test.go](../internal/store/usage_integration_test.go) |
 | Rollout / canaries | **CONDITIONAL** | Agent-scoped reporting is released, while account and realm aggregation, billing-unit conversion, current managed reconciliation, and retained load evidence are incomplete. [billing-and-limits.md](../docs/billing-and-limits.md), [transcript-ledger.md](../docs/transcript-ledger.md) |
@@ -784,5 +776,4 @@ Immutable value-free usage events, hourly and daily rollups, time and dimension 
 Open gates:
 
 - `usage-operations-alerting` (observability): Connect append failures, rollup lag, missing buckets, reconciliation drift, and retained volume to continuous metrics and a tested receiver. ([tracking/evidence](../docs/observability-and-operations.md))
-- `usage-query-bounds` (bounds / abuse): Define the accepted dimension vocabulary and add a hard returned-row cap or cursor pagination with boundary, hostile-import, and high-cardinality tests. ([tracking/evidence](../internal/store/usage.go))
 - `usage-rollup-expansion` (rollout / canaries): Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load; Team is purchasable while Stripe usage recording remains a stub, raising this gate's urgency. ([tracking/evidence](../docs/billing-and-limits.md))

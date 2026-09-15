@@ -721,6 +721,16 @@ test("release renderer injects matching immutable container and Worker identity"
   assert.equal(rendered.status, 0, rendered.stderr);
 
   const config = await readFile(output, "utf8");
+  assert.match(config, /"CP_SIGNUP_LEGAL_ENFORCEMENT"\s*:\s*"true"/);
+  assert.match(config, /"services"\s*:\s*\[\s*\{\s*"binding"\s*:\s*"LEGAL_DOCUMENTS"\s*,\s*"service"\s*:\s*"witself-legal"\s*\}\s*\]/);
+  for (const changed of [
+    config.replace('"service": "witself-legal"', '"service": "other-worker"'),
+    config.replace('"service": "witself-legal"', '"service": "witself-legal", "entrypoint": "Other"'),
+    config.replace('"CP_SIGNUP_LEGAL_ENFORCEMENT": "true"', '"CP_SIGNUP_LEGAL_ENFORCEMENT": "false"'),
+  ]) {
+    assert.notEqual(changed, config);
+    assert.throws(() => expectedBuildMetadata(changed), /signup legal/);
+  }
   assert.deepEqual(expectedBuildMetadata(config), {
     service: "witself-control-plane",
     version,
@@ -811,6 +821,34 @@ test("release renderer injects matching immutable container and Worker identity"
     /Worker vars/,
     "release identity stamps must not hide a silently closed signup gate",
   );
+  for (const replacement of ["", '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "true",',
+    '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": false,']) {
+    assert.throws(
+      () => expectedBuildMetadata(config.replace(
+        '"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "false",', replacement,
+      )),
+      /Worker vars/,
+      "release config must explicitly pin the container-reaching probe off",
+    );
+  }
+  assert.match(config, /"crons"\s*:\s*\["\*\/5 \* \* \* \*", "1,6,11,16,21,26,31,36,41,46,51,56 \* \* \* \*"\]/);
+  for (const crons of [
+    [],
+    ["*/5 * * * *"],
+    ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *"],
+    ["*/5 * * * *", "*/5 * * * *"],
+    ["*/5 * * * *", "*/10 * * * *"],
+    ["*/5 * * * *", "1,6,11,16,21,26,31,36,41,46,51,56 * * * *", "*/10 * * * *"],
+  ]) {
+    assert.throws(
+      () => expectedBuildMetadata(config.replace(
+        /"crons"\s*:\s*\[[^\]]*\]/,
+        `"crons": ${JSON.stringify(crons)}`,
+      )),
+      /route and schedule contract/,
+      "release config must pin distinct maintenance and probe cron triggers",
+    );
+  }
   assert.throws(
     () => expectedBuildMetadata(config.replace(
       '"namespace_id": "1002"',
@@ -947,6 +985,11 @@ test("release renderer injects matching immutable container and Worker identity"
     config,
     /"CP_SUPPORT_EMAIL_INTAKE_ENABLED"\s*:\s*"false"/,
     "release config must keep support email intake dark by default",
+  );
+  assert.match(
+    config,
+    /"CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED"\s*:\s*"false"/,
+    "release config must keep the container-reaching uptime probe off by default",
   );
   assert.match(
     config,
@@ -1284,7 +1327,9 @@ function deployedVersion(overrides = {}) {
           ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "10"],
           ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
           ["CP_SIGNUP_OPEN", "true"],
+          ["CP_SIGNUP_LEGAL_ENFORCEMENT", "true"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
+          ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
           name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
@@ -1324,6 +1369,7 @@ function deployedVersion(overrides = {}) {
           bucket_name,
           type: "r2_bucket",
         })),
+        { name: "LEGAL_DOCUMENTS", type: "service", service: "witself-legal" },
         { name: "EMAIL", type: "send_email" },
         {
           name: "RECOVER_LIMITER",
@@ -1681,6 +1727,26 @@ test("Worker version verification checks annotations, bindings, and script etag"
   );
 });
 
+test("Worker version verification pins the container-reaching uptime probe off as a plain variable", () => {
+  const name = "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED";
+  for (const replacement of [
+    null,
+    { name, type: "plain_text", text: "true" },
+    { name, type: "plain_text", text: false },
+    { name, type: "secret_text" },
+  ]) {
+    const candidate = deployedVersion();
+    candidate.resources.bindings = candidate.resources.bindings.filter((binding) =>
+      binding.name !== name);
+    if (replacement) candidate.resources.bindings.push(replacement);
+    assert.throws(
+      () => verifyWorkerVersion(candidate, expectedIdentity(), versionID),
+      /wrong CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED binding/,
+      "ordinary deployment must reject an absent, enabled, mistyped, or secret probe gate",
+    );
+  }
+});
+
 test("Worker version verification rejects stamped script and runtime drift", () => {
   const expected = expectedIdentity();
   for (const [mutate, message] of [
@@ -1716,6 +1782,20 @@ test("Worker version verification rejects stamped script and runtime drift", () 
       (value) => {
         value.resources.script_runtime.containers[0].class_name = "StampedAttacker";
       },
+      /runtime contract/,
+    ],
+    [
+      // Cloudflare now reports the Worker's own name on the container entry;
+      // any other name is a different Worker's container.
+      (value) => { value.resources.script_runtime.containers[0].name = "stamped-attacker"; },
+      /runtime contract/,
+    ],
+    [
+      (value) => { value.resources.script_runtime.containers[0].instance_type = "basic"; },
+      /runtime contract/,
+    ],
+    [
+      (value) => { value.resources.script_runtime.containers.push({ class_name: "Backend" }); },
       /runtime contract/,
     ],
   ]) {
@@ -2218,4 +2298,32 @@ test("dark deployment refuses every persistent activation secret", async () => {
     /runProductionWranglerDeploy\([\s\S]*?environment: commandEnvironments\.wranglerMutation/,
     "provider mutation must pass the explicit Wrangler mutation environment",
   );
+});
+
+
+test("signup legal deployment is enabled and bound only to the existing legal service", () => {
+  assert.doesNotThrow(() => verifyWorkerVersion(deployedVersion(), expectedIdentity(), versionID));
+  for (const mutate of [
+    (b) => { b.find((v) => v.name === "CP_SIGNUP_LEGAL_ENFORCEMENT").text = "false"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").service = "other-worker"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").type = "plain_text"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").environment = "staging"; },
+    (b) => { b.find((v) => v.name === "LEGAL_DOCUMENTS").entrypoint = "Other"; },
+    (b) => { b.splice(b.findIndex((v) => v.name === "LEGAL_DOCUMENTS"), 1); },
+  ]) {
+    const version = deployedVersion();
+    mutate(version.resources.bindings);
+    assert.throws(() => verifyWorkerVersion(version, expectedIdentity(), versionID), /LEGAL_DOCUMENTS|CP_SIGNUP_LEGAL_ENFORCEMENT/);
+  }
+});
+
+
+test("ordinary release renderer refuses committed false legal enforcement", async (t) => {
+  const paths = await isolatedSignupRenderer(t, { open: "true", perIP: "10", global: "500" });
+  const templatePath = join(dirname(dirname(paths.renderer)), "wrangler.template.jsonc");
+  const template = await readFile(templatePath, "utf8");
+  await writeFile(templatePath, replaceCommittedVar(template, "CP_SIGNUP_LEGAL_ENFORCEMENT", "false"));
+  const result = runIsolatedRenderer(paths);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /committed CP_SIGNUP_LEGAL_ENFORCEMENT must be exactly true/);
 });

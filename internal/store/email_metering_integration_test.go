@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // The limited Cloudflare pilot has no authoritative spam or abuse verdict.
@@ -16,10 +16,7 @@ import (
 // must not write usage that could be interpreted as a customer charge or
 // quota debit.
 func TestAgentEmailPilotEmitsNoBillableUsage(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

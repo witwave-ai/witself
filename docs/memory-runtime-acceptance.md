@@ -1,10 +1,11 @@
 # Live Runtime Memory Acceptance
 
 Status: executable four-runtime acceptance harness for production-readiness
-gate [#45](https://github.com/witwave-ai/witself/issues/45). The harness covers
-Codex, Claude Code, Cursor, and Grok Build. GitHub Copilot's phase-one
-guided-MCP adapter has no transcript hooks and remains outside this gate, as
-does Gemini.
+gate [#45](https://github.com/witwave-ai/witself/issues/45). The #45 gate
+covers Codex, Claude Code, Cursor, and Grok Build. The harness also accepts
+DeepSeek Harness, which has transcript hooks but is not part of that gate.
+GitHub Copilot's phase-one guided-MCP adapter has no transcript hooks and
+remains outside this gate, as does Gemini.
 
 Current #45 status: Claude Code and Codex are certified on Witself `v0.0.272`
 at commit `9dc2f3d` by runs `mra_2dqbqpx7rfbjkd65` and
@@ -49,6 +50,7 @@ The delivery claim remains capability-accurate:
 | Claude Code | automatic hook `additionalContext` | automatic hook `additionalContext` |
 | Cursor | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
 | Grok Build | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
+| DeepSeek Harness | managed instruction plus guided `self.show` | guided MCP `memory.recall` |
 
 Guided means the active foreground client follows the installed always-on
 policy without the user asking it to search. It is not renamed automatic hook
@@ -190,14 +192,15 @@ draining (`~/.witself/capture/outbox/<runtime>/`) makes every
 transcript-based case fail at once even though the sessions behaved
 correctly. Check the outbox before a certification window.
 
-When the stages are driven headlessly, always run
-`witself transcript flush --runtime <runtime>` in the foreground immediately
-before `verify`: a headless session (`claude -p`, `codex exec`) exits right
-after its `Stop` hook and takes the detached flush it spawned down with it, so
-its transcript stays local unless a longer-lived session on the same binding
-happens to flush later. In one autonomous window every stage behaved
-correctly, verification failed all six transcript-based cases, and a single
-foreground flush followed by `verify` alone turned the same run into a pass.
+For headless stages outside dsh, Stop and SessionEnd hooks attempt a best-effort
+foreground flush for up to three seconds, then start a detached flusher in its
+own session on macOS and Linux so it survives `claude -p` or `codex exec`
+exiting ([#339](https://github.com/witwave-ai/witself/issues/339)). Once the
+hooked binary includes this fix, a manual foreground flush is no longer
+required to work around parent exit. Running
+`witself transcript flush --runtime <runtime>` immediately before `verify`
+remains useful belt-and-braces: it drains currently uploadable events and
+reports delivery errors. Older hooked binaries still need this workaround.
 
 ### Older Codex hook binaries require fresh subjects
 
@@ -241,13 +244,59 @@ already-closed native session before verification. It launches neither Grok nor
 inference. Normal interactive use also retries automatically through the
 Stop-triggered one-shot flusher and every later Grok hook.
 
+### DeepSeek Harness acceptance leg
+
+Offline installer tests and no-model probes require temporary `HOME`, `DSH_HOME`,
+and `WITSELF_HOME`. Live acceptance uses its separately authorized fresh synthetic
+runtime binding; install the dedicated user-hook layout and restart dsh for that
+binding. Retain three distinct evidence layers:
+
+1. Installer/configuration: the final composed tree contains active
+   `witself-mcp`, `witself-hooks-policy`, `witself-hooks-shell`, and `witself-hooks`
+   rows with exact isolation labels, literal `workspace-write`, canonical
+   persisted storage root, and exclusive `witself-hooks.json`. A fresh install
+   leaves unrelated `hooks.json` untouched and unmounted. Exercise legacy-only
+   and mixed legacy migration, identity rebind, repeat install, removal,
+   interrupted recovery, and rollback. Mixed migration retains exactly one
+   `witself-hooks-legacy` bridge on the ordinary root policy; old v1 journals keep
+   their old path/rendering. Preserve foreign patch bytes, including `!!js`.
+   An unresolved executable Include causes verification refusal because the
+   dump does not expose its effective children, including backing-file entries
+   and inserted patches. Recognized carriers include `cordis:include`,
+   `@deepseek-ai/cordis-plugin-include`, and direct absolute, relative, or file-URL paths to that
+   package's `lib/index.js`. This inspection cannot classify arbitrary custom
+   plugins or symlink aliases without executing or resolving them.
+2. Plugin/OS enforcement: use an independently authorized no-model composition
+   probe with installed providers and disposable homes. Await `loader.await()`
+   **and optional child fibers** so injection failures cannot be missed. Verify
+   required entries are active, private hooks can write storage, ordinary tool
+   sessions cannot write that storage, and the root policy/executor survive
+   removal. A fake shell result or successful dump is insufficient. The dump
+   renderer composes YAML with source comments; it neither instantiates plugins
+   nor evaluates `!!js`. Record the tested OS; macOS enforcement evidence does
+   not certify Linux or Windows.
+3. Live capture: prepare with `--runtime dsh`, then run the same six prompts and
+   the separate checkpoint case using the real client. Require actual uploaded
+   transcript and memory evidence from that binding.
+
+Session context and recall use managed
+instructions plus guided MCP; transcript hooks do not imply automatic hydration.
+
+After the stages, exit the client and run
+`witself transcript flush --runtime dsh` before `memory acceptance verify` with
+the same state file. dsh persists `turn/end` after synchronous Stop returns, so
+its Stop hook leaves a durable event and starts the detached flusher directly.
+The explicit post-client flush finalizes the final answer from the native log
+without starting dsh or inference. Retain sanitized dsh evidence separately;
+a passing dsh leg does not close the four-runtime #45 gate.
+
 Repeat with fresh provider-bound subject agents for `claude-code`, `cursor`,
 and `grok-build`. A #45 certification set consists of four `status: "pass"`
 evidence documents that name the same Witself release and commit.
 
 ## What Verification Checks
 
-The verifier combines two independent evidence sources:
+The verifier combines two independent acceptance evidence sources:
 
 - visible transcript entries prove the real runtime and observed client
   version, exact prompt boundaries, six distinct sessions, identity response,
@@ -264,6 +313,17 @@ The verifier combines two independent evidence sources:
   prove the sensitive fact is clear on exact read and redacted in a broad list,
   the peer can read its own fixture, and the subject cannot read the peer
   fixture through its default owner scope.
+
+When a local hydration ledger is available, verification also summarizes
+observations for the selected runtime from `prepared_at` through `verified_at`.
+This optional telemetry records hook attempts, injections, failures, elision,
+output rejection, and maximum latency. It does not bind an observation to a
+particular acceptance stage or prove that the model received the context.
+Delivery detail says `observed` only when the run window has hook attempts;
+otherwise it says `capability-only`, including guided fallbacks and missing
+ledgers. History-dependent recall still requires the narrative marker in the
+assistant answer. These local scripts do not become an unattended regression
+job merely by retaining hydration observations.
 
 The harness does not accept a self-reported provider response as the only
 proof. It also does not infer a successful memory write merely because a
@@ -302,9 +362,27 @@ The retained schema is
   },
   "identity": {},
   "peer_identity": {},
+  "hydration": {
+    "attempts": 4,
+    "injected": 3,
+    "failures": 0,
+    "elided_count": 1,
+    "hook_output_rejected": 0,
+    "max_latency_ms": 120
+  },
   "cases": []
 }
 ```
+
+The top-level `hydration` block is optional and additive within schema v1;
+older states and reports, absent ledgers, and guided-fallback runs remain
+valid. Its six numeric fields are value-free counts and milliseconds, not
+prompt, query, context, identity, or raw error data. `attempts` can exceed
+`injected + failures` because an ordinary prompt can validly need no context.
+Degraded recall can count as both an injection and a failure; the counters
+are not disjoint. The ledger is local and bounded, so missing observations
+are unknown and do not establish hydration success or failure. Marker rejection
+still applies to the entire serialized report, including this block.
 
 Every report contains exactly seven named cases:
 

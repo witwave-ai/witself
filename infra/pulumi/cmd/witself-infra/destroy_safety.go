@@ -44,6 +44,9 @@ func runDestroySafety(ctx context.Context, cellName string, opts destroySafetyOp
 	if err := checkDestroyInventory(cellName, opts.ConfigPath, opts.AllowUnknownCell, out); err != nil {
 		return err
 	}
+	if err := checkDestroyDeletionProtection(cellName, opts.ConfigPath); err != nil {
+		return err
+	}
 	if err := checkDestroyAccounts(
 		ctx,
 		cellName,
@@ -59,11 +62,14 @@ func runDestroySafety(ctx context.Context, cellName string, opts destroySafetyOp
 	return confirmDestroy(cellName, opts.YesCell, opts.Interactive, opts.Input, out)
 }
 
-// destroyPreflight gives the dashboard the same two read-only guards before it
-// opens its typed-name dialog. The spawned CLI child repeats both checks before
+// destroyPreflight gives the dashboard the same read-only guards before it
+// opens its typed-name dialog. The spawned CLI child repeats these checks before
 // consuming --yes-cell, closing the gap between the UI check and execution.
 func (liveDataSource) destroyPreflight(ctx context.Context, configPath, cellName string) error {
 	if err := checkDestroyInventory(cellName, configPath, false, io.Discard); err != nil {
+		return err
+	}
+	if err := checkDestroyDeletionProtection(cellName, configPath); err != nil {
 		return err
 	}
 	cfg, _, err := loadInfraConfig(configPath)
@@ -90,6 +96,20 @@ func (liveDataSource) destroyPreflight(ctx context.Context, configPath, cellName
 		ctx, cellName, controlPlane, fleetTokenFile,
 		false, false, nil, io.Discard,
 	)
+}
+
+// checkDestroyDeletionProtection has no bypass. Even --allow-unknown-cell
+// cannot replace the inventory record needed to authorize unprotecting a cell.
+func checkDestroyDeletionProtection(cellName, configPath string) error {
+	cfg, path, err := loadInfraConfig(configPath)
+	if err != nil || cfg.deletionProtection(cellName) {
+		message := fmt.Sprintf("deletion protection: refusing destroy of cell %q; set deletion_protection: false on that cell in %s, then run a separate `witself-infra up -cell %s` with the same -config path to apply the unprotect BEFORE `destroy`; no CLI flag bypasses this record edit", cellName, path, cellName)
+		if err != nil {
+			return fmt.Errorf("%s: %w", message, err)
+		}
+		return fmt.Errorf("%s", message)
+	}
+	return nil
 }
 
 func checkDestroyInventory(cellName, configPath string, allowUnknown bool, out io.Writer) error {

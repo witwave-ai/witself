@@ -4,16 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMemoryCurationCuratorSensitiveScopePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 
 	t.Run("restricted profiles cannot request or consume sensitive curation", func(t *testing.T) {
 		ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
@@ -202,10 +200,7 @@ func TestMemoryCurationCuratorSensitiveScopePostgres(t *testing.T) {
 }
 
 func TestMemoryCurationRestrictedProfilesRejectSensitivePlanOutputsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 
 	t.Run("restricted profiles cannot stage sensitive output", func(t *testing.T) {
 		ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
@@ -358,10 +353,7 @@ func TestMemoryCurationRestrictedProfilesRejectSensitivePlanOutputsPostgres(t *t
 }
 
 func TestMemoryCurationRestrictedProfilesCannotSeeOrOperateTranscriptScopePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
 	preview := full
 	preview.AccessProfile = AccessProfileCuratorPreview
@@ -496,10 +488,7 @@ func TestMemoryCurationRestrictedProfilesCannotSeeOrOperateTranscriptScopePostgr
 }
 
 func TestMemoryCurationPreviewAbandonPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, full := newMemoryCurationAccessProfileStore(t, dsn)
 
 	previewRequest, err := st.RequestCuration(ctx, full, RequestMemoryCurationInput{

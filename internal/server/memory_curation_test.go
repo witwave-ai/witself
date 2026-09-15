@@ -259,7 +259,7 @@ func TestMemoryCurationHTTPRejectsAmbiguousOrHostileJSON(t *testing.T) {
 	}
 }
 
-func TestMemoryCurationCapabilityRequiresCompleteSurface(t *testing.T) {
+func TestMemoryCurationCapabilityReportsRegisteredSurface(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{Kind: PrincipalKindAgent, AccountStatus: "active"}, true, nil
 	}
@@ -325,10 +325,10 @@ func TestMemoryCurationCapabilityRequiresCompleteSurface(t *testing.T) {
 	assertCapability(t, cfg, true)
 	getPlan := cfg.GetMemoryCurationPlan
 	cfg.GetMemoryCurationPlan = nil
-	assertCapability(t, cfg, false)
+	assertCapability(t, cfg, true)
 	cfg.GetMemoryCurationPlan = getPlan
 	cfg.RollbackMemoryCuration = nil
-	assertCapability(t, cfg, false)
+	assertCapability(t, cfg, true)
 }
 
 func TestMemoryCurationAccessProfilesEnforceExactRouteMatrix(t *testing.T) {

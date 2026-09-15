@@ -552,6 +552,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeAntigravity,
 		transcriptcapture.RuntimeCopilot,
+		transcriptcapture.RuntimeDSH,
 	} {
 		t.Run(runtimeName, func(t *testing.T) {
 			portable := func(name string) string {

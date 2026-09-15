@@ -774,7 +774,8 @@ func (s liveDataSource) probeHealth(ctx context.Context, configPath, cell string
 	out, err := cmd.Output()
 	if err != nil {
 		detail := ""
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			detail = strings.TrimSpace(string(ee.Stderr))
 		}
 		if detail != "" {
@@ -1404,11 +1405,10 @@ func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// parenting helper lands — see the modal text and
 			// opRun.detach for the honest reason.
 			if m.op != nil {
-				if err := m.op.detach(); err != nil {
-					m.interruptModal = false
-					m.status = err.Error()
-					return m, nil
-				}
+				err := m.op.detach()
+				m.interruptModal = false
+				m.status = err.Error()
+				return m, nil
 			}
 			return m, tea.Quit
 		}

@@ -148,7 +148,6 @@ func TestValidateVersion(t *testing.T) {
 	t.Parallel()
 
 	for _, version := range []string{"0.0.1", "1.2.3", "1.2.3-rc.1", "1.2.3+build.7", "1.2.3-rc.1+build.7"} {
-		version := version
 		t.Run("valid_"+version, func(t *testing.T) {
 			t.Parallel()
 			if err := validateVersion(version); err != nil {
@@ -158,7 +157,6 @@ func TestValidateVersion(t *testing.T) {
 	}
 
 	for _, version := range []string{"", "v1.2.3", "1.2", "01.2.3", "1.02.3", "1.2.03", "1.2.3/other", "1.2.3 rc1"} {
-		version := version
 		t.Run("invalid_"+version, func(t *testing.T) {
 			t.Parallel()
 			if err := validateVersion(version); err == nil {
@@ -194,7 +192,6 @@ func TestValidateProduct(t *testing.T) {
 		{name: "test", mutate: func(product *product) { product.TestArgument = "--version" }, wantErr: "invalid test"},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			candidate := base
@@ -221,7 +218,6 @@ func TestRunValidatesRequiredPaths(t *testing.T) {
 		{name: "positional", args: []string{"--version", "1.2.3", "--dist", t.TempDir(), "--output", t.TempDir(), "extra"}, wantErr: "unexpected positional arguments"},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			err := run(test.args)
@@ -253,7 +249,6 @@ func TestRenderFormulasRejectsInvalidDirectoriesAndTemplate(t *testing.T) {
 		{name: "template", dist: t.TempDir(), output: t.TempDir(), template: "{{", wantErr: "parse formula template"},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			err := renderFormulas("1.2.3", test.dist, test.output, test.template)

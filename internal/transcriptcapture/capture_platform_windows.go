@@ -23,6 +23,10 @@ var windowsUntrustedWriteMask = windows.ACCESS_MASK(windows.GENERIC_WRITE) |
 	windows.ACCESS_MASK(windows.FILE_WRITE_ATTRIBUTES) |
 	windowsFileDeleteChild
 
+func lockSessionFile(file *os.File) error {
+	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
+}
+
 // trustedPathIdentity maps the Unix owner-and-mode contract onto Windows file
 // identity and ACLs. Windows FileMode permission bits are synthesized, so the
 // path must instead have the current token user or a Windows root-equivalent

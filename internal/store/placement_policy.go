@@ -87,7 +87,7 @@ func (s *Store) SetPlacementPolicy(ctx context.Context, accountID, operatorID st
 		accountID, nextRaw); err != nil {
 		return placement.Policy{}, fmt.Errorf("update placement policy: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID,
 		ActorKind: ActorOwner,
 		ActorID:   operatorID,
@@ -179,7 +179,7 @@ func (s *Store) setPlacementPolicySystem(
 		accountID, placement.MustJSON(next)); err != nil {
 		return placement.Policy{}, fmt.Errorf("restore placement policy: %w", err)
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID,
 		ActorKind: ActorSystem,
 		Verb:      VerbAccountPlacementPolicyChanged,

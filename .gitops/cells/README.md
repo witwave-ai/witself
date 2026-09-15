@@ -7,13 +7,18 @@ as the chart values file. The rendered `platform` and `apps` tier Applications
 also use this same values file.
 
 ```text
-cells/<cell>/
-  values.yaml   # chart pins, app pins, region, DNS names, namespaces, secret references
+cells/
+  catalog.yaml  # identity + enablement switches for values generation
+  <cell>/
+    values.yaml # generated GitOps overlay (Argo CD input)
 ```
 
-This file is the Git-owned control surface for a cell. Change chart versions or
-cell-specific settings here, then let Argo reconcile the rendered child
-Applications.
+`values.yaml` is the generated overlay Argo CD syncs. Identity and enablement
+switches come from [`catalog.yaml`](catalog.yaml).
+`scripts/roll-cell.sh` owns `apps.witselfServer.chartVersion` and `imageTag`.
+Civo app/platform bodies come from
+[`internal/gitopsvalues/overlays/`](../../internal/gitopsvalues/overlays/).
+See [`docs/gitops-values-generation.md`](../../docs/gitops-values-generation.md).
 
 For DNS, keep the stable names here:
 

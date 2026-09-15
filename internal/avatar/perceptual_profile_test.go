@@ -12,7 +12,6 @@ func TestPerceptualV1BuiltInSpeciesAndPlaceholderAreCompatible(t *testing.T) {
 		t.Fatalf("built-in style profile: %v", err)
 	}
 	for _, reference := range pack.References {
-		reference := reference
 		t.Run(string(reference.SubjectForm), func(t *testing.T) {
 			canonical, err := SanitizePerceptualV1AvatarBaseline([]byte(reference.SVG), pack)
 			if err != nil {

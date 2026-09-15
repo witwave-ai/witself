@@ -183,6 +183,12 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+  # Provider/Homebrew/control-plane snapshots build before matrix aggregation.
+  # Only tagged publication requires and signs the validated aggregate; an
+  # exact missing release path is an error, while snapshots render it empty.
+  extra_files:
+    - glob: '{{ if not .IsSnapshot }}evidence/provider-contract-release/provider-contract-evidence.json{{ end }}'
+      name_template: provider-contract-evidence.json
 
 # A tag workflow can fail after GitHub has accepted some or all release assets
 # (for example, during a transient GitHub API outage). Make an exact-tag retry
@@ -194,6 +200,8 @@ release:
   # directly by the sign pipe; this third output is picked up here.
   extra_files:
     - glob: dist/checksums.txt.sig
+    - glob: '{{ if not .IsSnapshot }}evidence/provider-contract-release/provider-contract-evidence.json{{ end }}'
+      name_template: provider-contract-evidence.json
 
 # SBOM per archive (syft). Attached to the release.
 sboms:

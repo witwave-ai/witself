@@ -258,6 +258,13 @@ const (
 	// MessagingEntitlementVersion is the only marker version understood by
 	// this release.
 	MessagingEntitlementVersion int64 = 1
+	// CollaborationEntitlementVersionPolicy makes CollaborationFeature
+	// authoritative independently of messaging. Absence is the legacy shape;
+	// once applied, this marker must not be removed by later plan writers.
+	CollaborationEntitlementVersionPolicy = "collaboration_entitlement_version"
+	// CollaborationEntitlementVersion is the only marker version understood by
+	// this release.
+	CollaborationEntitlementVersion int64 = 1
 	// AgentEmailRetentionDaysPolicy is the maximum age of retained inbound and
 	// outbound agent email. It remains meaningful while either direction is
 	// disabled so a downgrade can clean up already-stored mail. Absence means
@@ -320,6 +327,7 @@ var supportedLimitKeys = []string{
 var supportedPolicyKeys = []string{
 	AgentEmailEntitlementVersionPolicy,
 	AgentEmailRetentionDaysPolicy,
+	CollaborationEntitlementVersionPolicy,
 	MessageRetentionDaysPolicy,
 	MessagingEntitlementVersionPolicy,
 	TranscriptRetentionDaysPolicy,
@@ -613,6 +621,10 @@ func ValidatePolicies(policies map[string]int64) error {
 			if value < 1 || value > MaxMessageRetentionDays {
 				return fmt.Errorf("%s must be between 1 and %d days (omit it for indefinite retention)",
 					MessageRetentionDaysPolicy, MaxMessageRetentionDays)
+			}
+		case CollaborationEntitlementVersionPolicy:
+			if value != CollaborationEntitlementVersion {
+				return fmt.Errorf("%s must be %d", CollaborationEntitlementVersionPolicy, CollaborationEntitlementVersion)
 			}
 		case MessagingEntitlementVersionPolicy:
 			if value != MessagingEntitlementVersion {

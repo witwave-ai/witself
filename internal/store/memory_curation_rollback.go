@@ -249,7 +249,7 @@ func (s *Store) RollbackCuration(
 	if err != nil {
 		return RollbackMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRolledBack,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRolledBack,
 		run.RequestID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		MemoryCurationRunRolledBack); err != nil {
 		return RollbackMemoryCurationResult{}, err

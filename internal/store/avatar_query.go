@@ -33,7 +33,7 @@ type SelfAvatarCheckpoint struct {
 	RetryAfter        *time.Time
 }
 
-func createAgentAvatarProfileTx(ctx context.Context, tx pgx.Tx, accountID, realmID, agentID string) error {
+func (s *Store) createAgentAvatarProfileTx(ctx context.Context, tx pgx.Tx, accountID, realmID, agentID string) error {
 	var stylePackID string
 	var stylePackVersion int
 	var styleRevision int64
@@ -52,7 +52,7 @@ func createAgentAvatarProfileTx(ctx context.Context, tx pgx.Tx, accountID, realm
 		stylePackID, stylePackVersion, styleRevision); err != nil {
 		return fmt.Errorf("create agent avatar profile: %w", err)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorSystem,
 		Verb: VerbAvatarGenerationRequested,
 		Metadata: map[string]any{

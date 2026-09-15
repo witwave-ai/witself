@@ -342,7 +342,7 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			return nil, fmt.Errorf("advance transcript sequence: %w", err)
 		}
 		batchKey := usageBatchKey(insertedIDs)
-		if err := markMemoryCurationDueTx(ctx, tx, p, &lane,
+		if err := s.markMemoryCurationDueTx(ctx, tx, p, &lane,
 			"transcript_appended", MemoryCurationSourceTranscript, batchKey); err != nil {
 			return nil, err
 		}

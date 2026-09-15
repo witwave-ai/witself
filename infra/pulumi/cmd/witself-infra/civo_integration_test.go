@@ -164,6 +164,80 @@ func TestConfigAddCivoProdProfileRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigCivoK8sVersionRoundTrip(t *testing.T) {
+	const cellName = "civo-sandbox-use1-backup"
+	for _, tc := range []struct {
+		name    string
+		version string
+		present bool
+	}{
+		{name: "absent"},
+		{name: "pinned", version: "1.35.0-k3s1", present: true},
+		{name: "explicit empty", present: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `version: 1
+cells:
+  civo-sandbox-use1-backup:
+    cloud: civo
+    account_alias: sandbox
+    region: nyc1
+    role: backup
+    backend: local
+    civo_node_size: g4s.kube.medium
+    civo_admin_cidr: 203.0.113.7/32
+`
+			if tc.present {
+				body += "    k8s_version: \"" + tc.version + "\"\n"
+			}
+			path := writeConfig(t, body)
+			checkVersion := func() {
+				t.Helper()
+				cfg, _, err := loadInfraConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				version := cfg.Cells[cellName].K8sVersion
+				if (version != nil) != tc.present || (version != nil && *version != tc.version) {
+					t.Fatalf("loaded version = %v, want present=%t value=%q", version, tc.present, tc.version)
+				}
+				// Each up/preview/cell-health invocation resolves a fresh flag
+				// set from the inventory before constructing stack config.
+				resolved := newTestFlagSet()
+				if err := applyCellConfig(resolved, cellName, path); err != nil {
+					t.Fatal(err)
+				}
+				if got := resolved.Lookup("k8s-version").Value.String(); got != tc.version {
+					t.Fatalf("resolved version = %q, want %q", got, tc.version)
+				}
+			}
+			checkVersion()
+			// Automation health loads the same record without rewriting it.
+			// This fixture has no control plane, so no network call is needed.
+			if _, err := configuredHealthTargets(path, cellName, nil); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != body {
+				t.Fatal("config resolution or health changed the cell inventory")
+			}
+			// Adding another record rewrites the inventory through the real
+			// serializer; an existing pin (or its absence) must survive.
+			added := newTestFlagSet()
+			if err := added.Parse([]string{"-cloud", "aws", "-role", "dev"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := configAddCell(added, path); err != nil {
+				t.Fatal(err)
+			}
+			checkVersion()
+		})
+	}
+}
+
 func TestConfigAddCivoCellRejectsIncompleteProviderConfig(t *testing.T) {
 	for _, args := range [][]string{
 		{"-cloud", "civo", "-region", "nyc1", "-backend", "local"},

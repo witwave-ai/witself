@@ -110,7 +110,7 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		Region:             pulumi.String(c.region),
 		DatabaseVersion:    pulumi.String(version),
 		DeletionPolicy:     pulumi.String("DELETE"),
-		DeletionProtection: pulumi.Bool(false),
+		DeletionProtection: pulumi.Bool(c.deletionProtection),
 		Settings: &sql.DatabaseInstanceSettingsArgs{
 			Tier:                      pulumi.String(dbProfile.tier),
 			Edition:                   pulumi.String("ENTERPRISE"),
@@ -119,7 +119,7 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 			DiskSize:                  pulumi.Int(dbProfile.diskSizeGB),
 			DiskAutoresize:            pulumi.Bool(true),
 			DiskAutoresizeLimit:       pulumi.Int(dbProfile.diskAutoresizeLimitGB),
-			DeletionProtectionEnabled: pulumi.Bool(false),
+			DeletionProtectionEnabled: pulumi.Bool(c.deletionProtection),
 			RetainBackupsOnDelete:     pulumi.Bool(dbProfile.retainBackupsOnDelete),
 			UserLabels:                gcpDefaultLabels(c),
 			BackupConfiguration:       gcpDBBackupConfiguration(dbProfile),
@@ -132,7 +132,7 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 				SslMode:                                 pulumi.String("ENCRYPTED_ONLY"),
 			},
 		},
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{sqlAPI, net.privateConnection}))
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{sqlAPI, net.privateConnection}), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
 	}
@@ -153,19 +153,19 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 		Project:   pulumi.String(c.project),
 		Charset:   pulumi.String("UTF8"),
 		Collation: pulumi.String("en_US.UTF8"),
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{instance, user}))
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{instance, user}), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
 	}
 
-	dsn := pulumi.All(instance.PrivateIpAddress, pw.Result).ApplyT(func(a []interface{}) string {
+	dsn := pulumi.All(instance.PrivateIpAddress, pw.Result).ApplyT(func(a []any) string {
 		host, password := a[0].(string), a[1].(string)
 		return fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=require", dbUser, password, host, dbName)
 	}).(pulumi.StringOutput)
 
-	payload := pulumi.All(instance.PrivateIpAddress, pw.Result, dsn).ApplyT(func(a []interface{}) (string, error) {
+	payload := pulumi.All(instance.PrivateIpAddress, pw.Result, dsn).ApplyT(func(a []any) (string, error) {
 		host, password, conn := a[0].(string), a[1].(string), a[2].(string)
-		b, err := json.Marshal(map[string]interface{}{
+		b, err := json.Marshal(map[string]any{
 			"host":     host,
 			"port":     5432,
 			"username": dbUser,
@@ -179,12 +179,13 @@ func provisionGCPCloudSQL(ctx *pulumi.Context, c gcpCell, net *gcpNetwork, prov 
 	secret, err := secretmanager.NewSecret(ctx, "witself-db", &secretmanager.SecretArgs{
 		SecretId:           pulumi.String(gcpDBSecretName(c)),
 		DeletionPolicy:     pulumi.String("DELETE"),
-		DeletionProtection: pulumi.Bool(false),
+		DeletionProtection: pulumi.Bool(c.deletionProtection),
+		VersionDestroyTtl:  gcpSecretVersionDestroyTTL(c.deletionProtection),
 		Labels:             gcpDefaultLabels(c),
 		Replication: &secretmanager.SecretReplicationArgs{
 			Auto: &secretmanager.SecretReplicationAutoArgs{},
 		},
-	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{secretManagerAPI}))
+	}, pulumi.Provider(prov), pulumi.DependsOn([]pulumi.Resource{secretManagerAPI}), pulumi.Protect(c.deletionProtection))
 	if err != nil {
 		return nil, err
 	}

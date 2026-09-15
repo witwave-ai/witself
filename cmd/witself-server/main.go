@@ -156,9 +156,15 @@ func serve() int {
 		return 1
 	}
 	cfg.BackupToken = backupToken
+	supportTicketRateLimit, err := supportTicketRateLimitFromEnv(os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
-			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
+			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled),
+			store.WithSupportTicketRateLimit(supportTicketRateLimit))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
@@ -178,6 +184,23 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: agent-email cell storage: %v\n", err)
 			return 1
 		}
+		cfg.ReadIdentityCapacityMetrics = func(ctx context.Context) (server.IdentityCapacityMetrics, error) {
+			m, err := st.ReadIdentityCapacityMetrics(ctx)
+			if err != nil {
+				return server.IdentityCapacityMetrics{}, err
+			}
+			return server.IdentityCapacityMetrics{
+				Realms:         server.IdentityCapacityDimensionMetrics(m.Realms),
+				AgentsPerRealm: server.IdentityCapacityDimensionMetrics(m.AgentsPerRealm),
+				OperatorSeats:  server.IdentityCapacityDimensionMetrics(m.OperatorSeats),
+			}, nil
+		}
+		cfg.ReadAuditAppendMetrics = func(ctx context.Context) (server.AuditAppendMetrics, error) {
+			if err := ctx.Err(); err != nil {
+				return server.AuditAppendMetrics{}, err
+			}
+			return server.AuditAppendMetrics{TxFailures: st.AuditAppendFailures()}, nil
+		}
 		cfg.ReadSupportSLOMetrics = func(
 			ctx context.Context,
 		) (server.SupportSLOMetrics, error) {
@@ -188,6 +211,19 @@ func serve() int {
 			return server.SupportSLOMetrics{
 				UnansweredTickets:       m.UnansweredTickets,
 				OldestUnansweredSeconds: m.OldestUnansweredSeconds,
+			}, nil
+		}
+		cfg.ReadSealedPlanePostureMetrics = func(ctx context.Context) (server.SealedPlanePostureMetrics, error) {
+			m, err := st.ReadSealedPlanePostureMetrics(ctx)
+			if err != nil {
+				return server.SealedPlanePostureMetrics{}, err
+			}
+			return server.SealedPlanePostureMetrics{
+				OpenRotations:                  m.OpenRotations,
+				OldestOpenRotationSeconds:      m.OldestOpenRotationSeconds,
+				PendingEnrollments:             m.PendingEnrollments,
+				OldestPendingEnrollmentSeconds: m.OldestPendingEnrollmentSeconds,
+				MaxAgentDeliveries15m:          m.MaxAgentDeliveries15m,
 			}, nil
 		}
 		cfg.ReadAgentEmailCellStorageMetrics = func(
@@ -376,8 +412,11 @@ func serve() int {
 		cfg.GetUsage = func(ctx context.Context, p server.DomainPrincipal, query server.UsageQuery) (server.UsageReport, error) {
 			report, err := st.GetAgentUsage(ctx, toStorePrincipal(p), store.UsageQuery{
 				Since: query.Since, Until: query.Until, Bucket: query.Bucket, Dimensions: query.Dimensions,
+				AllowTruncation: query.AllowTruncation,
 			})
 			switch {
+			case errors.Is(err, store.ErrUsageQueryTooLarge):
+				return server.UsageReport{}, &server.UsageQueryTooLargeError{MaxRows: store.UsageReportPointLimit}
 			case errors.Is(err, store.ErrUsageInputInvalid):
 				return server.UsageReport{}, fmt.Errorf("%w: %v", server.ErrBadInput, err)
 			case errors.Is(err, store.ErrUsageForbidden):
@@ -836,6 +875,13 @@ func serve() int {
 				Processing: toServerMessageProcessing(result.Processing),
 				Message:    toServerAgentMessage(result.ResultMessage),
 			}, nil
+		}
+		cfg.PeekMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
+			msg, err := st.PeekMessage(ctx, toStorePrincipal(p), messageID)
+			if err != nil {
+				return server.Message{}, mapMessageError(err)
+			}
+			return toServerAgentMessage(msg), nil
 		}
 		cfg.ReadMessage = func(ctx context.Context, p server.DomainPrincipal, messageID string) (server.Message, error) {
 			msg, err := st.ReadMessage(ctx, toStorePrincipal(p), messageID)
@@ -2237,9 +2283,17 @@ func usage(w io.Writer) {
 // the server package's sentinels so the HTTP layer can pick the right
 // status code without importing the store package.
 func mapSupportError(err error) error {
+	var rateErr *store.SupportRateLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &rateErr):
+		return &server.SupportRateLimitError{
+			Limit: rateErr.Limit, WindowSeconds: rateErr.WindowSeconds,
+			RetryAfterSeconds: rateErr.RetryAfterSeconds,
+		}
+	case errors.Is(err, store.ErrSupportRateLimited):
+		return server.ErrSupportRateLimited
 	case errors.Is(err, store.ErrSupportDisabled):
 		return wrapAsSentinel(server.ErrSupportDisabled, store.ErrSupportDisabled, err)
 	case errors.Is(err, store.ErrSupportNotIncluded):
@@ -2759,6 +2813,6 @@ func toServerUsageReport(report store.UsageReport) server.UsageReport {
 		AccountID: report.AccountID, RealmID: report.RealmID, RealmName: report.RealmName,
 		AgentID: report.AgentID, AgentName: report.AgentName,
 		Since: report.Since, Until: report.Until, Bucket: report.Bucket,
-		Points: points, Totals: totals,
+		Points: points, Totals: totals, Truncated: report.Truncated,
 	}
 }

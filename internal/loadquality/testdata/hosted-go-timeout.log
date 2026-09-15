@@ -1,0 +1,37 @@
+panic: test timed out after 100ms
+	running tests:
+		TestManifestStackCaptureTimeout (0s)
+
+goroutine 23 [running]:
+testing.(*M).startAlarm.func1()
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2802 +0x2cc
+created by time.goFunc
+	/opt/hostedtoolcache/go/1.26.6/x64/src/time/sleep.go:215 +0x38
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0x2feccd99a008, {0x100550a40?, 0x15e6897000482290?}, 0x10074bee0)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2109 +0x3bc
+testing.runTests.func1(0x2feccd99a008)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2585 +0x40
+testing.tRunner(0x2feccd99a008, 0x2feccd9dfc48)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2036 +0xc4
+testing.runTests({0x10054f984, 0x1d}, {0x100559a1a, 0x32}, 0x2feccd8b2060, {0x10078aa80, 0x3a, 0x3a}, {0x808024011c446d3f?, 0x1005494b4?, ...})
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2583 +0x3f0
+testing.(*M).Run(0x2feccd8a4f00)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2443 +0x578
+main.main()
+	_testmain.go:160 +0x80
+
+goroutine 22 [sleep]:
+time.Sleep(0x34630b8a000)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/runtime/time.go:363 +0x150
+github.com/witwave-ai/witself/internal/loadquality.TestManifestStackCaptureTimeout.func1({0x2feccd864448?, 0x1003f4e10?})
+	/home/runner/work/witself/witself/internal/loadquality/manifest_stack_capture_test.go:7 +0x28
+github.com/witwave-ai/witself/internal/loadquality.ParseOptions(0x2feccd8a0f58?)
+	/home/runner/work/witself/witself/internal/loadquality/loadquality.go:301 +0x68
+github.com/witwave-ai/witself/internal/loadquality.TestManifestStackCaptureTimeout(0x2feccd99a248?)
+	/home/runner/work/witself/witself/internal/loadquality/manifest_stack_capture_test.go:7 +0x24
+testing.tRunner(0x2feccd99a248, 0x10074bee0)
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2036 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/opt/hostedtoolcache/go/1.26.6/x64/src/testing/testing.go:2101 +0x3a8

@@ -29,7 +29,7 @@ independent operator control.
 ## Channels
 
 - **In-product tickets** — the durable, authoritative channel:
-  `witself support create` / `list` / `show` / `comment` / `close`. Tickets
+  `witself account support open` / `list` / `show` / `reply` / `close`. Tickets
   and their messages are account-scoped, retained per the
   [data-retention policy](data-retention-policy.md), and included in account
   export.

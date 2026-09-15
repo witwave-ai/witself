@@ -136,6 +136,122 @@ hooks and does not request that elevation. Native Windows Claude Code and Grok
 Build install no transcript hooks. Grok Build and Cursor use their user-scoped
 hook locations on macOS and Linux, including Cursor inside WSL as Linux.
 
+DeepSeek Harness captures transcripts on macOS and Linux through its
+user-scoped claude-code hook bridge; native Windows installs no hooks. The
+OpenClaw, Antigravity, and GitHub Copilot preview integrations install MCP
+access and managed memory routing only: they record `hook_mode: none`, install
+no hooks, write nothing to `~/.witself/capture/outbox/`, and report
+`transcript capture: unavailable` at install.
+
+DeepSeek Harness keeps the v1 managed fence in
+`$DSH_HOME/cordis.patch.yml`. Fresh user-hook installs add `witself-hooks-policy`,
+`witself-hooks-shell`, and `witself-hooks` beside the unchanged `witself-mcp` row.
+The capture policy uses literal `workspace-write` with the canonical persisted
+`WITSELF_HOME` as its workspace root. The private shell and hook bridge share the
+reserved `witself-capture-shell` label; the policy and shell share
+`witself-capture-policy`. Policy `systemPrompt: true` and shell `settings: true`
+isolation prevent duplicate context/settings registration. The root policy,
+ordinary shell, and tools retain their existing scope; capture adds no
+unsandboxed executor.
+
+The private bridge reads only the canonical `$DSH_HOME/witself-hooks.json`.
+Witself must own the **complete document**, including every event and handler;
+foreign commands, metadata, or mixed handler sets are refused. An existing file
+cannot be claimed by first install even if it matches the desired commands. A
+previous binding or a durable recovery journal supplies the exact ownership
+capability. Fresh installs leave unrelated `$DSH_HOME/hooks.json` untouched and
+do not mount it.
+
+Legacy configs and v1 journals retain the old MCP plus ordinary hook bridge
+rendering. An omitted legacy `hook_config_path` resolves explicitly to
+`hooks.json`. Reinstall migrates a legacy user-hook binding by establishing the
+dedicated document, then removing only its exact prior Witself handlers from the
+shared file. Remaining operator handlers retain an ordinary root-policy bridge,
+`witself-hooks-legacy`. The persisted `dsh_legacy_hook_bridge` boolean records this
+choice; identity rebinds carry it without deriving a new choice from live foreign
+commands. Only legacy user-hook migration can initially acquire it. Bare event
+maps containing Witself markers are a supported refusal because the shared-file
+remover cannot safely subtract them. Foreign-only bare maps can migrate without
+rewriting. Shared-document install and restore inspect the same parsed snapshot
+used by their CAS write and refuse to wrap nonempty supported bare events,
+because the old bridge would then mask those events. Malformed or marker-bearing
+bare events also receive a value-free refusal. A late rollback refusal leaves
+the journal pending for safe forward recovery.
+
+The installer rechecks the legacy choice before mutation and publication. It
+validates dedicated ownership before publishing private rows, including during
+recovery and rollback. Recovery reconciles both documents even when the dedicated
+file already verifies. Journals contain prior/desired owned bindings, not raw
+foreign commands; both changed hook-file states enter durability closure before
+journal removal. Ownership drift or incomplete rollback leaves recovery pending.
+Uninstall removes all managed bridge/provider rows and the exact owned hook set;
+it preserves operator hooks. MCP-only bindings remain supported.
+
+A composed-config check parses the final `--dump-config` YAML as bounded,
+non-evaluating nodes. It verifies active managed IDs, exact private isolation and
+literal policy/path fields, compatibility selection, and reserved-label consumers
+in loader entries/groups. Unresolved executable Include entries cause verification
+refusal because the dump does not expose their effective children from backing
+files or patches. The check recognizes `cordis:include`, the full
+`@deepseek-ai/cordis-plugin-include` name, and direct absolute, relative, or file-URL paths to
+that package's `lib/index.js` after non-evaluating path normalization. All such
+carriers are refused, including disabled ones; unrelated nested config data is
+preserved. The check does not classify every arbitrary custom plugin or symlink
+alias, load referenced files, or evaluate or rewrite foreign `!!js` content.
+This verifies the supported configuration boundary; plugin startup,
+operating-system confinement, and live capture require separate evidence.
+An unavailable provider is reported separately.
+OS acceptance must independently prove private storage writes and ordinary
+session denial; fake executor tests cannot prove sandbox enforcement. Live
+capture still requires the real client and transcript acceptance evidence.
+
+The bridge emits claude-code-shaped payloads for `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+Its `Stop` payload carries neither assistant text nor a transcript path, so the
+Stop event is captured value-free and marked pending native finalization, and
+flush resolves the turn from the installed binding's session store under
+`$DSH_HOME/sessions/`; an ambient `DSH_HOME` is used only without a loadable
+binding. The log artifact must be a real regular file no larger than 64 MiB,
+owned by the current user and reached only through directories with the same
+property; the project directory matching the hook's `cwd` wins, and an ambiguous
+session id leaves the event pending. The same 64 MiB cap applies to decoded JSONL,
+alongside a 500,000-record cap. Crossing either bound settles the affected Stop
+as a value-free completion with a fixed diagnostic, because a growing log will
+not become readable by retrying. Later answers in that oversized log therefore
+cannot be recovered by this bounded reader.
+
+Because the bridge carries no turn identity, capture seeds `dsh_turn_ordinal`
+from the log's existing user-sourced prompts on first SessionStart or resume.
+A local prompt digest validates the selected native prompt; a shifted ordinal
+recovers the latest matching prompt, and no match settles value-free. The digest
+stays in local state and pending events and is removed before upload. Native
+plugin and agent-instruction messages do not count as user prompts, even when
+the bridge emits UserPromptSubmit for their inbox batch. A Stop
+without a trusted ordinal uses its prompt digest; legacy events without either
+anchor follow the latest started turn, waiting if it is still open.
+
+The log's first record must be its own session header. Finalization requires the
+native `turn/end`; dsh writes it after synchronous Stop returns, so dsh Stop
+queues durably and starts a detached flusher without a foreground polling wait.
+Unchanged log artifacts reuse the previous projection during polling. Multiple
+user prompts inside one native turn own separate step segments. Multiple human
+messages in one pre-step inbox batch form one prompt. A local Stop ordinal splits
+plugin continuations at native Stop markers, counting multiple handler markers
+in one step only once. This keeps repeated Stops from duplicating answers or
+accounting. Reasoning blocks are
+excluded, and a failed final model attempt leaves the final answer empty instead
+of promoting preceding intermediate text.
+
+In `trace` and `raw` modes, earlier assistant text and missing tool records ride
+along as children of the Stop event. Recovery tracks tool ids and hook phases,
+so a captured call does not hide a missing result. A turn that exceeds the
+bounded tracking list records an overflow and recovers no tools. A sealed turn
+is never rehydrated. The log applies the hook plane's fences for Witself sealed
+tool names, MCP wrapper payloads naming a sealed tool, and shell payloads invoking
+the sealed CLI. Later tool payloads and assistant text remain sealed. Native dsh
+`subagent` and `subagent_fork` calls are conservatively omitted because parent
+relay output carries no trusted child sealing provenance.
+
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude
 Code receives an isolated drop-in at
@@ -206,6 +322,7 @@ witself transcript flush --runtime codex
 witself transcript flush --runtime claude-code
 witself transcript flush --runtime grok-build
 witself transcript flush --runtime cursor
+witself transcript flush --runtime dsh
 ```
 
 Codex capture follows Codex's own persistence boundary: when a hook's
@@ -231,13 +348,25 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
 ### Known capture limitations
 
-- [Issue #339](https://github.com/witwave-ai/witself/issues/339): a headless
-  session can exit with the detached flush it spawned, leaving its durable
-  events local. Run `witself transcript flush --runtime <runtime>` in the
-  foreground before verifying delivery.
+- [Issue #339](https://github.com/witwave-ai/witself/issues/339): Stop and
+  SessionEnd hooks now attempt a best-effort foreground flush with a maximum
+  three-second budget before spawning the normal detached flusher, except dsh
+  Stop, which must return before its native completion fence can land. On macOS
+  and Linux the detached flusher starts in its own session and process group,
+  with detached standard streams and no controlling terminal, so it survives
+  the headless client exiting. Flush failures never fail the hook; undelivered
+  events remain in the durable outbox. Once the hooked binary includes this
+  fix, an explicit foreground flush is optional belt-and-braces before
+  verifying delivery.
 - [Issue #335](https://github.com/witwave-ai/witself/issues/335): Codex
   app-server delegated sessions end without a terminal fence, so their final
-  turn remains in the local outbox.
+  turn remains in the local outbox until a companion emits
+  `witself transcript fence --runtime codex --session <session_id> --run <run_id> --turn <turn_id>`
+  after the job completes, using the captured run and turn IDs pinned when
+  that job starts, or `--latest` when the launcher cannot pin them. This
+  implements the companion-emitted fence option; the operator-purge and
+  liveness options remain undecided. The delegation orchestrator must wire
+  this call into job completion.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
   persistence-boundary exclusion was merged on `main` by
   [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
@@ -256,6 +385,94 @@ currently uploadable event until the outbox is empty or a concrete delivery
 error occurs. Individual network requests remain time-bounded. Detached
 hook-triggered flushers are deliberately short-lived; if one reaches its work
 window, the next hook retries the durable remainder.
+
+`witself transcript fence --runtime RUNTIME --session <session_id> --run <run_id> --turn <turn_id> [--reason job-completed]`
+appends a synthetic `turn.completed` system event
+with body `delegation job completed`, `synthetic_fence: true`, and the reason
+in its data, then starts the normal flush. `--runtime` accepts any runtime
+capture knows, so every headless lane can close its own jobs. It requires an
+existing local session with a matching bound run and uses the same hook enqueue
+and turn bookkeeping as a real Stop. The orchestrator must pin the captured run
+and turn IDs when the delegated job starts and reuse those exact IDs for every
+completion retry; it must not read the current IDs when completion arrives.
+A session-only fence is refused. Repeating the most recent synthetic completion
+in the current run is a no-op, including after its events have flushed or
+subsequent prompts have opened newer turns. Once a later fence completes or a
+new run starts, older completions are rejected as stale. Other mismatched
+identities are refused without changing the current turn. Unknown sessions and
+sessions with no open turn are refused unless they are an idempotent repeat.
+A turn the runtime carries in its own ids, which local state never opens, is
+fenced only while the upload gate still holds its events. Sensitive turns
+retain the sealed-tool suppression: pending content is redacted through the
+same path as Stop before the fence can release the turn. The synthetic marker
+is retained, but a sensitive turn's caller-provided reason is omitted. The
+command does not capture ephemeral sessions or recover missing assistant text.
+
+### Headless Job Completion And Resumed Runs
+
+A headless launcher that cannot pin ids runs
+`witself transcript fence --runtime cursor --session <session_id> --latest --reason job-completed`
+as the last step of the job, after the agent process exits. `--latest` derives
+the session's bound run from local capture state and closes every turn of that
+session whose queued events the upload gate still holds, including turns
+orphaned by an earlier resume. It is idempotent: with nothing held it makes no
+event and exits 0, including after the runtime's own SessionEnd has removed the
+session's local state, so a launcher may always call it once the agent process
+has exited. `--latest` and the pinned
+`--run`/`--turn` form are mutually exclusive. Nothing here is age- or
+inactivity-based; only a real completion signal from the launcher, the runtime,
+or a run rollover releases a turn.
+
+Resuming a provider session (`agent -p ... --resume <session_id>` for Cursor,
+and the equivalent for other runtimes) keeps the session id and starts a new
+run. Capture now closes the prior run before binding the new one: the first
+event of the restarted session enqueues one synthetic `turn.completed` event
+per still-held turn of the prior run, with body
+`run completed when the session restarted` and `synthetic_fence: true`. The
+reason names the restart the runtime reported in its session-start `source`:
+`resumed` (the default when a runtime sends no source) or `cleared`. A
+session-start with source `compact` is context compaction, which Claude Code
+can report in the middle of a running turn; it keeps the run and the open turn
+and fences nothing, so a sealed tool later in that turn still suppresses the
+prompt captured before compaction. Those terminal events carry the prior run's id, are written before
+the restarted run's first event, and never reorder or drop anything: both runs
+reach the ledger in capture order. The outbox format is unchanged and a
+rollover needs no new state field, because the events still held in the outbox
+are the durable record of what to close. The session-state file gains one
+additive field, `sealed_turns`: the run/turn pairs that handled sealed
+material, recorded before their redaction is attempted and kept across run
+rollover, so a fence can still close such a turn sealed when the redaction that
+would have marked its queued events failed.
+
+A rollover fence is best-effort in the capture path: if the outbox cannot be
+projected (an unreadable queued file, or one written under a different
+binding), the hook is still captured and the fence is skipped, so capture never
+stops on a flush-side problem. `transcript fence --latest` closes the prior run
+once that file is resolved or removed. A fence redacts a turn exactly when the
+hook path sealed that turn: one of the turn's own queued events already carries
+the sealed marker, or `sealed_turns` recorded it. The session's run-level
+sealed flag is never projected onto other held turns, because the hook path
+clears that flag at the next real prompt, so closing an older or later turn
+never rewrites content that no sealed tool touched. A sealed fence re-runs the
+turn's redaction, which retries one that failed at capture time.
+
+`witself transcript status --runtime RUNTIME` and every deferring
+`witself transcript flush` print the same value-free backlog buckets:
+
+- `no-fence`: the session's bound run is still waiting for a terminal event.
+- `run-mismatch`: the events belong to a run the session no longer binds, which
+  an older build orphaned on resume. `--latest` recovers them.
+- `session-unbound`: the session has no local state while events are still
+  held, so no local command can derive their missing terminal. These events
+  stay queued and value-free. Both fence entry points refuse such a session on
+  purpose, because publishing a
+  terminal for an identity this install can no longer prove is exactly the
+  age-based release that issue #335 rejected; how an operator retires that
+  backlog remains open there.
+
+The buckets are counts only. A flush that defers events for another reason,
+such as a server rejection or an upload-ready event queued behind a held turn,
+reports the remainder as `other`.
 
 Cursor's `beforeSubmitPrompt` hook wraps the visible prompt in one provider
 timestamp and `user_query` envelope. Witself removes that transport-only
@@ -415,7 +632,7 @@ witself transcript append TRANSCRIPT_ID
 witself transcript list
 witself transcript show TRANSCRIPT_ID
 witself transcript tail TRANSCRIPT_ID --limit 20
-witself transcript flush --runtime codex|claude-code|grok-build|cursor
+witself transcript flush --runtime codex|claude-code|grok-build|cursor|dsh
 ```
 
 The installed stdio MCP server exposes read-only transcript tools through

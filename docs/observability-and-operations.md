@@ -214,15 +214,15 @@ Initial metric families should include:
 | `witself_http_in_flight_requests` | In-flight HTTP requests. |
 | `witself_auth_attempts_total` | Authentication attempts by principal kind, result, and reason class. |
 | `witself_token_operations_total` | Token create, rotate, revoke, and verification operations. |
-| `witself_secret_operations_total` | Sealed-plane secret operations by operation (`create`, `show`, `update`, `rename`, `copy`, `archive`, `restore`, `delete`, `grant`, `revoke`), owner kind, and result. The `show` operation returns metadata only and never a value; reveals are counted separately. |
+| `witself_secret_material_deliveries_total` | Implemented ciphertext-material delivery calls by bounded `field_kind` and `result`. Success means the server authorized and returned encrypted material, not that a client decrypted it. |
 | `witself_secret_limit_rejections_total` | Implemented non-retryable stored-secret create refusals. Its bounded labels are exactly `limit_dimension="stored_secret"` and `operation="create"`; it never carries an account, realm, agent, secret id, name, value, or error text. |
 | `witself_fact_limit_rejections_total` | Implemented non-retryable current-fact capacity refusals. Its bounded labels are exactly `limit_dimension="stored_fact"` and operation from the closed set `create` or `confirm`; it never carries account, realm, agent, subject, predicate, fact/candidate id, usage, maximum, value, or error text. Phase B activates finite defaults only after migration 0078 reconciles every target cell. |
 | `witself_memory_limit_rejections_total` | Implemented non-retryable active-memory capacity refusals. Its bounded labels are exactly `limit_dimension="stored_memory"` and operation from the closed set `create`, `supersede`, `restore`, `reactivate`, or `curation_apply`; it never carries account, realm, agent, memory, plan, usage, maximum, content, or error-text labels. |
 | `witself_plan_limit_rejections_total` | Implemented non-retryable realm and agent create refusals. Its bounded labels are `limit_dimension="realms"`, legacy `"agents"`, or `"agents_per_realm"`, plus `operation="create"`; it never carries an account, realm, agent, resource name, or error text. |
-| `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
-| `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
-| `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
-| `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
+| `witself_vault_lifecycle_operations_total` | Implemented vault registration, enrollment, and rotation calls by bounded `flow`, `operation`, and `result`, including fence conflicts and successful idempotent replays. |
+| `witself_sealed_plane_posture_metrics_up` | Implemented cell-wide posture reader health: 1 for a valid snapshot, 0 on read failure or invalid values; other posture gauges are omitted on failure. |
+| `witself_vault_open_rotations`, `witself_vault_oldest_open_rotation_seconds` | Implemented count and oldest age of open rotations, with no tenant labels. |
+| `witself_vault_pending_enrollments`, `witself_vault_oldest_pending_enrollment_seconds`, `witself_secret_material_max_agent_deliveries_15m` | Implemented unexpired pending/approved enrollment count and oldest age, plus the largest per-account/agent count of best-effort `secret_read` usage events in the preceding 15 minutes. Only aggregate values leave the store. |
 | `witself_memory_operations_total` | Memory domain operations by operation (`add`, `read`, `list`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, `evidence_resolve`, `delete`), authenticated principal kind, and result. Authentication or request-decoding failures remain visible in the HTTP family rather than being misreported as completed domain calls. |
 | `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), authenticated principal kind, and result. |
 | `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and authenticated principal kind. |
@@ -233,9 +233,9 @@ Initial metric families should include:
 | `witself_memory_vector_fallbacks_total` | Hybrid requests that used lexical-only ranking because vectors were missing, stale, or incompatible. This is coverage, not provider health. |
 | `witself_fact_operations_total` | Fact operations by operation (`set`, `get`, `list`, `delete`, `primary_change`), owner kind, and result. |
 | `witself_remember_total` | Deferred metric for a future explicit Witself `remember` action, by `routed_kind` (`fact`, `memory`), owner kind, and result. It never carries captured text. |
-| `witself_self_digest_renders_total` | Self-digest (`self show` / `GET /v1/self`) renders by source surface, `elided` (`true`, `false`), and result. |
-| `witself_self_digest_render_duration_seconds` | Self-digest render latency histogram by source surface. The digest path performs no model call. |
-| `witself_self_digest_elided_entries` | Histogram of entries elided from a digest render when the byte/line cap is hit, by source surface. |
+| `witself_self_digest_reads_total` | Completed `GET /v1/self` reads, including failures, by closed `surface` (`session_hook`, `prompt_hook`, `other`), `elided` (`true`, `false`), and `result` (`success`, `error`). |
+| `witself_self_digest_read_duration_seconds` | Server-side self-digest request latency histogram by the same closed `surface`. The digest path performs no model call. |
+| `witself_self_digest_elided_entries` | Histogram of known omitted fact and memory entries per self read, by the same closed `surface`. Includes encoded byte-budget trimming and, only with `include_counts=true`, exact store selection omissions. With counts disabled, pagination overflow is unknown and excluded from this histogram; it still sets `elided=true` on `witself_self_digest_reads_total`. A zero observation therefore does not imply a complete digest. |
 | `witself_memory_curation_operations_total` | Completed curation domain calls by operation (`start`, `renew`, `plan`, `apply`, `cancel`, `abandon`, `rollback`) and result. Successful idempotent replays count as calls, not as proven state transitions. |
 | `witself_memory_curation_requests` | Due curation requests by bounded state/priority class. No transcript or memory content is exposed. |
 | `witself_memory_curation_runs_total` | Client-run curation transitions by state (`started`, `planned`, `applied`, `conflict`, `abandoned`, `interrupted`, `rolled_back`) and result. |
@@ -249,6 +249,7 @@ Initial metric families should include:
 | `witself_group_operations_total` | Group operations by operation (`create`, `delete`, `member_add`, `member_remove`) and result. |
 | `witself_messages_total` | Messaging events by stage (`sent`, `delivered`, `read`), recipient kind, and result. |
 | `witself_message_rate_limit_rejections_total` | Implemented shared message-write budget refusals, including both retryable exhaustion and non-retryable zero/oversized-debit cases. Labels are the closed sets `limit_dimension` (`message_sent`, `message_delivered`, or `unknown`), `scope` (`agent`, `realm`, `recipient`, or `unknown`), and `operation` (`send`, `reply`, `complete`, `request_open`, `request_offer`, `request_complete`, or `unknown`). It never carries account, realm, agent, recipient, request, or message ids; plan/source names; limit/usage/retry values; content; or error text. |
+| `witself_message_processing_operations_total` | Implemented completed processing callback calls, including successful idempotent replays, with only `operation` (`claim`, `renew`, `release`, `request_claim`, `request_renew`, `request_release`, `unknown`) and `result` (`success`, `feature_disabled`, `rate_limited`, `bad_input`, `not_found`, `forbidden`, `plan_limited`, `busy`, `conflict`, `error`). All 70 series start at zero per server process and reset on restart. `busy` is claim contention; `conflict` includes stale fences. Unclassified errors, including cancellation/deadline errors, are `error`; this is not a paging policy. Calls rejected before reaching a configured callback remain in generic HTTP metrics only. These counters do not measure unique messages, durable transitions, active leases or expiry events. No identity, retry key, lease/failure/limit value, plan name, content or error text is collected; scraping invokes no messaging callback. |
 | `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `storage_full`, `feature_disabled`, `receive_disabled`, `unknown_recipient`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. `storage_full` is the independent schema-91 cell-ledger refusal; it is not an account-plan limit. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
 | `witself_agent_email_cell_storage_metrics_up`, `witself_agent_email_cell_storage_retained_bytes`, `witself_agent_email_cell_storage_admission_bytes`, `witself_agent_email_cell_storage_hard_bytes`, `witself_agent_email_cell_storage_root_rows`, `witself_agent_email_cell_storage_admission_root_rows`, `witself_agent_email_cell_storage_counted_rows`, `witself_agent_email_cell_storage_hard_counted_rows` | Implemented unlabeled, value-free schema-91 cell-ledger gauges. The server performs one read-only singleton query per scrape under a fixed two-second deadline. A read/query/invariant failure emits only `metrics_up 0` and omits the seven values; it never exports database error text or account/message identity. These are logical charges and thresholds, not PostgreSQL relation size, PVC usage, or billable account allowance. |
 | `witself_agent_email_rate_limit_rejections_total` | Signed inbound safety refusals with only closed `limit_dimension`, `scope`, and `source` labels. Account scope is explicit and bounded; no tenant, sender, address, limit value, or arbitrary key becomes a label. |
@@ -265,6 +266,15 @@ Initial metric families should include:
 | `witself_cell_placements_total` | Tenant placement decisions by `placement_reason` (`residency`, `capacity`, `wave`, `manual`) and result. Mirrors the `tenant.placed` audit event; it never carries a realm/account id or a cell id (see [deployment-cells.md](deployment-cells.md)). |
 | `witself_cell_migrations_total` | Tenant migrations between cells by `migration_phase` (`started`, `completed`, `failed`) and `plane` (`open`, `sealed`). Mirrors the `tenant.migration_started` / `tenant.migration_completed` / `tenant.migration_failed` audit events; it never carries a realm/account id or a source/destination cell id. |
 | `witself_cell_migration_duration_seconds` | Tenant migration latency histogram by `plane` (`open`, `sealed`). |
+| `witself_identity_capacity_accounts_measured` | Value-free per-cell count of live accounts with a finite limit, by the closed `dimension` set `realms`, `agents_per_realm`, `operator_seats`. |
+| `witself_identity_capacity_accounts_near_limit` | Value-free per-cell count of finite-limit live accounts with usage at least 80% of the limit, by the same closed `dimension` set. |
+| `witself_identity_capacity_accounts_at_limit` | Value-free per-cell count of finite-limit live accounts with usage at or above the limit, by the same closed `dimension` set. |
+| `witself_identity_capacity_accounts_unlimited` | Value-free per-cell count of live accounts with an unlimited or absent limit, by the same closed `dimension` set; these accounts are excluded from finite-limit counts and ratios. |
+| `witself_identity_capacity_min_headroom_ratio` | Value-free per-cell minimum `(limit - used) / limit`, clamped to `[0,1]`, by the same closed `dimension` set; 1 when no finite-limit account exists. For `agents_per_realm`, each account contributes its worst live realm. |
+| `witself_identity_capacity_metrics_up` | Unlabeled value-free collector health: 1 after a successful read-only capacity snapshot, 0 on failure with all capacity values omitted. |
+| `witself_audit_append_total` | Value-free standalone audit append calls, with only `result` (`success`, `error`) and `reason` (`none`, `not_found`, `bad_input`, `error`). Counter is per-process and resets on restart. |
+| `witself_audit_append_tx_failures_total` | Unlabeled value-free count of audit database-insert failures inside transactions, exported separately by the server and worker from each process's Store; caller-input validation failures do not increment it. Counter is per-process and resets on restart. |
+| `witself_audit_append_metrics_up` | Unlabeled value-free collector health: 1 after a successful transaction-failure counter read. The server emits 0 on reader failure with the counter omitted; the worker omits both series when its in-memory reader is not configured. |
 | `witself_audit_events_total` | Audit events emitted by type, result, and backend. |
 | `witself_audit_write_failures_total` | Audit sink write failures. |
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
@@ -276,6 +286,31 @@ Initial metric families should include:
 | `witself_object_store_operations_total` | Object/blob storage operations when configured. |
 | `witself_migration_version` | Applied migration version. |
 | `witself_migration_pending` | Pending migration count when known. |
+
+The identity-capacity and audit-append collectors export no
+account, realm, agent, operator, or plan identifiers in labels or values and
+never export database error text. Each server reader has a two-second timeout; the
+two run sequentially in the server scrape flow, adding at most four seconds
+of reader deadlines. The worker reads its own in-memory audit failure counter
+on each scrape, including failures followed by a successful job in the same
+batch. Identity capacity uses one read-only transaction with a
+statement timeout and the same live-identity predicates as plan enforcement.
+Audit counters measure append attempts: a standalone database failure can
+contribute to both audit counters, so their sum is not a unique failure count.
+Use counter increases to detect failures across process restarts. Known limitation: a container that restarts inside the same pod and fails an audit insert before its first scrape presents the same labels and an equal counter value as the previous process, so that single failure is not distinguishable from the old series and is not alerted; a process-start signal is the tracked follow-up.
+
+The four identity-capacity and audit-append alerts are gated by
+`platform.monitoring.collectorAlerts.enabled`, which defaults to false and is
+rendered from the cell catalog switch `collector_alerts`. Keep the gate off
+until compatible server and worker binaries are deployed and their scrape
+metrics verified. It also stays off on the serving cell for a semantic reason:
+`WitselfIdentityCapacityAtLimit` fires on any account whose usage equals its
+cap, and every Personal account holds its single root operator seat
+(`operator_seats` used = cap = 1), so the rule would page permanently; the
+rule must exclude structural minimums (or measure refused growth) before the
+group is enabled. Audit collector availability requires both the server and
+worker collectors to be present and healthy; identity capacity is collected
+only by the server.
 
 The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to
@@ -380,17 +415,30 @@ keeps the final-verdict response in `result` and returns the value-free route
 breakdown in `route_lookup_result`, grouped only by `result`, `evidence`, and
 `route_kind`. This makes `cp_error` on `custom_domain` routes directly visible
 without exposing a customer domain or tenant identifier.
-Metric names can evolve during implementation, but the coverage categories
-should remain. The sealed-plane families (`witself_secret_operations_total`,
-`witself_secret_reveals_total`, `witself_totp_operations_total`,
-`witself_kms_operations_total`, and `witself_kms_operation_duration_seconds`)
-count events and never carry payload: no secret value, field value, TOTP seed,
-generated code, or key material ever appears in a metric or its labels. They
-are present only when the sealed plane is enabled. The `server_side_decrypt`
-label on the reveal and TOTP families records which decrypt path served the
-value — `true` for token-only pods where the server mediates decryption,
-`false` for client-held decryption — per the hybrid model in
-[key-hierarchy.md](key-hierarchy.md).
+The implemented sealed-plane families are
+`witself_secret_material_deliveries_total`,
+`witself_vault_lifecycle_operations_total`, `witself_secret_limit_rejections_total`,
+and the cell-wide posture gauges listed above. They carry no account, realm,
+agent, secret, field id, name, value, ciphertext, wrapped DEK, TOTP seed, code,
+key material, or error text. The server does not emit reveal, TOTP-generation,
+or agent-secret KMS counters. Decryption and TOTP generation are client-local under
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md).
+
+Delivery `field_kind` is `password`, `api_key`, `token`, or `totp`, with `other`
+for any remaining field kind on success and `unknown` when the call fails.
+Delivery and lifecycle `result` is `success`, `conflict`, `forbidden`,
+`not_found`, `invalid`, or `error`. Conflicts include state/idempotency fences
+and vault-key mismatch/unavailability; they are not unexpected server errors.
+Lifecycle flow/operation pairs are `registration/register`,
+`enrollment/{create,approve,receive,consume,cancel}`, and
+`rotation/{start,stage,commit,cancel}`. Calls rejected before the domain
+callback (authentication, routing, decoding) appear only in the HTTP family.
+Counters appear after their first observation and reset on process restart.
+The posture reader runs one database query per scrape with a two-second timeout.
+Its per-account 15-minute usage aggregation uses the existing
+`usage_events_by_account_dimension_time` index; account/agent grouping remains
+inside SQL and only the maximum count leaves the store. No schema migration is
+needed. Combine cell aggregates with `max`, not a sum across replicas.
 
 The cross-realm collaboration families
 (`witself_conversations_total`, `witself_relay_envelopes_total`,
@@ -412,6 +460,16 @@ metrics on the thin global control plane that owns those decisions (a separate
 surface from any per-cell `/v1` route).
 
 ## Label And Privacy Rules
+
+Self-digest instrumentation maps the request header `X-Witself-Hydration`
+values `session` and `prompt` to `session_hook` and `prompt_hook`; absent or
+unrecognized values map to `other`. This hint is not authenticated runtime
+provenance. The raw header, account/agent ids, tokens, content, byte counts,
+and error text never become labels. Numeric elision counts are histogram
+observations. Errors still contribute latency and an elided-entry observation
+(zero when no digest could be assembled); optional checkpoint unavailability
+remains a successful read under the existing HTTP 200 contract. Server metrics cannot observe client DNS/TLS/deadline failures,
+renderer envelope elision, or Claude Code hook-output rejection.
 
 Metrics are operational metadata, not an escape hatch around the security
 model. They must never expose identity material, secret material, or
@@ -502,13 +560,9 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   profile id, model name, dimensions, or vector value.
 - `backend_kind`, such as `managed`, `self_hosted`, or `local`.
 - `store_backend`, `object_store_provider`.
-- `kms_provider`, the KMS provider family for sealed-plane operations, such as
-  `aws_kms`, `gcp_kms`, `azure_key_vault`, or `local_dev`. It must never carry a
-  key id, key ARN, endpoint URL, or key material.
-- `server_side_decrypt`, `true` or `false`, recording which decrypt path served
-  a reveal or TOTP code: `true` when the server mediates decryption for a
-  token-only pod, `false` for client-held decryption. It never carries a key,
-  a value, or any plaintext.
+- Sealed delivery `field_kind`, and vault lifecycle `flow`, `operation`, and
+  `result`, restricted to the closed sets above. No decrypt-path or KMS labels
+  apply to client-custodied agent secrets.
 - `reason_class`, a small normalized set such as `missing`, `stale`,
   `incompatible`, `non_finite`, `wrong_dimension`, or `unauthorized`, for
   optional-vector validation and fallback events.
@@ -552,8 +606,8 @@ Expected log fields:
 - Owner kind (`self`, `other_agent`, or `group`) for identity operations.
 - Permission verb and decision for policy-gated operations.
 - Recall mode and bounded vector coverage class for recall operations.
-- KMS provider, KMS operation, and the `server_side_decrypt` flag for
-  sealed-plane reveal, TOTP code, and key operations.
+- Bounded operation and result classes for sealed material delivery and vault
+  lifecycle operations; server logs cannot report local decrypt or TOTP outcomes.
 - Backend kind.
 - Stable error code when an operation fails.
 
@@ -662,13 +716,64 @@ enabled. The worker has a separate metrics Service and separate optional
 monitors so API and worker scrape selectors never overlap. The chart should not
 require those CRDs for a basic install.
 
+## Sealed-plane SLOs
+
+These objectives cover server-observable ciphertext delivery and vault lifecycle
+state under [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
+`AccessSecretField` authorizes a request and returns ciphertext plus its wrapped
+DEK. Its successful audit event, `secret.material.delivered`, does not prove
+client decryption, TOTP generation, or receipt at a plaintext sink. Local
+integrity failures never reach these server counters.
+
+| Objective | Measurement and operational threshold |
+| --- | --- |
+| Delivery availability | At least 99.9% non-`error` domain calls over a rolling 30 days: `1 - (sum(increase(witself_secret_material_deliveries_total{result="error"}[30d])) or vector(0)) / sum(increase(witself_secret_material_deliveries_total[30d]))`. With no calls the SLI is undefined, not evidence of success. A missing sparse error series means zero observed errors only when delivery observations exist. Expected conflicts, denials, missing fields, and invalid input remain non-`error` outcomes; this is server availability, not an authorized-reveal success rate. |
+| Delivery error alert | More than 5% `error` calls over 10 minutes, above 0.01 calls/second, sustained for 10 minutes. This shorter operational threshold is distinct from the 30-day objective. |
+| Rotation conflict budget | At most five `flow="rotation",result="conflict"` calls per 15 minutes, combining reset-adjusted observed increases across all series with any new-series count not already included in those increases across rotation operations. More than five combined conflicts sustained for five minutes warns about fences, stale state, or retry contention; successful idempotent replays are `success`. |
+| Rotation completion | No open rotation older than 24 hours. An age above 86,400 seconds for 15 minutes warns. Committed/cancelled rotations are excluded; this measures outstanding work, not historical completion latency. |
+| Pending enrollment age | Monitor the count and oldest age of unexpired `pending`/`approved` enrollments. Complete or cancel before the request's expiry. Expired requests are excluded even before lazy cleanup; no pending-enrollment page or global TTL is introduced. |
+| Delivery volume ceiling | Provisional warning when all delivery calls exceed one/second over 15 minutes, or one account/agent has more than 120 recorded `secret_read` usage events in 15 minutes, sustained for 15 minutes. The SQL projection exposes only the maximum count. Usage recording is best effort, so this gauge can undercount successful deliveries. |
+| KMS latency and local decrypt | Not applicable to the server SLO: the backend calls no agent-secret KMS and receives no client decrypt outcome. There is no emitted KMS latency series or claimed client-success objective. Any future client telemetry needs its own value-free contract and measured baseline. |
+
+The platform defaults configure seven-day Prometheus retention, also capped at
+4 GB, and the serving-cell values do not override them. A `[30d]` query against
+this shorter history
+cannot establish 30-day compliance. The availability objective requires a full
+30 days of retained aggregate evidence before reporting attainment; the query
+above defines the SLI but does not prove that the required history exists.
+This implementation does not change retention or provision another collector.
+
+The volume ceiling is a provisional fixed threshold, not a learned baseline.
+Production sealed-plane volume has no established baseline; tune it using
+sanitized aggregate observations after certification. Fence, age, volume, and
+delivery-error alerts are warnings. Only posture-reader unavailability is
+critical: `witself_sealed_plane_posture_metrics_up` absent or below one for
+three minutes. A failed reader emits `_up 0` and omits every posture gauge, so
+missing data cannot masquerade as zero outstanding work. A nil reader omits
+the entire family and the enabled absence alert fails closed.
+
+The five rules live in the `witself-sealed-plane` group and require monitoring,
+alerting, and the default-off
+`platform.monitoring.sealedPlaneAlerts.enabled` values switch. All use
+`service="sealed-plane"`, `witself_alert="true"`, and the existing incident
+receiver. Cell values are unchanged by this implementation. Release the server
+metrics first through the release train, verify the new families on each
+serving replica's `/metrics` (exercise synthetic delivery/lifecycle calls for
+sparse counters), then merge/enable rules through the serving-cell values flip.
+GitOps tracks `main` with automated sync; an absent-series rule enabled before
+the server release would page. Source tests and the feature-catalog gate are
+implementation evidence, not evidence that production has been rolled or that
+these objectives have been met. See [Sealed-plane alerts](runbooks.md#sealed-plane-alerts)
+for response actions and rollout acceptance.
+
 ## Alerts And Dashboards
 
 The repository now contains a default-off Founder/open-plane monitoring
 capability in the GitOps platform chart. It pins a trimmed
-`kube-prometheus-stack` package, disables Grafana and upstream default rules,
-and enables only Prometheus Operator, one bounded Prometheus, one bounded
-Alertmanager, kubelet/PVC collection, and kube-state-metrics. The application
+`kube-prometheus-stack` package, disables Grafana, and enables Prometheus
+Operator, one bounded Prometheus, one bounded Alertmanager, kubelet/PVC
+collection, and kube-state-metrics. Serving-cell extensions below add gated
+node and platform scrapes and a curated subset of upstream rules. The application
 chart can label the existing server and worker ServiceMonitors for exact
 selection and restrict both metrics ports to the `monitoring` namespace.
 
@@ -691,9 +796,13 @@ retained canary artifact. Two receivers are configured independently:
   alerting plane itself. Omitting its Secret omits the route, receiver, and
   mount.
 
-All shipped Witself rules aggregate away pod, instance, route, account, realm,
+The Witself product rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
-worker's existing closed-set job label.
+worker's existing closed-set job label. PostgreSQL rules additionally retain
+the namespace, scrape job, and instance needed to identify the failing exporter
+target, while removing database, user, application, and wait-event labels.
+Synthetic uptime rules additionally retain the public directory cell name in a
+`target` label.
 
 This capability is now live on the serving cell. Shared chart defaults remain
 disabled, and the staged GitOps rollout — stack, then targets, then alerting —
@@ -703,6 +812,184 @@ receiver, accepted 2026-08-26.
 The target-cell ServiceMonitors must be enabled only after the monitoring child
 Application and CRDs are Healthy; Argo sync waves in separate parent
 Applications do not establish that ordering.
+
+The self-digest rules in `founder-open-plane.rules.yaml` add recurring
+server evidence with promtool-tested firing, quiet, threshold, and recovery
+cases:
+
+- `WitselfSelfDigestErrorRatioHigh`: more than 5% errored reads over five
+  minutes, with more than 0.05 reads/second, sustained for ten minutes.
+- `WitselfSelfDigestSlow`: five-minute histogram p95 above 1.5 seconds,
+  sustained for ten minutes.
+- `WitselfSelfDigestElisionRatioHigh`: at least half of reads report
+  `elided=true` over five minutes, sustained for thirty minutes.
+
+All three are warnings with only `severity`, `service=witself-server`, and
+`witself_alert=true` rule labels. Thresholds are provisional; low traffic can
+keep the error-ratio alert quiet. No hydration metric-absence rule is added.
+The server/client release must reach the cell before the separate cell-GitOps
+rule rollout. Live hydration alert delivery and recovery acceptance remain
+pending; the prior monitoring acceptance above does not cover these rules.
+See the [Founder runbook](runbooks.md#founder-open-plane-monitoring).
+
+Client observations stay in the local value-free hydration ledger and are
+not scraped. `witself integration status --runtime codex` (or `claude-code`)
+reports the last 24 hours' attempts, injections, failures, p95 latency, and
+elision count; absent history reports `no recent hydration`. Runtime acceptance
+can add run-window counts and maximum latency to its optional `hydration`
+evidence block. These observations do not prove model-visible delivery or
+create a recurring authenticated runtime job. Scheduling the existing local
+Claude Code/Codex acceptance legs remains operator work; Cursor/Grok remain
+Scott-operated runtimes. Client freshness/staleness alerts and signed-in
+provider regression acceptance are still open.
+
+<a id="postgresql-alerts"></a>
+
+Deployment-hardening batch B adds the following database rules in
+[`postgresql.rules.yaml`](../.gitops/charts/platform/files/postgresql.rules.yaml)
+for `civo-sandbox-usw2-dev`. They require monitoring, alerting, the default-off
+`platform.monitoring.postgresql.enabled` switch, and an enabled Civo PostgreSQL
+exporter. They select the `witself-postgresql-metrics` service in the `witself`
+namespace. Their fixed `service: witself-postgresql`, severity, and
+`witself_alert: "true"` labels use the existing PagerDuty incident route; the
+PrometheusRule carries `release: witself-monitoring` for discovery.
+
+| Alert | Condition | Severity |
+| --- | --- | --- |
+| `WitselfPostgreSQLConnectionsHigh` | Sum of [`pg_stat_activity_count`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57) across connection states, divided by [`pg_settings_max_connections`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_setting.go#L90-L118), exceeds 0.8 for 10 minutes. | warning |
+| `WitselfPostgreSQLTransactionAgeHigh` | Oldest transaction age, [`pg_stat_activity_max_tx_duration`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57), exceeds 300 seconds for 5 minutes. | warning |
+| `WitselfPostgreSQLDeadlocks` | [`pg_stat_database_deadlocks`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_database.go#L172-L181) increases over 10 minutes. | warning |
+| `WitselfPostgreSQLExporterUnavailable` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is absent or zero for 10 minutes. | critical |
+| `WitselfPostgreSQLDown` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is zero for 5 minutes. | critical |
+
+Connection counts and limits are matched per scrape target before comparison.
+The two critical rules deliberately
+overlap for a database that remains down for 10 minutes; only exporter
+unavailability covers a missing series. The metric links above identify the
+upstream postgres_exporter 0.20.1 definitions declared by Bitnami PostgreSQL chart
+18.8.0. Its exporter image tag is mutable; verify the resolved version and all
+five metric families in a live scrape during activation. Batch B prepares these
+rules; serving-cell scrape and alert delivery acceptance follows deployment.
+
+<a id="serving-cell-monitoring-extensions"></a>
+
+The monitoring extensions are enabled in desired state only for
+`civo-sandbox-usw2-dev`. Shared defaults keep
+`platform.monitoring.nodeExporter.enabled`, `.kubelet.cadvisor`,
+`.defaultRules.enabled`, `.certManager.enabled`, and `.argocd.enabled` false.
+The stack's `enabled` switch gates every extension; alert rules additionally
+require `alerting.enabled`. The backup cell keeps monitoring disabled.
+
+| New scrape | Target | Discovery |
+| --- | --- | --- |
+| Node exporter | One existing node per DaemonSet pod, port 9100 | Upstream node-exporter ServiceMonitor; requests 20m CPU/32Mi and limits 100m CPU/64Mi per node. |
+| Kubelet cAdvisor | `/metrics/cadvisor` on each kubelet | Existing kubelet ServiceMonitor with cAdvisor enabled; probes/resource endpoints retain upstream defaults. |
+| cert-manager | Controller in `cert-manager`, `http-metrics` port 9402 | `witself-cert-manager` PodMonitor. |
+| Argo CD application controller | `argocd-application-controller` in `argocd`, `metrics` port 8082 | `witself-argocd-application-controller` PodMonitor. |
+| Argo CD repo-server | `argocd-repo-server` in `argocd`, `metrics` port 8084 | `witself-argocd-repo-server` PodMonitor. |
+| Argo CD server | `argocd-server` in `argocd`, `metrics` port 8083 | `witself-argocd-server` PodMonitor. |
+
+The four platform PodMonitors live in `monitoring` with
+`release: witself-monitoring`; their own namespace selectors target
+`cert-manager` or `argocd`. Prometheus's existing monitor namespace admission
+therefore remains narrow. The pinned cert-manager and Argo CD charts already
+expose these pod metrics ports, so no extra exporter or metrics Service is
+needed. Argo CD 10.0.1's controller/repo-server NetworkPolicies allow their
+metrics port from all namespaces, and its server policy permits ingress.
+cert-manager v1.20.3's NetworkPolicies are disabled; no existing platform policy
+blocks these scrapes or Prometheus egress.
+
+<a id="platform-alerts"></a>
+
+The exact added alert inventory is below. Every alert carries
+`witself_alert: "true"` and warning severity, so it uses the existing PagerDuty
+incident route. Platform rules retain the infrastructure labels needed to
+identify the node, workload, PVC, certificate, or Argo application.
+
+| Source | Enabled alert | Condition |
+| --- | --- | --- |
+| Upstream `node-exporter` | `NodeMemoryHighUtilization` | Host memory utilization exceeds 90% for 15 minutes. |
+| Upstream `node-exporter` | `NodeMemoryMajorPagesFaults` | Major page faults exceed 500/second for 15 minutes. |
+| Upstream `node-exporter` | `NodeClockSkewDetected` | Absolute clock offset exceeds 0.05 seconds and is not converging for 10 minutes. |
+| Upstream `node-exporter` | `NodeClockNotSynchronising` | Clock is unsynchronized with maximum error at least 16 seconds for 10 minutes. |
+| Upstream `kubernetes-apps` | `KubePodCrashLooping` | The five-minute window continues to contain `CrashLoopBackOff` observations for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeDeploymentReplicasMismatch` | Available replicas remain below desired replicas with no updated-replica changes in the ten-minute window, for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeStatefulSetReplicasMismatch` | Ready replicas differ from desired replicas with no updated-replica changes in the ten-minute window, for 15 minutes. |
+| Upstream `kubernetes-apps` | `KubeContainerWaiting` | Container remains waiting for a reason other than `CrashLoopBackOff` for 1 hour. |
+| Upstream `kubernetes-apps` | `KubePodNotReady` | Non-Job pod remains Pending, Unknown, or Running but not Ready for 15 minutes. |
+| Upstream `kubernetes-resources` | `KubeMemoryOvercommit` | Pod memory requests exceed the upstream cluster availability threshold. |
+| Upstream `kubernetes-resources` | `KubeCPUOvercommit` | Pod CPU requests exceed the upstream cluster availability threshold. |
+| Local `platform-node` | `NodeFilesystemSpaceFillingUp` | Writable filesystem is over 80% used and its six-hour trend predicts exhaustion within 24 hours, for 1 hour. |
+| Local `platform-storage` | `WitselfPrometheusPVCUsageHigh` | Prometheus PVC usage in `monitoring` exceeds 80% for 15 minutes. |
+| Local `platform-certificates` | `WitselfCertificateExpiringSoon` | Certificate expiration is less than 14 days away for 1 hour. |
+| Local `platform-argocd` | `WitselfArgoApplicationUnhealthy` | `argocd_app_info` reports health other than Healthy or sync other than Synced for 15 minutes. |
+
+[`platform.rules.yaml`](../.gitops/charts/platform/files/platform.rules.yaml)
+supplies the four local alerts. The two upstream
+`NodeFilesystemSpaceFillingUp` variants are disabled and replaced by the local
+rule with the same name because their 85%/90% thresholds cannot be selected as
+80%. Two local recording rules supply only the prerequisites for overcommit:
+`namespace_cpu:kube_pod_container_resource_requests:sum` and
+`namespace_memory:kube_pod_container_resource_requests:sum`. They retain only
+Pending/Running pod requests, deduplicate kube-state-metrics series, and also
+carry `witself_alert: "true"`. This avoids enabling the unrelated upstream
+recording groups.
+
+Only the `defaultRules.rules` keys `nodeExporterAlerting`, `kubernetesApps`, and
+`kubernetesResources` are enabled. The following keys are explicitly false:
+`alertmanager`, `etcd`, `configReloaders`, `general`,
+`k8sContainerCpuUsageSecondsTotal`, `k8sContainerMemoryCache`,
+`k8sContainerMemoryRss`, `k8sContainerMemorySwap`, `k8sContainerResource`,
+`k8sContainerMemoryWorkingSetBytes`, `k8sPodOwner`,
+`kubeApiserverAvailability`, `kubeApiserverBurnrate`, `kubeApiserverHistogram`,
+`kubeApiserverSlos`, `kubeControllerManager`, `kubelet`, `kubeProxy`,
+`kubePrometheusGeneral`, `kubePrometheusNodeRecording`, `kubernetesStorage`,
+`kubernetesSystem`, `kubeSchedulerAlerting`, `kubeSchedulerRecording`,
+`kubeStateMetrics`, `network`, `node`, `nodeExporterRecording`, `prometheus`,
+`prometheusOperator`, and `windows`.
+
+Within those three selected groups, `defaultRules.disabled` explicitly removes:
+
+- Node rules: upstream `NodeFilesystemSpaceFillingUp`,
+  `NodeFilesystemAlmostOutOfSpace`, `NodeFilesystemFilesFillingUp`,
+  `NodeFilesystemAlmostOutOfFiles`, `NodeNetworkReceiveErrs`,
+  `NodeNetworkTransmitErrs`, `NodeHighNumberConntrackEntriesUsed`,
+  `NodeTextFileCollectorScrapeError`, `NodeRAIDDegraded`, `NodeRAIDDiskFailure`,
+  `NodeFileDescriptorLimit`, `NodeCPUHighUsage`, `NodeSystemSaturation`,
+  `NodeDiskIOSaturation`, `NodeSystemdServiceFailed`,
+  `NodeSystemdServiceCrashlooping`, and `NodeBondingDegraded`.
+- App rules: `KubeDeploymentGenerationMismatch`, `KubeDeploymentRolloutStuck`,
+  `KubeStatefulSetGenerationMismatch`, `KubeStatefulSetUpdateNotRolledOut`,
+  `KubeDaemonSetRolloutStuck`, `KubeDaemonSetNotScheduled`,
+  `KubeDaemonSetMisScheduled`, `KubeJobNotCompleted`, `KubeJobFailed`,
+  `KubeHpaReplicasMismatch`, `KubeHpaMaxedOut`, and `KubePdbNotEnoughHealthyPods`.
+- Resource rules: `KubeCPUQuotaOvercommit`, `KubeMemoryQuotaOvercommit`,
+  `KubeQuotaAlmostFull`, `KubeQuotaFullyUsed`, `KubeQuotaExceeded`, and
+  `CPUThrottlingHigh`.
+
+The disabled system group additionally pins `KubeVersionMismatch`,
+`KubeClientErrors`, `KubeAPIDown`, `KubeletDown`, `KubeControllerManagerDown`,
+and `KubeSchedulerDown` as disabled. The two-node single-zone k3s cell does not
+expose the upstream etcd/controller-manager/scheduler scrape endpoints; those
+scrapes and rule groups remain explicitly off. This curated set does not turn
+on any API server, DNS, kube-proxy, Windows, RAID, bonding, or systemd monitoring.
+
+The ACME contact in both Civo cell values is
+`apps.witselfServer.civoIngress.acme.email: support@witwave.ai`, the operator support mailbox
+that routes to the founder. This is a configuration change: cert-manager
+updates/re-registers the ACME account contact on the next issuance. It does not
+force certificate issuance or replace an account key. Verify the configured
+contact and normal certificate renewal after the values reconcile.
+
+Only the node-exporter DaemonSet adds workloads: two pods add requests of
+40m CPU/64Mi and limits of 200m CPU/128Mi in total. Per node, the added request
+is 20m CPU/32Mi (about 1.06% of 1880m CPU and 1.39% of 2308Mi memory), with a
+100m CPU/64Mi limit. Against the supplied approximate node-2 baseline of 97%
+declared memory limits, 3% of 2308Mi leaves about 69Mi; adding 64Mi fits with
+about 5Mi remaining, approximately 99.77% committed. This is a narrow arithmetic
+fit from the supplied capacity snapshot, not live scheduling or runtime
+acceptance. Extra Prometheus scrape/ingestion cost has not been measured;
+cert-manager, Argo CD, cAdvisor, and rules add no resource requests or limits.
 
 Initial alert candidates:
 
@@ -777,6 +1064,184 @@ Analytics Engine rather than Prometheus and require a separate bounded bridge
 or alerting path. One monitored cell also does not close fleet-wide placement,
 restore, or capacity gates for any unmonitored accepting cell.
 
+## Synthetic uptime probes
+
+The control-plane Worker probes from Cloudflare every five minutes using a
+dedicated `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` Cron Trigger (minutes 1, 6, through 56 UTC).
+Maintenance retains `*/5 * * * *`. The scheduled handler dispatches by the cron
+expression: the probe trigger runs only the probe scheduler, and the maintenance
+trigger runs only maintenance. Each trigger starts a separate invocation with
+its own six-connection budget, even if cron timings overlap, so slow maintenance
+requests cannot occupy probe connection slots. The probe scheduler reads the
+`cell:` registry in the existing `DIRECTORY` KV binding, the cell directory used
+by `/v1/directory`, and requests each registered cell's `<api endpoint>/v1/version`.
+The fixed `control_plane` target at `https://self.witwave.ai/v1/version` is probed only
+when `CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED` is exactly `"true"`; its reviewed
+deployment value is `"false"` so ordinary deployment preserves container idle
+shutdown. While disabled, this target is omitted from results and metrics.
+Probes use a pool of four workers, leaving connection headroom for KV reads and
+writes. Each request's full ten-second timeout starts when its worker dispatches
+the fetch. The 25-second total budget covers directory
+reads, probes, and persistence, with the final five seconds reserved for one KV
+write. A worker dispatches only when all ten seconds fit within the remaining
+probe budget; otherwise the target is recorded as `skipped`. Waiting for a pool
+slot never shortens the request timeout. The optional control-plane self-probe
+runs first, followed by cells skipped on the previous run, then targets whose
+last completed observation was `ok`, then the remaining targets. Skipped cells
+are ordered never-checked first, then oldest completed check; target-name order
+breaks ties and orders the other groups. This gives skipped cells a turn on later
+runs even when earlier cells keep timing out.
+
+The scheduled probe handler contains failures; a directory read failure sets
+`directory_ok` to false while preserving previous valid cell results and their
+original check times. Cell targets retire only after successful discovery, so
+an intermittent directory failure cannot reset an ongoing cell-outage alert.
+If reading the previous snapshot fails or times out, the handler preserves the entire
+run document when discovery fails or any target is skipped. Previous
+observations and the scheduler timestamp remain unchanged and continue aging
+toward staleness. A malformed stored run document is replaced on the next run; only a readable one is preserved across skipped targets.
+
+Each run persists one JSON document at `DIRECTORY` key `config:uptime_probe_run`
+with shape `{ "scheduler": { "last_run_at": "...", "duration_ms": 0,
+"target_count": 0, "directory_ok": true }, "targets": [...] }` in a single
+KV put without a TTL. The heartbeat can advance only together with the results;
+a failed write leaves both unchanged, so scheduler-stale alerts can fire even
+when no target results have ever been saved. For one release, reads fall back to
+the legacy `config:uptime_probes` target snapshot and
+`config:uptime_probe_scheduler` record only when the new key is absent. New runs
+write only `config:uptime_probe_run`; a present but invalid document never falls
+back to legacy records. A replacement run records `recovered_from_malformed: true`
+without retaining any malformed values; subsequent normal runs omit the flag.
+
+Target rows store only names, state (`ok`, `down`, or `skipped`), HTTP status class, latency in
+milliseconds, and check time. A skipped target's optional `last_observation`
+retains the most recent completed check's state, HTTP status class, latency, and
+check time. Only a completed check refreshes that observation; repeated skips
+preserve it so an existing outage or stale-check alert can continue. A target
+skipped before its first check has no observation. The same document's
+`scheduler` includes runs with an empty directory or a directory read failure
+when the prior snapshot is valid, absent, or malformed and KV reads succeed. The scheduler target count counts discovered cells, excluding
+the optional control-plane target; a directory failure retains the previous
+cell count, or records zero when that count is unknown.
+
+Cell target names come from directory cell keys; the document and metrics
+contain no endpoints, account data, tokens, response bodies, or error text.
+Probes send no authentication or cell credentials. Public, unauthenticated
+`GET https://self.witwave.ai/metrics/probes` reads the persisted run without entering
+account/auth paths and returns Prometheus text with `Cache-Control: no-store`
+and the Worker's normal security headers. A missing or malformed run document
+(including unparseable JSON) produces zero-valued scheduler and snapshot gauges
+and no target series when KV reads succeed; the scrape still succeeds so
+scheduler-stale alerts can fire. Legacy reads preserve a valid scheduler without
+a snapshot, or valid target rows without a scheduler, but expose
+`witself_probe_last_write_ok 0` for either incomplete pair. KV read failures or
+timeouts return HTTP 503 so a failed scrape can alert.
+
+Every successful scrape includes six scheduler and snapshot gauges:
+
+| Metric | Meaning |
+| --- | --- |
+| `witself_probe_scheduler_last_run_timestamp_seconds` | Last scheduler run as Unix seconds; `0` before any recorded run. |
+| `witself_probe_scheduler_target_count` | Discovered cell count, excluding the optional control-plane target; retained count on directory failure, or `0` when unknown. |
+| `witself_probe_directory_ok` | `1` when the last run read the directory successfully, otherwise `0`, including before any recorded run. |
+| `witself_probe_snapshot_target_count` | Number of target rows in persisted results, including skipped targets and the optional control-plane target; `0` when absent or invalid. |
+| `witself_probe_last_write_ok` | `1` if a structurally valid run document (or complete legacy pair) was read; `0` if missing or invalid while KV is readable. This checks stored structure, not the latest write attempt or freshness: a failed write that leaves an older valid document still exposes `1`, while its scheduler timestamp ages. |
+| `witself_probe_document_was_malformed` | `1` when the last persisted run replaced malformed stored data; `0` otherwise, including before any recorded run. |
+
+Per-target gauges distinguish failed requests from skipped work. For skipped
+targets with a previous observation, the four measured gauges retain that
+observation and its original timestamp alongside `witself_probe_skipped 1`.
+Targets skipped before their first check emit only `witself_probe_skipped 1`:
+
+| Metric | Meaning |
+| --- | --- |
+| `witself_probe_up{target="<name>"}` | Last completed check: `1` for `ok` (a successful 2xx response), `0` for `down`; omitted without an observation. |
+| `witself_probe_skipped{target="<name>"}` | `1` when the run could not dispatch a full ten-second check; omitted for `ok` and `down`. |
+| `witself_probe_latency_seconds{target="<name>"}` | Last completed probe's elapsed time in seconds; omitted without an observation. |
+| `witself_probe_last_check_timestamp_seconds{target="<name>"}` | Last completed check time as Unix seconds; unchanged by skips and omitted without an observation. |
+| `witself_probe_http_status{target="<name>"}` | Last completed probe's HTTP status **class** (`1`–`5`); `0` when no HTTP response was available; omitted without an observation. |
+
+The platform chart gates the `witself-probes` scrape job and its rules behind
+`platform.monitoring.uptimeProbes.enabled`, which defaults to `false` and is
+enabled only in `civo-sandbox-usw2-dev`. That serving cell's Prometheus scrapes
+the HTTPS endpoint every 60 seconds. The rules in
+[uptime-probes.rules.yaml](../.gitops/charts/platform/files/uptime-probes.rules.yaml)
+cover target failures and the scheduler itself:
+
+- `WitselfProbeTargetDown`: `last_over_time(witself_probe_up[5m]) == 0` for ten
+  minutes, critical. The five-minute lookback bridges brief scrape failures;
+  a healthy observation clears the condition immediately.
+- `WitselfProbeStale`: a last-check age above 900 seconds for ten minutes,
+  warning, evaluated over a five-minute `last_over_time` lookback so a frozen
+  timestamp keeps ageing through brief scrape failures instead of resetting the
+  pending alert. Investigate a stopped cron or failed result persistence.
+- `WitselfProbeScrapeDown`: `up{job="witself-probes"} == 0` for 15 minutes,
+  critical. Investigate control-plane reachability from the cell or unavailable
+  probe results.
+- `WitselfProbeSchedulerStale`:
+  `time() - last_over_time(witself_probe_scheduler_last_run_timestamp_seconds[5m]) > 900`
+  for ten minutes, critical; the same bounded lookback means intermittent scrape
+  failures cannot hide a stopped scheduler. This also detects a scheduler that never ran, even without
+  any per-target series, a malformed document, or failed document writes.
+- `WitselfProbeResultsMissing`: a positive scheduler target count with zero
+  persisted target rows or no `witself_probe_up` samples for 15 minutes, critical.
+  The scheduler reports registered targets but no probe results are exposed
+  (persistence failure or stalled writes). The `absent()` branch explicitly
+  matches without labels so Prometheus's `job` and `instance` labels cannot hide
+  missing samples.
+- `WitselfProbeDirectoryUnavailable`: `witself_probe_directory_ok == 0` for
+  15 minutes, warning. Investigate registry reads and the scheduler's access to
+  `DIRECTORY`.
+- `WitselfProbeNoTargets`: `witself_probe_scheduler_target_count == 0` for
+  30 minutes, warning. The production directory should never be empty; check
+  cell registration and discovery.
+- `WitselfProbeBudgetExhausted`: `sum(witself_probe_skipped) > 0` for 15 minutes,
+  warning. Investigate slow targets and the number of targets sharing the run
+  budget. Skips retain previous observations without creating a new failure or
+  resetting an existing target-down or stale-check alert. A successful completed
+  check replaces the observation and clears the target's skipped metric.
+
+These alerts use the existing Alertmanager incident route and PagerDuty
+receiver. No PagerDuty key is copied into the control plane; alerting stays in
+Alertmanager. The existing external dead-man heartbeat covers loss of
+Prometheus/Alertmanager itself. For a target failure, check its public version
+endpoint; for staleness, check the control-plane cron and KV write outcomes;
+for scrape failure, check reachability and the metrics response from the
+serving cell.
+
+A five-minute GitHub Actions schedule with a one-minute job would consume about
+8,600 Actions minutes per 30-day month where billed minutes apply; standard
+public-repository runners have no billable minutes. The chosen design reuses
+the CP's existing Workers plan with a separate probe trigger: roughly 17,000
+additional monthly probe cron and optional self-probe invocations as a
+conservative estimate, plus about 43,000 requests for the 60-second scrape,
+are small against the plan's included requests. Cron
+uses the existing Workers allowance, and no monitor subscription, KV namespace,
+or secret is added. See [GitHub's minute accounting](https://docs.github.com/en/actions/how-tos/monitor-workflows/view-job-execution-time)
+and [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+
+CP `/v1/version` currently reaches the backend container, whose
+`sleepAfter` is ten minutes. A successful check every five minutes resets that
+idle timer and can keep an otherwise sleeping container running. Container
+memory, disk, and active CPU have separate usage allowances and charges, so the
+Workers request allowance alone does not prove zero additional cost. The
+container-reaching probe therefore defaults off; cell probes and the public
+metrics endpoint remain active. Enabling it requires a reviewed resolution of
+that cost conflict, then a coordinated source change setting the template's
+plain `CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED` variable and both generated-config
+and deployed-version verifier pins to `"true"`, followed by the normal CP deploy.
+Do not activate it with a secret or an out-of-band dashboard edit. See
+[Container inactivity](https://developers.cloudflare.com/containers/faq/)
+and [Container pricing](https://developers.cloudflare.com/containers/platform/pricing/).
+
+The normal control-plane deployment installs the cell probe handler and metrics
+endpoint with the CP target disabled. After deploy, verify that the Worker has
+exactly two Cron Triggers: `*/5 * * * *` for maintenance and `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` for
+probes. The normal GitOps sync applies the serving cell's scrape job and rules;
+a CP deployment alone
+does not update the cell's monitoring chart. This source change does not claim
+that either deployment has occurred.
+
 ## CI And Release Checks
 
 Required checks once the server and chart exist:
@@ -786,7 +1251,8 @@ Required checks once the server and chart exist:
 - Tests proving `owner_kind` only ever takes `self`, `other_agent`, or `group`
   for access-perspective metrics, and only `agent` or `group` for
   data-ownership metrics, and never an agent name, group name, or realm id.
-- Tests proving `server_side_decrypt` only ever takes `true` or `false`.
+- Tests proving sealed delivery and lifecycle labels use only their closed sets,
+  and posture read failures omit gauges without exposing error text.
 - Tests proving memory content, fact values, message bodies, and embedding
   vectors never appear in metrics, logs, or health responses.
 - Tests proving active-memory refusal labels are restricted to
@@ -853,3 +1319,41 @@ Required checks once the server and chart exist:
 - [release-and-build.md](release-and-build.md)
 - [implementation-plan.md](implementation-plan.md)
 - [threat-model.md](threat-model.md)
+
+## Entitlement delivery observations
+
+The existing public CP `/metrics/probes` response includes value-free
+`witself_entitlement_delivery_*` gauges. This is a projection of the private
+Worker reconciliation checkpoint, not a scrape of account data or a call to a
+cell. The additional KV read is independently bounded to five seconds; its
+failure emits unavailable entitlement observations without changing healthy
+probe HTTP 200. Existing probe read failures retain HTTP 503. Non-GET requests
+still receive HTTP 405 before any read.
+
+| Suffix | Meaning |
+|---|---|
+| `enabled` | Current normalized CP lifecycle enablement flag. |
+| `metrics_up` | Valid checkpoint metadata is readable; independent of freshness. |
+| `snapshot_state{state}` | One closed state: disabled, missing, invalid, unavailable or valid. |
+| `last_ack_timestamp_seconds` | Completion time of the last fully accounted CP page, including pages with account failures. |
+| `last_page_accounts{outcome}` | Last page's scanned, seeded, apply_pending and failed observations; outcomes overlap. |
+| `cycle_in_progress` | A private continuation cursor exists, including an unmeasured chain. |
+| `cycle_started_timestamp_seconds` | Current measured traversal's start, or zero when no current chain is measured. |
+| `cycle_coverage_complete` | A retained complete measured traversal exists; not instantaneous fleet coverage. |
+| `last_cycle_completed_timestamp_seconds` | Last complete traversal's time, or zero before one is established. |
+| `last_cycle_accounts{outcome}` | Entire last measured traversal; omitted when no complete traversal exists. |
+
+Only the three state families (`enabled`, `metrics_up`,
+`snapshot_state`) are emitted when data is disabled or unreadable. No account,
+plan, cursor, provider, endpoint, token or raw error value is a metric label.
+Count and timestamp HELP text distinguishes unavailable, partial and stale
+observations. Pending and failed must be viewed separately, not added as a
+unique count. A successful acknowledgement after reconciliation can include a
+change repaired during that page; the gauges do not reconstruct earlier
+failure history or measure per-account unapplied age.
+
+See [billing and limits](billing-and-limits.md#entitlement-delivery-monitoring)
+for traversal/KV consistency limits and the separate default-off alert gate.
+Tests and rendered rules establish capability only; actual Worker deployment,
+fresh observation checks and alert activation require a later authorized
+rollout.

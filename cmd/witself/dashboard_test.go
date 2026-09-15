@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/dashboard"
+	"github.com/witwave-ai/witself/internal/dashboard/stubcell"
 )
 
 var dashboardBannerPattern = regexp.MustCompile(
@@ -37,10 +39,8 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 		t.Fatalf("write token file: %v", err)
 	}
 
-	identity := client.SelfIdentity{
-		AccountID: "acc_1", AgentID: "agt_dash", AgentName: "dash",
-		RealmID: "rlm_1", RealmName: "default",
-	}
+	identity := stubcell.Identity("dash")
+	fixture := stubcell.New(stubcell.Config{BearerToken: "witself_agt_dash", Identity: identity, MinimalSelf: true})
 	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_dash" {
 			t.Errorf("Authorization = %q", got)
@@ -50,12 +50,7 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(client.SelfDigest{
-			SchemaVersion: "witself.v0", Identity: identity,
-		}); err != nil {
-			t.Errorf("encode self digest: %v", err)
-		}
+		fixture.ServeHTTP(w, r)
 	}))
 	defer cell.Close()
 
@@ -79,20 +74,75 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 	defer func() { os.Stderr = oldStderr }()
 	lines := make(chan string, 64)
 	scanErr := make(chan error, 1)
+	scanDone := make(chan struct{})
+	stopScan := make(chan struct{})
 	go func() {
+		defer close(scanDone)
+		defer close(lines)
 		scanner := bufio.NewScanner(pipeReader)
 		for scanner.Scan() {
-			lines <- scanner.Text()
+			select {
+			case lines <- scanner.Text():
+			case <-stopScan:
+				return
+			}
 		}
 		scanErr <- scanner.Err()
-		close(lines)
 	}()
 
 	args := []string{"--endpoint", cell.URL, "--token-file", tokenFile, "--agent", "dash"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan int, 1)
-	go func() { done <- dashboardServe(ctx, args) }()
+	var shutdownStart time.Time
+	var shutdownDeadline time.Time
+	cancelServe := func() {
+		if shutdownStart.IsZero() {
+			shutdownStart = time.Now()
+			shutdownDeadline = shutdownStart.Add(15 * time.Second)
+		}
+		cancel()
+	}
+	done := make(chan struct{})
+	var exitCode int
+	var exitedAt time.Time
+	type streamResult struct {
+		completedAt time.Time
+		err         error
+	}
+	var streamDone chan streamResult
+	streamObserved := false
+	go func() {
+		exitCode = dashboardServe(ctx, args)
+		exitedAt = time.Now()
+		close(done)
+	}()
+	defer func() {
+		cancelServe()
+		// Failure cleanup must unblock both the scanner's send and any
+		// shutdown logging before waiting for the serve goroutine.
+		close(stopScan)
+		_ = pipeWriter.Close()
+		_ = pipeReader.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Until(shutdownDeadline)):
+			t.Error("dashboard serve did not exit within the cancellation deadline during cleanup")
+		}
+		if streamDone != nil && !streamObserved {
+			// The response-body and client-context defers run first, so a
+			// failed observation cannot leave this reader blocked on I/O.
+			select {
+			case <-streamDone:
+			case <-time.After(time.Until(shutdownDeadline)):
+				t.Error("SSE reader did not exit within the cancellation deadline during cleanup")
+			}
+		}
+		select {
+		case <-scanDone:
+		case <-time.After(time.Until(shutdownDeadline)):
+			t.Error("stderr reader did not exit within the cancellation deadline during cleanup")
+		}
+	}()
 
 	var serveURL string
 	deadline := time.After(15 * time.Second)
@@ -105,8 +155,8 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 			if match := dashboardBannerPattern.FindStringSubmatch(line); match != nil {
 				serveURL = match[1]
 			}
-		case code := <-done:
-			t.Fatalf("dashboard serve exited early with code %d", code)
+		case <-done:
+			t.Fatalf("dashboard serve exited early with code %d", exitCode)
 		case <-deadline:
 			t.Fatal("timed out waiting for the serve banner")
 		}
@@ -172,8 +222,8 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 	}
 
 	// Open a live SSE stream so shutdown is exercised with a connection that
-	// never goes idle: the serve ctx must end the stream promptly instead of
-	// stalling the full 5s Shutdown timeout.
+	// never goes idle. Measure its clean EOF directly: total server shutdown
+	// may also wait for unrelated connections that have not sent a request.
 	sseCtx, sseCancel := context.WithCancel(context.Background())
 	defer sseCancel()
 	sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, "http://"+parsed.Host+"/api/events", nil)
@@ -189,25 +239,58 @@ func TestDashboardServeEndToEnd(t *testing.T) {
 		t.Fatalf("/api/events: got %d, want 200", sseResp.StatusCode)
 	}
 
-	shutdownStart := time.Now()
-	cancel()
+	streamDone = make(chan streamResult, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, sseResp.Body)
+		streamDone <- streamResult{completedAt: time.Now(), err: err}
+	}()
+
+	cancelServe()
+	var result streamResult
 	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("dashboard serve exited with code %d, want 0", code)
+	case result = <-streamDone:
+	case <-time.After(time.Until(shutdownStart.Add(4 * time.Second))):
+		// Both channels may be ready after a scheduling delay. Judge a
+		// buffered result by its completion time, not the select's choice.
+		select {
+		case result = <-streamDone:
+		default:
+			t.Fatal("SSE reader did not report clean EOF within 4s of serve ctx cancellation")
 		}
-		if elapsed := time.Since(shutdownStart); elapsed >= 4*time.Second {
-			t.Fatalf("shutdown took %v with an open SSE stream; the stream is not wired to the serve ctx", elapsed)
+	}
+	streamObserved = true
+	if result.err != nil {
+		t.Fatalf("SSE reader ended with an error after serve ctx cancellation, want clean EOF: %v", result.err)
+	}
+	if elapsed := result.completedAt.Sub(shutdownStart); elapsed < 0 || elapsed >= 4*time.Second {
+		t.Fatalf("SSE reader reached clean EOF %v after serve ctx cancellation, want from 0s to less than 4s", elapsed)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Until(shutdownDeadline)):
+		select {
+		case <-done:
+		default:
+			t.Fatal("dashboard serve did not exit within 15s of ctx cancellation")
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("dashboard serve did not shut down after ctx cancel")
+	}
+	if exitCode != 0 {
+		t.Fatalf("dashboard serve exited with code %d, want 0", exitCode)
+	}
+	if !exitedAt.Before(shutdownDeadline) {
+		t.Fatalf("dashboard serve exited %v after ctx cancellation, want less than 15s", exitedAt.Sub(shutdownStart))
 	}
 	if _, err := os.Stat(registryPath); !os.IsNotExist(err) {
 		t.Fatalf("registry entry not removed on shutdown: %v", err)
 	}
 	_ = pipeWriter.Close()
-	if err := <-scanErr; err != nil {
-		t.Errorf("scan captured stderr: %v", err)
+	select {
+	case err := <-scanErr:
+		if err != nil {
+			t.Errorf("scan captured stderr: %v", err)
+		}
+	case <-time.After(time.Until(shutdownDeadline)):
+		t.Error("stderr reader did not finish within the cancellation deadline")
 	}
 }
 
@@ -367,7 +450,7 @@ func TestDashboardStatusJSON(t *testing.T) {
 func stubDashboardSignal(t *testing.T, fn func(pid int) error) {
 	t.Helper()
 	previous := signalDashboard
-	signalDashboard = fn
+	signalDashboard = func(entry dashboard.RegistryEntry) error { return fn(entry.PID) }
 	t.Cleanup(func() { signalDashboard = previous })
 }
 

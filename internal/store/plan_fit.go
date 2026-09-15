@@ -209,6 +209,11 @@ func (s *Store) checkAccountPlanFit(
 		Violations:         []AccountPlanFitViolation{},
 	}
 	if apply != nil {
+		_, currentGoverned := apply.current.Policies[plans.CollaborationEntitlementVersionPolicy]
+		_, targetGoverned := apply.target.Policies[plans.CollaborationEntitlementVersionPolicy]
+		if currentGoverned && !targetGoverned {
+			return AccountPlanFitReport{}, ErrPlanSnapshotStale
+		}
 		switch {
 		case apply.target.Revision < apply.current.Revision,
 			apply.target.Revision == apply.current.Revision &&
@@ -531,7 +536,8 @@ func validAccountPlanSnapshotForFitApply(snapshot AccountPlanSnapshot) bool {
 		return false
 	}
 	if snapshot.Revision == 0 {
-		return snapshot.Hash == ""
+		_, governed := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]
+		return snapshot.Hash == "" && !governed
 	}
 	if snapshot.AppliedAt == nil {
 		return false

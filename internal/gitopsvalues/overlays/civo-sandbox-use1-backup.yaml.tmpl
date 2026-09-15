@@ -1,0 +1,103 @@
+apps:
+  civoPostgres:
+    enabled: true
+    namespace: witself
+    chartVersion: {{.CivoPostgresChartVersion}}
+    authSecretName: witself-postgresql-auth
+    storage: 8Gi
+    # Cells have drifted to different latest digests. Preserve this cell's
+    # running image content; cross-cell alignment is a separate reviewed change.
+    # A tag-to-digest reference change can still roll the StatefulSet pod.
+    image:
+      registry: registry-1.docker.io
+      repository: bitnami/postgresql
+      digest: sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049
+    networkPolicy:
+      enabled: true
+      allowExternal: false
+      # No monitoring stack on this cell; PostgreSQL metrics stay disabled.
+  witselfServer:
+    enabled: true
+    namespace: witself
+    # The apps chart emits worker.agentEmailRetention settings, which require
+    # the v0.0.211+ server chart schema.
+    chartVersion: {{.ChartVersion}}
+    imageTag: {{.ImageTag}}
+    backendKind: managed
+    # Schema-28's compatibility hold expired long ago (cells run schema 94);
+    # in-product permanent fact deletion backs the published privacy policy.
+    factDeletionEnabled: true
+    # All writers on 0.0.273: config-only rollout; ConfigMap checksum restarts
+    # pods and reruns digest backfill.
+    avatarPayloadCompactionEnabled: true
+    billing:
+      endpoint: https://self.witwave.ai
+    backup:
+      enabled: true
+      validationEnabled: true
+      targetName: witself-backup
+    # Keep replicas/PDB/topology unchanged on this single-node cell: a PDB
+    # minAvailable of 1 with 1 server replica would block node drains.
+    replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
+    topologySpreadConstraints: []
+    worker:
+      enabled: true
+      # Preview-first per the chart's own rollout contract: value-free
+      # counts only until a config-only flip to enforce. grace stays the
+      # chart default 720h - the privacy policy's 30 days.
+      accountPurge:
+        enabled: true
+        mode: enforce
+      replicaCount: 2
+      podDisruptionBudget:
+        enabled: false
+      topologySpreadConstraints: []
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    civoIngress:
+      enabled: true
+      className: traefik
+      clusterIssuer: letsencrypt-prod
+      tlsSecretName: witself-api-tls
+      acme:
+        email: support@witwave.ai
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretName: letsencrypt-prod-private-key
+    secrets:
+      bootstrap:
+        enabled: true
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+      database:
+        enabled: true
+        targetName: witself-db
+        urlKey: dsn
+      provision:
+        enabled: true
+        targetName: witself-provision
+        tokenKey: token
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: {{.CertManagerChartVersion}}
+    namespace: cert-manager
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+    serviceAccountAnnotations: {}
+    azureVaultURL: ""
+  keda:
+    enabled: false
+  # Resource Metrics API only; keep replica counts manual on this single node.
+  metricsServer:
+    enabled: true

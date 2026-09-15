@@ -7,12 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestExportAccountSelfActivePostgres is opt-in because it needs a disposable
@@ -21,10 +21,7 @@ import (
 // archive verifies through the shared checksum reader, and its manifest carries
 // only the self-service purpose (no backup or evacuation identity).
 func TestExportAccountSelfActivePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
@@ -191,10 +188,7 @@ func readSelfExportManifestFields(t *testing.T, archive []byte) map[string]json.
 // so a time-expired pending enrollment must not refuse the export forever,
 // while a live pending enrollment still fails closed.
 func TestExportAccountSelfIgnoresExpiredEnrollmentsPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)

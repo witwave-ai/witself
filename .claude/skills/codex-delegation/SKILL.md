@@ -1,6 +1,6 @@
 ---
 name: codex-delegation
-description: Delegates bounded implementation, investigation, or review work to Codex (GPT-5.6 Sol via the official OpenAI Codex plugin for Claude Code) in an isolated worktree while Claude keeps architecture, verification, integration, and merge ownership. Use for an independently testable implementation slice, a root-cause investigation, a test-gap search, or an adversarial second opinion on a diff.
+description: Delegates bounded implementation, investigation, or review work to Codex (GPT-6 Astra via the official OpenAI Codex plugin for Claude Code) in an isolated worktree while Claude keeps architecture, verification, integration, and merge ownership. Use for an independently testable implementation slice, a root-cause investigation, a test-gap search, or an adversarial second opinion on a diff.
 user-invocable: true
 ---
 
@@ -15,7 +15,7 @@ or launcher any more; do not invent one.
 
 ## Prerequisites (once per machine)
 
-- Codex CLI with the app server (`codex app-server --help` works; 0.149+),
+- Codex CLI with the app server (`codex app-server --help` works; 0.153.3+ — the floor `gpt-6-astra` needs),
   logged in (`codex login status`).
 - Plugin installed: `claude plugin marketplace add openai/codex-plugin-cc`
   then `claude plugin install codex@openai-codex`. Verify with
@@ -73,10 +73,12 @@ Prefer the smallest lane that answers the question.
    `status <job-id>` (use `--wait`) and read `result <job-id>`.
 
    **Model and reasoning depth — use the deepest available.** The model and
-   reasoning effort default to `~/.codex/config.toml` (`model = "gpt-5.6-sol"`,
+   reasoning effort default to `~/.codex/config.toml` (`model = "gpt-6-astra"`,
    the highest model; `model_reasoning_effort = "ultra"`, the deepest level).
    The full effort ladder is `minimal < low < medium < high < xhigh < max <
-   ultra`; `gpt-5.6-sol` supports and runs `ultra`. Do NOT pass `--effort`:
+   ultra`; `gpt-6-astra` supports and runs `ultra` and requires codex-cli
+   0.153.3 or newer (older CLIs get a 400 "requires a newer version of Codex"
+   from the API, so keep `npm install -g @openai/codex@latest` current). Do NOT pass `--effort`:
    the plugin's `--effort` flag only accepts up to `xhigh`, so passing it would
    *cap* a job below the config's `ultra` default. Leaving it unset makes the
    companion send `effort: null`, which inherits `ultra` from config. Only pass
@@ -91,6 +93,23 @@ Prefer the smallest lane that answers the question.
 6. Commit, push, open the PR, wait for CI, squash-merge only all-green at the
    exact reviewed head, verify post-merge CI, then remove your own clean
    merged worktree and branch.
+
+## Slice protocol with the self-review folded in (2026-09-04)
+
+With GPT-6 Astra, an ordinary implementation slice runs as one unit through
+`~/.witself/handoff/codex-slice.sh WORKTREE TASKFILE [FOCUS]`: the write task,
+then a read-only adversarial review of the working tree, then — only when the
+review reports high or medium findings — a `--resume-last` fix task and a
+second review. Claude still reads the final diff, runs the gate, and merges;
+an independent read-only review remains mandatory for changes to production
+code paths (server, store, workers, control plane, capture).
+
+Codex jobs can run the loopback- and PostgreSQL-bound tests themselves: the
+`workspace-write` sandbox has `network_access = true` and the shared Go caches
+as writable roots in `~/.codex/config.toml` (`[sandbox_workspace_write]`), so
+task texts should include the local test DSN
+(`postgres://postgres:test@127.0.0.1:5599/postgres?sslmode=disable`, container
+`witself-test-pg`) and ask for the full package tests, not compile-only runs.
 
 ## Guardrails
 

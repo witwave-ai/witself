@@ -44,6 +44,11 @@ data:
   WITSELF_AGENT_EMAIL_RETENTION_INTERVAL: {{ .Values.worker.agentEmailRetention.interval | quote }}
   WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT: {{ .Values.worker.agentEmailRetention.batchTimeout | quote }}
   WITSELF_ACCOUNT_PURGE_ENABLED: {{ .Values.worker.accountPurge.enabled | quote }}
+  WITSELF_SUPPORT_TICKET_AGE_OUT_ENABLED: {{ .Values.worker.supportTicketAgeOut.enabled | quote }}
+  WITSELF_SUPPORT_TICKET_AGE_OUT_AFTER: {{ .Values.worker.supportTicketAgeOut.after | quote }}
+  WITSELF_SUPPORT_TICKET_AGE_OUT_BATCH_SIZE: {{ .Values.worker.supportTicketAgeOut.batchSize | quote }}
+  WITSELF_SUPPORT_TICKET_AGE_OUT_INTERVAL: {{ .Values.worker.supportTicketAgeOut.interval | quote }}
+  WITSELF_SUPPORT_TICKET_AGE_OUT_BATCH_TIMEOUT: {{ .Values.worker.supportTicketAgeOut.batchTimeout | quote }}
   WITSELF_ACCOUNT_PURGE_MODE: {{ .Values.worker.accountPurge.mode | quote }}
   WITSELF_ACCOUNT_PURGE_BATCH_SIZE: {{ .Values.worker.accountPurge.batchSize | quote }}
   WITSELF_ACCOUNT_PURGE_INTERVAL: {{ .Values.worker.accountPurge.interval | quote }}

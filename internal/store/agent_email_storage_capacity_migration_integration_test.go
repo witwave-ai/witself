@@ -5,13 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const (
@@ -24,10 +25,7 @@ const (
 )
 
 func TestMigrations79Through81AgentEmailStorageCapacityPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 78)
@@ -152,10 +150,7 @@ func TestMigrations79Through81AgentEmailStorageCapacityPostgres(t *testing.T) {
 func TestMigration79AgentEmailStorageCapacityDownOnEmptyMessagesPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 78)
 	insertAgentEmailCapacityMigrationFixture(t, st)
@@ -197,10 +192,7 @@ func TestMigration79AgentEmailStorageCapacityDownOnEmptyMessagesPostgres(
 func TestMigration80AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 78)
@@ -243,10 +235,7 @@ func TestMigration80AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 func TestMigration80AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 78)
@@ -293,10 +282,7 @@ func TestMigration80AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
 func TestMigration81AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 80)
@@ -343,10 +329,7 @@ func TestMigration81AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 func TestMigration81AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 80)
@@ -398,10 +381,7 @@ func TestMigration81AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
 func TestSchema81AgentEmailCapacityMixedOldWritersDoNotUpgradeAccountLockPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 81)
@@ -481,10 +461,7 @@ func TestSchema81AgentEmailCapacityMixedOldWritersDoNotUpgradeAccountLockPostgre
 func TestMigration82AgentEmailStorageCapacityFinalizesCompatibilityRowsPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 81)
@@ -575,10 +552,7 @@ func TestMigration82AgentEmailStorageCapacityFinalizesCompatibilityRowsPostgres(
 func TestMigration82AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 81)
@@ -621,10 +595,7 @@ func TestMigration82AgentEmailCapacitySupportedWriterFenceRetryPostgres(
 func TestMigration82AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
 	t *testing.T,
 ) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 81)

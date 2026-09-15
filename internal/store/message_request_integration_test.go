@@ -4,17 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMessageRequestClientRankedLifecyclePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)
@@ -273,7 +271,6 @@ func TestMessageRequestClientRankedLifecyclePostgres(t *testing.T) {
 		agentID string
 		key     string
 	}{{bob.ID, "race-select-bob"}, {charlie.ID, "race-select-charlie"}} {
-		selection := selection
 		wait.Add(1)
 		go func() {
 			defer wait.Done()

@@ -4,20 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestSecretRetainedLimitBoundaryArchiveDeleteReplayAndOverLimitReads(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -117,10 +114,7 @@ func TestSecretRetainedLimitBoundaryArchiveDeleteReplayAndOverLimitReads(t *test
 }
 
 func TestSecretRetainedLimitZeroAndMissingUnlimited(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -143,10 +137,7 @@ func TestSecretRetainedLimitZeroAndMissingUnlimited(t *testing.T) {
 }
 
 func TestSecretRetainedLimitConcurrentCreatesAcrossReplicasAndOwners(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -209,10 +200,7 @@ func TestSecretRetainedLimitConcurrentCreatesAcrossReplicasAndOwners(t *testing.
 }
 
 func TestSecretDeleteReceiptMigrationDowngradeWithoutDeleteReceipts(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -247,10 +235,7 @@ func TestSecretDeleteReceiptMigrationDowngradeWithoutDeleteReceipts(t *testing.T
 }
 
 func TestSecretDeleteReceiptMigrationDowngradeRefusesCommittedDelete(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

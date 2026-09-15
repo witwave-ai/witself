@@ -238,7 +238,7 @@ func (s *Store) processAvatarStyleRolloutCandidate(
 		// deployment without knowing about the job table. Reconcile that
 		// irreversible lifecycle terminal even though ordinary work discovery is
 		// active-only, so the job cannot remain open forever.
-		if err := supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
+		if err := s.supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
 			candidate.RealmID, candidate.StyleRevision, desiredPackID,
 			desiredPackVersion, "account_closed", 0); err != nil {
 			return candidate, err
@@ -261,7 +261,7 @@ func (s *Store) processAvatarStyleRolloutCandidate(
 		 FOR SHARE OF ras`, candidate.AccountID, candidate.RealmID).Scan(
 		&selectedRevision, &selectedPackID, &selectedPackVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if err := supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
+		if err := s.supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
 			candidate.RealmID, candidate.StyleRevision, desiredPackID,
 			desiredPackVersion, "realm_deleted", 0); err != nil {
 			return candidate, err
@@ -277,7 +277,7 @@ func (s *Store) processAvatarStyleRolloutCandidate(
 	}
 	if selectedRevision != candidate.StyleRevision || selectedPackID != desiredPackID ||
 		selectedPackVersion != desiredPackVersion {
-		if err := supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
+		if err := s.supersedeAvatarStyleRolloutJobTx(ctx, tx, candidate.AccountID,
 			candidate.RealmID, candidate.StyleRevision, desiredPackID,
 			desiredPackVersion, "newer_style_selected", selectedRevision); err != nil {
 			return candidate, err
@@ -366,7 +366,7 @@ func (s *Store) processAvatarStyleRolloutCandidate(
 		return candidate, fmt.Errorf("record avatar style rollout progress: %w", err)
 	}
 	if candidate.Completed {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: candidate.AccountID, ActorKind: ActorSystem,
 			Verb: VerbAvatarStyleRolloutCompleted,
 			Metadata: map[string]any{
@@ -444,7 +444,7 @@ func (s *Store) recordAvatarStyleRolloutFailure(
 	return nil
 }
 
-func supersedeAvatarStyleRolloutJobTx(
+func (s *Store) supersedeAvatarStyleRolloutJobTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID, realmID string,
@@ -477,7 +477,7 @@ func supersedeAvatarStyleRolloutJobTx(
 	if supersededByRevision > 0 {
 		metadata["superseded_by_style_revision"] = strconv.FormatInt(supersededByRevision, 10)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: accountID, ActorKind: ActorSystem,
 		Verb: VerbAvatarStyleRolloutSuperseded, Metadata: metadata,
 	})
@@ -487,7 +487,7 @@ func supersedeAvatarStyleRolloutJobTx(
 // before an account becomes permanently ineligible for worker discovery. The
 // caller must already hold the account row lock, preserving the global
 // account -> rollout-job order used by publishers and workers.
-func supersedeOpenAvatarStyleRolloutsForAccountTx(
+func (s *Store) supersedeOpenAvatarStyleRolloutsForAccountTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID, reason string,
@@ -522,7 +522,7 @@ func supersedeOpenAvatarStyleRolloutsForAccountTx(
 	}
 	rows.Close()
 	for _, job := range jobs {
-		if err := supersedeAvatarStyleRolloutJobTx(ctx, tx, accountID, job.realmID,
+		if err := s.supersedeAvatarStyleRolloutJobTx(ctx, tx, accountID, job.realmID,
 			job.styleRevision, job.stylePackID, job.stylePackVersion, reason, 0); err != nil {
 			return err
 		}

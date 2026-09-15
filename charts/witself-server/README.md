@@ -314,6 +314,22 @@ may drain up to 32 productive passes and 48 total passes per scheduled attempt.
 The worker defers live inbound processing and unresolved outbound work. It
 preserves mailboxes, address reservations, audit events, and usage records.
 
+Support ticket admission is shared per account. `support.ticketRateLimit: 10`
+and `support.ticketRateWindow: 60s` render `WITSELF_SUPPORT_TICKET_RATE_LIMIT`
+and `WITSELF_SUPPORT_TICKET_RATE_WINDOW` into the API ConfigMap; API/CLI reads
+and replies remain available when new tickets are throttled. The server
+validates 1–1,000 tickets per 1 second–24 hours.
+
+`worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` into
+the worker ConfigMap. Defaults are `enabled: false`, `after: 720h`,
+`batchSize: 100`, `interval: 1h`, and `batchTimeout: 10s`. The worker validates
+ages of 24–8,760 hours, batches of 1–100, intervals of 1 minute–24 hours, and
+timeouts of 1 second–5 minutes. It resolves stale `awaiting_customer` tickets
+on active accounts only after a human reply. Threads remain retained and
+customer replies can reopen them. The published human response within
+1 business day is unchanged. Rate-setting changes roll API pods; age-out
+changes roll worker pods.
+
 The public chart default keeps `worker.enabled: false` because it has no shared
 database Secret. After PostgreSQL is configured, enabling it starts the
 two-replica default; operators can deliberately override `worker.replicaCount`.
@@ -377,12 +393,13 @@ ingress + TLS, and topology spread.
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `billing.endpoint`,
+`support.ticketRateLimit`, `support.ticketRateWindow`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
 `worker.messageRateBucketCleanup.*`,
 `worker.agentEmailRateBucketCleanup.*`,
 `worker.transcriptRetention.*`, `worker.messageRetention.*`,
-`worker.agentEmailRetention.*`, `worker.resources`,
+`worker.agentEmailRetention.*`, `worker.supportTicketAgeOut.*`, `worker.resources`,
 `worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,
 `agentEmail.receiveProduction.*`,
 `database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,

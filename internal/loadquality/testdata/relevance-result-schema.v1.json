@@ -1,0 +1,469 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://witself.witwave.ai/schemas/memory-relevance-result.v1.schema.json",
+  "title": "Witself synthetic lexical relevance evidence v1",
+  "description": "Measured top-K relevance on a frozen synthetic corpus; no quality threshold or production readiness claim. The Go validator additionally binds the corpus digest, complete case order, gold counts, and exact metric formulas.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "harness_version",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "postgresql_version",
+    "environment",
+    "fixture_clock",
+    "recall_as_of",
+    "corpus_sha256",
+    "corpus_memories",
+    "query_count",
+    "cases"
+  ],
+  "properties": {
+    "schema": {
+      "const": "witself.memory-relevance-result.v1"
+    },
+    "harness_version": {
+      "const": "1"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "outcome": {
+      "const": "measured"
+    },
+    "postgresql_version": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]?(\\.[0-9]{1,2}){0,2}$"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release",
+        "commit",
+        "provider",
+        "hardware_tier",
+        "go_version",
+        "goos",
+        "goarch",
+        "logical_cpus"
+      ],
+      "properties": {
+        "release": {
+          "$ref": "#/$defs/safe_metadata"
+        },
+        "commit": {
+          "$ref": "#/$defs/safe_metadata"
+        },
+        "provider": {
+          "$ref": "#/$defs/safe_label"
+        },
+        "hardware_tier": {
+          "$ref": "#/$defs/safe_label"
+        },
+        "go_version": {
+          "type": "string",
+          "pattern": "^go1\\.[0-9]{1,2}(\\.[0-9]{1,2}|(rc|beta)[0-9]{1,2})?$"
+        },
+        "goos": {
+          "enum": [
+            "aix",
+            "android",
+            "darwin",
+            "dragonfly",
+            "freebsd",
+            "hurd",
+            "illumos",
+            "ios",
+            "js",
+            "linux",
+            "netbsd",
+            "openbsd",
+            "plan9",
+            "solaris",
+            "wasip1",
+            "windows"
+          ]
+        },
+        "goarch": {
+          "enum": [
+            "386",
+            "amd64",
+            "arm",
+            "arm64",
+            "loong64",
+            "mips",
+            "mipsle",
+            "mips64",
+            "mips64le",
+            "ppc64",
+            "ppc64le",
+            "riscv64",
+            "s390x",
+            "wasm"
+          ]
+        },
+        "logical_cpus": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "fixture_clock": {
+      "const": "indexed-seconds-v1"
+    },
+    "recall_as_of": {
+      "const": "2026-01-02T00:00:00Z"
+    },
+    "corpus_sha256": {
+      "const": "e7557789f24cb13c0b89865dbdb211248224e49a1d7ff998aeac0fa69ba88807"
+    },
+    "corpus_memories": {
+      "const": 24
+    },
+    "query_count": {
+      "const": 12
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "aster_seedling_watering"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "aster_herb_watering"
+                },
+                "top_k": {
+                  "const": 1
+                },
+                "relevant_count": {
+                  "const": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "birch_puncture_instructions"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "birch_puncture_synonyms"
+                },
+                "top_k": {
+                  "const": 3
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "cedar_reservation_procedure"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "cedar_capacity_no_answer"
+                },
+                "top_k": {
+                  "const": 3
+                },
+                "relevant_count": {
+                  "const": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "dune_meeting_location"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "dune_rain_location"
+                },
+                "top_k": {
+                  "const": 1
+                },
+                "relevant_count": {
+                  "const": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "elm_catalog_requirements"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "elm_catalog_synonyms"
+                },
+                "top_k": {
+                  "const": 3
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "fern_bread_ingredients"
+                },
+                "top_k": {
+                  "const": 5
+                },
+                "relevant_count": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/case"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "fern_temperature_no_answer"
+                },
+                "top_k": {
+                  "const": 3
+                },
+                "relevant_count": {
+                  "const": 0
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "safe_label": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+_-]{0,127}$"
+    },
+    "safe_metadata": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "top_k",
+        "retrieved_count",
+        "relevant_count",
+        "relevant_ranks",
+        "true_positives",
+        "false_positives",
+        "precision_at_k",
+        "recall_at_k",
+        "reciprocal_rank"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "retrieved_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "relevant_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "relevant_ranks": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          }
+        },
+        "true_positives": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "false_positives": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "precision_at_k": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "recall_at_k": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reciprocal_rank": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    }
+  }
+}

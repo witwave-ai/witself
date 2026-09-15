@@ -6,20 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -361,6 +358,12 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	// back to 0087. Schema 0087 can safely discard its sole original-domain
 	// route, and schema 0086 can step back to 0085. The following 0085 -> 0084
 	// downgrade must still refuse to discard realm-alias delivery provenance.
+	// Schema 0095 only adds the support-ticket admission index, so it can
+	// safely step back without changing any account data.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0095 to 0094: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 94)
 	// Schema 0094 only adds the nullable account consent columns, and this
 	// fixture records no consent, so it can safely step back to 0093.
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
@@ -470,10 +473,7 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 }
 
 func TestAgentEmailRealmAliasMigrationDowngradeWithoutDeliveriesPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, schemaDSN := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -512,10 +512,7 @@ func TestAgentEmailRealmAliasMigrationDowngradeWithoutDeliveriesPostgres(t *test
 }
 
 func TestAgentEmailRealmAliasAppliedReplayRevalidatesLiveRealmPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -570,10 +567,7 @@ func TestAgentEmailRealmAliasAppliedReplayRevalidatesLiveRealmPostgres(t *testin
 }
 
 func TestAgentEmailRealmAliasArchiveRoundTripPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source, _ := newMigrationTestStore(t, dsn)
 	destination, _ := newMigrationTestStore(t, dsn)

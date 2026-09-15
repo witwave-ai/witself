@@ -298,7 +298,6 @@ func testConcurrentEventReceiptSemanticConflict(
 	var created atomic.Int64
 	var wg sync.WaitGroup
 	for _, receipt := range []EventReceipt{first, second} {
-		receipt := receipt
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

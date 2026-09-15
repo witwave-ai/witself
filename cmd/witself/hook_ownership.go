@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
@@ -18,6 +19,11 @@ func hydrateLegacyRuntimeHookOwnership(cfg *transcriptcapture.Config, executable
 	}
 	switch cfg.HookMode {
 	case transcriptcapture.HookModeUser:
+		// Empty persisted DSH paths predate dedicated storage. Resolve them
+		// before consulting the default used for fresh installations.
+		if cfg.Runtime == transcriptcapture.RuntimeDSH && cfg.HookConfigPath == "" {
+			cfg.HookConfigPath = filepath.Join(cfg.RuntimeConfigRoot, dshHookConfigFileName)
+		}
 		opts, err := userHooksOptionsFromConfig(*cfg, executable)
 		if err != nil {
 			return err
@@ -59,6 +65,9 @@ func hydrateLegacyRuntimeHookOwnership(cfg *transcriptcapture.Config, executable
 func planRuntimeHooksOwned(cfg *transcriptcapture.Config, previous *transcriptcapture.Config) error {
 	if cfg == nil || !supportsTranscriptHooks(cfg.Runtime) {
 		return nil
+	}
+	if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		return planDSHHooksOwned(cfg, previous)
 	}
 	clearHookOwnership(cfg)
 	switch cfg.HookMode {
@@ -121,6 +130,9 @@ func installRuntimeHooksOwned(cfg *transcriptcapture.Config, previous *transcrip
 			return "", false, err
 		}
 	}
+	if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		return installDSHHooksOwned(cfg, previous, false)
+	}
 	plannedConfigPath := cfg.HookConfigPath
 	var plannedManaged transcriptcapture.ManagedHookOwnership
 	plannedManagedSet := false
@@ -132,6 +144,11 @@ func installRuntimeHooksOwned(cfg *transcriptcapture.Config, previous *transcrip
 		}
 	}
 	clearHookOwnership(cfg)
+	if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		// The patch renderer needs this durable path even when a hook write
+		// fails, so rollback can restore the prior exact MCP binding.
+		cfg.HookConfigPath = plannedConfigPath
+	}
 	var path string
 	touched := false
 	switch cfg.HookMode {
@@ -216,6 +233,10 @@ func recoverRuntimeHooksOwned(desired *transcriptcapture.Config, previous *trans
 	if desired == nil || !supportsTranscriptHooks(desired.Runtime) {
 		return nil
 	}
+	if desired.Runtime == transcriptcapture.RuntimeDSH {
+		_, _, err := installDSHHooksOwned(desired, previous, true)
+		return err
+	}
 	// The desired binding itself is durable recovery authority. Accept it only
 	// when every exact handler or managed digest already verifies.
 	if err := verifyRuntimeHooksOwned(*desired); err == nil {
@@ -244,6 +265,9 @@ func removeRuntimeHooksOwned(cfg transcriptcapture.Config) (bool, error) {
 }
 
 func restoreRuntimeHooksOwned(attempted, previous *transcriptcapture.Config) error {
+	if (attempted != nil && attempted.Runtime == transcriptcapture.RuntimeDSH) || (previous != nil && previous.Runtime == transcriptcapture.RuntimeDSH) {
+		return restoreDSHHooksOwned(attempted, previous)
+	}
 	var errs []error
 	if attempted != nil {
 		if _, err := removeRuntimeHooksOwned(*attempted); err != nil {
@@ -351,6 +375,13 @@ func userHooksOptionsFromConfig(cfg transcriptcapture.Config, executable string)
 	}
 	if cfg.HookConfigPath != "" {
 		opts.ConfigPath = cfg.HookConfigPath
+	} else if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		// Binding setup canonicalizes DSH_HOME, including existing symlinks.
+		// Recovery must use that root instead of the current shell's selector.
+		opts.ConfigPath, err = dshHookConfigPathAt(cfg.RuntimeConfigRoot)
+		if err != nil {
+			return transcriptcapture.UserHooksOptions{}, err
+		}
 	}
 	return opts, nil
 }
@@ -411,6 +442,7 @@ func setManagedHookOwnership(cfg *transcriptcapture.Config, ownership transcript
 }
 
 func copyHookOwnership(dst *transcriptcapture.Config, src transcriptcapture.Config) {
+	dst.DSHLegacyHookBridge = src.DSHLegacyHookBridge
 	dst.HookConfigPath = src.HookConfigPath
 	dst.HookManagedDir = src.HookManagedDir
 	dst.HookRunnerPath = src.HookRunnerPath
@@ -419,6 +451,7 @@ func copyHookOwnership(dst *transcriptcapture.Config, src transcriptcapture.Conf
 }
 
 func clearHookOwnership(cfg *transcriptcapture.Config) {
+	cfg.DSHLegacyHookBridge = false
 	cfg.HookConfigPath = ""
 	cfg.HookManagedDir = ""
 	cfg.HookRunnerPath = ""

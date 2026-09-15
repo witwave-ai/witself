@@ -296,6 +296,8 @@ jq -e '
   (.spec.template.spec.containers | all(.image == "ghcr.io/witwave-ai/images/witself-server:0.0.245")) and
   (.spec.template.spec.volumes[] | select(.name == "private") | .emptyDir.medium == "Memory")
 ' "$work_dir/state/job-created.json" >/dev/null
+ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
+  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev witself
 jq -e '
   .immutable == true and
   (.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS == null) and
@@ -368,6 +370,8 @@ if grep -Fq 'goose:' "$noisy_backfill_output"; then
   exit 1
 fi
 test ! -e "$work_dir/output/noisy-backfill-must-stay-absent.json"
+ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
+  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev witself
 
 # Multiple valid-looking result objects are ambiguous and must stay fail-closed.
 reset_fake_run

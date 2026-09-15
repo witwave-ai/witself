@@ -29,6 +29,15 @@ audience snapshots. Migration 0038 and the `message_requests` capability add
 open multi-assignee requests with client-ranked selection and exact claim
 fences.
 
+Access-policy/operator-auth reconciliation (#342): the implemented bearer,
+bootstrap, operator identity, and curator-token wire shapes are pinned in
+[Authentication](#authentication). Declarative policies, security groups,
+per-realm operator roles, and cross-agent fact/memory permissions remain target
+work under `access-policy-contract-reconciliation`; browser/device-code login
+remains target under `operator-auth-contract-reconciliation`. Older target
+sections do not grant these capabilities. See [access-policy.md](access-policy.md)
+and [operator-auth.md](operator-auth.md).
+
 ## Decision
 
 The backend API is a public product contract. The `witself` CLI, MCP adapter,
@@ -75,37 +84,68 @@ older target sections below still describe a KMS-rooted or server-decrypt path.
 
 ## Authentication
 
-CLI remote mode should pass the token loaded from `--token-file`,
-`WITSELF_TOKEN_FILE`, `WITSELF_TOKEN`, or stored profile auth as a bearer token:
+Authenticated cell routes accept a bearer credential:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-The token resolves server-side to a principal:
+The implemented ordinary principal kinds are `agent` and `operator`. An agent
+token binds one agent, realm, and account. An operator token binds an operator
+and account; it has no agent or realm binding. Both derive identity from stored
+credentials. Authentication excludes consumed/revoked or expired credentials
+and deleted principals; agent authentication also excludes deleted realms
+(`internal/store/auth.go:222-278`). The root account role is `account_owner`;
+new non-root operators receive `account_operator`
+(`internal/store/auth.go:199-219`, `internal/store/operator.go:17,152-161`).
+These are account roles, not implemented per-realm access-policy memberships.
 
-- Agent token bound to one realm and one named agent.
-- Operator token bound to an account and one or more realm roles.
-- Admin/service token for tightly controlled internal or deployment use.
+Provision/service authority uses separately configured cell handlers, not a
+third ordinary `admin` principal kind. For example, account provisioning
+compares the bearer value with the configured provision credential rather than
+accepting an operator/agent token
+(`internal/server/server.go` `legacyProvisionAccountHandler` (line 4108)).
+Ordinary operator/domain wrappers require an active account. Narrow
+status/recovery/safety endpoints explicitly use the any-status operator wrapper
+(`internal/server/server.go` `requireOperator` (line 3260),
+`requireOperatorAnyStatus` (line 3276), `requireDomainPrincipal` (line 3303),
+and `requireDomainPrincipalAnyProfile` (line 3316)).
 
-The authenticated principal, not a caller-supplied agent name, determines the
-acting agent identity. This is load-bearing for cross-agent access and
-messaging: the actor on every operation and the `from` on every message are
-derived server-side from the token. Caller-supplied agent or group targets are
-authorization inputs, resolved against policy or operator role, never a way to
-assume another agent's identity.
+The implemented authentication shapes are flat JSON objects, with no `ok`/`data`
+wrapper:
 
-V0 agent tokens are durable by default. They do not expire unless an operator
-sets `ttl` or `expires_at`. Disabled agents and revoked tokens must fail
-authentication immediately.
+| Route | Request | Success response |
+|---|---|---|
+| `POST /v1/auth/bootstrap` | `{"bootstrap_token":"<bootstrap>"}` | `{"schema_version":"witself.v0","operator_token":"<credential>","operator_id":"<operator-id>"}` |
+| `GET /v1/whoami` or `GET /v1/auth/whoami` | Operator bearer credential; no body. | `{"schema_version":"witself.v0","principal":{"kind":"operator","operator_id":"<operator-id>","account_id":"<account-id>","account_role":"account_owner"}}` |
 
-Human operator login for managed endpoints should be performed through
-CLI-initiated browser or device-code flows. The API should expose auth-session
-or bootstrap endpoints only as needed to support those flows; it should not
-accept raw account passwords from CLI JSON payloads. Self-hosted first-operator
-setup should use a one-time bootstrap token or equivalent deployment-owned
-mechanism. The operator auth model is tracked in
-[operator-auth.md](operator-auth.md).
+The bootstrap exchange consumes a single-use credential. `account_role` in the
+identity response is present only when the role lookup is configured; the
+example shows an owner, and non-root operators report their stored role.
+`whoami` requires an active account and an operator credential; an agent token
+does not turn it into an agent identity endpoint. Evidence:
+`internal/server/server.go` `apiMux` (lines 2391, 2483-2485),
+`bootstrapLoginHandler` (line 3053), and `whoamiHandler` (line 6143),
+`internal/store/auth.go:102-173,199-219`. Refusals from these handlers use the
+flat `{"schema_version":"witself.v0","error":"<message>"}` shape
+(`internal/server/server.go` `writeJSONError` (line 3081)).
+
+`POST /v1/agents/{agent_id}/curator-tokens` requires an operator credential and
+accepts `{"access_profile":"curator-preview","display_name":"<label>","ttl":"1h"}`.
+The alternate profile is `curator-apply`; display name is required and TTL must
+be positive and at most `24h`. Unknown fields are rejected. The flat success
+object contains `schema_version`, `agent_token`, `token_id`, `agent_id`,
+`agent_name`, `access_profile`, `display_name`, and `expires_at`
+(`internal/server/server.go` `createCuratorTokenHandler` (line 6446)). Ordinary
+domain routes reject both restricted profiles; the specific curation permissions
+are described below.
+
+Browser/device-code login sessions, per-realm operator role grants, declarative
+policy decisions, and group principal/owner targeting remain targets. They
+are not alternate wire contracts for the implemented bootstrap and
+account-bound operator workflow in [operator-auth.md](operator-auth.md).
+The target login design should avoid accepting raw account passwords from CLI
+JSON payloads; no password-login payload is defined here.
 
 ## Response Envelope
 
@@ -123,7 +163,9 @@ API responses should use the same envelope as CLI `--json` output:
 Error responses should use the same structured error object and error codes
 defined in [json-contracts.md](json-contracts.md).
 
-The meta/discovery endpoints are the exception: `GET /v1/version`,
+The implemented flat authentication objects in [Authentication](#authentication)
+are exceptions to that target envelope. The meta/discovery endpoints are also
+exceptions: `GET /v1/version`,
 `GET /v1/capabilities`, and the health probes return a **bare/flat** JSON object
 with a top-level `schema_version` and no `ok`/`data`/`warnings` wrapper. The
 domain/data endpoints (memories, facts, policies, groups, messaging, secrets,
@@ -149,11 +191,38 @@ HTTP status codes should align with the structured error:
 | `404` | `not_found` | Resource not found or not visible to the caller. |
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
 | `422` | `usage_error` | Valid JSON with semantically invalid input. |
+| `422` | `usage_query_too_large` | Agent usage exceeds the 10,000-row cap without explicit truncation opt-in. |
 | `429` | `rate_limited` | Transient service-protection or throttle limit; `retryable: true`. |
 | `403` | `limit_exceeded` | Plan, quota, or structurally impossible rate debit; `retryable: false`. |
 | `500` | `internal_error` | Unexpected server failure. |
 | `503` | `backend_unavailable` | Backend dependency unavailable. |
 | `501` | `unsupported_operation` | Current backend does not support the operation. |
+
+`GET /v1/usage` returns only the active bearer-token agent's hourly or daily
+product usage, in `{schema_version, usage}`. It accepts RFC3339 `since` and
+`until`, `group_by=hour|day` (default `day`), and repeated `dimension` filters.
+The default window is 30 days; hourly windows are limited to 90 days and daily
+windows to 1,830 days. The report is limited to 10,000 points. If another point
+matches, callers without `allow_truncation=1` receive HTTP 422 and no usage
+report, using this flat error shape:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "usage_query_too_large",
+  "error": "usage query exceeds the 10000-row cap; narrow --since/--until, use a coarser --group-by, or opt in with --allow-truncation (allow_truncation=1)",
+  "max_rows": 10000
+}
+```
+
+`matched_rows` is omitted because the bounded query reads only cap+1 rows,
+without counting all matches. Partial success requires `allow_truncation=1`;
+`allow_truncation=0` retains the default refusal, and other or repeated values
+return HTTP 400. An opted-in HTTP 200 report always includes `truncated`, true
+when points were omitted, with totals covering only returned points. The CLI
+sends opt-in only for `witself usage --allow-truncation`, warns prominently on
+stderr in both output modes, and retains `truncated: true` in JSON. Otherwise
+it surfaces the server's 422 message verbatim. There is no cursor pagination.
 
 Clients must distinguish limit conditions by `error.code` and the `retryable`
 flag rather than treating every limit response or CLI exit `7` as retryable:
@@ -300,12 +369,12 @@ flag rather than treating every limit response or CLI exit `7` as retryable:
 This matches the overage behaviors in [billing-and-limits.md](billing-and-limits.md):
 `throttle` surfaces as `rate_limited`, `block` surfaces as `limit_exceeded`.
 
-The `access_denied` code covers both ordinary scope failures and cross-agent
-policy denials. A policy denial should include non-sensitive decision context in
-`details`, such as the requested permission, scope, and target owner, so callers
-and `policy test` agree on why access was refused. Denial context must not
-include memory content, fact values, or message bodies. The policy engine is
-tracked in [access-policy.md](access-policy.md).
+Target policy-denial shape: a future policy evaluator would use
+`access_denied` with non-sensitive decision context in `details`, such as the
+requested permission, scope, and target owner. No deciding-policy response or
+`policy test` exists today. The target policy engine is tracked in
+[access-policy.md](access-policy.md); implemented auth refusals are pinned in
+[Authentication](#authentication).
 
 ## Capability Discovery
 
@@ -350,6 +419,14 @@ Capability results should include:
   authenticated operator principal and account context. Managed cells include
   the authenticated operator's `account_role`; authorization-sensitive control
   planes fail closed when an older cell omits it.
+
+The current `features.policies` and `features.groups` values are each exactly
+`{"supported":false,"reason":"not_implemented"}`
+(`internal/server/capabilities.go` `configuredCapabilities` (lines 82-83);
+`internal/server/server.go` `apiMux` (line 2389), `feature` (line 3104),
+`capabilities` (line 3120), and `capabilitiesHandler` (line 3185)). They do not
+advertise a policy-test or group-management API. Cross-agent fact/memory authorization
+remains target work under `access-policy-contract-reconciliation`.
 
 Examples of feature flags:
 
@@ -594,9 +671,9 @@ deliver messages, or send customer/support notifications.
 `dry_run` is expected on the integrity-impacting identity mutations called out in
 [requirements.md](requirements.md): memory forget/restore/delete, cross-agent
 curate/forget, fact delete, primary promotion, policy delete, group member
-removal, and group deletion. The canonical dry run for a pure access decision is
-`POST /v1/policies:test`, which evaluates whether a subject/permission/target
-would be allowed without touching any record.
+removal, and group deletion. The pure access-decision dry run
+`POST /v1/policies:test` is target-only; it has no implemented handler or
+decision response.
 
 The implemented address-based fact-delete dry run is `DELETE
 /v1/facts?dry_run=true&subject={subject}&predicate={predicate}`. It resolves the
@@ -687,7 +764,7 @@ Initial route groups:
 | `/readyz` | Readiness probe. No sensitive config. |
 | `/startupz` | Startup probe. No auth, no sensitive config. |
 | `/healthz` | Alias probe. No auth, no sensitive config. |
-| `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
+| `/v1/whoami`, `/v1/auth/whoami` | Implemented operator-only, active-account identity response; flat `principal` with operator/account ids and optional `account_role`. See [Authentication](#authentication). |
 | `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
 | `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, value-free active-memory capacity plus memory/message/email/avatar checkpoints, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, `include_message_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Capacity/checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
 | `/v1/self/peers` | Agent-token-scoped list of every other live agent in the same realm with optional last-observed activity; no caller-controlled realm or agent selector and no availability inference. |
@@ -695,8 +772,8 @@ Initial route groups:
 | `/v1/self/dashboard-preferences` | Agent-token-only, own-row-only read (`GET`) and last-write-wins upsert (`PUT`) of the local dashboard's UI preferences row: a strictly validated 4 KiB `{"schema":"witself.dashboard-prefs.v1","theme":...}` document with unknown keys refused. Reads record no usage; writes emit no audit event. |
 | `/v1/remember` | Deferred explicit Witself capture action; it is not the natural-language cross-provider router. |
 | `/v1/sessions` | Target, not implemented: multi-session bootstrap would hydrate identity and open goals (`:start`) and persist a progress memory (`:end`). |
-| `/v1/auth` | CLI-initiated browser/device-code auth sessions when Witself owns the flow. |
-| `/v1/bootstrap` | One-time self-hosted first-operator bootstrap. |
+| `/v1/auth` | Browser/device-code sessions remain target; the implemented bootstrap and identity routes are pinned in [Authentication](#authentication). |
+| `/v1/auth/bootstrap` | Implemented single-use bootstrap-to-operator exchange; not `/v1/bootstrap`. |
 | `/v1/account` | Customer account and human operator/admin management. |
 | `/v1/realms` | Realm lifecycle and membership. |
 | `/v1/agents` | Named agent lifecycle and policy summary. |
@@ -706,14 +783,14 @@ Initial route groups:
 | `/v1/memory-curation-runs` | Implemented fenced runs: inspect frozen inputs, renew, plan, apply, cancel, abandon, and guarded rollback. |
 | `/v1/memory-curation-status` | Implemented value-free owner-lane/request/run status, optionally for one run. |
 | `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, server limits, and value-free active-memory capacity for a curator. |
-| `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
-| `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
-| `/v1/groups` | Security group lifecycle and membership. |
+| `/v1/facts`, `/v1/fact-candidates`, `/v1/fact-occurrences` | Agent-owned fact set/get/list/history, candidate review, upcoming lookup, capacity status, and permanent delete. Standalone `:primary` promotion remains target. |
+| `/v1/policies` | Target, not implemented: cross-agent policy create/list/show/delete/test. |
+| `/v1/groups` | Target, not implemented: security group lifecycle and membership. |
 | `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
-| `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
+| `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; observational recipient body peek; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
 | `/v1/message-requests` | Implemented message-backed realm open jobs: create/list/detail plus candidate offer/decline, coordinator client-ranked select/cancel, and selected-agent claim/renew/release/atomic-complete actions. |
-| `/v1/conversations` | Cross-realm conversation/task resource: list and show participants, state, and turn/cost budgets. |
-| `/v1/federation/peers` | Federation allow-list: list, add, and remove the accepted peer realms for cross-realm collaboration. |
+| `/v1/conversations` | Target: cross-realm conversation/task resource. |
+| `/v1/federation/peers` | Target: accepted peer-realm registry for cross-realm collaboration. |
 | `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
 | `/v1/totp` | Sealed-plane TOTP enrollment, metadata, code generation, and deletion. |
 | `/v1/password` | Stateless password generation (`:generate`). |
@@ -913,13 +990,14 @@ POST /v1/memory-curation-runs/{run_id}/cancel
 POST /v1/memory-curation-runs/{run_id}/abandon
 POST /v1/memory-curation-runs/{run_id}/rollback
 GET  /v1/memory-curation-status
-POST /v1/facts/{fact_id}:primary
+POST /v1/facts/{fact_id}:primary # target; not implemented
 POST /v1/sessions:start # target; not implemented
 POST /v1/sessions:end   # target; not implemented
-POST /v1/policies:test
+POST /v1/policies:test # target; not implemented
 POST /v1/messages:listen
 POST /v1/messages/{message_id}:reply
 POST /v1/messages/{message_id}:read
+GET  /v1/messages/{message_id}:peek
 POST /v1/messages/{message_id}:ack
 POST /v1/messages/{message_id}:claim
 POST /v1/messages/{message_id}:renew
@@ -1045,12 +1123,10 @@ Notes on specific actions and workflows:
   `full`. The authenticated preflight route reports the effective permission
   matrix for the presented token; `/v1/capabilities` remains deployment-wide
   feature discovery and is not an authorization oracle.
-- `:primary` is an atomic promotion that demotes any prior primary of the same
-  logical fact kind for the same owner. At most one primary per logical kind per
-  owner. See [facts-model.md](facts-model.md).
-- `:test` evaluates a subject/permission/target/scope against current policy and
-  returns the deciding policy id or a deny reason. It never mutates state and is
-  the canonical access-decision dry run.
+- `:primary` remains a target route, not an implemented standalone promotion.
+  See [facts-model.md](facts-model.md) for the current set/candidate contracts.
+- `:test` remains a target policy-decision dry run. There is no implemented
+  deciding-policy-id response; the current policy capability is unsupported.
 - `POST /v1/messages:listen` is the implemented stateless long-poll receive
   verb. It returns the oldest unacknowledged inbound message **metadata**, or an
   empty `messages` array with `timed_out=true` when the window elapses. The
@@ -1073,6 +1149,14 @@ Notes on specific actions and workflows:
   derives the recipient from the parent sender and derives the thread and
   `reply_to_message_id`; it derives `causal_depth` as parent plus one. Supplying
   routing, identity, or depth fields is rejected.
+- `GET /v1/messages/{message_id}:peek` returns the existing
+  `{schema_version, message}` envelope with body and payload for the
+  authenticated recipient. It preserves delivery, processing, read/ack state,
+  audit events, and usage. A sender without a recipient delivery cannot read
+  through this route. Messaging entitlement and live account/realm/agent
+  checks are the same as `:read`; claim ids and lease expiry are redacted.
+  The endpoint requires GET (HEAD is refused) and uses
+  `Cache-Control: private, no-store`. Console body display remains separate.
 - `:read` returns content and records only the recipient read transition.
   `:ack` separately records per-recipient acknowledgement; the acting agent is
   derived from the token for both operations. The ack response is metadata-only
@@ -1168,51 +1252,46 @@ Notes on specific actions and workflows:
   `DELETE /v1/secrets/{secret_id}` purge of that tombstone remains target-only.
   These lifecycle actions are audited as
   `secret.archived`/`secret.restored`/`secret.deleted`.
-- `:grant` and `:revoke` (on `/v1/secrets`) manage cross-agent and operator
-  access to a sealed-plane secret. Unlike the open plane — where cross-agent
-  read/curate/forget is governed by the [access-policy.md](access-policy.md)
-  identity policy engine — secret cross-agent and operator access is governed by
-  explicit grants plus realm roles, tracked in
-  [authorization-and-roles.md](authorization-and-roles.md). `:grant` names the
-  target `owner_agent` or `owner_group` and the granted scope; both require
-  `secret:grant`, support `dry_run`, carry an audit `reason`, and are audited as
-  `secret.grant`/`secret.revoke`. Secrets are not subject to the open cross-agent
-  read/curate/forget verbs.
+- `:grant` and `:revoke` cross-agent/operator secret access remain target-only.
+  The current vault wrapper requires a full agent principal
+  (`internal/server/secret.go` `secretAgentHandler` (line 467)); the target open-plane
+  [access policy](access-policy.md) does not grant secret access.
 - `:generate` (on `/v1/password`) is a stateless generator: it returns a freshly
   generated password once and creates no resource. It is a `POST` because the
   generated value must never appear in a URL; the returned value is sealed
   material (never logged, embedded, recalled, in the digest, or in the plaintext
   export). See [secret-model.md](secret-model.md).
 
-Cross-agent and operator mutations through these routes (`contribute`, `curate`,
-and `forget` against another agent's or group's records) require an audit
-`reason` in the request body, support `dry_run`, and are fully attributed in
-audit, for example "memory `mem_…` of agent A was pruned by agent B under policy
-`pol_…`". The verb model and guardrails are tracked in
-[access-policy.md](access-policy.md).
+Cross-agent/group fact and narrative-memory mutations, their audit `reason`
+and preview guardrails, and deciding-policy attribution remain targets under
+[access-policy.md](access-policy.md). These route examples do not create an
+operator override or a cross-agent permission.
 
 ## Cross-Agent And Group Targeting
 
-Cross-agent and group-scoped operations carry their target in the request body
-or path, never in a way that lets a caller assume another identity:
+Target only under `access-policy-contract-reconciliation`: there is no current
+policy evaluator, group API, or general operator override for facts/memories.
+The implemented store queries constrain fact/memory retrieval by the
+token-bound account, realm, and owning agent
+(`internal/store/fact.go:460-462`, `internal/store/memory.go:470-481,1200-1204`).
 
-- The acting agent is always the token-bound agent. The body never names the
-  actor.
-- A cross-agent read, contribute, curate, or forget names the target owner
-  (`owner_agent` or `owner_group`) and is evaluated against policy with a
-  default-deny stance. Absence of a matching `allow` policy yields
-  `access_denied`.
-- Group-scoped writes target `owner_group`; the same guardrails as cross-agent
-  writes apply (audit `reason`, `dry_run`, soft-delete by default).
-- Group membership is managed through nested member routes —
-  `GET /v1/groups/{group_id}/members`, `POST /v1/groups/{group_id}/members`, and
-  `DELETE /v1/groups/{group_id}/members/{principal}` — not colon actions; the
-  canonical route shapes are tracked in [api-routes.md](api-routes.md).
-- Operators may target any owner within their realm (operator override),
-  audited the same way as agent actions and subject to the same `reason`
-  requirements on destructive and cross-agent operations.
+The draft `owner_agent`/`owner_group` cross-agent targeting and
+`read`/`contribute`/`curate`/`forget` policy verbs still need implemented
+authorization and wire contracts. They must not be interpreted as permission
+to change the acting principal. Group membership route candidates remain:
 
-Identity references (`witself://…`) used in memory `links[]` or request bodies
+```text
+GET    /v1/groups/{group_id}/members              # target; not implemented
+POST   /v1/groups/{group_id}/members              # target; not implemented
+DELETE /v1/groups/{group_id}/members/{principal}  # target; not implemented
+```
+
+Membership authorization, role/scope vocabulary, group ownership, policy
+precedence, operator powers, and mutation/deletion guardrails remain target
+work in [access-policy.md](access-policy.md) and
+[security-groups.md](security-groups.md).
+
+Target identity references (`witself://…`) used in memory `links[]` or request bodies
 are validated at write time and re-checked at resolve time; cross-agent and
 cross-group references resolve only when policy permits. Reference parsing and
 resolution are tracked in [json-contracts.md](json-contracts.md).

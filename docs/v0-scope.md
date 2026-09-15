@@ -265,12 +265,13 @@ Core backend capabilities:
 - Prometheus metrics for HTTP traffic, auth, token operations, memory
   operations, recall and optional vector-index operations, fact operations, policy
   decisions, cross-agent accesses, group operations, messaging, audit events,
-  usage, limits, storage, vector storage, and migrations. When the sealed plane
-  is enabled, secret, reveal, TOTP, and KMS metric families
-  (`witself_secret_reveals_total`, `witself_totp_*`,
-  `witself_kms_operations_total`) and the sealed-plane metered dimensions
-  (`stored_secret`, `secret_read`, `totp_code`, `runtime_injection`,
-  `encrypted_storage_byte`) are added.
+  usage, limits, storage, vector storage, and migrations. The implemented sealed-plane families are
+  `witself_secret_material_deliveries_total`,
+  `witself_vault_lifecycle_operations_total`, secret-limit rejections, and
+  cell-wide posture gauges. Delivery counts server authorization and encrypted
+  material return, not client decryption or TOTP generation; no agent-secret
+  KMS metric exists under ADR 0003. See
+  [Sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos).
 - Local development adapter behind the same backend interface.
 - Postgres storage adapter with Goose migrations; it is the authoritative open-
   plane source and readiness gate. Migration `0030` adds the durable curation

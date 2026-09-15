@@ -1,6 +1,7 @@
 package cell
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -135,21 +136,60 @@ func TestCivoNodeProfileFor(t *testing.T) {
 }
 
 func TestProvisionCivoPinsExplicitKubernetesVersion(t *testing.T) {
-	mocks := &civoResourceMocks{}
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provisionCivo(ctx, civoCell{
-			name: "civo-sandbox-use1-dev", region: "nyc1",
-			nodeSize: "g4s.kube.medium", nodeCount: civoNodeProfileFor("minimal"), adminCIDR: "203.0.113.7/32",
-			k8sVersion: "1.35.0-k3s1",
-		})
-	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))
-	if err != nil {
-		t.Fatalf("provision Civo: %v", err)
+	unpinned := civoClusterForVersion(t, "")
+	pinned := civoClusterForVersion(t, "1.35.0-k3s1")
+	if got, ok := unpinned["kubernetesVersion"]; ok {
+		t.Errorf("unconfigured Kubernetes version = %v, want omitted for Civo latest stable", got)
 	}
-	cluster := mocks.inputs["civo:index/kubernetesCluster:KubernetesCluster"]
-	if got := cluster["kubernetesVersion"]; !got.IsString() || got.StringValue() != "1.35.0-k3s1" {
+	if got := pinned["kubernetesVersion"]; !got.IsString() || got.StringValue() != "1.35.0-k3s1" {
 		t.Errorf("kubernetesVersion = %v, want 1.35.0-k3s1", got)
 	}
+	pinnedShape := pinned.Copy()
+	delete(pinnedShape, "kubernetesVersion")
+	if !resource.NewObjectProperty(pinnedShape).DeepEquals(resource.NewObjectProperty(unpinned)) {
+		t.Errorf("pinned cluster properties except kubernetesVersion = %v, want unchanged from unpinned (%v)", pinnedShape, unpinned)
+	}
+}
+
+func civoClusterForVersion(t *testing.T, version string) resource.PropertyMap {
+	t.Helper()
+	// Deliberately differ from the requested pin to prove health's export comes
+	// from provider state, including when no version was configured.
+	const providerVersion = "1.35.1-k3s1"
+	mocks := &civoResourceMocks{kubernetesVersion: providerVersion}
+	var exportedVersion string
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		if err := Program(ctx); err != nil {
+			return err
+		}
+		output, ok := ctx.GetCurrentExportMap()["kubernetesVersion"].(pulumi.StringOutput)
+		if !ok {
+			return fmt.Errorf("kubernetesVersion export is missing or is not a string output")
+		}
+		output.ApplyT(func(value string) string {
+			exportedVersion = value
+			return value
+		})
+		return nil
+	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks), func(info *pulumi.RunInfo) {
+		info.Config = map[string]string{
+			"witself:cloud":         "civo",
+			"witself:profile":       "minimal",
+			"witself:civoNodeSize":  "g4s.kube.medium",
+			"witself:civoAdminCIDR": "203.0.113.7/32",
+			"civo:region":           "nyc1",
+		}
+		if version != "" {
+			info.Config["witself:k8sVersion"] = version
+		}
+	})
+	if err != nil {
+		t.Fatalf("Civo program with version %q: %v", version, err)
+	}
+	if exportedVersion != providerVersion {
+		t.Errorf("kubernetesVersion export with configured version %q = %q, want provider version %q", version, exportedVersion, providerVersion)
+	}
+	return mocks.inputs["civo:index/kubernetesCluster:KubernetesCluster"]
 }
 
 func TestProvisionCivoRequiresValidAdminCIDR(t *testing.T) {
@@ -167,8 +207,9 @@ func TestProvisionCivoRequiresValidAdminCIDR(t *testing.T) {
 }
 
 type civoResourceMocks struct {
-	types  map[string]bool
-	inputs map[string]resource.PropertyMap
+	types             map[string]bool
+	inputs            map[string]resource.PropertyMap
+	kubernetesVersion string
 }
 
 func (m *civoResourceMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -178,7 +219,11 @@ func (m *civoResourceMocks) NewResource(args pulumi.MockResourceArgs) (string, r
 	}
 	m.types[args.TypeToken] = true
 	m.inputs[args.TypeToken] = args.Inputs
-	return args.Name + "-id", args.Inputs, nil
+	outputs := args.Inputs.Copy()
+	if args.TypeToken == "civo:index/kubernetesCluster:KubernetesCluster" && m.kubernetesVersion != "" {
+		outputs["kubernetesVersion"] = resource.NewStringProperty(m.kubernetesVersion)
+	}
+	return args.Name + "-id", outputs, nil
 }
 
 func (*civoResourceMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {

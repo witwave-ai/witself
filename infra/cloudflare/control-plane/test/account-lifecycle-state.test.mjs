@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AccountLifecycleStateError,
   abortOperation,
+  acknowledgeAbortOperation,
   acknowledgeStep,
   bootstrapArchivedState,
   bootstrapLiveState,
@@ -20,6 +21,7 @@ import {
   nextLifecycleStep,
   quarantineRestoreOperation,
   replaceArchivedLocation,
+  requestAbortOperation,
   validateLifecycleState,
 } from "../src/account-lifecycle-state.mjs";
 
@@ -72,6 +74,93 @@ function archived() {
     },
   });
 }
+
+function abortCandidate(kind = "evacuate") {
+  const operationID = "11111111-1111-4111-8111-111111111111";
+  const state = claimOperation(live(), {
+    operation_id: operationID, kind, source_cell: SOURCE,
+    ...(kind === "move" ? { target_cell: TARGET } : {}),
+    archive: {
+      archive_id: operationID,
+      object: `archives/${ACCOUNT}/${operationID}.tar.gz`,
+    },
+  });
+  state.operation.source_registration_id = "reg-source";
+  state.operation.request_epoch = 0;
+  if (kind === "move") state.operation.target_registration_id = "reg-target";
+  return state;
+}
+
+test("abort intent and normalized receipt preserve the original lifecycle fence", () => {
+  for (const kind of ["evacuate", "move"]) {
+    const original = abortCandidate(kind);
+    const operationID = original.operation.operation_id;
+    const intent = requestAbortOperation(original, { operation_id: operationID });
+    assert.equal(original.operation.phase, "claimed");
+    assert.equal(nextLifecycleStep(intent).action, "abort_source");
+    assert.deepEqual(requestAbortOperation(intent, { operation_id: operationID }), intent);
+    assert.throws(() => abortOperation(intent, { operation_id: operationID }), expectCode("phase-mismatch"));
+    assert.throws(() => claimOperation(intent, {
+      operation_id: "other", kind, source_cell: SOURCE,
+    }), expectCode("operation-busy"));
+    const proof = {
+      account_id: ACCOUNT, evacuation_id: operationID,
+      evacuation_role: "source", status: "suspended", aborted: true,
+    };
+    const pending = acknowledgeAbortOperation(intent, {
+      operation_id: operationID, receipt: { ...proof, ignored: "provider metadata" },
+    });
+    assert.deepEqual(pending.operation.abort_receipt, proof);
+    assert.equal(nextLifecycleStep(pending).action, "cleanup_aborted_archive");
+    assert.deepEqual(pending.location, original.location);
+    assert.deepEqual(pending.projections, original.projections);
+    assert.equal(pending.epoch, original.epoch);
+    assert.deepEqual(pending.operation.archive, original.operation.archive);
+    assert.equal(pending.operation.source_registration_id, original.operation.source_registration_id);
+    assert.equal(pending.operation.target_registration_id, original.operation.target_registration_id);
+    const completed = abortOperation(pending, { operation_id: operationID });
+    assert.equal(completed.operation, null);
+    assert.deepEqual(completed.location, original.location);
+    assert.equal(completed.last_completed.outcome, "aborted");
+  }
+});
+
+test("abort transitions refuse committed authority and malformed or misplaced receipt", () => {
+  const original = abortCandidate();
+  const operationID = original.operation.operation_id;
+  const intent = requestAbortOperation(original, { operation_id: operationID });
+  const proof = {
+    account_id: ACCOUNT, evacuation_id: operationID,
+    evacuation_role: "source", status: "active", aborted: true,
+  };
+  for (const receipt of [
+    null, {}, { ...proof, account_id: "other" },
+    { ...proof, evacuation_id: "other" }, { ...proof, aborted: false },
+    { ...proof, evacuation_role: "target" }, { ...proof, status: "" },
+    { ...proof, status: "pending" }, { ...proof, status: "x".repeat(4096) },
+  ]) {
+    assert.throws(() => acknowledgeAbortOperation(intent, {
+      operation_id: operationID, receipt,
+    }), expectCode("invalid-state"));
+  }
+  for (const phase of ["archive_committed", "archive_projected", "route_retired", "live_committed"]) {
+    const state = structuredClone(original);
+    state.operation.phase = phase;
+    assert.throws(() => requestAbortOperation(state, {
+      operation_id: operationID,
+    }), expectCode("phase-mismatch"));
+  }
+  for (const state of [original, intent]) {
+    const misplaced = structuredClone(state);
+    misplaced.operation.abort_receipt = proof;
+    assert.throws(() => validateLifecycleState(misplaced), expectCode("invalid-state"));
+  }
+  const wrongObject = structuredClone(original);
+  wrongObject.operation.archive.object = "archives/other/attempt.tar.gz";
+  assert.throws(() => requestAbortOperation(wrongObject, {
+    operation_id: operationID,
+  }), expectCode("invalid-state"));
+});
 
 function evacuateToArchive(state, operationID = "evacuate_001") {
   let next = claimOperation(state, {

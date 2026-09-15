@@ -35,6 +35,8 @@ type Config struct {
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
 	MetricsAddr string // Prometheus metrics
 
+	metrics *runtimeMetrics // installed by instrumentConfig for handler-level observations
+
 	// ReadAgentEmailCellStorageMetrics supplies one value-free schema-91
 	// cell-storage snapshot per Prometheus scrape. It is never called by API or
 	// health traffic; nil omits this database-backed metric family.
@@ -42,6 +44,13 @@ type Config struct {
 	// ReadSupportSLOMetrics supplies the value-free support first-response
 	// posture for /metrics; nil skips the gauges entirely.
 	ReadSupportSLOMetrics func(context.Context) (SupportSLOMetrics, error)
+	// ReadSealedPlanePostureMetrics supplies cell-wide, value-free sealed-plane
+	// posture for /metrics; nil omits the gauges.
+	ReadSealedPlanePostureMetrics func(context.Context) (SealedPlanePostureMetrics, error)
+	// These readers expose value-free cell aggregates through independent 2 s
+	// sequential reads on /metrics. Nil readers omit their metric families.
+	ReadIdentityCapacityMetrics func(context.Context) (IdentityCapacityMetrics, error)
+	ReadAuditAppendMetrics      func(context.Context) (AuditAppendMetrics, error)
 
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
@@ -397,7 +406,7 @@ type Config struct {
 	// Authenticate), enable /v1/support/tickets. Any operator on the
 	// account may open, list, read, reply, and transition; the account
 	// owner's audit trail (via ListAccountEvents) shows who did what.
-	// ErrSupportDisabled -> 409, ErrTicketNotFound -> 404,
+	// ErrSupportDisabled -> 409, ErrSupportRateLimited -> 429, ErrTicketNotFound -> 404,
 	// ErrTicketStateInvalid -> 409, ErrTicketInputInvalid -> 400.
 	OpenSupportTicket        func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)
 	ListSupportTickets       func(ctx context.Context, accountID, operatorID string) ([]SupportTicket, error)
@@ -594,11 +603,13 @@ type Config struct {
 
 	// Realm-local direct messaging. All hooks require an agent principal; the
 	// store derives sender/account/realm from that principal and never from the
-	// request body. List is metadata-only; Read is the content boundary.
+	// request body. List is metadata-only; Read and observational Peek return
+	// recipient content, with only Read advancing the delivery's read state.
 	SendMessage  func(ctx context.Context, p DomainPrincipal, in SendMessageRequest) (Message, error)
 	ReplyMessage func(ctx context.Context, p DomainPrincipal, parentMessageID string, in ReplyMessageRequest) (Message, error)
 	ListMessages func(ctx context.Context, p DomainPrincipal, opts MessageListOptions) (MessagePage, error)
 	ReadMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
+	PeekMessage  func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 	AckMessage   func(ctx context.Context, p DomainPrincipal, messageID string) (Message, error)
 
 	// Message processing is a recipient-only fenced lease. The claim id and
@@ -1067,7 +1078,8 @@ func validPlanSnapshotRecord(snapshot PlanSnapshotRecord, accountID string) bool
 		return false
 	}
 	if snapshot.Revision == 0 {
-		return snapshot.SnapshotHash == ""
+		_, governed := snapshot.Policies[plans.CollaborationEntitlementVersionPolicy]
+		return snapshot.SnapshotHash == "" && !governed
 	}
 	expected, err := plans.SnapshotHash(
 		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features,
@@ -1489,10 +1501,21 @@ type TranscriptPage struct {
 
 // UsageQuery selects the authenticated agent's hourly or daily usage rollups.
 type UsageQuery struct {
-	Since      time.Time
-	Until      time.Time
-	Bucket     string
-	Dimensions []string
+	Since           time.Time
+	Until           time.Time
+	Bucket          string
+	Dimensions      []string
+	AllowTruncation bool
+}
+
+// UsageQueryTooLargeError refuses an unnegotiated partial usage report.
+// Matched rows are not counted: the store reads only MaxRows+1 rows.
+type UsageQueryTooLargeError struct {
+	MaxRows int
+}
+
+func (e *UsageQueryTooLargeError) Error() string {
+	return fmt.Sprintf("usage query exceeds the %d-row cap; narrow --since/--until, use a coarser --group-by, or opt in with --allow-truncation (allow_truncation=1)", e.MaxRows)
 }
 
 // UsagePoint is one dimension total in a UTC time bucket.
@@ -1504,7 +1527,8 @@ type UsagePoint struct {
 	EventCount  int64     `json:"event_count"`
 }
 
-// UsageTotal is a dimension total across the report window.
+// UsageTotal is a dimension total across returned points; it is partial when
+// UsageReport.Truncated is true.
 type UsageTotal struct {
 	Dimension  string `json:"dimension"`
 	Unit       string `json:"unit"`
@@ -1524,6 +1548,7 @@ type UsageReport struct {
 	Bucket    string       `json:"bucket"`
 	Points    []UsagePoint `json:"points"`
 	Totals    []UsageTotal `json:"totals"`
+	Truncated bool         `json:"truncated"`
 }
 
 // Message is one durable realm-local direct message and the recipient's
@@ -2244,7 +2269,8 @@ func Run(ctx context.Context, cfg Config) error {
 		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMuxFor(
-			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics)},
+			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics,
+			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics)},
 	}
 
 	type running struct {
@@ -2354,37 +2380,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.ApplyAgentEmailOutboundProviderEvent,
 		)
 	}
-	selfDigestSupported := cfg.AuthenticatePrincipal != nil
-	transcriptsSupported := selfDigestSupported &&
-		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
-		cfg.ListTranscripts != nil && cfg.GetTranscript != nil
-	messagingSupported := selfDigestSupported && cfg.SendMessage != nil &&
-		cfg.ListMessages != nil && cfg.ReadMessage != nil && cfg.AckMessage != nil
-	messageListenSupported := selfDigestSupported && cfg.ListMessages != nil
-	messageReplySupported := selfDigestSupported && cfg.ReplyMessage != nil
-	messageProcessingSupported := selfDigestSupported &&
-		cfg.ClaimMessage != nil && cfg.RenewMessageClaim != nil &&
-		cfg.ReleaseMessageClaim != nil && cfg.CompleteMessage != nil
-	messageRequestsSupported := selfDigestSupported &&
-		cfg.CreateMessageRequest != nil && cfg.ListMessageRequests != nil &&
-		cfg.GetMessageRequest != nil && cfg.OfferMessageRequest != nil &&
-		cfg.DeclineMessageRequest != nil && cfg.SelectMessageRequest != nil &&
-		cfg.CancelMessageRequest != nil && cfg.ClaimMessageRequest != nil &&
-		cfg.RenewMessageRequest != nil && cfg.ReleaseMessageRequest != nil &&
-		cfg.CompleteMessageRequest != nil
-	memoriesSupported := selfDigestSupported && cfg.CaptureMemory != nil &&
-		cfg.GetMemory != nil && cfg.ListMemories != nil && cfg.RecallMemories != nil &&
-		cfg.GetMemoryHistory != nil && cfg.AdjustMemory != nil &&
-		cfg.SupersedeMemory != nil &&
-		cfg.ForgetMemory != nil && cfg.RestoreMemory != nil &&
-		cfg.ReactivateMemory != nil && cfg.ResolveMemoryEvidence != nil &&
-		cfg.DeleteMemory != nil
-	memoryRecallSupported := selfDigestSupported && cfg.RecallMemories != nil
-	memorySupersedeSupported := selfDigestSupported && cfg.SupersedeMemory != nil
-	memoryDeleteSupported := selfDigestSupported && cfg.DeleteMemory != nil
-	memoryVectorsSupported := selfDigestSupported && cfg.CreateMemoryVectorProfile != nil &&
-		cfg.ListMemoryVectorProfiles != nil && cfg.PutMemoryVector != nil
-	memoryCurationSupported := selfDigestSupported &&
+	memoryCurationSupported := cfg.AuthenticatePrincipal != nil &&
 		cfg.RequestMemoryCuration != nil && cfg.ListMemoryCurationRequests != nil &&
 		cfg.GetMemoryCurationRequest != nil && cfg.StartMemoryCuration != nil &&
 		cfg.GetMemoryCurationRun != nil && cfg.GetMemoryCurationRunInputs != nil &&
@@ -2393,30 +2389,7 @@ func apiMux(cfg Config) http.Handler {
 		cfg.ApplyMemoryCuration != nil && cfg.CancelMemoryCuration != nil &&
 		cfg.AbandonMemoryCuration != nil && cfg.RollbackMemoryCuration != nil &&
 		cfg.GetMemoryCurationStatus != nil
-	avatarsSupported := cfg.AuthenticatePrincipal != nil &&
-		cfg.GetSelfAvatar != nil && cfg.GetSelfAvatarHistory != nil && cfg.GetSelfAvatarVersion != nil &&
-		cfg.GetSelfAvatarStyle != nil && cfg.ProposeSelfAvatar != nil &&
-		cfg.ActivateSelfAvatar != nil && cfg.RollbackSelfAvatar != nil &&
-		cfg.ResetSelfAvatar != nil &&
-		cfg.ReportSelfAvatarGenerationFailure != nil
-	secretsSupported := cfg.AuthenticatePrincipal != nil &&
-		cfg.GetCurrentVaultKey != nil && cfg.RegisterVaultKey != nil &&
-		cfg.CreateSecret != nil && cfg.GetSecretLimitStatus != nil &&
-		cfg.ListSecrets != nil && cfg.GetSecret != nil &&
-		cfg.ArchiveSecret != nil && cfg.RestoreSecret != nil &&
-		cfg.DeleteSecret != nil && cfg.AccessSecretField != nil
-	agentEmailSendSupported := selfDigestSupported && cfg.QueueAgentEmail != nil
-	agentEmailReplySupported := selfDigestSupported && cfg.ReplyAgentEmail != nil
-	agentEmailSentHistorySupported := selfDigestSupported &&
-		cfg.ListAgentEmailOutbox != nil && cfg.GetAgentEmailOutbound != nil
-	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
-		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
-		messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported,
-		messageRequestsSupported,
-		memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
-		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported,
-		avatarsSupported, secretsSupported,
-		agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported))
+	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -2683,6 +2656,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
 			cfg.GetSelfPlanEntitlements,
+			cfg.metrics,
 		))
 		if cfg.ListSelfPeers != nil {
 			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
@@ -2956,6 +2930,9 @@ func apiMux(cfg Config) http.Handler {
 			mux.HandleFunc("GET /v1/messages", listMessagesHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
 			mux.HandleFunc("POST /v1/messages:listen", messageListenHandler(cfg.AuthenticatePrincipal, cfg.ListMessages))
 		}
+		if cfg.PeekMessage != nil {
+			mux.HandleFunc("GET /v1/messages/{action}", peekMessageHandler(cfg.AuthenticatePrincipal, cfg.PeekMessage))
+		}
 		if cfg.ReadMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil ||
 			cfg.ClaimMessage != nil || cfg.RenewMessageClaim != nil ||
 			cfg.ReleaseMessageClaim != nil || cfg.CompleteMessage != nil {
@@ -3208,7 +3185,8 @@ func billingCapabilityURLHasUnsafeRune(raw string) bool {
 	return false
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported, agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported bool) http.HandlerFunc {
+func capabilitiesHandler(cfg Config) http.HandlerFunc {
+	features := configuredCapabilities(cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -3230,55 +3208,19 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				Version:    version.Version,
 				APIVersion: "v1",
 			},
-			Features: map[string]feature{
-				"memories":                 featureState(memoriesSupported),
-				"memory_recall":            featureState(memoryRecallSupported),
-				"memory_supersede":         featureState(memorySupersedeSupported),
-				"memory_permanent_delete":  featureState(memoryDeleteSupported),
-				"memory_vector_profiles":   featureState(memoryVectorsSupported),
-				"client_vector_recall":     featureState(memoryVectorsSupported && memoryRecallSupported),
-				"automatic_capture":        notImpl,
-				"opportunistic_curation":   featureState(memoryCurationSupported),
-				"scheduled_curation":       notImpl,
-				"transcript_capture":       featureState(transcriptsSupported),
-				"facts":                    notImpl,
-				"self_digest":              {Supported: selfDigestSupported},
-				"semantic_recall":          featureState(memoryVectorsSupported && memoryRecallSupported),
-				"policies":                 notImpl,
-				"groups":                   notImpl,
-				"avatars":                  featureState(avatarsSupported),
-				"secrets":                  featureState(secretsSupported),
-				"messaging":                {Supported: messagingSupported},
-				"message_listen":           featureState(messageListenSupported),
-				"message_reply":            featureState(messageReplySupported),
-				"message_processing":       featureState(messageProcessingSupported),
-				"message_requests":         featureState(messageRequestsSupported),
-				"agent_email_send":         featureState(agentEmailSendSupported),
-				"agent_email_reply":        featureState(agentEmailReplySupported),
-				"agent_email_sent_history": featureState(agentEmailSentHistorySupported),
-				"transcripts":              {Supported: transcriptsSupported},
-				"audit":                    notImpl,
-			},
-			Limits:  map[string]any{},
-			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
+			Features: map[string]feature{},
+			Limits:   map[string]any{},
+			Billing:  billingInfo{Supported: false, Reason: "self_hosted"},
 		}
 		if ep := envconfig.RawOr(os.LookupEnv, "WITSELF_BILLING_ENDPOINT", ""); validBillingCapabilityEndpoint(ep) {
 			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
 		} else if ep != "" {
 			caps.Billing = billingInfo{Supported: false, Reason: "invalid_configuration"}
 		}
-		if !transcriptsSupported {
-			caps.Features["transcripts"] = notImpl
+		for name, supported := range features {
+			caps.Features[name] = featureState(supported)
 		}
-		if !selfDigestSupported {
-			caps.Features["self_digest"] = notImpl
-		}
-		if !messagingSupported {
-			caps.Features["messaging"] = notImpl
-		}
-		if !memoriesSupported {
-			caps.Features["memories"] = notImpl
-		}
+		accountID, planInfo := cfg.AccountID, cfg.PlanInfo
 		if accountID != "" && backendKind != "managed" {
 			caps.Account = &accountInfo{ID: accountID}
 		}
@@ -3426,8 +3368,9 @@ func selfHandler(
 	getEmailCheckpoint func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 	getAvatarCheckpoint func(context.Context, DomainPrincipal) (*SelfAvatarCheckpoint, error),
 	getPlanEntitlements func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error),
+	metrics *runtimeMetrics,
 ) http.HandlerFunc {
-	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	render := func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) (elided bool, dropped int, resultErr error) {
 		// Self digests can contain durable personal context and must never be
 		// retained by shared or private HTTP caches.
 		w.Header().Set("Cache-Control", "private, no-store")
@@ -3732,14 +3675,45 @@ func selfHandler(
 			Elided: (includeFacts && factCount > len(facts)) ||
 				(includeSalient && memoryCount > len(memories)),
 		}
-		encoded, err := marshalBoundedSelfDigest(digest, maximumBytes)
+		// Count-disabled loaders return pagination hints, not exact totals.
+		// Keep those hints in Elided, but observe only known omitted entries.
+		if includeCounts && includeFacts {
+			dropped += max(0, factCount-len(facts))
+		}
+		if includeCounts && includeSalient {
+			dropped += max(0, memoryCount-len(memories))
+		}
+		encoded, trimmed, err := marshalBoundedSelfDigest(digest, maximumBytes)
+		dropped += trimmed
+		elided = digest.Elided || trimmed > 0
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "could not render self digest")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(encoded)
-	})
+		_, resultErr = w.Write(encoded)
+		return
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		recorder := &metricsResponseWriter{ResponseWriter: w}
+		elided, dropped := false, 0
+		completed := false
+		var resultErr error
+		defer func() {
+			if metrics == nil {
+				return
+			}
+			if !completed || recorder.status >= http.StatusBadRequest {
+				resultErr = errors.New("self digest read failed")
+			}
+			metrics.observeSelfDigest(r.Header.Get("X-Witself-Hydration"), elided, dropped, resultErr, time.Since(started))
+		}()
+		requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+			elided, dropped, resultErr = render(w, r, p)
+		})(recorder, r)
+		completed = true
+	}
 }
 
 func sortedSelfIndexKeys(values map[string]struct{}) []string {
@@ -3754,15 +3728,17 @@ func sortedSelfIndexKeys(values map[string]struct{}) []string {
 // marshalBoundedSelfDigest applies the wire-size budget to the encoded JSON,
 // preserving identity and the index while dropping the least essential
 // hydrated entries from the end. A selected section that was already bounded
-// by its store query must set Elided before calling this helper.
-func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, error) {
+// by its store query must set Elided before calling this helper. The returned
+// count includes only entries removed here, including on a render failure.
+func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, int, error) {
+	dropped := 0
 	for {
 		encoded, err := json.Marshal(digest)
 		if err != nil {
-			return nil, err
+			return nil, dropped, err
 		}
 		if len(encoded) <= maximumBytes {
-			return encoded, nil
+			return encoded, dropped, nil
 		}
 		if !digest.Elided {
 			digest.Elided = true
@@ -3774,8 +3750,9 @@ func marshalBoundedSelfDigest(digest SelfDigest, maximumBytes int) ([]byte, erro
 		case len(digest.PrimaryFacts) > 0:
 			digest.PrimaryFacts = digest.PrimaryFacts[:len(digest.PrimaryFacts)-1]
 		default:
-			return nil, fmt.Errorf("self digest identity and index exceed %d bytes", maximumBytes)
+			return nil, dropped, fmt.Errorf("self digest identity and index exceed %d bytes", maximumBytes)
 		}
+		dropped++
 	}
 }
 
@@ -3787,6 +3764,13 @@ func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrinci
 		}
 		q := r.URL.Query()
 		query := UsageQuery{Bucket: strings.TrimSpace(q.Get("group_by"))}
+		if values, ok := q["allow_truncation"]; ok {
+			if len(values) != 1 || (values[0] != "0" && values[0] != "1") {
+				writeJSONError(w, http.StatusBadRequest, "allow_truncation must be 0 or 1")
+				return
+			}
+			query.AllowTruncation = values[0] == "1"
+		}
 		if raw := strings.TrimSpace(q.Get("since")); raw != "" {
 			since, err := time.Parse(time.RFC3339, raw)
 			if err != nil {
@@ -3811,7 +3795,23 @@ func usageHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrinci
 			}
 		}
 		report, err := get(r.Context(), p, query)
+		// Enforce negotiation at the HTTP boundary even if a callback returns
+		// an already-truncated report instead of a typed refusal.
+		if err == nil && report.Truncated && !query.AllowTruncation {
+			err = &UsageQueryTooLargeError{MaxRows: len(report.Points)}
+		}
+		var tooLarge *UsageQueryTooLargeError
 		switch {
+		case errors.As(err, &tooLarge):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"code":           "usage_query_too_large",
+				"error":          tooLarge.Error(),
+				"max_rows":       tooLarge.MaxRows,
+			})
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -6785,6 +6785,13 @@ func validBackupID(value string) bool {
 // visibility is any-operator (locked with the product decision) so no
 // extra role guard is needed here.
 
+const (
+	// Support bodies allow 64 KiB after JSON decoding. Leave room for the
+	// six-byte Unicode escape form of every body byte plus ticket metadata.
+	maxSupportTicketRequestBytes      = 512 * 1024
+	maxSupportTicketStateRequestBytes = 8 * 1024
+)
+
 func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in OpenTicketRequest) (SupportTicket, SupportTicketMessage, error)) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
@@ -6793,7 +6800,7 @@ func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in O
 			Priority string `json:"priority"`
 			Body     string `json:"body"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketRequestBytes); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
@@ -6806,6 +6813,9 @@ func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in O
 			Body:       req.Body,
 		})
 		switch {
+		case errors.Is(err, ErrSupportRateLimited):
+			writeSupportRateLimitError(w, err)
+			return
 		case errors.Is(err, ErrTicketInputInvalid):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -6901,7 +6911,7 @@ func replySupportTicketHandler(auth AuthFunc, reply func(ctx context.Context, ac
 		var req struct {
 			Body string `json:"body"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketRequestBytes); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
@@ -6945,7 +6955,7 @@ func changeSupportTicketStateHandler(auth AuthFunc, changeState func(ctx context
 		var req struct {
 			State string `json:"state"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.State) == "" {
+		if err := decodeLimitedJSON(w, r, &req, maxSupportTicketStateRequestBytes); err != nil || strings.TrimSpace(req.State) == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing state")
 			return
 		}
@@ -7006,13 +7016,16 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics(), nil, nil)
+	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil)
 }
 
 func metricsMuxFor(
 	metrics *runtimeMetrics,
 	readAgentEmailCellStorage func(context.Context) (AgentEmailCellStorageMetrics, error),
 	readSupportSLO func(context.Context) (SupportSLOMetrics, error),
+	readIdentityCapacity func(context.Context) (IdentityCapacityMetrics, error),
+	readAuditAppend func(context.Context) (AuditAppendMetrics, error),
+	readSealedPlanePosture func(context.Context) (SealedPlanePostureMetrics, error),
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -7022,6 +7035,9 @@ func metricsMuxFor(
 			r.Context(), w, readAgentEmailCellStorage,
 		)
 		writeSupportSLOPrometheus(r.Context(), w, readSupportSLO)
+		writeSealedPlanePosturePrometheus(r.Context(), w, readSealedPlanePosture)
+		writeIdentityCapacityPrometheus(r.Context(), w, readIdentityCapacity)
+		writeAuditAppendPrometheus(r.Context(), w, readAuditAppend)
 	})
 	return securityResponseHeaders(mux)
 }

@@ -158,7 +158,6 @@ func TestRunAgentEmailRateBucketCleanupWorkerDrainsInboundAndOutboundTables(t *t
 	var waits int
 	deleteBatches := make([]agentEmailRateBucketCleanupDeleteFunc, len(deletions))
 	for lane := range deletions {
-		lane := lane
 		deleteBatches[lane] = func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
 			if before != fixedNow || limit != cfg.BatchSize || attemptCtx.Err() != nil {
 				t.Fatalf("lane %d cleanup call = before %s limit %d error %v",

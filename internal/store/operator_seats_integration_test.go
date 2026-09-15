@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"testing"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestOperatorSeatsCapCreateAndPlanFit proves the seat dimension end to end: the
@@ -16,10 +16,7 @@ import (
 // absent key stays unlimited, and a downgrade target that cannot hold the live
 // seats is reported as a plan-fit violation rather than silently accepted.
 func TestOperatorSeatsCapCreateAndPlanFit(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {

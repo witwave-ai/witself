@@ -161,6 +161,7 @@ type Metrics struct {
 	agentEmailOutboundBatches              map[RetentionResult]uint64
 	agentEmailOutboundItems                map[string]uint64
 	agentEmailOutboundLastSuccess          float64
+	readAuditAppendFailures                func() uint64
 	now                                    func() time.Time
 }
 
@@ -197,6 +198,14 @@ func newMetrics() *Metrics {
 		agentEmailOutboundItems: make(map[string]uint64),
 		now:                     time.Now,
 	}
+}
+
+// SetAuditAppendFailuresReader connects the worker's process-local store
+// counter. The reader must be nonblocking and must not query the database.
+func (m *Metrics) SetAuditAppendFailuresReader(read func() uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readAuditAppendFailures = read
 }
 
 func (m *Metrics) registerJob(name string) {
@@ -629,11 +638,22 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 		agentEmailOutboundItems[kind] = value
 	}
 	agentEmailOutboundLastSuccess := m.agentEmailOutboundLastSuccess
+	readAuditAppendFailures := m.readAuditAppendFailures
 	m.mu.Unlock()
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_up 1 if the witself-worker process is up.")
 	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_up gauge")
 	_, _ = fmt.Fprintln(w, "witself_worker_up 1")
+
+	if readAuditAppendFailures != nil {
+		failures := readAuditAppendFailures()
+		_, _ = fmt.Fprintln(w, "# HELP witself_audit_append_metrics_up 1 when the process audit append counter was read successfully.")
+		_, _ = fmt.Fprintln(w, "# TYPE witself_audit_append_metrics_up gauge")
+		_, _ = fmt.Fprintln(w, "witself_audit_append_metrics_up 1")
+		_, _ = fmt.Fprintln(w, "# HELP witself_audit_append_tx_failures_total Audit database insert failures in this process; resets on process restart.")
+		_, _ = fmt.Fprintln(w, "# TYPE witself_audit_append_tx_failures_total counter")
+		_, _ = fmt.Fprintf(w, "witself_audit_append_tx_failures_total %d\n", failures)
+	}
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_job_running 1 while a registered job loop is running.")
 	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_job_running gauge")

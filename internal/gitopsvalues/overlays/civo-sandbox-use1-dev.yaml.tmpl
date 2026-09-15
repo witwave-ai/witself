@@ -1,0 +1,76 @@
+apps:
+  civoPostgres:
+    enabled: true
+    namespace: witself
+    chartVersion: {{.CivoPostgresChartVersion}}
+    authSecretName: witself-postgresql-auth
+    storage: 8Gi
+  witselfServer:
+    enabled: true
+    namespace: witself
+    # The apps chart emits worker.agentEmailRetention settings, which require
+    # the v0.0.211+ server chart schema.
+    chartVersion: {{.ChartVersion}}
+    imageTag: {{.ImageTag}}
+    backendKind: managed
+    backup:
+      enabled: true
+      validationEnabled: true
+      targetName: witself-backup
+    replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
+    topologySpreadConstraints: []
+    worker:
+      enabled: true
+      replicaCount: 1
+      podDisruptionBudget:
+        enabled: false
+      topologySpreadConstraints: []
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    civoIngress:
+      enabled: true
+      className: traefik
+      clusterIssuer: letsencrypt-prod
+      tlsSecretName: witself-api-tls
+      acme:
+        email: ""
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretName: letsencrypt-prod-private-key
+    secrets:
+      bootstrap:
+        enabled: true
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+      database:
+        enabled: true
+        targetName: witself-db
+        urlKey: dsn
+      provision:
+        enabled: true
+        targetName: witself-provision
+        tokenKey: token
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: {{.CertManagerChartVersion}}
+    namespace: cert-manager
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+    serviceAccountAnnotations: {}
+    azureVaultURL: ""
+  keda:
+    enabled: false
+  # Civo's K3s profile supplies metrics-server.
+  metricsServer:
+    enabled: false

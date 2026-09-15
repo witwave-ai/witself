@@ -242,7 +242,7 @@ func (s *Store) exportAccount(
 		return ErrAccountNotExportable
 	}
 	if !readOnlySnapshot {
-		if err := expireAccountVaultKeyEnrollmentsTx(
+		if err := s.expireAccountVaultKeyEnrollmentsTx(
 			ctx, tx, accountID,
 		); err != nil {
 			return fmt.Errorf("expire vault key enrollments before export: %w", err)
@@ -336,7 +336,7 @@ func (s *Store) exportAccount(
 	// request and cancel its active fences before the snapshot streams, so an
 	// archive can never carry time-expired authority as state=open.
 	if !readOnlySnapshot {
-		if _, _, err := drainMessageRequestReconciliationTx(
+		if _, _, err := s.drainMessageRequestReconciliationTx(
 			ctx, tx, accountID,
 		); err != nil {
 			return fmt.Errorf("expire message requests before export: %w", err)

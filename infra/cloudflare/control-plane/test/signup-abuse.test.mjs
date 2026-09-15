@@ -435,3 +435,44 @@ test("an ambiguous counter response replays its marker without re-verifying Turn
   assert.equal(namespace.counterCalls[1].body.count, 1);
   assert.equal(namespace.counterCalls[1].scope, namespace.counterCalls[0].scope);
 });
+
+test("public re-consent uses the existing limiter and never forwards malformed or internal authority input", async () => {
+  const path = "/v1/account-signups/refused-attempt:reconsent";
+  const refusal = { schema_version: "witself.signup-legal-refusal.v1", code: "signup_legal_stale",
+    error: "signup legal acceptance is out of date", provision_id: "refused-attempt", request_fingerprint: "a".repeat(64),
+    consent_terms_version: "v1", consent_privacy_version: "v1", refusal_id: "refusal-fence", refusal_revision: 1,
+    required_terms_version: "v2", required_privacy_version: "v2" };
+  const input = { schema_version: "witself.signup-reconsent.v1", refusal, transition_id: "transition",
+    candidate: { provision_id: "candidate", consent_terms_version: "v2", consent_privacy_version: "v2" },
+    email: "person@example.test", invite: INVITE, display_name: "Person" };
+  const request = (body = JSON.stringify(input), requestPath = path) => new Request(ORIGIN + requestPath, {
+    method: "POST", body, headers: { "CF-Connecting-IP": SOURCE_IP, "Content-Type": "application/json" },
+  });
+  let calls = 0;
+  const allowed = limiter(true);
+  const env = { SIGNUP_IP_LIMITER: allowed, ACCOUNT_SIGNUP: {
+    idFromName: (name) => { assert.equal(name, "provision:refused-attempt"); return name; },
+    get: () => ({ fetch: async (r) => {
+      calls++; assert.equal(r.url, "https://account-signup.internal/legal/reconsent");
+      assert.deepEqual(await r.json(), input);
+      return Response.json({ schema_version: "witself.signup-reconsent-ack.v1", status: "registered",
+        refusal, transition_id: input.transition_id, candidate: input.candidate, candidate_request_fingerprint: "b".repeat(64) });
+    } }),
+  } };
+  const response = await run(request(), env);
+  assert.equal(response.status, 200); assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(calls, 1); assert.deepEqual(allowed.calls, [{ key: SOURCE_IP }]);
+  for (const body of [JSON.stringify({ ...input, turnstile_verified: true }), JSON.stringify({ ...input, legal_abuse: {} }),
+    JSON.stringify(input).replace('"transition_id":"transition"', '"transition_id":"transition","transition_id":"other"'),
+    JSON.stringify(input) + " {}", " ".repeat(65537)]) {
+    const rejected = await run(request(body), env);
+    assert.equal(rejected.status, 400); assert.equal(rejected.headers.get("Cache-Control"), "private, no-store");
+  }
+  assert.equal((await run(request(JSON.stringify(input), "/v1/account-signups/wrong:reconsent"), env)).status, 400);
+  assert.equal(calls, 1);
+  for (const limiterName of ["SIGNUP_IP_LIMITER", "PUBLIC_IP_LIMITER"]) {
+    const denied = await run(request(), { ...env, [limiterName]: limiter(false) });
+    assert.equal(denied.status, 429); assert.equal(denied.headers.get("Cache-Control"), "private, no-store");
+  }
+  assert.equal(calls, 1);
+});

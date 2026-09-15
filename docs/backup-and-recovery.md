@@ -159,6 +159,14 @@ Freeze moves while any possible destination is older than schema 91. A physical
 whole-database restore does preserve the singleton and triggers; verify its
 three measured counters against the five counted tables before reopening mail.
 
+Migration `0095_add_support_ticket_admission_index.sql` participates as an
+index-only schema change: it adds `support_tickets_by_account_opened` on
+`support_tickets (account_id, opened_at DESC)` for the admission window. It
+adds no account archive stream or row transformation; logical restore rebuilds
+the index from imported tickets, and Down removes only the index. The release
+must follow the schema-change backup and migration procedure and cannot use a
+`--no-schema-change` attestation.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -408,6 +416,14 @@ operator credential. There is no customer `witself import` command. A separate
 archive from the paired evacuation-export route is consumed by the
 provision-token-authorized operator import for account moves; the customer
 `purpose=self` artifact is not accepted there.
+
+Usage archive recovery preserves the historical dimension syntax
+`^[a-z][a-z0-9_]{0,63}$` for both events and hourly/daily rollups, including
+dimensions such as `legacy_custom` that are outside the current ingestion
+vocabulary. Import validates syntax, scope, and matching rollups without
+renaming or discarding those dimensions; later exports preserve them unchanged.
+The closed dimension vocabulary applies to new usage-event ingestion, so older
+account archives remain restorable and portable without a data migration.
 
 **Sealed-plane carve-out.** The whole-account archive includes portable
 client-encrypted secret/TOTP state, public AVK bindings, and value-free lifecycle
@@ -706,6 +722,27 @@ A full disaster-recovery exercise that commits data must therefore use a
 disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine
 drill endpoint into an account-import escape hatch.
+
+The [avatar live acceptance record](agent-avatars.md#live-acceptance-record)
+combines the shipped `witself export` self archive with a separate committed
+backup generation and this rollback-only validation path. It checks a synthetic
+agent's activated, rolled-back, rejected, reset, and compacted avatar lineage.
+The result can attest **validated by rollback-only restore drill**; it cannot
+claim a committed restore of the self export. There is no customer `witself
+import` command, and an active account's non-backup archive is rejected by the
+store's committed import path.
+
+That harness's manual `POST /v1/backups:run` writes another R2 object and is a
+billing-bearing operation requiring operator authorization before the live run.
+An operator may instead wait for the next scheduled generation taken after the
+synthetic lifecycle completes and run the drill against that exact generation.
+A generation predating the synthetic agent cannot prove its avatar lineage.
+This scheduled alternative uses the separate operator procedure; the harness
+itself requests a new backup. It fences the returned minute-slot ID against a
+post-lifecycle observation of the durable current job and catalog, refuses
+explicit existing-object recovery, and requires the matching committed current
+job before drilling. A later `exported_at` alone cannot prove a fresh database
+snapshot.
 
 ### Realm email alias authority recovery
 

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 type customDomainEmailFixture struct {
@@ -144,10 +144,7 @@ func (f customDomainEmailFixture) ingest(
 }
 
 func TestAgentEmailCustomDomainProjectionDeliveryAndFencesPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	f := newCustomDomainEmailFixture(t, dsn, "projection")
 	first, err := f.store.ApplyAgentEmailCustomDomainRoute(ctx, f.accountID, f.customInput)
@@ -331,10 +328,7 @@ func TestAgentEmailCustomDomainProjectionDeliveryAndFencesPostgres(t *testing.T)
 }
 
 func TestAgentEmailRouteNamespaceRejectsCrossTableCollisionsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 
 	t.Run("managed alias already owns namespace", func(t *testing.T) {
@@ -428,10 +422,7 @@ func TestAgentEmailRouteNamespaceRejectsCrossTableCollisionsPostgres(t *testing.
 }
 
 func TestAgentEmailRouteNamespaceFenceRejectsConflictingArchivePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	source := newCustomDomainEmailFixture(t, dsn, "namespace-archive-source")
 	if _, err := source.store.ApplyAgentEmailCustomDomainRoute(
@@ -486,10 +477,7 @@ func TestAgentEmailRouteNamespaceFenceRejectsConflictingArchivePostgres(t *testi
 func TestAgentEmailCustomDomainRequestIdentityFenceRejectsConflictingArchivePostgres(
 	t *testing.T,
 ) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	destination, _ := newMigrationTestStore(t, dsn)
 	if err := destination.Migrate(); err != nil {
@@ -557,10 +545,7 @@ func TestAgentEmailCustomDomainRequestIdentityFenceRejectsConflictingArchivePost
 }
 
 func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	f := newCustomDomainEmailFixture(t, dsn, "downgrade")
 	if _, err := f.store.ApplyAgentEmailCustomDomainRoute(ctx, f.accountID, f.customInput); err != nil {
@@ -655,10 +640,7 @@ func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing
 }
 
 func TestAgentEmailCustomDomainRouteMustRetireBeforeRealmClosePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	f := newCustomDomainEmailFixture(t, dsn, "realm-close")
 	if _, err := f.store.ApplyAgentEmailCustomDomainRoute(
@@ -720,10 +702,7 @@ func TestAgentEmailCustomDomainRouteMustRetireBeforeRealmClosePostgres(t *testin
 }
 
 func TestAgentEmailCustomDomainArchiveRoundTripAndEnvelopeValidationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	f := newCustomDomainEmailFixture(t, dsn, "archive")
 	destination, _ := newMigrationTestStore(t, dsn)

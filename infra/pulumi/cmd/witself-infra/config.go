@@ -10,6 +10,8 @@ package main
 // untouched flag never clobbers a configured value, and every
 // existing all-flags invocation keeps working with no config file at
 // all.
+// Deletion protection is inventory-only: cell entry > defaults > true,
+// with no command-line override.
 //
 // The file holds POINTERS, never secrets: profile names, subscription
 // and project IDs, token file PATHS. The loader hard-rejects anything
@@ -121,6 +123,7 @@ type cellEntry struct {
 
 	Channel                *string          `yaml:"channel,omitempty"`
 	Profile                *string          `yaml:"profile,omitempty"`
+	DeletionProtection     *bool            `yaml:"deletion_protection,omitempty"`
 	CIDR                   *string          `yaml:"cidr,omitempty"`
 	K8sVersion             *string          `yaml:"k8s_version,omitempty"`
 	DBVersion              *string          `yaml:"db_version,omitempty"`
@@ -145,9 +148,45 @@ type infraConfig struct {
 	Cells    map[string]cellEntry `yaml:"cells,omitempty"`
 }
 
+// deletionProtection resolves the inventory-only safety policy. An unrecorded
+// cell cannot inherit an unprotect default: the record is the audit trail.
+func (c *infraConfig) deletionProtection(cellName string) bool {
+	if c == nil {
+		return true
+	}
+	entry, ok := c.Cells[cellName]
+	if !ok {
+		return true
+	}
+	if entry.DeletionProtection != nil {
+		return *entry.DeletionProtection
+	}
+	if c.Defaults != nil && c.Defaults.DeletionProtection != nil {
+		return *c.Defaults.DeletionProtection
+	}
+	return true
+}
+
+// loadCellDeletionProtection preserves all-flags provisioning without an
+// inventory, while never silently ignoring an existing unreadable inventory.
+func loadCellDeletionProtection(cellName, configPath string) (bool, error) {
+	path, err := resolveConfigPath(configPath)
+	if err != nil {
+		return true, err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return true, nil
+	}
+	cfg, _, err := loadInfraConfig(path)
+	if err != nil {
+		return true, err
+	}
+	return cfg.deletionProtection(cellName), nil
+}
+
 // flagValues maps set fields onto their CLI flag names — the single
 // source of truth for config↔flag correspondence. Bools stringify for
-// flag.Set.
+// flag.Set. DeletionProtection deliberately has no flag mapping.
 func (e *cellEntry) flagValues() map[string]string {
 	if e == nil {
 		return nil

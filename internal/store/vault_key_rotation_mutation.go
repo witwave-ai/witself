@@ -67,7 +67,7 @@ func (s *Store) StartVaultKeyRotation(ctx context.Context, p Principal, in Start
 	// pending key epoch or snapshot. This makes the check race-free against
 	// Create/Approve/ConsumeVaultKeyEnrollment, which take the same lock and
 	// reject an open rotation.
-	if err := ensureNoActiveVaultKeyEnrollmentTx(ctx, tx, p); err != nil {
+	if err := s.ensureNoActiveVaultKeyEnrollmentTx(ctx, tx, p); err != nil {
 		return VaultKeyRotation{}, VaultKeyRotationReceipt{}, err
 	}
 
@@ -168,7 +168,7 @@ func (s *Store) StartVaultKeyRotation(ctx context.Context, p Principal, in Start
 	if err != nil {
 		return VaultKeyRotation{}, VaultKeyRotationReceipt{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultKeyRotationStarted,
 		Metadata: map[string]any{
@@ -364,7 +364,7 @@ func (s *Store) StageVaultKeyRotation(ctx context.Context, p Principal, rotation
 		return VaultKeyRotation{}, VaultKeyRotationReceipt{}, err
 	}
 	if newlyStaged > 0 {
-		if err := logEventTx(ctx, tx, EventInput{
+		if err := s.logEventTx(ctx, tx, EventInput{
 			AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 			Verb: VerbVaultKeyRotationStaged,
 			Metadata: map[string]any{
@@ -593,7 +593,7 @@ func (s *Store) CommitVaultKeyRotation(ctx context.Context, p Principal, rotatio
 	if err != nil {
 		return VaultKeyRotation{}, VaultKeyRotationReceipt{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb:     VerbVaultKeyRotationCommitted,
 		Metadata: vaultKeyRotationCommitEventMetadata(p, rotation, in.RecoveryDisposition),
@@ -739,7 +739,7 @@ func (s *Store) CancelVaultKeyRotation(ctx context.Context, p Principal, rotatio
 	if err != nil {
 		return VaultKeyRotation{}, VaultKeyRotationReceipt{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{
+	if err := s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultKeyRotationCancelled,
 		Metadata: map[string]any{
@@ -778,8 +778,8 @@ func ensureNoOpenVaultKeyRotationTx(ctx context.Context, tx pgx.Tx, p Principal)
 	return nil
 }
 
-func ensureNoActiveVaultKeyEnrollmentTx(ctx context.Context, tx pgx.Tx, p Principal) error {
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+func (s *Store) ensureNoActiveVaultKeyEnrollmentTx(ctx context.Context, tx pgx.Tx, p Principal) error {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return err
 	}
 	var exists bool

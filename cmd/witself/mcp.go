@@ -1058,11 +1058,11 @@ type mcpMessage struct {
 
 func mcpCmd(args []string) int {
 	if commandHelpRequested(args) {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot|dsh [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot|dsh [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
 		return 2
 	}
 	command, err := parseMCPServeCommandOptions(args[1:], os.Stderr)
@@ -1127,6 +1127,12 @@ func mcpCmd(args []string) int {
 			return 1
 		}
 	}
+	if cfg.Runtime == transcriptcapture.RuntimeDSH {
+		if err := validateDSHServeTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
+	}
 	if expected := strings.TrimSpace(command.Account); expected != "" && expected != cfg.Account {
 		fmt.Fprintf(os.Stderr, "witself mcp: account %q does not match installed account %q\n", expected, cfg.Account)
 		return 1
@@ -1183,8 +1189,8 @@ type mcpServeCommandOptions struct {
 func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeCommandOptions, error) {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(output)
-	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
-	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot")
+	configureCommandUsage(fs, "usage: witself mcp serve --runtime codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot|dsh [--profile full|read-only|curator-preview|curator-apply] [--no-value-tools] [--token-file FILE]")
+	runtime := fs.String("runtime", "", "installed integration: codex|claude-code|grok-build|cursor|openclaw|antigravity|copilot|dsh")
 	account := fs.String("account", "", "installed account name")
 	realm := fs.String("realm", "", "installed realm name")
 	agent := fs.String("agent", "", "installed agent name")
@@ -2381,6 +2387,8 @@ func mcpInstructionsForMode(runtimeName, selfTool, messageListTool string, readO
 		instructions = cursorMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeCopilot:
 		instructions = copilotMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+	case transcriptcapture.RuntimeDSH:
+		instructions = dshMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	default:
 		instructions = factCapacityMCPRoutingInstructions + "\n\n" + instructions
 	}

@@ -2,17 +2,15 @@ package store
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailOutboundMigrationDowngradePostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 
 	t.Run("operational rate buckets alone can downgrade", func(t *testing.T) {
 		ctx := context.Background()
@@ -54,7 +52,6 @@ func TestAgentEmailOutboundMigrationDowngradePostgres(t *testing.T) {
 		{name: "provider event graph", checkTable: "agent_email_outbound_provider_events"},
 		{name: "recipient suppression", checkTable: "agent_email_outbound_recipient_suppressions"},
 	} {
-		test := test
 		t.Run(test.name+" refuses downgrade", func(t *testing.T) {
 			ctx := context.Background()
 			st, dsn := newMigrationTestStore(t, baseDSN)

@@ -5,16 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestMemoryCurationCapBacklogQueuesFollowUpPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	for _, sourceKind := range []string{
 		MemoryCurationSourceMemory,
 		MemoryCurationSourceEvidence,
@@ -110,10 +108,7 @@ func TestMemoryCurationCapBacklogQueuesFollowUpPostgres(t *testing.T) {
 }
 
 func TestMemoryCurationTranscriptRunFreezesExistingMemoryContextPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	existing := captureHardeningMemory(ctx, t, st, p,
 		"The client chose PostgreSQL as the portable memory source of truth.",
@@ -238,10 +233,7 @@ func TestMemoryCurationTranscriptRunFreezesExistingMemoryContextPostgres(t *test
 }
 
 func TestMemoryCurationTranscriptContextRespectsMemoryStatesPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	active := captureHardeningMemory(ctx, t, st, p,
 		"Scopequasar belongs to the active comparison head.", "context-state-active")
@@ -331,10 +323,7 @@ func TestMemoryCurationTranscriptContextRespectsMemoryStatesPostgres(t *testing.
 }
 
 func TestMemoryCurationTranscriptContextRespectsOwnerAndSensitivityPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	public := captureHardeningMemory(ctx, t, st, p,
 		"Privacyscope identifies the public same-owner memory.", "context-scope-public")
@@ -437,10 +426,7 @@ func TestMemoryCurationTranscriptContextRespectsOwnerAndSensitivityPostgres(t *t
 }
 
 func TestMemoryCurationTranscriptBudgetIsSharedAcrossPendingStreamsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	first, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
 		CreateTranscriptInput{ExternalID: "fair-transcript-first"})
@@ -543,10 +529,7 @@ func TestMemoryCurationTranscriptBudgetIsSharedAcrossPendingStreamsPostgres(t *t
 }
 
 func TestMemoryCurationAutomaticRequestIsolationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	if _, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
 		CoalescingKey: automaticMemoryCurationCoalescingKey,
@@ -614,10 +597,7 @@ func TestMemoryCurationAutomaticRequestIsolationPostgres(t *testing.T) {
 }
 
 func TestMemoryCurationRollbackReplayDoesNotAdvanceCursorsPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, st, p := newMemoryCurationHardeningStore(t, dsn)
 	source := captureHardeningMemory(ctx, t, st, p, "source retained for replay", "replay-source")
 	requested, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
@@ -726,10 +706,7 @@ func TestMemoryCurationRollbackReplayDoesNotAdvanceCursorsPostgres(t *testing.T)
 }
 
 func TestMemoryCurationApplyRollbackHardeningPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	t.Run("tampered applied result cannot target unrelated resources", func(t *testing.T) {
 		ctx, st, p, _, started, _, applied, createdID :=
 			prepareHardeningAppliedCreate(t, dsn, "provenance")

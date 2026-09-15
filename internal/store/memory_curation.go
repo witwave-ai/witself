@@ -619,7 +619,7 @@ func prepareMemoryCurationMutationTx(ctx context.Context, tx pgx.Tx, p Principal
 	return nil
 }
 
-func logMemoryCurationEventTx(ctx context.Context, tx pgx.Tx, p Principal, verb, requestID, runID string, requestGeneration, fence int64, state string) error {
+func (s *Store) logMemoryCurationEventTx(ctx context.Context, tx pgx.Tx, p Principal, verb, requestID, runID string, requestGeneration, fence int64, state string) error {
 	metadata := map[string]any{
 		"request_id": requestID, "request_generation": strconv.FormatInt(requestGeneration, 10),
 		"state": state,
@@ -630,7 +630,7 @@ func logMemoryCurationEventTx(ctx context.Context, tx pgx.Tx, p Principal, verb,
 	if fence > 0 {
 		metadata["fencing_generation"] = strconv.FormatInt(fence, 10)
 	}
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: verb, Metadata: metadata,
 	})
@@ -776,7 +776,7 @@ func (s *Store) RequestCuration(ctx context.Context, p Principal, in RequestMemo
 	if err != nil {
 		return RequestMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRequested,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationRequested,
 		request.ID, "", nextGeneration, 0, request.State); err != nil {
 		return RequestMemoryCurationResult{}, err
 	}
@@ -786,7 +786,7 @@ func (s *Store) RequestCuration(ctx context.Context, p Principal, in RequestMemo
 	return RequestMemoryCurationResult{Request: request, Receipt: receipt}, nil
 }
 
-func interruptExpiredCurationRunTx(ctx context.Context, tx pgx.Tx, p Principal, lane *MemoryCurationLane) (bool, error) {
+func (s *Store) interruptExpiredCurationRunTx(ctx context.Context, tx pgx.Tx, p Principal, lane *MemoryCurationLane) (bool, error) {
 	if lane.ActiveRunID == "" {
 		return false, nil
 	}
@@ -855,7 +855,7 @@ func interruptExpiredCurationRunTx(ctx context.Context, tx pgx.Tx, p Principal, 
 		lane.FencingGeneration-1, lane.FencingGeneration); err != nil {
 		return false, fmt.Errorf("fence expired curation run: %w", err)
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationInterrupted,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationInterrupted,
 		request.ID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		MemoryCurationRunInterrupted); err != nil {
 		return false, err
@@ -1511,7 +1511,7 @@ func (s *Store) StartCuration(ctx context.Context, p Principal, in StartMemoryCu
 			return StartMemoryCurationResult{}, err
 		}
 	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	expired, err := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 	if err != nil {
 		return StartMemoryCurationResult{}, err
 	}
@@ -1662,7 +1662,7 @@ func (s *Store) StartCuration(ctx context.Context, p Principal, in StartMemoryCu
 	if err != nil {
 		return StartMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationStarted,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationStarted,
 		request.ID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		run.State); err != nil {
 		return StartMemoryCurationResult{}, err
@@ -1773,7 +1773,7 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 	// constrained to carry a non-null lease and exact replays must return the
 	// same value-free coordinate.
 	expiredLease := run.LeaseExpiresAt
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	expired, err := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 	if err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
@@ -1802,7 +1802,7 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 		return RenewMemoryCurationResult{}, fmt.Errorf("renew curation lease: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		expired, interruptErr := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+		expired, interruptErr := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 		if interruptErr != nil {
 			return RenewMemoryCurationResult{}, interruptErr
 		}
@@ -1890,7 +1890,7 @@ func (s *Store) finishCuration(ctx context.Context, p Principal, runID string, i
 	if err != nil {
 		return FinishMemoryCurationResult{}, err
 	}
-	expired, err := interruptExpiredCurationRunTx(ctx, tx, p, &lane)
+	expired, err := s.interruptExpiredCurationRunTx(ctx, tx, p, &lane)
 	if err != nil {
 		return FinishMemoryCurationResult{}, err
 	}
@@ -2007,7 +2007,7 @@ func (s *Store) finishCuration(ctx context.Context, p Principal, runID string, i
 	if err != nil {
 		return FinishMemoryCurationResult{}, err
 	}
-	if err := logMemoryCurationEventTx(ctx, tx, p, verb, request.ID, run.ID,
+	if err := s.logMemoryCurationEventTx(ctx, tx, p, verb, request.ID, run.ID,
 		run.RequestGeneration, run.FencingGeneration, run.State); err != nil {
 		return FinishMemoryCurationResult{}, err
 	}

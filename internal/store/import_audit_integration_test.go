@@ -6,18 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestImportAccountAuditCrossCheckPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
@@ -284,10 +281,7 @@ func assertImportedAuditAccountState(
 // from the archive the scan already compared), so without this test a refactor
 // dropping the Tx re-check would leave the suite green.
 func TestValidateImportedAccountAuditConsistencyTxPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)

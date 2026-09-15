@@ -1,0 +1,215 @@
+{
+  "schema": "witself.memory-relevance-corpus.v1",
+  "memories": [
+    {
+      "label": "aster_seedling_schedule",
+      "content": "Aster greenhouse seedling watering takes place at dawn on Monday, Wednesday, and Friday."
+    },
+    {
+      "label": "aster_seedling_dry_check",
+      "content": "Aster greenhouse seedling watering also requires a dusk check; add water only when the growing medium is dry."
+    },
+    {
+      "label": "aster_herb_schedule",
+      "content": "Aster greenhouse herb watering takes place at noon every day."
+    },
+    {
+      "label": "birch_seedling_schedule",
+      "content": "Birch greenhouse seedling watering takes place at dawn every day."
+    },
+    {
+      "label": "birch_puncture_patch",
+      "content": "Birch bicycle puncture repair instructions: remove the tube, locate the hole, and apply a patch."
+    },
+    {
+      "label": "birch_puncture_replace",
+      "content": "Birch bicycle puncture repair instructions: replace the tube when its tear is too large for a patch."
+    },
+    {
+      "label": "birch_repair_poster",
+      "content": "The Birch bicycle puncture repair instructions are printed on a poster for the Saturday class."
+    },
+    {
+      "label": "birch_chain_repair",
+      "content": "Birch bicycle chain repair uses a spare connecting link."
+    },
+    {
+      "label": "cedar_reservation_method",
+      "content": "The Cedar workshop reservation procedure requires callers to give the visit date to the front desk."
+    },
+    {
+      "label": "cedar_reservation_hold",
+      "content": "The Cedar workshop reservation procedure holds a booking for ten minutes after its booked start time."
+    },
+    {
+      "label": "cedar_reservation_form",
+      "content": "The form for the Cedar workshop reservation procedure has blank fields labelled room capacity and contact details."
+    },
+    {
+      "label": "vale_reservation_method",
+      "content": "The Vale workshop reservation procedure requires visitors to sign the book at the entrance counter."
+    },
+    {
+      "label": "dune_dry_meeting_location",
+      "content": "The Dune reading club meeting location is the courtyard on dry days."
+    },
+    {
+      "label": "dune_rain_meeting_location",
+      "content": "The Dune reading club meeting location moves to the north hall when rain is forecast."
+    },
+    {
+      "label": "dune_minutes_cabinet",
+      "content": "The Dune reading club meeting minutes record the location of the west storage cabinet."
+    },
+    {
+      "label": "vale_meeting_location",
+      "content": "The Vale reading club meeting location is the north hall every week."
+    },
+    {
+      "label": "elm_catalog_approval",
+      "content": "Elm museum artifact catalog update requirements include curator approval before publication."
+    },
+    {
+      "label": "elm_catalog_fields",
+      "content": "Elm museum artifact catalog update requirements include an accession number and a shelf code for every record."
+    },
+    {
+      "label": "elm_catalog_training",
+      "content": "The Elm museum training session on artifact catalog update requirements starts at noon in the east room."
+    },
+    {
+      "label": "elm_artifact_storage",
+      "content": "Elm museum artifact storage uses acid-free boxes."
+    },
+    {
+      "label": "fern_bread_base",
+      "content": "Fern kitchen bread ingredients include flour and water."
+    },
+    {
+      "label": "fern_bread_additions",
+      "content": "Fern kitchen bread ingredients also include yeast and salt."
+    },
+    {
+      "label": "fern_oven_layout",
+      "content": "The Fern kitchen bread oven has a temperature dial and an ingredients chart beside its door."
+    },
+    {
+      "label": "fern_cake_ingredients",
+      "content": "Fern kitchen cake ingredients include sugar and butter."
+    }
+  ],
+  "queries": [
+    {
+      "name": "aster_seedling_watering",
+      "query": "aster seedling watering",
+      "top_k": 5,
+      "relevant_labels": [
+        "aster_seedling_schedule",
+        "aster_seedling_dry_check"
+      ],
+      "rationale": "Relevant memories supply the Aster seedling watering schedule and its dry-medium condition; either is a useful partial answer. aster_herb_schedule concerns different plants, and birch_seedling_schedule concerns a different greenhouse. Other labels supply no Aster seedling watering guidance."
+    },
+    {
+      "name": "aster_herb_watering",
+      "query": "aster herb watering",
+      "top_k": 1,
+      "relevant_labels": [
+        "aster_herb_schedule"
+      ],
+      "rationale": "Only aster_herb_schedule supplies watering guidance for Aster herb pots. The Aster seedling memories concern different plants; the Birch schedule concerns another greenhouse. Partial word overlap does not make those instructions applicable."
+    },
+    {
+      "name": "birch_puncture_instructions",
+      "query": "birch bicycle puncture repair instructions",
+      "top_k": 5,
+      "relevant_labels": [
+        "birch_puncture_patch",
+        "birch_puncture_replace"
+      ],
+      "rationale": "Both memories supply an actual puncture repair action, including the conditional replacement alternative. birch_repair_poster merely locates a document and names a class; it supplies no repair action. birch_chain_repair concerns a different bicycle component."
+    },
+    {
+      "name": "birch_puncture_synonyms",
+      "query": "birch punctured tyre fix",
+      "top_k": 3,
+      "relevant_labels": [
+        "birch_puncture_patch",
+        "birch_puncture_replace"
+      ],
+      "rationale": "This asks for the same puncture repair guidance using punctured rather than puncture, British tyre spelling, and fix rather than repair. The same two action-bearing memories remain relevant regardless of lexical matching. The poster and chain repair remain irrelevant for the same reasons as the instructions query."
+    },
+    {
+      "name": "cedar_reservation_procedure",
+      "query": "cedar reservation procedure",
+      "top_k": 5,
+      "relevant_labels": [
+        "cedar_reservation_method",
+        "cedar_reservation_hold"
+      ],
+      "rationale": "Both memories state an actual Cedar reservation procedure or rule: supplying the date to the desk and the ten-minute hold. cedar_reservation_form describes empty form fields, not a reservation action or hold rule. vale_reservation_method supplies another workshop policy."
+    },
+    {
+      "name": "cedar_capacity_no_answer",
+      "query": "cedar room capacity",
+      "top_k": 3,
+      "relevant_labels": [],
+      "rationale": "The requested room capacity is a number or explicit occupancy limit. cedar_reservation_form mentions a blank field labelled room capacity but supplies no value. No other memory states Cedar room capacity. A field name, contact detail or booking hold duration is not an occupancy answer."
+    },
+    {
+      "name": "dune_meeting_location",
+      "query": "dune reading club meeting location",
+      "top_k": 5,
+      "relevant_labels": [
+        "dune_dry_meeting_location",
+        "dune_rain_meeting_location"
+      ],
+      "rationale": "Both weather-conditional meeting venues answer this unqualified location query. dune_minutes_cabinet instead gives the location of a storage cabinet recorded in minutes, not the meeting venue. vale_meeting_location concerns another club. No priority is assigned between the two relevant weather conditions."
+    },
+    {
+      "name": "dune_rain_location",
+      "query": "dune reading club rain location",
+      "top_k": 1,
+      "relevant_labels": [
+        "dune_rain_meeting_location"
+      ],
+      "rationale": "Only dune_rain_meeting_location supplies the venue under the requested rain condition. The dry-day courtyard rule does not supply the rainy-day venue; minutes storage and the Vale club do not answer this query."
+    },
+    {
+      "name": "elm_catalog_requirements",
+      "query": "elm artifact catalog update requirements",
+      "top_k": 5,
+      "relevant_labels": [
+        "elm_catalog_approval",
+        "elm_catalog_fields"
+      ],
+      "rationale": "The two relevant memories supply actual update requirements: curator approval and required record fields. elm_catalog_training states a session time/place without any requirement, and elm_artifact_storage concerns physical storage rather than catalog updates."
+    },
+    {
+      "name": "elm_catalog_synonyms",
+      "query": "elm artifact catalogue revision rules",
+      "top_k": 3,
+      "relevant_labels": [
+        "elm_catalog_approval",
+        "elm_catalog_fields"
+      ],
+      "rationale": "Catalogue revision rules asks for the same artifact catalog update requirements using a spelling variant and synonyms. Curator approval and required fields remain relevant even if the current lexical path misses them. Training logistics and physical storage remain irrelevant."
+    },
+    {
+      "name": "fern_bread_ingredients",
+      "query": "fern bread ingredients",
+      "top_k": 5,
+      "relevant_labels": [
+        "fern_bread_base",
+        "fern_bread_additions"
+      ],
+      "rationale": "The two memories each provide part of the bread ingredient list. fern_oven_layout only says an ingredients chart exists and gives appliance layout; it names no ingredient. fern_cake_ingredients supplies a different recipe. Each actual bread-ingredient subset is relevant rather than requiring the entire list in one memory."
+    },
+    {
+      "name": "fern_temperature_no_answer",
+      "query": "fern bread oven temperature",
+      "top_k": 3,
+      "relevant_labels": [],
+      "rationale": "The requested oven temperature is a temperature value or setting for Fern bread. fern_oven_layout mentions a temperature dial but gives no temperature or setting. The ingredient records and cake recipe supply none either. A dial location does not answer a temperature question."
+    }
+  ]
+}

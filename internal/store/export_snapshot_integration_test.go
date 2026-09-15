@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 // TestExportAccountUsesOnePostgresSnapshot is opt-in because it needs a
@@ -21,10 +21,7 @@ import (
 // another session. The change must remain blocked until the archive completes,
 // and every streamed table must retain the pre-change view.
 func TestExportAccountUsesOnePostgresSnapshot(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, err := Open(ctx, dsn)
 	if err != nil {

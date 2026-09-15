@@ -32,6 +32,36 @@ groups:
         annotations:
           summary: Witself server responses exceed the bounded 5xx ratio.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestErrorRatioHigh
+        expr: (sum(rate(witself_self_digest_reads_total{result="error"}[5m])) / clamp_min(sum(rate(witself_self_digest_reads_total[5m])), 0.001)) > 0.05 and sum(rate(witself_self_digest_reads_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Self-digest reads exceed the bounded error ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(witself_self_digest_read_duration_seconds_bucket[5m]))) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Self-digest read p95 latency exceeds 1.5 seconds.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSelfDigestElisionRatioHigh
+        expr: (sum(rate(witself_self_digest_reads_total{elided="true"}[5m])) / sum(rate(witself_self_digest_reads_total[5m]))) >= 0.5
+        for: 30m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: At least half of self-digest reads elide entries.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
       - alert: WitselfWorkerJobStopped
         expr: max by (job) (witself_worker_job_running) < 1
         for: 5m
@@ -217,3 +247,118 @@ groups:
           summary: Clients are reporting a sustained avatar generation-failure rate.
           description: Successful avatar generation-failure reports have exceeded 0.003 per second for 10 minutes; inspect renderer compatibility, proposal validation, and client failure reason classes.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: witself-collectors
+    interval: 30s
+    rules:
+      - alert: WitselfIdentityCapacityMetricsUnavailable
+        expr: absent(witself_identity_capacity_metrics_up) or max(witself_identity_capacity_metrics_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: identity
+          witself_alert: "true"
+        annotations:
+          summary: Identity-capacity metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfIdentityCapacityAtLimit
+        expr: max(witself_identity_capacity_accounts_at_limit) > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: identity
+          witself_alert: "true"
+        annotations:
+          summary: Accounts are blocked from creating identities by a finite capacity limit.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAuditAppendMetricsUnavailable
+        expr: absent(witself_audit_append_metrics_up{container="witself-server"}) or absent(witself_audit_append_metrics_up{container="witself-worker"}) or min(witself_audit_append_metrics_up) < 1 or count((witself_up or witself_worker_up) unless on (namespace, pod, container) witself_audit_append_metrics_up) > 0
+        for: 3m
+        labels:
+          severity: critical
+          service: audit
+          witself_alert: "true"
+        annotations:
+          summary: Audit-append metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAuditAppendFailures
+        # A new process can fail before its first scrape. Include its nonzero
+        # counters until that same series has a ten-minute-old observation;
+        # compare before summing so another replica cannot hide the new one.
+        expr: >-
+          sum(increase(witself_audit_append_total{result="error",reason="error"}[10m])) > 0
+          or sum(increase(witself_audit_append_tx_failures_total[10m])) > 0
+          or sum(witself_audit_append_total{result="error",reason="error"}
+            unless witself_audit_append_total{result="error",reason="error"} offset 10m) > 0
+          or sum(witself_audit_append_tx_failures_total
+            unless witself_audit_append_tx_failures_total offset 10m) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: audit
+          witself_alert: "true"
+        annotations:
+          summary: Audit appends report a database or unexpected failure.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: witself-sealed-plane
+    interval: 30s
+    rules:
+      - alert: WitselfSealedPlanePostureMetricsUnavailable
+        expr: absent(witself_sealed_plane_posture_metrics_up) or max(witself_sealed_plane_posture_metrics_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Sealed-plane posture metrics are unavailable.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfSecretMaterialDeliveryErrorRatio
+        expr: (sum(rate(witself_secret_material_deliveries_total{result="error"}[10m])) / clamp_min(sum(rate(witself_secret_material_deliveries_total[10m])), 0.001)) > 0.05 and sum(rate(witself_secret_material_deliveries_total[10m])) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Secret material deliveries exceed the bounded server-error ratio.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfVaultRotationFenceConflicts
+        # Sum all reset-adjusted increases with only the new-series count not
+        # already included in those increases, so old and new replicas share a
+        # budget without double counting or losing observed conflicts on reset.
+        # Fall back to the current count when increase lacks a second sample.
+        expr: >-
+          (sum(increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m])) or vector(0))
+          + (sum((clamp_min(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}
+            - increase(witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"}[15m]), 0)
+            or witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"})
+            unless witself_vault_lifecycle_operations_total{flow="rotation",result="conflict"} offset 15m) or vector(0)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Vault key rotation conflicts exceed the provisional fence-conflict budget.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfVaultRotationStuckOpen
+        expr: max(witself_vault_oldest_open_rotation_seconds) > 86400
+        for: 15m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: A vault key rotation has remained open for over 24 hours.
+          runbook: docs/runbooks.md#sealed-plane-alerts
+      - alert: WitselfSecretMaterialDeliveryVolumeAnomaly
+        expr: sum(rate(witself_secret_material_deliveries_total[15m])) > 1 or max(witself_secret_material_max_agent_deliveries_15m) > 120
+        for: 15m
+        labels:
+          severity: warning
+          service: sealed-plane
+          witself_alert: "true"
+        annotations:
+          summary: Secret material delivery volume exceeds a provisional ceiling.
+          runbook: docs/runbooks.md#sealed-plane-alerts

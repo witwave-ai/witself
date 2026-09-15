@@ -1777,6 +1777,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if _, present := obj["plan_snapshot_hash"]; present && !hashPresent {
 			return badf("accounts row plan_snapshot_hash must be a string")
 		}
+		if policies, ok := obj["plan_policies"].(map[string]any); ok && !purged {
+			if _, governed := policies[plans.CollaborationEntitlementVersionPolicy]; governed {
+				_, applied, err := importedOptionalTimestamp(obj, "plan_applied_at")
+				if !revisionPresent || revision < 1 || !hashPresent || !applied || err != nil {
+					return badf("accounts row collaboration authority requires a fenced applied snapshot")
+				}
+			}
+		}
 		if revisionPresent != hashPresent {
 			return badf("accounts row plan snapshot revision and hash must be present together")
 		}
@@ -4360,6 +4368,14 @@ func (ic *importCtx) validateImportedMemoryEvidence(
 }
 
 func (ic *importCtx) validateUsageScope(obj map[string]any, badf func(string, ...any) error, table string) error {
+	// Recovery preserves dimensions accepted by earlier releases. Their write
+	// validator and usage-table CHECKs used ^[a-z][a-z0-9_]{0,63}$; keep that
+	// exact syntax here, while the closed vocabulary governs new ingestion.
+	// Unknown historical dimensions must survive import and later export.
+	dimension, err := requireStringField(obj, "dimension")
+	if err != nil || !usageDimensionPattern.MatchString(dimension) {
+		return badf("%s row has invalid usage dimension", table)
+	}
 	realmID, err := requireStringField(obj, "realm_id")
 	if err != nil || !ic.realms[realmID] {
 		return badf("%s row references realm %q not present in this archive", table, realmID)
@@ -6963,7 +6979,7 @@ func (s *Store) importAccount(
 	// cell. The state transition, active-fence cancellation, and value-free
 	// system audit share this import transaction and are exactly-once because
 	// only state=open rows can transition.
-	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
+	if _, _, err := s.drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("reconcile imported message requests: %w", err)
 	}
 
@@ -8425,7 +8441,7 @@ func validateImportedMemoryRetryShields(memoryID string, memory memoryImportScop
 
 // decodeImportRow preserves the exact spelling of every JSON number. In
 // particular, BIGINT counters such as change_seq must not pass through the
-// default interface{} float64 representation, which loses integer precision
+// default float64 representation for any values, which loses integer precision
 // above 2^53. Requiring EOF retains json.Unmarshal's one-value contract.
 func decodeImportRow(row []byte) (map[string]any, error) {
 	if err := rejectDuplicateJSONNames(row); err != nil {

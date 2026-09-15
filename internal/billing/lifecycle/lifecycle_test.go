@@ -442,6 +442,7 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 			"policies":{
 				"agent_email_entitlement_version":1,
 				"agent_email_retention_days":30,
+				"collaboration_entitlement_version":1,
 				"message_retention_days":30,
 				"messaging_entitlement_version":1,
 				"transcript_retention_days":30
@@ -1199,7 +1200,6 @@ func TestAccountMessagingAndRetentionOverridesAreIndependentOfBilling(t *testing
 func TestMessageRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	for _, days := range []int64{0, plans.MaxMessageRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetMessageRetentionOverride(
 			t.Context(), "acct_bad_message_retention", &days,
 			testAdminActor(), "invalid test",
@@ -1307,7 +1307,6 @@ func TestAgentEmailOverridesAreIndependentOfBilling(t *testing.T) {
 func TestAgentEmailRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	for _, days := range []int64{0, plans.MaxAgentEmailRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetAgentEmailRetentionOverride(
 			t.Context(), "acct_bad_email_retention", &days,
 			testAdminActor(), "invalid test",
@@ -1418,7 +1417,6 @@ func TestRetentionOverrideValidation(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()
 	for _, days := range []int64{0, plans.MaxTranscriptRetentionDays + 1} {
-		days := days
 		if _, err := h.m.SetTranscriptRetentionOverride(
 			ctx, "acct_bad", &days, testAdminActor(), "invalid test",
 		); !errors.Is(err, ErrAdminInput) {
@@ -2446,4 +2444,66 @@ type slowApplier struct {
 func (s *slowApplier) Apply(_ context.Context, accountID string, request ApplyRequest) (ApplyAck, error) {
 	s.onApply(accountID)
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func TestResolvedSnapshotCollaborationAdoptionIsExplicit(t *testing.T) {
+	h := newHarness(t, false)
+	// Free now carries the catalog collaboration marker so a paid-to-Free
+	// downgrade can apply cleanly; adoption is still explicit (the catalog
+	// declares it, the resolver never synthesises it). Messaging remains
+	// denied by grant so the override still ships through unchanged.
+	for _, tc := range []struct {
+		name     string
+		override *MessagingOverride
+		hash     string
+	}{
+		{"current free catalog", nil, "270875a0b903a5c558524029ed478d4f99b42684015119133338c685428185e3"},
+		{"existing messaging override", &MessagingOverride{Enabled: true}, "61d135382b51a19e35ca5c4cae877d17de5559a2e90a0794271bb19ffb15f684"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot, err := h.m.resolveSnapshot(Record{AccountID: "acc_collaboration", Entitled: plans.Free, MessagingOverride: tc.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] != plans.CollaborationEntitlementVersion {
+				t.Fatalf("Free must carry the catalog collaboration marker: %+v", snapshot.Policies)
+			}
+			if snapshot.Hash != tc.hash {
+				t.Fatalf("resolved hash=%s want=%s", snapshot.Hash, tc.hash)
+			}
+			if tc.override != nil && !slices.Contains(snapshot.Features, plans.MessagingFeature) {
+				t.Fatal("legacy messaging override was lost")
+			}
+		})
+	}
+	// Deliberate future catalog policy adoption supplies authority. Neither the
+	// issuer binary's age nor the plan name infers permission or adoption.
+	custom, err := plans.Parse([]byte(`{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true},{"id":"custom","available":true,"policies":{"collaboration_entitlement_version":1},"features":["messaging"]},{"id":"custom_enabled","available":true,"policies":{"collaboration_entitlement_version":1},"features":["messaging","collaboration"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = custom
+	for _, tc := range []struct {
+		plan    string
+		enabled bool
+	}{{"custom", false}, {"custom_enabled", true}} {
+		t.Run(tc.plan, func(t *testing.T) {
+			snapshot, err := h.m.resolveSnapshot(Record{AccountID: "acc_collaboration", Entitled: tc.plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] != 1 || snapshot.DefaultPolicies[plans.CollaborationEntitlementVersionPolicy] != 1 || slices.Contains(snapshot.Features, plans.CollaborationFeature) != tc.enabled {
+				t.Fatalf("explicitly governed snapshot=%+v", snapshot)
+			}
+			hash, err := plans.SnapshotHash(snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features)
+			if err != nil || hash != snapshot.Hash {
+				t.Fatal("governed snapshot hash lost authority")
+			}
+			snapshot.Policies[plans.CollaborationEntitlementVersionPolicy] = 2
+			original, _ := custom.Get(tc.plan)
+			if original.Policies[plans.CollaborationEntitlementVersionPolicy] != 1 {
+				t.Fatal("resolved policy aliases catalog state")
+			}
+		})
+	}
 }

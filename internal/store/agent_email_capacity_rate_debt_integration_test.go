@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -12,13 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAgentEmailCellStorageRefusalsPreserveRateDebtPostgres(t *testing.T) {
-	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if baseDSN == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	baseDSN := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
@@ -202,7 +199,6 @@ func TestAgentEmailCellStorageRefusalsPreserveRateDebtPostgres(t *testing.T) {
 		errs := make([]error, 2)
 		var group sync.WaitGroup
 		for index := range results {
-			index := index
 			group.Add(1)
 			go func() {
 				defer group.Done()

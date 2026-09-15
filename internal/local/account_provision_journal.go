@@ -9,16 +9,20 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/jsonstrict"
+	"github.com/witwave-ai/witself/internal/signuplegal"
 	"github.com/witwave-ai/witself/internal/token"
 )
 
 const (
-	accountProvisionJournalSchema   = "witself.account-provision-journal.v1"
-	maxAccountProvisionJournalBytes = 16 * 1024
-	maxAccountProvisionConfigBytes  = 4 * 1024 * 1024
-	accountProvisionJournalLockFile = ".lock"
+	accountProvisionJournalSchema      = "witself.account-provision-journal.v1"
+	accountProvisionLegalJournalSchema = "witself.account-provision-journal.v2"
+	maxAccountProvisionJournalBytes    = 16 * 1024
+	maxAccountProvisionConfigBytes     = 4 * 1024 * 1024
+	accountProvisionJournalLockFile    = ".lock"
 )
 
 var (
@@ -47,14 +51,18 @@ var (
 // request values retained are the non-sensitive accepted legal version labels.
 // AccountID and OperatorToken are added only after the one-shot bootstrap
 // exchange succeeds, so a crash cannot strand the consumed credential.
+// Refused v2 journals retain one bounded refusal and optional candidate; promotion
+// or a credential winner returns to v1 without carrying recursive lineage.
 type AccountProvisionJournal struct {
-	SchemaVersion          string `json:"schema_version"`
-	RequestFingerprint     string `json:"request_fingerprint"`
-	ProvisionID            string `json:"provision_id"`
-	AcceptedTermsVersion   string `json:"accepted_terms_version,omitempty"`
-	AcceptedPrivacyVersion string `json:"accepted_privacy_version,omitempty"`
-	AccountID              string `json:"account_id,omitempty"`
-	OperatorToken          string `json:"operator_token,omitempty"`
+	SchemaVersion          string               `json:"schema_version"`
+	RequestFingerprint     string               `json:"request_fingerprint"`
+	ProvisionID            string               `json:"provision_id"`
+	AcceptedTermsVersion   string               `json:"accepted_terms_version,omitempty"`
+	AcceptedPrivacyVersion string               `json:"accepted_privacy_version,omitempty"`
+	AccountID              string               `json:"account_id,omitempty"`
+	OperatorToken          string               `json:"operator_token,omitempty"`
+	LegalRefusal           *signuplegal.Refusal `json:"legal_refusal,omitempty"`
+	Reconsent              *signuplegal.Pending `json:"reconsent,omitempty"`
 }
 
 // AccountProvisionJournalPath returns the canonical private journal path for a
@@ -85,6 +93,13 @@ func BeginAccountProvisionJournal(
 func BeginAccountProvisionJournalWithConsent(
 	localName, requestFingerprint, acceptedTermsVersion,
 	acceptedPrivacyVersion string,
+) (AccountProvisionJournal, bool, error) {
+	return beginAccountProvisionJournalWithConsent(localName, requestFingerprint, acceptedTermsVersion, acceptedPrivacyVersion, syncAccountProvisionJournalDirectory)
+}
+
+func beginAccountProvisionJournalWithConsent(
+	localName, requestFingerprint, acceptedTermsVersion, acceptedPrivacyVersion string,
+	syncReplayDirectory func(string) error,
 ) (AccountProvisionJournal, bool, error) {
 	if !accountProvisionFingerprintPattern.MatchString(requestFingerprint) ||
 		!validAccountProvisionConsentVersions(
@@ -125,6 +140,13 @@ func BeginAccountProvisionJournalWithConsent(
 				clearAccountProvisionJournal(&current)
 				return AccountProvisionJournal{}, false, err
 			}
+		}
+		// A prior initial publication or reconsent promotion may have renamed
+		// successfully but failed its directory sync. A visible record alone
+		// cannot authorize the next remote mutation until replay sync succeeds.
+		if err := syncReplayDirectory(directory); err != nil {
+			clearAccountProvisionJournal(&current)
+			return AccountProvisionJournal{}, false, ErrAccountProvisionJournalStorage
 		}
 		return current, false, nil
 	}
@@ -213,12 +235,165 @@ func SaveAccountProvisionCredential(
 		}
 		return ErrAccountProvisionJournalConflict
 	}
+	expected := current
 	current.AccountID = accountID
 	current.OperatorToken = operatorToken
-	expected := current
-	expected.AccountID = ""
-	expected.OperatorToken = ""
+	// The original exact credential wins over a racing refusal or transition.
+	// A stale promotion must never replace this completed handoff.
+	current.SchemaVersion = accountProvisionJournalSchema
+	current.LegalRefusal = nil
+	current.Reconsent = nil
 	return publishAccountProvisionJournal(home, path, current, &expected)
+}
+
+// RecordAccountProvisionLegalRefusal retains a typed, exact not-admitted
+// receipt without changing the original request. An identical lost local
+// acknowledgement can replay; any different full-record owner conflicts.
+func RecordAccountProvisionLegalRefusal(
+	localName string, expected AccountProvisionJournal, refusal signuplegal.Refusal,
+) (AccountProvisionJournal, error) {
+	if !validAccountProvisionJournal(expected) || expected.AccountID != "" ||
+		refusal.ValidateFor(expected.ProvisionID, expected.AcceptedTermsVersion, expected.AcceptedPrivacyVersion) != nil {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
+	}
+	if expected.LegalRefusal != nil && *expected.LegalRefusal != refusal {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+	}
+	next := expected
+	next.SchemaVersion = accountProvisionLegalJournalSchema
+	next.LegalRefusal = &refusal
+	return updateAccountProvisionLegalJournal(localName, func(current AccountProvisionJournal) (AccountProvisionJournal, error) {
+		if equalAccountProvisionJournal(current, next) {
+			return current, nil
+		}
+		if !equalAccountProvisionJournal(current, expected) {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+		}
+		return next, nil
+	})
+}
+
+// BeginAccountProvisionReconsent durably elects one candidate before remote
+// registration. Retries with the same requested pair and local fingerprint
+// reuse the winner; they never choose another candidate after an ambiguous ack.
+func BeginAccountProvisionReconsent(
+	localName string, expected AccountProvisionJournal, newLocalFingerprint, terms, privacy string,
+) (AccountProvisionJournal, error) {
+	if !validAccountProvisionJournal(expected) || expected.LegalRefusal == nil ||
+		expected.AccountID != "" || !accountProvisionFingerprintPattern.MatchString(newLocalFingerprint) ||
+		terms == "" || !validAccountProvisionConsentVersions(terms, privacy) {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
+	}
+	return updateAccountProvisionLegalJournal(localName, func(current AccountProvisionJournal) (AccountProvisionJournal, error) {
+		// A concurrently persisted candidate is replayable only when the entire
+		// predecessor still matches and the requested local identity/pair agrees.
+		owner := current
+		owner.Reconsent = expected.Reconsent
+		if !equalAccountProvisionJournal(owner, expected) {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+		}
+		if current.Reconsent != nil {
+			if (expected.Reconsent != nil && *current.Reconsent != *expected.Reconsent) ||
+				current.Reconsent.RequestFingerprint != newLocalFingerprint ||
+				current.Reconsent.Candidate.ConsentTermsVersion != terms ||
+				current.Reconsent.Candidate.ConsentPrivacyVersion != privacy {
+				return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+			}
+			return current, nil
+		}
+		if expected.Reconsent != nil {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+		}
+		candidateID, err := id.New("prv")
+		if err != nil {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalStorage
+		}
+		transitionID, err := id.New("trn")
+		if err != nil {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalStorage
+		}
+		current.Reconsent = &signuplegal.Pending{
+			Candidate:    signuplegal.Candidate{ProvisionID: candidateID, ConsentTermsVersion: terms, ConsentPrivacyVersion: privacy},
+			TransitionID: transitionID, RequestFingerprint: newLocalFingerprint,
+		}
+		return current, nil
+	})
+}
+
+// PromoteAccountProvisionReconsent replaces the predecessor only after an
+// exact registered acknowledgement. The transport additionally binds the ack
+// to the actual request core; the journal never retains email/name/invite.
+func PromoteAccountProvisionReconsent(
+	localName string, expected AccountProvisionJournal, ack signuplegal.Ack,
+) (AccountProvisionJournal, error) {
+	if !validAccountProvisionJournal(expected) || expected.LegalRefusal == nil ||
+		expected.Reconsent == nil || expected.AccountID != "" || ack.Validate() != nil {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
+	}
+	pending := *expected.Reconsent
+	if ack.Refusal != *expected.LegalRefusal || ack.Candidate != pending.Candidate || ack.TransitionID != pending.TransitionID {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+	}
+	// The CP fingerprint is opaque and is not the local fingerprint.
+	next := AccountProvisionJournal{
+		SchemaVersion:          accountProvisionJournalSchema,
+		RequestFingerprint:     pending.RequestFingerprint,
+		ProvisionID:            pending.Candidate.ProvisionID,
+		AcceptedTermsVersion:   pending.Candidate.ConsentTermsVersion,
+		AcceptedPrivacyVersion: pending.Candidate.ConsentPrivacyVersion,
+	}
+	return updateAccountProvisionLegalJournal(localName, func(current AccountProvisionJournal) (AccountProvisionJournal, error) {
+		if equalAccountProvisionJournal(current, next) {
+			return current, nil
+		}
+		if !equalAccountProvisionJournal(current, expected) {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalConflict
+		}
+		return next, nil
+	})
+}
+
+func updateAccountProvisionLegalJournal(
+	localName string, next func(AccountProvisionJournal) (AccountProvisionJournal, error),
+) (AccountProvisionJournal, error) {
+	home, path, err := accountProvisionJournalLocation(localName)
+	if err != nil {
+		return AccountProvisionJournal{}, err
+	}
+	directory := filepath.Dir(path)
+	if err := validateAccountProvisionJournalDirectories(home, directory); err != nil {
+		return AccountProvisionJournal{}, classifyAccountProvisionJournalDirectoryError(err)
+	}
+	lock, err := acquireAccountProvisionJournalLock(home, directory)
+	if err != nil {
+		return AccountProvisionJournal{}, err
+	}
+	defer lock.release()
+	current, err := readAccountProvisionJournalLocked(home, path)
+	if err != nil {
+		return AccountProvisionJournal{}, err
+	}
+	defer clearAccountProvisionJournal(&current)
+	record, err := next(current)
+	if err != nil {
+		return AccountProvisionJournal{}, err
+	}
+	if !validAccountProvisionJournal(record) {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
+	}
+	if equalAccountProvisionJournal(record, current) {
+		// An earlier rename may have completed before its directory sync failed.
+		// Replay does not authorize remote work until that boundary is durable.
+		if err := syncAccountProvisionJournalDirectory(directory); err != nil {
+			return AccountProvisionJournal{}, ErrAccountProvisionJournalStorage
+		}
+		return record, nil
+	}
+	if err := publishAccountProvisionJournal(home, path, record, &current); err != nil {
+		clearAccountProvisionJournal(&record)
+		return AccountProvisionJournal{}, err
+	}
+	return record, nil
 }
 
 // DeleteAccountProvisionJournal removes only the exact completed credential
@@ -264,7 +439,7 @@ func DeleteAccountProvisionJournal(
 	if err != nil || !privateRegularAccountProvisionJournalFile(info) {
 		return ErrAccountProvisionJournalUnsafe
 	}
-	if err := os.Remove(path); err != nil {
+	if err := removeAccountProvisionPrivateFile(path, info); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	if err := syncAccountProvisionJournalDirectory(directory); err != nil {
@@ -331,16 +506,15 @@ func SaveProvisionedAccountDurable(
 		return ErrNameTaken
 	}
 
-	tokenPath, err := TokenPath(localName)
-	if err != nil {
+	tokenPath := filepath.Join(home, "tokens", "accounts", localName, "owner.token")
+	legacyPath := filepath.Join(home, "tokens", "accounts", localName+".token")
+	if _, legacyErr := os.Lstat(legacyPath); legacyErr == nil {
+		return ErrNameTaken
+	} else if !errors.Is(legacyErr, os.ErrNotExist) {
 		return ErrAccountProvisionJournalStorage
 	}
-	if legacyPath, legacyErr := legacyTokenPath(localName); legacyErr == nil {
-		if _, legacyErr = os.Lstat(legacyPath); legacyErr == nil {
-			return ErrNameTaken
-		} else if !errors.Is(legacyErr, os.ErrNotExist) {
-			return ErrAccountProvisionJournalStorage
-		}
+	if err := lock.pinCredentialDirectory(home, filepath.Dir(tokenPath)); err != nil {
+		return err
 	}
 	tokenRaw, tokenExists, err := readPrivateProvisionFile(
 		tokenPath, maxAccountProvisionJournalBytes,
@@ -397,6 +571,7 @@ func SaveProvisionedAccountDurable(
 
 type accountProvisionJournalLock struct {
 	file *os.File
+	pins []*accountProvisionDirectoryPins
 }
 
 func acquireAccountProvisionJournalLock(
@@ -406,7 +581,17 @@ func acquireAccountProvisionJournalLock(
 		return nil, classifyAccountProvisionJournalDirectoryError(err)
 	}
 	path := filepath.Join(directory, accountProvisionJournalLockFile)
-	file, created, err := openLocalLockFileNoFollow(path, true)
+	pins, err := pinAccountProvisionDirectories(home, directory, false)
+	if err != nil {
+		return nil, classifyAccountProvisionJournalDirectoryError(err)
+	}
+	pinsOwned := true
+	defer func() {
+		if pinsOwned {
+			_ = pins.close()
+		}
+	}()
+	file, created, err := openAccountProvisionPrivateFile(path, true)
 	if err != nil {
 		if errors.Is(err, errLocalLockFileStorage) {
 			return nil, ErrAccountProvisionJournalStorage
@@ -426,13 +611,11 @@ func acquireAccountProvisionJournalLock(
 		!privateRegularAccountProvisionJournalFile(linked) {
 		return nil, ErrAccountProvisionJournalUnsafe
 	}
-	if created {
-		if err := file.Sync(); err != nil {
-			return nil, ErrAccountProvisionJournalStorage
-		}
-		if err := syncAccountProvisionJournalDirectory(directory); err != nil {
-			return nil, ErrAccountProvisionJournalStorage
-		}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		return nil, err
+	}
+	if err := syncAccountProvisionLockPublication(file, directory, created); err != nil {
+		return nil, err
 	}
 	if err := lockLocalFile(file); err != nil {
 		return nil, ErrAccountProvisionJournalStorage
@@ -447,8 +630,13 @@ func acquireAccountProvisionJournalLock(
 		_ = unlockLocalFile(file)
 		return nil, classifyAccountProvisionJournalDirectoryError(err)
 	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		_ = unlockLocalFile(file)
+		return nil, err
+	}
 	cleanup = false
-	return &accountProvisionJournalLock{file: file}, nil
+	pinsOwned = false
+	return &accountProvisionJournalLock{file: file, pins: []*accountProvisionDirectoryPins{pins}}, nil
 }
 
 func (lock *accountProvisionJournalLock) release() {
@@ -458,6 +646,10 @@ func (lock *accountProvisionJournalLock) release() {
 	_ = unlockLocalFile(lock.file)
 	_ = lock.file.Close()
 	lock.file = nil
+	for i := len(lock.pins) - 1; i >= 0; i-- {
+		_ = lock.pins[i].close()
+	}
+	lock.pins = nil
 }
 
 func readAccountProvisionJournalLocked(
@@ -478,7 +670,7 @@ func readAccountProvisionJournalLocked(
 	if !privateRegularAccountProvisionJournalFile(before) {
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalUnsafe
 	}
-	file, _, err := openLocalLockFileNoFollow(path, false)
+	file, _, err := openAccountProvisionPrivateFile(path, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalUnavailable
 	}
@@ -495,6 +687,9 @@ func readAccountProvisionJournalLocked(
 		opened.Size() <= 0 || opened.Size() > maxAccountProvisionJournalBytes {
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalUnsafe
 	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		return AccountProvisionJournal{}, err
+	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxAccountProvisionJournalBytes+1))
 	if err != nil {
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalStorage
@@ -503,10 +698,14 @@ func readAccountProvisionJournalLocked(
 	if len(raw) > maxAccountProvisionJournalBytes {
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
 	}
+	unique := json.NewDecoder(bytes.NewReader(raw))
+	if !utf8.Valid(raw) || jsonstrict.ConsumeUniqueValue(unique) != nil || jsonstrict.RequireEOF(unique) != nil {
+		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
+	}
 	var record AccountProvisionJournal
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&record); err != nil || !validAccountProvisionJournal(record) {
+	if err := decoder.Decode(&record); err != nil || !validAccountProvisionJournal(record) || !validAccountProvisionJournalJSON(raw, record) {
 		clearAccountProvisionJournal(&record)
 		return AccountProvisionJournal{}, ErrAccountProvisionJournalInvalid
 	}
@@ -531,6 +730,10 @@ func readAccountProvisionJournalLocked(
 		clearAccountProvisionJournal(&record)
 		return AccountProvisionJournal{}, classifyAccountProvisionJournalDirectoryError(err)
 	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		clearAccountProvisionJournal(&record)
+		return AccountProvisionJournal{}, err
+	}
 	return record, nil
 }
 
@@ -538,6 +741,22 @@ func publishAccountProvisionJournal(
 	home, path string,
 	record AccountProvisionJournal,
 	expected *AccountProvisionJournal,
+) error {
+	return publishAccountProvisionJournalWithIO(home, path, record, expected, accountProvisionJournalIO{
+		syncFile: (*os.File).Sync, rename: os.Rename, syncDirectory: syncAccountProvisionJournalDirectory,
+	})
+}
+
+// Per-call operations keep deterministic publication fault tests isolated;
+// every production caller uses the real file sync, atomic rename and dir sync.
+type accountProvisionJournalIO struct {
+	syncFile      func(*os.File) error
+	rename        func(string, string) error
+	syncDirectory func(string) error
+}
+
+func publishAccountProvisionJournalWithIO(
+	home, path string, record AccountProvisionJournal, expected *AccountProvisionJournal, fs accountProvisionJournalIO,
 ) error {
 	if !validAccountProvisionJournal(record) {
 		return ErrAccountProvisionJournalInvalid
@@ -561,19 +780,20 @@ func publishAccountProvisionJournal(
 			return ErrAccountProvisionJournalUnsafe
 		}
 	}
-	file, err := os.CreateTemp(directory, ".account-provision-*.tmp")
+	file, err := createAccountProvisionPrivateTemp(directory, ".account-provision-*.tmp")
 	if err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	temporaryPath := file.Name()
 	temporaryExists := true
+	cleanupIdentity, _ := file.Stat()
 	defer func() {
 		_ = file.Close()
 		if temporaryExists {
-			_ = os.Remove(temporaryPath)
+			_ = removeAccountProvisionPrivateFile(temporaryPath, cleanupIdentity)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := prepareAccountProvisionPrivateTemp(file); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	temporaryInfo, err := file.Stat()
@@ -584,7 +804,7 @@ func publishAccountProvisionJournal(
 	if err != nil || written != int64(len(raw)) {
 		return ErrAccountProvisionJournalStorage
 	}
-	if err := file.Sync(); err != nil {
+	if err := fs.syncFile(file); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	if err := file.Close(); err != nil {
@@ -601,7 +821,7 @@ func publishAccountProvisionJournal(
 		if !matches {
 			return ErrAccountProvisionJournalConflict
 		}
-		if err := os.Rename(temporaryPath, path); err != nil {
+		if err := fs.rename(temporaryPath, path); err != nil {
 			return ErrAccountProvisionJournalStorage
 		}
 		temporaryExists = false
@@ -612,7 +832,7 @@ func publishAccountProvisionJournal(
 			}
 			return ErrAccountProvisionJournalStorage
 		}
-		if err := os.Remove(temporaryPath); err != nil {
+		if err := removeAccountProvisionPrivateFile(temporaryPath, cleanupIdentity); err != nil {
 			return ErrAccountProvisionJournalStorage
 		}
 		temporaryExists = false
@@ -629,7 +849,10 @@ func publishAccountProvisionJournal(
 	if err := validateAccountProvisionJournalDirectories(home, directory); err != nil {
 		return classifyAccountProvisionJournalDirectoryError(err)
 	}
-	if err := syncAccountProvisionJournalDirectory(directory); err != nil {
+	if err := validateAccountProvisionPrivatePath(path, temporaryInfo); err != nil {
+		return err
+	}
+	if err := fs.syncDirectory(directory); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	return nil
@@ -643,45 +866,11 @@ func accountProvisionJournalLocation(localName string) (home, path string, err e
 	if err != nil {
 		return "", "", ErrAccountProvisionJournalStorage
 	}
+	home, err = accountProvisionHome(home)
+	if err != nil {
+		return "", "", err
+	}
 	return home, filepath.Join(home, "journal", "account-provision", localName+".json"), nil
-}
-
-func ensureAccountProvisionJournalDirectories(home, directory string) error {
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return ErrAccountProvisionJournalStorage
-	}
-	for _, path := range accountProvisionJournalDirectories(home, directory) {
-		info, err := os.Lstat(path)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-				return ErrAccountProvisionJournalStorage
-			}
-			info, err = os.Lstat(path)
-			if err != nil {
-				return ErrAccountProvisionJournalStorage
-			}
-		case err != nil:
-			return ErrAccountProvisionJournalStorage
-		}
-		if !privateAccountProvisionJournalDirectory(info) {
-			return ErrAccountProvisionJournalUnsafe
-		}
-	}
-	return nil
-}
-
-func validateAccountProvisionJournalDirectories(home, directory string) error {
-	for _, path := range accountProvisionJournalDirectories(home, directory) {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if !privateAccountProvisionJournalDirectory(info) {
-			return ErrAccountProvisionJournalUnsafe
-		}
-	}
-	return nil
 }
 
 func accountProvisionJournalDirectories(home, directory string) []string {
@@ -693,12 +882,22 @@ func accountProvisionJournalDirectories(home, directory string) []string {
 }
 
 func validAccountProvisionJournal(record AccountProvisionJournal) bool {
-	if record.SchemaVersion != accountProvisionJournalSchema ||
+	if (record.SchemaVersion != accountProvisionJournalSchema && record.SchemaVersion != accountProvisionLegalJournalSchema) ||
 		!accountProvisionFingerprintPattern.MatchString(record.RequestFingerprint) ||
 		!accountProvisionIDPattern.MatchString(record.ProvisionID) ||
 		!validAccountProvisionConsentVersions(
 			record.AcceptedTermsVersion, record.AcceptedPrivacyVersion,
 		) {
+		return false
+	}
+	if record.SchemaVersion == accountProvisionLegalJournalSchema {
+		if record.AccountID != "" || record.OperatorToken != "" || record.LegalRefusal == nil ||
+			record.LegalRefusal.ValidateFor(record.ProvisionID, record.AcceptedTermsVersion, record.AcceptedPrivacyVersion) != nil {
+			return false
+		}
+		return record.Reconsent == nil || (record.Reconsent.Validate() == nil && record.Reconsent.Candidate.ProvisionID != record.ProvisionID)
+	}
+	if record.LegalRefusal != nil || record.Reconsent != nil {
 		return false
 	}
 	if record.AccountID == "" && record.OperatorToken == "" {
@@ -710,6 +909,41 @@ func validAccountProvisionJournal(record AccountProvisionJournal) bool {
 	kind, _, err := token.Parse(record.OperatorToken)
 	return err == nil && kind == token.KindOperator &&
 		strings.TrimSpace(record.OperatorToken) == record.OperatorToken
+}
+
+// Reject case aliases and null fields in addition to duplicate/trailing JSON.
+// Nested protocol shapes are checked before any record can authorize a write.
+func validAccountProvisionJournalJSON(raw []byte, record AccountProvisionJournal) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for key, value := range fields {
+		switch key {
+		case "schema_version", "request_fingerprint", "provision_id", "accepted_terms_version", "accepted_privacy_version", "account_id", "operator_token", "legal_refusal", "reconsent":
+		default:
+			return false
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return false
+		}
+	}
+	if record.LegalRefusal != nil {
+		refusal, err := signuplegal.DecodeRefusal(fields["legal_refusal"])
+		if err != nil || refusal != *record.LegalRefusal {
+			return false
+		}
+	}
+	if record.Reconsent != nil {
+		var pending, candidate map[string]json.RawMessage
+		if json.Unmarshal(fields["reconsent"], &pending) != nil || len(pending) != 3 ||
+			len(pending["candidate"]) == 0 || len(pending["transition_id"]) == 0 || len(pending["request_fingerprint"]) == 0 ||
+			json.Unmarshal(pending["candidate"], &candidate) != nil || len(candidate) != 3 ||
+			len(candidate["provision_id"]) == 0 || len(candidate["consent_terms_version"]) == 0 || len(candidate["consent_privacy_version"]) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func validAccountProvisionConsentVersions(termsVersion, privacyVersion string) bool {
@@ -735,17 +969,11 @@ func equalAccountProvisionJournal(left, right AccountProvisionJournal) bool {
 		left.AcceptedTermsVersion == right.AcceptedTermsVersion &&
 		left.AcceptedPrivacyVersion == right.AcceptedPrivacyVersion &&
 		left.AccountID == right.AccountID &&
-		left.OperatorToken == right.OperatorToken
-}
-
-func privateAccountProvisionJournalDirectory(info os.FileInfo) bool {
-	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 &&
-		info.Mode().Perm() == 0o700
-}
-
-func privateRegularAccountProvisionJournalFile(info os.FileInfo) bool {
-	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 &&
-		info.Mode().Perm() == 0o600
+		left.OperatorToken == right.OperatorToken &&
+		(left.LegalRefusal == nil) == (right.LegalRefusal == nil) &&
+		(left.LegalRefusal == nil || *left.LegalRefusal == *right.LegalRefusal) &&
+		(left.Reconsent == nil) == (right.Reconsent == nil) &&
+		(left.Reconsent == nil || *left.Reconsent == *right.Reconsent)
 }
 
 func classifyAccountProvisionJournalDirectoryError(err error) error {
@@ -757,18 +985,6 @@ func classifyAccountProvisionJournalDirectoryError(err error) error {
 	default:
 		return ErrAccountProvisionJournalStorage
 	}
-}
-
-func syncAccountProvisionJournalDirectory(directory string) error {
-	dir, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return err
-	}
-	return dir.Close()
 }
 
 func readProvisionConfig(home string) (*Config, bool, error) {
@@ -802,7 +1018,7 @@ func readPrivateProvisionFile(path string, maximum int64) ([]byte, bool, error) 
 	if !privateRegularAccountProvisionJournalFile(before) {
 		return nil, false, ErrAccountProvisionJournalUnsafe
 	}
-	file, _, err := openLocalLockFileNoFollow(path, false)
+	file, _, err := openAccountProvisionPrivateFile(path, false)
 	if err != nil {
 		return nil, false, ErrAccountProvisionJournalUnsafe
 	}
@@ -814,6 +1030,9 @@ func readPrivateProvisionFile(path string, maximum int64) ([]byte, bool, error) 
 		!privateRegularAccountProvisionJournalFile(opened) ||
 		opened.Size() < 0 || opened.Size() > maximum {
 		return nil, false, ErrAccountProvisionJournalUnsafe
+	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		return nil, false, err
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
@@ -833,54 +1052,29 @@ func readPrivateProvisionFile(path string, maximum int64) ([]byte, bool, error) 
 		clear(raw)
 		return nil, false, ErrAccountProvisionJournalUnsafe
 	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		clear(raw)
+		return nil, false, err
+	}
 	return raw, true, nil
-}
-
-func ensurePrivateProvisionDirectory(home, directory string) error {
-	relative, err := filepath.Rel(home, directory)
-	if err != nil || relative == "." || relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return ErrAccountProvisionJournalUnsafe
-	}
-	current := home
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			if err := os.Mkdir(current, 0o700); err != nil &&
-				!errors.Is(err, os.ErrExist) {
-				return ErrAccountProvisionJournalStorage
-			}
-			info, err = os.Lstat(current)
-			if err != nil {
-				return ErrAccountProvisionJournalStorage
-			}
-		case err != nil:
-			return ErrAccountProvisionJournalStorage
-		}
-		if !privateAccountProvisionJournalDirectory(info) {
-			return ErrAccountProvisionJournalUnsafe
-		}
-	}
-	return nil
 }
 
 func publishPrivateProvisionFileNoReplace(path string, raw []byte) error {
 	directory := filepath.Dir(path)
-	file, err := os.CreateTemp(directory, ".account-token-*.tmp")
+	file, err := createAccountProvisionPrivateTemp(directory, ".account-token-*.tmp")
 	if err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	temporaryPath := file.Name()
 	temporaryExists := true
+	cleanupIdentity, _ := file.Stat()
 	defer func() {
 		_ = file.Close()
 		if temporaryExists {
-			_ = os.Remove(temporaryPath)
+			_ = removeAccountProvisionPrivateFile(temporaryPath, cleanupIdentity)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := prepareAccountProvisionPrivateTemp(file); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	info, err := file.Stat()
@@ -903,7 +1097,7 @@ func publishPrivateProvisionFileNoReplace(path string, raw []byte) error {
 		}
 		return ErrAccountProvisionJournalStorage
 	}
-	if err := os.Remove(temporaryPath); err != nil {
+	if err := removeAccountProvisionPrivateFile(temporaryPath, cleanupIdentity); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	temporaryExists = false
@@ -911,6 +1105,9 @@ func publishPrivateProvisionFileNoReplace(path string, raw []byte) error {
 	if err != nil || !os.SameFile(info, published) ||
 		!privateRegularAccountProvisionJournalFile(published) {
 		return ErrAccountProvisionJournalUnsafe
+	}
+	if err := validateAccountProvisionPrivatePath(path, info); err != nil {
+		return err
 	}
 	if err := syncAccountProvisionJournalDirectory(directory); err != nil {
 		return ErrAccountProvisionJournalStorage
@@ -925,19 +1122,20 @@ func replaceProvisionConfig(home string, config *Config) error {
 	}
 	raw = append(raw, '\n')
 	defer clear(raw)
-	file, err := os.CreateTemp(home, ".config-*.tmp")
+	file, err := createAccountProvisionPrivateTemp(home, ".config-*.tmp")
 	if err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	temporaryPath := file.Name()
 	temporaryExists := true
+	cleanupIdentity, _ := file.Stat()
 	defer func() {
 		_ = file.Close()
 		if temporaryExists {
-			_ = os.Remove(temporaryPath)
+			_ = removeAccountProvisionPrivateFile(temporaryPath, cleanupIdentity)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := prepareAccountProvisionPrivateTemp(file); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
 	info, err := file.Stat()
@@ -955,10 +1153,14 @@ func replaceProvisionConfig(home string, config *Config) error {
 		return ErrAccountProvisionJournalStorage
 	}
 	path := filepath.Join(home, "config.json")
-	if existing, err := os.Lstat(path); err == nil &&
-		!privateRegularAccountProvisionJournalFile(existing) {
-		return ErrAccountProvisionJournalUnsafe
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if existing, err := os.Lstat(path); err == nil {
+		if !privateRegularAccountProvisionJournalFile(existing) {
+			return ErrAccountProvisionJournalUnsafe
+		}
+		if err := validateAccountProvisionPrivatePath(path, existing); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return ErrAccountProvisionJournalStorage
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
@@ -969,6 +1171,9 @@ func replaceProvisionConfig(home string, config *Config) error {
 	if err != nil || !os.SameFile(info, published) ||
 		!privateRegularAccountProvisionJournalFile(published) {
 		return ErrAccountProvisionJournalUnsafe
+	}
+	if err := validateAccountProvisionPrivatePath(path, info); err != nil {
+		return err
 	}
 	if err := syncAccountProvisionJournalDirectory(home); err != nil {
 		return ErrAccountProvisionJournalStorage
@@ -981,7 +1186,7 @@ func syncPrivateProvisionFile(path string) error {
 	if err != nil || !privateRegularAccountProvisionJournalFile(before) {
 		return ErrAccountProvisionJournalUnsafe
 	}
-	file, _, err := openLocalLockFileNoFollow(path, false)
+	file, _, err := openAccountProvisionPrivateFile(path, false)
 	if err != nil {
 		return ErrAccountProvisionJournalUnsafe
 	}
@@ -993,8 +1198,20 @@ func syncPrivateProvisionFile(path string) error {
 		!privateRegularAccountProvisionJournalFile(opened) {
 		return ErrAccountProvisionJournalUnsafe
 	}
+	if err := validateAccountProvisionPrivateFileHandle(file, path, opened); err != nil {
+		return err
+	}
 	if err := file.Sync(); err != nil {
 		return ErrAccountProvisionJournalStorage
 	}
+	return validateAccountProvisionPrivateFileHandle(file, path, opened)
+}
+
+func (lock *accountProvisionJournalLock) pinCredentialDirectory(home, directory string) error {
+	pins, err := pinAccountProvisionCredentialDirectories(home, directory)
+	if err != nil {
+		return err
+	}
+	lock.pins = append(lock.pins, pins)
 	return nil
 }

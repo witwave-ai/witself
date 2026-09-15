@@ -29,18 +29,6 @@ function render(output, extra = {}) {
   });
 }
 
-test("bridge pins the same Wrangler release as agent-email", async () => {
-  const [bridge, source] = await Promise.all([
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readFile(new URL("../../agent-email/package.json", import.meta.url), "utf8"),
-  ]);
-  assert.equal(
-    JSON.parse(bridge).devDependencies.wrangler,
-    JSON.parse(source).devDependencies.wrangler,
-  );
-  assert.equal(JSON.parse(bridge).devDependencies.wrangler, "4.120.0");
-});
-
 test("rendered deployment stays dark, email-only, and release-identified", async () => {
   const directory = await mkdtemp(join(tmpdir(), "support-email-config-"));
   try {

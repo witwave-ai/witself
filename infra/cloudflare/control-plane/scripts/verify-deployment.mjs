@@ -172,6 +172,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "routes",
     "secrets",
     "send_email",
+    "services",
     "triggers",
     "unsafe",
     "vars",
@@ -185,6 +186,10 @@ function assertGeneratedConfigContract(config, expectedMain) {
   if (config.compatibility_date !== COMPATIBILITY_DATE ||
       !sameJSON(config.limits, { cpu_ms: CPU_LIMIT_MS })) {
     throw new Error("generated config Worker runtime did not match");
+  }
+  if (!sameJSON(config.services, [{ binding: "LEGAL_DOCUMENTS", service: "witself-legal" }]) ||
+      config.vars?.CP_SIGNUP_LEGAL_ENFORCEMENT !== "true") {
+    throw new Error("generated config signup legal service or enabled gate did not match");
   }
   if (!sameJSON(config.secrets, { required: REQUIRED_SECRET_BINDINGS })) {
     throw new Error("generated config required secret contract did not match");
@@ -264,7 +269,9 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
+    "CP_SIGNUP_LEGAL_ENFORCEMENT",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
+    "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "WITSELF_EDGE_RELEASE_COMMIT",
@@ -284,7 +291,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
       config.vars.CP_SIGNUP_DAILY_LIMIT_PER_IP !== "10" ||
       config.vars.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== "500" ||
       config.vars.CP_SIGNUP_OPEN !== "true" ||
-      config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false") {
+      config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false" ||
+      config.vars.CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED !== "false") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
   parseManagedDeliveryAccountAllowlist(
@@ -307,7 +315,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
   if (!sameJSON(config.routes, [{
     pattern: "self.witwave.ai",
     custom_domain: true,
-  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *"] })) {
+  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *", "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"] })) {
     throw new Error("generated config route and schedule contract did not match");
   }
   if (!sameJSON(config.send_email, [{ name: "EMAIL" }])) {
@@ -579,6 +587,19 @@ function exactNamedHandlers(namedHandlers) {
   }
 }
 
+// Cloudflare's version resource began returning the Worker's own name inside
+// each runtime container entry (observed 2026-09-05). Accept exactly one
+// container for the Backend class whose optional name, when present, is this
+// Worker's name; any other key, class, or count still fails the contract.
+function exactRuntimeContainers(containers, scriptName) {
+  if (!Array.isArray(containers) || containers.length !== 1) return false;
+  const entry = containers[0];
+  if (!isRecord(entry) || entry.class_name !== "Backend") return false;
+  const keys = Object.keys(entry).sort();
+  if (sameJSON(keys, ["class_name"])) return true;
+  return sameJSON(keys, ["class_name", "name"]) && entry.name === scriptName;
+}
+
 export function verifyWorkerVersion(version, expected, expectedVersionID, {
   allowLegacyEmptyManagedDeliveryCohort = false,
 } = {}) {
@@ -620,7 +641,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
       runtime.migration_tag !== MIGRATION_TAG ||
       runtime.usage_model !== "standard" ||
       !sameJSON(runtime.limits, { cpu_ms: CPU_LIMIT_MS }) ||
-      !sameJSON(runtime.containers, [{ class_name: "Backend" }]) ||
+      !exactRuntimeContainers(runtime.containers, "witself-control-plane") ||
       (Object.hasOwn(runtime, "compatibility_flags") &&
        !sameJSON(runtime.compatibility_flags, []))) {
     throw new Error("deployed Worker version runtime contract did not match");
@@ -639,7 +660,10 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SIGNUP_OPEN",
+    "CP_SIGNUP_LEGAL_ENFORCEMENT",
+    "LEGAL_DOCUMENTS",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
+    "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
@@ -697,6 +721,18 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "AGENT_EMAIL_DIRECTORY",
     expected.agent_email_directory_id,
   );
+  const legacyLegalBindings = allowLegacyEmptyManagedDeliveryCohort === true &&
+    expected.version === "0.0.240" && !bindings.has("LEGAL_DOCUMENTS") &&
+    !bindings.has("CP_SIGNUP_LEGAL_ENFORCEMENT");
+  if (!legacyLegalBindings) {
+    exactPlainBinding(bindings, "CP_SIGNUP_LEGAL_ENFORCEMENT", "true");
+    const legal = bindings.get("LEGAL_DOCUMENTS");
+    if (legal?.type !== "service" || legal.service !== "witself-legal" ||
+        (legal.environment !== undefined && legal.environment !== "production") ||
+        legal.entrypoint !== undefined || legal.props !== undefined) {
+      throw new Error("deployed Worker version has the wrong LEGAL_DOCUMENTS service binding");
+    }
+  }
   for (const [name, value] of [
     ["AGENT_EMAIL_DOMAIN", "witmail.net"],
     ["AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"],
@@ -707,6 +743,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
     ["CP_SIGNUP_OPEN", "true"],
     ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
+    ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
   ]) {
     exactPlainBinding(bindings, name, value);
   }

@@ -166,13 +166,14 @@ deployment cells under a thin global control plane.
   provider/platform certification levels, transactional install lifecycle, and
   the evidence required before an AI runtime integration is called supported.
 - [claude-codex-delegation.md](claude-codex-delegation.md): how Claude Code
-  delegates bounded implementation and review work to Codex (GPT-5.6 Sol)
+  delegates bounded implementation and review work to Codex (GPT-6 Astra)
   through OpenAI's official Codex plugin — read-only review lanes, a
   workspace-write task lane that Claude runs only inside its own worktree,
   and the verification and merge ownership Claude keeps.
-- [memory-load-quality.md](memory-load-quality.md): the deterministic
-  PostgreSQL load/quality harness, current exploratory baseline, evidence
-  schema, and remaining production workload/SLO work.
+- [memory-load-quality.md](memory-load-quality.md): the five deterministic
+  PostgreSQL load/quality slices, manual GitHub-hosted reference workflow and
+  sanitized run manifest, exploratory baselines, and remaining managed-cloud
+  workload/SLO work.
 - [deployment-cells.md](deployment-cells.md): the multi-cloud deployment
   topology — a fleet of independent cells, each authoritative for its own
   tenants, under a thin global control plane that does placement and routing
@@ -226,6 +227,9 @@ deployment cells under a thin global control plane.
   federation, policy `deny` effects, and advanced vector-profile migration.
 - [helm-chart.md](helm-chart.md): first self-hosted Kubernetes deployment
   artifact and chart requirements.
+- [gitops-values-generation.md](gitops-values-generation.md): generating
+  per-cell `.gitops/cells/<cell>/values.yaml` overlays from cell config, the
+  `roll-cell.sh` pin contract, and the CI drift check.
 - [terraform-infrastructure.md](terraform-infrastructure.md): AWS, GCP, and
   Azure infrastructure modules and stack layout.
 - [governance-and-support.md](governance-and-support.md): public-code,
@@ -235,12 +239,15 @@ deployment cells under a thin global control plane.
 
 - [runbooks.md](runbooks.md): hand-testing and operator recipes for the live
   CLI, account lifecycle, integrations, billing, retention, and recovery paths.
-- [workflow-scripts.md](workflow-scripts.md): step-by-step CLI workflow scripts
-  for install, setup, billing, memories, facts, policy, groups, messaging, MCP,
-  self-hosted, and local mode.
+- [workflow-scripts.md](workflow-scripts.md): shipped CLI workflows, with unimplemented targets marked separately
+  for account onboarding, billing, memories, facts, messaging, client-held
+  secrets, MCP, transcripts, the dashboard, and self-hosted bootstrap.
 - [cli-command-surface.md](cli-command-surface.md): human and agent CLI command
   design, including local runtime discovery and bulk integration lifecycle
   operations.
+- [witself-admin.md](witself-admin.md): implemented operator CLI reference for
+  the dashboard, cell registry repairs, fleet events, placement, backup evidence,
+  invites, support tickets, account policies, and email administration.
 - [mcp-tools.md](mcp-tools.md): MCP tool surface and safety posture.
 - [json-contracts.md](json-contracts.md): shared machine-readable response
   shapes, `witself://` references, and resource contracts for CLI, MCP, managed

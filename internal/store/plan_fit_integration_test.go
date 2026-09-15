@@ -4,19 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAccountPlanFitReportsEveryFiniteDurableUsageViolationPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	fixture := newCustomDomainEmailFixture(t, dsn, "plan-fit-all")
 	if _, err := fixture.store.ApplyAgentEmailCustomDomainRoute(
@@ -130,10 +127,7 @@ func TestAccountPlanFitReportsEveryFiniteDurableUsageViolationPostgres(t *testin
 }
 
 func TestAccountPlanFitApplyAppliesAndExactReplaySkipsRefitPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -198,10 +192,7 @@ func TestAccountPlanFitApplyAppliesAndExactReplaySkipsRefitPostgres(t *testing.T
 }
 
 func TestAccountPlanFitApplyWaitsForConcurrentCapacityWriterPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -307,10 +298,7 @@ func TestAccountPlanFitApplyWaitsForConcurrentCapacityWriterPostgres(t *testing.
 }
 
 func TestAccountPlanFitApplyRejectsStaleFencePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -345,10 +333,7 @@ func TestAccountPlanFitApplyRejectsStaleFencePostgres(t *testing.T) {
 }
 
 func TestAccountPlanFitFailsClosedWhenDerivedUsageIsAmbiguousPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx := context.Background()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
@@ -371,10 +356,7 @@ func TestAccountPlanFitFailsClosedWhenDerivedUsageIsAmbiguousPostgres(t *testing
 }
 
 func TestAccountPlanFitRejectsIncompleteTargetBeforeReadingPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	st, _ := newMigrationTestStore(t, dsn)
 	if _, err := st.CheckAccountPlanFit(
 		context.Background(), "acct_missing", AccountPlanFitTarget{},

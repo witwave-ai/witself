@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -16,13 +15,11 @@ import (
 
 	avatardomain "github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	phaseA, err := Open(ctx, dsn)
@@ -284,10 +281,7 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 }
 
 func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
@@ -648,10 +642,7 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 }
 
 func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
-	}
+	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	st, err := Open(ctx, dsn)

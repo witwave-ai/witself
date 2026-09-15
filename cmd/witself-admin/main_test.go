@@ -182,6 +182,35 @@ func TestJSONEnvelopes(t *testing.T) {
 		wantKeys []string
 	}{
 		{
+			name:     "settings show",
+			value:    settingsJSONMap(client.PlacementRunnerConfig{}, client.ReaperConfig{}, client.PlacementConfig{}),
+			wantKeys: []string{"schema_version", "placement_runner", "reaper", "placement"},
+		},
+		{
+			name:     "settings placement-runner",
+			value:    placementRunnerJSONMap(client.PlacementRunnerConfig{}),
+			wantKeys: []string{"schema_version", "placement_runner"},
+		},
+		{
+			name:     "settings reaper",
+			value:    reaperJSONMap(client.ReaperConfig{}),
+			wantKeys: []string{"schema_version", "reaper"},
+		},
+		{
+			name:     "settings placement",
+			value:    placementJSONMap(client.PlacementConfig{}),
+			wantKeys: []string{"schema_version", "placement"},
+		},
+		{
+			name: "settings placement-runner run",
+			value: placementRunnerResultJSONMap(client.PlacementRunnerResult{
+				Restore: json.RawMessage(`{"restored":1}`), Rebalance: json.RawMessage(`{"moved":1}`),
+				RestoreError:   &client.PlacementRunnerStepError{Status: 409, Body: json.RawMessage(`{"error":"restore refused"}`)},
+				RebalanceError: &client.PlacementRunnerStepError{Status: 503, Body: json.RawMessage(`{"error":"rebalance refused"}`)},
+			}),
+			wantKeys: []string{"schema_version", "placement_runner", "restore", "rebalance", "restore_error", "rebalance_error"},
+		},
+		{
 			name:     "whoami",
 			value:    whoamiJSONMap(&client.AdminWhoami{AdminID: "adm_abcd1234", Handle: "sarah"}),
 			wantKeys: []string{"admin"},

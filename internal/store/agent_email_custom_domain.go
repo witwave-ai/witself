@@ -262,7 +262,7 @@ func (s *Store) ApplyAgentEmailCustomDomainRoute(
 		if err != nil {
 			return AgentEmailCustomDomainRoute{}, err
 		}
-		if err := logAgentEmailCustomDomainRouteProjectionTx(ctx, tx, updated); err != nil {
+		if err := s.logAgentEmailCustomDomainRouteProjectionTx(ctx, tx, updated); err != nil {
 			return AgentEmailCustomDomainRoute{}, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -281,7 +281,7 @@ func (s *Store) ApplyAgentEmailCustomDomainRoute(
 		}
 		return AgentEmailCustomDomainRoute{}, err
 	}
-	if err := logAgentEmailCustomDomainRouteProjectionTx(ctx, tx, created); err != nil {
+	if err := s.logAgentEmailCustomDomainRouteProjectionTx(ctx, tx, created); err != nil {
 		return AgentEmailCustomDomainRoute{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -461,12 +461,12 @@ func updateAgentEmailCustomDomainRouteTx(
 	return route, nil
 }
 
-func logAgentEmailCustomDomainRouteProjectionTx(
+func (s *Store) logAgentEmailCustomDomainRouteProjectionTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	route AgentEmailCustomDomainRoute,
 ) error {
-	return logEventTx(ctx, tx, EventInput{
+	return s.logEventTx(ctx, tx, EventInput{
 		AccountID: route.AccountID,
 		ActorKind: ActorControlPlane,
 		Verb:      VerbAgentEmailCustomDomainRouteProjected,

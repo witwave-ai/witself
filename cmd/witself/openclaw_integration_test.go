@@ -860,6 +860,7 @@ func TestTranscriptHookSupportIsExplicitlyAllowlisted(t *testing.T) {
 		transcriptcapture.RuntimeClaudeCode,
 		transcriptcapture.RuntimeGrokBuild,
 		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeDSH,
 	} {
 		if !supportsTranscriptHooks(runtimeName) {
 			t.Errorf("%s should support transcript hooks", runtimeName)

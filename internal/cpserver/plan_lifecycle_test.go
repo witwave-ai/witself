@@ -19,6 +19,128 @@ type lifecycleTestApplier struct {
 	requests atomic.Int64
 }
 
+// Controlled cell transport, with a durable acknowledgement fence distinct
+// from the CP record. No provider, database or live HTTP endpoint is used.
+type deliveryObservationApplier struct {
+	mode  string
+	fence lifecycle.ApplyFence
+}
+
+func (a *deliveryObservationApplier) ReadApplyFence(context.Context, string) (lifecycle.ApplyFence, error) {
+	if a.mode == "unreadable" {
+		return lifecycle.ApplyFence{}, fmt.Errorf("fixture cell fence unavailable")
+	}
+	return a.fence, nil
+}
+
+func (a *deliveryObservationApplier) Apply(_ context.Context, _ string, request lifecycle.ApplyRequest) (lifecycle.ApplyAck, error) {
+	if a.mode == "never-delivered" {
+		return lifecycle.ApplyAck{}, fmt.Errorf("fixture request never reached cell")
+	}
+	a.fence = lifecycle.ApplyFence{Revision: request.Revision, Hash: request.Hash}
+	if a.mode == "lost-acknowledgement" {
+		return lifecycle.ApplyAck{}, fmt.Errorf("fixture accepted cell response lost")
+	}
+	return lifecycle.ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func (a *deliveryObservationApplier) ApplyIfFits(ctx context.Context, id string, request lifecycle.ApplyRequest) (lifecycle.ConditionalApplyResult, error) {
+	if a.mode == "blocked" {
+		return lifecycle.ConditionalApplyResult{Violations: []string{"fixture capacity exceeds target"}}, nil
+	}
+	ack, err := a.Apply(ctx, id, request)
+	return lifecycle.ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
+func TestPlanLifecycleTickReportsDeliveryGaps(t *testing.T) {
+	for _, mode := range []string{"never-delivered", "lost-acknowledgement", "blocked", "unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			catalog, err := plans.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := lifecycle.NewMemStore()
+			applier := &deliveryObservationApplier{}
+			manager, err := lifecycle.NewManager(lifecycle.Config{Catalog: catalog, Store: store, Applier: applier})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const id = "acct_delivery_private_fixture"
+			if mode == "blocked" {
+				if err := store.Put(context.Background(), lifecycle.Record{AccountID: id, Entitled: plans.Free, Applied: "team"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "unreadable" {
+				if _, pending, err := manager.EnsureAccount(context.Background(), id); err != nil || pending {
+					t.Fatalf("seed acknowledged account: pending=%v error=%v", pending, err)
+				}
+			}
+			applier.mode = mode
+			mux := http.NewServeMux()
+			if err := Register(mux, Config{
+				Manager: manager, Catalog: catalog, LifecycleObserver: NewPlanLifecycleObserver(false),
+				Authenticate: func(context.Context, string, string, AccountPermission) (AccountAccess, bool, error) {
+					return AccountAccess{}, false, nil
+				},
+				InternalAuthenticate: func(_ context.Context, token string) (bool, error) { return token == "fixture", nil },
+			}); err != nil {
+				t.Fatal(err)
+			}
+			call := func() map[string]any {
+				t.Helper()
+				req := httptest.NewRequest(http.MethodPost, "/v1/plan-lifecycle:tick", strings.NewReader(`{"account_ids":["`+id+`"]}`))
+				req.Header.Set("Authorization", "Bearer fixture")
+				r := httptest.NewRecorder()
+				mux.ServeHTTP(r, req)
+				if r.Code != http.StatusOK {
+					t.Fatalf("tick HTTP %d", r.Code)
+				}
+				if strings.Contains(r.Body.String(), id) || strings.Contains(r.Body.String(), "fixture request") {
+					t.Fatal("private account or error escaped aggregate acknowledgement")
+				}
+				var doc struct {
+					Lifecycle map[string]any `json:"plan_lifecycle"`
+				}
+				if err := json.Unmarshal(r.Body.Bytes(), &doc); err != nil {
+					t.Fatal(err)
+				}
+				return doc.Lifecycle
+			}
+			first := call()
+			pending := float64(1)
+			if mode == "unreadable" {
+				pending = 0
+			} // Stored CP acknowledgement alone cannot prove a successful current observation.
+			if first["scanned"] != float64(1) || first["apply_pending"] != pending || first["failed"] != float64(1) || first["succeeded"] != false {
+				t.Fatalf("delivery gap aggregate = %+v", first)
+			}
+			record, snapshot, err := manager.ResolvedStatus(context.Background(), id, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lifecycle.SnapshotApplyPending(record, snapshot) != (pending == 1) {
+				t.Fatal("aggregate differs from authoritative desired/applied state")
+			}
+			if mode == "never-delivered" && applier.fence.Revision != 0 {
+				t.Fatal("never-delivered fixture reached cell")
+			}
+			if mode == "lost-acknowledgement" && (applier.fence.Revision != record.SnapshotRevision || applier.fence.Hash != record.DesiredSnapshotHash || record.AppliedSnapshotRevision != 0) {
+				t.Fatal("lost acknowledgement fixture did not separate cell acceptance from CP acknowledgement")
+			}
+			applier.mode = "healthy"
+			second := call()
+			if second["scanned"] != float64(1) || second["apply_pending"] != float64(0) || second["failed"] != float64(0) || second["succeeded"] != true {
+				t.Fatalf("recovered aggregate = %+v", second)
+			}
+			record, snapshot, err = manager.ResolvedStatus(context.Background(), id, "")
+			if err != nil || lifecycle.SnapshotApplyPending(record, snapshot) || record.AppliedSnapshotRevision != applier.fence.Revision || record.AppliedSnapshotHash != applier.fence.Hash {
+				t.Fatal("recovery did not bind exact CP and cell acknowledgement fences")
+			}
+		})
+	}
+}
+
 func (a *lifecycleTestApplier) Apply(
 	_ context.Context,
 	_ string,

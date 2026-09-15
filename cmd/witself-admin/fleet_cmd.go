@@ -18,12 +18,25 @@ import (
 // the operator (and the dashboard's cells pane) sees it.
 func cellsCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin cells list ...")
+		cellsUsage(os.Stderr)
 		return 2
 	}
 	switch args[0] {
 	case "list":
 		return cellsList(args[1:])
+	case "show":
+		return cellsShow(args[1:])
+	case "register":
+		return cellsRegister(args[1:])
+	case "deregister":
+		return cellsDeregister(args[1:])
+	case "drain":
+		return cellsSetAccepting(args[1:], false)
+	case "undrain":
+		return cellsSetAccepting(args[1:], true)
+	case "help", "--help", "-h":
+		cellsUsage(os.Stdout)
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "witself-admin cells: unknown subcommand %q\n", args[0])
 		return 2

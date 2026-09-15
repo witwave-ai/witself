@@ -52,6 +52,31 @@ witself-infra config show -cell aws-sandbox-usw2-dev   # effective merged config
 ```
 
 Precedence: explicit flag > cell entry > `defaults:` block > built-in.
+The inventory-only `deletion_protection` boolean uses cell entry >
+`defaults.deletion_protection` > **true** when absent, for both `minimal` and
+`prod` profiles. There is no flag override. For example:
+
+```yaml
+version: 1
+defaults:
+  deletion_protection: true
+cells:
+  aws-sandbox-usw2-dev:
+    cloud: aws
+    account_alias: sandbox
+    region: us-west-2
+    role: dev
+    deletion_protection: true
+```
+
+Destroy refuses while this is true. Break-glass requires recording
+`deletion_protection: false` on the cell and applying a **separate `up` before
+`destroy`**. `up` reviews and consumes a saved plan, refusing protected
+database/secret-store replacement, including protection adoption on old cells.
+Azure purge protection remains irreversible. See
+[Deletion protection and break-glass](../../docs/runbooks.md#deletion-protection-and-break-glass)
+for provider primitives, the resource inventory, and the operator procedure.
+
 The file holds references only — profile names, subscription/project
 IDs, token file *paths*. Both the load and write paths reject anything
 shaped like a credential.
@@ -127,6 +152,8 @@ F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile wi
 ./bin/witself-infra preview $F
 ./bin/witself-infra up      $F
 ./bin/witself-infra outputs $F
+# Before destroy: save the cell in infra.yaml, record deletion_protection: false,
+# and apply a separate up -cell CELL (see the break-glass runbook).
 ./bin/witself-infra destroy $F
 ```
 
@@ -167,9 +194,32 @@ install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
 ./bin/witself-infra dashboard
 ```
 
-Omit `-k8s-version` to let Civo choose its latest stable K3s release, or
-provide a Civo version such as `1.35.0-k3s1` to pin it. Civo currently uses an
-explicit local Pulumi backend for these cells; `bootstrap -cell
+Persist the Civo API version in each cell's `k8s_version` field in
+`~/.witself/infra.yaml`, alongside `civo_node_size`, to keep the pin across
+`preview`, `up`, and health reads. For a cluster whose kubelets report
+`v1.35.0+k3s1`, the Civo version name is `1.35.0-k3s1`:
+
+```yaml
+    k8s_version: "1.35.0-k3s1"
+```
+
+The optional field participates in the inventory merge: explicit
+`-k8s-version` > cell record > `defaults:`. With no configured version, Civo's
+`KubernetesVersion` input remains absent and the API chooses its latest stable
+K3s release. A flag override applies only to that invocation; `up` and
+`preview` do not save it to the inventory. `config add-cell -k8s-version ...`
+persists it when creating a new record; edit an existing record to pin it.
+
+Pinning the currently running version must produce **no changes** in
+`witself-infra preview -cell CELL`; stop if it proposes an update or replacement.
+A differing pin is a cluster upgrade and must follow
+[K3s minor upgrade (Civo)](../../docs/runbooks.md#k3s-minor-upgrade-civo),
+which includes version-format sources and the backup-first sequence.
+The Civo stack exports the provider-reported `kubernetesVersion` for
+`cell-health` and the dashboard. The automation `health` command reports probe
+state only; use `kubectl get nodes` to verify actual running kubelet versions.
+
+Civo currently uses an explicit local Pulumi backend for these cells; `bootstrap -cell
 civo-sandbox-use1-dev` initializes that directory locally and performs no
 cloud-side backend work.
 
@@ -410,6 +460,8 @@ that is the self-hosted path, same command.
 # The registered endpoint is the cell's apiHost output (api.<cell>.<domain>).
 witself-infra up -control-plane https://self.witwave.ai $F
 
+# Before destroy: record deletion_protection: false on this cell and apply
+# a separate up -cell CELL, as described in the break-glass runbook.
 # destroy: DRAIN the cell (placement stops), EVACUATE every account to a
 # Cloudflare R2 archive (per-account file, integrity-checked), then REMOVE the
 # empty registry entry and tear down:
@@ -441,7 +493,7 @@ control plane forgets them.
 | `-control-plane URL` | `destroy` | drain, evacuate every account to R2, then remove the cell from the fleet before teardown |
 | `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: SKIP evacuation and force-purge accounts — sandbox/dev override, the data dies with the cell |
-| `--allow-unknown-cell` | `destroy` | bypass the phantom-stack refusal when the exact target is absent from the current inventory |
+| `--allow-unknown-cell` | `destroy` | bypass only the phantom-stack check; an unrecorded cell still fails deletion protection |
 | `--force-with-accounts` | `destroy` | proceed after the control plane reports live or archived accounts still placed on the target; does not imply purge |
 | `--skip-account-check` | `destroy` | bypass an unavailable placement-status read; required for an intentional self-host destroy with no control plane |
 | `--yes-cell=NAME` | non-interactive `destroy` | confirm only when `NAME` exactly matches the target cell; interactive runs prompt for the exact name instead |
@@ -520,5 +572,5 @@ the next manual or scheduled placement pass does that.
 26. **[done]** Azure HTTPS parity with cert-manager Azure DNS-01
     issuer/certificate automation for the Azure Gateway path.
 27. Azure HTTP-to-HTTPS redirect policy.
-28. SSO; sealed-plane KMS (prod); deletion-protection break-glass flow, and
-    remaining production hardening.
+28. **[done]** Database/secret-store deletion protection and inventory break-glass.
+29. SSO; sealed-plane KMS (prod), and remaining production hardening.

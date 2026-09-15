@@ -102,30 +102,30 @@ platform:
 			Finalizers: pulumi.StringArray{pulumi.String("resources-finalizer.argocd.argoproj.io")},
 		},
 		OtherFields: kubernetes.UntypedArgs{
-			"spec": map[string]interface{}{
+			"spec": map[string]any{
 				"project": "default",
-				"sources": []interface{}{
-					map[string]interface{}{
+				"sources": []any{
+					map[string]any{
 						"repoURL":        c.gitopsRepo,
 						"targetRevision": c.gitopsRevision,
 						"path":           c.gitopsPath,
-						"helm": map[string]interface{}{
-							"valueFiles": []interface{}{"$values/" + c.gitopsValuesPath},
+						"helm": map[string]any{
+							"valueFiles": []any{"$values/" + c.gitopsValuesPath},
 							"values":     runtimeValues,
 						},
 					},
-					map[string]interface{}{
+					map[string]any{
 						"repoURL":        c.gitopsRepo,
 						"targetRevision": c.gitopsRevision,
 						"ref":            "values",
 					},
 				},
-				"destination": map[string]interface{}{
+				"destination": map[string]any{
 					"server":    "https://kubernetes.default.svc",
 					"namespace": argocdNamespace,
 				},
-				"syncPolicy": map[string]interface{}{
-					"automated": map[string]interface{}{"prune": true, "selfHeal": true},
+				"syncPolicy": map[string]any{
+					"automated": map[string]any{"prune": true, "selfHeal": true},
 				},
 			},
 		},

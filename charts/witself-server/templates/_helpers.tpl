@@ -102,6 +102,7 @@ the pod and can be fenced by imperative one-shot operations.
   "cell" .Values.cell
   "backupValidation" .Values.backup.validation
   "features" .Values.features
+  "support" .Values.support
   "agentEmail" .Values.agentEmail
   "avatar" .Values.avatar
   "server" .Values.server

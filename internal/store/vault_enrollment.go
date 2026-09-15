@@ -179,7 +179,7 @@ func (s *Store) CreateVaultKeyEnrollment(ctx context.Context, p Principal, in Cr
 	if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
 	var active int
@@ -236,7 +236,7 @@ func (s *Store) CreateVaultKeyEnrollment(ctx context.Context, p Principal, in Cr
 	if err := insertVaultEnrollmentReceiptTx(ctx, tx, p, "enrollment_request", in.IdempotencyKey, requestHash, in.ID, value.RowVersion); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultEnrollmentRequested, Metadata: vaultEnrollmentEventMetadata(value, false)}); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
@@ -295,7 +295,7 @@ func (s *Store) ApproveVaultKeyEnrollment(ctx context.Context, p Principal, enro
 	if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
 	value, err := getVaultKeyEnrollmentTx(ctx, tx, p, enrollmentID, true)
@@ -341,7 +341,7 @@ func (s *Store) ApproveVaultKeyEnrollment(ctx context.Context, p Principal, enro
 	if err := insertVaultEnrollmentReceiptTx(ctx, tx, p, "enrollment_approve", in.IdempotencyKey, requestHash, enrollmentID, revision); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultEnrollmentApproved, Metadata: vaultEnrollmentEventMetadata(value, true)}); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
@@ -366,7 +366,7 @@ func (s *Store) AccessVaultKeyEnrollmentTransfer(ctx context.Context, p Principa
 		return VaultKeyEnrollmentTransfer{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollmentTransfer{}, err
 	}
 	value, err := getVaultKeyEnrollmentTx(ctx, tx, p, enrollmentID, true)
@@ -452,7 +452,7 @@ func (s *Store) ConsumeVaultKeyEnrollment(ctx context.Context, p Principal, enro
 	if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
 	value, err := getVaultKeyEnrollmentTx(ctx, tx, p, enrollmentID, true)
@@ -501,7 +501,7 @@ func (s *Store) ConsumeVaultKeyEnrollment(ctx context.Context, p Principal, enro
 	if err := insertVaultEnrollmentReceiptTx(ctx, tx, p, "enrollment_consume", in.IdempotencyKey, requestHash, enrollmentID, revision); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultEnrollmentConsumed, Metadata: vaultEnrollmentEventMetadata(value, true)}); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
@@ -556,7 +556,7 @@ func (s *Store) CancelVaultKeyEnrollment(ctx context.Context, p Principal, enrol
 		}
 		return value, nil
 	}
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
 	value, err := getVaultKeyEnrollmentTx(ctx, tx, p, enrollmentID, true)
@@ -593,7 +593,7 @@ func (s *Store) CancelVaultKeyEnrollment(ctx context.Context, p Principal, enrol
 	if err := insertVaultEnrollmentReceiptTx(ctx, tx, p, "enrollment_cancel", in.IdempotencyKey, requestHash, enrollmentID, revision); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
-	if err := logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
+	if err := s.logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
 		Verb: VerbVaultEnrollmentCancelled, Metadata: vaultEnrollmentEventMetadata(value, false)}); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
@@ -618,7 +618,7 @@ func (s *Store) GetVaultKeyEnrollment(ctx context.Context, p Principal, enrollme
 		return VaultKeyEnrollment{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return VaultKeyEnrollment{}, err
 	}
 	value, err := getVaultKeyEnrollmentTx(ctx, tx, p, enrollmentID, false)
@@ -652,7 +652,7 @@ func (s *Store) ListVaultKeyEnrollments(ctx context.Context, p Principal, opts V
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
+	if err := s.expireVaultKeyEnrollmentsTx(ctx, tx, p); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
@@ -816,7 +816,7 @@ func getVaultKeyEnrollmentTx(ctx context.Context, tx pgx.Tx, p Principal, enroll
 	return out, nil
 }
 
-func expireVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, p Principal) error {
+func (s *Store) expireVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, p Principal) error {
 	rows, err := tx.Query(ctx, `
 		UPDATE agent_vault_key_enrollments
 		   SET lifecycle_state='expired', source_ephemeral_public_key=NULL,
@@ -855,7 +855,7 @@ func expireVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, p Principal) er
 	// expiry result first, then close it before writing per-enrollment audit.
 	rows.Close()
 	for _, value := range expired {
-		if err := logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorSystem,
+		if err := s.logEventTx(ctx, tx, EventInput{AccountID: p.AccountID, ActorKind: ActorSystem,
 			Verb: VerbVaultEnrollmentExpired, Metadata: map[string]any{
 				"agent_id": p.ID, "enrollment_id": value.enrollmentID, "key_id": value.keyID,
 				"key_version": fmt.Sprint(value.keyVersion), "target_location_id": value.targetLocationID,
@@ -870,7 +870,7 @@ func expireVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, p Principal) er
 // account while ExportAccount holds the account write-fence. Keeping this
 // account-scoped variant inside the export transaction guarantees that an
 // archive cannot contain an expired-but-still-authoritative transfer capsule.
-func expireAccountVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, accountID string) error {
+func (s *Store) expireAccountVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, accountID string) error {
 	rows, err := tx.Query(ctx, `
 		UPDATE agent_vault_key_enrollments
 		   SET lifecycle_state='expired', source_ephemeral_public_key=NULL,
@@ -909,7 +909,7 @@ func expireAccountVaultKeyEnrollmentsTx(ctx context.Context, tx pgx.Tx, accountI
 	// returned rows must still be closed before the first audit INSERT on pgx.
 	rows.Close()
 	for _, value := range expired {
-		if err := logEventTx(ctx, tx, EventInput{AccountID: accountID, ActorKind: ActorSystem,
+		if err := s.logEventTx(ctx, tx, EventInput{AccountID: accountID, ActorKind: ActorSystem,
 			Verb: VerbVaultEnrollmentExpired, Metadata: map[string]any{
 				"agent_id": value.agentID, "enrollment_id": value.enrollmentID, "key_id": value.keyID,
 				"key_version": fmt.Sprint(value.keyVersion), "target_location_id": value.targetLocationID,

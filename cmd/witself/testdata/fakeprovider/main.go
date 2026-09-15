@@ -54,6 +54,8 @@ func run(args []string) error {
 		return runAntigravity(args)
 	case "copilot":
 		return runCopilot(args)
+	case "dsh":
+		return runDSH(args)
 	}
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Println("codex-cli 1.2.3")
@@ -224,6 +226,53 @@ func runAntigravity(args []string) error {
 	default:
 		return fmt.Errorf("unexpected Antigravity command: %v", args)
 	}
+}
+
+// runDSH models the two dsh contracts the preview integration relies on: the
+// version probe and the composed-profile dump. The dump is produced by reading
+// the home-level patch file the installer owns, so a test can prove that the
+// managed block actually reaches a composed profile.
+func runDSH(args []string) error {
+	root := os.Getenv("DSH_HOME")
+	if root == "" {
+		return errors.New("DSH_HOME is required")
+	}
+	switch {
+	case equalArgs(args, "--version"):
+		fmt.Println("0.1.5-rc.1")
+		return nil
+	case equalArgs(args, "--profile", "headless", "--dump-config"):
+		raw, err := os.ReadFile(filepath.Join(root, "cordis.patch.yml"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		fmt.Print(composedDSHTree(string(raw)))
+		return nil
+	}
+	return fmt.Errorf("unsupported dsh invocation %q", strings.Join(args, " "))
+}
+
+// This synthetic provider implements only literal top-level insert lists.
+// Preserve full rows and inert !!js bytes so boundary checks see config fields.
+func composedDSHTree(document string) string {
+	var result strings.Builder
+	inserting := false
+	for _, line := range strings.Split(document, "\n") {
+		if line == "- insert:" {
+			inserting = true
+			continue
+		}
+		if strings.HasPrefix(line, "- ") {
+			inserting = false
+		}
+		if inserting && strings.HasPrefix(line, "    ") {
+			result.WriteString(strings.TrimPrefix(line, "    ") + "\n")
+		}
+	}
+	if result.Len() == 0 {
+		return "[]\n"
+	}
+	return result.String()
 }
 
 func runCopilot(args []string) error {

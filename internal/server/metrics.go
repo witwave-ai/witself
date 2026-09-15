@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -27,6 +28,10 @@ type runtimeMetrics struct {
 	httpRequests map[httpMetricLabels]uint64
 	httpLatency  map[httpDurationLabels]*metricHistogram
 
+	selfDigestReads   map[selfDigestLabels]uint64
+	selfDigestLatency map[string]*metricHistogram
+	selfDigestElided  map[string]*metricHistogram
+
 	memoryOperations      map[memoryOperationMetricLabels]uint64
 	memoryRecalls         map[recallMetricLabels]uint64
 	memoryRecallTime      map[recallDurationLabels]*metricHistogram
@@ -36,11 +41,23 @@ type runtimeMetrics struct {
 	curationOperations    map[operationMetricLabels]uint64
 	planLimitRejects      map[limitMetricLabels]uint64
 	secretLimitRejects    map[limitMetricLabels]uint64
+	secretDeliveries      map[secretDeliveryMetricLabels]uint64
+	vaultLifecycleOps     map[vaultLifecycleMetricLabels]uint64
 	memoryLimitRejects    map[limitMetricLabels]uint64
 	factLimitRejects      map[limitMetricLabels]uint64
 	messageRateRejects    map[messageRateMetricLabels]uint64
+	messageProcessing     map[operationMetricLabels]uint64
 	agentEmailIngests     map[string]uint64
 	agentEmailRateRejects map[agentEmailRateMetricLabels]uint64
+	auditAppends          map[auditAppendMetricLabels]uint64
+}
+
+type secretDeliveryMetricLabels struct {
+	FieldKind, Result string
+}
+
+type vaultLifecycleMetricLabels struct {
+	Flow, Operation, Result string
 }
 
 type httpMetricLabels struct {
@@ -49,6 +66,10 @@ type httpMetricLabels struct {
 
 type httpDurationLabels struct {
 	Method, Route string
+}
+
+type selfDigestLabels struct {
+	Surface, Elided, Result string
 }
 
 type operationMetricLabels struct {
@@ -83,6 +104,10 @@ type messageRateMetricLabels struct {
 	LimitDimension, Scope, Operation string
 }
 
+type auditAppendMetricLabels struct {
+	Result, Reason string
+}
+
 type agentEmailRateMetricLabels struct {
 	LimitDimension, Scope, Source string
 }
@@ -100,7 +125,29 @@ type AgentEmailCellStorageMetrics struct {
 	HardCountedRows   int64
 }
 
+// IdentityCapacityDimensionMetrics aggregates accounts for one bounded identity
+// dimension. Unlimited accounts do not contribute to measured counts or ratios.
+type IdentityCapacityDimensionMetrics struct {
+	AccountsMeasured  int64
+	AccountsNearLimit int64
+	AccountsAtLimit   int64
+	AccountsUnlimited int64
+	MinHeadroomRatio  float64
+}
+
+// IdentityCapacityMetrics contains only cell aggregates and a fixed dimension set.
+type IdentityCapacityMetrics struct {
+	Realms, AgentsPerRealm, OperatorSeats IdentityCapacityDimensionMetrics
+}
+
+// AuditAppendMetrics counts database insert failures in this store process.
+// The counter resets when the process restarts.
+type AuditAppendMetrics struct {
+	TxFailures uint64
+}
+
 const agentEmailCellStorageMetricsTimeout = 2 * time.Second
+const capacityMetricsTimeout = 2 * time.Second
 
 type metricHistogram struct {
 	Buckets []uint64
@@ -109,12 +156,41 @@ type metricHistogram struct {
 }
 
 var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// Keep the hydration alert's 1.5-second threshold on an exact bucket boundary:
+// interpolation across 1..2.5 seconds otherwise reports healthy reads as slow.
+// Other metric families retain their existing bucket contracts.
+var selfDigestLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 5, 10}
 var hitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100}
 
 func newRuntimeMetrics() *runtimeMetrics {
-	return &runtimeMetrics{
+	// Emit every supported sealed-plane series even on an idle scrape. Alerts
+	// must still handle activity that occurs before Prometheus first scrapes.
+	secretDeliveries := make(map[secretDeliveryMetricLabels]uint64)
+	for _, fieldKind := range []string{"password", "api_key", "token", "totp", "other"} {
+		secretDeliveries[secretDeliveryMetricLabels{FieldKind: fieldKind, Result: "success"}] = 0
+	}
+	for _, result := range []string{"conflict", "forbidden", "not_found", "invalid", "error"} {
+		secretDeliveries[secretDeliveryMetricLabels{FieldKind: "unknown", Result: result}] = 0
+	}
+	vaultLifecycleOps := make(map[vaultLifecycleMetricLabels]uint64)
+	for flow, operations := range map[string][]string{
+		"registration": {"register"},
+		"enrollment":   {"create", "approve", "receive", "consume", "cancel"},
+		"rotation":     {"start", "stage", "commit", "cancel"},
+	} {
+		for _, operation := range operations {
+			for _, result := range []string{"success", "conflict", "forbidden", "not_found", "invalid", "error"} {
+				vaultLifecycleOps[vaultLifecycleMetricLabels{Flow: flow, Operation: operation, Result: result}] = 0
+			}
+		}
+	}
+	metrics := &runtimeMetrics{
 		httpRequests:          make(map[httpMetricLabels]uint64),
 		httpLatency:           make(map[httpDurationLabels]*metricHistogram),
+		selfDigestReads:       make(map[selfDigestLabels]uint64),
+		selfDigestLatency:     make(map[string]*metricHistogram),
+		selfDigestElided:      make(map[string]*metricHistogram),
 		memoryOperations:      make(map[memoryOperationMetricLabels]uint64),
 		memoryRecalls:         make(map[recallMetricLabels]uint64),
 		memoryRecallTime:      make(map[recallDurationLabels]*metricHistogram),
@@ -124,12 +200,40 @@ func newRuntimeMetrics() *runtimeMetrics {
 		curationOperations:    make(map[operationMetricLabels]uint64),
 		planLimitRejects:      make(map[limitMetricLabels]uint64),
 		secretLimitRejects:    make(map[limitMetricLabels]uint64),
+		secretDeliveries:      secretDeliveries,
+		vaultLifecycleOps:     vaultLifecycleOps,
 		memoryLimitRejects:    make(map[limitMetricLabels]uint64),
 		factLimitRejects:      make(map[limitMetricLabels]uint64),
 		messageRateRejects:    make(map[messageRateMetricLabels]uint64),
+		messageProcessing:     make(map[operationMetricLabels]uint64),
 		agentEmailIngests:     make(map[string]uint64),
 		agentEmailRateRejects: make(map[agentEmailRateMetricLabels]uint64),
+		// Keep all bounded series present before the first failure so Prometheus
+		// can observe its initial increase.
+		auditAppends: map[auditAppendMetricLabels]uint64{
+			{Result: "success", Reason: "none"}:    0,
+			{Result: "error", Reason: "not_found"}: 0,
+			{Result: "error", Reason: "bad_input"}: 0,
+			{Result: "error", Reason: "error"}:     0,
+		},
 	}
+	// Seed the complete closed set so the first request or error has an
+	// observable increase even when a serving cell has little hydration traffic.
+	for _, surface := range []string{"session_hook", "prompt_hook", "other"} {
+		for _, elided := range []string{"false", "true"} {
+			for _, result := range []string{"success", "error"} {
+				metrics.selfDigestReads[selfDigestLabels{Surface: surface, Elided: elided, Result: result}] = 0
+			}
+		}
+		metrics.selfDigestLatency[surface] = &metricHistogram{Buckets: make([]uint64, len(selfDigestLatencyBuckets))}
+		metrics.selfDigestElided[surface] = &metricHistogram{Buckets: make([]uint64, len(hitBuckets))}
+	}
+	for _, operation := range []string{"claim", "renew", "release", "request_claim", "request_renew", "request_release", "unknown"} {
+		for _, result := range []string{"success", "feature_disabled", "rate_limited", "bad_input", "not_found", "forbidden", "plan_limited", "busy", "conflict", "error"} {
+			metrics.messageProcessing[operationMetricLabels{Operation: operation, Result: result}] = 0
+		}
+	}
+	return metrics
 }
 
 func (m *runtimeMetrics) instrument(next http.Handler) http.Handler {
@@ -171,6 +275,7 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 }
 
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
+	cfg.metrics = m
 	if operation := cfg.IngestAgentEmailPilot; operation != nil {
 		cfg.IngestAgentEmailPilot = func(
 			ctx context.Context,
@@ -197,6 +302,31 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 			result, err := operation(ctx, accountID, realmID, in)
 			m.observePlanLimitRejection(err, "agents_per_realm")
 			return result, err
+		}
+	}
+	if operation := cfg.CreateOperator; operation != nil {
+		cfg.CreateOperator = func(ctx context.Context, accountID, actorOperatorID, displayName, tokenDisplayName string, ttl *time.Duration) (Operator, string, *time.Time, error) {
+			result, token, expiresAt, err := operation(ctx, accountID, actorOperatorID, displayName, tokenDisplayName, ttl)
+			m.observePlanLimitRejection(err, "operator_seats")
+			return result, token, expiresAt, err
+		}
+	}
+	if operation := cfg.LogAccountEvent; operation != nil {
+		cfg.LogAccountEvent = func(ctx context.Context, accountID, verb, actorKind string, metadata map[string]any) error {
+			err := operation(ctx, accountID, verb, actorKind, metadata)
+			reason := "none"
+			switch {
+			case errors.Is(err, ErrNotFound):
+				reason = "not_found"
+			case errors.Is(err, ErrBadInput):
+				reason = "bad_input"
+			case err != nil:
+				reason = "error"
+			}
+			m.mu.Lock()
+			m.auditAppends[auditAppendMetricLabels{Result: metricResult(err == nil), Reason: reason}]++
+			m.mu.Unlock()
+			return err
 		}
 	}
 	if operation := cfg.SendMessage; operation != nil {
@@ -241,6 +371,48 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 			return result, err
 		}
 	}
+	if operation := cfg.ClaimMessage; operation != nil {
+		cfg.ClaimMessage = func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimMessageRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "claim")
+			return result, err
+		}
+	}
+	if operation := cfg.RenewMessageClaim; operation != nil {
+		cfg.RenewMessageClaim = func(ctx context.Context, p DomainPrincipal, messageID string, in RenewMessageClaimRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "renew")
+			return result, err
+		}
+	}
+	if operation := cfg.ReleaseMessageClaim; operation != nil {
+		cfg.ReleaseMessageClaim = func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageProcessingOperation(err, "release")
+			return result, err
+		}
+	}
+	if operation := cfg.ClaimMessageRequest; operation != nil {
+		cfg.ClaimMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in ClaimMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_claim")
+			return result, err
+		}
+	}
+	if operation := cfg.RenewMessageRequest; operation != nil {
+		cfg.RenewMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in RenewMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_renew")
+			return result, err
+		}
+	}
+	if operation := cfg.ReleaseMessageRequest; operation != nil {
+		cfg.ReleaseMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in ReleaseMessageRequestRequest) (MessageRequestClaim, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageProcessingOperation(err, "request_release")
+			return result, err
+		}
+	}
 	if operation := cfg.CreateSecret; operation != nil {
 		cfg.CreateSecret = func(ctx context.Context, p DomainPrincipal, in CreateSecretRequest) (SecretMutationResult, error) {
 			result, err := operation(ctx, p, in)
@@ -251,6 +423,92 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 				}]++
 				m.mu.Unlock()
 			}
+			return result, err
+		}
+	}
+
+	if operation := cfg.AccessSecretField; operation != nil {
+		cfg.AccessSecretField = func(ctx context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
+			result, err := operation(ctx, p, secretID, fieldID, in)
+			// Failed authorization may not have resolved a field. Never infer
+			// field identity or local decryption from a failed delivery.
+			fieldKind := "unknown"
+			if err == nil {
+				fieldKind = metricSecretFieldKind(result.FieldKind)
+			}
+			m.mu.Lock()
+			m.secretDeliveries[secretDeliveryMetricLabels{FieldKind: fieldKind, Result: metricSecretResult(err)}]++
+			m.mu.Unlock()
+			return result, err
+		}
+	}
+	if operation := cfg.RegisterVaultKey; operation != nil {
+		cfg.RegisterVaultKey = func(ctx context.Context, p DomainPrincipal, in RegisterVaultKeyRequest) (VaultKeyMutationResult, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("registration", "register", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CreateVaultKeyEnrollment; operation != nil {
+		cfg.CreateVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, in CreateVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("enrollment", "create", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ApproveVaultKeyEnrollment; operation != nil {
+		cfg.ApproveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in ApproveVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "approve", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ReceiveVaultKeyEnrollment; operation != nil {
+		cfg.ReceiveVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, targetLocationID string) (VaultKeyEnrollmentTransfer, error) {
+			result, err := operation(ctx, p, enrollmentID, targetLocationID)
+			m.observeVaultLifecycleOperation("enrollment", "receive", err)
+			return result, err
+		}
+	}
+	if operation := cfg.ConsumeVaultKeyEnrollment; operation != nil {
+		cfg.ConsumeVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in ConsumeVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "consume", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CancelVaultKeyEnrollment; operation != nil {
+		cfg.CancelVaultKeyEnrollment = func(ctx context.Context, p DomainPrincipal, enrollmentID string, in CancelVaultKeyEnrollmentRequest) (VaultKeyEnrollment, error) {
+			result, err := operation(ctx, p, enrollmentID, in)
+			m.observeVaultLifecycleOperation("enrollment", "cancel", err)
+			return result, err
+		}
+	}
+	if operation := cfg.StartVaultKeyRotation; operation != nil {
+		cfg.StartVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, in StartVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, in)
+			m.observeVaultLifecycleOperation("rotation", "start", err)
+			return result, err
+		}
+	}
+	if operation := cfg.StageVaultKeyRotation; operation != nil {
+		cfg.StageVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in StageVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "stage", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CommitVaultKeyRotation; operation != nil {
+		cfg.CommitVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in CommitVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "commit", err)
+			return result, err
+		}
+	}
+	if operation := cfg.CancelVaultKeyRotation; operation != nil {
+		cfg.CancelVaultKeyRotation = func(ctx context.Context, p DomainPrincipal, rotationID string, in CancelVaultKeyRotationRequest) (VaultKeyRotationMutationResult, error) {
+			result, err := operation(ctx, p, rotationID, in)
+			m.observeVaultLifecycleOperation("rotation", "cancel", err)
 			return result, err
 		}
 	}
@@ -420,7 +678,7 @@ func (m *runtimeMetrics) observePlanLimitRejection(err error, fallbackDimension 
 		dimension = detail.Dimension
 	}
 	switch dimension {
-	case "realms", "agents", "agents_per_realm":
+	case "realms", "agents", "agents_per_realm", "operator_seats":
 	default:
 		dimension = "unknown"
 	}
@@ -489,6 +747,45 @@ func (m *runtimeMetrics) observeMessageRateRejection(err error, operation string
 		Operation:      operation,
 	}]++
 	m.mu.Unlock()
+}
+
+// Count completed calls, including idempotent replays, rather than inferring
+// durable transitions or lease expiry from callback outcomes.
+func (m *runtimeMetrics) observeMessageProcessingOperation(err error, operation string) {
+	switch operation {
+	case "claim", "renew", "release", "request_claim", "request_renew", "request_release":
+	default:
+		operation = "unknown"
+	}
+	result := messageProcessingMetricResult(err)
+	m.mu.Lock()
+	m.messageProcessing[operationMetricLabels{Operation: operation, Result: result}]++
+	m.mu.Unlock()
+}
+
+func messageProcessingMetricResult(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, ErrFeatureNotEnabled):
+		return "feature_disabled"
+	case errors.Is(err, ErrMessageRateLimited):
+		return "rate_limited"
+	case errors.Is(err, ErrBadInput):
+		return "bad_input"
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, ErrPlanLimit):
+		return "plan_limited"
+	case errors.Is(err, ErrBusy):
+		return "busy"
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
+		return "conflict"
+	default:
+		return "error"
+	}
 }
 
 func agentEmailIngestMetricOutcome(err error) string {
@@ -561,6 +858,17 @@ func (m *runtimeMetrics) observeCurationOperation(operation string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.curationOperations[operationMetricLabels{Operation: operation, Result: metricResult(err == nil)}]++
+}
+
+// observeSelfDigest accepts only the raw hydration header as its surface input;
+// metricSurface maps it to server-owned labels before anything is retained.
+func (m *runtimeMetrics) observeSelfDigest(surface string, elided bool, dropped int, err error, elapsed time.Duration) {
+	surface = metricSurface(surface)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.selfDigestReads[selfDigestLabels{Surface: surface, Elided: strconv.FormatBool(elided), Result: metricResult(err == nil)}]++
+	observeHistogram(m.selfDigestLatency, surface, elapsed.Seconds(), selfDigestLatencyBuckets)
+	observeHistogram(m.selfDigestElided, surface, float64(max(0, dropped)), hitBuckets)
 }
 
 func (m *runtimeMetrics) observeRecall(principalKind string, request MemoryRecallRequest, page MemoryRecallPage, err error, elapsed time.Duration) {
@@ -672,6 +980,121 @@ func writeSupportSLOPrometheus(
 	writeIntGauge(w, "witself_support_oldest_unanswered_seconds", "Age of the oldest ticket awaiting its first response.", status.OldestUnansweredSeconds)
 }
 
+// SealedPlanePostureMetrics contains only cell-wide counts and ages; no tenant identifiers.
+type SealedPlanePostureMetrics struct {
+	OpenRotations                  int64
+	OldestOpenRotationSeconds      int64
+	PendingEnrollments             int64
+	OldestPendingEnrollmentSeconds int64
+	MaxAgentDeliveries15m          int64
+}
+
+const sealedPlanePostureMetricsTimeout = 2 * time.Second
+
+// writeSealedPlanePosturePrometheus omits posture values if the projection is
+// unavailable, so a failed read cannot look like a healthy empty cell.
+func writeSealedPlanePosturePrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (SealedPlanePostureMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, sealedPlanePostureMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || status.OpenRotations < 0 || status.OldestOpenRotationSeconds < 0 ||
+		status.PendingEnrollments < 0 || status.OldestPendingEnrollmentSeconds < 0 || status.MaxAgentDeliveries15m < 0 {
+		writeIntGauge(w, "witself_sealed_plane_posture_metrics_up", "1 when sealed-plane posture was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_sealed_plane_posture_metrics_up", "1 when sealed-plane posture was read successfully.", 1)
+	writeIntGauge(w, "witself_vault_open_rotations", "Open vault key rotations in this cell.", status.OpenRotations)
+	writeIntGauge(w, "witself_vault_oldest_open_rotation_seconds", "Age of the oldest open vault key rotation in this cell.", status.OldestOpenRotationSeconds)
+	writeIntGauge(w, "witself_vault_pending_enrollments", "Unexpired pending or approved vault key enrollments in this cell.", status.PendingEnrollments)
+	writeIntGauge(w, "witself_vault_oldest_pending_enrollment_seconds", "Age of the oldest unexpired pending or approved vault key enrollment in this cell.", status.OldestPendingEnrollmentSeconds)
+	writeIntGauge(w, "witself_secret_material_max_agent_deliveries_15m", "Maximum secret-read usage-event count for one agent over the last 15 minutes in this cell.", status.MaxAgentDeliveries15m)
+}
+
+// Each live collector uses its own bounded read and omits measurements on
+// failure, so an unavailable projection cannot appear as a healthy zero.
+func writeIdentityCapacityPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (IdentityCapacityMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, capacityMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || !validIdentityCapacityDimensionMetrics(status.Realms) ||
+		!validIdentityCapacityDimensionMetrics(status.AgentsPerRealm) ||
+		!validIdentityCapacityDimensionMetrics(status.OperatorSeats) {
+		writeIntGauge(w, "witself_identity_capacity_metrics_up", "1 when cell identity capacity was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_identity_capacity_metrics_up", "1 when cell identity capacity was read successfully.", 1)
+	dimensions := []struct {
+		name    string
+		metrics IdentityCapacityDimensionMetrics
+	}{
+		{"realms", status.Realms},
+		{"agents_per_realm", status.AgentsPerRealm},
+		{"operator_seats", status.OperatorSeats},
+	}
+	for _, metric := range []struct {
+		name, help string
+		value      func(IdentityCapacityDimensionMetrics) int64
+	}{
+		{"witself_identity_capacity_accounts_measured", "Live accounts with a finite identity limit in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsMeasured }},
+		{"witself_identity_capacity_accounts_near_limit", "Live finite-limit accounts using at least 80 percent of identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsNearLimit }},
+		{"witself_identity_capacity_accounts_at_limit", "Live finite-limit accounts at or above identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsAtLimit }},
+		{"witself_identity_capacity_accounts_unlimited", "Live accounts with unlimited or absent identity limits in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsUnlimited }},
+	} {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
+		for _, dimension := range dimensions {
+			_, _ = fmt.Fprintf(w, "%s%s %d\n", metric.name, labels("dimension", dimension.name), metric.value(dimension.metrics))
+		}
+	}
+	_, _ = fmt.Fprintln(w, "# HELP witself_identity_capacity_min_headroom_ratio Minimum finite-account identity headroom in this cell, clamped to [0,1]; 1 when none is finite.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_identity_capacity_min_headroom_ratio gauge")
+	for _, dimension := range dimensions {
+		_, _ = fmt.Fprintf(w, "witself_identity_capacity_min_headroom_ratio%s %s\n", labels("dimension", dimension.name), strconv.FormatFloat(dimension.metrics.MinHeadroomRatio, 'g', -1, 64))
+	}
+}
+
+func validIdentityCapacityDimensionMetrics(m IdentityCapacityDimensionMetrics) bool {
+	return m.AccountsMeasured >= 0 && m.AccountsUnlimited >= 0 &&
+		m.AccountsAtLimit >= 0 && m.AccountsAtLimit <= m.AccountsNearLimit &&
+		m.AccountsNearLimit <= m.AccountsMeasured &&
+		!math.IsNaN(m.MinHeadroomRatio) && m.MinHeadroomRatio >= 0 && m.MinHeadroomRatio <= 1 &&
+		(m.AccountsMeasured > 0 || m.MinHeadroomRatio == 1)
+}
+
+func writeAuditAppendPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (AuditAppendMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, capacityMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil {
+		writeIntGauge(w, "witself_audit_append_metrics_up", "1 when the process audit append counter was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_audit_append_metrics_up", "1 when the process audit append counter was read successfully.", 1)
+	_, _ = fmt.Fprintln(w, "# HELP witself_audit_append_tx_failures_total Audit database insert failures in this process; resets on process restart.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_audit_append_tx_failures_total counter")
+	_, _ = fmt.Fprintf(w, "witself_audit_append_tx_failures_total %d\n", status.TxFailures)
+}
+
 func validAgentEmailCellStorageMetrics(status AgentEmailCellStorageMetrics) bool {
 	return status.RetainedBytes >= 0 &&
 		status.RootRows >= 0 &&
@@ -693,6 +1116,9 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		httpInFlight:          m.httpInFlight,
 		httpRequests:          maps.Clone(m.httpRequests),
 		httpLatency:           cloneHistogramMap(m.httpLatency),
+		selfDigestReads:       maps.Clone(m.selfDigestReads),
+		selfDigestLatency:     cloneHistogramMap(m.selfDigestLatency),
+		selfDigestElided:      cloneHistogramMap(m.selfDigestElided),
 		memoryOperations:      maps.Clone(m.memoryOperations),
 		memoryRecalls:         maps.Clone(m.memoryRecalls),
 		memoryRecallTime:      cloneHistogramMap(m.memoryRecallTime),
@@ -702,11 +1128,15 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		curationOperations:    maps.Clone(m.curationOperations),
 		planLimitRejects:      maps.Clone(m.planLimitRejects),
 		secretLimitRejects:    maps.Clone(m.secretLimitRejects),
+		secretDeliveries:      maps.Clone(m.secretDeliveries),
+		vaultLifecycleOps:     maps.Clone(m.vaultLifecycleOps),
 		memoryLimitRejects:    maps.Clone(m.memoryLimitRejects),
 		factLimitRejects:      maps.Clone(m.factLimitRejects),
 		messageRateRejects:    maps.Clone(m.messageRateRejects),
+		messageProcessing:     maps.Clone(m.messageProcessing),
 		agentEmailIngests:     maps.Clone(m.agentEmailIngests),
 		agentEmailRateRejects: maps.Clone(m.agentEmailRateRejects),
+		auditAppends:          maps.Clone(m.auditAppends),
 	}
 }
 
@@ -739,6 +1169,15 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	writeHistogramMap(w, "witself_http_request_duration_seconds", "API request duration by bounded route template and method.", m.httpLatency, latencyBuckets, func(k httpDurationLabels) string {
 		return labels("method", k.Method, "route", k.Route)
 	})
+	writeCounterMap(w, "witself_self_digest_reads_total", "Self-digest reads by bounded hydration surface, elision, and result.", m.selfDigestReads, func(k selfDigestLabels) string {
+		return labels("surface", k.Surface, "elided", k.Elided, "result", k.Result)
+	})
+	writeHistogramMap(w, "witself_self_digest_read_duration_seconds", "Self-digest handler duration including authentication by bounded hydration surface.", m.selfDigestLatency, selfDigestLatencyBuckets, func(surface string) string {
+		return labels("surface", surface)
+	})
+	writeHistogramMap(w, "witself_self_digest_elided_entries", "Known omitted self-digest entries by bounded hydration surface: encoded byte-budget trimming plus exact store selection counts when requested; excludes unknown pagination overflow when counts are disabled.", m.selfDigestElided, hitBuckets, func(surface string) string {
+		return labels("surface", surface)
+	})
 	writeCounterMap(w, "witself_memory_operations_total", "Narrative-memory domain operations by operation, principal kind, and result.", m.memoryOperations, func(k memoryOperationMetricLabels) string {
 		return labels("operation", k.Operation, "principal_kind", k.PrincipalKind, "result", k.Result)
 	})
@@ -760,11 +1199,17 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	writeCounterMap(w, "witself_memory_curation_operations_total", "Completed memory-curation domain calls by operation and result; idempotent replays are counted as calls.", m.curationOperations, func(k operationMetricLabels) string {
 		return labels("operation", k.Operation, "result", k.Result)
 	})
-	writeCounterMap(w, "witself_plan_limit_rejections_total", "Realm and agent create refusals by bounded plan-limit dimension and operation.", m.planLimitRejects, func(key limitMetricLabels) string {
+	writeCounterMap(w, "witself_plan_limit_rejections_total", "Identity create refusals by bounded plan-limit dimension and operation.", m.planLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_secret_material_deliveries_total", "Ciphertext delivery calls by bounded field kind and result; does not observe client decryption.", m.secretDeliveries, func(key secretDeliveryMetricLabels) string {
+		return labels("field_kind", key.FieldKind, "result", key.Result)
+	})
+	writeCounterMap(w, "witself_vault_lifecycle_operations_total", "Vault lifecycle calls by bounded flow, operation, and result; idempotent replays count as calls.", m.vaultLifecycleOps, func(key vaultLifecycleMetricLabels) string {
+		return labels("flow", key.Flow, "operation", key.Operation, "result", key.Result)
 	})
 	writeCounterMap(w, "witself_memory_limit_rejections_total", "Net-positive active-memory mutation refusals by bounded limit dimension and operation.", m.memoryLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
@@ -775,11 +1220,17 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	writeCounterMap(w, "witself_message_rate_limit_rejections_total", "Messaging write refusals by bounded rate-limit dimension, scope, and operation.", m.messageRateRejects, func(key messageRateMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "operation", key.Operation)
 	})
+	writeCounterMap(w, "witself_message_processing_operations_total", "Completed messaging processing callback calls by operation and result; idempotent replays are counted as calls, not durable transitions or lease events.", m.messageProcessing, func(key operationMetricLabels) string {
+		return labels("operation", key.Operation, "result", key.Result)
+	})
 	writeCounterMap(w, "witself_agent_email_ingests_total", "Signed inbound agent-email deliveries by bounded storage or refusal outcome.", m.agentEmailIngests, func(outcome string) string {
 		return labels("outcome", outcome)
 	})
 	writeCounterMap(w, "witself_agent_email_rate_limit_rejections_total", "Signed inbound agent-email safety refusals by bounded dimension, scope, and source.", m.agentEmailRateRejects, func(key agentEmailRateMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "source", key.Source)
+	})
+	writeCounterMap(w, "witself_audit_append_total", "Standalone audit append calls by bounded result and reason; resets on process restart.", m.auditAppends, func(key auditAppendMetricLabels) string {
+		return labels("result", key.Result, "reason", key.Reason)
 	})
 }
 
@@ -838,6 +1289,17 @@ func escapeMetricLabel(value string) string {
 	return strings.ReplaceAll(value, "\"", "\\\"")
 }
 
+func metricSurface(header string) string {
+	switch header {
+	case "session":
+		return "session_hook"
+	case "prompt":
+		return "prompt_hook"
+	default:
+		return "other"
+	}
+}
+
 func metricMethod(method string) string {
 	switch method {
 	case http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
@@ -859,6 +1321,39 @@ func metricRoute(pattern string) string {
 		return pattern
 	}
 	return "unmatched"
+}
+
+func (m *runtimeMetrics) observeVaultLifecycleOperation(flow, operation string, err error) {
+	m.mu.Lock()
+	m.vaultLifecycleOps[vaultLifecycleMetricLabels{Flow: flow, Operation: operation, Result: metricSecretResult(err)}]++
+	m.mu.Unlock()
+}
+
+func metricSecretResult(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict),
+		errors.Is(err, ErrSecretVaultKeyMismatch), errors.Is(err, ErrSecretVaultKeyUnavailable):
+		return "conflict"
+	case errors.Is(err, ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrBadInput):
+		return "invalid"
+	default:
+		return "error"
+	}
+}
+
+func metricSecretFieldKind(kind string) string {
+	switch kind {
+	case "password", "api_key", "token", "totp":
+		return kind
+	default:
+		return "other"
+	}
 }
 
 func metricResult(ok bool) string {
