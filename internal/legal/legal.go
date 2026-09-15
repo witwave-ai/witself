@@ -17,7 +17,7 @@ const TermsVersion = "2026-08-31"
 
 // PrivacyVersion is the version label of the published Privacy Policy that
 // `witself account create --accept-terms` records consent to.
-const PrivacyVersion = "2026-09-04"
+const PrivacyVersion = "2026-09-15"
 
 // BaseURL is where the published legal pages are served. Each document is
 // BaseURL/<slug>; ?format=md returns the raw markdown, and

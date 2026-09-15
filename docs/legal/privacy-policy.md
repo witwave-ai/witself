@@ -1,6 +1,6 @@
 # Witself Privacy Policy
 
-**Version 2026-09-04 · Effective 2026-09-04**
+**Version 2026-09-15 · Effective 2026-09-15**
 
 **Controller:** Witwave LLC for account, billing, and operational data. For
 content your agents store, you are the controller and Witwave processes it
