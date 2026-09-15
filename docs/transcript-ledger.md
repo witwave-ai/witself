@@ -386,6 +386,19 @@ error occurs. Individual network requests remain time-bounded. Detached
 hook-triggered flushers are deliberately short-lived; if one reaches its work
 window, the next hook retries the durable remainder.
 
+If a flusher fails while a competing hook has queued new eligible work, it
+hands that work's trigger to one detached successor after releasing ownership.
+Unchanged failures and privacy-held turns do not repeatedly spawn flushers;
+an ongoing outage can still leave events queued for a later hook or manual
+flush. A successor applies the usual binding, completion, and suppression checks.
+
+Flush ownership uses a permanent kernel lease alongside the legacy PID marker.
+Do not delete the lease file to clear a busy queue: process exit releases its
+kernel lock. When upgrading from a binary that uses only the PID marker, let
+old uploaders exit before starting new ones. The new lease serializes new
+uploaders and respects a live legacy owner, but cannot coordinate a stale-lock
+reclamation already in progress in an old binary.
+
 `witself transcript fence --runtime RUNTIME --session <session_id> --run <run_id> --turn <turn_id> [--reason job-completed]`
 appends a synthetic `turn.completed` system event
 with body `delegation job completed`, `synthetic_fence: true`, and the reason
