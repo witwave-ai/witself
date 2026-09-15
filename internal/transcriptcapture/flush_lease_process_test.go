@@ -18,7 +18,7 @@ const flushLeaseProcessMode = "WITSELF_FLUSH_LEASE_TEST_MODE"
 
 // Exercise the kernel lease directly as well as the public lock: a working
 // legacy PID marker must not hide a broken cross-process kernel lock.
-func TestFlushLeaseProcessExclusion(t *testing.T) {
+func TestCapturePlatformFlushLeaseProcessExclusion(t *testing.T) {
 	for _, mode := range []string{"lease", "flush"} {
 		t.Run(mode, func(t *testing.T) {
 			home, dir := flushLeaseProcessFixture(t)
@@ -43,7 +43,7 @@ func TestFlushLeaseProcessExclusion(t *testing.T) {
 	}
 }
 
-func TestFlushLeaseProcessRecoversAfterOwnerDeath(t *testing.T) {
+func TestCapturePlatformFlushLeaseProcessRecoversAfterOwnerDeath(t *testing.T) {
 	for _, mode := range []string{"lease", "flush"} {
 		t.Run(mode, func(t *testing.T) {
 			home, dir := flushLeaseProcessFixture(t)
@@ -75,7 +75,7 @@ func TestFlushLeaseProcessRecoversAfterOwnerDeath(t *testing.T) {
 	}
 }
 
-func TestFlushLeaseProcessHonorsLiveLegacyOwner(t *testing.T) {
+func TestCapturePlatformFlushLeaseProcessHonorsLiveLegacyOwner(t *testing.T) {
 	home, dir := flushLeaseProcessFixture(t)
 	legacy := startFlushLeaseProcess(t, home, "legacy")
 	legacy.requireAcquired(t, true)
@@ -103,7 +103,7 @@ func TestFlushLeaseProcessHonorsLiveLegacyOwner(t *testing.T) {
 	successor.stop(t, false)
 }
 
-func TestFlushLeaseProcessRepeatedReleasePreservesNewOwner(t *testing.T) {
+func TestCapturePlatformFlushLeaseProcessRepeatedReleasePreservesNewOwner(t *testing.T) {
 	for _, mode := range []string{"lease", "flush"} {
 		t.Run(mode, func(t *testing.T) {
 			home, dir := flushLeaseProcessFixture(t)
@@ -190,7 +190,7 @@ func startFlushLeaseProcess(t *testing.T, home, mode string) *flushLeaseProcess 
 		t.Fatal(err)
 	}
 	ready := filepath.Join(t.TempDir(), "ready.json")
-	cmd := exec.Command(executable, "-test.run=^TestFlushLeaseProcessHelper$", "-test.timeout=1m")
+	cmd := exec.Command(executable, "-test.run=^TestCapturePlatformFlushLeaseProcessHelper$", "-test.timeout=1m")
 	cmd.Env = []string{
 		flushLeaseProcessMode + "=" + mode,
 		"WITSELF_FLUSH_LEASE_TEST_READY=" + ready,
@@ -299,7 +299,7 @@ func (p *flushLeaseProcess) stop(t *testing.T, force bool) {
 // This helper runs only in the exact re-executed test binary. Holding stdin
 // open retains ownership; closing it releases normally, while Kill skips all
 // Go defers and leaves the legacy PID marker for the next owner to reclaim.
-func TestFlushLeaseProcessHelper(t *testing.T) {
+func TestCapturePlatformFlushLeaseProcessHelper(t *testing.T) {
 	mode := os.Getenv(flushLeaseProcessMode)
 	if mode == "" {
 		t.Skip("subprocess helper")
