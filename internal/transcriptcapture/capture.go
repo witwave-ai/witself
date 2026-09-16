@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -3110,13 +3111,40 @@ func AcquireFlushLock(runtime string) (release func(), acquired bool, err error)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, false, err
 	}
+	leaseRelease, leased, err := acquireFlushLease(dir)
+	if err != nil || !leased {
+		return leaseRelease, false, err
+	}
+	leaseRetained := false
+	defer func() {
+		if !leaseRetained {
+			leaseRelease()
+		}
+	}()
 	path := filepath.Join(dir, ".flush.lock")
 	for attempts := 0; attempts < 2; attempts++ {
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
-			_ = file.Close()
-			return func() { _ = os.Remove(path) }, true, nil
+			info, statErr := file.Stat()
+			_, writeErr := fmt.Fprintf(file, "%d\n", os.Getpid())
+			closeErr := file.Close()
+			removeOwnedMarker := func() {
+				if current, err := os.Lstat(path); err == nil && info != nil && os.SameFile(info, current) {
+					_ = os.Remove(path)
+				}
+			}
+			if err := errors.Join(statErr, writeErr, closeErr); err != nil {
+				removeOwnedMarker()
+				return nil, false, err
+			}
+			leaseRetained = true
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					removeOwnedMarker()
+					leaseRelease()
+				})
+			}, true, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, false, err

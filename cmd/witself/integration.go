@@ -2519,7 +2519,7 @@ func integrationCmd(args []string) int {
 	return 0
 }
 
-func transcriptFlush(args []string) int {
+func transcriptFlush(args []string) (exitCode int) {
 	fs := flag.NewFlagSet("transcript flush", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	runtime := fs.String("runtime", "", "codex|claude-code|grok-build|cursor")
@@ -2554,9 +2554,20 @@ func transcriptFlush(args []string) int {
 		time.Sleep(foregroundFlushLockPollPeriod)
 	}
 	lockHeld := true
+	initialPaths := map[string]struct{}{}
+	attemptedPaths := map[string]struct{}{}
+	heldPaths := map[string]error{}
+	blockedTranscripts := map[string]error{}
+	handoffEligible := false
 	defer func() {
 		if lockHeld {
 			release()
+			// A detached competitor may have surrendered its trigger while we
+			// owned the lock. Transfer only newly arrived, unattempted work on
+			// a fatal exit; unchanged failures must not create a retry loop.
+			if exitCode != 0 && handoffEligible {
+				handoffFailedCaptureFlush(runtimeName, initialPaths, attemptedPaths, blockedTranscripts, heldPaths)
+			}
 		}
 	}()
 	pending, err := transcriptcapture.Pending(runtimeName)
@@ -2564,7 +2575,7 @@ func transcriptFlush(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
 		return 1
 	}
-	heldPaths := map[string]error{}
+	rememberCapturePaths(pending, initialPaths)
 	quarantined := 0
 	pending, partitioned := partitionEphemeralCodex(runtimeName, pending, heldPaths)
 	quarantined += partitioned
@@ -2602,7 +2613,7 @@ func transcriptFlush(args []string) int {
 		}
 		return 1
 	}
-	blockedTranscripts := map[string]error{}
+	handoffEligible = true
 	createdTranscripts := map[string]client.Transcript{}
 	seenPaths := map[string]struct{}{}
 	rememberCapturePaths(pending, seenPaths)
@@ -2679,6 +2690,7 @@ func transcriptFlush(args []string) int {
 
 			tr, created := createdTranscripts[transcriptID]
 			if !created {
+				rememberCapturePaths(group, attemptedPaths)
 				event := group[0].Event
 				tr, err = client.CreateTranscript(ctx, conn.Endpoint, conn.Token, client.CreateTranscriptInput{
 					ExternalID: transcriptID,
@@ -2712,6 +2724,7 @@ func transcriptFlush(args []string) int {
 							continue
 						}
 					}
+					rememberCapturePaths(batch.events, attemptedPaths)
 					if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, batch.inputs); err != nil {
 						if !errors.Is(err, client.ErrBadRequest) {
 							fmt.Fprintf(os.Stderr, "witself: append capture events: %v\n", err)
@@ -2835,6 +2848,48 @@ func transcriptFlush(args []string) int {
 	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined, remaining)
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
+}
+
+// handoffFailedCaptureFlush inspects only a fresh snapshot after releasing the
+// lock. It must not finalize, quarantine, or acknowledge anything: a successor
+// reacquires ownership and applies all normal privacy and binding checks.
+func handoffFailedCaptureFlush(runtimeName string, initial, attempted map[string]struct{}, blocked, held map[string]error) {
+	pending, err := transcriptcapture.Pending(runtimeName)
+	if err != nil {
+		return
+	}
+	cfg, err := transcriptcapture.LoadConfig(runtimeName)
+	if err != nil || !hasUnattemptedCaptureArrival(runtimeName, pending, cfg, initial, attempted, blocked, held) {
+		return
+	}
+	if err := startBackgroundFlush(runtimeName); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: hand off capture flush: %v\n", err)
+	}
+}
+
+func hasUnattemptedCaptureArrival(runtimeName string, pending []transcriptcapture.PendingEvent, cfg transcriptcapture.Config, initial, attempted map[string]struct{}, blocked, held map[string]error) bool {
+	readiness := transcriptcapture.NewReadinessIndex(pending)
+	for _, event := range pending {
+		if _, exists := initial[event.Path]; exists {
+			continue
+		}
+		if _, exists := attempted[event.Path]; exists {
+			continue
+		}
+		if _, exists := held[event.Path]; exists {
+			continue
+		}
+		if reason := blocked[event.Event.TranscriptExternalID()]; reason != nil {
+			continue
+		}
+		if runtimeName == transcriptcapture.RuntimeCodex && strings.TrimSpace(event.Event.SourceTranscriptPath) == "" {
+			continue
+		}
+		if captureEventBindingError(event.Event, cfg) == nil && readiness.UploadReady(event) {
+			return true
+		}
+	}
+	return false
 }
 
 // dropEphemeralCodex excludes newly arrived pathless Codex events from a
@@ -3467,6 +3522,12 @@ func startBackgroundFlush(runtime string) error {
 	// pipes whose readers disappear as soon as the hook process exits.
 	detachCaptureFlush(cmd)
 	cmd.Env = append(os.Environ(), captureDetachedFlushEnv+"=1")
+	return startCaptureFlushProcess(cmd)
+}
+
+// Tests retain the exact started process here so even a child delayed before
+// its first instruction remains owned and can be reaped on assertion failure.
+var startCaptureFlushProcess = func(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
