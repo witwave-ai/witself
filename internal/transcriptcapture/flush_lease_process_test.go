@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -24,7 +26,7 @@ func TestCapturePlatformFlushLeaseProcessExclusion(t *testing.T) {
 			home, dir := flushLeaseProcessFixture(t)
 			owner := startFlushLeaseProcess(t, home, mode)
 			owner.requireAcquired(t, true)
-			before, err := os.Stat(filepath.Join(dir, ".flush.lease"))
+			before, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lease"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -34,7 +36,7 @@ func TestCapturePlatformFlushLeaseProcessExclusion(t *testing.T) {
 			owner.stop(t, false)
 			successor := startFlushLeaseProcess(t, home, mode)
 			successor.requireAcquired(t, true)
-			after, err := os.Stat(filepath.Join(dir, ".flush.lease"))
+			after, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lease"))
 			if err != nil || !os.SameFile(before, after) {
 				t.Fatalf("lease inode changed across owners: %v", err)
 			}
@@ -49,7 +51,7 @@ func TestCapturePlatformFlushLeaseProcessRecoversAfterOwnerDeath(t *testing.T) {
 			home, dir := flushLeaseProcessFixture(t)
 			owner := startFlushLeaseProcess(t, home, mode)
 			owner.requireAcquired(t, true)
-			before, err := os.Stat(filepath.Join(dir, ".flush.lease"))
+			before, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lease"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +65,7 @@ func TestCapturePlatformFlushLeaseProcessRecoversAfterOwnerDeath(t *testing.T) {
 			}
 			successor := startFlushLeaseProcess(t, home, mode)
 			successor.requireAcquired(t, true)
-			after, err := os.Stat(filepath.Join(dir, ".flush.lease"))
+			after, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lease"))
 			if err != nil || !os.SameFile(before, after) {
 				t.Fatalf("lease inode changed after owner death: %v", err)
 			}
@@ -79,7 +81,7 @@ func TestCapturePlatformFlushLeaseProcessHonorsLiveLegacyOwner(t *testing.T) {
 	home, dir := flushLeaseProcessFixture(t)
 	legacy := startFlushLeaseProcess(t, home, "legacy")
 	legacy.requireAcquired(t, true)
-	marker, err := os.Stat(filepath.Join(dir, ".flush.lock"))
+	marker, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func TestCapturePlatformFlushLeaseProcessHonorsLiveLegacyOwner(t *testing.T) {
 	contender.requireAcquired(t, false)
 	contender.stop(t, false)
 	requireFlushLeaseMarkerPID(t, dir, legacy.cmd.Process.Pid)
-	after, err := os.Stat(filepath.Join(dir, ".flush.lock"))
+	after, err := flushLeaseProcessFileInfo(filepath.Join(dir, ".flush.lock"))
 	if err != nil || !os.SameFile(marker, after) {
 		t.Fatalf("refused contender replaced live legacy marker: %v", err)
 	}
@@ -170,6 +172,17 @@ func requireFlushLeaseMarkerPID(t *testing.T, dir string, pid int) {
 	}
 }
 
+func flushLeaseProcessFileInfo(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Windows os.Stat defers identity lookup until SameFile. File.Stat takes
+	// the identity from this handle now, before an owner can be replaced.
+	info, statErr := file.Stat()
+	return info, errors.Join(statErr, file.Close())
+}
+
 type flushLeaseProcess struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
@@ -238,7 +251,9 @@ func startFlushLeaseProcess(t *testing.T, home, mode string) *flushLeaseProcess 
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	exited := false
+	done := p.done
 	for {
+		sharingBlocked := false
 		if raw, err := os.ReadFile(ready); err == nil {
 			var result flushLeaseProcessResult
 			if err := json.Unmarshal(raw, &result); err != nil {
@@ -249,15 +264,20 @@ func startFlushLeaseProcess(t *testing.T, home, mode string) *flushLeaseProcess 
 			}
 			p.acquired = result.Acquired
 			return p
+		} else if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(32)) {
+			// ERROR_SHARING_VIOLATION can briefly cover the published path
+			// during Windows rename. Retry only this fixture transport error.
+			sharingBlocked = true
 		} else if !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
-		if exited {
+		if exited && (!sharingBlocked || p.waitErr != nil) {
 			t.Fatalf("flush lease helper exited before reporting acquisition: %v", p.waitErr)
 		}
 		select {
-		case <-p.done:
+		case <-done:
 			exited = true
+			done = nil
 		case <-deadline.C:
 			t.Fatal("flush lease helper did not report acquisition")
 		case <-ticker.C:
