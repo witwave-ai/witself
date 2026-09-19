@@ -38,10 +38,28 @@ apps:
     billing:
       endpoint: https://self.witwave.ai
     agentEmail:
+      providerEventTokenSecret:
+        name: witself-agent-email-provider-event-v2
+        key: token
       receivePilot:
         enabled: false
       receiveProduction:
-        enabled: false
+        enabled: true
+        domain: witmail.net
+        acceptedLegacyDomains:
+          - agent-mail.witwave.ai
+        # Edge Workers still project the usw2-dev audience; rename only in a coordinated edge/cell change.
+        audience: civo-sandbox-usw2-dev
+        accountIDs: []
+        accountIDsExistingSecret:
+          name: witself-agent-email-receive-cohort-v1
+          key: account_ids
+        retryCanaryAgentID: ""
+        retryCanaryAgentIDExistingSecret:
+          name: witself-agent-email-retry-canary-v1
+          key: agent_id
+        relayPublicKeysJSON: '{"relay-2026-08":"iwuwCIdpnBlEc+9upLpJUVFHjYLyV86iuwc9MBqvr9w="}'
+        relayReplayWindow: 5m
     backup:
       enabled: true
       validationEnabled: false
@@ -86,7 +104,13 @@ apps:
               app.kubernetes.io/instance: witself-server
               app.kubernetes.io/component: worker
       agentEmailOutbound:
-        enabled: false
+        enabled: true
+        dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
+        dispatchAudience: witself-agent-email-send
+        dispatchKeyID: civo-sandbox-usw2-dev-2026-08
+        dispatchPrivateKeySecret:
+          name: witself-agent-email-outbound-dispatch-v1
+          key: private-key
       agentEmailRetention:
         enabled: true
         mode: enforce

@@ -733,6 +733,24 @@ for recovery_phase in restore serving; do
     "          serviceMonitor:" \
     "            enabled: false"
   extract_document Application witself-server "$recovery_apps" "$recovery_application"
+  require_sequence "$recovery_application" \
+    "          providerEventTokenSecret:" \
+    "            key: token" \
+    "            name: witself-agent-email-provider-event-v2"
+  require_sequence "$recovery_application" \
+    "            accountIDsExistingSecret:" \
+    "              key: account_ids" \
+    "              name: witself-agent-email-receive-cohort-v1"
+  require_sequence "$recovery_application" \
+    "            retryCanaryAgentIDExistingSecret:" \
+    "              key: agent_id" \
+    "              name: witself-agent-email-retry-canary-v1"
+  require_sequence "$recovery_application" \
+    "            dispatchKeyID: civo-sandbox-usw2-dev-2026-08" \
+    "            dispatchPrivateKeySecret:" \
+    "              key: private-key" \
+    "              name: witself-agent-email-outbound-dispatch-v1" \
+    "            enabled: true"
   extract_application_helm_values "$recovery_application" "$recovery_values"
   require_line "replicaCount: $recovery_replicas" "$recovery_values"
   helm template witself-server "$server_chart" --namespace witself \
@@ -742,21 +760,47 @@ for recovery_phase in restore serving; do
   extract_document ConfigMap witself-server "$recovery_render" "$recovery_config"
   require_line '  WITSELF_CELL_NAME: "civo-sandbox-use1-serving"' "$recovery_config"
   require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$recovery_config"
-  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$recovery_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "true"' "$recovery_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE: "civo-sandbox-usw2-dev"' "$recovery_config"
+  require_sequence "$recovery_deployment" \
+    "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" \
+    "              valueFrom:" \
+    "                secretKeyRef:" \
+    '                  name: "witself-agent-email-provider-event-v2"' \
+    '                  key: "token"'
+  require_sequence "$recovery_deployment" \
+    "            - name: WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS" \
+    "              valueFrom:" \
+    "                secretKeyRef:" \
+    '                  name: "witself-agent-email-receive-cohort-v1"' \
+    '                  key: "account_ids"'
+  require_sequence "$recovery_deployment" \
+    "            - name: WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID" \
+    "              valueFrom:" \
+    "                secretKeyRef:" \
+    '                  name: "witself-agent-email-retry-canary-v1"' \
+    '                  key: "agent_id"'
   if grep -Fqx 'kind: ServiceMonitor' "$recovery_render"; then
     echo "recovery cell unexpectedly rendered a ServiceMonitor" >&2
     exit 1
   fi
-  if grep -Eq 'witself-agent-email-(provider-event-v2|receive-cohort-v1|retry-canary-v1|outbound-dispatch-v1)|witself-monitoring-(pagerduty-v1|deadman-v1)' \
+  if grep -Eq 'witself-monitoring-(pagerduty-v1|deadman-v1)' \
     "$recovery_apps" "$recovery_render"; then
-    echo "recovery cell still references a dead-cluster operator Secret" >&2
+    echo "recovery cell still references a dead-cluster monitoring Secret" >&2
     exit 1
   fi
   if [[ "$recovery_worker_enabled" == true ]]; then
     extract_document Deployment witself-worker "$recovery_render" "$recovery_worker"
     require_line "  replicas: 2" "$recovery_worker"
+    require_sequence "$recovery_worker" \
+      "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" \
+      "              valueFrom:" \
+      "                secretKeyRef:" \
+      '                  name: "witself-agent-email-outbound-dispatch-v1"' \
+      '                  key: "private-key"'
     extract_document ConfigMap witself-worker "$recovery_render" "$recovery_worker"
-    require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$recovery_worker"
+    require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "true"' "$recovery_worker"
+    require_line "$(grep '^  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID:' "$civo_worker_config")" "$recovery_worker"
   elif extract_document Deployment witself-worker "$recovery_render" "$recovery_worker" 2>/dev/null; then
     echo "recovery restore phase unexpectedly rendered a worker Deployment" >&2
     exit 1
