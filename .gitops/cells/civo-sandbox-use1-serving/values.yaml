@@ -60,7 +60,7 @@ apps:
       enabled: true
       validationEnabled: false
       targetName: witself-backup
-    replicaCount: 0
+    replicaCount: 2
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
@@ -78,7 +78,7 @@ apps:
             app.kubernetes.io/name: witself-server
             app.kubernetes.io/instance: witself-server
     worker:
-      enabled: false
+      enabled: true
       # Preview-first per the chart's own rollout contract: value-free
       # counts only until a config-only flip to enforce. grace stays the
       # chart default 720h - the privacy policy's 30 days.
