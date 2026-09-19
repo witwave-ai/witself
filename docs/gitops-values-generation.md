@@ -1,8 +1,8 @@
 # GitOps cell values generation
 
-Status: implemented. `scripts/gitops-cell-values.sh` generates the nine
+Status: implemented. `scripts/gitops-cell-values.sh` generates the ten
 `.gitops/cells/<cell>/values.yaml` overlays from checked-in cell config and
-fails CI when a committed file drifts. Those nine files remain live Argo CD
+fails CI when a committed file drifts. Those ten files remain live Argo CD
 inputs; this generator must reproduce them byte-for-byte or report the diff
 without touching them.
 
@@ -28,7 +28,7 @@ the same composed name as `witself-infra`
 | `gitops.repoURL`, `gitops.targetRevision` | Catalog `gitops` block |
 | `gitops.valuesPath` | Civo only: `.gitops/cells/<cell>/values.yaml` |
 | Cloud-family ingress, secrets, ExternalDNS/ESO, and platform add-on enablement | AWS / Azure / GCP family templates. Chart versions for cert-manager, external-dns, external-secrets, KEDA, and metrics-server come from [`.gitops/charts/platform/values.yaml`](../.gitops/charts/platform/values.yaml) and are **not** per-cell: every overlay emits those fleet defaults. A future per-cell platform chart pin needs a catalog field; it is not expressible in `values.yaml` by hand. Civo Postgres chart version comes from [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml) |
-| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-usw2-dev` overlay, with `collectorAlerts.enabled` only when `collector_alerts` is true and `sealedPlaneAlerts.enabled` only when `sealed_plane_alerts` is true) |
+| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-usw2-dev` and `civo-sandbox-use1-serving` overlays; the recovery overlay renders all three switches explicitly, initially false) |
 
 ### Pinned scalars that `scripts/roll-cell.sh` owns
 
@@ -62,9 +62,11 @@ not a per-cell overlay: both Azure cells share them.
 
 The sealed-plane alert group is a catalog switch (`sealed_plane_alerts`)
 rendered in the serving-cell overlay next to `collector_alerts`, not a
-`roll-cell.sh` pin. Both switches take effect only through the
-`civo-sandbox-usw2-dev` overlay's `platform.monitoring` block, so setting them
-on a cell without that block (or without `monitoring: true`) renders nothing.
+`roll-cell.sh` pin. The `civo-sandbox-usw2-dev` overlay emits enabled alert blocks only when
+`monitoring: true`. The `civo-sandbox-use1-serving` recovery overlay renders
+all three switches explicitly as false until a later monitoring change.
+Setting switches on an overlay without a `platform.monitoring` block has
+no effect.
 
 ## Usage
 
