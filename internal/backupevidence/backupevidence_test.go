@@ -156,7 +156,7 @@ func makePair(t *testing.T) (*fixture, *fixture) {
 	t.Helper()
 	root := t.TempDir()
 	a := makeFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
-	b := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	b := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	return a, b
 }
 
@@ -198,18 +198,41 @@ func TestVerifyPassBothCells(t *testing.T) {
 
 func TestVerifySingleRequiredCell(t *testing.T) {
 	root := t.TempDir()
-	f := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	f := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
 	report, findings := verifyDirs([]string{f.dir}, func(o *Options) {
-		o.RequiredCells = []string{"civo-sandbox-usw2-dev"}
+		o.RequiredCells = []string{"civo-sandbox-use1-serving"}
 	})
 	if len(findings) != 0 || report.Result != "pass" || report.CellsRequired != 1 {
 		t.Fatalf("expected single-cell pass, got %v %+v", findings, report)
 	}
 }
 
+func TestVerifyRejectsLegacyServingCell(t *testing.T) {
+	root := t.TempDir()
+	legacy := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	t.Run("explicit required cell", func(t *testing.T) {
+		report, findings := verifyDirs([]string{legacy.dir}, func(o *Options) {
+			o.RequiredCells = []string{"civo-sandbox-usw2-dev"}
+		})
+		requireReason(t, findings, ReasonCellUnsupported)
+		if report.Result != "fail" || report.ManifestsVerified != 0 || report.CellsSatisfied != 0 {
+			t.Fatalf("legacy cell must not satisfy rollout evidence: %+v", report)
+		}
+	})
+	t.Run("default reviewed cells", func(t *testing.T) {
+		backup := makeFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "4e5f6071")
+		report, findings := verifyDirs([]string{backup.dir, legacy.dir}, nil)
+		requireReason(t, findings, ReasonCellUnsupported)
+		requireReason(t, findings, ReasonCellMissing)
+		if report.Result != "fail" || report.ManifestsVerified != 1 || report.CellsSatisfied != 1 {
+			t.Fatalf("legacy evidence must not cover the replacement serving cell: %+v", report)
+		}
+	})
+}
+
 func TestMissingSecondCellFailsClosed(t *testing.T) {
 	root := t.TempDir()
-	f := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	f := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
 	report, findings := verifyDirs([]string{f.dir}, nil)
 	requireReason(t, findings, ReasonCellMissing)
 	if report.Result != "fail" || report.ManifestsVerified != 1 || report.CellsSatisfied != 1 {
@@ -623,18 +646,18 @@ func TestInsecurePermissions(t *testing.T) {
 func TestDuplicateEvidence(t *testing.T) {
 	t.Run("same directory twice", func(t *testing.T) {
 		root := t.TempDir()
-		f := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+		f := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
 		_, findings := verifyDirs([]string{f.dir, f.dir}, func(o *Options) {
-			o.RequiredCells = []string{"civo-sandbox-usw2-dev"}
+			o.RequiredCells = []string{"civo-sandbox-use1-serving"}
 		})
 		requireReason(t, findings, ReasonCellDuplicate)
 	})
 	t.Run("same cell two artifacts", func(t *testing.T) {
 		root := t.TempDir()
-		f1 := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
-		f2 := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+		f1 := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
+		f2 := makeFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 		_, findings := verifyDirs([]string{f1.dir, f2.dir}, func(o *Options) {
-			o.RequiredCells = []string{"civo-sandbox-usw2-dev"}
+			o.RequiredCells = []string{"civo-sandbox-use1-serving"}
 		})
 		requireReason(t, findings, ReasonCellDuplicate)
 	})
@@ -658,7 +681,7 @@ func TestOptionValidation(t *testing.T) {
 	})
 	t.Run("duplicate required cell", func(t *testing.T) {
 		_, findings := verifyDirs([]string{t.TempDir()}, func(o *Options) {
-			o.RequiredCells = []string{"civo-sandbox-usw2-dev", "civo-sandbox-usw2-dev"}
+			o.RequiredCells = []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-serving"}
 		})
 		requireReason(t, findings, ReasonCellDuplicate)
 	})

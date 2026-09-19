@@ -29,7 +29,7 @@ STUB_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
 TRAIN="$FIXTURE_ROOT/scripts/roll-train.sh"
 BACKUP=civo-sandbox-use1-backup
-SERVING=civo-sandbox-usw2-dev
+SERVING=civo-sandbox-use1-serving
 VERSION=1.2.3
 ORIGINAL_PATH=$PATH
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/.git" "$STUB_BIN" "$STATE_DIR"
@@ -122,8 +122,8 @@ case "$1" in
             cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
             ;;
           serving_pins_newer:*wave-2-*)
-            sed 's/1.2.2/1.2.4/g' "$path/.gitops/cells/civo-sandbox-usw2-dev/values.yaml" >"$STATE_DIR/new-values"
-            cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
+            sed 's/1.2.2/1.2.4/g' "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml" >"$STATE_DIR/new-values"
+            cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
             ;;
         esac
         printf '%s\n' "$path" >>"$STATE_DIR/worktrees"
@@ -232,7 +232,7 @@ printf '\n' >>"$TEST_LOG"
 version=1.2.3
 case "$SCENARIO:$*" in
   backup_live_newer:*witself-civo-sandbox-use1-backup*) version=1.2.4 ;;
-  serving_live_newer:*witself-civo-sandbox-usw2-dev*) version=1.2.4 ;;
+  serving_live_newer:*witself-civo-sandbox-use1-serving*) version=1.2.4 ;;
   concurrent_live:*) [ ! -f "$STATE_DIR/checks_seen" ] || version=1.2.4 ;;
 esac
 case "$*" in
@@ -293,7 +293,7 @@ printf 'curl' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 version=1.2.2
-if [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = civo-sandbox-usw2-dev ]; then version=1.2.3; fi
+if [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = civo-sandbox-use1-serving ]; then version=1.2.3; fi
 printf '{"version":"%s"}\n' "$version"
 EOF_CURL
 

@@ -8,7 +8,7 @@ usage: scripts/roll-train.sh VERSION [options]
   --no-schema-change       Attest that this release cannot advance the DB schema
   --backup-evidence DIR    Forward verified backup artifacts (repeat up to twice)
   --cells BACKUP,SERVING   Full cell directory names, in wave order
-                          Default: civo-sandbox-use1-backup,civo-sandbox-usw2-dev
+                          Default: civo-sandbox-use1-backup,civo-sandbox-use1-serving
   --serving-url URL        Serving HTTP(S) origin (default: https://cell.apiHost)
   --workdir DIR            Parent for isolated run/worktree directories
                           Default: $(git rev-parse --git-common-dir)/../.roll-train
@@ -498,7 +498,7 @@ main() {
   export LC_ALL=C
   VERSION='' NO_SCHEMA_CHANGE=false DRY_RUN=false SERVING_URL='' WORKDIR=''
   CI_TIMEOUT=3600 ARGO_TIMEOUT=1200 POLL_INTERVAL=15
-  local cells=civo-sandbox-use1-backup,civo-sandbox-usw2-dev option value evidence
+  local cells=civo-sandbox-use1-backup,civo-sandbox-use1-serving option value evidence
   local common release runs host live current tool cell values
   local evidence_dirs=()
   GATE_ARGS=()
@@ -546,8 +546,8 @@ main() {
     # receive the selected cells. Evidence for that pair cannot cover another
     # database, so reject unsupported selections before any operational call.
     if [ "${#evidence_dirs[@]}" -gt 0 ]; then
-      [ "$cells" = civo-sandbox-use1-backup,civo-sandbox-usw2-dev ] ||
-        usage_error "--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-usw2-dev; verifier coverage does not support other cell pairs"
+      [ "$cells" = civo-sandbox-use1-backup,civo-sandbox-use1-serving ] ||
+        usage_error "--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-use1-serving; verifier coverage does not support other cell pairs"
     fi
     SCHEMA_STATEMENT="Schema attestation: none; roll-cell.sh must verify backup/restore evidence for both reviewed cells before editing either pin in each wave."
   fi

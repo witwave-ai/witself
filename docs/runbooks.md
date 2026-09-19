@@ -535,7 +535,7 @@ A pin of the current image preserves content, but the changed image reference
 updates the StatefulSet pod template and can roll PostgreSQL. Verify readiness
 and the resulting image ID after sync. Re-pin the rollback-only
 `civo-sandbox-use1-backup` first, verify it, and review the serving
-`civo-sandbox-usw2-dev` separately. Their current digests differ; copying one
+`civo-sandbox-use1-serving` separately. Their current digests differ; copying one
 cell's digest to the other is a separate image-alignment change, not merely
 recording its current image.
 
@@ -543,8 +543,8 @@ recording its current image.
 
 Before running `scripts/roll-cell.sh` for a release that can advance the
 database schema, run the encrypted logical backup and disposable restore drill
-for **both** reviewed Civo production databases. `civo-sandbox-usw2-dev` is the
-serving cell despite its legacy name. `civo-sandbox-use1-backup` is an isolated
+for **both** reviewed Civo production databases. `civo-sandbox-use1-serving` is the
+serving cell in NYC1. `civo-sandbox-use1-backup` is an isolated
 rollback-only drill target registered `backup_validation_target=true` and
 `accepting=false`, with no registered accounts; do not move or import accounts
 into it until it has been deliberately upgraded and reclassified. This is not
@@ -559,7 +559,7 @@ exact invocations in
 [Civo PostgreSQL pre-migration backup](backup-and-recovery.md#civo-postgresql-pre-migration-backup).
 
 Do not change either GitOps values file until there are two current manifests,
-one for `civo-sandbox-use1-backup` and one for `civo-sandbox-usw2-dev`, with all
+one for `civo-sandbox-use1-backup` and one for `civo-sandbox-use1-serving`, with all
 of these properties:
 
 ```sh
@@ -594,8 +594,9 @@ omitting both fails closed.
 
 Run `scripts/roll-train.sh` from a local operator checkout with access to both
 cells. It rolls `civo-sandbox-use1-backup` first, verifies that wave, then rolls
-the serving cell `civo-sandbox-usw2-dev`. The operator's kube contexts must be
-named `witself-<full-cell-directory-name>`. This runs locally because verifying
+the serving cell `civo-sandbox-use1-serving`. The operator's kube contexts must be
+named `witself-<full-cell-directory-name>` (the serving context is
+`witself-civo-sandbox-use1-serving`). This runs locally because verifying
 Argo CD convergence requires those kube contexts; no GitHub Actions cell
 kubeconfig or new secret is needed.
 
@@ -673,7 +674,7 @@ those replicas. Only after these checks does it remove that wave's worktree
 and branch and proceed to the next wave.
 
 The default cells are
-`--cells civo-sandbox-use1-backup,civo-sandbox-usw2-dev`, in that order.
+`--cells civo-sandbox-use1-backup,civo-sandbox-use1-serving`, in that order.
 `--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
 with a unique directory per run; the primary checkout need not be clean.
 Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
@@ -731,7 +732,7 @@ replacement inventory:
 cells:
   civo-sandbox-use1-backup:
     k8s_version: "1.35.0-k3s1"
-  civo-sandbox-usw2-dev:
+  civo-sandbox-use1-serving:
     k8s_version: "1.35.0-k3s1"
 ```
 
@@ -741,7 +742,7 @@ reviewed checkout, with the existing inventory, credentials, backend, and
 
 ```sh
 witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-backup
-witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-serving
 ```
 
 `preview` runs Pulumi Preview without applying cloud changes. Pinning to the
@@ -834,9 +835,9 @@ Only after all backup-cell checks pass, change the serving cell's
 entire verification/observation period:
 
 ```sh
-witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+witself-infra preview -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-serving
 # Only after reviewing the expected Kubernetes version update:
-witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-usw2-dev
+witself-infra up -config "$HOME/.witself/infra.yaml" -cell civo-sandbox-use1-serving
 ```
 
 Also recheck the public serving `/v1/version` and external availability after
@@ -3212,8 +3213,8 @@ in one parent commit.
 
    ```sh
    scripts/run-monitoring-alert-canary.sh \
-     --context witself-civo-sandbox-usw2-dev \
-     --cell civo-sandbox-usw2-dev \
+     --context witself-civo-sandbox-use1-serving \
+     --cell civo-sandbox-use1-serving \
      --out /private/monitoring-acceptance.json \
      --apply
    ```
@@ -3301,10 +3302,11 @@ The five `witself-sealed-plane` rules require both
 `platform.monitoring.alerting.enabled` and the separate, default-off
 `platform.monitoring.sealedPlaneAlerts.enabled`. The gate is rendered from the
 cell catalog switch `sealed_plane_alerts` (see
-[GitOps values generation](gitops-values-generation.md)); it is on for
-`civo-sandbox-usw2-dev` since v0.0.286 verified the posture, vault-lifecycle,
-and material-delivery series there, and off for every other cell. Keep a new
-cell's gate off until a compatible server release is serving and its metrics
+[GitOps values generation](gitops-values-generation.md)). It was enabled for
+`civo-sandbox-usw2-dev` after v0.0.286 verified the posture, vault-lifecycle,
+and material-delivery series there. The replacement `civo-sandbox-use1-serving`
+keeps this gate off in its values file. Keep a new cell's gate off until a
+compatible server release is serving and its metrics
 are verified. The platform chart automatically syncs from its configured GitOps
 revision, so the release-before-rules merge order remains: ship the server
 metrics, roll the release train, verify the new series on the serving cell,

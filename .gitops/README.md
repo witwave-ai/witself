@@ -84,7 +84,7 @@ VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
 CELL="${ROLLOUT_CELL:?set ROLLOUT_CELL}"
 scripts/roll-cell.sh "$CELL" "$VERSION" \
   --backup-evidence "$BACKUP_ROOT"/<use1-backup-id> \
-  --backup-evidence "$BACKUP_ROOT"/<usw2-dev-backup-id>
+  --backup-evidence "$BACKUP_ROOT"/<use1-serving-backup-id>
 git diff -- ".gitops/cells/${CELL}/values.yaml"
 ```
 
@@ -262,9 +262,10 @@ updates. This batch changes neither server chart versions nor egress behavior.
 
 ## Serving-cell monitoring extensions
 
-The platform chart's monitoring extensions are default off and enabled only
-in `civo-sandbox-usw2-dev`. All controls below are under `platform.monitoring`
-and require its `enabled` switch. Alert rules also require `alerting.enabled`.
+The platform chart's monitoring extensions are default off. The replacement
+serving cell `civo-sandbox-use1-serving` keeps monitoring disabled in its values
+file. All controls below are under `platform.monitoring` and require its
+`enabled` switch. Alert rules also require `alerting.enabled`.
 
 | Knob | Shared default | Effect |
 | --- | --- | --- |
@@ -282,7 +283,7 @@ Services or exporter workloads. The pinned upstream NetworkPolicies permit
 the scrapes. The only workload addition is one node-exporter pod per node:
 two pods total request 40m CPU/64Mi and are limited to 200m CPU/128Mi.
 
-Both `civo-sandbox-usw2-dev` and `civo-sandbox-use1-backup` now set
+Both `civo-sandbox-use1-serving` and `civo-sandbox-use1-backup` set
 `apps.witselfServer.civoIngress.acme.email: support@witwave.ai`. cert-manager updates or
 re-registers the ACME contact on the next issuance; this config-only change
 does not force issuance. The backup platform render stays byte-identical and

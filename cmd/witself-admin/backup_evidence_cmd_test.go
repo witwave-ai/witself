@@ -87,7 +87,7 @@ func writeBackupEvidenceFixture(t *testing.T, root, cell, release, suffix string
 func TestBackupEvidenceVerifyCmdPass(t *testing.T) {
 	root := t.TempDir()
 	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
-	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", dirA, dirB}); code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -95,7 +95,7 @@ func TestBackupEvidenceVerifyCmdPass(t *testing.T) {
 
 func TestBackupEvidenceVerifyCmdFailsOnMissingCell(t *testing.T) {
 	root := t.TempDir()
-	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
 	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", dir}); code != 1 {
 		t.Fatalf("expected exit 1 for missing required cell, got %d", code)
 	}
@@ -103,19 +103,35 @@ func TestBackupEvidenceVerifyCmdFailsOnMissingCell(t *testing.T) {
 
 func TestBackupEvidenceVerifyCmdSingleCellFlag(t *testing.T) {
 	root := t.TempDir()
-	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "0a1b2c3d")
 	code := backupEvidenceCmd([]string{
-		"verify", "--release", "0.0.258", "--cell", "civo-sandbox-usw2-dev", dir,
+		"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-serving", dir,
 	})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 }
 
+func TestBackupEvidenceVerifyCmdRejectsLegacyCellFlag(t *testing.T) {
+	root := t.TempDir()
+	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
+	stderr := captureStderr(t, func() {
+		code := backupEvidenceCmd([]string{
+			"verify", "--release", "0.0.258", "--cell", "civo-sandbox-usw2-dev", dir,
+		})
+		if code != 1 {
+			t.Fatalf("expected exit 1 for legacy cell, got %d", code)
+		}
+	})
+	if !strings.Contains(stderr, "cell_unsupported") {
+		t.Fatalf("expected unsupported-cell finding, got %q", stderr)
+	}
+}
+
 func TestBackupEvidenceVerifyCmdReleaseMismatch(t *testing.T) {
 	root := t.TempDir()
 	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
-	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.259", dirA, dirB}); code != 1 {
 		t.Fatalf("expected exit 1 for release mismatch, got %d", code)
 	}
@@ -142,7 +158,7 @@ func TestBackupEvidenceVerifyCmdUsageErrors(t *testing.T) {
 func TestBackupEvidenceVerifyCmdEvidenceOut(t *testing.T) {
 	root := t.TempDir()
 	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
-	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	out := filepath.Join(t.TempDir(), "evidence.json")
 	code := backupEvidenceCmd([]string{
 		"verify", "--release", "0.0.258", "--evidence-out", out, dirA, dirB,
@@ -168,7 +184,7 @@ func TestBackupEvidenceVerifyCmdEvidenceOut(t *testing.T) {
 	if report["schema"] != "witself.civo-pre-migration-backup.verify.v1" || report["result"] != "pass" {
 		t.Fatalf("unexpected evidence payload: %s", raw)
 	}
-	for _, needle := range []string{dirA, dirB, "backup_id", "civo-sandbox-usw2-dev"} {
+	for _, needle := range []string{dirA, dirB, "backup_id", "civo-sandbox-use1-serving"} {
 		if strings.Contains(string(raw), needle) {
 			t.Fatalf("evidence leaked %q: %s", needle, raw)
 		}
@@ -207,7 +223,7 @@ func captureStderr(t *testing.T, fn func()) string {
 func TestBackupEvidenceVerifyCmdStderrCarriesNoPathsOrValues(t *testing.T) {
 	root := t.TempDir()
 	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
-	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	occupied := filepath.Join(t.TempDir(), "evidence.json")
 	if err := os.WriteFile(occupied, []byte("racer"), 0o600); err != nil {
 		t.Fatal(err)
@@ -229,7 +245,7 @@ func TestBackupEvidenceVerifyCmdStderrCarriesNoPathsOrValues(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		root, dirA, dirB, occupied, missingInput, os.TempDir(),
-		"0a1b2c3d", "4e5f6071", "civo-sandbox-usw2-dev", "civo-sandbox-use1-backup",
+		"0a1b2c3d", "4e5f6071", "civo-sandbox-use1-serving", "civo-sandbox-use1-backup",
 	} {
 		if forbidden != "" && strings.Contains(stderr, forbidden) {
 			t.Fatalf("stderr leaked %q:\n%s", forbidden, stderr)

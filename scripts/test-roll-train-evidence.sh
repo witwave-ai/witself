@@ -6,7 +6,7 @@ TEST_ROOT_RAW="$(mktemp -d "${TMPDIR:-/tmp}/witself-roll-train-evidence-test.XXX
 TEST_ROOT="$(cd "$TEST_ROOT_RAW" && pwd -P)"
 TRAIN="$SOURCE_ROOT/scripts/roll-train.sh"
 BACKUP=civo-sandbox-use1-backup
-SERVING=civo-sandbox-usw2-dev
+SERVING=civo-sandbox-use1-serving
 VERSION=1.2.3
 EVIDENCE_A="$TEST_ROOT/evidence/$BACKUP-pre-v$VERSION-20260820T113000Z-0a1b2c3d"
 EVIDENCE_B="$TEST_ROOT/evidence/$SERVING-pre-v$VERSION-20260820T113000Z-0a1b2c3d"
@@ -104,7 +104,7 @@ for cells in "civo-sandbox-use1-dev,$SERVING" "$BACKUP,civo-sandbox-usw2-other" 
     status=0
     bash "$TRAIN" "${args[@]}" >"$TEST_ROOT/output" 2>&1 || status=$?
     [ "$status" -eq 2 ] || fail "$mode custom evidence pair should fail argument validation: $cells (exit $status)"
-    grep -Fq -- '--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-usw2-dev' "$TEST_ROOT/output" ||
+    grep -Fq -- '--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-use1-serving' "$TEST_ROOT/output" ||
       fail "$mode custom pair did not explain verifier coverage"
     [ ! -s "$TEST_LOG" ] || fail "$mode custom evidence pair reached an operational command"
     [ ! -e "$TEST_ROOT/train" ] || fail "$mode custom evidence pair created a workdir"

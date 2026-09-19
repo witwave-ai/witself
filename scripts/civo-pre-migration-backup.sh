@@ -21,7 +21,7 @@ usage: civo-pre-migration-backup.sh \
 
 Supported serving cells:
   civo-sandbox-use1-backup
-  civo-sandbox-usw2-dev
+  civo-sandbox-use1-serving
 
 POSTGRES_IMAGE must already exist in the local Docker image store. The script
 runs its immutable image ID with --pull=never; it never pulls during a backup.
@@ -104,7 +104,7 @@ done
 [ -n "$RESTORE_IMAGE" ] || { usage >&2; die "--restore-image is required"; }
 
 case "$CELL" in
-  civo-sandbox-use1-backup|civo-sandbox-usw2-dev) ;;
+  civo-sandbox-use1-backup|civo-sandbox-use1-serving) ;;
   *) die "unsupported source cell $CELL; this guard intentionally excludes drill and non-Civo cells" ;;
 esac
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
