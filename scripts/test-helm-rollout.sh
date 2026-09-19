@@ -16,6 +16,7 @@ gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
 civo_cell="$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
 civo_backup_cell="$repo_root/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
 civo_use1_cell="$repo_root/.gitops/cells/civo-sandbox-use1-dev/values.yaml"
+civo_recovery_cell="$repo_root/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
 
 render_dir="$(mktemp -d)"
 trap 'rm -r "$render_dir"' EXIT
@@ -702,6 +703,65 @@ require_sequence "$civo_worker_deployment" \
   "                secretKeyRef:" \
   '                  name: "witself-agent-email-outbound-dispatch-v1"' \
   '                  key: "private-key"'
+
+# Keep the recovery stop and subsequent activation independently renderable.
+# Explicit overrides preserve this regression after the phase-2 values land.
+for recovery_phase in restore serving; do
+  recovery_replicas=0
+  recovery_worker_enabled=false
+  if [[ "$recovery_phase" == serving ]]; then
+    recovery_replicas=2
+    recovery_worker_enabled=true
+  fi
+  recovery_apps="$render_dir/recovery-$recovery_phase-apps.yaml"
+  recovery_postgres="$render_dir/recovery-$recovery_phase-postgres.yaml"
+  recovery_application="$render_dir/recovery-$recovery_phase-application.yaml"
+  recovery_values="$render_dir/recovery-$recovery_phase-values.yaml"
+  recovery_render="$render_dir/recovery-$recovery_phase-render.yaml"
+  recovery_config="$render_dir/recovery-$recovery_phase-config.yaml"
+  recovery_deployment="$render_dir/recovery-$recovery_phase-deployment.yaml"
+  recovery_worker="$render_dir/recovery-$recovery_phase-worker.yaml"
+  helm template witself-apps "$apps_chart" \
+    --values "$civo_recovery_cell" \
+    --set apps.witselfServer.replicaCount="$recovery_replicas" \
+    --set apps.witselfServer.worker.enabled="$recovery_worker_enabled" \
+    >"$recovery_apps"
+  extract_document Application witself-postgresql "$recovery_apps" "$recovery_postgres"
+  require_line "          resourcesPreset: micro" "$recovery_postgres"
+  require_line '            size: "8Gi"' "$recovery_postgres"
+  require_sequence "$recovery_postgres" \
+    "          serviceMonitor:" \
+    "            enabled: false"
+  extract_document Application witself-server "$recovery_apps" "$recovery_application"
+  extract_application_helm_values "$recovery_application" "$recovery_values"
+  require_line "replicaCount: $recovery_replicas" "$recovery_values"
+  helm template witself-server "$server_chart" --namespace witself \
+    --values "$recovery_values" >"$recovery_render"
+  extract_document Deployment witself-server "$recovery_render" "$recovery_deployment"
+  require_line "  replicas: $recovery_replicas" "$recovery_deployment"
+  extract_document ConfigMap witself-server "$recovery_render" "$recovery_config"
+  require_line '  WITSELF_CELL_NAME: "civo-sandbox-use1-serving"' "$recovery_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$recovery_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$recovery_config"
+  if grep -Fqx 'kind: ServiceMonitor' "$recovery_render"; then
+    echo "recovery cell unexpectedly rendered a ServiceMonitor" >&2
+    exit 1
+  fi
+  if grep -Eq 'witself-agent-email-(provider-event-v2|receive-cohort-v1|retry-canary-v1|outbound-dispatch-v1)|witself-monitoring-(pagerduty-v1|deadman-v1)' \
+    "$recovery_apps" "$recovery_render"; then
+    echo "recovery cell still references a dead-cluster operator Secret" >&2
+    exit 1
+  fi
+  if [[ "$recovery_worker_enabled" == true ]]; then
+    extract_document Deployment witself-worker "$recovery_render" "$recovery_worker"
+    require_line "  replicas: 2" "$recovery_worker"
+    extract_document ConfigMap witself-worker "$recovery_render" "$recovery_worker"
+    require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$recovery_worker"
+  elif extract_document Deployment witself-worker "$recovery_render" "$recovery_worker" 2>/dev/null; then
+    echo "recovery restore phase unexpectedly rendered a worker Deployment" >&2
+    exit 1
+  fi
+done
 
 # Billing discovery is absent by default, forwarded only when explicitly set,
 # and server-only. An explicit empty value must preserve the exact portable

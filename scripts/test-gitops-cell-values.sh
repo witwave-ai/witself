@@ -15,14 +15,14 @@ fail() {
   exit 1
 }
 
-# (a) --check passes on the committed nine files.
+# (a) --check passes on the committed ten files.
 check_out="$work_dir/check.out"
 if ! bash "$generator" --check --root "$source_root" >"$check_out" 2>&1; then
   cat "$check_out" >&2
   fail "--check did not pass on the committed cell values"
 fi
-grep -Fq 'gitops cell values: 9 files match' "$check_out" \
-  || fail "--check passed without the nine-file match verdict"
+grep -Fq 'gitops cell values: 10 files match' "$check_out" \
+  || fail "--check passed without the ten-file match verdict"
 
 # Fixture tree: copy catalog, chart pins, and cell values. Templates are
 # compiled into the generator from this checkout.
@@ -63,7 +63,7 @@ if ! bash "$generator" --write --root "$fixture" >"$restore_out" 2>&1; then
   cat "$restore_out" >&2
   fail "--write did not restore the drifted fixture"
 fi
-grep -Fq 'wrote 1 files, skipped 8 unchanged' "$restore_out" \
+grep -Fq 'wrote 1 files, skipped 9 unchanged' "$restore_out" \
   || fail "--write did not report restoring exactly one drifted file"
 cmp -s "$original_aws" "$aws_values" \
   || fail "--write did not restore aws-sandbox-usw2-dev/values.yaml byte-for-byte"

@@ -16,8 +16,8 @@ func TestCommittedValuesMatchGenerator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(generated) != 9 {
-		t.Fatalf("generated %d cells, want 9", len(generated))
+	if len(generated) != 10 {
+		t.Fatalf("generated %d cells, want 10", len(generated))
 	}
 	for _, cell := range sortedCells(generated) {
 		path := filepath.Join(root, filepath.FromSlash(valuesRel(cell)))

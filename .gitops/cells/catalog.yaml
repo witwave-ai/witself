@@ -57,6 +57,17 @@ cells:
     overlay: civo-sandbox-use1-dev.yaml.tmpl
     switches:
       domain_documentation_only: true
+  civo-sandbox-use1-serving:
+    cloud: civo
+    region: nyc1
+    role: serving
+    domain: cells.witself.witwave.ai
+    overlay: civo-sandbox-use1-serving.yaml.tmpl
+    switches:
+      domain_documentation_only: true
+      monitoring: false
+      collector_alerts: false
+      sealed_plane_alerts: false
   civo-sandbox-usw2-dev:
     cloud: civo
     region: phx1
