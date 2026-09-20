@@ -85,10 +85,8 @@ expected_peer = {
 }
 reference_apps = render("witself-apps", apps_chart, reference_path)
 reference_pg = child_values(reference_apps, "witself-postgresql")
-# Recovery explicitly opts into collector alerts, whose old-cell catalog
-# switch remains false. Compare with the same reviewed old-cell capability on.
-reference_monitoring = child_values(render("witself-platform", platform_chart, reference_path,
-                                          "--set", "platform.monitoring.collectorAlerts.enabled=true"),
+# Compare with the reviewed old-cell monitoring values as committed.
+reference_monitoring = child_values(render("witself-platform", platform_chart, reference_path),
                                    "witself-monitoring")
 reference_monitoring["commonLabels"]["witself.io/cell"] = cell_name
 
@@ -181,8 +179,8 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
       baseline_monitoring ||= monitoring
       check("phase 2 must preserve phase 1 monitoring stack", monitoring == baseline_monitoring)
     else
-      check("#{label}: alerting and both gated rule groups enabled", %w[alerting collectorAlerts sealedPlaneAlerts].all? { |key| values.dig("platform", "monitoring", key, "enabled") == true })
-      check("#{label}: monitoring values must match usw2-dev with collector alerts enabled", monitoring == reference_monitoring)
+      check("#{label}: alerting and the sealed-plane rule group enabled", %w[alerting sealedPlaneAlerts].all? { |key| values.dig("platform", "monitoring", key, "enabled") == true })
+      check("#{label}: monitoring values must match usw2-dev", monitoring == reference_monitoring)
     end
 
     next unless stack_archive

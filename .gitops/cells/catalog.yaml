@@ -67,7 +67,7 @@ cells:
     switches:
       domain_documentation_only: true
       monitoring: true
-      collector_alerts: true
+      collector_alerts: false
       sealed_plane_alerts: true
       postgres_backup: true
   civo-sandbox-usw2-dev:
