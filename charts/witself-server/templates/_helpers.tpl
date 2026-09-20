@@ -84,10 +84,14 @@ app.kubernetes.io/part-of: witself
 {{- end -}}
 {{- end -}}
 
-{{/* The image reference, defaulting the tag to the chart appVersion. */}}
+{{/* Prefer an immutable digest; otherwise default the tag to the chart appVersion. */}}
 {{- define "witself-server.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

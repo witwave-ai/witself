@@ -188,6 +188,9 @@
 {{- fail "apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled" -}}
 {{- end -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "metrics" $metricsValues "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- with .Values.apps.witselfServer.imageDigest -}}
+{{- $_ := set $serverValues.image "digest" . -}}
+{{- end -}}
 {{- if $billingEndpoint -}}
 {{- $_ := set $serverValues "billing" (dict "endpoint" $billingEndpoint) -}}
 {{- end -}}

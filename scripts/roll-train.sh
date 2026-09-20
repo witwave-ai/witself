@@ -64,7 +64,16 @@ require_app_cell_identity() {
 }
 
 pods_converged() {
-  jq -e --arg suffix ":$1" '
+  local suffix=":$1" digest=${2:-}
+  if [ -n "${2:-}" ]; then
+    [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    suffix="@$2"
+  fi
+  jq -e --arg suffix "$suffix" --arg digest "$digest" '
+    def image_matches:
+      type == "string" and endswith($suffix) and
+      (split("@") | length == (if $suffix | startswith("@") then 2 else 1 end)) and
+      (split("@")[0] | length > 0);
     (.items | type == "array" and length > 0) and
     all(.items[];
       .metadata.deletionTimestamp == null and .status.phase == "Running" and
@@ -73,19 +82,30 @@ pods_converged() {
       (.spec.containers | type == "array" and length > 0) and
       all(.spec.containers[];
         (.name | type == "string" and length > 0) and
-        (.image | type == "string") and (.image | endswith($suffix))) and
+        (.image | image_matches)) and
       (.status.containerStatuses | type == "array") and
       ([.spec.containers[].name] | sort) ==
         ([.status.containerStatuses[].name] | sort) and
       all(.status.containerStatuses[];
         .ready == true and (.state.running | type == "object") and
         .state.waiting == null and .state.terminated == null and
-        (.image | type == "string") and (.image | endswith($suffix))))
+        # Runtime status.image may retain a tag after a digest-only pull.
+        ((.image | image_matches) or
+          ($digest != "" and (.imageID | type == "string" and endswith($digest))))))
   ' >/dev/null
 }
 
 deployments_converged() {
-  jq -e --arg suffix ":$1" '
+  local suffix=":$1"
+  if [ -n "${2:-}" ]; then
+    [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    suffix="@$2"
+  fi
+  jq -e --arg suffix "$suffix" '
+    def image_matches:
+      type == "string" and endswith($suffix) and
+      (split("@") | length == (if $suffix | startswith("@") then 2 else 1 end)) and
+      (split("@")[0] | length > 0);
     (.items | type == "array" and length > 0) and
     all(.items[];
       .metadata.deletionTimestamp == null and
@@ -99,7 +119,7 @@ deployments_converged() {
       (.status.unavailableReplicas // 0) == 0 and
       (.spec.template.spec.containers | type == "array" and length > 0) and
       all(.spec.template.spec.containers[];
-        (.image | type == "string") and (.image | endswith($suffix))))
+        (.image | image_matches)))
   ' >/dev/null
 }
 
@@ -268,6 +288,28 @@ wait_merge_ci() {
   done
 }
 
+# Read the pin written by roll-cell, without another registry lookup. Missing
+# and empty pins preserve tag-only cells; malformed pins must never fall back.
+cell_image_digest() {
+  yq -o=json '.apps.witselfServer' "$1" | jq -er '
+    select(type == "object") |
+    (if has("imageDigest") then .imageDigest else "" end) |
+    select(type == "string") |
+    select(. == "" or (length == 71 and test("^sha256:[0-9a-f]{64}$")))
+  ' || die "invalid imageDigest in $1"
+}
+
+# Only matching recorded pins can give a digest a release version. Keep both
+# version fields consistent so neither can conceal a newer or ambiguous pin.
+digest_release_version() {
+  local values=$1 chart tag
+  chart=$(yq -er '.apps.witselfServer.chartVersion' "$values") || return 1
+  tag=$(yq -er '.apps.witselfServer.imageTag' "$values") || return 1
+  valid_version "$chart" && valid_version "$tag" && [ "$chart" = "$tag" ] ||
+    die "invalid or inconsistent chartVersion/imageTag for digest pin in $values"
+  printf '%s\n' "$tag"
+}
+
 cell_worker_enabled() {
   local values=$1 enabled defaults
   # Resolve defaults from this cell's worktree, then overlay its partial values
@@ -303,8 +345,13 @@ expected_deployments_present() {
 }
 
 wait_argo() {
-  local cell=$1 namespace=$2 values=$3 deadline=$((SECONDS + ARGO_TIMEOUT)) app pods deployments worker_enabled
+  local cell=$1 namespace=$2 values=$3 deadline=$((SECONDS + ARGO_TIMEOUT)) app pods deployments worker_enabled digest release_version
   worker_enabled=$(cell_worker_enabled "$values") || die "cannot determine expected workloads for $cell"
+  digest=$(cell_image_digest "$values") || die "cannot determine expected image for $cell"
+  if [ -n "$digest" ]; then
+    release_version=$(digest_release_version "$values") || return 1
+    [ "$release_version" = "$VERSION" ] || die "$cell digest pin does not record target release $VERSION"
+  fi
   while :; do
     app=$(run_before "$deadline" "Argo convergence ($cell)" \
       kubectl --context "witself-$cell" --request-timeout=20s -n argocd \
@@ -322,13 +369,16 @@ wait_argo() {
     printf '%s\n' "$deployments" | jq -e '.items | type == "array"' >/dev/null || die "invalid deployment JSON for $cell"
     if expected_deployments_present "$cell" "$worker_enabled" "$deployments" &&
        printf '%s\n' "$app" | argo_converged "$VERSION" &&
-       printf '%s\n' "$pods" | pods_converged "$VERSION" &&
-       printf '%s\n' "$deployments" | deployments_converged "$VERSION" &&
+       printf '%s\n' "$pods" | pods_converged "$VERSION" "$digest" &&
+       printf '%s\n' "$deployments" | deployments_converged "$VERSION" "$digest" &&
        printf '%s\n' "$pods" | pods_match_deployment_replicas "$deployments" &&
        [ "$(printf '%s\n' "$pods" | jq '.items | length')" = \
          "$(printf '%s\n' "$deployments" | jq '[.items[].spec.replicas] | add')" ]; then
       [ "$SECONDS" -lt "$deadline" ] || die "Argo convergence ($cell) timed out"
-      log "CELL $cell VERIFIED: Synced Healthy revision $VERSION; ready pods and deployment replicas; pod images:"
+      log "CELL $cell VERIFIED: Synced Healthy revision $VERSION; ready pods and deployment replicas"
+      if [ -n "$digest" ]; then
+        log "Pod and deployment image digests match the cell values pin"
+      fi
       printf '%s\n' "$pods" | jq -r '.items[].spec.containers[].image' | sort -u
       return
     fi
@@ -351,7 +401,10 @@ require_upgrade_pins() {
 
 require_live_not_newer() {
   local cell=$1 namespace=$2 values=$3 app pods deployments current images image worker_enabled
+  local baseline_values=${4:-$3} digest baseline_digest live_digest pin_values matched
   worker_enabled=$(cell_worker_enabled "$values") || die "cannot determine expected workloads for $cell"
+  digest=$(cell_image_digest "$values") || die "cannot read digest pin for $cell"
+  baseline_digest=$(cell_image_digest "$baseline_values") || die "cannot read baseline digest pin for $cell"
   app=$(kubectl --context "witself-$cell" --request-timeout=20s -n argocd \
     get applications.argoproj.io witself-server -o json)
   printf '%s\n' "$app" | jq -e 'type == "object"' >/dev/null || die "invalid Argo JSON for $cell"
@@ -384,16 +437,32 @@ require_live_not_newer() {
     (.[1].items[].spec.template.spec.containers[].image)
   ') || die "invalid live workload images for $cell"
   while IFS= read -r image; do
-    current=${image##*:}
-    if [[ "$image" != *:* || "$image" == *@* ]] ||
-      ! valid_version "$current" || version_lower "$VERSION" "$current"; then
-      die "$cell live image '$image' is invalid or newer than $VERSION"
+    if [[ "$image" == *@* ]]; then
+      [[ "$image" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || die "$cell live image digest is invalid"
+      live_digest=${image##*@}
+      matched=false
+      for pin_values in "$values" "$baseline_values"; do
+        if { [ "$pin_values" = "$values" ] && [ "$live_digest" = "$digest" ]; } ||
+           { [ "$pin_values" = "$baseline_values" ] && [ "$live_digest" = "$baseline_digest" ]; }; then
+          matched=true
+          current=$(digest_release_version "$pin_values") || die "$cell digest release is invalid"
+          if version_lower "$VERSION" "$current"; then
+            die "$cell live image digest release '$current' is newer than $VERSION"
+          fi
+        fi
+      done
+      [ "$matched" = true ] || die "$cell live image digest has no matching release pin in the cell values"
+    else
+      current=${image##*:}
+      if [[ "$image" != *:* ]] || ! valid_version "$current" || version_lower "$VERSION" "$current"; then
+        die "$cell live image '$image' is invalid or newer than $VERSION"
+      fi
     fi
   done <<<"$images"
 }
 
 roll_wave() {
-  local cell=$1 wave=$2 values namespace title body head view merge_oid changed base baseline latest merge_attr
+  local cell=$1 wave=$2 values namespace title body head view merge_oid changed base baseline latest merge_attr baseline_values
   PHASE="wave $wave ($cell): worktree creation"
   CURRENT_BRANCH="roll-train/$RUN_ID/wave-$wave-$cell"
   CURRENT_WT="$RUN_DIR/wave-$wave-$cell"
@@ -405,6 +474,8 @@ roll_wave() {
   cd "$CURRENT_WT"
   values=".gitops/cells/$cell/values.yaml"
   baseline=$(cat "$values")
+  baseline_values="$RUN_DIR/wave-$wave-baseline.yaml"
+  printf '%s\n' "$baseline" >"$baseline_values"
   namespace=$(yq -er '.apps.witselfServer.namespace' "$values")
   [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "invalid server namespace for $cell"
   PHASE="wave $wave ($cell): version guards"
@@ -456,7 +527,7 @@ roll_wave() {
   git fetch origin main
   latest=$(git show "origin/main:$values")
   [ "$latest" = "$baseline" ] || die "$cell desired values changed before merge; inspect $CURRENT_PR"
-  require_live_not_newer "$cell" "$namespace" "$values"
+  require_live_not_newer "$cell" "$namespace" "$values" "$baseline_values"
   PHASE="wave $wave ($cell): squash merge"
   # Preserve the configured operator's DCO sign-off in the squash commit too.
   git log -1 --format=%b >"$RUN_DIR/wave-$wave-merge.txt"
@@ -578,7 +649,8 @@ push branch; create PR; require all required checks to pass (${CI_TIMEOUT}s);
 verify head OID/main base; recheck unchanged cell values and live versions;
 squash merge --match-head-commit (both pin edits conflict with concurrent upgrades);
 verify exact post-merge CI (${CI_TIMEOUT}s); Argo Synced + Healthy + revision $VERSION;
-ready, nonterminating Running server pods and ready containers with images ending :$VERSION;
+ready, nonterminating Running server pods and ready containers with images matching
+the cell's written digest pin, or ending :$VERSION for tag-only cells;
 observed deployment generation and all replicas updated/ready/available (${ARGO_TIMEOUT}s);
 remove verified worktree/branch. Poll interval: ${POLL_INTERVAL}s.
 Finally: print serving /v1/version; witself-infra health --json if available.

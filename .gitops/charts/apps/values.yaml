@@ -61,6 +61,8 @@ apps:
     chartName: witself-server
     chartVersion: 0.0.45
     imageTag: 0.0.45
+    # Optional immutable server image pin; empty preserves the tag-only chart values.
+    imageDigest: ""
     backendKind: managed
     # Public control-plane origin/prefix advertised by managed cells for
     # provider-neutral billing commands. Empty keeps discovery dark and is not

@@ -8,9 +8,9 @@ without touching them.
 
 ## Design: source of truth
 
-Each overlay is assembled from three owners. The generator never dumps the
-whole document through `yq` (that re-indents comments; see
-`scripts/roll-cell.sh`).
+Each overlay is assembled from three owners. The generator emits templates
+and preserves their comments and key order without dumping the whole document
+through a YAML serializer.
 
 ### Generated from cell config
 
@@ -37,11 +37,19 @@ back unchanged:
 
 - `apps.witselfServer.chartVersion`
 - `apps.witselfServer.imageTag`
+- `apps.witselfServer.imageDigest` (optional; omitted when empty)
 
-`roll-cell.sh` is the only tool allowed to change those two paths (it uses
-`yq -i` on just those scalars, then `git diff` to refuse any other edit).
-Run `--write` after a roll and the generator keeps the new pins. Do not put
-the live pin in the catalog or in an overlay placeholder's default.
+`roll-cell.sh` resolves the release server image from the GHCR manifest API,
+validates its digest, and passes all three pins to the generator's
+`--roll-cell CELL --version VERSION --image-digest DIGEST` mode. That mode
+rejects existing generation drift and invalid pins before atomically replacing
+only the selected cell's values. Run `--write` after a roll and the generator
+keeps the new pins. Do not put the live pin in the catalog or in an overlay
+placeholder's default.
+
+The digest must be `sha256:` followed by 64 lowercase hexadecimal characters.
+The apps chart forwards a non-empty `imageDigest` as the server chart's
+`image.digest`. Empty or absent digest pins retain the existing tag rendering.
 
 When `--write` bootstraps a catalog cell that has no `values.yaml` yet, it
 creates the file using `apps.witselfServer.chartVersion` / `imageTag` from
@@ -104,13 +112,18 @@ their own rollout commit.
 
 ## How `roll-cell.sh` pins interact
 
-1. `scripts/roll-cell.sh <cell> <version> …` edits only the two Witself
-   pins with `yq` and refuses stray formatting.
+1. `scripts/roll-cell.sh <cell> <version> …` resolves the manifest digest
+   and asks the generator to update only the three Witself release pins.
+   Registry failures or missing/malformed digests abort before any values edit.
 2. The generator treats those pins as inputs. `--check` after a roll still
    passes because it substitutes the new scalars into the same template.
 3. `--write` after a roll is a no-op unless some other generated field also
    drifted.
 
-If `yq` ever rewrites comments or key order, `roll-cell.sh` already fails
-closed on that stray diff. This generator does not call `yq` at all: it
-emits Go `text/template` output so comment-bearing blocks round-trip.
+The generator emits Go `text/template` output and adds a non-empty digest
+beside the generated server image tag, using the parsed YAML location to
+preserve comment-bearing blocks. Unpinned cells retain their existing bytes.
+
+`scripts/roll-train.sh` supports tag-only and digest-pinned rolls. Its digest
+convergence and downgrade checks use the release pins in the cell values;
+see [the release train contract](release-and-build.md#current-automated-release-and-rollout-boundary).
