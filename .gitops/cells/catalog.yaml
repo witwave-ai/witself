@@ -69,7 +69,7 @@ cells:
       monitoring: true
       collector_alerts: true
       sealed_plane_alerts: true
-      postgres_backup: false
+      postgres_backup: true
   civo-sandbox-usw2-dev:
     cloud: civo
     region: phx1
