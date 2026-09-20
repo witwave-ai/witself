@@ -27,7 +27,7 @@ import {
 
 const ACCOUNT = "acct_test";
 const SOURCE = "aws-us-west-2";
-const TARGET = "civo-phx1";
+const TARGET = "civo-fixture-target";
 const ARCHIVE = {
   archive_id: "archive.001",
   object: "accounts/acct_test/attempt-001.tar.gz",

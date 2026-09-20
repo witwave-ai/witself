@@ -165,7 +165,7 @@ func TestFleetRegistrationPinsRestoreTargetIsolation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := fleetRegistration(
-				"civo-sandbox-use1-dev",
+				"civo-fixture-use1-dev",
 				"api.example.com",
 				"civo",
 				"nyc1",
@@ -181,7 +181,7 @@ func TestFleetRegistrationPinsRestoreTargetIsolation(t *testing.T) {
 			if got.Accepting == nil || *got.Accepting == test.target {
 				t.Fatalf("accepting = %v, want %v", got.Accepting, !test.target)
 			}
-			if got.Name != "civo-sandbox-use1-dev" ||
+			if got.Name != "civo-fixture-use1-dev" ||
 				got.Endpoint != "https://api.example.com" {
 				t.Fatalf("cell identity changed: %#v", got)
 			}

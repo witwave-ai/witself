@@ -39,7 +39,7 @@ end
 # until WitselfIdentityCapacityAtLimit stops treating a Personal account's
 # single root operator seat as a capacity breach.
 pagerduty = File.join(chart, 'ci/monitoring-pagerduty-values.yaml')
-serving = File.join(root, '.gitops/cells/civo-sandbox-usw2-dev/values.yaml')
+serving = File.join(root, '.gitops/cells/civo-sandbox-use1-serving/values.yaml')
 disabled = render.call(pagerduty)
 abort "gated alerts rendered without an opt-in: #{pagerduty}" unless disabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_opt_ins
 enabled = render.call(pagerduty, '--set', 'platform.monitoring.collectorAlerts.enabled=true')

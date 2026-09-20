@@ -120,8 +120,8 @@ func TestCivoProvisionSecretContainsIndependentBackupCredential(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		cluster, err := civo.NewKubernetesCluster(
 			ctx, "test-cluster", &civo.KubernetesClusterArgs{
-				Name:        pulumi.String("witself-civo-sandbox-usw2-dev"),
-				Region:      pulumi.String("PHX1"),
+				Name:        pulumi.String("witself-civo-sandbox-use1-serving"),
+				Region:      pulumi.String("NYC1"),
 				NetworkId:   pulumi.String("network-id"),
 				FirewallId:  pulumi.String("firewall-id"),
 				ClusterType: pulumi.String("k3s"),
@@ -139,18 +139,18 @@ func TestCivoProvisionSecretContainsIndependentBackupCredential(t *testing.T) {
 		return provisionCivoArgoCD(
 			ctx,
 			civoCell{
-				name:             "civo-sandbox-usw2-dev",
-				region:           "PHX1",
+				name:             "civo-sandbox-use1-serving",
+				region:           "NYC1",
 				gitopsRepo:       "https://github.com/witwave-ai/witself",
 				gitopsPath:       ".gitops/charts/bootstrap",
-				gitopsValuesPath: ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+				gitopsValuesPath: ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
 				gitopsRevision:   "main",
 			},
 			cluster,
-			pulumi.String("civo-sandbox-usw2-dev.civo.com"),
-			pulumi.String("civo-sandbox-usw2-dev.civo.com"),
+			pulumi.String("civo-sandbox-use1-serving.civo.com"),
+			pulumi.String("civo-sandbox-use1-serving.civo.com"),
 		)
-	}, pulumi.WithMocks("witself-infra", "civo-sandbox-usw2-dev", mocks))
+	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-serving", mocks))
 	if err != nil {
 		t.Fatalf("provision Civo credentials: %v", err)
 	}

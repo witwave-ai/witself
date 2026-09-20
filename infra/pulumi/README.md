@@ -178,9 +178,9 @@ install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
 # Write the Civo API token into that file using your password manager/editor.
 
 ./bin/witself-infra config add-cell \
-  -cloud civo -account-alias sandbox -region nyc1 -role dev \
+  -cloud civo -account-alias sandbox -region nyc1 -role serving -profile prod \
   -backend local \
-  -state-dir "$HOME/.witself/infra-state/civo-sandbox-use1-dev" \
+  -state-dir "$HOME/.witself/infra-state/civo-sandbox-use1-serving" \
   -civo-token-file "$HOME/.witself/tokens/civo-sandbox.token" \
   -civo-expected-account-id 00000000-0000-0000-0000-000000000000 \
   -civo-node-size g4s.kube.medium \
@@ -188,10 +188,10 @@ install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
   -argocd \
   -control-plane https://self.witwave.ai
 
-./bin/witself-infra whoami -cell civo-sandbox-use1-dev
-./bin/witself-infra preview -cell civo-sandbox-use1-dev
-./bin/witself-infra up -cell civo-sandbox-use1-dev
-./bin/witself-infra cell-health -cell civo-sandbox-use1-dev
+./bin/witself-infra whoami -cell civo-sandbox-use1-serving
+./bin/witself-infra preview -cell civo-sandbox-use1-serving
+./bin/witself-infra up -cell civo-sandbox-use1-serving
+./bin/witself-infra cell-health -cell civo-sandbox-use1-serving
 ./bin/witself-infra dashboard
 ```
 
@@ -221,7 +221,7 @@ The Civo stack exports the provider-reported `kubernetesVersion` for
 state only; use `kubectl get nodes` to verify actual running kubelet versions.
 
 Civo currently uses an explicit local Pulumi backend for these cells; `bootstrap -cell
-civo-sandbox-use1-dev` initializes that directory locally and performs no
+civo-sandbox-use1-serving` initializes that directory locally and performs no
 cloud-side backend work.
 
 The Civo `minimal` profile (and the default when `-profile` is omitted) uses one

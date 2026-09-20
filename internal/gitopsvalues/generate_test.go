@@ -17,10 +17,17 @@ func TestCommittedValuesMatchGenerator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(generated) != 10 {
-		t.Fatalf("generated %d cells, want 10", len(generated))
+	cfg, err := loadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generated) != len(cfg.Cells) {
+		t.Fatalf("generated %d cells, want %d catalog cells", len(generated), len(cfg.Cells))
 	}
 	for _, cell := range sortedCells(generated) {
+		if _, ok := cfg.Cells[cell]; !ok {
+			t.Fatalf("generated cell %s is not in the catalog", cell)
+		}
 		path := filepath.Join(root, filepath.FromSlash(valuesRel(cell)))
 		committed, err := os.ReadFile(path)
 		if err != nil {
@@ -43,9 +50,9 @@ func TestCheckPassesOnCommittedTree(t *testing.T) {
 const sealedPlaneAlertsBlock = "    sealedPlaneAlerts:\n      enabled: true\n"
 
 func TestSealedPlaneAlertsTemplate(t *testing.T) {
-	tmpl := templates.Lookup("civo-sandbox-usw2-dev.yaml.tmpl")
+	tmpl := templates.Lookup("civo-sandbox-use1-serving.yaml.tmpl")
 	if tmpl == nil {
-		t.Fatal("missing civo-sandbox-usw2-dev overlay template")
+		t.Fatal("missing civo-sandbox-use1-serving overlay template")
 	}
 	for _, tc := range []struct {
 		name    string
@@ -104,18 +111,15 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
 	// would fire permanently because every Personal account already holds its
 	// single root operator seat (used == cap == 1). Only the sealed-plane group
 	// is enabled on the serving cell.
-	serving := cfg.Cells["civo-sandbox-usw2-dev"]
+	serving := cfg.Cells["civo-sandbox-use1-serving"]
 	if serving.Switches.CollectorAlerts || !serving.Switches.SealedPlaneAlerts {
-		t.Fatalf("civo-sandbox-usw2-dev switches: collector_alerts=%v sealed_plane_alerts=%v, want false/true",
+		t.Fatalf("civo-sandbox-use1-serving switches: collector_alerts=%v sealed_plane_alerts=%v, want false/true",
 			serving.Switches.CollectorAlerts, serving.Switches.SealedPlaneAlerts)
 	}
 	for name, cell := range cfg.Cells {
-		if name == "civo-sandbox-usw2-dev" {
-			continue
-		}
 		if name == "civo-sandbox-use1-serving" {
-			// The replacement serving cell mirrors the lost cell: monitoring and the
-			// sealed-plane group on, the collector group off until the
+			// The serving cell enables monitoring and the sealed-plane group,
+			// with the collector group off until the
 			// identity-capacity rule semantics are fixed.
 			if !cell.Switches.Monitoring || cell.Switches.CollectorAlerts || !cell.Switches.SealedPlaneAlerts {
 				t.Error("replacement serving cell must enable monitoring and the sealed-plane group only")
@@ -128,7 +132,7 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
 	}
 }
 
-func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCells(t *testing.T) {
+func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
 	generated, err := generateAll(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -137,15 +141,6 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCells(t *testing.T) {
 		body := string(generated[cell])
 		hasSealed := strings.Contains(body, sealedPlaneAlertsBlock)
 		hasCollector := strings.Contains(body, "    collectorAlerts:\n      enabled: true\n")
-		if cell == "civo-sandbox-usw2-dev" {
-			if !hasSealed {
-				t.Errorf("%s missing sealedPlaneAlerts block", valuesRel(cell))
-			}
-			if hasCollector {
-				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
-			}
-			continue
-		}
 		if cell == "civo-sandbox-use1-serving" {
 			if !hasSealed {
 				t.Errorf("%s missing sealedPlaneAlerts block", valuesRel(cell))

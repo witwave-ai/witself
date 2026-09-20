@@ -194,6 +194,7 @@ cat >"$work_dir/state/deployment.json" <<'EOF'
 EOF
 cp "$work_dir/state/deployment.json" "$work_dir/state/deployment-with-retry.json"
 
+# The serving fixture retains the deployed receive audience as a distinct live identifier.
 cat >"$work_dir/state/config.json" <<'EOF'
 {
   "apiVersion":"v1","kind":"ConfigMap","metadata":{
@@ -202,7 +203,7 @@ cat >"$work_dir/state/config.json" <<'EOF'
   },
   "data":{
     "WITSELF_BACKEND_KIND":"managed",
-    "WITSELF_CELL_NAME":"civo-sandbox-usw2-dev",
+    "WITSELF_CELL_NAME":"civo-sandbox-use1-serving",
     "WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED":"true",
     "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED":"false",
     "WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN":"witmail.net",
@@ -266,7 +267,7 @@ reset_fake_run
 output_path="$work_dir/output/primary-canary.json"
 operation_output="$work_dir/operation-output"
 if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation canary-manifest \
@@ -297,7 +298,7 @@ jq -e '
   (.spec.template.spec.volumes[] | select(.name == "private") | .emptyDir.medium == "Memory")
 ' "$work_dir/state/job-created.json" >/dev/null
 ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
-  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev witself
+  "$work_dir/state/job-created.json" civo-sandbox-use1-serving witself
 jq -e '
   .immutable == true and
   (.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS == null) and
@@ -324,7 +325,7 @@ jq '
 ' "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
 phase_a_output="$work_dir/phase-a-output"
 if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation canary-manifest \
@@ -352,7 +353,7 @@ export FAKE_RUNNER_EXIT=0
 export FAKE_RUNNER_LOG=$'2026/08/15 17:53:44 goose: no migrations to run. current version: 89\n{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":10,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}'
 noisy_backfill_output="$work_dir/noisy-backfill-output"
 if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation backfill \
@@ -371,14 +372,14 @@ if grep -Fq 'goose:' "$noisy_backfill_output"; then
 fi
 test ! -e "$work_dir/output/noisy-backfill-must-stay-absent.json"
 ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
-  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev witself
+  "$work_dir/state/job-created.json" civo-sandbox-use1-serving witself
 
 # Multiple valid-looking result objects are ambiguous and must stay fail-closed.
 reset_fake_run
 export FAKE_RUNNER_LOG=$'{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":0,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}\n{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":0,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}'
 ambiguous_backfill_output="$work_dir/ambiguous-backfill-output"
 if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation backfill \
@@ -398,7 +399,7 @@ jq '.data.WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID = "agent_aaaaaaaaaaaaaaaa"' 
   "$work_dir/state/config-dark.json" >"$work_dir/state/config.json"
 literal_config_output="$work_dir/literal-config-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/literal-config-must-stay-absent.json" \
     --timeout-seconds 60 >"$literal_config_output" 2>&1; then
@@ -420,7 +421,7 @@ jq '.spec.template.spec.containers[0].image = "ghcr.io/witwave-ai/images/witself
   "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
 pre245_retry_output="$work_dir/pre245-retry-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/pre245-retry-must-stay-absent.json" \
     --timeout-seconds 60 >"$pre245_retry_output" 2>&1; then
@@ -444,7 +445,7 @@ jq '
 ' "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
 shared_secret_output="$work_dir/shared-secret-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/shared-secret-must-stay-absent.json" \
     --timeout-seconds 60 >"$shared_secret_output" 2>&1; then
@@ -468,7 +469,7 @@ reset_fake_run
 export FAKE_BACKGROUND_DELETE=true
 lingering_output="$work_dir/lingering-output"
 if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation backfill \
@@ -496,7 +497,7 @@ reset_fake_run
 export FAKE_STALE_READINESS=true
 stale_output="$work_dir/stale-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/stale-must-stay-absent.json" \
     --timeout-seconds 60 >"$stale_output" 2>&1; then
@@ -511,7 +512,7 @@ reset_fake_run
 export FAKE_COHORT_IMMUTABLE=false
 mutable_cohort_output="$work_dir/mutable-cohort-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/mutable-cohort-must-stay-absent.json" \
     --timeout-seconds 60 >"$mutable_cohort_output" 2>&1; then
@@ -526,7 +527,7 @@ reset_fake_run
 export FAKE_RETRY_CANARY_IMMUTABLE=false
 mutable_retry_canary_output="$work_dir/mutable-retry-canary-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/mutable-retry-canary-must-stay-absent.json" \
     --timeout-seconds 60 >"$mutable_retry_canary_output" 2>&1; then
@@ -541,7 +542,7 @@ reset_fake_run
 export FAKE_SOURCE_DRIFT=config
 drift_output="$work_dir/drift-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/drift-must-stay-absent.json" \
     --timeout-seconds 60 >"$drift_output" 2>&1; then
@@ -556,7 +557,7 @@ reset_fake_run
 export FAKE_SOURCE_DRIFT=retry-secret
 retry_secret_drift_output="$work_dir/retry-secret-drift-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/retry-secret-drift-must-stay-absent.json" \
     --timeout-seconds 60 >"$retry_secret_drift_output" 2>&1; then
@@ -574,7 +575,7 @@ export FAKE_RUNNER_EXIT=0
 export FAKE_COMPLETE_ERROR=true
 completion_output="$work_dir/completion-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/completion-must-stay-absent.json" \
     --timeout-seconds 60 >"$completion_output" 2>&1; then
@@ -591,7 +592,7 @@ export FAKE_RUNNER_EXIT=1
 export FAKE_RUNNER_LOG='witself-server: agent-email production canary database open failed (reason=database_unavailable)'
 canary_failure_output="$work_dir/canary-failure-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/failed-canary-must-stay-absent.json" \
     --timeout-seconds 60 >"$canary_failure_output" 2>&1; then
@@ -614,7 +615,7 @@ export FAKE_RUNNER_EXIT=1
 export FAKE_RUNNER_LOG='witself-server: agent-email production canary database open failed (reason=account_acc_aaaaaaaaaaaaaaaa) secret=witself-db'
 untrusted_reason_output="$work_dir/untrusted-reason-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/untrusted-reason-must-stay-absent.json" \
     --timeout-seconds 60 >"$untrusted_reason_output" 2>&1; then
@@ -637,7 +638,7 @@ export FAKE_RUNNER_EXIT=1
 export FAKE_RUNNER_LOG=$'witself-server: agent-email production canary database open failed (reason=database_unavailable)\nwitself-server: agent-email production canary snapshot failed (reason=canary_snapshot_failed)'
 conflicting_reasons_output="$work_dir/conflicting-reasons-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/conflicting-reasons-must-stay-absent.json" \
     --timeout-seconds 60 >"$conflicting_reasons_output" 2>&1; then
@@ -655,7 +656,7 @@ export FAKE_RUNNER_EXIT=1
 export FAKE_RUNNER_LOG_FAILURE=true
 log_failure_output="$work_dir/log-failure-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --cell civo-sandbox-use1-serving --kubeconfig "$work_dir/kubeconfig" --context civo-test \
     --operation canary-manifest \
     --artifact-output "$work_dir/output/log-failure-must-stay-absent.json" \
     --timeout-seconds 60 >"$log_failure_output" 2>&1; then
@@ -680,7 +681,7 @@ export FAKE_RUNNER_EXIT=1
 exception_output="$work_dir/output/backfill-exception.json"
 failure_output="$work_dir/failure-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation backfill \
@@ -705,7 +706,7 @@ reset_fake_run
 export FAKE_ARTIFACT_INSPECTION_ERROR=true
 inspection_output="$work_dir/inspection-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
-    --cell civo-sandbox-usw2-dev \
+    --cell civo-sandbox-use1-serving \
     --kubeconfig "$work_dir/kubeconfig" \
     --context civo-test \
     --operation canary-manifest \

@@ -28,7 +28,7 @@ the same composed name as `witself-infra`
 | `gitops.repoURL`, `gitops.targetRevision` | Catalog `gitops` block |
 | `gitops.valuesPath` | Civo only: `.gitops/cells/<cell>/values.yaml` |
 | Cloud-family ingress, secrets, ExternalDNS/ESO, and platform add-on enablement | AWS / Azure / GCP family templates. Chart versions for cert-manager, external-dns, external-secrets, KEDA, and metrics-server come from [`.gitops/charts/platform/values.yaml`](../.gitops/charts/platform/values.yaml) and are **not** per-cell: every overlay emits those fleet defaults. A future per-cell platform chart pin needs a catalog field; it is not expressible in `values.yaml` by hand. Civo Postgres chart version comes from [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml) |
-| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-usw2-dev` and `civo-sandbox-use1-serving` overlays; the recovery overlay renders all three switches explicitly, initially false) |
+| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-use1-serving` overlay; the checked-in switches enable the recovered serving-cell monitoring) |
 
 ### Pinned scalars that `scripts/roll-cell.sh` owns
 
@@ -70,11 +70,25 @@ not a per-cell overlay: both Azure cells share them.
 
 The sealed-plane alert group is a catalog switch (`sealed_plane_alerts`)
 rendered in the serving-cell overlay next to `collector_alerts`, not a
-`roll-cell.sh` pin. The `civo-sandbox-usw2-dev` overlay emits enabled alert blocks only when
-`monitoring: true`. The `civo-sandbox-use1-serving` recovery overlay renders
-all three switches explicitly as false until a later monitoring change.
+`roll-cell.sh` pin. The `civo-sandbox-use1-serving` overlay emits enabled alert blocks only when
+`monitoring: true`. Its checked-in configuration enables monitoring and sealed-plane alerts,
+while collector alerts remain disabled. The recovery fixture replays the three phases
+from a temporary disabled-discovery baseline without changing the checked-in
+serving configuration.
 Setting switches on an overlay without a `platform.monitoring` block has
 no effect.
+
+To regenerate `scripts/testdata/monitoring-recovery/phase2.patch` (phase 1 to 2)
+and `phase3.patch` (phase 2 to 3) from the phase-3 base, reconstruct the adjacent-phase
+snapshots in isolation and regenerate cell values in each. Copy only the four files
+into `a/` (earlier phase) and `b/` (later phase), preserving repository-relative paths,
+then run `git diff --no-index --no-prefix a b` from their parent to retain the `a/`
+and `b/` patch prefixes (exit 1 means differences). The exact `git apply --include`
+set is `--include=.gitops/cells/catalog.yaml`,
+`--include=internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl`,
+`--include=.gitops/cells/civo-sandbox-use1-serving/values.yaml`, and
+`--include=internal/gitopsvalues/generate_test.go`. Save each diff to its phase patch
+and replay both with `ruby scripts/testdata/test-monitoring-recovery.rb "$PWD"`.
 
 ## Usage
 

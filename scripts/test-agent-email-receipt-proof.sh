@@ -401,7 +401,7 @@ cat >"$work_dir/state/cell-config.json" <<'EOF'
   "apiVersion":"v1","kind":"ConfigMap",
   "metadata":{"name":"witself-server","uid":"server-config-uid","resourceVersion":"server-config-rv",
     "annotations":{"witself.io/server-config-checksum":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}},
-  "data":{"WITSELF_BACKEND_KIND":"managed","WITSELF_CELL_NAME":"civo-sandbox-usw2-dev"}
+  "data":{"WITSELF_BACKEND_KIND":"managed","WITSELF_CELL_NAME":"civo-sandbox-use1-serving"}
 }
 EOF
 
@@ -421,7 +421,7 @@ chmod 600 "$work_dir/kubeconfig"
 export FAKE_KUBE_STATE="$work_dir/state"
 export FAKE_ORIGINAL_KUBECONFIG="$work_dir/kubeconfig"
 export FAKE_EXPECTED_KUBECONFIG_CONTENT="$work_dir/kubeconfig-expected"
-export FAKE_EXPECTED_CONTEXT=witself-civo-sandbox-usw2-dev
+export FAKE_EXPECTED_CONTEXT=witself-civo-sandbox-use1-serving
 export FAKE_EXPECTED_NAMESPACE=witself
 export WITSELF_AGENT_EMAIL_RECEIPT_PROOF_CLEANUP_TIMEOUT_SECONDS=1
 export PATH="$work_dir/bin:$PATH"
@@ -431,9 +431,9 @@ export FAKE_RUNNER_LOG="$proof"
 export FAKE_RUNNER_EXIT=0
 
 base_args=(
-  --cell civo-sandbox-usw2-dev
+  --cell civo-sandbox-use1-serving
   --kubeconfig "$work_dir/kubeconfig"
-  --context witself-civo-sandbox-usw2-dev
+  --context witself-civo-sandbox-use1-serving
   --namespace witself
   --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.249
   --expected-config-checksum bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -497,7 +497,7 @@ test ! -e "$work_dir/state/forbidden-exec.log"
 
 jq -e '
   .kind == "ConfigMap" and .metadata.name == "witself-agent-email-receipt-proof-lock" and
-  .immutable == true and .metadata.labels["witself.io/cell"] == "civo-sandbox-usw2-dev" and
+  .immutable == true and .metadata.labels["witself.io/cell"] == "civo-sandbox-use1-serving" and
   (.data | keys | sort == ["WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT",
     "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID",
     "WITSELF_AGENT_EMAIL_OUTBOUND_PROVIDER_TIMEOUT"]) and
@@ -507,7 +507,7 @@ jq -e '
 jq -e '
   .kind == "Job" and .metadata.name == "witself-agent-email-receipt-proof" and
   .metadata.labels["app.kubernetes.io/managed-by"] == "witself-operator" and
-  .metadata.labels["witself.io/cell"] == "civo-sandbox-usw2-dev" and
+  .metadata.labels["witself.io/cell"] == "civo-sandbox-use1-serving" and
   .spec.backoffLimit == 0 and .spec.activeDeadlineSeconds == 60 and
   .spec.ttlSecondsAfterFinished == 3600 and
   .spec.template.spec.automountServiceAccountToken == false and
@@ -515,7 +515,7 @@ jq -e '
   (.spec.template.spec.containers | length == 1)
 ' "$work_dir/state/job-created.json" >/dev/null
 ruby "$repo_root/scripts/test-postgres-operation-policy.rb" \
-  "$work_dir/state/job-created.json" civo-sandbox-usw2-dev "$FAKE_EXPECTED_NAMESPACE"
+  "$work_dir/state/job-created.json" civo-sandbox-use1-serving "$FAKE_EXPECTED_NAMESPACE"
 jq -e '
   .spec.template.spec.containers[0] as $runner |
   $runner.image == "ghcr.io/witwave-ai/images/witself-server:0.0.249" and
@@ -710,9 +710,9 @@ fi
 reset_fake_run
 missing_namespace_output="$work_dir/missing-namespace-output"
 run_expect_failure 'error: required arguments are missing' "$missing_namespace_output" \
-  --cell civo-sandbox-usw2-dev \
+  --cell civo-sandbox-use1-serving \
   --kubeconfig "$work_dir/kubeconfig" \
-  --context witself-civo-sandbox-usw2-dev \
+  --context witself-civo-sandbox-use1-serving \
   --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.249 \
   --expected-config-checksum bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --expected-replicas 2 \

@@ -152,8 +152,8 @@ The fleet spans AWS, GCP, Azure, and Civo, across multiple accounts per cloud.
   stack; all four provider graphs are implemented. The three hyperscaler
   managed-PostgreSQL paths must pass the same
   conformance and cell-move gates before it is described as certified.
-  Civo is the current production provider: `civo-sandbox-usw2-dev` is the
-  serving cell despite its legacy name, while `civo-sandbox-use1-backup` is the
+  Civo is the current production provider: `civo-sandbox-use1-serving` is the
+  serving cell, while `civo-sandbox-use1-backup` is the
   non-accepting rollback-only drill target.
 - **Placement is by region and data-residency.** A thin global control plane picks
   the home cell for a new tenant by region / data-residency requirement, capacity

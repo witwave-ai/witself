@@ -82,7 +82,7 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 	fs := newTestFlagSet()
 	if err := fs.Parse([]string{
 		"-cloud", "civo",
-		"-account-alias", "sandbox",
+		"-account-alias", "fixture",
 		"-region", "nyc1",
 		"-role", "dev",
 		"-backend", "local",
@@ -104,7 +104,7 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 	if err := resolved.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyCellConfig(resolved, "civo-sandbox-use1-dev", path); err != nil {
+	if err := applyCellConfig(resolved, "civo-fixture-use1-dev", path); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
@@ -406,9 +406,9 @@ func TestCivoCellRejectsSecurityContextOverride(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	configPath := writeConfig(t, `version: 1
 cells:
-  civo-sandbox-use1-dev:
+  civo-fixture-use1-dev:
     cloud: civo
-    account_alias: sandbox
+    account_alias: fixture
     region: nyc1
     role: dev
     backend: local
@@ -417,7 +417,7 @@ cells:
 `)
 	err := run([]string{
 		"preview",
-		"-cell", "civo-sandbox-use1-dev",
+		"-cell", "civo-fixture-use1-dev",
 		"-config", configPath,
 		"-civo-expected-account-id", "override-account",
 	})

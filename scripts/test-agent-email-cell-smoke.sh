@@ -89,10 +89,11 @@ jq -n --arg checksum "$checksum" '{
       env:[{name:"WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS",valueFrom:{secretKeyRef:{name:"receive-cohort-v1",key:"account_ids",optional:false}}}]}]} }},
   status:{observedGeneration:7,replicas:2,readyReplicas:2,updatedReplicas:2,availableReplicas:2,unavailableReplicas:0}
 }' >"$deployment_json"
+# The serving fixture retains the deployed receive audience as a distinct live identifier.
 jq -n --arg checksum "$checksum" --arg public "$public_value" '{
   metadata:{name:"witself-server-config",uid:"config-uid",resourceVersion:"52",
     annotations:{"witself.io/server-config-checksum":$checksum}},
-  data:{WITSELF_BACKEND_KIND:"managed",WITSELF_CELL_NAME:"civo-sandbox-usw2-dev",
+  data:{WITSELF_BACKEND_KIND:"managed",WITSELF_CELL_NAME:"civo-sandbox-use1-serving",
     WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED:"true",
     WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED:"false",
     WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN:"witmail.net",
@@ -145,6 +146,11 @@ const server = createServer((request, response) => {
   if (request.url !== "/v1/internal/agent-email:ingest" || request.method !== "POST") {
     response.writeHead(404);
     response.end();
+    return;
+  }
+  if (request.headers["x-witself-email-audience"] !== "civo-sandbox-usw2-dev") {
+    response.writeHead(401, { "Content-Type": "application/json" });
+    response.end('{"error":"incorrect_receive_audience"}\n');
     return;
   }
   const chunks = [];
@@ -208,7 +214,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$FAKE_COMMAND_LOG"
 joined=" $* "
 if [[ "$joined" == *" get applications.argoproj.io witself-postgresql "* ]]; then
-  printf '%s' 'civo-sandbox-usw2-dev'
+  printf '%s' 'civo-sandbox-use1-serving'
 elif [[ "$joined" == *" create -f - -o json "* ]]; then
   input="$(cat)"
   grep -F 'witself-agent-email-operation-lock' <<<"$input" >/dev/null
@@ -317,7 +323,7 @@ export FAKE_AGENT_AUTHORIZATION
 : >"$FAKE_COMMAND_LOG"
 chmod 600 "$FAKE_COMMAND_LOG"
 
-common=(--cell civo-sandbox-usw2-dev --kubeconfig "$kubeconfig" --context fake-civo \
+common=(--cell civo-sandbox-use1-serving --kubeconfig "$kubeconfig" --context fake-civo \
   --target-file "$target" --namespace witself --deployment witself-server --service witself-server)
 signed=(--agent-token-file "$agent_token_file" --relay-key-id relay-1 --relay-private-key-file "$key_file")
 
@@ -344,6 +350,60 @@ assert_private_output "$disabled_err"
 disabled_state="$private/disabled-state.json"
 cp "$state" "$disabled_state"
 chmod 600 "$disabled_state"
+
+# A valid physical cell cannot make a missing or malformed relay audience usable.
+for audience_case in null numeric empty uppercase too_long trailing_newline leading_dash trailing_dash; do
+  audience_config="$private/audience-$audience_case.json"
+  audience_state="$private/audience-$audience_case-state.json"
+  case "$audience_case" in
+    null) audience_filter='null' ;;
+    numeric) audience_filter='42' ;;
+    empty) audience_filter='""' ;;
+    uppercase) audience_filter='"Civo-audience"' ;;
+    too_long) audience_filter='("a" * 64)' ;;
+    trailing_newline) audience_filter='"civo-audience\n"' ;;
+    leading_dash) audience_filter='"-civo-audience"' ;;
+    trailing_dash) audience_filter='"civo-audience-"' ;;
+  esac
+  jq ".data.WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE = ($audience_filter)" \
+    "$config_json" >"$audience_config"
+  chmod 600 "$audience_config"
+  export FAKE_CONFIG_JSON="$audience_config"
+  rm -f "$FAKE_REQUEST_COUNT" "$FAKE_OWNER_REQUEST_COUNT"
+  if "$runner" "${common[@]}" --phase disabled --state-file "$audience_state" \
+      "${signed[@]}" >"$private/audience.out" 2>"$private/audience.err"; then
+    fail "invalid $audience_case receive audience was accepted"
+  fi
+  grep -Fq 'managed production receive configuration is not ready' "$private/audience.err" ||
+    fail "invalid $audience_case receive audience did not fail source validation"
+  [ ! -e "$FAKE_REQUEST_COUNT" ] && [ ! -e "$FAKE_OWNER_REQUEST_COUNT" ] ||
+    fail "invalid $audience_case receive audience reached a server endpoint"
+  [ ! -e "$audience_state" ] || fail "invalid receive audience created state"
+  assert_private_output "$private/audience.out"
+  assert_private_output "$private/audience.err"
+done
+
+# A well-formed replacement audience still violates the already reviewed phase fence.
+audience_drift_state="$private/audience-drift-state.json"
+audience_drift_config="$private/audience-drift.json"
+cp "$disabled_state" "$audience_drift_state"
+jq '.data.WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE="civo-fixture-other"' \
+  "$config_json" >"$audience_drift_config"
+chmod 600 "$audience_drift_state" "$audience_drift_config"
+export FAKE_CONFIG_JSON="$audience_drift_config" FAKE_DB_PHASE=entitled
+export FAKE_RELAY_VERDICT=accepted FAKE_OWNER_GATE=address_available FAKE_ENTITLED_REVISION=2
+if "$runner" "${common[@]}" --phase entitled --state-file "$audience_drift_state" \
+    "${signed[@]}" >"$private/audience-drift.out" 2>"$private/audience-drift.err"; then
+  fail "changed receive audience was accepted between plan phases"
+fi
+grep -Fq 'server configuration changed between plan phases' "$private/audience-drift.err" ||
+  fail "receive audience drift did not fail the configuration fence"
+[ ! -e "$FAKE_REQUEST_COUNT" ] && [ ! -e "$FAKE_OWNER_REQUEST_COUNT" ] ||
+  fail "changed receive audience reached a server endpoint"
+jq -e '.entitled==null' "$audience_drift_state" >/dev/null || fail "audience drift changed state"
+assert_private_output "$private/audience-drift.out"
+assert_private_output "$private/audience-drift.err"
+export FAKE_CONFIG_JSON="$config_json"
 
 service_selector_state="$private/service-selector-state.json"
 service_selector_json="$private/service-selector.json"
@@ -616,7 +676,7 @@ permission_out="$private/permission.out"
 permission_err="$private/permission.err"
 permission_state="$private/permission-state.json"
 export FAKE_DB_PHASE=disabled FAKE_RELAY_VERDICT=feature_disabled
-if "$runner" --cell civo-sandbox-usw2-dev --kubeconfig "$kubeconfig" --context fake-civo \
+if "$runner" --cell civo-sandbox-use1-serving --kubeconfig "$kubeconfig" --context fake-civo \
     --phase disabled --target-file "$loose_target" --state-file "$permission_state" \
     "${signed[@]}" >"$permission_out" 2>"$permission_err"; then
   fail "loose private target permissions were accepted"

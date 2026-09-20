@@ -207,27 +207,31 @@ func TestVerifySingleRequiredCell(t *testing.T) {
 	}
 }
 
-func TestVerifyRejectsLegacyServingCell(t *testing.T) {
-	root := t.TempDir()
-	legacy := makeFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
-	t.Run("explicit required cell", func(t *testing.T) {
-		report, findings := verifyDirs([]string{legacy.dir}, func(o *Options) {
-			o.RequiredCells = []string{"civo-sandbox-usw2-dev"}
+func TestVerifyRejectsUnreviewedCell(t *testing.T) {
+	for _, cell := range []string{"civo-fixture-use1-unreviewed", "civo-sandbox-usw2-dev"} {
+		t.Run(cell, func(t *testing.T) {
+			root := t.TempDir()
+			unreviewed := makeFixture(t, root, cell, "0.0.258", "0a1b2c3d")
+			t.Run("explicit required cell", func(t *testing.T) {
+				report, findings := verifyDirs([]string{unreviewed.dir}, func(o *Options) {
+					o.RequiredCells = []string{cell}
+				})
+				requireReason(t, findings, ReasonCellUnsupported)
+				if report.Result != "fail" || report.ManifestsVerified != 0 || report.CellsSatisfied != 0 {
+					t.Fatalf("unreviewed cell must not satisfy rollout evidence: %+v", report)
+				}
+			})
+			t.Run("default reviewed cells", func(t *testing.T) {
+				backup := makeFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "4e5f6071")
+				report, findings := verifyDirs([]string{backup.dir, unreviewed.dir}, nil)
+				requireReason(t, findings, ReasonCellUnsupported)
+				requireReason(t, findings, ReasonCellMissing)
+				if report.Result != "fail" || report.ManifestsVerified != 1 || report.CellsSatisfied != 1 {
+					t.Fatalf("unreviewed evidence must not cover the replacement serving cell: %+v", report)
+				}
+			})
 		})
-		requireReason(t, findings, ReasonCellUnsupported)
-		if report.Result != "fail" || report.ManifestsVerified != 0 || report.CellsSatisfied != 0 {
-			t.Fatalf("legacy cell must not satisfy rollout evidence: %+v", report)
-		}
-	})
-	t.Run("default reviewed cells", func(t *testing.T) {
-		backup := makeFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "4e5f6071")
-		report, findings := verifyDirs([]string{backup.dir, legacy.dir}, nil)
-		requireReason(t, findings, ReasonCellUnsupported)
-		requireReason(t, findings, ReasonCellMissing)
-		if report.Result != "fail" || report.ManifestsVerified != 1 || report.CellsSatisfied != 1 {
-			t.Fatalf("legacy evidence must not cover the replacement serving cell: %+v", report)
-		}
-	})
+	}
 }
 
 func TestMissingSecondCellFailsClosed(t *testing.T) {
@@ -310,7 +314,7 @@ func TestManifestMutations(t *testing.T) {
 		{"release mismatch", func(d map[string]any) { d["target_release"] = "0.0.259" }, ReasonReleaseMismatch},
 		{"release malformed", func(d map[string]any) { d["target_release"] = "v0.0.258" }, ReasonManifestFieldInvalid},
 		{"cell unsupported", func(d map[string]any) {
-			d["source"].(map[string]any)["cell"] = "civo-sandbox-use1-dev"
+			d["source"].(map[string]any)["cell"] = "civo-fixture-use1-unreviewed"
 		}, ReasonCellUnsupported},
 		{"backup id cell mismatch", func(d map[string]any) {
 			d["backup_id"] = "civo-sandbox-use1-backup-pre-v0.0.258-20260820T113000Z-0a1b2c3d"

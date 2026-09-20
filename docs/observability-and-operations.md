@@ -877,10 +877,10 @@ target, while removing database, user, application, and wait-event labels.
 Synthetic uptime rules additionally retain the public directory cell name in a
 `target` label.
 
-The capability's 2026-08-26 acceptance on `civo-sandbox-usw2-dev` proved
+The capability's 2026-08-26 acceptance on the former serving cell proved
 sustained scrapes, bounded storage and resource headroom, rule health, and
 firing and resolved delivery at the external PagerDuty receiver. After the
-PHX1 loss on 2026-09-19, monitoring re-establishment on
+serving-cell loss on 2026-09-19, monitoring re-establishment on
 `civo-sandbox-use1-serving` is staged in three GitOps changes: install the
 stack with null-routed Alertmanager and no application discovery; enable the
 PostgreSQL, server, and worker ServiceMonitors plus the restricted metrics
@@ -939,8 +939,9 @@ provider regression acceptance are still open.
 
 Deployment-hardening batch B adds the following database rules in
 [`postgresql.rules.yaml`](../.gitops/charts/platform/files/postgresql.rules.yaml)
-for `civo-sandbox-usw2-dev`. They require monitoring, alerting, the default-off
-`platform.monitoring.postgresql.enabled` switch, and an enabled Civo PostgreSQL
+for the serving cell, now `civo-sandbox-use1-serving`. They require monitoring,
+alerting, the default-off `platform.monitoring.postgresql.enabled` switch, and
+an enabled Civo PostgreSQL
 exporter. They select the `witself-postgresql-metrics` service in the `witself`
 namespace. Their fixed `service: witself-postgresql`, severity, and
 `witself_alert: "true"` labels use the existing PagerDuty incident route; the
@@ -966,7 +967,7 @@ rules; serving-cell scrape and alert delivery acceptance follows deployment.
 <a id="serving-cell-monitoring-extensions"></a>
 
 The monitoring extensions are enabled in desired state only for
-`civo-sandbox-usw2-dev`. Shared defaults keep
+`civo-sandbox-use1-serving`. Shared defaults keep
 `platform.monitoring.nodeExporter.enabled`, `.kubelet.cadvisor`,
 `.defaultRules.enabled`, `.certManager.enabled`, and `.argocd.enabled` false.
 The stack's `enabled` switch gates every extension; alert rules additionally

@@ -3489,9 +3489,10 @@ The five `witself-sealed-plane` rules require both
 `platform.monitoring.sealedPlaneAlerts.enabled`. The gate is rendered from the
 cell catalog switch `sealed_plane_alerts` (see
 [GitOps values generation](gitops-values-generation.md)). It was enabled for
-`civo-sandbox-usw2-dev` after v0.0.286 verified the posture, vault-lifecycle,
+the former serving cell after v0.0.286 verified the posture, vault-lifecycle,
 and material-delivery series there. The replacement `civo-sandbox-use1-serving`
-keeps this gate off in its values file. Keep a new cell's gate off until a
+now enables this gate in its values file; the recovery fixture retains the
+staged activation sequence. Keep a new cell's gate off until a
 compatible server release is serving and its metrics
 are verified. The platform chart automatically syncs from its configured GitOps
 revision, so the release-before-rules merge order remains: ship the server

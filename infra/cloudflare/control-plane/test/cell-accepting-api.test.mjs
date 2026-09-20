@@ -79,8 +79,8 @@ function cell(overrides = {}) {
   return {
     endpoint: "https://cell.test.invalid",
     cloud: "civo",
-    region: "Phoenix",
-    region_code: "phx1",
+    region: "New York",
+    region_code: "nyc1",
     channel: "edge",
     owner: "witwave",
     weight: 7,

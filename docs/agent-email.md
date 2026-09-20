@@ -31,8 +31,8 @@ deployment deliberately differs from those defaults:
 | Adapter lifecycle delivery | Off | Enabled |
 | `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
 | Edge DMARC / relay envelope | DMARC rejection off; relay v1 | DMARC hard-fail rejection enabled with trusted authserv-id `mx.cloudflare.net`; relay v2 records signed SPF/DKIM/DMARC results |
-| Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; originally enabled on v0.0.252/schema 90 and now running on v0.0.272/schema 94 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
-| Cell storage ledger | Schema 91 | Live on `civo-sandbox-usw2-dev`; database-triggered 3-GiB/25,000-root admission and 4-GiB/100,000-counted-row hard boundaries |
+| Agent-email retention | Off, preview defaults | Configured cell-wide on `civo-sandbox-use1-serving`, carrying forward the former serving cell's two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
+| Cell storage ledger | Schema 91 | Configured on `civo-sandbox-use1-serving`; database-triggered 3-GiB/25,000-root admission and 4-GiB/100,000-counted-row hard boundaries |
 
 The lifecycle path uses `witself-agent-email-send-events`, its configured
 consumer, and `witself-agent-email-send-events-dlq`. A real delivered event was

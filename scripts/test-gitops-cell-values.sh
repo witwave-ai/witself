@@ -15,14 +15,20 @@ fail() {
   exit 1
 }
 
-# (a) --check passes on the committed ten files.
+catalog_cell_count() {
+  ruby -ryaml -e 'puts YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false).fetch("cells").length' \
+    "$1/.gitops/cells/catalog.yaml"
+}
+
+# (a) --check passes on every committed catalog cell.
+cell_count=$(catalog_cell_count "$source_root")
 check_out="$work_dir/check.out"
 if ! bash "$generator" --check --root "$source_root" >"$check_out" 2>&1; then
   cat "$check_out" >&2
   fail "--check did not pass on the committed cell values"
 fi
-grep -Fq 'gitops cell values: 10 files match' "$check_out" \
-  || fail "--check passed without the ten-file match verdict"
+grep -Fxq "gitops cell values: $cell_count files match" "$check_out" \
+  || fail "--check passed without matching all $cell_count catalog cells"
 
 # Fixture tree: copy catalog, chart pins, and cell values. Templates are
 # compiled into the generator from this checkout.
@@ -63,7 +69,7 @@ if ! bash "$generator" --write --root "$fixture" >"$restore_out" 2>&1; then
   cat "$restore_out" >&2
   fail "--write did not restore the drifted fixture"
 fi
-grep -Fq 'wrote 1 files, skipped 9 unchanged' "$restore_out" \
+grep -Fxq "gitops cell values: wrote 1 files, skipped $((cell_count - 1)) unchanged" "$restore_out" \
   || fail "--write did not report restoring exactly one drifted file"
 cmp -s "$original_aws" "$aws_values" \
   || fail "--write did not restore aws-sandbox-usw2-dev/values.yaml byte-for-byte"
@@ -117,6 +123,7 @@ printf '%s\n' \
   "    region: us-west-2" \
   "    role: canary" \
   >>"$fixture/.gitops/cells/catalog.yaml"
+fixture_count=$(catalog_cell_count "$fixture")
 new_values="$fixture/.gitops/cells/${new_cell}/values.yaml"
 [ ! -e "$new_values" ] || fail "bootstrap fixture already had ${new_cell}/values.yaml"
 missing_out="$work_dir/missing.out"
@@ -133,6 +140,8 @@ fi
 [ -f "$new_values" ] || fail "--write did not create ${new_cell}/values.yaml"
 grep -Fq "gitops cell values: wrote .gitops/cells/${new_cell}/values.yaml" "$bootstrap_out" \
   || fail "--write did not report creating the new cell overlay"
+grep -Fxq "gitops cell values: wrote 1 files, skipped $((fixture_count - 1)) unchanged" "$bootstrap_out" \
+  || fail "--write did not report bootstrapping exactly one catalog cell"
 default_chart=$(awk '
   $0 == "  witselfServer:" { in_server=1; next }
   in_server && $1 == "chartVersion:" { print $2; exit }
@@ -151,5 +160,24 @@ if ! bash "$generator" --check --root "$fixture" >"$work_dir/bootstrap-check.out
   cat "$work_dir/bootstrap-check.out" >&2
   fail "--check failed after bootstrapping the new catalog cell"
 fi
+grep -Fxq "gitops cell values: $fixture_count files match" "$work_dir/bootstrap-check.out" \
+  || fail "--check did not match the expanded catalog cell count"
+
+# (f) retiring a catalog entry must fail while its generated file remains.
+cp "$source_root/.gitops/cells/catalog.yaml" "$fixture/.gitops/cells/catalog.yaml"
+retired_out="$work_dir/retired.out"
+status=0
+bash "$generator" --check --root "$fixture" >"$retired_out" 2>&1 || status=$?
+[ "$status" -eq 1 ] || fail "--check with an uncataloged values file exited $status, want 1"
+grep -Fq "cell directory $new_cell has values.yaml but is not in .gitops/cells/catalog.yaml" "$retired_out" \
+  || fail "--check did not reject the retired cell's values file"
+rm "$new_values"
+rmdir "$(dirname "$new_values")"
+if ! bash "$generator" --check --root "$fixture" >"$work_dir/retired-check.out" 2>&1; then
+  cat "$work_dir/retired-check.out" >&2
+  fail "--check failed after removing the retired cell values"
+fi
+grep -Fxq "gitops cell values: $cell_count files match" "$work_dir/retired-check.out" \
+  || fail "--check did not match the reduced catalog cell count"
 
 printf 'gitops cell values tests passed\n'

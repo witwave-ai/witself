@@ -13,11 +13,11 @@ import (
 
 func fleetTestCell() map[string]any {
 	return map[string]any{
-		"name":                     "civo-sandbox-usw2-dev",
+		"name":                     "civo-sandbox-use1-serving",
 		"endpoint":                 "https://cell.example.com",
 		"cloud":                    "civo",
-		"region":                   "PHX1",
-		"region_code":              "usw2",
+		"region":                   "NYC1",
+		"region_code":              "use1",
 		"channel":                  "experimental",
 		"weight":                   float64(0),
 		"accepting":                true,
@@ -40,7 +40,7 @@ func TestFleetSetAcceptingSendsOnlyAuthoritativeMutation(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer fleet-test-token" {
 					t.Error("missing fleet authorization")
 				}
-				if r.Method != http.MethodPatch || r.URL.RequestURI() != "/v1/cells/civo-sandbox-usw2-dev" {
+				if r.Method != http.MethodPatch || r.URL.RequestURI() != "/v1/cells/civo-sandbox-use1-serving" {
 					t.Error("accepting repair attempted a snapshot read or registration upsert")
 					http.NotFound(w, r)
 					return
@@ -64,7 +64,7 @@ func TestFleetSetAcceptingSendsOnlyAuthoritativeMutation(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": cell})
 			}))
 			defer server.Close()
-			result, err := SetFleetCellAccepting(context.Background(), server.URL+"/", "fleet-test-token", "civo-sandbox-usw2-dev", accepting)
+			result, err := SetFleetCellAccepting(context.Background(), server.URL+"/", "fleet-test-token", "civo-sandbox-use1-serving", accepting)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,7 +74,7 @@ func TestFleetSetAcceptingSendsOnlyAuthoritativeMutation(t *testing.T) {
 			if result.Cell.ProvisionToken != "" || result.Cell.BackupToken != "" {
 				t.Fatal("repair response retained credentials")
 			}
-			if want := []string{"PATCH /v1/cells/civo-sandbox-usw2-dev"}; !reflect.DeepEqual(requests, want) {
+			if want := []string{"PATCH /v1/cells/civo-sandbox-use1-serving"}; !reflect.DeepEqual(requests, want) {
 				t.Fatalf("requests = %v, want %v", requests, want)
 			}
 		})
@@ -103,7 +103,7 @@ func TestFleetRegisterCredentialContractAndAcknowledgement(t *testing.T) {
 	}))
 	defer server.Close()
 	cell := FleetCell{
-		Name: "civo-sandbox-usw2-dev", Endpoint: "https://cell.example.com",
+		Name: "civo-sandbox-use1-backup", Endpoint: "https://cell.example.com",
 		Accepting: &accepting, BackupValidationTarget: true,
 		ProvisionToken: "witself_prv_test", BackupToken: "witself_bak_test",
 	}
@@ -152,7 +152,7 @@ func TestFleetRegisterRejectsAmbiguousAcknowledgements(t *testing.T) {
 			defer server.Close()
 			accepting := false
 			result, err := RegisterFleetCell(context.Background(), server.URL, "fleet-test-token", FleetCell{
-				Name: "civo-sandbox-usw2-dev", Endpoint: "https://cell.example.com", Accepting: &accepting, HasBackupToken: true, HasProvisionToken: true,
+				Name: "civo-sandbox-use1-serving", Endpoint: "https://cell.example.com", Accepting: &accepting, HasBackupToken: true, HasProvisionToken: true,
 			})
 			if err == nil || result != nil {
 				t.Fatalf("ambiguous acknowledgement accepted: result=%v error=%v", result, err)
@@ -273,14 +273,14 @@ func TestFleetUndrainPreservesAuthoritativeIsolationRefusal(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.Method != http.MethodPatch || r.URL.RequestURI() != "/v1/cells/civo-sandbox-usw2-dev" {
+		if r.Method != http.MethodPatch || r.URL.RequestURI() != "/v1/cells/civo-sandbox-use1-backup" {
 			t.Error("undrain attempted a snapshot read or fallback upsert")
 		}
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"backup validation target cannot accept placements"}`))
 	}))
 	defer server.Close()
-	_, err := SetFleetCellAccepting(context.Background(), server.URL, "fleet-test-token", "civo-sandbox-usw2-dev", true)
+	_, err := SetFleetCellAccepting(context.Background(), server.URL, "fleet-test-token", "civo-sandbox-use1-backup", true)
 	if !errors.Is(err, ErrConflict) || err.Error() != "backup validation target cannot accept placements" || requests != 1 {
 		t.Fatalf("backup target undrain: error=%v requests=%d", err, requests)
 	}
@@ -387,7 +387,7 @@ func TestFleetSetAcceptingRejectsAmbiguousAcknowledgements(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(out)
 		}))
-		result, err := SetFleetCellAccepting(context.Background(), server.URL, "fleet-test-token", "civo-sandbox-usw2-dev", true)
+		result, err := SetFleetCellAccepting(context.Background(), server.URL, "fleet-test-token", "civo-sandbox-use1-serving", true)
 		server.Close()
 		if err == nil || result != nil {
 			t.Fatalf("ambiguous acknowledgement accepted: result=%v error=%v", result, err)

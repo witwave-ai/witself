@@ -4,8 +4,8 @@ Status: draft. This document captures the go-forward deployment topology for bot
 managed Witself Cloud and self-hosted Witself: a fleet of independent cells under a
 thin global control plane. Decided 2026-06-28.
 
-> **Recovery note:** `civo-sandbox-usw2-dev` was lost with the PHX1 decommission
-> on 2026-09-19; its fleet registry name is temporarily retained. The replacement
+> **Recovery note:** The former serving cell was lost on 2026-09-19; its fleet
+> registry name `civo-sandbox-usw2-dev` is temporarily retained. The replacement
 > serving cell is `civo-sandbox-use1-serving` in NYC1; the release train rolls
 > `civo-sandbox-use1-backup` first, then this replacement.
 
@@ -230,7 +230,7 @@ entitlement, cell worker, adapter dispatch gate, event-delivery gate, or Queue
 subscription never implicitly enables any other layer.
 
 The application `0.0.253` production snapshot was narrower than the catalog and
-differed from those defaults. The multi-account `civo-sandbox-usw2-dev` cell ran two
+differed from those defaults. The former multi-account serving cell ran two
 worker replicas; receive, adapter dispatch, lifecycle delivery, and the
 `email.sending` subscription are enabled only for the exact Founder email
 cohort, while receipt replay remains off. Agent-email retention is cell-wide and
@@ -537,8 +537,8 @@ delete a route merely to make the down migration pass. Delivery activation is
 a later, separately reviewed edge rollout.
 
 The custom-domain routing foundation completed its dark schema-88 cell wave;
-the multi-account `civo-sandbox-usw2-dev` cell hosting the exact Founder email
-cohort later advanced through schema 90 and now runs schema 91. That does not
+the former multi-account serving cell hosting the exact Founder email
+cohort later advanced through schema 90 to schema 91. That does not
 activate customer-domain provider delivery. Keep both control-plane routing
 gates and `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` off. Do not add a
 customer domain to managed receive configuration, change MX/Email Routing, or

@@ -166,7 +166,7 @@ ruby -ryaml -e '
   abort "entitlement delivery rules enabled by default" if values.dig("additionalPrometheusRulesMap", "entitlement-delivery")
 ' "$child_values"
 helm template witself-platform "$platform_chart" \
-  --values "$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml" >"$tmp/probes-platform.yaml"
+  --values "$repo_root/.gitops/cells/civo-sandbox-use1-serving/values.yaml" >"$tmp/probes-platform.yaml"
 ruby -ryaml -e '
   app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
   abort "serving-cell monitoring Application missing" unless app

@@ -12,14 +12,14 @@ func TestProvisionCivoRegistersOnlyCivoSubstrate(t *testing.T) {
 	mocks := &civoResourceMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return provisionCivo(ctx, civoCell{
-			name:      "civo-sandbox-use1-dev",
+			name:      "civo-fixture-use1-dev",
 			region:    "nyc1",
 			profile:   "minimal",
 			nodeSize:  "g4s.kube.medium",
 			nodeCount: civoNodeProfileFor("minimal"),
 			adminCIDR: "203.0.113.7/32",
 		})
-	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))
+	}, pulumi.WithMocks("witself-infra", "civo-fixture-use1-dev", mocks))
 	if err != nil {
 		t.Fatalf("provision Civo: %v", err)
 	}
@@ -49,8 +49,8 @@ func TestProvisionCivoRegistersOnlyCivoSubstrate(t *testing.T) {
 	if got := cluster["region"]; !got.IsString() || got.StringValue() != "nyc1" {
 		t.Errorf("cluster region = %v, want nyc1", got)
 	}
-	if got := cluster["name"]; !got.IsString() || got.StringValue() != "witself-civo-sandbox-use1-dev" {
-		t.Errorf("cluster name = %v, want witself-civo-sandbox-use1-dev", got)
+	if got := cluster["name"]; !got.IsString() || got.StringValue() != "witself-civo-fixture-use1-dev" {
+		t.Errorf("cluster name = %v, want witself-civo-fixture-use1-dev", got)
 	}
 	if got := cluster["applications"]; !got.IsString() || got.StringValue() != "traefik2-nodeport" {
 		t.Errorf("cluster applications = %v, want traefik2-nodeport", got)
@@ -101,14 +101,14 @@ func civoPoolForProfile(t *testing.T, profile string) resource.PropertyMap {
 	mocks := &civoResourceMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return provisionCivo(ctx, civoCell{
-			name:      "civo-sandbox-use1-dev",
+			name:      "civo-fixture-use1-dev",
 			region:    "nyc1",
 			profile:   profile,
 			nodeSize:  "g4s.kube.medium",
 			nodeCount: civoNodeProfileFor(profile),
 			adminCIDR: "203.0.113.7/32",
 		})
-	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))
+	}, pulumi.WithMocks("witself-infra", "civo-fixture-use1-dev", mocks))
 	if err != nil {
 		t.Fatalf("provision Civo with profile %q: %v", profile, err)
 	}
@@ -171,7 +171,7 @@ func civoClusterForVersion(t *testing.T, version string) resource.PropertyMap {
 			return value
 		})
 		return nil
-	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks), func(info *pulumi.RunInfo) {
+	}, pulumi.WithMocks("witself-infra", "civo-fixture-use1-dev", mocks), func(info *pulumi.RunInfo) {
 		info.Config = map[string]string{
 			"witself:cloud":         "civo",
 			"witself:profile":       "minimal",
@@ -196,10 +196,10 @@ func TestProvisionCivoRequiresValidAdminCIDR(t *testing.T) {
 	for _, cidr := range []string{"", "0.0.0.0"} {
 		err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 			return provisionCivo(ctx, civoCell{
-				name: "civo-sandbox-use1-dev", region: "nyc1",
+				name: "civo-fixture-use1-dev", region: "nyc1",
 				nodeSize: "g4s.kube.medium", adminCIDR: cidr,
 			})
-		}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", &civoResourceMocks{}))
+		}, pulumi.WithMocks("witself-infra", "civo-fixture-use1-dev", &civoResourceMocks{}))
 		if err == nil {
 			t.Errorf("admin CIDR %q unexpectedly accepted", cidr)
 		}
