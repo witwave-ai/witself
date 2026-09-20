@@ -1,23 +1,21 @@
 diff --git a/.gitops/cells/catalog.yaml b/.gitops/cells/catalog.yaml
-index 51106a58..a9a8780a 100644
+index 51106a58..b79dba80 100644
 --- a/.gitops/cells/catalog.yaml
 +++ b/.gitops/cells/catalog.yaml
-@@ -67,8 +67,8 @@ cells:
-     switches:
+@@ -68,7 +68,7 @@ cells:
        domain_documentation_only: true
        monitoring: true
--      collector_alerts: false
+       collector_alerts: false
 -      sealed_plane_alerts: false
-+      collector_alerts: true
 +      sealed_plane_alerts: true
        postgres_backup: true
    civo-sandbox-usw2-dev:
      cloud: civo
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index 72301869..6c233ce4 100644
+index 72301869..ba81a925 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -194,18 +194,44 @@ apps:
+@@ -194,18 +194,42 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -32,8 +30,7 @@ index 72301869..6c233ce4 100644
      enabled: true
      alerting:
 -      enabled: false
-+      enabled: true
-     collectorAlerts:
+-    collectorAlerts:
 -      enabled: false
 +      enabled: true
      sealedPlaneAlerts:
