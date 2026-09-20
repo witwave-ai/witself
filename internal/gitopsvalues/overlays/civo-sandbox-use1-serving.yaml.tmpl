@@ -223,6 +223,13 @@ platform:
     receiverDeadman:
       secretName: witself-monitoring-deadman-v1
       secretKey: url
+{{- else }}
+  monitoring:
+    enabled: false
+    alerting:
+      enabled: false
+    postgresBackupAlerts:
+      enabled: {{.PostgresBackup}}
 {{- end }}
   awsAlbIngress:
     enabled: false

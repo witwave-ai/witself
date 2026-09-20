@@ -224,7 +224,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
 					}
 					wantMonitoring := cell == "civo-sandbox-use1-serving" && monitoringEnabled
-					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
+					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
 						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
 					}
 					if cell == "civo-sandbox-use1-backup" && postgres.Metrics.ServiceMonitor.Enabled {
