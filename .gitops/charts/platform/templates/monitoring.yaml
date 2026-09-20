@@ -3,6 +3,7 @@
 {{- $receiver := $monitoring.receiver -}}
 {{- $deadman := $monitoring.receiverDeadman -}}
 {{- $platformRules := and $monitoring.alerting.enabled $monitoring.defaultRules.enabled -}}
+{{- $postgresBackupRules := and $monitoring.postgresBackupAlerts.enabled (dig "civoPostgres" "backup" "enabled" false (.Values.apps | default dict)) -}}
 {{- if $monitoring.alerting.enabled }}
 {{- if or (gt (len $receiver.secretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $receiver.secretName)) -}}
 {{- fail "platform.monitoring.receiver.secretName must be a valid Kubernetes Secret name when alerting is enabled; the referenced Secret must be immutable" -}}
@@ -373,8 +374,9 @@ spec:
                   resources:
                     requests:
                       storage: {{ $monitoring.alertmanager.storage | quote }}
-{{ if $monitoring.alerting.enabled }}
+{{ if or $monitoring.alerting.enabled $postgresBackupRules }}
         additionalPrometheusRulesMap:
+{{ if $monitoring.alerting.enabled }}
           founder-open-plane:
 {{- $founderGroups := list }}
 {{- range $group := (fromYaml (.Files.Get "files/founder-open-plane.rules.yaml")).groups }}
@@ -402,6 +404,11 @@ spec:
           entitlement-delivery:
 {{ .Files.Get "files/entitlement-delivery.rules.yaml" | nindent 12 }}
 {{ end }}
+{{ end }}
+{{ end }}
+{{ if $postgresBackupRules }}
+          postgres-backup:
+{{ .Files.Get "files/postgres-backup.rules.yaml" | nindent 12 }}
 {{ end }}
 {{ end }}
   destination:

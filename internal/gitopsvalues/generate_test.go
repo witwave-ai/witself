@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -143,6 +144,154 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
 			t.Errorf("%s unexpectedly rendered collectorAlerts", valuesRel(cell))
 		}
 	}
+}
+
+func TestCatalogPostgresBackupSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  bool
+	}{
+		{input: "postgres_backup: true\n", want: true},
+		{input: "postgres_backup: false\n"},
+		{input: "{}\n"},
+	} {
+		var switches Switches
+		if err := yaml.Unmarshal([]byte(tc.input), &switches); err != nil {
+			t.Fatal(err)
+		}
+		if switches.PostgresBackup != tc.want {
+			t.Errorf("decode %q: postgres_backup=%v, want %v", tc.input, switches.PostgresBackup, tc.want)
+		}
+	}
+	cfg, err := loadCatalog(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cell := range cfg.Cells {
+		if cell.Switches.PostgresBackup {
+			t.Errorf("%s activates postgres_backup; every checked-in cell must stay dark", name)
+		}
+	}
+}
+
+func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
+	root := repoRoot(t)
+	charts, err := loadChartPins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup"} {
+		for _, monitoringEnabled := range []bool{false, true} {
+			name := cell + "/monitoring-off"
+			if monitoringEnabled {
+				name = cell + "/monitoring-on"
+			}
+			t.Run(name, func(t *testing.T) {
+				var disabledValues map[string]any
+				for _, enabled := range []bool{false, true} {
+					cfg, err := loadCatalog(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					entry := cfg.Cells[cell]
+					entry.Switches.PostgresBackup = enabled
+					entry.Switches.Monitoring = monitoringEnabled
+					cfg.Cells[cell] = entry
+					body, err := generateCell(root, cell, cfg, charts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					values := decodePostgresBackupValues(t, body)
+					postgres := values.Apps.CivoPostgres
+					monitoring := values.Platform.Monitoring
+					if postgres.Backup.Enabled == nil || *postgres.Backup.Enabled != enabled {
+						t.Errorf("backup.enabled must match postgres_backup=%v", enabled)
+					}
+					if monitoring.PostgresBackupAlerts.Enabled == nil || *monitoring.PostgresBackupAlerts.Enabled != enabled {
+						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
+					}
+					wantMonitoring := cell == "civo-sandbox-use1-serving" && monitoringEnabled
+					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
+						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
+					}
+					if cell == "civo-sandbox-use1-backup" && postgres.Metrics.ServiceMonitor.Enabled {
+						t.Errorf("postgres_backup=%v enabled a ServiceMonitor without a monitoring stack", enabled)
+					}
+					// Activation changes only the two derived flags. In particular,
+					// account snapshots, monitoring resources, and receiver Secrets
+					// must stay independent of this database-dump feature.
+					var fullValues map[string]any
+					if err := yaml.Unmarshal(body, &fullValues); err != nil {
+						t.Fatal(err)
+					}
+					fullValues["apps"].(map[string]any)["civoPostgres"].(map[string]any)["backup"].(map[string]any)["enabled"] = false
+					fullValues["platform"].(map[string]any)["monitoring"].(map[string]any)["postgresBackupAlerts"].(map[string]any)["enabled"] = false
+					if !enabled {
+						disabledValues = fullValues
+					} else if !reflect.DeepEqual(fullValues, disabledValues) {
+						t.Error("postgres_backup changed values beyond the dump and backup-alert switches")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGeneratedValuesPostgresBackupsDefaultOff(t *testing.T) {
+	generated, err := generateAll(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cell, body := range generated {
+		values := decodePostgresBackupValues(t, body)
+		backup := values.Apps.CivoPostgres.Backup.Enabled
+		alerts := values.Platform.Monitoring.PostgresBackupAlerts.Enabled
+		if cell == "civo-sandbox-use1-serving" || cell == "civo-sandbox-use1-backup" {
+			if backup == nil || alerts == nil {
+				t.Errorf("%s must explicitly disable both backup and backup alerts", cell)
+			} else if *backup || *alerts {
+				t.Errorf("%s unexpectedly enables backup or backup alerts", cell)
+			}
+		} else if backup != nil || alerts != nil {
+			t.Errorf("%s unexpectedly includes a PostgreSQL backup switch", cell)
+		}
+	}
+}
+
+type postgresBackupValues struct {
+	Apps struct {
+		CivoPostgres struct {
+			Backup  struct{ Enabled *bool }
+			Metrics struct {
+				Enabled        bool
+				ServiceMonitor struct {
+					Enabled bool
+					Labels  map[string]string
+				} `yaml:"serviceMonitor"`
+			}
+		} `yaml:"civoPostgres"`
+	}
+	Platform struct {
+		Monitoring struct {
+			Enabled              bool
+			Alerting             struct{ Enabled bool }
+			PostgresBackupAlerts struct{ Enabled *bool } `yaml:"postgresBackupAlerts"`
+			Receiver             struct {
+				Kind       string
+				SecretName string `yaml:"secretName"`
+				SecretKey  string `yaml:"secretKey"`
+			}
+		}
+	}
+}
+
+func decodePostgresBackupValues(t *testing.T, body []byte) postgresBackupValues {
+	t.Helper()
+	var values postgresBackupValues
+	if err := yaml.Unmarshal(body, &values); err != nil {
+		t.Fatalf("decode generated values: %v", err)
+	}
+	return values
 }
 
 func repoRoot(t *testing.T) string {

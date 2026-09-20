@@ -1,0 +1,180 @@
+rule_files:
+  - ../files/postgres-backup.rules.yaml
+evaluation_interval: 30s
+tests:
+  - name: exact 26 hour threshold stays quiet and older backup pages after the hold
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics",instance="postgres-a:9187"}
+        values: 60+0x1620
+    alert_rule_test:
+      - eval_time: 26h1m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+      - eval_time: 26h6m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+      - eval_time: 26h7m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: &stale_alerts
+          - exp_labels:
+              namespace: witself
+              severity: critical
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: PostgreSQL has no successful encrypted backup within 26 hours or its backup metric is absent.
+              runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
+  - name: daily successful dump keeps the stale page quiet
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 60+0x1439 86400+0x180
+    alert_rule_test:
+      - eval_time: 26h6m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+  - name: no first result or missing backup metric pages even with unrelated healthy exporter
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="unrelated-postgresql-metrics"}
+        values: 0+60x10
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: *stale_alerts
+  - name: initialized empty backup table pages before any successful run
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 0+0x10
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: *stale_alerts
+  - name: upload success clears an existing stale page
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: -93601+0x5 360+0x5
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: *stale_alerts
+      - eval_time: 6m
+        alertname: WitselfPostgresBackupStale
+        exp_alerts: []
+  - name: latest completed failure pages on first observation and remains after one hour
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics",instance="postgres-a:9187"}
+        values: 1+0x70
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics",instance="postgres-a:9187"}
+        values: 0+0x70
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: &failed_alerts
+          - exp_labels:
+              namespace: witself
+              severity: critical
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: PostgreSQL encrypted backup's latest attempt failed or exceeded its maximum runtime.
+              runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
+      - eval_time: 70m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: *failed_alerts
+  - name: successful retry clears failure without resetting historical failure count
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 1+0x5 360+0x5
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"}
+        values: 0+0x5 1+0x5
+      - series: witself_postgres_backup_failures_total{namespace="witself",service="witself-postgresql-metrics"}
+        values: 3+0x11
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: *failed_alerts
+      - eval_time: 6m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+  - name: running attempt stays quiet and pages only when it records failure
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 1+0x10
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"}
+        values: -1+0x5 0+0x5
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: *failed_alerts
+  - name: unfinished attempt pages only after maximum job runtime and retry clears it
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 1+0x122 7380+0x3
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"}
+        values: -1+0x122 1+0x3
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+      - eval_time: 2h1m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: *failed_alerts
+      - eval_time: 2h3m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+  - name: initialized empty table is not a completed failed attempt
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 0+0x180
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"}
+        values: -1+0x180
+      - series: witself_postgres_backup_failures_total{namespace="witself",service="witself-postgresql-metrics"}
+        values: 0+0x180
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+  - name: historical failures at exporter startup and unrelated failed exporter stay quiet
+    interval: 1m
+    input_series:
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+        values: 1+0x10
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"}
+        values: 1+0x10
+      - series: witself_postgres_backup_failures_total{namespace="witself",service="witself-postgresql-metrics"}
+        values: 3+0x10
+      - series: witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="unrelated-postgresql-metrics"}
+        values: 1+0x10
+      - series: witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="unrelated-postgresql-metrics"}
+        values: 0+0x10
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []

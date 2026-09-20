@@ -112,6 +112,11 @@ platform:
       # Enable only after the server release exposes healthy sealed posture
       # metrics and the material-delivery and vault-lifecycle counters.
       enabled: false
+    postgresBackupAlerts:
+      # The cell catalog couples this opt-in to the encrypted daily dump.
+      # It never enables the monitoring stack on an unmonitored cell.
+      # Rules also evaluate while the existing receiver remains null-routed.
+      enabled: false
     postgresql:
       # Enable only with the cell's Civo PostgreSQL exporter and alerting.
       enabled: false

@@ -658,4 +658,7 @@ ruby -ryaml -e '
 "$promtool_bin" check rules "$delivery_rules"
 "$promtool_bin" test rules "$delivery_rule_tests"
 
+ruby "$repo_root/scripts/testdata/test-monitoring-postgres-backup.rb" \
+  "$repo_root" "$tmp" "$chart_archive" "$promtool_bin"
+
 echo "monitoring rollout capability checks passed"

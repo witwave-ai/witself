@@ -18,6 +18,8 @@ apps:
     namespace: witself
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
+    backup:
+      enabled: false
     storage: 8Gi
     # Cells have drifted to different latest digests. Preserve this cell's
     # running image content; cross-cell alignment is a separate reviewed change.
@@ -96,6 +98,9 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
+  monitoring:
+    postgresBackupAlerts:
+      enabled: false
   awsAlbIngress:
     enabled: false
   certManager:

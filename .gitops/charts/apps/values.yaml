@@ -19,6 +19,16 @@ apps:
     chartName: postgresql
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
+    backup:
+      # Catalog postgres_backup enables the job and exporter query. Paging
+      # also requires an independently enabled platform monitoring stack.
+      enabled: false
+      schedule: "0 3 * * *"
+      activeDeadlineSeconds: 3600
+      # PostgreSQL 18 client plus Alpine's signed age/aws-cli packages at startup.
+      image: postgres:18-alpine3.23
+      ageRecipientSecretName: witself-postgresql-backup-age
+      r2SecretName: witself-postgresql-backup-r2
     storage: 8Gi
     # Preserve the existing Bitnami footprint unless a measured cell-specific
     # working set requires a larger preset.

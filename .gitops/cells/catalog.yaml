@@ -50,6 +50,7 @@ cells:
     overlay: civo-sandbox-use1-backup.yaml.tmpl
     switches:
       domain_documentation_only: true
+      postgres_backup: false
   civo-sandbox-use1-dev:
     cloud: civo
     region: nyc1
@@ -68,6 +69,7 @@ cells:
       monitoring: true
       collector_alerts: false
       sealed_plane_alerts: false
+      postgres_backup: false
   civo-sandbox-usw2-dev:
     cloud: civo
     region: phx1

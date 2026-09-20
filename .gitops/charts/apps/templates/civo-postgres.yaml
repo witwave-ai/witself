@@ -1,6 +1,7 @@
 {{- $pg := .Values.apps.civoPostgres -}}
+{{- $metricsEnabled := or $pg.metrics.enabled $pg.backup.enabled -}}
 {{- if and $pg.enabled (eq .Values.cell.cloud "civo") }}
-{{- if and $pg.metrics.serviceMonitor.enabled (not $pg.metrics.enabled) -}}
+{{- if and $pg.metrics.serviceMonitor.enabled (not $metricsEnabled) -}}
 {{- fail "apps.civoPostgres.metrics.serviceMonitor.enabled requires apps.civoPostgres.metrics.enabled" -}}
 {{- end }}
 apiVersion: argoproj.io/v1alpha1
@@ -66,8 +67,34 @@ spec:
         readReplicas:
           replicaCount: 0
         metrics:
-          enabled: {{ $pg.metrics.enabled }}
-          {{- if $pg.metrics.enabled }}
+          enabled: {{ $metricsEnabled }}
+          {{- if $metricsEnabled }}
+          {{- if $pg.backup.enabled }}
+          # Reuse the existing SQL exporter; no second metrics service or PVC.
+          customMetrics:
+            witself_postgres_backup:
+              query: |
+                SELECT
+                  COALESCE(EXTRACT(EPOCH FROM MAX(finished_at) FILTER (WHERE succeeded)), 0)::double precision AS last_success_timestamp_seconds,
+                  COALESCE(EXTRACT(EPOCH FROM MAX(started_at)), 0)::double precision AS last_attempt_timestamp_seconds,
+                  COALESCE((SELECT CASE WHEN finished_at IS NULL THEN -1 WHEN succeeded THEN 1 ELSE 0 END
+                    FROM witself_ops.backup_runs ORDER BY started_at DESC LIMIT 1), -1) AS last_attempt_succeeded,
+                  COUNT(*) FILTER (WHERE finished_at IS NOT NULL AND NOT succeeded) AS failures_total
+                FROM witself_ops.backup_runs
+              metrics:
+                - last_success_timestamp_seconds:
+                    usage: GAUGE
+                    description: "Unix timestamp of the last completed encrypted R2 PostgreSQL backup."
+                - last_attempt_timestamp_seconds:
+                    usage: GAUGE
+                    description: "Unix timestamp of the latest PostgreSQL backup attempt."
+                - last_attempt_succeeded:
+                    usage: GAUGE
+                    description: "Latest PostgreSQL backup attempt: 1 succeeded, 0 failed, -1 unfinished or never attempted."
+                - failures_total:
+                    usage: COUNTER
+                    description: "Failed PostgreSQL backup attempts."
+          {{- end }}
           serviceMonitor:
             enabled: {{ $pg.metrics.serviceMonitor.enabled }}
             namespace: {{ $pg.namespace | quote }}
@@ -99,6 +126,15 @@ spec:
                     - protocol: TCP
                       port: 5432
                   from:
+                    {{- if $pg.backup.enabled }}
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: {{ $pg.namespace | quote }}
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: witself-postgresql-backup
+                          witself.io/cell: {{ .Values.cell.name | quote }}
+                    {{- end }}
                     - namespaceSelector:
                         matchLabels:
                           kubernetes.io/metadata.name: {{ .Values.apps.witselfServer.namespace | quote }}
@@ -143,7 +179,7 @@ spec:
                           app.kubernetes.io/component: operator-proof
                           app.kubernetes.io/managed-by: witself-operator
                           witself.io/cell: {{ .Values.cell.name | quote }}
-                {{- if $pg.metrics.enabled }}
+                {{- if $metricsEnabled }}
                 - ports:
                     - protocol: TCP
                       port: 9187
