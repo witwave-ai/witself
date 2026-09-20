@@ -180,18 +180,57 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
-  # Recovery phase 2: discover PostgreSQL, server, and worker scrape targets.
-  # Keep Alertmanager null-routed until sustained scrapes are verified.
+{{- if .Monitoring }}
+  # Phase 3 of the monitoring rollout (runbook: Founder open-plane monitoring).
+  # Stack (phase 1) and scrape targets (phase 2) are verified; this enables
+  # alert routing: PagerDuty Events API v2 incidents plus the external
+  # dead-man heartbeat. Secret values live only in the two immutable
+  # in-cluster Secrets named here; nothing sensitive enters Git or Argo state.
   monitoring:
-    enabled: {{.Monitoring}}
+    enabled: true
     alerting:
-      enabled: false
+      enabled: true
+{{- if .CollectorAlerts }}
     collectorAlerts:
-      enabled: {{.CollectorAlerts}}
+      enabled: true
+{{- end }}
+{{- if .SealedPlaneAlerts }}
     sealedPlaneAlerts:
-      enabled: {{.SealedPlaneAlerts}}
+      enabled: true
+{{- end }}
     postgresBackupAlerts:
       enabled: {{.PostgresBackup}}
+    postgresql:
+      enabled: true
+    nodeExporter:
+      enabled: true
+    kubelet:
+      cadvisor: true
+    defaultRules:
+      enabled: true
+    certManager:
+      enabled: true
+    argocd:
+      enabled: true
+    uptimeProbes:
+      enabled: true
+    entitlementDelivery:
+      enabled: true
+    receiver:
+      kind: pagerduty
+      secretName: witself-monitoring-pagerduty-v1
+      secretKey: routing_key
+    receiverDeadman:
+      secretName: witself-monitoring-deadman-v1
+      secretKey: url
+{{- else }}
+  monitoring:
+    enabled: false
+    alerting:
+      enabled: false
+    postgresBackupAlerts:
+      enabled: {{.PostgresBackup}}
+{{- end }}
   awsAlbIngress:
     enabled: false
   certManager:

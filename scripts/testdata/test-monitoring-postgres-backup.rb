@@ -71,12 +71,20 @@ cases.each do |name, values_path, overrides, enabled|
     unrelated.fetch('additionalPrometheusRulesMap').delete('postgres-backup')
     abort 'backup opt-in changed unrelated monitoring values' unless unrelated == base
   end
-  if %w[alerting-disabled civo-sandbox-use1-serving-enabled].include?(name)
+  if name == 'alerting-disabled'
     config = values.dig('alertmanager', 'config')
     abort "#{name}: backup activation changed null routing" unless config['receivers'] == [{'name' => 'null'}] &&
       config.dig('route', 'receiver') == 'null' && config.dig('route', 'routes') == [] &&
       Array(values.dig('alertmanager', 'alertmanagerSpec', 'secrets')).empty?
     abort "#{name}: backup activation enabled unrelated alerts" unless values.fetch('additionalPrometheusRulesMap').keys == ['postgres-backup']
+  end
+  if name == 'civo-sandbox-use1-serving-enabled'
+    # The serving cell routes alerts (monitoring phase 3). Backup activation must not
+    # touch Alertmanager routing, receiver Secrets, or any other rule group.
+    without = render_parent.call(values_path)
+    abort "#{name}: backup activation changed alert routing or receiver mounts" unless values['alertmanager'] == without['alertmanager']
+    abort "#{name}: backup activation enabled unrelated alerts" unless
+      (values.fetch('additionalPrometheusRulesMap').keys - ['postgres-backup']).sort == without.fetch('additionalPrometheusRulesMap', {}).keys.sort
   end
 
   values_path = File.join(tmp, "backup-#{name}-child-values.yaml")
