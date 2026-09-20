@@ -51,6 +51,19 @@ trap finish EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
+# Structured chart image pins select tools supplied by the built image. Check
+# every dependency before database or object-store work, and never repair a
+# broken image by reaching a package mirror. Unset retains the legacy sequence.
+case "${WITSELF_POSTGRES_BACKUP_IMAGE_MODE:-runtime-install}" in
+  runtime-install) ;;
+  preinstalled)
+    for required_tool in psql pg_dump gzip age aws date; do
+      command -v "$required_tool" >/dev/null || exit 1
+    done
+    ;;
+  *) exit 1 ;;
+esac
+
 # Operators provision the table and two restricted roles once. The Job never
 # carries administrator credentials or creates schemas, tables, or roles.
 for required_variable in METRICS_DATABASE METRICS_USER METRICS_PASSWORD PGHOST; do
@@ -75,7 +88,9 @@ done
 # The public PostgreSQL image already contains psql/pg_dump/bash/gzip. Installing
 # from its signed Alpine repositories avoids an unpublished private image gate.
 failure_stage=package_setup
-apk add --no-cache age aws-cli >/dev/null
+if [[ "${WITSELF_POSTGRES_BACKUP_IMAGE_MODE:-runtime-install}" == runtime-install ]]; then
+  apk add --no-cache age aws-cli >/dev/null
+fi
 
 backup_id="$(date -u +%Y%m%dT%H%M%SZ)-${POD_UID}"
 object_key="${R2_PREFIX%/}/${CELL_NAME}/${backup_id}.sql.gz.age"

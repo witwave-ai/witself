@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 require 'yaml'
 require 'open3'
+require 'json'
 
 root = ARGV.fetch(0)
 chart = File.join(root, '.gitops/charts/apps')
@@ -14,6 +15,10 @@ end
 def render(chart, cell, *overrides)
   args = ['helm', 'template', 'witself-apps', chart, '--values', cell]
   overrides.each do |value|
+    if value.is_a?(Hash)
+      value.each { |key, entry| args.concat(['--set-json', "#{key}=#{JSON.generate(entry)}"]) }
+      next
+    end
     # Boolean/integer overrides must retain their actual types.
     flag = value.match?(/=(true|false|[0-9]+)$/) ? '--set' : '--set-string'
     args.concat([flag, value])
@@ -58,11 +63,73 @@ container = pod.dig('spec', 'containers').fetch(0)
 check('backup must not gain Linux capabilities or privilege escalation', container.dig('securityContext', 'allowPrivilegeEscalation') == false && container.dig('securityContext', 'capabilities', 'drop') == ['ALL'])
 check('backup must retain the default seccomp profile', pod.dig('spec', 'securityContext', 'seccompProfile', 'type') == 'RuntimeDefault')
 check('dump container must not receive the PostgreSQL administrator credential', container.fetch('env').none? { |entry| entry.dig('valueFrom', 'secretKeyRef', 'key') == 'postgres-password' || (entry['name'] == 'PGUSER' && entry['value'] == 'postgres') })
-check('backup must run the mounted Bash runner with its PostgreSQL image', container['image'] == 'postgres:18-alpine3.23' && container['command'] == ['/bin/bash', '/scripts/backup.sh'])
+check('backup must run the mounted Bash runner with its default PostgreSQL image', container['image'] == defaults.dig('apps', 'civoPostgres', 'backup', 'legacyImage') && container['command'] == ['/bin/bash', '/scripts/backup.sh'])
 config = named(docs, 'ConfigMap', 'witself-postgresql-backup')
 check('mounted runner must match the tested source exactly', config && config.dig('data', 'backup.sh') == File.read(File.join(chart, 'files/postgres-backup.sh')))
 check('backup script must be mounted read-only from the matching ConfigMap', container.fetch('volumeMounts').any? { |mount| mount['mountPath'] == '/scripts' && mount['readOnly'] == true && pod.dig('spec', 'volumes').any? { |volume| volume['name'] == mount['name'] && volume.dig('configMap', 'name') == 'witself-postgresql-backup' } })
 check('backup chart must never emit a Secret', docs.none? { |doc| doc['kind'] == 'Secret' })
+check('legacy image must not enable preinstalled mode', container.fetch('env').none? { |entry| entry['name'] == 'WITSELF_POSTGRES_BACKUP_IMAGE_MODE' })
+
+# Keep existing scalar overrides compatible. Empty structured pins select the
+# same image, environment, permissions, and runner as the legacy chart defaults.
+[{}, {'repository' => '', 'tag' => '', 'digest' => ''}].each do |image|
+  fallback = documents(chart, cell, *enabled, {'apps.civoPostgres.backup.image' => image})
+  check('empty image pins must preserve every rendered resource', fallback == docs)
+end
+legacy_image = 'postgres:18-alpine'
+legacy = documents(chart, cell, *enabled, "apps.civoPostgres.backup.image=#{legacy_image}")
+legacy_job = named(legacy, 'CronJob', 'witself-postgresql-backup')
+expected_legacy_job = Marshal.load(Marshal.dump(job))
+expected_legacy_job.dig('spec', 'jobTemplate', 'spec', 'template', 'spec', 'containers').fetch(0)['image'] = legacy_image
+check('custom scalar image must retain all legacy CronJob behavior', legacy_job == expected_legacy_job)
+
+# Changing the chart's legacy image default must also change every empty-pin
+# fallback, without opting into preinstalled tools or changing other resources.
+[{}, {'repository' => '', 'tag' => '', 'digest' => ''}].each do |image|
+  fallback = documents(chart, cell, *enabled,
+    "apps.civoPostgres.backup.legacyImage=#{legacy_image}",
+    {'apps.civoPostgres.backup.image' => image})
+  check('empty image pins must follow the configured legacy image default', fallback == legacy)
+end
+
+repository = 'ghcr.io/witwave-ai/images/witself-postgres-backup'
+digest = 'sha256:' + ('a' * 64)
+[
+  [{'repository' => repository, 'tag' => '0.0.999'}, "#{repository}:0.0.999"],
+  [{'repository' => repository, 'tag' => '0.0.999', 'digest' => ''}, "#{repository}:0.0.999"],
+  [{'repository' => repository, 'tag' => '0.0.999', 'digest' => digest}, "#{repository}@#{digest}"],
+  [{'repository' => 'postgres', 'tag' => '18'}, 'postgres:18'],
+  [{'repository' => 'localhost:5000/team/postgres', 'tag' => '18'}, 'localhost:5000/team/postgres:18'],
+  [{'repository' => 'ghcr.io/team_name/postgres--backup', 'tag' => '18'}, 'ghcr.io/team_name/postgres--backup:18'],
+].each do |image, expected_image|
+  pinned = documents(chart, cell, *enabled, {'apps.civoPostgres.backup.image' => image})
+  pinned_job = named(pinned, 'CronJob', 'witself-postgresql-backup')
+  expected_job = Marshal.load(Marshal.dump(job))
+  expected_container = expected_job.dig('spec', 'jobTemplate', 'spec', 'template', 'spec', 'containers').fetch(0)
+  expected_container['image'] = expected_image
+  expected_container['env'].unshift({'name' => 'WITSELF_POSTGRES_BACKUP_IMAGE_MODE', 'value' => 'preinstalled'})
+  check('structured image must select preinstalled mode and preserve all other CronJob behavior', pinned_job == expected_job)
+  check('structured image must mount the same tested runner', named(pinned, 'ConfigMap', 'witself-postgresql-backup') == config)
+end
+
+[
+  {'repository' => repository},
+  {'repository' => repository, 'tag' => ''},
+  {'tag' => '0.0.999'},
+  {'digest' => digest},
+  {'repository' => '', 'tag' => '0.0.999', 'digest' => digest},
+  {'repository' => repository, 'tag' => '0.0.999', 'digest' => 'sha256:invalid'},
+  {'repository' => repository, 'tag' => '0.0.999', 'digest' => 'sha256:' + ('A' * 64)},
+  {'repository' => repository + ':mutable', 'tag' => '0.0.999'},
+  {'repository' => 'ghcr.io/team:5000/backup', 'tag' => '0.0.999'},
+  {'repository' => repository + '@' + digest, 'tag' => '0.0.999'},
+  {'repository' => repository, 'tag' => 'has whitespace'},
+  {'repository' => repository, 'tag' => '0.0.999', 'installPackages' => true},
+  [], true, 42, '',
+].each do |image|
+  _, _, status = render(chart, cell, *enabled, {'apps.civoPostgres.backup.image' => image})
+  check('backup schema must reject malformed or partial image selection', !status.success?)
+end
 
 expected_refs = {
   'PGPASSWORD' => ['witself-postgresql-backup-r2', 'dump-password'],
@@ -126,6 +193,7 @@ end)
   check("backup must reject invalid prerequisite: #{override}", !status.success? && Array(diagnostic).any? { |message| errors.include?(message) })
 end
 [
+  'apps.civoPostgres.backup.legacyImage=',
   'apps.civoPostgres.backup.ageRecipientSecretName=',
   'apps.civoPostgres.backup.r2SecretName=',
   'apps.civoPostgres.backup.ageRecipientSecretName=a..b',

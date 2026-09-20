@@ -30,6 +30,10 @@ def fake(command):
     # Real command errors can contain endpoint, SQL, credentials, or dump data.
     # Every child emits a sentinel so even the successful path tests log hygiene.
     sys.stderr.write("fixture-private-child-diagnostic\n")
+    if command == "date":
+        require(args == ["-u", "+%Y%m%dT%H%M%SZ"], "backup ID must retain its UTC format")
+        sys.stdout.write("20260919T030000Z\n")
+        return 0
     if command == "psql":
         # Guard the fixture itself: even mock invocations must name codex_a.
         require("--dbname=codex_a" in args, "fixture attempted a forbidden database")
@@ -158,13 +162,15 @@ def fake(command):
     raise AssertionError("unmocked command")
 
 
-def run_case(root, failure="", overrides=None):
+def run_case(root, failure="", overrides=None, missing_tools=()):
     with tempfile.TemporaryDirectory(prefix="witself-backup-test-") as directory:
         work = Path(directory)
         binaries = work / "bin"
         binaries.mkdir()
         this_file = str(Path(__file__).resolve())
-        for command in ("apk", "psql", "pg_dump", "gzip", "age", "aws"):
+        for command in ("apk", "psql", "pg_dump", "gzip", "age", "aws", "date"):
+            if command in missing_tools:
+                continue
             binary = binaries / command
             # The launcher has no shell interpolation of environment values.
             binary.write_text("#!" + sys.executable + "\n"
@@ -174,7 +180,9 @@ def run_case(root, failure="", overrides=None):
                               + " + sys.argv[1:])\n")
             binary.chmod(0o700)
         env = {
-            "PATH": str(binaries) + ":/usr/bin:/bin",
+            # Hermetic command lookup also proves a missing image tool cannot
+            # accidentally be supplied by the host running this offline suite.
+            "PATH": str(binaries),
             "HOME": str(work),
             "WITSELF_HOME": str(work / "witself"),
             "DSH_HOME": str(work / "dsh"),
@@ -265,7 +273,31 @@ def tests(root):
         status, events = run_case(root, overrides=overrides)
         require(status != 0 and events == ["metrics_init", "metrics_failure"],
                 "invalid configuration must fail before package, dump, or upload work")
-    print("PostgreSQL backup offline runner checks passed (26 cases)")
+
+    preinstalled = {"WITSELF_POSTGRES_BACKUP_IMAGE_MODE": "preinstalled"}
+    for missing_tools in ((), ("apk",)):
+        status, events = run_case(root, "apk", preinstalled, missing_tools)
+        require(status == 0 and "apk" not in events,
+                "preinstalled image must succeed without package installation or apk itself")
+        require([event for event in events if event in expected] == [event for event in expected if event != "apk"],
+                "preinstalled image must retain upload, promotion, cleanup, and telemetry ordering")
+    for tool in ("psql", "pg_dump", "gzip", "age", "aws", "date"):
+        status, events = run_case(root, overrides=preinstalled, missing_tools=(tool,))
+        require(status != 0 and events == [],
+                "missing preinstalled " + tool + " must fail before any external work")
+    status, events = run_case(root, overrides={"WITSELF_POSTGRES_BACKUP_IMAGE_MODE": "unknown"})
+    require(status != 0 and events == [],
+            "unknown image mode must fail closed before package, database, or object-store work")
+    for failure in ("pg_dump", "gzip", "age", "upload", "head", "head_invalid", "head_empty", "promote", "cleanup"):
+        status, events = run_case(root, failure, preinstalled)
+        require(status != 0 and "apk" not in events,
+                "preinstalled " + failure + " failure must fail without installing packages")
+        require(events.count("metrics_failure") == 1 and "metrics_success" not in events and "cleanup" in events,
+                "preinstalled " + failure + " failure must retain failure telemetry and cleanup")
+        if failure not in ("promote", "cleanup"):
+            require("promote" not in events,
+                    "preinstalled " + failure + " failure must not publish incomplete ciphertext")
+    print("PostgreSQL backup offline runner checks passed (44 cases)")
 
 
 if __name__ == "__main__":

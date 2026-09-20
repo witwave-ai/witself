@@ -13,12 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Keep this required check named exactly go. Mirror these Go jobs in
-  # release.yml; every parallel gate must succeed before this check is green.
+  # Keep this required check named exactly go. Mirror the Go jobs in release.yml;
+  # the pre-tag backup image tripwire must also succeed before merges.
   go:
     name: go
     if: ${{ always() }}
-    needs: [go-rest, go-store, go-infra, provider-contract-evidence]
+    needs: [go-rest, go-store, go-infra, postgres-backup-image, provider-contract-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,11 +28,12 @@ jobs:
           GO_REST_RESULT: ${{ needs.go-rest.result }}
           GO_STORE_RESULT: ${{ needs.go-store.result }}
           GO_INFRA_RESULT: ${{ needs.go-infra.result }}
+          BACKUP_IMAGE_RESULT: ${{ needs.postgres-backup-image.result }}
           PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}
         run: |
-          for result in "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
+          for result in "$BACKUP_IMAGE_RESULT" "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
             if [ "$result" != success ]; then
-              echo "A required Go gate did not succeed: $result" >&2
+              echo "A required CI gate did not succeed: $result" >&2
               exit 1
             fi
           done
@@ -218,6 +219,16 @@ jobs:
           go build ./...
           go test ./...
           golangci-lint run ./...
+
+  postgres-backup-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build and smoke-test pinned backup image
+        env:
+          CI: "true"
+        run: make check-postgres-backup-image
 
   release-config:
     runs-on: ubuntu-latest

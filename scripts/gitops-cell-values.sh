@@ -7,9 +7,13 @@
 # (or the apps chart defaults on first write) so scripts/roll-cell.sh remains
 # the release pin writer through --roll-cell after bootstrap. Empty imageDigest
 # remains omitted; --roll-cell requires a complete validated digest and refuses drift.
+# apps.civoPostgres.backup.image pins are preserved on ordinary generation and
+# server-only rolls. --backup-image-repository, --backup-image-tag, and
+# --backup-image-digest opt a roll into changing the backup image atomically.
 #
 # Usage: scripts/gitops-cell-values.sh --check|--write [--root PATH]
-#        scripts/gitops-cell-values.sh --roll-cell CELL --version VERSION --image-digest DIGEST [--root PATH]
+#        scripts/gitops-cell-values.sh --roll-cell CELL --version VERSION --image-digest DIGEST
+#          [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST] [--root PATH]
 set -euo pipefail
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)

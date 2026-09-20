@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # roll-cell — bump a cell's witself-server chart+image to a released Witself
 # version. Scoped: only apps.witselfServer.chartVersion, imageTag and
-# imageDigest are changed through the cell-values generator. Upstream chart
+# imageDigest are changed through the cell-values generator. --backup-image
+# also pins the purpose-built PostgreSQL backup image at the same release;
+# without it, any existing backup pin is preserved. Upstream chart
 # versions (cert-manager, external-dns, external-secrets, keda,
 # metrics-server) are OFF-LIMITS to this script by design.
 #
@@ -10,7 +12,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <cell-name> <version> (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
+  echo "usage: $0 <cell-name> <version> [--backup-image] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
 }
 
 die() {
@@ -20,9 +22,14 @@ die() {
 
 BACKUP_EVIDENCE=()
 NO_SCHEMA_CHANGE=false
+PIN_BACKUP_IMAGE=false
 POSITIONAL=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --backup-image)
+      PIN_BACKUP_IMAGE=true
+      shift
+      ;;
     --backup-evidence)
       if [ "$#" -lt 2 ]; then
         usage
@@ -129,20 +136,44 @@ if ! printf '%s' "$RELEASE_SCHEMA" | jq -e '.properties.image.properties.digest'
   die "release v${VERSION} chart does not declare image.digest; refusing an unenforceable digest pin"
 fi
 
+BACKUP_REPOSITORY=ghcr.io/witwave-ai/images/witself-postgres-backup
+if [ "$PIN_BACKUP_IMAGE" = true ]; then
+  if ! BACKUP_SCHEMA=$(git -C "$REPO_ROOT" show "${RELEASE_REF}:.gitops/charts/apps/values.schema.json" 2>/dev/null); then
+    die "release v${VERSION} apps chart has no readable values.schema.json; cannot verify backup image pin support"
+  fi
+  if ! printf '%s' "$BACKUP_SCHEMA" | jq -e '
+    [.properties.apps.properties.civoPostgres.properties.backup.properties.image |
+      .. | objects | select(.type? == "object" and .properties.repository? and .properties.tag? and .properties.digest?)] |
+    length > 0
+  ' >/dev/null 2>&1; then
+    die "release v${VERSION} apps chart does not declare backup image repository, tag, and digest; refusing an unenforceable backup pin"
+  fi
+fi
+
 # Resolve and verify the complete registry manifest before the generator can
 # change any pin. A failed lookup never leaves a tag-only partial roll.
 if ! DIGEST=$(bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION"); then
   die "image digest resolution failed; rollout aborted before any values file edit"
+fi
+ROLL_ARGS=(--root "$REPO_ROOT" --roll-cell "$CELL" --version "$VERSION" --image-digest "$DIGEST")
+if [ "$PIN_BACKUP_IMAGE" = true ]; then
+  if ! BACKUP_DIGEST=$(bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION" --repository "$BACKUP_REPOSITORY"); then
+    die "backup image digest resolution failed; rollout aborted before any values file edit"
+  fi
+  ROLL_ARGS+=(--backup-image-repository "$BACKUP_REPOSITORY" --backup-image-tag "$VERSION" --backup-image-digest "$BACKUP_DIGEST")
 fi
 
 BEFORE=$(mktemp "${TMPDIR:-/tmp}/witself-roll-cell-before.XXXXXX")
 trap 'rm -f -- "$BEFORE"' EXIT
 cp "$VALUES" "$BEFORE"
 # The generator refuses existing drift and atomically changes only this cell.
-bash "$REPO_ROOT/scripts/gitops-cell-values.sh" --root "$REPO_ROOT" \
-  --roll-cell "$CELL" --version "$VERSION" --image-digest "$DIGEST"
+bash "$REPO_ROOT/scripts/gitops-cell-values.sh" "${ROLL_ARGS[@]}"
 
-echo "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag + imageDigest)"
+ROLL_SUMMARY="apps.witselfServer.chartVersion + imageTag + imageDigest"
+if [ "$PIN_BACKUP_IMAGE" = true ]; then
+  ROLL_SUMMARY+="; backup image pinned to $BACKUP_REPOSITORY:$VERSION by digest"
+fi
+echo "rolled $CELL to $VERSION ($ROLL_SUMMARY)"
 echo "diff:"
 status=0
 diff -u --label "$CELL/values.yaml (before)" --label "$CELL/values.yaml (after)" \

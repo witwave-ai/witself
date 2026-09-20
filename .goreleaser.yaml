@@ -229,8 +229,9 @@ signs:
     output: true
 
 # Build each container and its multi-architecture manifest in one BuildKit
-# operation. The Dockerfiles only COPY GoReleaser's platform-partitioned
-# binaries, so no emulation or in-container compilation is required.
+# operation. Application images COPY GoReleaser's platform-partitioned
+# binaries. The backup image installs pinned Alpine tools under QEMU at build
+# time so scheduled jobs never depend on package mirrors.
 dockers_v2:
   - id: witself
     ids:
@@ -268,6 +269,26 @@ dockers_v2:
     sbom: false
     labels:
       "org.opencontainers.image.title": "witself-server"
+      "org.opencontainers.image.source": "https://github.com/witwave-ai/witself"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "FSL-1.1-ALv2"
+
+  # No application binaries are needed in the backup image's build context.
+  - id: witself-postgres-backup
+    ids:
+      - none
+    dockerfile: images/witself-postgres-backup/Dockerfile
+    images:
+      - "ghcr.io/witwave-ai/images/witself-postgres-backup"
+    tags:
+      - "{{ .Version }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: false
+    labels:
+      "org.opencontainers.image.title": "witself-postgres-backup"
       "org.opencontainers.image.source": "https://github.com/witwave-ai/witself"
       "org.opencontainers.image.version": "{{ .Version }}"
       "org.opencontainers.image.revision": "{{ .FullCommit }}"
