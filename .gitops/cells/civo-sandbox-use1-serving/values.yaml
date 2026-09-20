@@ -34,8 +34,11 @@ apps:
       enabled: true
       allowExternal: false
     metrics:
-      # Keep exporter ingress closed until the monitoring CRDs are healthy.
-      enabled: false
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
   witselfServer:
     enabled: true
     namespace: witself
@@ -80,6 +83,21 @@ apps:
       validationEnabled: false
       targetName: witself-backup
     replicaCount: 2
+    # Phase 2 of the monitoring rollout: expose server metrics to the
+    # monitoring-namespace Prometheus only.
+    metrics:
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
+    networkPolicy:
+      metricsFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
@@ -105,6 +123,20 @@ apps:
         enabled: true
         mode: enforce
       replicaCount: 2
+      # Phase 2: worker metrics restricted to the same Prometheus peers.
+      metrics:
+        serviceMonitor:
+          enabled: true
+          labels:
+            release: witself-monitoring
+      networkPolicy:
+        metricsFrom:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: monitoring
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
       podDisruptionBudget:
         enabled: true
         minAvailable: 1
@@ -160,8 +192,8 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
-  # Recovery phase 1: install the stack and CRDs with null-routed Alertmanager.
-  # Scrape discovery and receiver routing follow in separate GitOps changes.
+  # Recovery phase 2: discover PostgreSQL, server, and worker scrape targets.
+  # Keep Alertmanager null-routed until sustained scrapes are verified.
   monitoring:
     enabled: true
     alerting:
