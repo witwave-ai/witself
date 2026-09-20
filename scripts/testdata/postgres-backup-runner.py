@@ -114,6 +114,17 @@ def fake(command):
                 "R2 credentials must reach only the child process")
         if "s3api" in args:
             operation = args[args.index("s3api") + 1:]
+            if operation[0] == "copy-object":
+                require(operation[operation.index("--bucket") + 1] == "fixture-bucket",
+                        "promotion must copy within the configured bucket")
+                key = operation[operation.index("--key") + 1]
+                source = operation[operation.index("--copy-source") + 1]
+                require(key.endswith("-fixture-pod.sql.gz.age") and source == "fixture-bucket/" + key + ".incomplete",
+                        "promotion must only rename the complete ciphertext object")
+                require(key.startswith("fixture-prefix/fixture-cell/"), "backup escaped the single configured destination")
+                require("fixture-pod" in key, "backup object must have a unique pod identity")
+                event("promote")
+                return 42 if "promote" in failures else 0
             require(operation[:3] == ["head-object", "--bucket", "fixture-bucket"],
                     "byte verification must inspect only the configured bucket")
             require(operation[operation.index("--key") + 1].endswith("-fixture-pod.sql.gz.age.incomplete"),
@@ -132,10 +143,7 @@ def fake(command):
             require(destination.endswith(".sql.gz.age.incomplete"), "stream must land on incomplete object")
             action = "upload"
         elif operation[0] == "cp":
-            source, destination = operation[1:3]
-            require(source.endswith(".sql.gz.age.incomplete") and source == destination + ".incomplete",
-                    "promotion must only rename the complete ciphertext object")
-            action = "promote"
+            raise AssertionError("promotion must not use the multipart-capable s3 cp path")
         elif operation[0] == "rm":
             destination = operation[1]
             require(destination.endswith(".incomplete"), "cleanup may only delete the temporary object")

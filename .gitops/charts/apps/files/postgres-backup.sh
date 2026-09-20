@@ -100,7 +100,11 @@ bytes="$head_bytes"
 # Promote only a complete pipeline, within the same destination. Unique pod IDs
 # prevent retries from overwriting prior artifacts.
 failure_stage=object_promotion
-s3 cp "$staging" "$destination"
+# Promote with one server-side CopyObject: R2 answers NotImplemented to the
+# multipart copy (UploadPartCopy) that `aws s3 cp` selects above 8 MiB, and a
+# single CopyObject covers objects up to 5 GiB.
+aws_cli s3api copy-object --bucket "$R2_BUCKET" \
+  --copy-source "${R2_BUCKET}/${object_key}.incomplete" --key "$object_key" >/dev/null
 failure_stage=staging_cleanup
 s3 rm "$staging"
 staging=""
