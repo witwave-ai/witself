@@ -804,11 +804,21 @@ target, while removing database, user, application, and wait-event labels.
 Synthetic uptime rules additionally retain the public directory cell name in a
 `target` label.
 
-This capability is now live on the serving cell. Shared chart defaults remain
-disabled, and the staged GitOps rollout — stack, then targets, then alerting —
-proved sustained scrapes, bounded storage and resource headroom, rule health,
-plus both firing and resolved delivery at the tested external PagerDuty
-receiver, accepted 2026-08-26.
+The capability's 2026-08-26 acceptance on `civo-sandbox-usw2-dev` proved
+sustained scrapes, bounded storage and resource headroom, rule health, and
+firing and resolved delivery at the external PagerDuty receiver. After the
+PHX1 loss on 2026-09-19, monitoring re-establishment on
+`civo-sandbox-use1-serving` is staged in three GitOps changes: install the
+stack with null-routed Alertmanager and no application discovery; enable the
+PostgreSQL, server, and worker ServiceMonitors plus the restricted metrics
+peers after the stack and CRDs are Healthy; then enable alerting and the
+immutable receiver Secret references after verifying the targets and required
+metrics. The healthchecks.io dead-man check and PagerDuty `witself-prod`
+service are unchanged external resources. Shared chart defaults remain
+disabled. These staged changes do not establish live recovery acceptance:
+fresh firing/resolved delivery and dead-man lapse/restore evidence are required
+on the replacement cell under the [monitoring rollout runbook](runbooks.md#founder-open-plane-monitoring).
+
 The target-cell ServiceMonitors must be enabled only after the monitoring child
 Application and CRDs are Healthy; Argo sync waves in separate parent
 Applications do not establish that ordering.

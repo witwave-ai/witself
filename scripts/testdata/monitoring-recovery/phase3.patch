@@ -1,0 +1,165 @@
+diff --git a/.gitops/cells/catalog.yaml b/.gitops/cells/catalog.yaml
+index 6bbc712a..2916a8f4 100644
+--- a/.gitops/cells/catalog.yaml
++++ b/.gitops/cells/catalog.yaml
+@@ -66,8 +66,8 @@ cells:
+     switches:
+       domain_documentation_only: true
+       monitoring: true
+-      collector_alerts: false
+-      sealed_plane_alerts: false
++      collector_alerts: true
++      sealed_plane_alerts: true
+   civo-sandbox-usw2-dev:
+     cloud: civo
+     region: phx1
+diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
+index 5c59457c..ce652601 100644
+--- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
++++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
+@@ -168,16 +168,42 @@ apps:
+         targetName: witself-provision
+         tokenKey: token
+ platform:
+-  # Recovery phase 2: discover PostgreSQL, server, and worker scrape targets.
+-  # Keep Alertmanager null-routed until sustained scrapes are verified.
++  # Phase 3 of the monitoring rollout (runbook: Founder open-plane monitoring).
++  # Stack (phase 1) and scrape targets (phase 2) are verified; this enables
++  # alert routing: PagerDuty Events API v2 incidents plus the external
++  # dead-man heartbeat. Secret values live only in the two immutable
++  # in-cluster Secrets named here; nothing sensitive enters Git or Argo state.
+   monitoring:
+     enabled: true
+     alerting:
+-      enabled: false
++      enabled: true
+     collectorAlerts:
+-      enabled: false
++      enabled: true
+     sealedPlaneAlerts:
+-      enabled: false
++      enabled: true
++    postgresql:
++      enabled: true
++    nodeExporter:
++      enabled: true
++    kubelet:
++      cadvisor: true
++    defaultRules:
++      enabled: true
++    certManager:
++      enabled: true
++    argocd:
++      enabled: true
++    uptimeProbes:
++      enabled: true
++    entitlementDelivery:
++      enabled: true
++    receiver:
++      kind: pagerduty
++      secretName: witself-monitoring-pagerduty-v1
++      secretKey: routing_key
++    receiverDeadman:
++      secretName: witself-monitoring-deadman-v1
++      secretKey: url
+   awsAlbIngress:
+     enabled: false
+   certManager:
+diff --git a/internal/gitopsvalues/generate_test.go b/internal/gitopsvalues/generate_test.go
+index b1686c56..4b670a72 100644
+--- a/internal/gitopsvalues/generate_test.go
++++ b/internal/gitopsvalues/generate_test.go
+@@ -112,13 +112,20 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
+ 		if name == "civo-sandbox-usw2-dev" {
+ 			continue
+ 		}
++		if name == "civo-sandbox-use1-serving" {
++			// Recovery phase 3 explicitly enables both groups after scrape verification.
++			if !cell.Switches.Monitoring || !cell.Switches.CollectorAlerts || !cell.Switches.SealedPlaneAlerts {
++				t.Error("replacement serving cell must enable monitoring and both alert groups")
++			}
++			continue
++		}
+ 		if cell.Switches.SealedPlaneAlerts {
+ 			t.Errorf("%s unexpectedly sets sealed_plane_alerts", name)
+ 		}
+ 	}
+ }
+ 
+-func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
++func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCells(t *testing.T) {
+ 	generated, err := generateAll(repoRoot(t))
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -136,6 +143,12 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
+ 			}
+ 			continue
+ 		}
++		if cell == "civo-sandbox-use1-serving" {
++			if !hasSealed || !hasCollector {
++				t.Errorf("%s missing recovery phase-3 alert groups", valuesRel(cell))
++			}
++			continue
++		}
+ 		if hasSealed {
+ 			t.Errorf("%s unexpectedly rendered sealedPlaneAlerts", valuesRel(cell))
+ 		}
+diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
+index 4564dfd9..0da76d2b 100644
+--- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
++++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
+@@ -154,16 +154,48 @@ apps:
+         targetName: witself-provision
+         tokenKey: token
+ platform:
+-  # Recovery phase 2: discover PostgreSQL, server, and worker scrape targets.
+-  # Keep Alertmanager null-routed until sustained scrapes are verified.
++{{- if .Monitoring }}
++  # Phase 3 of the monitoring rollout (runbook: Founder open-plane monitoring).
++  # Stack (phase 1) and scrape targets (phase 2) are verified; this enables
++  # alert routing: PagerDuty Events API v2 incidents plus the external
++  # dead-man heartbeat. Secret values live only in the two immutable
++  # in-cluster Secrets named here; nothing sensitive enters Git or Argo state.
+   monitoring:
+-    enabled: {{.Monitoring}}
++    enabled: true
+     alerting:
+-      enabled: false
++      enabled: true
++{{- if .CollectorAlerts }}
+     collectorAlerts:
+-      enabled: {{.CollectorAlerts}}
++      enabled: true
++{{- end }}
++{{- if .SealedPlaneAlerts }}
+     sealedPlaneAlerts:
+-      enabled: {{.SealedPlaneAlerts}}
++      enabled: true
++{{- end }}
++    postgresql:
++      enabled: true
++    nodeExporter:
++      enabled: true
++    kubelet:
++      cadvisor: true
++    defaultRules:
++      enabled: true
++    certManager:
++      enabled: true
++    argocd:
++      enabled: true
++    uptimeProbes:
++      enabled: true
++    entitlementDelivery:
++      enabled: true
++    receiver:
++      kind: pagerduty
++      secretName: witself-monitoring-pagerduty-v1
++      secretKey: routing_key
++    receiverDeadman:
++      secretName: witself-monitoring-deadman-v1
++      secretKey: url
++{{- end }}
+   awsAlbIngress:
+     enabled: false
+   certManager:

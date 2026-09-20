@@ -729,9 +729,8 @@ for recovery_phase in restore serving; do
   extract_document Application witself-postgresql "$recovery_apps" "$recovery_postgres"
   require_line "          resourcesPreset: micro" "$recovery_postgres"
   require_line '            size: "8Gi"' "$recovery_postgres"
-  require_sequence "$recovery_postgres" \
-    "          serviceMonitor:" \
-    "            enabled: false"
+  # PostgreSQL metrics are off during monitoring phase 1; subsequent phases
+  # enable its selected ServiceMonitor. The phase helper verifies both forms.
   extract_document Application witself-server "$recovery_apps" "$recovery_application"
   require_sequence "$recovery_application" \
     "          providerEventTokenSecret:" \
@@ -780,10 +779,8 @@ for recovery_phase in restore serving; do
     "                secretKeyRef:" \
     '                  name: "witself-agent-email-retry-canary-v1"' \
     '                  key: "agent_id"'
-  if grep -Fqx 'kind: ServiceMonitor' "$recovery_render"; then
-    echo "recovery cell unexpectedly rendered a ServiceMonitor" >&2
-    exit 1
-  fi
+  # The recovery monitoring helper below checks ServiceMonitor absence in
+  # phase 1 and exact discovery/NetworkPolicy parity in phases 2 and 3.
   if grep -Eq 'witself-monitoring-(pagerduty-v1|deadman-v1)' \
     "$recovery_apps" "$recovery_render"; then
     echo "recovery cell still references a dead-cluster monitoring Secret" >&2
@@ -806,6 +803,9 @@ for recovery_phase in restore serving; do
     exit 1
   fi
 done
+
+# Exercise the checked-in phase patches without mutating the current tree.
+ruby "$repo_root/scripts/testdata/test-monitoring-recovery.rb" "$repo_root"
 
 # Billing discovery is absent by default, forwarded only when explicitly set,
 # and server-only. An explicit empty value must preserve the exact portable
