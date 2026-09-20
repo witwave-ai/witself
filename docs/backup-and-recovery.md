@@ -789,10 +789,11 @@ successful restore drill and the other acceptance prerequisites complete.
 ### Scheduled PostgreSQL backups
 
 The cell apps chart includes a **default-off** daily logical dump to Cloudflare
-R2, outside the Kubernetes provider. `civo-sandbox-use1-serving` and
-`civo-sandbox-use1-backup` both keep
-`switches.postgres_backup: false` in `.gitops/cells/catalog.yaml`. No credential,
-bucket policy change, or live activation accompanies this implementation.
+R2, outside the Kubernetes provider. The checked-in `.gitops/cells/catalog.yaml`
+sets `switches.postgres_backup: true` for `civo-sandbox-use1-serving` and keeps
+it `false` for `civo-sandbox-use1-backup`. These desired-state switches do not
+prove live backup acceptance. Publishing the purpose-built image changes
+neither switch and provisions no credentials or bucket policy.
 This is **not PITR**: there is no WAL archive or recovery between dumps, and a
 successful daily schedule can still lose nearly 24 hours of writes. It does not
 replace the separate pre-migration backup and restore-validation gate below.
@@ -808,17 +809,74 @@ object size. The final object is
 remove the staging object; interrupted uploads may leave incomplete objects or
 multipart uploads for operator cleanup under the existing bucket policy.
 
-The PostgreSQL 18 Alpine image supplies `pg_dump`, `psql`, Bash, and gzip;
-the Job installs `age` and `aws-cli` from that image's signed Alpine repositories
-at startup. Consequently it needs outbound HTTPS to those repositories and R2,
-and the container starts as root for package installation. Package availability
-is a runtime dependency; a failed install fails the Job and records a failed
-attempt when the telemetry database remains reachable. The image is configurable
-under `apps.civoPostgres.backup.image` and must retain this command/package
-contract. The dump uses the read-only `witself_backup_dump` login; run telemetry
+The fallback `apps.civoPostgres.backup.legacyImage`, `postgres:18-alpine3.23`,
+supplies `pg_dump`, `psql`, Bash, and gzip. The chart defaults `backup.image`
+to an empty object, which selects this fallback; legacy scalar image values
+remain supported. In either case, the Job installs `age` and `aws-cli` from the
+image's signed Alpine repositories at startup. It needs outbound HTTPS to those repositories
+and R2, and starts as root for package installation. Package availability
+remains a runtime dependency in this mode; a failed install fails the Job and
+records a failed attempt when the telemetry database remains reachable.
+
+The purpose-built `ghcr.io/witwave-ai/images/witself-postgres-backup` image
+instead installs exact `age` and `aws-cli` versions during its release build,
+on a digest-pinned PostgreSQL 18 Alpine base. It is published for amd64 and
+arm64 with the same signing, BuildKit provenance, and SBOM attestation path as
+the server image. Configure an image object with `repository` and `tag`, and
+optionally `digest`; a nonempty digest takes precedence over the tag. This
+mode checks the required tools and fails closed if any are missing, without
+running `apk` or falling back to package installation. It still needs database
+and R2 connectivity. Tool preflight failures happen before telemetry writes;
+inspect Job failures and backup freshness when no attempt row exists. The
+container security context and backup schedule remain unchanged.
+
+The dump uses the read-only `witself_backup_dump` login; run telemetry
 uses `witself_backup_metrics`, with write privileges only on its dedicated
 table. The Job receives neither a PostgreSQL administrator credential nor a
 Kubernetes API token.
+
+After the first successful release containing the backup image, switch the
+serving cell through the generator:
+
+1. After the first release publishes
+   `ghcr.io/witwave-ai/images/witself-postgres-backup`, an operator must set
+   that GHCR package's visibility to **public** once in its package settings.
+   Both the digest resolver and the kubelet pull anonymously; the resolver
+   does not consult operator registry credentials. Until the package is
+   public, `scripts/roll-cell.sh CELL VERSION --backup-image` refuses with
+   `registry manifest unreachable`.
+2. Verify the release workflow completed, including publication, signature,
+   provenance, and SBOM checks for both architectures of the backup image.
+   Use a reviewed checkout containing these chart/generator changes and the
+   target `vVERSION` tag locally. Do not select a release predating this image.
+3. Run the existing schema rollout gate with the explicit image opt-in:
+
+   ```sh
+   VERSION="${RELEASE_VERSION:?set the published version without v}"
+   scripts/roll-cell.sh civo-sandbox-use1-serving "$VERSION" --backup-image \
+     --backup-evidence "${BACKUP_CELL_EVIDENCE:?set the backup-cell evidence directory}" \
+     --backup-evidence "${SERVING_CELL_EVIDENCE:?set the serving-cell evidence directory}"
+   bash scripts/gitops-cell-values.sh --check
+   bash scripts/test-postgres-backup.sh
+   ```
+
+   For a release proven unable to advance the database schema, replace both
+   evidence arguments with `--no-schema-change`. The script verifies image
+   support in the local target tag, resolves both release index digests, and
+   writes them together. It updates the server release pin as well as the
+   backup pin; it does not enable the backup switch. No cell overlay edit is
+   needed. Existing backup pins survive normal regeneration and ordinary
+   server rolls; repeat `--backup-image` when upgrading the backup tools.
+4. Review the serving cell's generated diff: the server release pin and
+   `apps.civoPostgres.backup.image` should be the only changes. Keep the
+   schedule, switches, and Secret references unchanged. Follow the normal
+   owner-reviewed commit, gate, merge, and GitOps reconciliation process.
+5. If backups are already enabled, wait for reconciliation and use the initial
+   Job procedure below, avoiding overlap with another backup. Verify the Job
+   uses the reviewed image digest, completes, records a final encrypted object
+   and successful telemetry, and passes a disposable restore. If backups are
+   disabled, complete the separate activation steps below first. An image pin
+   alone is not backup acceptance.
 
 For operator activation on a provisioned cell:
 

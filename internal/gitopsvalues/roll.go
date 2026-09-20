@@ -14,11 +14,26 @@ var releaseVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 // RollCell generates exactly one existing cell with a complete release pin set.
 // It refuses drift and validates every input before atomically replacing values.
 func RollCell(root, cell, version, digest string, out io.Writer) error {
+	return RollCellWithBackupImage(root, cell, version, digest, nil, out)
+}
+
+// RollCellWithBackupImage optionally sets the PostgreSQL backup image in the same
+// atomic write as the server pins. A nil backup preserves the existing image.
+// The caller must resolve both digests before calling this function.
+func RollCellWithBackupImage(root, cell, version, digest string, backup *BackupImagePins, out io.Writer) error {
 	if !releaseVersionPattern.MatchString(version) {
 		return fmt.Errorf("release version must look like MAJOR.MINOR.PATCH")
 	}
 	if !imageDigestPattern.MatchString(digest) {
 		return fmt.Errorf("release image digest must be sha256 followed by 64 lowercase hexadecimal characters")
+	}
+	if backup != nil {
+		if err := backup.validate(); err != nil {
+			return err
+		}
+		if backup.Repository == "" || backup.Tag != version || !imageDigestPattern.MatchString(backup.Digest) {
+			return fmt.Errorf("backup release pin requires a repository, release-matching tag, and sha256 digest")
+		}
 	}
 	cfg, err := loadCatalog(root)
 	if err != nil {
@@ -44,7 +59,7 @@ func RollCell(root, cell, version, digest string, out io.Writer) error {
 		return fmt.Errorf("%s differs from generated output; resolve drift before rolling", valuesRel(cell))
 	}
 	pins := serverPins{ChartVersion: version, ImageTag: version, ImageDigest: digest}
-	rolled, err := generateCellWithPins(root, cell, cfg, charts, &pins)
+	rolled, err := generateCellWithImagePins(root, cell, cfg, charts, &pins, backup)
 	if err != nil {
 		return err
 	}
@@ -62,5 +77,8 @@ func RollCell(root, cell, version, digest string, out io.Writer) error {
 		}
 	}
 	_, _ = fmt.Fprintf(out, "gitops cell values: rolled %s chartVersion, imageTag, and imageDigest\n", cell)
+	if backup != nil {
+		_, _ = fmt.Fprintln(out, "gitops cell values: pinned PostgreSQL backup image repository, tag, and digest")
+	}
 	return nil
 }

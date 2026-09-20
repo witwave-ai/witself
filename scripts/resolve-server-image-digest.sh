@@ -3,17 +3,23 @@
 # Anonymous registry API access only: never consult Docker or gh credentials.
 set -euo pipefail
 
-die() { echo "error: server image digest resolution failed: $*" >&2; exit 2; }
-[ "$#" -eq 1 ] || die "expected a release version"
+die() { echo "error: image digest resolution failed: $*" >&2; exit 2; }
+repository=ghcr.io/witwave-ai/images/witself-server
+if [ "$#" -eq 3 ] && [ "$2" = --repository ]; then
+  repository=$3
+elif [ "$#" -ne 1 ]; then
+  die "expected a release version [--repository ghcr.io/OWNER/IMAGE]"
+fi
 version=$1
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
+[[ "$repository" =~ ^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)+$ ]] || die "repository must be a canonical ghcr.io image repository without a tag or digest"
+repository=${repository#ghcr.io/}
 for tool in curl jq shasum; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/witself-image-digest.XXXXXX")
 trap 'rm -rf -- "$work_dir"' EXIT
-repository=witwave-ai/images/witself-server
 accept='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
 
 # -q must be first: a user's .curlrc must not add credentials, output, or redirects.

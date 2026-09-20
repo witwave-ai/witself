@@ -30,7 +30,7 @@ Pulumi-module, vulnerability, and native Windows x64 provider-integration gates
 before publishing. GoReleaser then publishes the macOS and Linux archives, the
 Windows x64 `witself` CLI archive, checksum Sigstore bundle and transitional
 detached-signature compatibility assets,
-archive SBOMs, GitHub release, multi-architecture CLI and server images,
+archive SBOMs, GitHub release, multi-architecture CLI, server, and PostgreSQL backup images,
 and signed immutable image manifests. The workflow renders the `witself`,
 `witself-infra`, and `witself-admin` Homebrew formulae from those exact archives
 and publishes them to the tap in one non-force commit. After the tap records the
@@ -346,6 +346,8 @@ The implemented release action owns:
   `ghcr.io/witwave-ai/images/witself`.
 - Publishing the public GHCR backend image at
   `ghcr.io/witwave-ai/images/witself-server`.
+- Publishing the PostgreSQL backup job image at
+  `ghcr.io/witwave-ai/images/witself-postgres-backup`.
 - Publishing the public Helm chart at
   `ghcr.io/witwave-ai/charts/witself-server`.
 - Signing the published GHCR images.
@@ -607,7 +609,7 @@ docker run --rm --entrypoint /usr/local/bin/witself-worker \
   "ghcr.io/witwave-ai/images/witself-server:${VERSION}" serve
 ```
 
-Implemented image behavior:
+Implemented CLI/server image behavior:
 
 - Build from the public distroless static base image.
 - Run as the distroless non-root user.
@@ -626,11 +628,65 @@ Implemented image behavior:
 
 Published-image execution smoke tests remain release-hardening targets.
 
+The scheduled PostgreSQL backup image is:
+
+- Dockerfile: `images/witself-postgres-backup/Dockerfile`
+- Image package: `ghcr.io/witwave-ai/images/witself-postgres-backup`
+- Platforms: `linux/amd64`, `linux/arm64`
+
+It pins the official PostgreSQL 18 Alpine base by its multi-architecture index
+digest and installs exact `age` and `aws-cli` Alpine package versions at build
+time. The PostgreSQL base supplies `pg_dump`, `psql`, Bash, and gzip. Updating
+the base or package versions requires a reviewed Dockerfile change and another
+release; unavailable package versions fail the build. The shared GoReleaser
+Docker configuration publishes version tags, signs the resulting manifests
+with keyless Cosign, and uses the same BuildKit provenance behavior as the
+server image. The release workflow also generates and attests its Syft SBOM.
+The backup image has no moving `latest` channel.
+
+The backup-image job in `.github/workflows/ci.yml` is the pre-tag pin-drift
+tripwire: it builds this Dockerfile for `linux/amd64` without pushing and runs
+`age --version`, `aws --version`, and `pg_dump --version` inside the resulting
+image. This catches unavailable Alpine package revisions before a release tag
+can begin publishing artifacts. Run `make check-postgres-backup-image` locally
+for the same check; `make check` includes it. Local runs print
+`skipped: no docker` when a Docker daemon is unavailable, while CI requires
+Docker and fails rather than skipping.
+
+To bump the pins, edit `images/witself-postgres-backup/Dockerfile`: choose a
+reviewed official PostgreSQL 18 multi-architecture base index digest and exact
+`age`/`aws-cli` revisions available for both `x86_64` and `aarch64` in that
+base's Alpine repositories. Keep the base and package pins consistent and
+update the Dockerfile's version comments. Run `make check-postgres-backup-image`
+and validate a two-platform build for `linux/amd64,linux/arm64` before the
+reviewed change is released. The single-platform CI tripwire does not replace
+that two-platform validation or the release's provenance and SBOM checks.
+
+Cell activation is separate from publication. An explicit
+`scripts/roll-cell.sh CELL VERSION --backup-image` plus the existing rollout
+gate resolves both server and backup release manifests before one atomic
+generated-values update. The optional backup pin is
+`apps.civoPostgres.backup.image.{repository,tag,digest}`; the digest selects the
+image while the tag records the release. Ordinary rolls and regeneration
+preserve an existing backup pin; repeat `--backup-image` to update it. The
+resolver accepts `--repository ghcr.io/witwave-ai/images/witself-postgres-backup`
+and verifies registry manifest bytes before returning their index digest.
+
+Until an operator opts in, the default empty `backup.image` object selects
+`backup.legacyImage` (`postgres:18-alpine3.23`) and the runner still installs
+packages at startup. Legacy scalar image values remain supported. A configured
+image object requires a repository and tag, with an optional digest; it selects preinstalled
+tools and never invokes `apk`. Missing tools fail the Job. See the
+[scheduled-backup runbook](backup-and-recovery.md#scheduled-postgresql-backups)
+for the first-release activation procedure. Publication alone changes neither
+the backup schedule nor any cell's values.
+
 Container publishing should use GitHub Packages / GHCR with public visibility.
 Initial package paths should be:
 
 - `ghcr.io/witwave-ai/images/witself`
 - `ghcr.io/witwave-ai/images/witself-server`
+- `ghcr.io/witwave-ai/images/witself-postgres-backup`
 
 ## Homebrew
 
