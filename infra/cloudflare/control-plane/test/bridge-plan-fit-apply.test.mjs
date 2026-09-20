@@ -320,6 +320,35 @@ function blockedResult() {
   };
 }
 
+test("atomic plan apply preserves an operator seat refusal and compensates preparations", async () => {
+  const seats = withSnapshotHash({ ...target, limits: { operator_seats: 1 } });
+  const blocked = {
+    ...blockedResult(),
+    target_snapshot_hash: seats.snapshot_hash,
+    violations: [{
+      code: "limit_exceeded", dimension: "operator_seats", scope: "account",
+      used: 2, max: 1, subject_count: 1,
+    }],
+  };
+  const events = [];
+  const env = environment();
+  env.AGENT_EMAIL_DOMAINS = authorityNamespace("domain", events, undefined, seats);
+  env.REALM_EMAIL_ALIASES = authorityNamespace("alias", events, undefined, seats);
+  const response = await handleInternalBridgeRequest(
+    request({ schema_version: "witself.v0", target: seats }), env,
+    async (_url, init) => {
+      assert.equal(init.method, "POST", "valid refusal must not trigger invalid-result recovery");
+      events.push("cell:blocked");
+      return Response.json(blocked);
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), blocked);
+  assert.deepEqual(events, [
+    "domain:prepare", "alias:prepare", "cell:blocked", "alias:complete", "domain:complete",
+  ]);
+});
+
 test("atomic plan apply prepares authorities, commits the cell, then completes", async () => {
   const events = [];
   const env = environment();
@@ -888,6 +917,92 @@ test("tampered current snapshot cannot drive authority compensation", async () =
   );
   assert.equal(response.status, 502);
   assert.deepEqual(events, ["domain:prepare", "alias:prepare"]);
+});
+
+function staleAuthorityNamespace(label, events, requests, alwaysStale = false) {
+  return authorityNamespace(label, events, (body) => {
+    if (body.reprepare_completed === true && !alwaysStale) return undefined;
+    return Response.json({
+      schema_version: label === "alias"
+        ? "witself.realm-email-alias.v1"
+        : "witself.agent-email-domain.v1",
+      account_id: "acct_1",
+      mode: "prepare",
+      plan_revision: target.revision,
+      plan_snapshot_hash: target.snapshot_hash,
+      prepared: false,
+      pending: false,
+      stale: true,
+      complete: true,
+    });
+  }, target, requests);
+}
+
+test("completed authority reprepare requires a verified older cell snapshot", async (t) => {
+  for (const [name, current] of [
+    ["tampered content", { ...currentSnapshot, plan: "tampered" }],
+    ["different account", { ...currentSnapshot, account_id: "acct_other" }],
+    ["same revision conflicting content", {
+      ...currentSnapshot, revision: target.revision,
+    }],
+    ["newer cell", { ...currentSnapshot, revision: target.revision + 1 }],
+  ]) {
+    await t.test(name, async () => {
+      const events = [];
+      const requests = [];
+      const env = environment();
+      env.AGENT_EMAIL_DOMAINS = staleAuthorityNamespace("domain", events, requests);
+      env.REALM_EMAIL_ALIASES = staleAuthorityNamespace("alias", events, requests);
+      const response = await handleInternalBridgeRequest(request(), env, async (_url, init) => {
+        assert.equal(init.method, "GET", "unverified or superseded cell must not be written");
+        return Response.json(current);
+      });
+      assert.equal(response.status, 502);
+      assert.equal(requests.some(({ body }) => body.reprepare_completed === true), false);
+      assert.equal(requests.some(({ body }) => body.mode === "complete"), false);
+    });
+  }
+});
+
+test("exact accepted cell fence completes without refitting completed authorities", async () => {
+  const events = [];
+  const requests = [];
+  const env = environment();
+  env.AGENT_EMAIL_DOMAINS = staleAuthorityNamespace("domain", events, requests);
+  env.REALM_EMAIL_ALIASES = staleAuthorityNamespace("alias", events, requests);
+  let cellReads = 0;
+  const response = await handleInternalBridgeRequest(request(), env, async (_url, init) => {
+    assert.equal(init.method, "GET");
+    cellReads += 1;
+    return Response.json(appliedSnapshot);
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), appliedResult());
+  assert.equal(cellReads, 1);
+  assert.deepEqual(events, ["domain:prepare", "alias:complete", "domain:complete"]);
+  assert.equal(requests.some(({ body }) => body.reprepare_completed === true), false);
+});
+
+test("a still-newer authority refuses restored-cell replay and compensates the prepared dimension", async () => {
+  const events = [];
+  const requests = [];
+  const env = environment();
+  env.AGENT_EMAIL_DOMAINS = authorityNamespace("domain", events, undefined, target, requests);
+  env.REALM_EMAIL_ALIASES = staleAuthorityNamespace("alias", events, requests, true);
+  const response = await handleInternalBridgeRequest(request(), env, async (_url, init) => {
+    assert.equal(init.method, "GET", "stale authority must not permit a cell write");
+    return Response.json(currentSnapshot);
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, "agent email plan-fit authority is unavailable");
+  assert.deepEqual(events, [
+    "domain:prepare", "alias:prepare",
+    "domain:prepare", "alias:prepare", "domain:complete",
+  ]);
+  const compensation = requests.at(-1).body;
+  assert.equal(compensation.plan_revision, currentSnapshot.revision);
+  assert.equal(compensation.recover_pending_revision, target.revision);
+  assert.equal(compensation.recover_pending_snapshot_hash, target.snapshot_hash);
 });
 
 test("atomic plan apply rejects malformed targets before any authority or cell call", async (t) => {

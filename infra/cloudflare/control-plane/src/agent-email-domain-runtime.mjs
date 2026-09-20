@@ -970,6 +970,9 @@ export async function reconcileAgentEmailDomainsForPlan(
         mode,
         plan_revision: snapshot.revision,
         plan_snapshot_hash: snapshot.snapshot_hash,
+        ...(options.reprepare_completed === true
+          ? { reprepare_completed: true }
+          : {}),
         ...(options.recover_pending_revision === undefined
           ? {}
           : {
@@ -2702,7 +2705,12 @@ export class DurableAgentEmailDomainRegistry {
 
     if (input.mode === "prepare") {
       const maximum = input.feature_enabled ? input.domain_limit : 0;
-      if (committedRelation <= 0) {
+      // A restored cell can be behind this completed fence while lifecycle
+      // retries the exact acknowledged revision. Hash and entitlement equality
+      // were checked above; re-fit current usage and install the normal pending
+      // allocation fence below. Never roll the completed authority backward.
+      if (committedRelation < 0 ||
+          (committedRelation === 0 && input.reprepare_completed !== true)) {
         return json({
           schema_version: SCHEMA_VERSION,
           account_id: accountID,
@@ -2966,7 +2974,29 @@ export class DurableAgentEmailDomainRegistry {
         });
       }
     }
-    if (committedRelation === 0 && !pending && !recoversPending) {
+    const completesRepeatedPrepare = pending?.state === "awaiting_cell" &&
+      pending.prepare_fit !== undefined &&
+      pending.plan_revision === planFence.revision &&
+      pending.plan_snapshot_hash === planFence.snapshot_hash &&
+      pending.feature_enabled === input.feature_enabled &&
+      pending.domain_limit === input.domain_limit;
+    if (committedRelation === 0 && !recoversPending &&
+        (!pending || completesRepeatedPrepare)) {
+      if (completesRepeatedPrepare) {
+        const maximum = pending.feature_enabled ? pending.domain_limit : 0;
+        if (!validAgentEmailDomainPrepareFit(pending.prepare_fit, maximum) ||
+            pending.prepare_fit.over_limit_count !== 0) {
+          fail("persisted custom domain prepare evidence is invalid", 503);
+        }
+        // This policy already completed before the cell restore. Release only
+        // its repeated fit freeze; rewriting the immutable completed fence
+        // would violate the authority journal's same-revision identity.
+        await this.atomic([], [
+          planIntentKey(accountID),
+          planDueKey(pending),
+        ].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+      }
       return json({
         schema_version: SCHEMA_VERSION,
         account_id: accountID,

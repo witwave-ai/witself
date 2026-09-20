@@ -111,7 +111,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -326,6 +326,9 @@ test-memory-relevance: ## Measure the fixed synthetic lexical relevance corpus
 feature-status: ## Regenerate the reviewed feature status scorecard
 	go run ./internal/cmd/render-feature-status
 
+plan-contract: ## Generate the Worker plan validator contract from the Go catalog
+	go run ./internal/plans/cmd/export-contract
+
 gitops-cell-values: ## Generate per-cell GitOps values overlays from cell config
 	bash scripts/gitops-cell-values.sh --write
 
@@ -357,6 +360,7 @@ check: ## Run CI's exact local gate set — run before every push
 	@echo "check: all gates green"
 
 check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
+	go test ./internal/plans -run '^TestWorkerPlanContract'
 	cd infra/pulumi && go vet ./...
 	cd infra/pulumi && go build ./...
 	cd infra/pulumi && go test ./...

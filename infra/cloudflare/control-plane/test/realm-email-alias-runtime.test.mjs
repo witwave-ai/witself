@@ -847,6 +847,165 @@ test("realm-alias prepare atomically fits, fences, replays, and compensates with
   );
 });
 
+test("realm-alias exact completed prepare preserves conflicts, stale fences, and newer pending intent", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "completed-fence");
+  assert.equal((await approve(fixture.runtime, requested.body.request))
+    .response.status, 200);
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 3,
+    plan_revision: 18,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const completed = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "complete",
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  const unflagged = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare",
+  });
+  assert.equal(unflagged.response.status, 200);
+  assert.equal(unflagged.body.stale, true);
+  assert.equal(unflagged.body.prepared, false);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+  for (const conflict of [
+    { plan_snapshot_hash: "9".repeat(64) },
+    { alias_limit: 2 },
+    { feature_enabled: false },
+    { activation_enabled: false },
+  ]) {
+    const rejected = await call(fixture.runtime, "/plan/reconcile", {
+      ...plan, mode: "prepare", reprepare_completed: true, ...conflict,
+    });
+    assert.equal(rejected.response.status, 409);
+    assert.match(rejected.body.error, /conflicts/);
+    assert.deepEqual([...fixture.storage.values.entries()], before);
+  }
+  const stale = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare", reprepare_completed: true, plan_revision: 17,
+  });
+  assert.equal(stale.response.status, 200);
+  assert.equal(stale.body.stale, true);
+  assert.equal(stale.body.prepared, false);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+
+  const newer = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare", reprepare_completed: true, plan_revision: 19,
+    plan_snapshot_hash: "9".repeat(64),
+  });
+  assert.equal(newer.response.status, 200);
+  assert.equal(newer.body.prepared, true);
+  const newerPending = structuredClone([...fixture.storage.values.entries()]);
+  const exact = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare", reprepare_completed: true,
+  });
+  assert.equal(exact.response.status, 200);
+  assert.equal(exact.body.stale, true);
+  assert.equal(exact.body.prepared, false);
+  assert.deepEqual([...fixture.storage.values.entries()], newerPending);
+});
+
+test("realm-alias exact completed prepare freezes allocations and compensates without lowering the committed fence", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "completed-freeze");
+  assert.equal((await approve(fixture.runtime, requested.body.request))
+    .response.status, 200);
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 3,
+    plan_revision: 18,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  assert.equal((await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "complete",
+  })).body.complete, true);
+  const committed = await fixture.storage.get(`plan-fence:${ACCOUNT}`);
+  const allocation = await fixture.storage.get("claim:completed-freeze");
+  const routes = structuredClone([...fixture.emailDirectory.values.entries()]);
+  const prepared = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare", reprepare_completed: true,
+  });
+  assert.equal(prepared.response.status, 200);
+  assert.equal(prepared.body.prepared, true);
+  assert.equal(prepared.body.pending, true);
+  assert.equal(prepared.body.fit.highest_used, 1);
+  assert.equal(prepared.body.fit.over_limit_count, 0);
+  assert.equal((await fixture.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "awaiting_cell");
+  const crossing = await requestAlias(fixture.runtime, "replay-crossing", plan);
+  assert.equal(crossing.response.status, 409);
+  assert.match(crossing.body.error, /converging/);
+
+  const compensated = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "complete",
+    plan_revision: 15,
+    plan_snapshot_hash: "5".repeat(64),
+    recover_pending_revision: plan.plan_revision,
+    recover_pending_snapshot_hash: plan.plan_snapshot_hash,
+  });
+  assert.equal(compensated.response.status, 200);
+  assert.equal(compensated.body.recovered, true);
+  assert.equal(await fixture.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+  assert.deepEqual(await fixture.storage.get(`plan-fence:${ACCOUNT}`), committed);
+  assert.equal(committed.committed_revision, 18);
+  assert.deepEqual(await fixture.storage.get("claim:completed-freeze"), allocation);
+  assert.deepEqual([...fixture.emailDirectory.values.entries()], routes);
+  assert.equal((await requestAlias(fixture.runtime, "replay-crossing", plan))
+    .response.status, 202);
+});
+
+test("realm-alias exact completed prepare refits allocations still in downgrade grace", async () => {
+  const fixture = registry();
+  for (const alias of ["replay-grace-a", "replay-grace-b"]) {
+    const requested = await requestAlias(fixture.runtime, alias);
+    assert.equal(requested.response.status, 202);
+    assert.equal((await approve(fixture.runtime, requested.body.request))
+      .response.status, 200);
+  }
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 1,
+    plan_revision: 18,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  assert.equal((await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "complete",
+  })).body.complete, true);
+  const grace = await fixture.storage.get("claim:replay-grace-b");
+  assert.ok(grace.plan_grace_until);
+  assert.equal(grace.plan_suspended, false);
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  const routes = structuredClone([...fixture.emailDirectory.values.entries()]);
+  const unflagged = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare",
+  });
+  assert.equal(unflagged.response.status, 200);
+  assert.equal(unflagged.body.stale, true);
+  assert.equal(unflagged.body.prepared, false);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+  const blocked = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan, mode: "prepare", reprepare_completed: true,
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.code, "plan_fit_failed");
+  assert.equal(blocked.body.prepared, false);
+  assert.equal(blocked.body.fit.maximum, 1);
+  assert.equal(blocked.body.fit.highest_used, 2);
+  assert.equal(blocked.body.fit.over_limit_count, 1);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+  assert.deepEqual([...fixture.emailDirectory.values.entries()], routes);
+});
+
 test("realm-alias plan wrapper prepares and exactly replays disabled finite and enabled unlimited targets", async () => {
   const bind = (fixture) => {
     fixture.env.REALM_EMAIL_ALIASES = {
