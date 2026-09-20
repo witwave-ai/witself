@@ -1015,51 +1015,57 @@ tests:
     interval: 1m
     input_series: *hydration_recovery_below_threshold
     alert_rule_test: *hydration_recovery_expectations
-  - name: self digest elision fires at exactly half after thirty minutes and recovers
+  - name: self digest elision recording aggregates surfaces and results and follows the five minute window
     interval: 1m
     input_series:
-    - series: witself_self_digest_reads_total{surface="session_hook",elided="true",result="success",pod="private-pod"}
-      values: 0+30x36 1080+0x20
-    - series: witself_self_digest_reads_total{surface="prompt_hook",elided="false",result="success",pod="private-pod"}
-      values: 0+30x36 1140+60x20
-    alert_rule_test:
-    - eval_time: 30m
-      alertname: WitselfSelfDigestElisionRatioHigh
-      exp_alerts: []
-    - eval_time: 31m
-      alertname: WitselfSelfDigestElisionRatioHigh
-      exp_alerts:
-      - exp_labels:
-          severity: warning
-          service: witself-server
-          witself_alert: 'true'
-        exp_annotations:
-          summary: At least half of self-digest reads elide entries.
-          runbook: docs/runbooks.md#founder-open-plane-monitoring
-    - eval_time: 46m
-      alertname: WitselfSelfDigestElisionRatioHigh
-      exp_alerts: []
-  - name: self digest elision is silent below half and fires above half
+    - series: witself_self_digest_reads_total{surface="session_hook",elided="true",result="success",pod="private-pod-a"}
+      values: 0+30x10 300+0x10
+    - series: witself_self_digest_reads_total{surface="other",elided="true",result="error",pod="private-pod-b"}
+      values: 0+15x21
+    - series: witself_self_digest_reads_total{surface="prompt_hook",elided="false",result="success",pod="private-pod-c"}
+      values: 0+15x10 195+45x10
+    promql_expr_test:
+    - expr: witself:self_digest_elision_ratio:rate5m
+      eval_time: 5m
+      exp_samples:
+      - labels: '{__name__="witself:self_digest_elision_ratio:rate5m"}'
+        value: 0.75
+    - expr: witself:self_digest_elision_ratio:rate5m
+      eval_time: 12m
+      exp_samples:
+      - labels: '{__name__="witself:self_digest_elision_ratio:rate5m"}'
+        value: 0.5
+    - expr: witself:self_digest_elision_ratio:rate5m
+      eval_time: 16m
+      exp_samples:
+      - labels: '{__name__="witself:self_digest_elision_ratio:rate5m"}'
+        value: 0.25
+  - name: fully elided successful self digest reads remain dashboard data without any self digest alert
     interval: 1m
     input_series:
-    - series: witself_self_digest_reads_total{surface="session_hook",elided="true",result="success",pod="private-pod"}
-      values: 0+29x36 1075+31x45
-    - series: witself_self_digest_reads_total{surface="other",elided="false",result="success",pod="private-pod"}
-      values: 0+31x36 1145+29x45
+    - series: witself_self_digest_reads_total{surface="other",elided="true",result="success",pod="private-pod"}
+      values: 0+60x40
+    - series: witself_self_digest_reads_total{surface="other",elided="true",result="error",pod="private-pod"}
+      values: 0+0x40
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="other",le="1",pod="private-pod"}
+      values: 0+60x40
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="other",le="1.5",pod="private-pod"}
+      values: 0+60x40
+    - series: witself_self_digest_read_duration_seconds_bucket{surface="other",le="+Inf",pod="private-pod"}
+      values: 0+60x40
     alert_rule_test:
-    - eval_time: 35m
-      alertname: WitselfSelfDigestElisionRatioHigh
+    - eval_time: 40m
+      alertname: WitselfSelfDigestErrorRatioHigh
       exp_alerts: []
-    - eval_time: 76m
-      alertname: WitselfSelfDigestElisionRatioHigh
-      exp_alerts:
-      - exp_labels:
-          severity: warning
-          service: witself-server
-          witself_alert: 'true'
-        exp_annotations:
-          summary: At least half of self-digest reads elide entries.
-          runbook: docs/runbooks.md#founder-open-plane-monitoring
+    - eval_time: 40m
+      alertname: WitselfSelfDigestSlow
+      exp_alerts: []
+    promql_expr_test:
+    - expr: witself:self_digest_elision_ratio:rate5m
+      eval_time: 40m
+      exp_samples:
+      - labels: '{__name__="witself:self_digest_elision_ratio:rate5m"}'
+        value: 1
 
   - name: sealed posture failure waits three minutes and healthy reads stay quiet
     interval: 1m

@@ -3321,11 +3321,10 @@ The hydration rules ship with the platform chart's existing alerting gate.
 First roll the server/client release and confirm self-digest counters and
 histograms on the serving cell after authenticated reads; then roll the rules
 through a separate cell-GitOps PR. No hydration metric-absence rule is present.
-The error threshold (>5% over five minutes, >0.05 reads/second, for ten minutes),
-latency threshold (five-minute p95 >1.5 seconds for ten minutes), and elision
-threshold (at least 50% over five minutes for thirty minutes) are provisional
-and need a serving-cell baseline. The traffic floor may suppress error alerts
-on a quiet cell. Retain separate firing/resolved receiver evidence before
+The error threshold (>5% over five minutes, >0.05 reads/second, for ten minutes)
+and latency threshold (five-minute p95 >1.5 seconds for ten minutes) are
+provisional and need a serving-cell baseline. The traffic floor may suppress
+error alerts on a quiet cell. Retain separate firing/resolved receiver evidence before
 closing live hydration alert acceptance; local promtool success alone does
 not provide that evidence.
 
@@ -3333,7 +3332,18 @@ not provide that evidence.
 | --- | --- |
 | `WitselfSelfDigestErrorRatioHigh` | Compare `witself_self_digest_reads_total` rates by closed `surface` and `result`; check authentication/refusal behavior and self-loader/database health. Failures include 4xx and 5xx; metrics contain no error text or tenant identity. |
 | `WitselfSelfDigestSlow` | Inspect `witself_self_digest_read_duration_seconds_bucket` by surface and compare server/database latency. The histogram ends at the server and cannot measure client network or hook deadlines. |
-| `WitselfSelfDigestElisionRatioHigh` | Compare the elided read share and `witself_self_digest_elided_entries` histogram. It counts digest byte trimming plus exact store-selection omissions only when `include_counts=true`. Count-disabled pagination hints still set `elided=true`, but their unknown omitted-entry counts are excluded from the histogram; zero does not prove a complete digest. Elision is a bounded-context signal, not proof of failed injection. |
+
+The dashboard recording rule `witself:self_digest_elision_ratio:rate5m` divides
+the summed five-minute rates of reads with `elided="true"` by the summed rates
+of all reads, across surfaces and results. Elision is expected when a digest
+exceeds the hydration byte budget, so this share has no alert. When both sums
+are present and the total read rate is zero, the ratio is NaN; absent series
+can leave it without a sample. Compare it with the
+`witself_self_digest_elided_entries` histogram for known omissions: the histogram
+counts digest byte trimming plus exact store-selection omissions only when
+`include_counts=true`. Count-disabled pagination hints still set `elided=true`,
+but their unknown omitted-entry counts are excluded from the histogram; zero
+does not prove a complete digest.
 
 For client-only failures, run `witself integration status --runtime codex` or
 `--runtime claude-code` on the affected machine. Its recent value-free ledger

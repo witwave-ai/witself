@@ -904,16 +904,25 @@ cases:
   minutes, with more than 0.05 reads/second, sustained for ten minutes.
 - `WitselfSelfDigestSlow`: five-minute histogram p95 above 1.5 seconds,
   sustained for ten minutes.
-- `WitselfSelfDigestElisionRatioHigh`: at least half of reads report
-  `elided=true` over five minutes, sustained for thirty minutes.
 
-All three are warnings with only `severity`, `service=witself-server`, and
+Both are warnings with only `severity`, `service=witself-server`, and
 `witself_alert=true` rule labels. Thresholds are provisional; low traffic can
 keep the error-ratio alert quiet. No hydration metric-absence rule is added.
 The server/client release must reach the cell before the separate cell-GitOps
 rule rollout. Live hydration alert delivery and recovery acceptance remain
 pending; the prior monitoring acceptance above does not cover these rules.
 See the [Founder runbook](runbooks.md#founder-open-plane-monitoring).
+
+The dashboard recording rule `witself:self_digest_elision_ratio:rate5m` is
+`sum(rate(witself_self_digest_reads_total{elided="true"}[5m])) / sum(rate(witself_self_digest_reads_total[5m]))`.
+It tracks the elided read share across all surfaces and results, including
+errors. When both sums are present and the total read rate is zero, the ratio
+is NaN; absent series can leave it without a sample. Elision is
+expected when a digest exceeds the hydration byte budget, so this share has
+no alert. The `witself_self_digest_elided_entries` histogram counts known byte
+trimming and, with `include_counts=true`, exact store-selection omissions.
+Count-disabled pagination overflow still sets `elided=true` but has unknown
+omitted-entry counts; a zero histogram observation does not prove completeness.
 
 Client observations stay in the local value-free hydration ledger and are
 not scraped. `witself integration status --runtime codex` (or `claude-code`)
