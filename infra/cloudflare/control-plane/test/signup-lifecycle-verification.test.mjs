@@ -506,6 +506,45 @@ function resend(env, accountId = "acct_1", init = {}) {
   });
 }
 
+for (const [label, cellRow, expectedEndpoint] of [
+  ["uses the live registry over the stored endpoint", { endpoint: "https://replacement.test.invalid" }, "https://replacement.test.invalid"],
+  ["falls back for a missing cell row", null, CELL_ENDPOINT],
+  ["falls back for a missing endpoint", {}, CELL_ENDPOINT],
+  ["falls back for a null endpoint", { endpoint: null }, CELL_ENDPOINT],
+  ["falls back for a non-string endpoint", { endpoint: 123 }, CELL_ENDPOINT],
+  ["falls back for an empty endpoint", { endpoint: "" }, CELL_ENDPOINT],
+  ["falls back for an HTTP endpoint", { endpoint: "http://insecure.test.invalid" }, CELL_ENDPOINT],
+  ["falls back for a malformed HTTPS endpoint", { endpoint: "https://" }, CELL_ENDPOINT],
+  ["falls back for a relative endpoint", { endpoint: "/cell" }, CELL_ENDPOINT],
+  ["falls back for a credential-bearing endpoint", { endpoint: "https://user:password@cell.test.invalid" }, CELL_ENDPOINT],
+]) {
+  test(`resend ${label}`, async (t) => {
+    const { env, kv, email } = makeEnv();
+    seedAcct(kv);
+    seedPending(kv);
+    if (cellRow !== null) {
+      await kv.put("cell:cell-a", JSON.stringify(cellRow));
+    }
+    const acctBefore = kv.map.get("acct:acct_1");
+    const accountCalls = [];
+    mockCell(t, {
+      "/v1/account": (url, init) => {
+        accountCalls.push({ url: url.href, authorization: init.headers.Authorization });
+        return cellJSON({ account: { id: "acct_1", status: "pending", email: "owner@example.test" } });
+      },
+    });
+    const resp = await resend(env);
+    assert.equal(resp.status, 200);
+    assert.equal((await resp.json()).verification_email_sent, true);
+    assert.deepEqual(accountCalls, [{
+      url: `${expectedEndpoint}/v1/account`, authorization: "Bearer operator-token",
+    }]);
+    assert.equal(email.sent.length, 1);
+    assert.equal(kv.json("pending:acct_1").emails_sent, 2);
+    assert.equal(kv.map.get("acct:acct_1"), acctBefore, "routing must not rewrite the account placement");
+  });
+}
+
 test("resend is method-, auth-, and existence-bounded", async (t) => {
   const { env, kv } = makeEnv();
   const calls = mockCell(t, {});

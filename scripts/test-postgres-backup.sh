@@ -7,5 +7,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ruby "$repo_root/scripts/testdata/postgres-backup-image.rb" "$repo_root"
 ruby "$repo_root/scripts/testdata/postgres-backup-chart.rb" "$repo_root"
 python3 "$repo_root/scripts/testdata/postgres-backup-runner.py" "$repo_root"

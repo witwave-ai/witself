@@ -111,7 +111,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -342,10 +342,15 @@ govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
 check-cell-secrets: ## Reject plaintext or invalid cell Secret artifacts without a decryption identity
 	bash scripts/cell-secrets.sh check
 
+check-postgres-backup-image: ## Build and smoke-test the backup image; Docker is mandatory in CI
+	bash scripts/test-postgres-backup-image-check.sh
+	bash scripts/check-postgres-backup-image.sh
+
 check: ## Run CI's exact local gate set — run before every push
 	bash scripts/check-conflict-markers.sh
 	bash scripts/test-conflict-markers.sh
 	$(MAKE) check-cell-secrets
+	$(MAKE) check-postgres-backup-image
 	$(MAKE) check-go-mod-tidy
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \

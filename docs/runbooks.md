@@ -586,9 +586,15 @@ in `civo-sandbox-use1-serving`:
 - `witself/witself-postgresql-backup-age`
 - `witself/witself-postgresql-backup-r2`
 
-`civo-sandbox-use1-backup` has none of these in that inventory. This change
-ships no populated Secret files; the inventory is an operator checklist,
-not evidence of current cluster state or completed repository population.
+`civo-sandbox-use1-backup` has none of these in that inventory. All eight
+were populated on 2026-09-20 with `export` from the live serving cell, and
+`decrypt-apply civo-sandbox-use1-serving --diff-names` reported every file
+identical to the cluster at that time. The inventory above is the dated
+names-only record; re-run the inspection before trusting it as current
+cluster state. The private identity is read from the 1Password item
+`witself-cell-secrets-age` by its field ID `credential` (the field's label
+is "identity (AGE-SECRET-KEY, private)"); the item also carries the public
+`recipient`, which must equal the pin in `.gitops/secrets/.sops.yaml`.
 
 ## PostgreSQL image pin: how to re-pin
 
@@ -670,6 +676,31 @@ file untouched on any nonzero exit, or when no verifier binary is executable
 that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
+
+### Cell identity after a same-name re-endpoint
+
+The serving cell created on 2026-09-19 is the Kubernetes cluster
+`witself-civo-sandbox-use1-serving` (server `WITSELF_CELL_NAME=civo-sandbox-use1-serving`),
+but it is registered in the fleet registry under the name of the cell it
+replaced, `civo-sandbox-usw2-dev`, with that cell's `registration_id`. The
+coordinator's same-instance rule allowed the endpoint change without
+re-placing accounts, and the agent-email audience and dispatch key id
+(`civo-sandbox-usw2-dev`, `civo-sandbox-usw2-dev-2026-08`) are projected by
+the edge under that name. Decision (2026-09-20): keep the registry name until
+a deliberate cell-rename lifecycle exists; renaming today would require
+evacuating and restoring every account and re-issuing the agent-email
+dispatch key. Operators must therefore read `civo-sandbox-usw2-dev` in
+`witself-admin cells` output as the live serving cell, and
+`civo-sandbox-use1-serving` in GitOps, kubectl contexts and Pulumi state.
+
+### Restore transport: `kubectl exec -i` can hang after `pg_restore` exits
+
+During the 2026-09-19 restore, `kubectl exec -i` into the PostgreSQL pod with
+the dump on stdin did not return after `pg_restore` finished; the restore had
+completed and the verification query proved it. Prefer a Kubernetes Job that
+reads the dump from a volume or object storage, or run `pg_restore` with a
+`timeout` and verify with the documented row check rather than waiting on the
+exec session.
 
 ### After restoring a cell from backup: entitlement re-delivery
 
@@ -3217,6 +3248,31 @@ placement queue. A transient R2/body-stream failure remains retryable and is
 never quarantine evidence. To recover later, replace the archived projection
 with a newly validated archive identity through a separately reviewed recovery
 workflow; do not delete or rewrite the quarantined object in place.
+
+### Directory routing after a same-name re-endpoint
+
+For an endpoint change under the same fleet registry cell name, the public
+`GET /v1/directory/<account>` route reads the current `cell:<name>` HTTPS
+endpoint and region fields. Resend-verification also resolves the current
+registry endpoint. Once this Worker change ships, rewriting each
+`acct:<account>` row after a re-endpoint is no longer required for clients or
+resend-verification, but remains recommended so the stored fallback is not
+stale.
+
+The registry's region fields win whenever present, including empty strings;
+only absent or null fields retain the account's stored region hints. The cell
+coordinator uses empty strings as defaults for these fields. A missing cell
+row or invalid HTTPS endpoint leaves the directory's entire stored account
+route unchanged and makes resend-verification use the stored account endpoint.
+Directory registry reads and public responses use a 60-second cache window,
+subject to KV propagation.
+
+### Cell identity after a same-name re-endpoint
+
+The account row's `cell_registration_id` and `epoch` remain unchanged even if
+the registry's `registration_id` differs: an endpoint refresh is not proof that
+the account was placed on a replacement cell instance. Preserve that fence;
+use the restore lifecycle above when placement on another instance is needed.
 
 ## Diagnose an interrupted restore or source finalization
 

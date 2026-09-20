@@ -98,6 +98,7 @@ import {
   PLAN_LIFECYCLE_ACTIVATE_PATH,
   restartContainerWithEnvironment,
   runScheduledPlanLifecycle,
+  validCellEndpoint,
 } from "./bridge.mjs";
 import {
   accountBackupSchedulingEnabled,
@@ -2258,7 +2259,10 @@ async function handleResend(request, env, accountId) {
   }
   let cellResp;
   try {
-    cellResp = await fetch(`${entry.endpoint}/v1/account`, {
+    // Follow same-name re-endpoints without rewriting the account's stored route.
+    const cell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
+    const endpoint = validCellEndpoint(cell?.endpoint) ?? entry.endpoint;
+    cellResp = await fetch(`${endpoint}/v1/account`, {
       headers: { Authorization: auth },
       signal: AbortSignal.timeout(15000),
     });
@@ -4740,8 +4744,23 @@ async function handleFetch(request, env, ctx) {
         cacheTtl: 60,
       });
       if (entry) {
+        const registered = await env.DIRECTORY.get(`cell:${entry.cell}`, {
+          type: "json",
+          cacheTtl: 60,
+        });
+        const endpoint = validCellEndpoint(registered?.endpoint);
+        // Registry routing metadata follows a re-endpoint without rewriting
+        // every account. Keep the account's registration fence and epoch:
+        // routing to a new endpoint does not prove placement on a new instance.
+        // Project only public routing fields; registry rows also hold secrets.
+        const cell = endpoint ? {
+          ...entry,
+          endpoint,
+          region: registered.region ?? entry.region,
+          region_code: registered.region_code ?? entry.region_code,
+        } : entry;
         return json(
-          { schema_version: "witself.v0", account_id: m[1], cell: entry },
+          { schema_version: "witself.v0", account_id: m[1], cell },
           200,
           { "Cache-Control": "max-age=60" },
         );

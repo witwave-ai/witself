@@ -22,9 +22,12 @@ func run(args []string) int {
 	rollCell := fs.String("roll-cell", "", "roll exactly one existing catalog cell; sanctioned only via scripts/roll-cell.sh, which guarantees the digest matches the tag")
 	version := fs.String("version", "", "release chart version and image tag for --roll-cell")
 	imageDigest := fs.String("image-digest", "", "required sha256 image digest for --roll-cell")
+	backupRepository := fs.String("backup-image-repository", "", "optional backup image repository for --roll-cell; requires tag and digest")
+	backupTag := fs.String("backup-image-tag", "", "backup image release tag for --roll-cell")
+	backupDigest := fs.String("backup-image-digest", "", "backup image sha256 digest for --roll-cell")
 	root := fs.String("root", ".", "repository root containing .gitops/cells")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST [--root PATH]\n")
+		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST\n         [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST] [--root PATH]\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -53,11 +56,19 @@ func run(args []string) int {
 		_, _ = fmt.Fprintln(os.Stderr, "error: --roll-cell requires --version and --image-digest")
 		return 2
 	}
+	var backup *gitopsvalues.BackupImagePins
+	if *backupRepository != "" || *backupTag != "" || *backupDigest != "" {
+		if *rollCell == "" || *backupRepository == "" || *backupTag == "" || *backupDigest == "" {
+			_, _ = fmt.Fprintln(os.Stderr, "error: backup image repository, tag, and digest require --roll-cell and must all be supplied")
+			return 2
+		}
+		backup = &gitopsvalues.BackupImagePins{Repository: *backupRepository, Tag: *backupTag, Digest: *backupDigest}
+	}
 	var err error
 	if *check {
 		err = gitopsvalues.Check(*root, os.Stdout)
 	} else if *rollCell != "" {
-		err = gitopsvalues.RollCell(*root, *rollCell, *version, *imageDigest, os.Stdout)
+		err = gitopsvalues.RollCellWithBackupImage(*root, *rollCell, *version, *imageDigest, backup, os.Stdout)
 	} else {
 		err = gitopsvalues.Write(*root, os.Stdout)
 	}

@@ -40,6 +40,7 @@ ROLL_PATH="$DEFAULT_ROLL_PATH"
 ADMIN_BIN=
 ADMIN_EXIT=0
 REGISTRY_CASE=index
+BACKUP_REGISTRY_CASE=index
 REGISTRY_LOG="$TEST_ROOT/registry.log"
 
 mkdir -p \
@@ -87,6 +88,18 @@ cp "$SOURCE_ROOT/charts/witself-server/values.schema.json" "$RELEASE_SCHEMA"
 git -C "$REPO_ROOT" add -- charts/witself-server/values.schema.json
 git -C "$REPO_ROOT" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
   commit -qm 'Release with digest support'
+git -C "$REPO_ROOT" -c tag.gpgsign=false tag v1.2.4
+BACKUP_RELEASE_SCHEMA="$REPO_ROOT/.gitops/charts/apps/values.schema.json"
+cp "$BACKUP_RELEASE_SCHEMA" "$TEST_ROOT/apps-schema-current.json"
+printf '%s\n' '{"properties":{"apps":{"properties":{"civoPostgres":{"properties":{"backup":{"properties":{"image":{"type":"string"}}}}}}}}}' >"$BACKUP_RELEASE_SCHEMA"
+git -C "$REPO_ROOT" add -- .gitops/charts/apps/values.schema.json
+git -C "$REPO_ROOT" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  commit -qm 'Release with legacy backup image schema'
+git -C "$REPO_ROOT" -c tag.gpgsign=false tag v1.2.5
+cp "$TEST_ROOT/apps-schema-current.json" "$BACKUP_RELEASE_SCHEMA"
+git -C "$REPO_ROOT" add -- .gitops/charts/apps/values.schema.json
+git -C "$REPO_ROOT" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  commit -qm 'Release with backup image pin support'
 git -C "$REPO_ROOT" -c tag.gpgsign=false tag "v$VERSION"
 printf '%s\n' '{"properties":{"image":{"properties":{"tag":{"type":"string"}}}}}' >"$RELEASE_SCHEMA"
 
@@ -102,12 +115,19 @@ import sys
 
 args = sys.argv[1:]
 assert args[0] == '-q', 'curl must ignore user configuration'
-case = os.environ['WITSELF_REGISTRY_CASE']
 url = args[-1]
-with open(os.environ['WITSELF_REGISTRY_LOG'], 'a') as log:
-    log.write(('auth' if url.endswith('/token') else 'manifest') + '\n')
 if url == 'https://ghcr.io/token':
-    assert 'scope=repository:witwave-ai/images/witself-server:pull' in args
+    scope = next(arg for arg in args if arg.startswith('scope=repository:'))
+    repository = scope.removeprefix('scope=repository:').removesuffix(':pull')
+else:
+    repository = url.removeprefix('https://ghcr.io/v2/').split('/manifests/')[0]
+assert repository in ['witwave-ai/images/witself-server', 'witwave-ai/images/witself-postgres-backup']
+backup = repository.endswith('/witself-postgres-backup')
+case = os.environ['WITSELF_BACKUP_REGISTRY_CASE' if backup else 'WITSELF_REGISTRY_CASE']
+with open(os.environ['WITSELF_REGISTRY_LOG'], 'a') as log:
+    log.write(('auth' if url.endswith('/token') else 'manifest') + ' ' + repository + '\n')
+if url == 'https://ghcr.io/token':
+    assert 'scope=repository:' + repository + ':pull' in args
     assert 'service=ghcr.io' in args
     if case == 'auth-unreachable':
         sys.exit(7)
@@ -118,7 +138,7 @@ if url == 'https://ghcr.io/token':
     else:
         print(json.dumps({'token': 'synthetic-anonymous-pull'}))
     sys.exit(0)
-assert url == 'https://ghcr.io/v2/witwave-ai/images/witself-server/manifests/1.2.3'
+assert url == 'https://ghcr.io/v2/' + repository + '/manifests/1.2.3'
 assert 'Authorization: Bearer synthetic-anonymous-pull' in sys.stdin.read()
 accept = args[args.index('--header') + 1]
 for media_type in ['application/vnd.oci.image.index.v1+json',
@@ -133,7 +153,7 @@ media_type = {
     'single': 'application/vnd.oci.image.manifest.v1+json',
     'docker-single': 'application/vnd.docker.distribution.manifest.v2+json',
 }.get(case, 'application/vnd.oci.image.index.v1+json')
-body = {'schemaVersion': 2, 'mediaType': media_type}
+body = {'schemaVersion': 2, 'mediaType': media_type, 'annotations': {'fixture.repository': repository}}
 if case in ['single', 'docker-single']:
     body.update(config={'digest': 'sha256:' + '1' * 64, 'size': 42}, layers=[])
 else:
@@ -148,7 +168,7 @@ if case == 'empty-index':
     body['manifests'] = []
 raw = json.dumps(body).encode() if case != 'invalid-json' else b'not-json'
 digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
-Path(os.environ['WITSELF_EXPECTED_DIGEST']).write_text(digest)
+Path(os.environ['WITSELF_EXPECTED_DIGEST'] + ('.backup' if backup else '')).write_text(digest)
 header_digest = digest
 if case == 'malformed':
     header_digest = 'sha256:invalid'
@@ -199,11 +219,12 @@ chmod +x "$OVERRIDE_ADMIN"
 
 reset_case() {
   cp "$BASELINE" "$VALUES"
-  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$TEST_ROOT/expected-digest"
+  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$TEST_ROOT/expected-digest" "$TEST_ROOT/expected-digest.backup"
   ROLL_PATH="$DEFAULT_ROLL_PATH"
   ADMIN_BIN=
   ADMIN_EXIT=0
   REGISTRY_CASE=index
+  BACKUP_REGISTRY_CASE=index
 }
 
 run_roll() {
@@ -211,6 +232,7 @@ run_roll() {
     export PATH="$ROLL_PATH"
     export WITSELF_TEST_GENERATOR="$TEST_ROOT/generator"
     export WITSELF_REGISTRY_CASE="$REGISTRY_CASE"
+    export WITSELF_BACKUP_REGISTRY_CASE="$BACKUP_REGISTRY_CASE"
     export WITSELF_REGISTRY_LOG="$REGISTRY_LOG"
     export WITSELF_EXPECTED_DIGEST="$TEST_ROOT/expected-digest"
     export WITSELF_ADMIN_LOG="$ADMIN_LOG"
@@ -228,17 +250,32 @@ assert_values() {
   local expected=$1 label=$2
   if [ "$expected" = "$ROLLED" ]; then
     # Pin-only expected diff, calculated independently of the generator.
-    python3 - "$BASELINE" "$ROLLED" "$VERSION" "$TEST_ROOT/expected-digest" <<'EOF_EXPECTED'
+    python3 - "$BASELINE" "$ROLLED" "$VERSION" "$TEST_ROOT/expected-digest" "${3:-false}" <<'EOF_EXPECTED'
 from pathlib import Path
 import sys
-baseline, rolled, version, digest_file = sys.argv[1:]
+baseline, rolled, version, digest_file, with_backup = sys.argv[1:]
 lines = []
 in_server = False
+in_postgres = False
+in_backup = False
 for line in Path(baseline).read_text().splitlines(keepends=True):
     if line == '  witselfServer:\n':
         in_server = True
     elif line.strip() and not line.startswith('    '):
         in_server = False
+    if line == '  civoPostgres:\n':
+        in_postgres = True
+    elif line.strip() and not line.startswith('    '):
+        in_postgres = False
+    if in_postgres and line == '    backup:\n':
+        in_backup = True
+    elif line.strip() and not line.startswith('      '):
+        in_backup = False
+    if with_backup == 'true' and in_postgres and in_backup and line.startswith('      enabled:'):
+        line += ('      image:\n'
+                 '        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"\n'
+                 '        tag: "' + version + '"\n'
+                 '        digest: ' + Path(digest_file + '.backup').read_text() + '\n')
     if in_server and line.startswith('    chartVersion:'):
         line = '    chartVersion: ' + version + '\n'
     if in_server and line.startswith('    imageTag:'):
@@ -294,6 +331,11 @@ expect_output "warning: operator attests release $VERSION cannot advance the dat
   "--no-schema-change"
 [ ! -e "$ADMIN_LOG" ] || fail "--no-schema-change invoked the verifier"
 assert_values "$ROLLED" "--no-schema-change"
+expect_output "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag + imageDigest)" \
+  "server-only roll summary"
+if grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG"; then
+  fail 'server-only roll contacted backup registry before opt-in'
+fi
 
 # Two evidence directories are passed once, in order, before pins are edited.
 reset_case
@@ -440,4 +482,82 @@ if run_roll "$CELL" "$VERSION" --no-schema-change >"$CASE_OUTPUT" 2>&1; then
 fi
 cmp -s "$VALUES" "$TEST_ROOT/drifted-values" || fail 'failed roll discarded operator edits'
 
-printf 'roll cell backup gate and image digest tests passed\n'
+# Backup image opt-in requires support in the target release's apps schema,
+# even though the current checkout supports structured image pins.
+for release in 1.2.4 1.2.5; do
+  reset_case
+  if run_roll "$CELL" "$release" --backup-image --no-schema-change >"$CASE_OUTPUT" 2>&1; then
+    fail "release $release without backup image pin support succeeded"
+  fi
+  case "$release" in
+    1.2.4) expect_output 'cannot verify backup image pin support' "backup release $release" ;;
+    1.2.5) expect_output 'does not declare backup image repository, tag, and digest' "backup release $release" ;;
+  esac
+  [ ! -e "$REGISTRY_LOG" ] || fail "unsupported backup release $release contacted registry"
+  assert_values "$BASELINE" "unsupported backup release $release"
+done
+
+# Both complete multi-platform indexes are resolved before one generator write.
+for kind in index list proxy; do
+  reset_case
+  BACKUP_REGISTRY_CASE=$kind
+  run_roll "$CELL" "$VERSION" --backup-image --no-schema-change >"$CASE_OUTPUT" 2>&1 ||
+    fail "$kind backup manifest did not resolve"
+  assert_values "$ROLLED" "$kind backup manifest" true
+  expect_output "backup image pinned to ghcr.io/witwave-ai/images/witself-postgres-backup:$VERSION by digest" \
+    "$kind backup roll summary"
+  [ "$(wc -l <"$REGISTRY_LOG" | tr -d ' ')" = 4 ] || fail 'backup roll did not resolve both images exactly once'
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+    fail "$kind backup roll did not survive generation"
+done
+
+# An ordinary roll preserves a prior backup pin without refreshing its release.
+cp "$VALUES" "$TEST_ROOT/pinned-values"
+rm -f "$REGISTRY_LOG"
+BACKUP_REGISTRY_CASE=unreachable
+run_roll "$CELL" "$VERSION" --no-schema-change >"$CASE_OUTPUT" 2>&1 ||
+  fail 'ordinary roll failed with an existing backup pin'
+cmp -s "$VALUES" "$TEST_ROOT/pinned-values" || fail 'ordinary roll changed existing backup pin'
+if grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG"; then
+  fail 'ordinary roll unnecessarily refreshed an existing backup pin'
+fi
+
+# An explicit reroll replaces the existing backup index without duplicating it.
+BACKUP_REGISTRY_CASE=index
+run_roll "$CELL" "$VERSION" --backup-image --no-schema-change >"$CASE_OUTPUT" 2>&1 ||
+  fail 'explicit backup reroll failed'
+assert_values "$ROLLED" 'explicit backup reroll' true
+
+# Failures in the second lookup preserve the original server pins as well.
+for kind in auth-unreachable auth-empty auth-invalid unreachable redirect missing malformed mismatch duplicate unsupported empty-index invalid-json; do
+  reset_case
+  BACKUP_REGISTRY_CASE=$kind
+  if run_roll "$CELL" "$VERSION" --backup-image --no-schema-change >"$CASE_OUTPUT" 2>&1; then
+    fail "$kind backup registry response unexpectedly succeeded"
+  fi
+  expect_output 'backup image digest resolution failed' "$kind backup registry response"
+  grep -Fq 'manifest witwave-ai/images/witself-server' "$REGISTRY_LOG" ||
+    fail 'backup failure fixture did not first resolve the server image'
+  assert_values "$BASELINE" "$kind backup registry response"
+done
+
+# Backup opt-in cannot bypass the original evidence gate.
+reset_case
+ADMIN_EXIT=1
+if run_roll "$CELL" "$VERSION" --backup-image --backup-evidence "$EVIDENCE_A" >"$CASE_OUTPUT" 2>&1; then
+  fail 'backup image opt-in bypassed failed evidence gate'
+fi
+[ ! -e "$REGISTRY_LOG" ] || fail 'failed backup opt-in gate contacted registry'
+assert_values "$BASELINE" 'backup image opt-in evidence failure'
+
+# Repository parameter validation happens before any anonymous registry request.
+for repository in 'ghcr.io/witwave-ai/images/witself-postgres-backup:latest' 'other.example/a/b' 'ghcr.io/a/../b' 'ghcr.io/a/b?x=y'; do
+  reset_case
+  if PATH="$DEFAULT_ROLL_PATH" WITSELF_REGISTRY_LOG="$REGISTRY_LOG" \
+    bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION" --repository "$repository" >"$CASE_OUTPUT" 2>&1; then
+    fail 'resolver accepted a noncanonical repository'
+  fi
+  [ ! -e "$REGISTRY_LOG" ] || fail 'invalid repository reached registry'
+done
+
+printf 'roll cell backup gate and server/backup image digest tests passed\n'

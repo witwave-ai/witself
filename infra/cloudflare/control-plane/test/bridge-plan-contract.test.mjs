@@ -113,6 +113,73 @@ test("plan-fit accepts the Go cell's account-scoped operator seat refusal", asyn
   }]);
 });
 
+async function planFitDimensionResponse(violations) {
+  const target = targetSnapshot({
+    limits: Object.fromEntries(contract.plan_fit_dimensions.map(({ dimension }) => [dimension, 1])),
+    features: ["agent_email_realm_alias", "agent_email_custom_domain"],
+  });
+  const authority = (schema, usage) => ({
+    idFromName: (name) => name,
+    get: () => ({ fetch: async () => Response.json({
+      schema_version: schema,
+      account_id: "acct_1",
+      maximum: 1,
+      ...usage,
+    }) }),
+  });
+  return handleInternalBridgeRequest(
+    new Request("https://bridge.example/v1/internal/accounts/acct_1:plan-fit", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-bridge", "Content-Type": "application/json" },
+      body: JSON.stringify({ schema_version: "witself.v0", target }),
+    }),
+    {
+      INTERNAL_BRIDGE_TOKEN: "test-bridge",
+      DIRECTORY: {
+        async get(key) {
+          if (key === "acct:acct_1") return { cell: "cell-a" };
+          if (key === "cell:cell-a") {
+            return { endpoint: "https://cell.example", provision_token: "test-cell" };
+          }
+          return null;
+        },
+      },
+      REALM_EMAIL_ALIASES: authority("witself.realm-email-alias.v1", { highest_used: 0, over_limit_count: 0 }),
+      AGENT_EMAIL_DOMAINS: authority("witself.agent-email-domain.v1", { used: 0 }),
+    },
+    async () => Response.json({
+      schema_version: "witself.v0",
+      account_id: "acct_1",
+      target_plan: target.plan,
+      target_snapshot_hash: target.snapshot_hash,
+      violations,
+    }),
+  );
+}
+
+function dimensionViolation({ dimension, scope }) {
+  return { code: "limit_exceeded", dimension, scope, used: 2, max: 1, subject_count: 1 };
+}
+
+test("plan-fit accepts and orders every generated cell dimension and scope", async () => {
+  const expected = contract.plan_fit_dimensions.map(dimensionViolation);
+  const response = await planFitDimensionResponse(expected.toReversed());
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).violations, expected);
+});
+
+test("plan-fit rejects a mismatched scope for every generated cell dimension", async (t) => {
+  for (const dimension of contract.plan_fit_dimensions) {
+    await t.test(dimension.dimension, async () => {
+      const response = await planFitDimensionResponse([{
+        ...dimensionViolation(dimension),
+        scope: "authority",
+      }]);
+      assert.equal(response.status, 502);
+    });
+  }
+});
+
 test("both Worker plan validators enforce every generated limit boundary", async (t) => {
   for (const [key, maximum] of Object.entries(contract.limit_maximums)) {
     await t.test(key, async () => {

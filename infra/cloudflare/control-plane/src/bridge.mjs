@@ -81,32 +81,14 @@ const PLAN_FIT_DIMENSION_FEATURE = Object.freeze({
   [PLAN_FIT_ALIAS_LIMIT]: "agent_email_realm_alias",
   [PLAN_FIT_DOMAIN_LIMIT]: "agent_email_custom_domain",
 });
-const PLAN_FIT_DIMENSION_ORDER = Object.freeze([
-  "realms",
-  "operator_seats",
-  "agents",
-  "agents_per_realm",
-  "stored_memory",
-  "stored_fact",
-  "stored_secret",
-  "agent_email_attachment_storage_bytes",
-  PLAN_FIT_ALIAS_LIMIT,
-  PLAN_FIT_DOMAIN_LIMIT,
-]);
-const PLAN_FIT_DIMENSION_SCOPE = Object.freeze({
-  realms: "account",
-  operator_seats: "account",
-  agents: "account",
-  agents_per_realm: "realm",
-  stored_memory: "agent",
-  stored_fact: "agent",
-  stored_secret: "agent",
-  agent_email_attachment_storage_bytes: "account",
-  [PLAN_FIT_ALIAS_LIMIT]: "realm",
-  [PLAN_FIT_DOMAIN_LIMIT]: "account",
-});
 // Generated from internal/plans. Go freshness and boundary tests prevent the
 // Worker vocabulary and validation bounds from drifting from the cell catalog.
+const PLAN_FIT_DIMENSION_ORDER = new Map(
+  planContract.plan_fit_dimensions.map(({ dimension }, index) => [dimension, index]),
+);
+const PLAN_FIT_DIMENSION_SCOPE = Object.freeze(Object.fromEntries(
+  planContract.plan_fit_dimensions.map(({ dimension, scope }) => [dimension, scope]),
+));
 const PLAN_FEATURE_KEYS = new Set(planContract.feature_keys);
 const PLAN_LIMIT_MAXIMUMS = Object.freeze(planContract.limit_maximums);
 const PLAN_LIMIT_KEYS = new Set(Object.keys(PLAN_LIMIT_MAXIMUMS));
@@ -704,7 +686,7 @@ async function resolveInternalAccount(env, accountID) {
   });
 }
 
-function validCellEndpoint(raw) {
+export function validCellEndpoint(raw) {
   if (typeof raw !== "string") return null;
   try {
     const endpoint = new URL(raw);
@@ -926,7 +908,7 @@ function validPlanLimits(limits) {
     return false;
   }
   return Object.entries(limits).every(([key, value]) => {
-    const maximum = PLAN_LIMIT_MAXIMUMS[key] ?? Number.MAX_SAFE_INTEGER;
+    const maximum = PLAN_LIMIT_MAXIMUMS[key];
     return PLAN_LIMIT_KEYS.has(key) && Number.isSafeInteger(value) &&
       value >= 0 && value <= maximum;
   });
@@ -1133,12 +1115,9 @@ function mergeAuthoritativePlanFit(report, dimension, authoritative) {
       ),
     });
   }
-  const order = new Map(
-    PLAN_FIT_DIMENSION_ORDER.map((value, index) => [value, index]),
-  );
   report.violations.sort((left, right) =>
-    (order.get(left.dimension) ?? Number.MAX_SAFE_INTEGER) -
-      (order.get(right.dimension) ?? Number.MAX_SAFE_INTEGER)
+    (PLAN_FIT_DIMENSION_ORDER.get(left.dimension) ?? Number.MAX_SAFE_INTEGER) -
+      (PLAN_FIT_DIMENSION_ORDER.get(right.dimension) ?? Number.MAX_SAFE_INTEGER)
   );
 }
 
@@ -1508,6 +1487,18 @@ async function applyPlanSnapshotIfFits(request, env, accountID, fetchImpl) {
         if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
           await completePlanAuthorities(env, accountID, target);
           return json(appliedPlanFitEnvelope(accountID, target, current));
+        }
+        if (current.revision > target.revision) {
+          if (authority.prepared.length > 0) {
+            await recoverPlanAuthorities(
+              env,
+              accountID,
+              target,
+              current,
+              authority.prepared,
+            );
+          }
+          return err("cell plan snapshot supersedes plan-fit target", 409);
         }
         // Preserve exact-cell replay without refitting usage (which can include
         // downgrade grace). Only a verified older cell permits re-preparing an

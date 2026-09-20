@@ -10,13 +10,20 @@ type IntegerBounds struct {
 	Maximum int64 `json:"maximum"`
 }
 
+// PlanFitDimension describes one durable-capacity refusal in cell report order.
+type PlanFitDimension struct {
+	Dimension string `json:"dimension"`
+	Scope     string `json:"scope"`
+}
+
 // ValidationContract is the Worker-facing projection of the Go snapshot
 // vocabulary and integer bounds. It contains no account or deployment state.
 type ValidationContract struct {
-	SchemaVersion string                   `json:"schema_version"`
-	FeatureKeys   []string                 `json:"feature_keys"`
-	LimitMaximums map[string]int64         `json:"limit_maximums"`
-	PolicyBounds  map[string]IntegerBounds `json:"policy_bounds"`
+	SchemaVersion     string                   `json:"schema_version"`
+	FeatureKeys       []string                 `json:"feature_keys"`
+	LimitMaximums     map[string]int64         `json:"limit_maximums"`
+	PolicyBounds      map[string]IntegerBounds `json:"policy_bounds"`
+	PlanFitDimensions []PlanFitDimension       `json:"plan_fit_dimensions"`
 }
 
 // WorkerValidationContract returns a fresh contract for the Worker validators.
@@ -54,6 +61,21 @@ func WorkerValidationContract() ValidationContract {
 			MessageRetentionDaysPolicy:            {1, MaxMessageRetentionDays},
 			MessagingEntitlementVersionPolicy:     {MessagingEntitlementVersion, MessagingEntitlementVersion},
 			TranscriptRetentionDaysPolicy:         {1, MaxTranscriptRetentionDays},
+		},
+		// Keep this ordered vocabulary aligned with the dimensions emitted by
+		// internal/store/plan_fit.go. The source-parity test checks every call
+		// to addAccountViolation and addScopedViolation without needing a DB.
+		PlanFitDimensions: []PlanFitDimension{
+			{RealmLimit, "account"},
+			{OperatorSeatsLimit, "account"},
+			{AgentLimit, "account"},
+			{AgentPerRealmLimit, "realm"},
+			{StoredMemoryLimit, "agent"},
+			{StoredFactLimit, "agent"},
+			{StoredSecretLimit, "agent"},
+			{AgentEmailAttachmentStorageBytesLimit, "account"},
+			{AgentEmailRealmAliasesPerRealmLimit, "realm"},
+			{AgentEmailCustomDomainsPerAccountLimit, "account"},
 		},
 	}
 }

@@ -4,6 +4,17 @@
 {{- if not (and $pg.enabled (eq .Values.cell.cloud "civo")) }}
 {{- fail "apps.civoPostgres.backup.enabled requires Civo PostgreSQL" }}
 {{- end }}
+{{- $image := $backup.legacyImage -}}
+{{- $preinstalled := false -}}
+{{- if kindIs "string" $backup.image -}}
+{{- $image = $backup.image -}}
+{{- else if $backup.image.repository -}}
+{{- $preinstalled = true -}}
+{{- $image = printf "%s:%s" $backup.image.repository $backup.image.tag -}}
+{{- if $backup.image.digest -}}
+{{- $image = printf "%s@%s" $backup.image.repository $backup.image.digest -}}
+{{- end -}}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -44,7 +55,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: backup
-              image: {{ $backup.image | quote }}
+              image: {{ $image | quote }}
               imagePullPolicy: IfNotPresent
               command: [/bin/bash, /scripts/backup.sh]
               securityContext:
@@ -61,6 +72,10 @@ spec:
                   cpu: "1"
                   memory: 512Mi
               env:
+                {{- if $preinstalled }}
+                - name: WITSELF_POSTGRES_BACKUP_IMAGE_MODE
+                  value: preinstalled
+                {{- end }}
                 - name: PGHOST
                   value: witself-postgresql
                 - name: PGPORT

@@ -61,6 +61,10 @@ func generateCell(root string, name string, cfg *Catalog, charts chartPins) ([]b
 }
 
 func generateCellWithPins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins) ([]byte, error) {
+	return generateCellWithImagePins(root, name, cfg, charts, override, nil)
+}
+
+func generateCellWithImagePins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins, backupOverride *BackupImagePins) ([]byte, error) {
 	data, err := resolveCell(name, cfg)
 	if err != nil {
 		return nil, err
@@ -75,6 +79,13 @@ func generateCellWithPins(root string, name string, cfg *Catalog, charts chartPi
 		pins = &existing
 	}
 	data.ChartVersion, data.ImageTag = pins.ChartVersion, pins.ImageTag
+	backupPins := backupOverride
+	if backupPins == nil {
+		backupPins, err = readBackupImagePins(valuesPath)
+		if err != nil {
+			return nil, err
+		}
+	}
 	data.CertManagerChartVersion = charts.CertManager
 	data.ExternalDNSChartVersion = charts.ExternalDNS
 	data.ExternalSecretsChartVersion = charts.ExternalSecrets
@@ -109,7 +120,11 @@ func generateCellWithPins(root string, name string, cfg *Catalog, charts chartPi
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, fmt.Errorf("cell %q: %w", name, err)
 	}
-	return addServerDigest(out.Bytes(), pins.ImageDigest)
+	body, err := addServerDigest(out.Bytes(), pins.ImageDigest)
+	if err != nil {
+		return nil, err
+	}
+	return addBackupImagePins(body, backupPins)
 }
 
 func generateAll(root string) (map[string][]byte, error) {
