@@ -1,0 +1,6 @@
+{
+  "sessionId": "grok-orphan-stop",
+  "hookEventName": "stop",
+  "turn_id": null,
+  "reason": "end_turn"
+}

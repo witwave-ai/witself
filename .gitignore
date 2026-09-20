@@ -17,6 +17,7 @@ Thumbs.db
 .grok/
 .codex/
 .dsh/
+.claude/launch.json
 
 # Go (implementation to come — see docs/scaffold-readiness.md)
 /bin/
