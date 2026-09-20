@@ -2629,11 +2629,11 @@ func transcriptFlush(args []string) (exitCode int) {
 	flushed := 0
 	for {
 		if len(ready) == 0 {
-			if !detached || runtimeName != transcriptcapture.RuntimeDSH {
+			if !detached || (runtimeName != transcriptcapture.RuntimeDSH && runtimeName != transcriptcapture.RuntimeGrokBuild) {
 				break
 			}
 			var retried bool
-			pending, retried, err = waitDSHNativeFlushRetry(ctx, blockedTranscripts, heldPaths)
+			pending, retried, err = waitNativeFlushRetry(ctx, runtimeName, blockedTranscripts, heldPaths)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "witself: retry native capture completion: %v\n", err)
 				return 1
@@ -3384,16 +3384,25 @@ func reopenRetryableBlockedTranscripts(
 	rememberCapturePaths(pending, seen)
 }
 
-// waitDSHNativeFlushRetry reopens only unfinished dsh native Stops whose
-// durable retry schedule is due. dsh cannot publish turn/end until every
-// synchronous Stop hook returns, so the detached process must make progress
-// without relying on a subsequent hook or a new outbox path. The finalizer's
-// persisted deadline bounds retries across process restarts.
-func waitDSHNativeFlushRetry(
+// waitNativeFlushRetry reopens only unfinished native Stops whose durable
+// retry schedule is due. The detached process must make progress without a
+// subsequent hook or a new outbox path. Each finalizer's persisted deadline
+// bounds retries across process restarts.
+func waitNativeFlushRetry(
 	ctx context.Context,
+	runtimeName string,
 	blocked, held map[string]error,
 ) ([]transcriptcapture.PendingEvent, bool, error) {
-	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeDSH)
+	var retryAt func(transcriptcapture.PendingEvent) (time.Time, bool)
+	switch runtimeName {
+	case transcriptcapture.RuntimeDSH:
+		retryAt = transcriptcapture.DSHNativeRetryAt
+	case transcriptcapture.RuntimeGrokBuild:
+		retryAt = transcriptcapture.GrokNativeRetryAt
+	default:
+		return nil, false, nil
+	}
+	pending, err := transcriptcapture.Pending(runtimeName)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3406,12 +3415,15 @@ func waitDSHNativeFlushRetry(
 		if !exists || reason != nil {
 			continue
 		}
-		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && (next.IsZero() || at.Before(next)) {
+		if at, ok := retryAt(candidate); ok && (next.IsZero() || at.Before(next)) {
 			next = at
 		}
 	}
 	if next.IsZero() {
 		return pending, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return pending, false, err
 	}
 	timer := time.NewTimer(max(time.Until(next), 0))
 	defer timer.Stop()
@@ -3419,6 +3431,9 @@ func waitDSHNativeFlushRetry(
 	case <-ctx.Done():
 		return pending, false, ctx.Err()
 	case <-timer.C:
+	}
+	if err := ctx.Err(); err != nil {
+		return pending, false, err
 	}
 	now := time.Now()
 	for _, candidate := range pending {
@@ -3429,7 +3444,7 @@ func waitDSHNativeFlushRetry(
 		if reason, exists := blocked[transcriptID]; !exists || reason != nil {
 			continue
 		}
-		if at, ok := transcriptcapture.DSHNativeRetryAt(candidate); ok && !at.After(now) {
+		if at, ok := retryAt(candidate); ok && !at.After(now) {
 			delete(blocked, transcriptID)
 		}
 	}

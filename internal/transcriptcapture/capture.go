@@ -2392,6 +2392,9 @@ func entryPayloadFits(payload map[string]any, key string, value any) bool {
 }
 
 func (e Event) entriesWithoutRecovered() []Entry {
+	if e.Runtime == RuntimeGrokBuild {
+		e.Data = withoutGrokNativeRetry(e.Data)
+	}
 	if e.Runtime == RuntimeDSH {
 		// Prompt correlation is private local state, including for unresolved
 		// or operator-fenced events projected directly by a caller.
@@ -2720,7 +2723,8 @@ func PendingEventUploadReady(current PendingEvent, all []PendingEvent) bool {
 // unresolved Stop remains in the outbox until the trusted native transcript
 // contains the matching completed turn. The original event is rewritten
 // atomically before any network operation, preserving byte-identical retry
-// behavior at the server idempotency boundary.
+// behavior at the server idempotency boundary. A Stop without a turn, prompt,
+// or transcript settles value-free after its durable native retry budget.
 //
 // The caller must hold the runtime flush lock. ready=false is a normal,
 // retryable state; a later hook or an explicit transcript flush will try again.
@@ -2766,6 +2770,9 @@ func finalizePendingWithin(
 			return pending, false, fmt.Errorf("persist suppressed grok Stop event: %w", err)
 		}
 		return PendingEvent{Path: pending.Path, Event: event}, true, nil
+	}
+	if grokStopWithoutNativeIdentity(event) {
+		return finalizeGrokOrphanStop(pending)
 	}
 	if strings.TrimSpace(event.SourceTranscriptPath) == "" {
 		return pending, false, errors.New("unresolved grok Stop event has no native transcript path")
