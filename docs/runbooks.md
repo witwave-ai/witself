@@ -660,7 +660,8 @@ rollout record. The script never writes to the source database and never leaves
 a plaintext dump; a `pending` manifest or any nonzero exit blocks the rollout.
 Do not run a live restore as part of this procedure.
 
-`scripts/roll-cell.sh` enforces this gate before it edits either values pin.
+`scripts/roll-cell.sh` enforces this gate before it delegates the release pin update
+to the values generator.
 Pass each verified artifact directory with `--backup-evidence` (one per
 reviewed cell); the helper first runs `witself-admin backup-evidence verify
 --release "$RELEASE_VERSION"` on those directories and aborts with the values

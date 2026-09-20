@@ -31,6 +31,10 @@ TRAIN="$FIXTURE_ROOT/scripts/roll-train.sh"
 BACKUP=civo-sandbox-use1-backup
 SERVING=civo-sandbox-use1-serving
 VERSION=1.2.3
+OLD_DIGEST="sha256:$(printf 'a%.0s' {1..64})"
+BACKUP_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
+SERVING_DIGEST="sha256:$(printf 'c%.0s' {1..64})"
+export OLD_DIGEST BACKUP_DIGEST SERVING_DIGEST
 ORIGINAL_PATH=$PATH
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/.git" "$STUB_BIN" "$STATE_DIR"
 mkdir -p "$FIXTURE_ROOT/.gitops/charts/apps"
@@ -218,7 +222,7 @@ case "$1 $2" in
     fi
     printf '{"baseRefName":"main","headRefOid":"%s","state":"MERGED","mergeCommit":{"oid":"cccccccccccccccccccccccccccccccccccccccc"}}\n' "$oid"
     ;;
-  'pr merge') touch "$STATE_DIR/merged"; printf 'merged\n' ;;
+  'pr merge') touch "$STATE_DIR/merged" "$STATE_DIR/merged-$(cat "$STATE_DIR/cell")"; printf 'merged\n' ;;
   *) printf 'unhandled gh: %s\n' "$*" >&2; exit 64 ;;
 esac
 EOF_GH
@@ -235,6 +239,18 @@ case "$SCENARIO:$*" in
   serving_live_newer:*witself-civo-sandbox-use1-serving*) version=1.2.4 ;;
   concurrent_live:*) [ ! -f "$STATE_DIR/checks_seen" ] || version=1.2.4 ;;
 esac
+cell=$(printf '%s\n' "$*" | sed -nE 's/.*--context witself-([a-z0-9-]+).*/\1/p')
+image="ghcr.io/witwave-ai/witself-server:$version"
+if [[ "$SCENARIO" = digest_* ]] && { [ "$SCENARIO" != digest_from_tag ] || [ -f "$STATE_DIR/merged-$cell" ]; }; then
+  digest=$OLD_DIGEST
+  if [ -f "$STATE_DIR/merged-$cell" ]; then
+    digest=$BACKUP_DIGEST
+    [ "$cell" != civo-sandbox-use1-serving ] || digest=$SERVING_DIGEST
+  elif [ "$SCENARIO" = digest_concurrent_live ] && [ -f "$STATE_DIR/checks_seen" ]; then
+    digest=$SERVING_DIGEST
+  fi
+  image="ghcr.io/witwave-ai/witself-server@$digest"
+fi
 case "$*" in
   *'get ns argocd'*) printf '{"metadata":{"name":"argocd"}}\n' ;;
   *'get application'*|*'get applications'*|*'get app '*)
@@ -254,29 +270,50 @@ case "$*" in
     spec_version=$version; running_version=$version
     [ "$SCENARIO" != newer_pod_spec ] || spec_version=1.2.4
     [ "$SCENARIO" != newer_running_image ] || running_version=1.2.4
-    jq -n --arg spec_version "$spec_version" --arg running_version "$running_version" '{items: [
+    spec_image="ghcr.io/witwave-ai/witself-server:$spec_version"
+    running_image="ghcr.io/witwave-ai/witself-server:$running_version"
+    image_id=''
+    if [[ "$SCENARIO" = digest_* ]]; then
+      spec_image=$image; running_image=$image
+      if [ -f "$STATE_DIR/merged-$cell" ]; then
+        # Container runtimes can retain a tag in status.image after a digest
+        # pull. Certify these pods using the runtime's imageID instead.
+        running_image="ghcr.io/witwave-ai/witself-server:1.2.2"
+        image_id=$image
+        case "$SCENARIO" in
+          digest_pod_spec_mismatch) spec_image="ghcr.io/witwave-ai/witself-server@$OLD_DIGEST" ;;
+          digest_pod_status_mismatch) image_id="ghcr.io/witwave-ai/witself-server@$OLD_DIGEST" ;;
+          digest_tag_mismatch) spec_image="ghcr.io/witwave-ai/witself-server:$version"; running_image=$spec_image ;;
+        esac
+      fi
+    fi
+    jq -n --arg spec_image "$spec_image" --arg running_image "$running_image" --arg image_id "$image_id" '{items: [
       ("witself-server", "witself-worker") as $name | {
         metadata: {name: ($name + "-pod"), labels: {
           "app.kubernetes.io/name": $name, "app.kubernetes.io/instance": "witself-server",
           "app.kubernetes.io/component": (if $name == "witself-worker" then "worker" else "server" end)
         }},
-        spec: {containers: [{name: $name, image: ("ghcr.io/witwave-ai/witself-server:" + $spec_version)}]},
+        spec: {containers: [{name: $name, image: $spec_image}]},
         status: {phase: "Running", conditions: [{type: "Ready", status: "True"}],
-          containerStatuses: [{name: $name, image: ("ghcr.io/witwave-ai/witself-server:" + $running_version),
+          containerStatuses: [{name: $name, image: $running_image,
+            imageID: (if $image_id != "" and $name == "witself-worker" then "docker-pullable://" + $image_id else $image_id end),
             ready: true, state: {running: {}}}]}
       }
     ]}'
     ;;
   *'get deployments -l app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server'*)
-    [ "$SCENARIO" != newer_deployment ] || version=1.2.4
-    jq -n --arg version "$version" '{items: [
+    [ "$SCENARIO" != newer_deployment ] || image="ghcr.io/witwave-ai/witself-server:1.2.4"
+    if [ "$SCENARIO" = digest_deployment_mismatch ] && [ -f "$STATE_DIR/merged-$cell" ]; then
+      image="ghcr.io/witwave-ai/witself-server@$OLD_DIGEST"
+    fi
+    jq -n --arg image "$image" '{items: [
       ("witself-server", "witself-worker") as $name | {
         metadata: {name: $name, generation: 1},
         spec: {replicas: 1, selector: {matchLabels: ({
           "app.kubernetes.io/name": $name, "app.kubernetes.io/instance": "witself-server"
         } + if $name == "witself-worker" then {"app.kubernetes.io/component": "worker"} else {} end)},
         template: {spec: {containers: [
-          {name: $name, image: ("ghcr.io/witwave-ai/witself-server:" + $version)}
+          {name: $name, image: $image}
         ]}}},
         status: {observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1}
       }
@@ -292,6 +329,7 @@ set -euo pipefail
 printf 'curl' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
+case "${!#}" in */v1/version) ;; *) printf 'unexpected curl URL\n' >&2; exit 97 ;; esac
 version=1.2.2
 if [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = civo-sandbox-use1-serving ]; then version=1.2.3; fi
 printf '{"version":"%s"}\n' "$version"
@@ -301,6 +339,7 @@ cat >"$STUB_BIN/yq" <<'EOF_YQ'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
+  *'-o=json .apps.witselfServer'*) exec "$ROLL_TRAIN_REAL_YQ" "$@" ;;
   *'.cell.apiHost'*)
     file=${!#}
     if [[ "$file" = - || "$file" = .* ]]; then
@@ -340,6 +379,15 @@ printf 'roll-cell' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 printf '%s\n' "$1" >"$STATE_DIR/cell"
+if [[ "$SCENARIO" = digest_* ]]; then
+  pin=$BACKUP_DIGEST
+  [ "$1" != civo-sandbox-use1-serving ] || pin=$SERVING_DIGEST
+  PIN=$pin "$ROLL_TRAIN_REAL_YQ" -i '
+    .apps.witselfServer.chartVersion = "1.2.3" |
+    .apps.witselfServer.imageTag = "1.2.3" |
+    .apps.witselfServer.imageDigest = strenv(PIN)
+  ' ".gitops/cells/$1/values.yaml"
+fi
 EOF_ROLL_CELL
 chmod +x "$STUB_BIN/"* "$FIXTURE_ROOT/scripts/roll-cell.sh"
 
@@ -356,6 +404,15 @@ reset_case() {
   fi
   : >"$TEST_LOG"
   SCENARIO=success
+  for cell in "$BACKUP" "$SERVING"; do
+    "$ROLL_TRAIN_REAL_YQ" -i 'del(.apps.witselfServer.imageDigest)' "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml"
+  done
+}
+
+pin_fixture_cells() {
+  for cell in "$BACKUP" "$SERVING"; do
+    "$ROLL_TRAIN_REAL_YQ" -i '.apps.witselfServer.imageDigest = strenv(OLD_DIGEST)' "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml"
+  done
 }
 
 expect_failure() {
@@ -541,7 +598,7 @@ printf 'roll train test: sourced watchdog preserves pending exit code and stdout
 # Import in an isolated shell so the script's helper names cannot overwrite
 # this harness. Importing the script must not start a train.
 run_predicate() {
-  bash -c 'source "$1"; "$2" "$3"' _ "$TRAIN" "$1" "$VERSION"
+  bash -c 'source "$1"; "$2" "$3" "$4"' _ "$TRAIN" "$1" "$VERSION" "${2:-}"
 }
 argo_good='{"status":{"sync":{"status":"Synced","revision":"1.2.3"},"health":{"status":"Healthy"}}}'
 printf '%s\n' "$argo_good" | run_predicate argo_converged || fail 'converged Argo fixture refused'
@@ -564,6 +621,60 @@ for bad in '{}' '{"items":[]}' '{"items":[{"spec":{"containers":[]}}]}' \
 done
 printf 'roll train test: pod images require nonempty exact-version matches\n'
 
+pods_digest=$(printf '%s\n' "$pods_good" | jq --arg image "ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST" '
+  .items += [.items[0] | .spec.containers[0].name = "witself-worker" |
+    .status.containerStatuses[0].name = "witself-worker"] |
+  .items[].spec.containers[0].image = $image |
+  .items[].status.containerStatuses[0].image = $image
+')
+printf '%s\n' "$pods_digest" | run_predicate pods_converged "$BACKUP_DIGEST" || fail 'matching server and worker digests refused'
+if printf '%s\n' "$pods_digest" | jq --arg image "ghcr.io/witwave-ai/witself-server@$OLD_DIGEST" \
+  '.items[1].status.containerStatuses[0].image = $image' | run_predicate pods_converged "$BACKUP_DIGEST"; then
+  fail 'correct server digest hid a stale running worker digest'
+fi
+printf 'roll train test: matching server digest cannot hide a stale running worker digest\n'
+
+for image_id in "ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST" \
+  "docker-pullable://ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST" \
+  "$BACKUP_DIGEST" "docker://$BACKUP_DIGEST"; do
+  pods_image_id=$(printf '%s\n' "$pods_digest" | jq --arg image_id "$image_id" '
+    .items[].status.containerStatuses[0] |=
+      (.image = "ghcr.io/witwave-ai/witself-server:1.2.2" | .imageID = $image_id)
+  ')
+  printf '%s\n' "$pods_image_id" | run_predicate pods_converged "$BACKUP_DIGEST" || fail 'tagged status with matching runtime imageID refused'
+  if printf '%s\n' "$pods_image_id" | jq '.items[1].spec.containers[0].image = "ghcr.io/witwave-ai/witself-server:1.2.3"' \
+    | run_predicate pods_converged "$BACKUP_DIGEST"; then
+    fail 'matching imageID hid an unpinned worker spec'
+  fi
+  if printf '%s\n' "$pods_image_id" | jq --arg image_id "$OLD_DIGEST" '.items[1].status.containerStatuses[0].imageID = $image_id' \
+    | run_predicate pods_converged "$BACKUP_DIGEST"; then
+    fail 'tagged status with stale worker imageID accepted'
+  fi
+done
+if printf '%s\n' "$pods_good" | jq --arg image_id "$BACKUP_DIGEST" '
+  .items[0].status.containerStatuses[0] |= (.image = "ghcr.io/witwave-ai/witself-server:1.2.2" | .imageID = $image_id)
+' | run_predicate pods_converged; then
+  fail 'runtime imageID bypassed tag-only status validation'
+fi
+printf 'roll train test: runtime imageID certifies pinned status while spec, worker digest, and tag-mode guards remain enforced\n'
+
+cp "$FIXTURE_ROOT/.gitops/cells/$BACKUP/values.yaml" "$TEST_ROOT/inconsistent-pin.yaml"
+"$ROLL_TRAIN_REAL_YQ" -i '
+  .apps.witselfServer.imageDigest = strenv(BACKUP_DIGEST) |
+  .apps.witselfServer.chartVersion = "1.2.3"
+' "$TEST_ROOT/inconsistent-pin.yaml"
+result=0
+bash -c '
+  source "$1"
+  VERSION=1.2.3 ARGO_TIMEOUT=1
+  cell_worker_enabled() { printf "true\n"; }
+  wait_argo "$2" witself "$3"
+' _ "$TRAIN" "$BACKUP" "$TEST_ROOT/inconsistent-pin.yaml" >"$TEST_ROOT/output" 2>&1 || result=$?
+[ "$result" -ne 0 ] || fail 'inconsistent digest release pin accepted'
+grep -Fq 'invalid or inconsistent chartVersion/imageTag for digest pin' "$TEST_ROOT/output" || fail 'digest release validation lost its original failure'
+if grep -Fq 'does not record target release' "$TEST_ROOT/output"; then fail 'digest release failure was mislabeled as a target release mismatch'; fi
+printf 'roll train test: inconsistent digest release pin preserves its validation error\n'
+
 reset_case
 bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 >"$TEST_ROOT/output" 2>&1 \
   || fail 'offline two-wave train failed'
@@ -583,6 +694,40 @@ grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'train omitted final se
 grep -Fq 'witself-infra <health> <--json>' "$TEST_LOG" || fail 'available infra health binary was not invoked'
 if grep -Eq '<(--force|--force-with-lease|-f)>' "$TEST_LOG"; then fail 'train used force'; fi
 printf 'roll train test: offline two-wave success, merge fences, CI, order, cleanup, and health passed\n'
+
+for scenario in digest_success digest_from_tag; do
+  reset_case
+  SCENARIO=$scenario
+  if [ "$scenario" = digest_success ]; then pin_fixture_cells; fi
+  bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 \
+    >"$TEST_ROOT/output" 2>&1 || fail "$scenario two-wave train failed"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail "$scenario did not merge both waves"
+  [ "$(grep -Fc 'image digests match the cell values pin' "$TEST_ROOT/output")" -eq 2 ] || fail "$scenario did not verify both cell-specific digests"
+  [ "$(grep -Fxc "ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST" "$TEST_ROOT/output")" -eq 1 ] || fail "$scenario omitted or duplicated the certified backup image"
+  [ "$(grep -Fxc "ghcr.io/witwave-ai/witself-server@$SERVING_DIGEST" "$TEST_ROOT/output")" -eq 1 ] || fail "$scenario omitted or duplicated the certified serving image"
+  while IFS= read -r path; do [ ! -d "$path" ] || fail "$scenario retained its worktree"; done <"$STATE_DIR/worktrees"
+done
+printf 'roll train test: pinned and first-pin waves preserve live version evidence and converge on each written cell pin\n'
+
+for scenario in digest_pod_spec_mismatch digest_pod_status_mismatch digest_deployment_mismatch digest_tag_mismatch; do
+  reset_case
+  SCENARIO=$scenario
+  pin_fixture_cells
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --argo-timeout 2 --poll-interval 1
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail "$scenario failed before convergence"
+  grep -Fq 'Argo convergence' "$TEST_ROOT/output" || fail "$scenario missed convergence check"
+  grep -Fq 'timed out' "$TEST_ROOT/output" || fail "$scenario failed without waiting for the written digest"
+  if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail "$scenario started serving wave"; fi
+done
+printf 'roll train test: stale requested, running, deployment digests and matching tags cannot certify a pinned wave\n'
+
+reset_case
+SCENARIO=digest_concurrent_live
+pin_fixture_cells
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work"
+grep -Fq 'no matching release pin' "$TEST_ROOT/output" || fail 'unmapped concurrent live digest was not refused'
+if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail 'unmapped live digest reached merge'; fi
+printf 'roll train test: concurrent unknown live digest stops before merge\n'
 
 reset_case
 mkdir -p "$TEST_ROOT/evidence backup" "$TEST_ROOT/evidence serving"

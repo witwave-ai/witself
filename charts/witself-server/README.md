@@ -391,7 +391,7 @@ ingress + TLS, and topology spread.
 ## Key values
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
-for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
+for validation. Most-used: `image.tag`, `image.digest`, `replicaCount`, `backend.kind`,
 `billing.endpoint`,
 `support.ticketRateLimit`, `support.ticketRateWindow`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
@@ -406,3 +406,9 @@ for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,
 `lifecycle.preStopSleepSeconds`, and `terminationGracePeriodSeconds`.
+
+`image.digest` defaults to empty. Set it to `sha256:` followed by exactly 64
+lowercase hexadecimal characters to pin both server and worker to
+`image.repository@image.digest`. A digest takes precedence over `image.tag`.
+Without a digest, the chart keeps rendering `image.repository:image.tag`, with
+an empty tag defaulting to the chart's `appVersion`.

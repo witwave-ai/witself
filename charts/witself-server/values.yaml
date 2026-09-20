@@ -27,6 +27,8 @@ image:
   repository: ghcr.io/witwave-ai/images/witself-server
   # Empty tag defaults to the chart appVersion.
   tag: ""
+  # Optional sha256 digest takes precedence over tag for both server and worker.
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

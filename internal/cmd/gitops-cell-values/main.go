@@ -19,9 +19,12 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	check := fs.Bool("check", false, "exit non-zero with a unified diff when generated files differ")
 	write := fs.Bool("write", false, "rewrite generated files that differ")
+	rollCell := fs.String("roll-cell", "", "roll exactly one existing catalog cell; sanctioned only via scripts/roll-cell.sh, which guarantees the digest matches the tag")
+	version := fs.String("version", "", "release chart version and image tag for --roll-cell")
+	imageDigest := fs.String("image-digest", "", "required sha256 image digest for --roll-cell")
 	root := fs.String("root", ".", "repository root containing .gitops/cells")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n")
+		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST [--root PATH]\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -31,14 +34,30 @@ func run(args []string) int {
 		fs.Usage()
 		return 2
 	}
-	if *check == *write {
+	modeCount := 0
+	for _, selected := range []bool{*check, *write, *rollCell != ""} {
+		if selected {
+			modeCount++
+		}
+	}
+	if modeCount != 1 {
 		fs.Usage()
-		_, _ = fmt.Fprintln(os.Stderr, "error: exactly one of --check or --write is required")
+		_, _ = fmt.Fprintln(os.Stderr, "error: exactly one of --check, --write, or --roll-cell is required")
+		return 2
+	}
+	if *rollCell == "" && (*version != "" || *imageDigest != "") {
+		_, _ = fmt.Fprintln(os.Stderr, "error: --version and --image-digest require --roll-cell")
+		return 2
+	}
+	if *rollCell != "" && (*version == "" || *imageDigest == "") {
+		_, _ = fmt.Fprintln(os.Stderr, "error: --roll-cell requires --version and --image-digest")
 		return 2
 	}
 	var err error
 	if *check {
 		err = gitopsvalues.Check(*root, os.Stdout)
+	} else if *rollCell != "" {
+		err = gitopsvalues.RollCell(*root, *rollCell, *version, *imageDigest, os.Stdout)
 	} else {
 		err = gitopsvalues.Write(*root, os.Stdout)
 	}

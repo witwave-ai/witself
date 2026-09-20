@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # roll-cell — bump a cell's witself-server chart+image to a released Witself
-# version. Scoped: only the two Witself-owned fields (apps.witselfServer.
-# chartVersion and apps.witselfServer.imageTag) are touched. Upstream chart
+# version. Scoped: only apps.witselfServer.chartVersion, imageTag and
+# imageDigest are changed through the cell-values generator. Upstream chart
 # versions (cert-manager, external-dns, external-secrets, keda,
 # metrics-server) are OFF-LIMITS to this script by design.
 #
@@ -97,11 +97,7 @@ if [ ! -f "$VALUES" ]; then
   exit 2
 fi
 
-if ! command -v yq >/dev/null 2>&1; then
-  die "yq is required (brew install yq)"
-fi
-
-# This gate must complete before either values pin is edited. The verifier is
+# This gate must complete before registry access or any values pin is edited. The verifier is
 # deliberately resolved only from the operator's override or normal PATH.
 if [ "$NO_SCHEMA_CHANGE" = true ]; then
   echo "warning: operator attests release $VERSION cannot advance the database schema; backup evidence verification skipped" >&2
@@ -117,28 +113,41 @@ else
   echo "backup evidence verified for release $VERSION (${#BACKUP_EVIDENCE[@]} artifact directories)"
 fi
 
-# The two paths this script may touch. Any other chartVersion (upstream
-# helm charts under platform.*) is silently left alone — that's the point.
-yq -i ".apps.witselfServer.chartVersion = \"$VERSION\"" "$VALUES"
-yq -i ".apps.witselfServer.imageTag = \"$VERSION\"" "$VALUES"
-
-# Diff surface check: if any line outside our two paths changed, something
-# is wrong with the script — bail before we commit noise.
-if ! git -C "$REPO_ROOT" diff --unified=0 "$VALUES" | grep -E '^[+-][^+-]' | grep -vE '^[+-] *(chartVersion|imageTag): *"?[0-9]+\.[0-9]+\.[0-9]+"?' > /tmp/roll-cell.stray 2>&1 && [ -s /tmp/roll-cell.stray ]; then
-  # No stray lines — good. (The grep -v filter emptied the output.)
-  :
+# Older release charts silently ignore image.digest. Check the exact local
+# release tag before resolving or writing a pin that its chart cannot enforce.
+for tool in git jq; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool is required to verify release chart digest support"
+done
+RELEASE_REF="refs/tags/v${VERSION}"
+if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "${RELEASE_REF}^{commit}" >/dev/null; then
+  die "release tag v${VERSION} is not available locally; fetch the release tag before rolling"
 fi
-STRAY="$(git -C "$REPO_ROOT" diff --unified=0 "$VALUES" 2>&1 | awk '/^[+-][^+-]/' | grep -Ev 'chartVersion:|imageTag:' || true)"
-if [ -n "$STRAY" ]; then
-  echo "error: unexpected changes outside apps.witselfServer:" >&2
-  echo "$STRAY" >&2
-  git -C "$REPO_ROOT" checkout -- "$VALUES"
-  exit 2
+if ! RELEASE_SCHEMA=$(git -C "$REPO_ROOT" show "${RELEASE_REF}:charts/witself-server/values.schema.json" 2>/dev/null); then
+  die "release v${VERSION} chart has no readable values.schema.json; cannot verify image.digest support"
+fi
+if ! printf '%s' "$RELEASE_SCHEMA" | jq -e '.properties.image.properties.digest' >/dev/null 2>&1; then
+  die "release v${VERSION} chart does not declare image.digest; refusing an unenforceable digest pin"
 fi
 
-echo "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag)"
+# Resolve and verify the complete registry manifest before the generator can
+# change any pin. A failed lookup never leaves a tag-only partial roll.
+if ! DIGEST=$(bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION"); then
+  die "image digest resolution failed; rollout aborted before any values file edit"
+fi
+
+BEFORE=$(mktemp "${TMPDIR:-/tmp}/witself-roll-cell-before.XXXXXX")
+trap 'rm -f -- "$BEFORE"' EXIT
+cp "$VALUES" "$BEFORE"
+# The generator refuses existing drift and atomically changes only this cell.
+bash "$REPO_ROOT/scripts/gitops-cell-values.sh" --root "$REPO_ROOT" \
+  --roll-cell "$CELL" --version "$VERSION" --image-digest "$DIGEST"
+
+echo "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag + imageDigest)"
 echo "diff:"
-git -C "$REPO_ROOT" --no-pager diff "$VALUES"
+status=0
+diff -u --label "$CELL/values.yaml (before)" --label "$CELL/values.yaml (after)" \
+  "$BEFORE" "$VALUES" || status=$?
+[ "$status" -le 1 ] || die "could not display values diff"
 echo
 echo "next: review this cell in the intended rollout wave; commit + push to main"
 echo "      triggers reconciliation only for provisioned cells watching this repo."

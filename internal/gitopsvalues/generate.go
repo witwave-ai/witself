@@ -57,15 +57,24 @@ func mustParseTemplates() *template.Template {
 }
 
 func generateCell(root string, name string, cfg *Catalog, charts chartPins) ([]byte, error) {
+	return generateCellWithPins(root, name, cfg, charts, nil)
+}
+
+func generateCellWithPins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins) ([]byte, error) {
 	data, err := resolveCell(name, cfg)
 	if err != nil {
 		return nil, err
 	}
 	valuesPath := filepath.Join(root, cellsDirRel, name, valuesFileName)
-	data.ChartVersion, data.ImageTag, err = readServerPins(valuesPath, charts)
-	if err != nil {
-		return nil, err
+	pins := override
+	if pins == nil {
+		existing, err := readServerPins(valuesPath, charts)
+		if err != nil {
+			return nil, err
+		}
+		pins = &existing
 	}
+	data.ChartVersion, data.ImageTag = pins.ChartVersion, pins.ImageTag
 	data.CertManagerChartVersion = charts.CertManager
 	data.ExternalDNSChartVersion = charts.ExternalDNS
 	data.ExternalSecretsChartVersion = charts.ExternalSecrets
@@ -100,7 +109,7 @@ func generateCell(root string, name string, cfg *Catalog, charts chartPins) ([]b
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, fmt.Errorf("cell %q: %w", name, err)
 	}
-	return out.Bytes(), nil
+	return addServerDigest(out.Bytes(), pins.ImageDigest)
 }
 
 func generateAll(root string) (map[string][]byte, error) {

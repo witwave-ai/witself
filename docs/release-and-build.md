@@ -49,6 +49,15 @@ artifact exists, roll only the intended canary or wave with
 application is actually installed and healthy. See
 [Deployment Cells](deployment-cells.md) and [`.gitops/README.md`](../.gitops/README.md).
 
+The release train (`scripts/roll-train.sh`) supports both tag-only
+`repository:VERSION` images and digest-pinned `repository@sha256:...` images.
+For a digest-pinned cell, convergence requires the selected pod and deployment
+image digests to match `apps.witselfServer.imageDigest` read from that cell's
+values after the roll; the train does not resolve the registry again. Its
+downgrade guard compares versions from image tags for tag-only images and uses
+the `chartVersion` and `imageTag` recorded alongside the matching digest for
+digest-pinned images, refusing a newer live pin or an unrecognized digest.
+
 The public plan Worker and the Cloudflare control-plane Worker/container are
 also separate deployments. Deploy both from the same clean, exactly tagged
 checkout only after its release workflow succeeds:
