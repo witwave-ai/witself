@@ -1043,6 +1043,9 @@ export async function reconcileRealmEmailAliasesForPlan(
       mode,
       plan_revision: snapshot?.revision ?? 0,
       plan_snapshot_hash: snapshot?.snapshot_hash ?? "",
+      ...(options.reprepare_completed === true
+        ? { reprepare_completed: true }
+        : {}),
       ...(options.recover_pending_revision === undefined
         ? {}
         : {
@@ -7280,7 +7283,12 @@ export class DurableRealmEmailAliasRegistry {
 
     if (input.mode === "prepare") {
       const maximum = input.feature_enabled === true ? input.alias_limit : 0;
-      if (relation <= 0) {
+      // A restored cell can need the exact completed revision delivered again.
+      // The hash and entitlement checks above still apply; take fresh fit
+      // evidence and freeze allocations through the usual pending intent below
+      // rather than rolling the completed authority back to the cell's fence.
+      if (relation < 0 ||
+          (relation === 0 && input.reprepare_completed !== true)) {
         return json({
           schema_version: SCHEMA_VERSION,
           account_id: input.account_id,

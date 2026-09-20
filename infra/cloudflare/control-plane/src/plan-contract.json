@@ -1,0 +1,65 @@
+{
+  "schema_version": "witself.plan-contract.v1",
+  "feature_keys": [
+    "agent_email_custom_domain",
+    "agent_email_realm_alias",
+    "agent_email_receive",
+    "agent_email_send",
+    "collaboration",
+    "facts",
+    "memory",
+    "messaging",
+    "secrets",
+    "support"
+  ],
+  "limit_maximums": {
+    "agent_email_attachment_storage_bytes": 9007199254740991,
+    "agent_email_custom_domains_per_account": 9007199254740991,
+    "agent_email_max_raw_bytes": 26214400,
+    "agent_email_realm_aliases_per_realm": 9007199254740991,
+    "agent_email_received_bytes_per_realm_minute": 4294967296,
+    "agent_email_received_bytes_per_recipient_minute": 536870912,
+    "agent_email_received_bytes_per_sender_minute": 67108864,
+    "agent_email_received_per_realm_minute": 5000,
+    "agent_email_received_per_recipient_minute": 300,
+    "agent_email_received_per_sender_minute": 30,
+    "agent_email_sent_per_agent_minute": 30,
+    "agent_email_sent_per_realm_minute": 300,
+    "agents": 9007199254740991,
+    "agents_per_realm": 9007199254740991,
+    "message_delivered_per_realm_minute": 100000,
+    "message_delivered_per_recipient_minute": 5000,
+    "message_sent_per_agent_minute": 2000,
+    "operator_seats": 9007199254740991,
+    "realms": 9007199254740991,
+    "stored_fact": 9007199254740991,
+    "stored_memory": 9007199254740991,
+    "stored_secret": 9007199254740991
+  },
+  "policy_bounds": {
+    "agent_email_entitlement_version": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "agent_email_retention_days": {
+      "minimum": 1,
+      "maximum": 36500
+    },
+    "collaboration_entitlement_version": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "message_retention_days": {
+      "minimum": 1,
+      "maximum": 36500
+    },
+    "messaging_entitlement_version": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "transcript_retention_days": {
+      "minimum": 1,
+      "maximum": 36500
+    }
+  }
+}

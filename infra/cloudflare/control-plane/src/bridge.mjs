@@ -54,22 +54,11 @@ import {
   deliveryBounded, writeDeliveryCheckpoint,
 } from "./entitlement-delivery-metrics.mjs";
 
+import planContract from "./plan-contract.json" with { type: "json" };
+
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
-  "(?:realms|agents|agents_per_realm|stored_memory|stored_fact|stored_secret|" +
-  "agent_email_max_raw_bytes|agent_email_attachment_storage_bytes|" +
-  "agent_email_realm_aliases_per_realm|" +
-  "agent_email_custom_domains_per_account|" +
-  "agent_email_sent_per_agent_minute|" +
-  "agent_email_sent_per_realm_minute|" +
-  "message_sent_per_agent_minute|message_delivered_per_realm_minute|" +
-  "message_delivered_per_recipient_minute|" +
-  "agent_email_received_per_sender_minute|" +
-  "agent_email_received_per_recipient_minute|" +
-  "agent_email_received_per_realm_minute|" +
-  "agent_email_received_bytes_per_sender_minute|" +
-  "agent_email_received_bytes_per_recipient_minute|" +
-  "agent_email_received_bytes_per_realm_minute)";
+  `(?:${Object.keys(planContract.limit_maximums).join("|")})`;
 const ADMIN_POLICY_PATH = new RegExp(
   `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|messaging|message-retention|email-receive|email-send|email-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
 );
@@ -94,6 +83,7 @@ const PLAN_FIT_DIMENSION_FEATURE = Object.freeze({
 });
 const PLAN_FIT_DIMENSION_ORDER = Object.freeze([
   "realms",
+  "operator_seats",
   "agents",
   "agents_per_realm",
   "stored_memory",
@@ -105,6 +95,7 @@ const PLAN_FIT_DIMENSION_ORDER = Object.freeze([
 ]);
 const PLAN_FIT_DIMENSION_SCOPE = Object.freeze({
   realms: "account",
+  operator_seats: "account",
   agents: "account",
   agents_per_realm: "realm",
   stored_memory: "agent",
@@ -114,73 +105,13 @@ const PLAN_FIT_DIMENSION_SCOPE = Object.freeze({
   [PLAN_FIT_ALIAS_LIMIT]: "realm",
   [PLAN_FIT_DOMAIN_LIMIT]: "account",
 });
-const PLAN_FEATURE_KEYS = new Set([
-  "agent_email_custom_domain",
-  "agent_email_realm_alias",
-  "agent_email_receive",
-  "agent_email_send",
-  "collaboration",
-  "facts",
-  "memory",
-  "messaging",
-  "secrets",
-  "support",
-]);
-const PLAN_LIMIT_KEYS = new Set([
-  "agent_email_attachment_storage_bytes",
-  "agent_email_custom_domains_per_account",
-  "agent_email_max_raw_bytes",
-  "agent_email_realm_aliases_per_realm",
-  "agent_email_received_bytes_per_realm_minute",
-  "agent_email_received_bytes_per_recipient_minute",
-  "agent_email_received_bytes_per_sender_minute",
-  "agent_email_received_per_realm_minute",
-  "agent_email_received_per_recipient_minute",
-  "agent_email_received_per_sender_minute",
-  "agent_email_sent_per_agent_minute",
-  "agent_email_sent_per_realm_minute",
-  "agents",
-  "agents_per_realm",
-  "message_delivered_per_realm_minute",
-  "message_delivered_per_recipient_minute",
-  "message_sent_per_agent_minute",
-  "realms",
-  "stored_fact",
-  "stored_memory",
-  "stored_secret",
-]);
-const PLAN_POLICY_KEYS = new Set([
-  "agent_email_entitlement_version",
-  "collaboration_entitlement_version",
-  "agent_email_retention_days",
-  "message_retention_days",
-  "messaging_entitlement_version",
-  "transcript_retention_days",
-]);
-const PLAN_LIMIT_MAXIMUMS = Object.freeze({
-  agent_email_max_raw_bytes: 25 * 1024 * 1024,
-  agent_email_received_bytes_per_realm_minute: 4 * 1024 * 1024 * 1024,
-  agent_email_received_bytes_per_recipient_minute: 512 * 1024 * 1024,
-  agent_email_received_bytes_per_sender_minute: 64 * 1024 * 1024,
-  agent_email_received_per_realm_minute: 5_000,
-  agent_email_received_per_recipient_minute: 300,
-  agent_email_received_per_sender_minute: 30,
-  agent_email_sent_per_agent_minute: 30,
-  agent_email_sent_per_realm_minute: 300,
-  message_delivered_per_realm_minute: 100_000,
-  message_delivered_per_recipient_minute: 5_000,
-  message_sent_per_agent_minute: 2_000,
-});
-const RETENTION_POLICY_KEYS = new Set([
-  "agent_email_retention_days",
-  "message_retention_days",
-  "transcript_retention_days",
-]);
-const ENTITLEMENT_POLICY_KEYS = new Set([
-  "agent_email_entitlement_version",
-  "collaboration_entitlement_version",
-  "messaging_entitlement_version",
-]);
+// Generated from internal/plans. Go freshness and boundary tests prevent the
+// Worker vocabulary and validation bounds from drifting from the cell catalog.
+const PLAN_FEATURE_KEYS = new Set(planContract.feature_keys);
+const PLAN_LIMIT_MAXIMUMS = Object.freeze(planContract.limit_maximums);
+const PLAN_LIMIT_KEYS = new Set(Object.keys(PLAN_LIMIT_MAXIMUMS));
+const PLAN_POLICY_BOUNDS = Object.freeze(planContract.policy_bounds);
+const PLAN_POLICY_KEYS = new Set(Object.keys(PLAN_POLICY_BOUNDS));
 
 export const ADMIN_ID_HEADER = "X-Witself-Admin-ID";
 export const ADMIN_HANDLE_HEADER = "X-Witself-Admin-Handle";
@@ -1007,8 +938,8 @@ function validPlanPolicies(policies) {
   }
   return Object.entries(policies).every(([key, value]) =>
     PLAN_POLICY_KEYS.has(key) && Number.isSafeInteger(value) &&
-    ((RETENTION_POLICY_KEYS.has(key) && value >= 1 && value <= 36_500) ||
-      (ENTITLEMENT_POLICY_KEYS.has(key) && value === 1))
+    value >= PLAN_POLICY_BOUNDS[key].minimum &&
+    value <= PLAN_POLICY_BOUNDS[key].maximum
   );
 }
 
@@ -1251,6 +1182,13 @@ async function planFitAuthorityViolation(
 }
 
 function preparedAuthorityOutcome(body, dimension, maximum, target) {
+  if (body?.prepared === false && body.pending === false &&
+      body.stale === true && body.complete === true &&
+      body.plan_revision === target.revision &&
+      body.plan_snapshot_hash === target.snapshot_hash &&
+      body.fit === undefined) {
+    return { prepared: false, violation: null, conflict: null, stale: true };
+  }
   if (body?.code === "plan_fit_prepared_fence_conflict") {
     if (body.prepared !== false || body.pending !== true ||
         body.stale !== false || body.complete !== false ||
@@ -1337,7 +1275,7 @@ function validPlanAuthorityCompletion(
     : body.recovered === undefined);
 }
 
-async function preparePlanAuthorities(env, accountID, target) {
+async function preparePlanAuthorities(env, accountID, target, options = {}) {
   const prepared = [];
   for (const authority of [
     {
@@ -1357,6 +1295,7 @@ async function preparePlanAuthorities(env, accountID, target) {
         accountID,
         target,
         "prepare",
+        options,
       );
       outcome = preparedAuthorityOutcome(
         body,
@@ -1366,6 +1305,11 @@ async function preparePlanAuthorities(env, accountID, target) {
       );
     } catch {
       return { prepared, violation: null, conflict: null, unavailable: true };
+    }
+    if (outcome.stale) {
+      return {
+        prepared, violation: null, conflict: null, unavailable: true, stale: true,
+      };
     }
     if (outcome.conflict) {
       return {
@@ -1542,9 +1486,14 @@ async function applyPlanSnapshotIfFits(request, env, accountID, fetchImpl) {
   }
 
   let authority;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    authority = await preparePlanAuthorities(env, accountID, target);
-    if (!authority.conflict) break;
+  let reprepareCompleted = false;
+  // At most two older prepared fences plus one completed-fence retry, followed
+  // by the final preparation. Concurrent changes still exhaust this bound.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    authority = await preparePlanAuthorities(env, accountID, target, {
+      reprepare_completed: reprepareCompleted,
+    });
+    if (!authority.conflict && !authority.stale) break;
 
     let current;
     try {
@@ -1555,6 +1504,21 @@ async function applyPlanSnapshotIfFits(request, env, accountID, fetchImpl) {
         accountID,
         target,
       );
+      if (authority.stale) {
+        if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
+          await completePlanAuthorities(env, accountID, target);
+          return json(appliedPlanFitEnvelope(accountID, target, current));
+        }
+        // Preserve exact-cell replay without refitting usage (which can include
+        // downgrade grace). Only a verified older cell permits re-preparing an
+        // exact completed authority fence; the authorities never accept a target
+        // below their own completed fence or a conflicting hash/entitlement.
+        if (current.revision < target.revision && !reprepareCompleted) {
+          reprepareCompleted = true;
+          continue;
+        }
+        break; // The unavailable path compensates any prepared dimensions.
+      }
       if (current.revision === authority.conflict.revision &&
           current.snapshot_hash !== authority.conflict.snapshot_hash) {
         return err("prepared plan-fit fence conflicts with the cell", 502);

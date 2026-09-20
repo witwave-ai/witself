@@ -671,6 +671,45 @@ that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
 
+### After restoring a cell from backup: entitlement re-delivery
+
+A PostgreSQL restore can put the cell's plan revision behind the control
+plane's last acknowledgement and the global email authorities. With plan
+lifecycle enabled, the scheduled control-plane tick detects that fence
+mismatch and uses conditional fit-and-apply to re-deliver its resolved plan.
+It can retry the existing desired revision; a restore does not necessarily
+mint a new revision.
+
+The Worker validates plan keys and bounds against the generated Go catalog
+contract. After verifying that the cell revision is older, the Worker can ask
+both email authorities to prepare an exact completed revision again, checking
+current allocation usage and fencing allocation changes
+before the cell write. After the cell accepts the snapshot, the Worker
+completes both authorities. An interrupted preparation is recovered against
+the verified current cell snapshot and retried. Completed authority fences
+are never rolled back to the backup's older revision; conflicting hashes,
+newer authority work, and usage that does not fit remain blocked.
+
+After the restored cell is reachable, observe at least one fresh, complete
+lifecycle scan. Require
+`witself_entitlement_delivery_last_cycle_accounts{outcome="failed"} == 0`
+and scheduled tick logs with `failed=0` and `succeeded=true`. A stale metric
+sample or a successful page before the scan finishes is insufficient.
+
+If delivery does not converge over subsequent ticks, retain the per-account
+HTTP status and value-free error message and verify the account's cell route,
+cell reachability, and lifecycle configuration. Inspect the account-filtered
+`witself-admin email-alias audit` and `witself-admin email-domain audit`, plus
+`witself-admin email-domain journal status`, for incomplete reconciliation or
+unhealthy journals. A 400 target-validation error requires checking the
+deployed Worker's plan contract. A fit refusal requires resolving the reported
+capacity or entitlement mismatch; repeated 502 authority failures require
+reviewing the exact branch, pending work, and journal health. Retry through
+the normal lifecycle tick after correcting the cause. Escalate conflicting
+revision/hash evidence or a newer authority fence to the control-plane owner;
+do not clear Durable Object fences, edit snapshots, or use an unconditional
+apply to bypass the refusal.
+
 ## Two-wave roll (automated)
 
 Run `scripts/roll-train.sh` from a local operator checkout with access to both

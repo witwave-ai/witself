@@ -39,6 +39,32 @@ type conditionalApplyRecorder struct {
 	calls  int
 }
 
+type conditionalFenceApplyRecorder struct {
+	conditionalApplyRecorder
+	fence   ApplyFence
+	request ApplyRequest
+}
+
+func (a *conditionalFenceApplyRecorder) ReadApplyFence(
+	context.Context,
+	string,
+) (ApplyFence, error) {
+	return a.fence, nil
+}
+
+func (a *conditionalFenceApplyRecorder) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	a.request = request
+	result, err := a.conditionalApplyRecorder.ApplyIfFits(ctx, accountID, request)
+	if err == nil && result.Applied {
+		a.fence = ApplyFence(result.Ack)
+	}
+	return result, err
+}
+
 func (a *conditionalApplyRecorder) ApplyIfFits(
 	_ context.Context,
 	_ string,
@@ -110,6 +136,80 @@ func TestUnknownNewerCellFenceRequiresAtomicFitAndApplyCapability(t *testing.T) 
 	}
 	if applier.calls != 0 {
 		t.Fatalf("legacy Apply calls = %d; unknown cell plan must fail closed", applier.calls)
+	}
+}
+
+func TestRestoredOlderCellFenceUsesConditionalApplyAndReplaysDesiredRevision(t *testing.T) {
+	for _, restoredPlan := range []string{plans.Free, "team"} {
+		t.Run(restoredPlan, func(t *testing.T) {
+			ctx := context.Background()
+			catalog, err := plans.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := NewMemStore()
+			applier := &conditionalFenceApplyRecorder{
+				conditionalApplyRecorder: conditionalApplyRecorder{
+					result: ConditionalApplyResult{Applied: true},
+				},
+			}
+			manager, err := NewManager(Config{
+				Catalog: catalog, Store: store, Applier: applier,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := manager.resolveSnapshot(Record{Entitled: plans.Free})
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := manager.resolveSnapshot(Record{Entitled: restoredPlan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			applier.fence = ApplyFence{Revision: 15, Hash: restored.Hash}
+			const accountID = "acct_restored_older_cell"
+			const desiredRevision = 18
+			if err := store.Put(ctx, Record{
+				AccountID: accountID, Entitled: plans.Free, Applied: plans.Free,
+				SnapshotRevision: desiredRevision, DesiredSnapshotHash: target.Hash,
+				AppliedSnapshotRevision: desiredRevision, AppliedSnapshotHash: target.Hash,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			// There is no recorded plan downgrade or pending snapshot. Only the
+			// cell rollback requires delivery through the atomic bridge path.
+			if err := manager.ReconcileAccount(ctx, accountID); err != nil {
+				t.Fatal(err)
+			}
+			if applier.calls != 1 || applier.legacyOnlyApplyRecorder.calls != 0 {
+				t.Fatalf("conditional calls=%d legacy calls=%d",
+					applier.calls, applier.legacyOnlyApplyRecorder.calls)
+			}
+			if applier.request.Revision != desiredRevision || applier.request.Hash != target.Hash ||
+				applier.request.Plan != plans.Free {
+				t.Fatalf("restored-cell delivery did not replay the exact desired snapshot at revision %d",
+					desiredRevision)
+			}
+			record, ok, err := store.Get(ctx, accountID)
+			if err != nil || !ok {
+				t.Fatalf("Get record = ok %v, err %v", ok, err)
+			}
+			if record.SnapshotRevision != desiredRevision ||
+				record.AppliedSnapshotRevision != desiredRevision ||
+				record.Applied != plans.Free || record.AppliedSnapshotHash != target.Hash ||
+				SnapshotApplyPending(record, target) {
+				t.Fatal("restored-cell delivery did not preserve the exact desired acknowledgement")
+			}
+			if err := manager.ReconcileAccount(ctx, accountID); err != nil {
+				t.Fatal(err)
+			}
+			if applier.calls != 1 || applier.legacyOnlyApplyRecorder.calls != 0 {
+				t.Fatalf("settled restored cell was redelivered: conditional calls=%d legacy calls=%d",
+					applier.calls, applier.legacyOnlyApplyRecorder.calls)
+			}
+		})
 	}
 }
 
