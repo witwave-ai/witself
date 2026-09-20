@@ -8,6 +8,17 @@
         "monitoring": {
           "type": "object",
           "properties": {
+            "memoryAlerts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Opt in to memory-curation rules after production metrics verification. Monitoring and alerting must also be enabled; existing receiver configuration is preserved."
+                }
+              }
+            },
             "postgresBackupAlerts": {
               "type": "object",
               "additionalProperties": false,

@@ -1680,6 +1680,26 @@ after a live, version-gated conformance test passes.
   [memory-load-quality.md](memory-load-quality.md#protected-repeatable-workflow).
   The first hosted artifact still needs post-merge verification; managed-cloud
   baselines and their protected environment remain separate follow-up work.
+- [x] Complete issue #46 item 1's instrumentation half in source: committed
+  `witself_memory_curation_run_transitions_total{from,to}` and
+  `witself_memory_curation_lease_events_total{event}` counters, cell-wide
+  `witself_memory_curation_queue_age_seconds` histogram and
+  `witself_memory_curation_requests_pending` gauge, closed value-free labels,
+  queue-reader health via `witself_memory_curation_queue_metrics_up`, and the
+  tested `witself-memory` warning rules for backlog age, lease-expiry
+  ratio, and plan/apply failure ratio. Counters are process-local observations
+  of committed changes. Queue age describes due, unclaimed work; the pending
+  gauge also includes future-due unclaimed work. Neither exposes tenant
+  identifiers. See
+  [Memory and curation instrumentation](observability-and-operations.md#memory-and-curation-instrumentation)
+  for exact metric semantics and provisional thresholds.
+- [ ] Complete issue #46 item 1's activation half: deploy the metric-producing
+  server release, verify every serving replica's scrapes, confirm thresholds
+  against aggregate observations, and retain firing/resolved receiver
+  evidence. `platform.monitoring.memoryAlerts.enabled` remains `false` in the
+  generated `civo-sandbox-use1-serving` and `civo-sandbox-use1-backup` values;
+  existing receiver configuration is unchanged. These source changes do not
+  prove live alert activation or close issue #46 or #47.
 - [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
   load-test queue claims and fencing, bounded curation plans, lexical/vector
   indexes, archive rebuild, high-cardinality accounts, and concurrent agents.

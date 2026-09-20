@@ -119,7 +119,7 @@ func (s *Store) RollbackCuration(
 		return RollbackMemoryCurationResult{}, ErrMemoryCurationInputInvalid
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return RollbackMemoryCurationResult{}, err
 	}
@@ -266,6 +266,7 @@ func (s *Store) RollbackCuration(
 		ReplayRequestID:  replayRequest.ID,
 		ReplayGeneration: replayRequest.RequestGeneration, CreatedAt: mutation.CreatedAt,
 	}
+	observeMemoryCurationTransitionTx(tx, MemoryCurationRunApplied, MemoryCurationRunRolledBack)
 	if err := tx.Commit(ctx); err != nil {
 		return RollbackMemoryCurationResult{}, err
 	}

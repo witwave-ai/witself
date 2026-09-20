@@ -19,6 +19,7 @@ type Store struct {
 	avatarPayloadCompactionEnabled bool
 	supportTicketRateLimit         SupportTicketRateLimitConfig
 	auditAppendFailures            atomic.Uint64
+	memoryCurationMetrics          memoryCurationMetrics
 }
 
 // AuditAppendFailures returns failed account_events INSERT attempts made by

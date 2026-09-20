@@ -122,7 +122,7 @@ func (s *Store) ApplyCuration(
 		return ApplyMemoryCurationResult{}, ErrMemoryCurationInputInvalid
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
@@ -335,6 +335,7 @@ func (s *Store) ApplyCuration(
 		receipt.FollowUpRequestID = followUp.ID
 		receipt.FollowUpGeneration = followUp.RequestGeneration
 	}
+	observeMemoryCurationTransitionTx(tx, MemoryCurationRunPlanned, MemoryCurationRunApplied)
 	if err := tx.Commit(ctx); err != nil {
 		return ApplyMemoryCurationResult{}, err
 	}
@@ -1213,6 +1214,7 @@ func (s *Store) markMemoryCurationApplyConflictTx(
 	}); err != nil {
 		return err
 	}
+	observeMemoryCurationTransitionTx(tx, run.State, MemoryCurationRunConflict)
 	return s.logMemoryCurationEventTx(ctx, tx, p, VerbMemoryCurationConflicted,
 		run.RequestID, run.ID, run.RequestGeneration, run.FencingGeneration,
 		MemoryCurationRunConflict)

@@ -104,6 +104,7 @@ func TestMemoryCurationRollbackLateFailurePostgres(t *testing.T) {
 		Reason: "verify late receipt failure is atomic", IdempotencyKey: "rollback-late-retry",
 	}
 	before := rollbackFailureSnapshot(ctx, t, st, p)
+	metricsBefore := st.MemoryCurationCounters()
 	removeFault := installRollbackReceiptSuppression(ctx, t, st, p, started.Run.ID,
 		createdID, in, sequence, generation, active)
 	_, err = st.RollbackCuration(ctx, p, started.Run.ID, in)
@@ -115,6 +116,7 @@ func TestMemoryCurationRollbackLateFailurePostgres(t *testing.T) {
 	if after := rollbackFailureSnapshot(ctx, t, st, p); !reflect.DeepEqual(after, before) {
 		t.Fatal("failed rollback committed staged durable state")
 	}
+	assertMemoryCurationCounters(t, st, metricsBefore)
 	removeFault()
 
 	// A fresh one-connection pool cannot inherit the failed caller's locks.

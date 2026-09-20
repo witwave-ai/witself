@@ -45,7 +45,8 @@ func TestConfigureMemoryCurationWiresCompleteSurface(t *testing.T) {
 		cfg.RenewMemoryCuration == nil || cfg.PlanMemoryCuration == nil ||
 		cfg.ApplyMemoryCuration == nil || cfg.CancelMemoryCuration == nil ||
 		cfg.AbandonMemoryCuration == nil || cfg.RollbackMemoryCuration == nil ||
-		cfg.GetMemoryCurationStatus == nil || cfg.GetSelfMemoryCheckpoint == nil {
+		cfg.GetMemoryCurationStatus == nil || cfg.GetSelfMemoryCheckpoint == nil ||
+		cfg.ReadMemoryCurationCounters == nil || cfg.ReadMemoryCurationQueueMetrics == nil {
 		t.Fatal("configureMemoryCuration left part of the public surface unwired")
 	}
 }

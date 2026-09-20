@@ -1,0 +1,211 @@
+---
+rule_files:
+- "../files/memory.rules.yaml"
+evaluation_interval: 1m
+tests:
+- name: sustained old backlog lease expiries and malformed plans aggregate across
+    targets without target labels
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+8x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 1+0x40
+  - series: witself_memory_curation_lease_events_total{event="expire",instance="server-a"}
+    values: 0+3x40
+  - series: witself_memory_curation_lease_events_total{event="start",instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_operations_total{operation="plan",result="error",instance="server-a"}
+    values: 0+3x40
+  - series: witself_memory_curation_operations_total{operation="apply",result="success",instance="server-b"}
+    values: 0+7x40
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: More than 10 percent of curation queue observations exceed 15 minutes.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+  - eval_time: 16m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Curation lease expirations exceed 20 percent of starts.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+  - eval_time: 16m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Curation plan and apply errors exceed 20 percent of attempts.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+  - eval_time: 15m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Curation lease expirations exceed 20 percent of starts.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+  - eval_time: 11m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Curation plan and apply errors exceed 20 percent of attempts.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+- name: exact thresholds stay quiet
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+9x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 1+0x40
+  - series: witself_memory_curation_lease_events_total{event="expire",instance="server-a"}
+    values: 0+2x40
+  - series: witself_memory_curation_lease_events_total{event="start",instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_operations_total{operation="plan",result="error",instance="server-a"}
+    values: 0+2x40
+  - series: witself_memory_curation_operations_total{operation="apply",result="success",instance="server-b"}
+    values: 0+8x40
+  alert_rule_test:
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []
+- name: low traffic does not create failure ratio alerts
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 1+0x40
+  - series: witself_memory_curation_lease_events_total{event="expire",instance="server-a"}
+    values: 0+0x10 1+0x30
+  - series: witself_memory_curation_lease_events_total{event="start",instance="server-a"}
+    values: 0+0x10 1+0x30
+  - series: witself_memory_curation_operations_total{operation="plan",result="error",instance="server-a"}
+    values: 0+0x10 1+0x30
+  - series: witself_memory_curation_operations_total{operation="apply",result="success",instance="server-b"}
+    values: 0+0x40
+  alert_rule_test:
+  - eval_time: 24m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 24m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 24m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []
+- name: idle counters do not alert
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_lease_events_total{event="expire",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_lease_events_total{event="start",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_operations_total{operation="plan",result="error",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_operations_total{operation="apply",result="success",instance="server-b"}
+    values: 0+0x40
+  alert_rule_test:
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []
+- name: absent metrics do not synthesize failures
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []
+- name: cleared queue and unrelated operation errors do not alert
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+8x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_lease_events_total{event="expire",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_lease_events_total{event="start",instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_operations_total{operation="plan",result="error",instance="server-a"}
+    values: 0+0x40
+  - series: witself_memory_curation_operations_total{operation="apply",result="success",instance="server-b"}
+    values: 0+7x40
+  - series: witself_memory_curation_operations_total{operation="start",result="error"}
+    values: 0+100x40
+  - series: witself_memory_curation_run_transitions_total{from="open",to="abandoned"}
+    values: 0+100x40
+  alert_rule_test:
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationLeaseExpiryRatioHigh
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: WitselfMemoryCurationRunFailureRatioHigh
+    exp_alerts: []

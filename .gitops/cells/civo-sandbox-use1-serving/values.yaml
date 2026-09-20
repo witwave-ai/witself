@@ -205,6 +205,8 @@ platform:
       enabled: true
     sealedPlaneAlerts:
       enabled: true
+    memoryAlerts:
+      enabled: false
     postgresBackupAlerts:
       enabled: true
     postgresql:

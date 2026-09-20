@@ -860,6 +860,9 @@ func (s *Store) interruptExpiredCurationRunTx(ctx context.Context, tx pgx.Tx, p 
 		MemoryCurationRunInterrupted); err != nil {
 		return false, err
 	}
+	observeMemoryCurationTransitionTx(tx, run.State, MemoryCurationRunInterrupted)
+	observeMemoryCurationLeaseEventTx(tx, "expire")
+	observeMemoryCurationLeaseEventTx(tx, "reconcile")
 	return true, nil
 }
 
@@ -1491,7 +1494,7 @@ func (s *Store) StartCuration(ctx context.Context, p Principal, in StartMemoryCu
 	if err != nil {
 		return StartMemoryCurationResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return StartMemoryCurationResult{}, err
 	}
@@ -1671,6 +1674,8 @@ func (s *Store) StartCuration(ctx context.Context, p Principal, in StartMemoryCu
 	if err != nil {
 		return StartMemoryCurationResult{}, err
 	}
+	observeMemoryCurationTransitionTx(tx, "none", MemoryCurationRunOpen)
+	observeMemoryCurationLeaseEventTx(tx, "start")
 	if err := tx.Commit(ctx); err != nil {
 		return StartMemoryCurationResult{}, err
 	}
@@ -1701,7 +1706,7 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 	if err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
@@ -1825,6 +1830,7 @@ func (s *Store) RenewCuration(ctx context.Context, p Principal, runID string, in
 	if err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
+	observeMemoryCurationLeaseEventTx(tx, "renew")
 	if err := tx.Commit(ctx); err != nil {
 		return RenewMemoryCurationResult{}, err
 	}
@@ -1875,7 +1881,7 @@ func (s *Store) finishCuration(ctx context.Context, p Principal, runID string, i
 	if err != nil {
 		return FinishMemoryCurationResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return FinishMemoryCurationResult{}, err
 	}
@@ -1938,6 +1944,7 @@ func (s *Store) finishCuration(ctx context.Context, p Principal, runID string, i
 		WHERE id=$1 AND state IN ('open','planned')`, run.ID, in.Reason); err != nil {
 		return FinishMemoryCurationResult{}, fmt.Errorf("abandon curation run: %w", err)
 	}
+	observeMemoryCurationTransitionTx(tx, run.State, MemoryCurationRunAbandoned)
 	requestResultState := MemoryCurationRequestCancelled
 	if requeue {
 		// An accepted preview is a successful, non-mutating inspection rather

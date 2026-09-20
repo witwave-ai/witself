@@ -377,6 +377,10 @@ spec:
 {{ if or $monitoring.alerting.enabled $postgresBackupRules }}
         additionalPrometheusRulesMap:
 {{ if $monitoring.alerting.enabled }}
+{{ if $monitoring.memoryAlerts.enabled }}
+          memory:
+{{ .Files.Get "files/memory.rules.yaml" | nindent 12 }}
+{{ end }}
           founder-open-plane:
 {{- $founderGroups := list }}
 {{- range $group := (fromYaml (.Files.Get "files/founder-open-plane.rules.yaml")).groups }}

@@ -99,6 +99,8 @@ apps:
         tokenKey: token
 platform:
   monitoring:
+    memoryAlerts:
+      enabled: false
     postgresBackupAlerts:
       enabled: false
   awsAlbIngress:

@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -47,6 +48,9 @@ type Config struct {
 	// ReadSealedPlanePostureMetrics supplies cell-wide, value-free sealed-plane
 	// posture for /metrics; nil omits the gauges.
 	ReadSealedPlanePostureMetrics func(context.Context) (SealedPlanePostureMetrics, error)
+	// Curation counters are process-local; the queue reader observes the cell.
+	ReadMemoryCurationCounters     func() MemoryCurationCounters
+	ReadMemoryCurationQueueMetrics func(context.Context) (MemoryCurationQueueMetrics, error)
 	// These readers expose value-free cell aggregates through independent 2 s
 	// sequential reads on /metrics. Nil readers omit their metric families.
 	ReadIdentityCapacityMetrics func(context.Context) (IdentityCapacityMetrics, error)
@@ -2270,7 +2274,7 @@ func Run(ctx context.Context, cfg Config) error {
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMuxFor(
 			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics,
-			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics)},
+			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics, cfg.ReadMemoryCurationCounters, cfg.ReadMemoryCurationQueueMetrics)},
 	}
 
 	type running struct {
@@ -7016,7 +7020,7 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil)
+	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil)
 }
 
 func metricsMuxFor(
@@ -7026,10 +7030,24 @@ func metricsMuxFor(
 	readIdentityCapacity func(context.Context) (IdentityCapacityMetrics, error),
 	readAuditAppend func(context.Context) (AuditAppendMetrics, error),
 	readSealedPlanePosture func(context.Context) (SealedPlanePostureMetrics, error),
+	readMemoryCurationCounters func() MemoryCurationCounters,
+	readMemoryCurationQueue func(context.Context) (MemoryCurationQueueMetrics, error),
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		// Overlap the curation projection with existing database collectors so
+		// its two-second deadline does not consume the remaining margin in the
+		// default ten-second scrape timeout. Only this handler writes w.
+		var curationOutput chan []byte
+		if readMemoryCurationCounters != nil || readMemoryCurationQueue != nil {
+			curationOutput = make(chan []byte, 1)
+			go func() {
+				var output bytes.Buffer
+				metrics.writeMemoryCurationPrometheus(r.Context(), &output, readMemoryCurationCounters, readMemoryCurationQueue)
+				curationOutput <- output.Bytes()
+			}()
+		}
 		metrics.writePrometheus(w)
 		writeAgentEmailCellStoragePrometheus(
 			r.Context(), w, readAgentEmailCellStorage,
@@ -7038,6 +7056,9 @@ func metricsMuxFor(
 		writeSealedPlanePosturePrometheus(r.Context(), w, readSealedPlanePosture)
 		writeIdentityCapacityPrometheus(r.Context(), w, readIdentityCapacity)
 		writeAuditAppendPrometheus(r.Context(), w, readAuditAppend)
+		if curationOutput != nil {
+			_, _ = w.Write(<-curationOutput)
+		}
 	})
 	return securityResponseHeaders(mux)
 }

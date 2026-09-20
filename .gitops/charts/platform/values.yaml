@@ -112,6 +112,10 @@ platform:
       # Enable only after the server release exposes healthy sealed posture
       # metrics and the material-delivery and vault-lifecycle counters.
       enabled: false
+    memoryAlerts:
+      # Enable only after memory-curation metrics are healthy in the serving cell.
+      # This opt-in reuses the existing alert receiver configuration.
+      enabled: false
     postgresBackupAlerts:
       # The cell catalog couples this opt-in to the encrypted daily dump.
       # It never enables the monitoring stack on an unmonitored cell.

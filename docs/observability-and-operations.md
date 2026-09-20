@@ -237,10 +237,12 @@ Initial metric families should include:
 | `witself_self_digest_read_duration_seconds` | Server-side self-digest request latency histogram by the same closed `surface`. The digest path performs no model call. |
 | `witself_self_digest_elided_entries` | Histogram of known omitted fact and memory entries per self read, by the same closed `surface`. Includes encoded byte-budget trimming and, only with `include_counts=true`, exact store selection omissions. With counts disabled, pagination overflow is unknown and excluded from this histogram; it still sets `elided=true` on `witself_self_digest_reads_total`. A zero observation therefore does not imply a complete digest. |
 | `witself_memory_curation_operations_total` | Completed curation domain calls by operation (`start`, `renew`, `plan`, `apply`, `cancel`, `abandon`, `rollback`) and result. Successful idempotent replays count as calls, not as proven state transitions. |
-| `witself_memory_curation_requests` | Due curation requests by bounded state/priority class. No transcript or memory content is exposed. |
-| `witself_memory_curation_runs_total` | Client-run curation transitions by state (`started`, `planned`, `applied`, `conflict`, `abandoned`, `interrupted`, `rolled_back`) and result. |
+| `witself_memory_curation_run_transitions_total` | Committed run state transitions, with only closed `from` and `to` labels. Run states are `open`, `planned`, `applied`, `rolled_back`, `abandoned`, `interrupted`, and `conflict`; `from="none"` marks creation, cancellation becomes `abandoned`, and lease expiry becomes `interrupted`. Successful idempotent replays do not count again. |
+| `witself_memory_curation_queue_age_seconds` | Histogram of the oldest due, unclaimed request's age at observation time, aggregated across the cell. This measures queue observations, not the distribution of individual request wait times. No tenant labels; only the standard histogram bucket label `le`. |
+| `witself_memory_curation_requests_pending` | Unlabeled cell-wide gauge of unclaimed `queued` and `retry_wait` requests, including requests not yet due, from the same read-only queue snapshot. |
+| `witself_memory_curation_queue_metrics_up` | Unlabeled queue reader health: 1 for a valid snapshot, 0 on failure or invalid values. Failed reads omit the queue histogram and pending gauge; committed transition and lease counters remain available. |
 | `witself_memory_curation_actions_total` | Caller-authored plan actions by primitive (`create`, `replace`, `supersede`, `relate`, `propose_fact`), mode (`preview`, `apply`, `rollback`), and result. |
-| `witself_memory_curation_lease_events_total` | Durable lease claim, renew, fence, expire, and release events by result. Pending store/audit-point instrumentation; API-call success is not treated as proof that a new lease event occurred. |
+| `witself_memory_curation_lease_events_total` | Committed lease events with only the closed `event` label: `start`, `renew`, `expire`, or `reconcile`. Successful idempotent replays do not count again. |
 | `witself_session_operations_total` | Session lifecycle operations by `phase` (`start`, `end`), owner kind, and result. |
 | `witself_ingest_operations_total` | Ingest runs (CLAUDE.md/AGENTS.md/GEMINI.md import) by `mode` (`dry_run`, `apply`) and result. Source labels are never raw file paths. |
 | `witself_ingest_records_total` | Records produced by ingest by `outcome` (`fact_added`, `memory_added`, `duplicate_skipped`). |
@@ -765,6 +767,77 @@ the server release would page. Source tests and the feature-catalog gate are
 implementation evidence, not evidence that production has been rolled or that
 these objectives have been met. See [Sealed-plane alerts](runbooks.md#sealed-plane-alerts)
 for response actions and rollout acceptance.
+
+## Memory And Curation Instrumentation
+
+The curation transition and lease counters observe committed store mutations
+within each server process and reset on restart. They are not a historical
+database census. Events become visible only after the outer SQL transaction
+commits; rolled-back transactions and idempotent replays do not add events.
+Committed expiry reconciliation and apply conflicts still count when the API
+returns their existing domain error. The existing
+`witself_memory_curation_operations_total`
+instead measures completed domain calls, including idempotent replays and
+failures that leave run state unchanged. Use the operation counter to identify
+repeated malformed plans; a run transition alone cannot observe that failure.
+Request state `cancelled` is not a run state: cancel and abandon transition the
+run to `abandoned`. Expired leases transition the run to `interrupted` when the
+existing store reconciliation executes; scraping never reconciles work.
+Exhausted retries can move a request to `dead_letter`; that is also a request
+state, not an additional run state.
+The nine exported transition pairs are `none` to `open`, `open` to `planned`,
+`planned` to `applied`, `applied` to `rolled_back`, `open` or `planned` to
+`abandoned`, `open` or `planned` to `interrupted`, and `planned` to `conflict`.
+A successful fresh claim emits `start`; a fresh heartbeat emits `renew`.
+Durable expiry interruption and its retry/dead-letter reconciliation emit both
+`expire` and `reconcile`.
+
+The queue reader has a two-second deadline and runs concurrently with the
+existing collectors, so its deadline does not add to their sequential scrape
+budget. It returns only cell-wide aggregate observations, without account,
+realm, agent, request, or run labels. Each successful queue read during a scrape
+adds one histogram observation of the oldest due, unclaimed
+request's age, or zero when no request is due. Bucket boundaries are 0, 30, 60,
+300, 900, 1,800, 3,600, 21,600, and 86,400 seconds, plus `+Inf`. The pending
+gauge includes unclaimed `queued` and `retry_wait` requests even when their due
+time is still in the future. Both queue projections cover active accounts and
+undeleted realms/agents, and queue age uses the database clock. A failed or
+invalid read emits
+`witself_memory_curation_queue_metrics_up 0` and omits the histogram and pending
+gauge rather than reporting zero outstanding work; committed counters remain
+available independently. The histogram does not measure every request's waiting
+time or the time an active client spends reviewing a plan. Closed state and
+event labels exclude identifiers, content, and error text.
+
+The `witself-memory` rule group contains three provisional warnings:
+
+| Rule | Threshold |
+| --- | --- |
+| `WitselfMemoryCurationBacklogAgeHigh` | More than 10% of oldest-due-unclaimed queue-age observations exceed 900 seconds over 15 minutes, with pending requests still present, sustained for 15 minutes. |
+| `WitselfMemoryCurationLeaseExpiryRatioHigh` | Lease `expire` events exceed 20% of `start` events over 15 minutes, with at least five starts, sustained for 10 minutes. This compares observed events, not a matched cohort of runs. |
+| `WitselfMemoryCurationRunFailureRatioHigh` | `plan` and `apply` calls with `result="error"` exceed 20% of all `plan` and `apply` calls over 15 minutes, with at least five calls, sustained for 10 minutes. This is an operation-failure proxy, not the fraction of unique failed runs. |
+
+All three use `severity="warning"`, `service="memory-curation"`, and
+`witself_alert="true"`. Inspect backlog trends and foreground-client activity
+for backlog warnings; compare renewals and expiry with client completion time
+for lease warnings; inspect value-free plan/apply outcomes and existing
+validation behavior for failure warnings. An `abandoned` or `interrupted` run
+alone does not establish a malformed plan or server failure.
+
+The group requires monitoring, alerting, and its own default-off
+`platform.monitoring.memoryAlerts.enabled` switch, generated from the catalog's
+`memory_alerts` switch. Checked-in values keep it off for both
+`civo-sandbox-use1-serving` and `civo-sandbox-use1-backup`. It uses the existing
+incident receiver configuration without changing routes or credentials.
+
+Issue #46 item 1's instrumentation half is implemented in source; activation
+remains pending. Release compatible server metrics, verify aggregate scrapes
+from every serving replica, establish a measured baseline for these provisional
+thresholds, then enable the group and retain firing and resolved receiver
+evidence through the deployment owner's rollout. Source, chart, and Prometheus
+rule tests do not establish production activation or narrative-memory
+readiness. The existing serving-cell monitoring phase 3 remains independent of
+this disabled group.
 
 ## Alerts And Dashboards
 

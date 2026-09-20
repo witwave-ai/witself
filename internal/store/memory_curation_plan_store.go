@@ -286,7 +286,7 @@ func (s *Store) PlanCuration(
 		return PlanMemoryCurationResult{}, memoryCurationInputInvalid(err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginMemoryCurationMetricsTx(ctx)
 	if err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
@@ -444,6 +444,7 @@ func (s *Store) PlanCuration(
 		run.State); err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
+	observeMemoryCurationTransitionTx(tx, MemoryCurationRunOpen, MemoryCurationRunPlanned)
 	if err := tx.Commit(ctx); err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
