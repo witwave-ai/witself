@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/billing"
@@ -555,7 +556,8 @@ type Config struct {
 
 // Manager runs the plan state machine.
 type Manager struct {
-	cfg Config
+	cfg                  Config
+	stripeWebhookReplays atomic.Uint64
 
 	// applyMu serializes apply() PER ACCOUNT. The state machine's own
 	// concurrency (CAS on Record.Version) prevents lost writes. The mutex
@@ -564,6 +566,13 @@ type Manager struct {
 	// stale or conflicting snapshots.
 	applyMuMap sync.Mutex
 	applyMu    map[string]*sync.Mutex
+}
+
+// StripeWebhookReplays is a process-lifetime count of webhook deliveries that
+// encountered an already-processed durable Stripe receipt. Reconciliation's
+// pending-index repairs are excluded, and no provider identity is retained.
+func (m *Manager) StripeWebhookReplays() uint64 {
+	return m.stripeWebhookReplays.Load()
 }
 
 // NewManager validates cfg and returns a Manager.
@@ -2745,7 +2754,7 @@ func (m *Manager) OnEvents(ctx context.Context, provider string, events []billin
 		if err != nil {
 			return err
 		}
-		if err := m.processReceipt(ctx, store, stored); err != nil {
+		if err := m.processReceipt(ctx, store, stored, true); err != nil {
 			return err
 		}
 	}
@@ -2760,11 +2769,15 @@ func (m *Manager) processReceipt(
 	ctx context.Context,
 	store EventReceiptStore,
 	receipt EventReceipt,
+	webhookDelivery bool,
 ) error {
 	if err := validateEventReceipt(receipt); err != nil {
 		return fmt.Errorf("billing event store returned an invalid receipt: %w", err)
 	}
 	if receipt.Status == EventReceiptProcessed {
+		if webhookDelivery && receipt.Provider == "stripe" {
+			m.stripeWebhookReplays.Add(1)
+		}
 		return store.CompleteEvent(
 			ctx, receipt, *receipt.ProcessedAt)
 	}
@@ -2781,6 +2794,9 @@ func (m *Manager) processReceipt(
 	// Another worker may have completed between ReceiveEvent/PendingEvents and
 	// this claim attempt. Repair only its pending-index cleanup; never refold.
 	if claimed.Status == EventReceiptProcessed {
+		if webhookDelivery && claimed.Provider == "stripe" {
+			m.stripeWebhookReplays.Add(1)
+		}
 		return store.CompleteEvent(
 			ctx, claimed, *claimed.ProcessedAt)
 	}
@@ -3163,7 +3179,7 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 			firstErr = receiptErr
 		}
 		for _, receipt := range receipts {
-			if receiptErr := m.processReceipt(ctx, receiptStore, receipt); receiptErr != nil &&
+			if receiptErr := m.processReceipt(ctx, receiptStore, receipt, false); receiptErr != nil &&
 				firstErr == nil {
 				firstErr = receiptErr
 			}

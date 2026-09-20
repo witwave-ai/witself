@@ -1171,12 +1171,55 @@ Targets skipped before their first check emit only `witself_probe_skipped 1`:
 | `witself_probe_last_check_timestamp_seconds{target="<name>"}` | Last completed check time as Unix seconds; unchanged by skips and omitted without an observation. |
 | `witself_probe_http_status{target="<name>"}` | Last completed probe's HTTP status **class** (`1`–`5`); `0` when no HTTP response was available; omitted without an observation. |
 
+The same endpoint also exports Stripe and billing observations from the
+control-plane Go container, where webhook verification and reconciliation run.
+The existing authenticated lifecycle cron acknowledgement carries an optional
+`stripe_observation` snapshot. The Worker stores it with the existing private
+lifecycle cursor checkpoint in one KV write, then projects only fixed fields
+through `/metrics/probes`. Scraping does not call or wake the container. This
+uses the existing five-minute maintenance trigger and authentication; it adds
+no trigger, token, or namespace. Failure to store optional metadata falls back
+to the original cursor envelope, preserving the existing reconciliation flow.
+
+| Metric | Meaning |
+| --- | --- |
+| `witself_cp_stripe_webhook_events_total{outcome="verified"\|"rejected"\|"replayed"}` | Process-lifetime webhook observations. `verified` and `rejected` count verification attempts; verified requests include duplicates, zero-event deliveries, and requests whose later processing fails. `replayed` counts normalized deliveries whose durable receipt was already processed and overlaps verified observations. Do not sum the three outcomes as unique events. |
+| `witself_cp_billing_reconciliation_lag_seconds` | Age of the oldest observed pending billing-mutation receipt from the bounded pre-reconciliation batch scan. An older observation survives incomplete or failed scans; a complete empty scan clears it to `0`. Omitted when no valid observation establishes either pending work or an empty scan. |
+| `witself_cp_billing_reconciliation_failures_total` | Process-lifetime account and billing-mutation reconciliation failures, including failed scans that produce no item-level failure. |
+
+`outcome` is the only application label in these three families, with exactly
+the three values above; the lag and failure series have no application labels.
+Account, customer, subscription, event, receipt, and cursor identifiers never
+appear in their names or labels. Counters are sampled by the lifecycle cron,
+reset when the container process restarts, and can lose increments between
+the last persisted sample and a restart. They are operational observations,
+not a durable accounting ledger. The lag measures observed mutation receipts,
+not the global oldest unreconciled item, all Stripe events, or fleet-wide
+backlog completeness; bounded selection can miss older work. A retained
+timestamp continues ageing at scrape time until a later valid scan replaces
+it, even when that receipt was repaired during the previous batch.
+
+Disabled lifecycle scheduling, manual/fake acknowledgements, and malformed or
+missing snapshots do not manufacture a fresh observation or zero-valued Stripe
+series. Inspect the existing `witself_entitlement_delivery_metrics_up`,
+`snapshot_state`, and `last_ack_timestamp_seconds` families for checkpoint
+availability and freshness. When separately enabled, the
+`WitselfEntitlementDeliveryMetricsUnavailable` and
+`WitselfEntitlementDeliverySchedulerStale` alerts cover missing/invalid
+checkpoints and stale acknowledgements; see
+[entitlement delivery monitoring](billing-and-limits.md#entitlement-delivery-monitoring).
+A fresh, valid entitlement checkpoint can still lack its optional Stripe
+snapshot, so these checkpoint alerts do not detect Stripe-only absence.
+
 The platform chart gates the `witself-probes` scrape job and its rules behind
-`platform.monitoring.uptimeProbes.enabled`, which defaults to `false` and is
-enabled only in `civo-sandbox-usw2-dev`. That serving cell's Prometheus scrapes
-the HTTPS endpoint every 60 seconds. The rules in
+`platform.monitoring.uptimeProbes.enabled`, which defaults to `false`. The
+serving-cell rollout target is `civo-sandbox-use1-serving`; its checked-in
+values currently leave this gate and incident alerting disabled. The owner
+must enable the relevant values and deploy the control-plane change. Once
+enabled, the serving cell's Prometheus scrapes the HTTPS endpoint every
+60 seconds. The rules in
 [uptime-probes.rules.yaml](../.gitops/charts/platform/files/uptime-probes.rules.yaml)
-cover target failures and the scheduler itself:
+cover target failures, the scheduler, and the Stripe observations:
 
 - `WitselfProbeTargetDown`: `last_over_time(witself_probe_up[5m]) == 0` for ten
   minutes, critical. The five-minute lookback bridges brief scrape failures;
@@ -1210,6 +1253,23 @@ cover target failures and the scheduler itself:
   budget. Skips retain previous observations without creating a new failure or
   resetting an existing target-down or stale-check alert. A successful completed
   check replaces the observation and clears the target's skipped metric.
+- `WitselfStripeWebhookRejections`: the summed rejected webhook rate over
+  15 minutes exceeds `0.01` per second (more than nine per 15 minutes), sustained
+  for five minutes, critical. Investigate Stripe endpoint/signing configuration
+  and rejected traffic. This observes verification rejection; a verified request
+  that later returns a processing error does not increase the rejected counter.
+- `WitselfBillingReconciliationStalled`: observed lag exceeds 900 seconds and
+  reconciliation failures increased within the preceding 15 minutes, with both
+  conditions sustained for five minutes, critical. Investigate failed lifecycle
+  or billing-mutation reconciliation and its pending receipts. Old work alone
+  and failures without old observed work do not fire this alert. Catching up or
+  having no failures within the 15-minute window clears the condition.
+
+Both Stripe alerts remain silent when their required series are absent. Their
+counter snapshots and lag sample do not establish complete coverage of missing
+webhook deliveries, all webhook HTTP 5xx responses, or a stopped lifecycle cron.
+Use checkpoint freshness alerts and probe availability alerts alongside them;
+absence of a Stripe alert is not proof of healthy billing.
 
 These alerts use the existing Alertmanager incident route and PagerDuty
 receiver. No PagerDuty key is copied into the control plane; alerting stays in
@@ -1248,7 +1308,7 @@ The normal control-plane deployment installs the cell probe handler and metrics
 endpoint with the CP target disabled. After deploy, verify that the Worker has
 exactly two Cron Triggers: `*/5 * * * *` for maintenance and `1,6,11,16,21,26,31,36,41,46,51,56 * * * *` for
 probes. The normal GitOps sync applies the serving cell's scrape job and rules;
-a CP deployment alone
+enable its monitoring values before that sync. A CP deployment alone
 does not update the cell's monitoring chart. This source change does not claim
 that either deployment has occurred.
 
