@@ -1362,8 +1362,10 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Encrypted pre-migration backups and disposable restore validation exist; provider PITR, committed production restore, and multi-cell movement drills remain incomplete.",
+          "summary": "Pre-migration backups and restore validation exist. Daily age-encrypted PostgreSQL dumps to R2 and staleness/failure alerts are implemented, default off. Credentialed activation, scheduled restore evidence, provider PITR, production restore, and multi-cell movement drills remain incomplete.",
           "evidence": [
+            ".gitops/charts/apps/templates/civo-postgres-backup.yaml",
+            ".gitops/charts/platform/files/postgres-backup.rules.yaml",
             "cmd/witself-admin/backup_evidence_cmd.go",
             "docs/backup-and-recovery.md",
             "docs/deployment-cells.md"

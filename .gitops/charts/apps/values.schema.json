@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "apps": {
+      "type": "object",
+      "properties": {
+        "civoPostgres": {
+          "type": "object",
+          "properties": {
+            "backup": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "enabled",
+                "schedule",
+                "activeDeadlineSeconds",
+                "image",
+                "ageRecipientSecretName",
+                "r2SecretName"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "schedule": {
+                  "type": "string",
+                  "minLength": 9
+                },
+                "activeDeadlineSeconds": {
+                  "type": "integer",
+                  "minimum": 60,
+                  "maximum": 7200
+                },
+                "image": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "ageRecipientSecretName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                },
+                "r2SecretName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

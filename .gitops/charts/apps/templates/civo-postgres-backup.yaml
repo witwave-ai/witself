@@ -1,0 +1,112 @@
+{{- $pg := .Values.apps.civoPostgres -}}
+{{- $backup := $pg.backup -}}
+{{- if $backup.enabled }}
+{{- if not (and $pg.enabled (eq .Values.cell.cloud "civo")) }}
+{{- fail "apps.civoPostgres.backup.enabled requires Civo PostgreSQL" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: witself-postgresql-backup
+  namespace: {{ $pg.namespace | quote }}
+data:
+  backup.sh: |
+{{ .Files.Get "files/postgres-backup.sh" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: witself-postgresql-backup
+  namespace: {{ $pg.namespace | quote }}
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+spec:
+  schedule: {{ $backup.schedule | quote }}
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $backup.activeDeadlineSeconds }}
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: witself-postgresql-backup
+            witself.io/cell: {{ .Values.cell.name | quote }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: {{ $backup.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: [/bin/bash, /scripts/backup.sh]
+              securityContext:
+                # apk installs age/aws-cli before the encrypted streaming job.
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              env:
+                - name: PGHOST
+                  value: witself-postgresql
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: witself
+                - name: METRICS_DATABASE
+                  value: postgres
+                - name: PGUSER
+                  value: witself_backup_dump
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.r2SecretName is required" $backup.r2SecretName | quote }}
+                      key: dump-password
+                - name: METRICS_USER
+                  value: witself_backup_metrics
+                - name: METRICS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.r2SecretName is required" $backup.r2SecretName | quote }}
+                      key: metrics-password
+                - name: CELL_NAME
+                  value: {{ .Values.cell.name | quote }}
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: AGE_RECIPIENT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.ageRecipientSecretName is required" $backup.ageRecipientSecretName | quote }}
+                      key: recipient
+                {{- range $env, $key := dict "AWS_ACCESS_KEY_ID" "access-key-id" "AWS_SECRET_ACCESS_KEY" "secret-access-key" "R2_ENDPOINT" "endpoint" "R2_BUCKET" "bucket" "R2_PREFIX" "prefix" }}
+                - name: {{ $env }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.r2SecretName is required" $backup.r2SecretName | quote }}
+                      key: {{ $key }}
+                {{- end }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: witself-postgresql-backup
+{{- end }}

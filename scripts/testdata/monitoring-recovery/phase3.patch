@@ -2,7 +2,7 @@ diff --git a/.gitops/cells/catalog.yaml b/.gitops/cells/catalog.yaml
 index 6bbc712a..2916a8f4 100644
 --- a/.gitops/cells/catalog.yaml
 +++ b/.gitops/cells/catalog.yaml
-@@ -66,8 +66,8 @@ cells:
+@@ -66,9 +66,9 @@ cells:
      switches:
        domain_documentation_only: true
        monitoring: true
@@ -10,6 +10,7 @@ index 6bbc712a..2916a8f4 100644
 -      sealed_plane_alerts: false
 +      collector_alerts: true
 +      sealed_plane_alerts: true
+       postgres_backup: false
    civo-sandbox-usw2-dev:
      cloud: civo
      region: phx1
@@ -17,7 +18,7 @@ diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells
 index 5c59457c..ce652601 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -168,16 +168,42 @@ apps:
+@@ -168,18 +168,44 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -39,6 +40,8 @@ index 5c59457c..ce652601 100644
      sealedPlaneAlerts:
 -      enabled: false
 +      enabled: true
+     postgresBackupAlerts:
+       enabled: false
 +    postgresql:
 +      enabled: true
 +    nodeExporter:
@@ -108,7 +111,7 @@ diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl 
 index 4564dfd9..0da76d2b 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-@@ -154,16 +154,48 @@ apps:
+@@ -154,18 +154,50 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -136,6 +139,8 @@ index 4564dfd9..0da76d2b 100644
 -      enabled: {{.SealedPlaneAlerts}}
 +      enabled: true
 +{{- end }}
+     postgresBackupAlerts:
+       enabled: {{.PostgresBackup}}
 +    postgresql:
 +      enabled: true
 +    nodeExporter:

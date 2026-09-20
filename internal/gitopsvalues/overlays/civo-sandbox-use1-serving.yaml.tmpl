@@ -4,6 +4,8 @@ apps:
     namespace: witself
     chartVersion: {{.CivoPostgresChartVersion}}
     authSecretName: witself-postgresql-auth
+    backup:
+      enabled: {{.PostgresBackup}}
     storage: 8Gi
     # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
     # Micro adds headroom; the other Civo cells inherit nano.
@@ -188,6 +190,8 @@ platform:
       enabled: {{.CollectorAlerts}}
     sealedPlaneAlerts:
       enabled: {{.SealedPlaneAlerts}}
+    postgresBackupAlerts:
+      enabled: {{.PostgresBackup}}
   awsAlbIngress:
     enabled: false
   certManager:

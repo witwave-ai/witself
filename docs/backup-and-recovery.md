@@ -786,6 +786,164 @@ future incident that genuinely requires cutover needs a separately designed
 and reviewed promotion protocol. Alias activation remains off until a
 successful restore drill and the other acceptance prerequisites complete.
 
+### Scheduled PostgreSQL backups
+
+The cell apps chart includes a **default-off** daily logical dump to Cloudflare
+R2, outside the Kubernetes provider. `civo-sandbox-use1-serving` and
+`civo-sandbox-use1-backup` both keep
+`switches.postgres_backup: false` in `.gitops/cells/catalog.yaml`. No credential,
+bucket policy change, or live activation accompanies this implementation.
+This is **not PITR**: there is no WAL archive or recovery between dumps, and a
+successful daily schedule can still lose nearly 24 hours of writes. It does not
+replace the separate pre-migration backup and restore-validation gate below.
+
+`witself-postgresql-backup` runs at 03:00 UTC with `concurrencyPolicy: Forbid`,
+no automatic retry, a one-hour deadline, and one successful/three failed Job
+records retained. It streams `pg_dump --no-owner --no-privileges | gzip | age -r`
+to the S3 API. Plaintext dump files are never written. Each object is first
+uploaded with an `.incomplete` suffix and promoted within the same bucket/prefix
+only after every pipeline stage succeeds and R2 reports a nonzero encrypted
+object size. The final object is
+`<prefix>/<cell>/<UTC-timestamp>-<pod-uid>.sql.gz.age`. Failed attempts try to
+remove the staging object; interrupted uploads may leave incomplete objects or
+multipart uploads for operator cleanup under the existing bucket policy.
+
+The PostgreSQL 18 Alpine image supplies `pg_dump`, `psql`, Bash, and gzip;
+the Job installs `age` and `aws-cli` from that image's signed Alpine repositories
+at startup. Consequently it needs outbound HTTPS to those repositories and R2,
+and the container starts as root for package installation. Package availability
+is a runtime dependency; a failed install fails the Job and records a failed
+attempt when the telemetry database remains reachable. The image is configurable
+under `apps.civoPostgres.backup.image` and must retain this command/package
+contract. The dump uses the read-only `witself_backup_dump` login; run telemetry
+uses `witself_backup_metrics`, with write privileges only on its dedicated
+table. The Job receives neither a PostgreSQL administrator credential nor a
+Kubernetes API token.
+
+For operator activation on a provisioned cell:
+
+1. Provision the database roles and telemetry table once, before enabling the
+   CronJob. These are operator tasks, separate from the two Secrets and catalog
+   switch; the Job cannot provision or repair its own privileges. Using the
+   existing authorized administrator connection, run the checked-in SQL in the
+   indicated databases with `ON_ERROR_STOP` and a transaction:
+
+   ```sh
+   psql --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction --dbname=witself \
+     --file=.gitops/charts/apps/files/postgres-backup-dump-role.sql
+   psql --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction --dbname=postgres \
+     --file=.gitops/charts/apps/files/postgres-backup-metrics-role.sql
+   ```
+
+   The first script grants SELECT on current public tables/sequences and on
+   future public objects created by `witself`. Additional schemas or object
+   owners require equivalent explicit grants. The second creates
+   `witself_ops.backup_runs` in `postgres` and grants its dedicated writer
+   SELECT/INSERT/UPDATE. The SQL query reuses the chart's existing exporter
+   credentials and `postgres` database; those credentials are not given to the
+   backup Job. If the exporter login is customized, grant that login schema
+   USAGE and table SELECT separately. Both scripts fail on existing role/schema
+   names rather than overwrite unknown configuration. Review existing state
+   before retrying provisioning.
+
+   Set each new login password privately with interactive psql
+   `\password witself_backup_dump` and `\password witself_backup_metrics`;
+   keep those passwords out of shell arguments, Git, and command output. Supply
+   the same passwords in the Secret below.
+2. Create these **two backup Secrets** in the PostgreSQL namespace (`witself`),
+   using the normal secret-provisioning workflow. Do not commit their contents.
+
+   | Default Secret name | Keys |
+   | --- | --- |
+   | `witself-postgresql-backup-age` | `recipient`: the age public recipient; keep the private identity outside the cell and backup bucket |
+   | `witself-postgresql-backup-r2` | `access-key-id`, `secret-access-key`, `endpoint` (HTTPS R2 S3 endpoint), `bucket`, `prefix`, `dump-password` (for `witself_backup_dump`), `metrics-password` (for `witself_backup_metrics`) |
+
+   Values `apps.civoPostgres.backup.ageRecipientSecretName` and
+   `apps.civoPostgres.backup.r2SecretName` can reference other names; only names
+   are rendered. Use an existing operator-selected bucket and a separate cell
+   prefix. The R2 credential needs upload, multipart, object metadata/read,
+   copy, and delete operations used for staging and promotion. This slice adds
+   no retention policy or second destination.
+3. Set that cell's single `switches.postgres_backup` to `true` in the catalog and
+   run `make gitops-cell-values`. The generated values enable the CronJob,
+   existing PostgreSQL exporter's custom query, and
+   `platform.monitoring.postgresBackupAlerts.enabled` together. The chart
+   enables the exporter if needed, but the switch does not enable a
+   ServiceMonitor, monitoring stack, or alert receiver. Rules render only when
+   the backup switch and `platform.monitoring.enabled` are both enabled.
+   `civo-sandbox-use1-backup` therefore gets dumps and exporter telemetry but
+   **no page** while its monitoring stack remains off. The serving cell has
+   monitoring enabled, but its current `platform.monitoring.alerting.enabled`
+   is `false`, keeping Alertmanager null-routed: backup rules can fire without
+   delivering a page. Actual paging requires the independently reviewed
+   receiver policy and credentials. Follow the normal reviewed GitOps rollout.
+   No account-snapshot switch, including `CP_ACCOUNT_BACKUPS_ENABLED`, is involved.
+4. Once GitOps has converged, run an initial Job so activation does not wait for
+   tomorrow's schedule:
+
+   ```sh
+   kubectl --context "$CELL_CONTEXT" -n witself create job \
+     --from=cronjob/witself-postgresql-backup "postgres-backup-initial-$(date -u +%s)"
+   ```
+
+   Verify Job completion, a final encrypted R2 object, its successful telemetry
+   row, and a disposable restore before recording backup acceptance. On a
+   monitored cell, also verify the exported metrics and alert-rule loading;
+   record paging acceptance only after receiver delivery is separately proven.
+   Do not run manual Jobs concurrently with the scheduled Job;
+   Kubernetes' `Forbid` applies only to Jobs created by the CronJob controller.
+
+The chart's existing Bitnami `postgres_exporter` supports custom SQL queries;
+it has no textfile collector or Pushgateway. The Job inserts one row per attempt
+in `witself_ops.backup_runs` in the exporter's `postgres` database. Each row
+records `started_at`, `finished_at`, `succeeded`, encrypted `bytes`,
+`object_key`, and bounded `error_text` containing a static failure stage rather
+than command output or database content. Only complete upload, promotion, and
+staging cleanup record success. The exporter exposes:
+
+- `witself_postgres_backup_last_success_timestamp_seconds`: latest successful
+  completion, or zero before any success.
+- `witself_postgres_backup_last_attempt_timestamp_seconds`: latest attempt's
+  start time, or zero before any attempt.
+- `witself_postgres_backup_last_attempt_succeeded`: `1` for success, `0` for a
+  completed failure, and `-1` for an unfinished attempt or no attempts.
+- `witself_postgres_backup_failures_total`: count of completed failed attempts.
+
+A killed Pod can leave an unfinished row. Missing Secrets or a database outage
+can prevent any telemetry update, so the absence/staleness alert remains
+necessary. This table is outside the `witself` logical dump and starts fresh on
+a replacement cluster after provisioning.
+
+When the rules render, `WitselfPostgresBackupStale` fires after five minutes
+without a successful-backup series, with a zero last-success timestamp, or with
+a success older than 26 hours. A never-successful backup therefore alerts after
+activation. `WitselfPostgresBackupFailed` fires immediately for a completed
+failed latest attempt, or when an unfinished attempt exceeds 7,200 seconds (the
+chart's maximum configurable deadline). It remains firing until a later attempt
+replaces the failure; a historical failure count or exporter restart alone does
+not trigger it. Both rules are absent when backup or the monitoring stack is
+off. Firing alerts only deliver pages when the independent receiver policy is
+active.
+
+Restore into a **new, empty, disposable database first**, using a compatible
+PostgreSQL major with required extensions (including pgvector) already available.
+Provision the destination database and its owner separately; this dump omits
+cluster roles and ownership/ACL commands. With R2 credentials supplied privately
+to the operator's AWS CLI and a separately held age identity:
+
+```bash
+set -o pipefail
+aws --endpoint-url "$R2_ENDPOINT" s3 cp "$ENCRYPTED_BACKUP_S3_URI" - \
+  | age --decrypt -i "$AGE_IDENTITY_FILE" \
+  | gzip --decompress \
+  | psql --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction "$RESTORE_DATABASE_URL"
+```
+
+Check schema version, extension state, constraints/indexes, and application data
+before any operator-approved cutover. A successful upload is not evidence of a
+successful restore. Scheduled dumps do not claim the pre-migration script's
+restore-verified manifest contract.
+
 ### Civo PostgreSQL pre-migration backup
 
 The two reviewed Civo production databases use standalone PostgreSQL on an

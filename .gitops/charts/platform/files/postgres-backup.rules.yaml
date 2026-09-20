@@ -1,0 +1,50 @@
+# Emitted by the existing PostgreSQL exporter's custom SQL query. The timestamp
+# is advanced only after the encrypted stream has been uploaded successfully.
+groups:
+  - name: witself-postgres-backup
+    interval: 30s
+    rules:
+      - alert: WitselfPostgresBackupStale
+        expr: |
+          time() - max by (namespace) (
+            witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+          ) > 93600
+          or max by (namespace) (
+            witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
+          ) <= 0
+          or absent(witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"})
+        for: 5m
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL has no successful encrypted backup within 26 hours or its backup metric is absent.
+          runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
+      - alert: WitselfPostgresBackupFailed
+        # SQL returns -1 while the latest attempt is running, 0 on terminal
+        # failure, and 1 on success. Empty tables have attempt timestamp zero.
+        # Keep a completed failure firing until a later attempt replaces it;
+        # a historical failures counter or exporter restart is not a new failure.
+        # A killed pod may leave an unfinished row. Page once it exceeds the
+        # schema's maximum allowed activeDeadlineSeconds (7200 seconds).
+        expr: |
+          max by (namespace) (
+            (witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"} == 0)
+            and
+            (witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"} > 0)
+          )
+          or max by (namespace) (
+            (witself_postgres_backup_last_attempt_succeeded{namespace="witself",service="witself-postgresql-metrics"} == -1)
+            and
+            (witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"} > 0)
+            and
+            (time() - witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"} > 7200)
+          )
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL encrypted backup's latest attempt failed or exceeded its maximum runtime.
+          runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
