@@ -12,6 +12,20 @@ import (
 // The server performs no inference: plans and provenance come from the calling
 // client, while the store owns authorization, leases, fences, and transactions.
 func configureMemoryCuration(cfg *server.Config, st *store.Store) {
+	cfg.ReadMemoryCurationCounters = func() server.MemoryCurationCounters {
+		value := st.MemoryCurationCounters()
+		transitions := make(map[server.MemoryCurationTransition]uint64, len(value.Transitions))
+		for edge, count := range value.Transitions {
+			transitions[server.MemoryCurationTransition{From: edge.From, To: edge.To}] = count
+		}
+		return server.MemoryCurationCounters{Transitions: transitions, LeaseEvents: value.LeaseEvents}
+	}
+	cfg.ReadMemoryCurationQueueMetrics = func(ctx context.Context) (server.MemoryCurationQueueMetrics, error) {
+		value, err := st.ReadMemoryCurationQueueMetrics(ctx)
+		return server.MemoryCurationQueueMetrics{
+			RequestsPending: value.RequestsPending, QueueAgeSeconds: value.QueueAgeSeconds,
+		}, err
+	}
 	cfg.GetSelfMemoryCheckpoint = func(ctx context.Context, p server.DomainPrincipal) (*server.SelfMemoryCheckpoint, error) {
 		checkpoint, err := projectSelfMemoryCheckpoint(ctx, st, toStorePrincipal(p))
 		return checkpoint, mapMemoryCurationError(err)

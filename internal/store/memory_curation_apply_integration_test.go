@@ -315,6 +315,13 @@ func TestMemoryCurationApplyPostgres(t *testing.T) {
 	if _, err := st.RollbackCuration(ctx, p, started.Run.ID, changedRollback); !errors.Is(err, ErrMemoryCurationIdempotencyConflict) {
 		t.Fatalf("changed rollback retry error = %v", err)
 	}
+	assertMemoryCurationCounters(t, st, MemoryCurationCounters{
+		Transitions: map[MemoryCurationTransition]uint64{
+			{"none", "open"}: 2, {"open", "planned"}: 1,
+			{"planned", "applied"}: 1, {"applied", "rolled_back"}: 1,
+			{"open", "abandoned"}: 1,
+		}, LeaseEvents: map[string]uint64{"start": 2},
+	})
 }
 
 func TestMemoryCurationApplyConflictsPostgres(t *testing.T) {
@@ -356,6 +363,11 @@ func TestMemoryCurationApplyConflictsPostgres(t *testing.T) {
 		if _, err := st.ApplyCuration(ctx, p, started.Run.ID, in); !errors.Is(err, ErrMemoryCurationConflict) {
 			t.Fatalf("stale apply exact retry error = %v", err)
 		}
+		assertMemoryCurationCounters(t, st, MemoryCurationCounters{
+			Transitions: map[MemoryCurationTransition]uint64{
+				{"none", "open"}: 1, {"open", "planned"}: 1, {"planned", "conflict"}: 1,
+			}, LeaseEvents: map[string]uint64{"start": 1},
+		})
 	})
 
 	t.Run("cursor compare-and-swap rolls back produced resources", func(t *testing.T) {
@@ -397,6 +409,11 @@ func TestMemoryCurationApplyConflictsPostgres(t *testing.T) {
 		if appliedActions != 0 {
 			t.Fatalf("cursor conflict left %d applied actions", appliedActions)
 		}
+		assertMemoryCurationCounters(t, st, MemoryCurationCounters{
+			Transitions: map[MemoryCurationTransition]uint64{
+				{"none", "open"}: 1, {"open", "planned"}: 1, {"planned", "conflict"}: 1,
+			}, LeaseEvents: map[string]uint64{"start": 1},
+		})
 	})
 }
 

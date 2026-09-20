@@ -1,0 +1,38 @@
+groups:
+  - name: witself-memory
+    interval: 30s
+    rules:
+      - alert: WitselfMemoryCurationBacklogAgeHigh
+        # Queue observations measure the oldest due, unclaimed request. Require
+        # a current backlog so a cleared queue cannot sustain this alert.
+        expr: (1 - sum(rate(witself_memory_curation_queue_age_seconds_bucket{le="900"}[15m])) / sum(rate(witself_memory_curation_queue_age_seconds_count[15m]))) > 0.10 and max(witself_memory_curation_requests_pending) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: memory-curation
+          witself_alert: "true"
+        annotations:
+          summary: More than 10 percent of curation queue observations exceed 15 minutes.
+          runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+      - alert: WitselfMemoryCurationLeaseExpiryRatioHigh
+        expr: (sum(increase(witself_memory_curation_lease_events_total{event="expire"}[15m])) / sum(increase(witself_memory_curation_lease_events_total{event="start"}[15m]))) > 0.20 and sum(increase(witself_memory_curation_lease_events_total{event="start"}[15m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+          service: memory-curation
+          witself_alert: "true"
+        annotations:
+          summary: Curation lease expirations exceed 20 percent of starts.
+          runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
+      - alert: WitselfMemoryCurationRunFailureRatioHigh
+        # Failed plan/apply calls include malformed plans that leave a run open.
+        # Abandonment, cancellation and lease interruption are not error proxies.
+        expr: (sum(increase(witself_memory_curation_operations_total{operation=~"plan|apply",result="error"}[15m])) / sum(increase(witself_memory_curation_operations_total{operation=~"plan|apply"}[15m]))) > 0.20 and sum(increase(witself_memory_curation_operations_total{operation=~"plan|apply"}[15m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+          service: memory-curation
+          witself_alert: "true"
+        annotations:
+          summary: Curation plan and apply errors exceed 20 percent of attempts.
+          runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation

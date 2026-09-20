@@ -661,4 +661,7 @@ ruby -ryaml -e '
 ruby "$repo_root/scripts/testdata/test-monitoring-postgres-backup.rb" \
   "$repo_root" "$tmp" "$chart_archive" "$promtool_bin"
 
+ruby "$repo_root/scripts/testdata/test-monitoring-memory-alerts.rb" \
+  "$repo_root" "$tmp" "$chart_archive" "$promtool_bin"
+
 echo "monitoring rollout capability checks passed"

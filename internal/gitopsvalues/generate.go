@@ -42,6 +42,7 @@ type templateData struct {
 	Monitoring                  bool
 	CollectorAlerts             bool
 	SealedPlaneAlerts           bool
+	MemoryAlerts                bool
 	PostgresBackup              bool
 	Overlay                     string
 	overlayName                 string

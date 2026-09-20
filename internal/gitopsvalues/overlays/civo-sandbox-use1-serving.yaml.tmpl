@@ -198,6 +198,8 @@ platform:
     sealedPlaneAlerts:
       enabled: true
 {{- end }}
+    memoryAlerts:
+      enabled: {{.MemoryAlerts}}
     postgresBackupAlerts:
       enabled: {{.PostgresBackup}}
     postgresql:
@@ -228,6 +230,8 @@ platform:
     enabled: false
     alerting:
       enabled: false
+    memoryAlerts:
+      enabled: {{.MemoryAlerts}}
     postgresBackupAlerts:
       enabled: {{.PostgresBackup}}
 {{- end }}

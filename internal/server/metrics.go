@@ -39,6 +39,7 @@ type runtimeMetrics struct {
 	vectorSearches        map[vectorSearchMetricLabels]uint64
 	vectorFallbacks       map[vectorFallbackMetricLabels]uint64
 	curationOperations    map[operationMetricLabels]uint64
+	curationQueueAge      map[string]*metricHistogram
 	planLimitRejects      map[limitMetricLabels]uint64
 	secretLimitRejects    map[limitMetricLabels]uint64
 	secretDeliveries      map[secretDeliveryMetricLabels]uint64
@@ -163,6 +164,8 @@ var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
 var selfDigestLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 5, 10}
 var hitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100}
 
+var curationQueueAgeBuckets = []float64{0, 30, 60, 300, 900, 1800, 3600, 21600, 86400}
+
 func newRuntimeMetrics() *runtimeMetrics {
 	// Emit every supported sealed-plane series even on an idle scrape. Alerts
 	// must still handle activity that occurs before Prometheus first scrapes.
@@ -198,6 +201,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		vectorSearches:        make(map[vectorSearchMetricLabels]uint64),
 		vectorFallbacks:       make(map[vectorFallbackMetricLabels]uint64),
 		curationOperations:    make(map[operationMetricLabels]uint64),
+		curationQueueAge:      make(map[string]*metricHistogram),
 		planLimitRejects:      make(map[limitMetricLabels]uint64),
 		secretLimitRejects:    make(map[limitMetricLabels]uint64),
 		secretDeliveries:      secretDeliveries,
@@ -231,6 +235,11 @@ func newRuntimeMetrics() *runtimeMetrics {
 	for _, operation := range []string{"claim", "renew", "release", "request_claim", "request_renew", "request_release", "unknown"} {
 		for _, result := range []string{"success", "feature_disabled", "rate_limited", "bad_input", "not_found", "forbidden", "plan_limited", "busy", "conflict", "error"} {
 			metrics.messageProcessing[operationMetricLabels{Operation: operation, Result: result}] = 0
+		}
+	}
+	for _, operation := range []string{"start", "renew", "plan", "apply", "cancel", "abandon", "rollback"} {
+		for _, result := range []string{"success", "error"} {
+			metrics.curationOperations[operationMetricLabels{Operation: operation, Result: result}] = 0
 		}
 	}
 	return metrics
@@ -855,6 +864,11 @@ func (m *runtimeMetrics) observeMemoryOperation(operation, principalKind string,
 }
 
 func (m *runtimeMetrics) observeCurationOperation(operation string, err error) {
+	switch operation {
+	case "start", "renew", "plan", "apply", "cancel", "abandon", "rollback":
+	default:
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.curationOperations[operationMetricLabels{Operation: operation, Result: metricResult(err == nil)}]++
@@ -987,6 +1001,78 @@ type SealedPlanePostureMetrics struct {
 	PendingEnrollments             int64
 	OldestPendingEnrollmentSeconds int64
 	MaxAgentDeliveries15m          int64
+}
+
+// MemoryCurationTransition contains only store-owned lifecycle states. The
+// renderer independently allowlists edges; supplied strings never become labels.
+type MemoryCurationTransition struct {
+	From, To string
+}
+
+// MemoryCurationCounters counts committed mutations in this store process,
+// excluding idempotent replays and transactions that roll back.
+type MemoryCurationCounters struct {
+	Transitions map[MemoryCurationTransition]uint64
+	LeaseEvents map[string]uint64
+}
+
+// MemoryCurationQueueMetrics is a cell-wide, value-free queue projection.
+type MemoryCurationQueueMetrics struct {
+	RequestsPending int64
+	QueueAgeSeconds float64
+}
+
+func (m *runtimeMetrics) writeMemoryCurationPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	readCounters func() MemoryCurationCounters,
+	readQueue func(context.Context) (MemoryCurationQueueMetrics, error),
+) {
+	if readCounters != nil {
+		status := readCounters()
+		// Iterate the closed vocabulary instead of trusting callback map keys.
+		// Emit idle zeros so the first committed event has a scrape baseline.
+		transitions := make(map[MemoryCurationTransition]uint64)
+		for _, edge := range []MemoryCurationTransition{
+			{"none", "open"}, {"open", "planned"}, {"planned", "applied"},
+			{"applied", "rolled_back"}, {"open", "abandoned"}, {"planned", "abandoned"},
+			{"open", "interrupted"}, {"planned", "interrupted"},
+			{"planned", "conflict"},
+		} {
+			transitions[edge] = status.Transitions[edge]
+		}
+		writeCounterMap(w, "witself_memory_curation_run_transitions_total", "Committed curation run state transitions in this process; none denotes run creation; excludes idempotent replays.", transitions, func(edge MemoryCurationTransition) string {
+			return labels("from", edge.From, "to", edge.To)
+		})
+		events := make(map[string]uint64)
+		for _, event := range []string{"start", "renew", "expire", "reconcile"} {
+			events[event] = status.LeaseEvents[event]
+		}
+		writeCounterMap(w, "witself_memory_curation_lease_events_total", "Committed curation lease events in this process; expiry and its queue reconciliation each count once.", events, func(event string) string {
+			return labels("event", event)
+		})
+	}
+	if readQueue == nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, capacityMetricsTimeout)
+	defer cancel()
+	status, err := readQueue(readCtx)
+	if err != nil || status.RequestsPending < 0 || status.QueueAgeSeconds < 0 ||
+		math.IsNaN(status.QueueAgeSeconds) || math.IsInf(status.QueueAgeSeconds, 0) ||
+		(status.RequestsPending == 0 && status.QueueAgeSeconds != 0) {
+		writeIntGauge(w, "witself_memory_curation_queue_metrics_up", "1 when the cell curation queue was read successfully.", 0)
+		return
+	}
+	writeIntGauge(w, "witself_memory_curation_queue_metrics_up", "1 when the cell curation queue was read successfully.", 1)
+	writeIntGauge(w, "witself_memory_curation_requests_pending", "Unclaimed queued and retry-wait requests in this cell, including requests not yet due.", status.RequestsPending)
+	// One observation per successful scrape, including zero for an empty due
+	// queue. Keep the histogram process-local and serialize concurrent scrapes.
+	m.mu.Lock()
+	observeHistogram(m.curationQueueAge, "", status.QueueAgeSeconds, curationQueueAgeBuckets)
+	histogram := cloneHistogramMap(m.curationQueueAge)
+	m.mu.Unlock()
+	writeHistogramMap(w, "witself_memory_curation_queue_age_seconds", "Age since due_at of the oldest due unclaimed request at each successful scrape; zero when none is due.", histogram, curationQueueAgeBuckets, func(string) string { return "" })
 }
 
 const sealedPlanePostureMetricsTimeout = 2 * time.Second
@@ -1280,6 +1366,9 @@ func labels(pairs ...string) string {
 }
 
 func appendLabel(existing, key, value string) string {
+	if existing == "" || existing == "{}" {
+		return labels(key, value)
+	}
 	return strings.TrimSuffix(existing, "}") + "," + key + "=\"" + escapeMetricLabel(value) + "\"}"
 }
 
