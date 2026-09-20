@@ -236,7 +236,7 @@ elif tool == 'witself':
 elif tool=='curl':
     url=next(a for a in args if a.startswith('https://'))
     if '/v1/directory/' in url:
-        emit({'account_id':account,'cell':{'cell':'civo-sandbox-usw2-dev','endpoint':'https://cell.invalid'},'status':'active','epoch':1})
+        emit({'account_id':account,'cell':{'cell':'civo-sandbox-use1-serving','endpoint':'https://cell.invalid'},'status':'active','epoch':1})
     if url.endswith('/v1/version'):
         metadata = {'version':'0.0.275','commit':'bd103ff','date':'2026-09-06T00:21:06Z'}
         if url.startswith('https://cp.invalid/'):
@@ -310,7 +310,7 @@ elif tool=='curl':
                 'current_job':current_job, 'catalog':[
                 {'backup_id':backup,'scheduled_at':'2099-01-01T00:00:00Z','status':'active',
                  'exported_at':stamp,'verified_at':stamp,'account_id':account,
-                 'source_cell':'civo-sandbox-usw2-dev','archive_schema_version':94}]}}})
+                 'source_cell':'civo-sandbox-use1-serving','archive_schema_version':94}]}}})
         if url.endswith(':restore-drill'):
             if scenario.startswith('backup_retry_'):
                 assert scenario=='backup_retry_committed' and now >= state['backup_retry_epoch']+299, 'cannot drill an uncommitted backup'
@@ -401,7 +401,7 @@ new_case() {
 }
 run_harness() {
   local selected_drill=civo-sandbox-use1-backup
-  if [ "$FAKE_AVATAR_SCENARIO" = usage_wrong_drill ]; then selected_drill=civo-sandbox-usw2-dev; fi
+  if [ "$FAKE_AVATAR_SCENARIO" = usage_wrong_drill ]; then selected_drill=civo-sandbox-use1-serving; fi
   bash "$canary" --account evac-a --realm-id realm_bbbbbbbbbbbbbbbb \
     --agent "avatar-acceptance-$FAKE_AVATAR_SCENARIO" --control-plane https://cp.invalid \
     --fleet-token-file "$work_dir/fleet.token" --drill-cell "$selected_drill" \

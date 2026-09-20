@@ -28,7 +28,7 @@ func TestRegisterSendsDistinctCredentialShape(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"cell": map[string]any{
-				"name":                     "civo-sandbox-usw2-dev",
+				"name":                     "civo-sandbox-use1-serving",
 				"backup_validation_target": false,
 				"has_backup_token":         true,
 			},
@@ -42,11 +42,11 @@ func TestRegisterSendsDistinctCredentialShape(t *testing.T) {
 		hc:    server.Client(),
 	}
 	err := client.Register(context.Background(), Cell{
-		Name:           "civo-sandbox-usw2-dev",
+		Name:           "civo-sandbox-use1-serving",
 		Endpoint:       "https://api.cell.example.com",
 		Cloud:          "civo",
-		Region:         "PHX1",
-		RegionCode:     "usw2",
+		Region:         "NYC1",
+		RegionCode:     "use1",
 		Channel:        "experimental",
 		ProvisionToken: "witself_prv_provision-only",
 		BackupToken:    "witself_bak_backup-only",
@@ -80,7 +80,7 @@ func TestRegisterBackupValidationTargetIsFailClosed(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"cell": map[string]any{
-				"name":                     "civo-sandbox-use1-dev",
+				"name":                     "civo-sandbox-use1-backup",
 				"accepting":                false,
 				"backup_validation_target": true,
 				"has_backup_token":         true,
@@ -91,7 +91,7 @@ func TestRegisterBackupValidationTargetIsFailClosed(t *testing.T) {
 
 	client := &Client{base: server.URL, token: "fleet-test-token", hc: server.Client()}
 	err := client.Register(context.Background(), Cell{
-		Name:                   "civo-sandbox-use1-dev",
+		Name:                   "civo-sandbox-use1-backup",
 		Endpoint:               "https://api.cell.example.com",
 		Accepting:              &falseValue,
 		BackupValidationTarget: true,
@@ -119,7 +119,7 @@ func TestRegisterBackupValidationTargetRejectsAmbiguousAcknowledgement(t *testin
 		{
 			name: "missing marker",
 			cellAck: map[string]any{
-				"name":             "civo-sandbox-use1-dev",
+				"name":             "civo-sandbox-use1-backup",
 				"accepting":        false,
 				"has_backup_token": true,
 			},
@@ -128,7 +128,7 @@ func TestRegisterBackupValidationTargetRejectsAmbiguousAcknowledgement(t *testin
 		{
 			name: "still accepting",
 			cellAck: map[string]any{
-				"name":                     "civo-sandbox-use1-dev",
+				"name":                     "civo-sandbox-use1-backup",
 				"accepting":                true,
 				"backup_validation_target": true,
 				"has_backup_token":         true,
@@ -138,7 +138,7 @@ func TestRegisterBackupValidationTargetRejectsAmbiguousAcknowledgement(t *testin
 		{
 			name: "missing accepting",
 			cellAck: map[string]any{
-				"name":                     "civo-sandbox-use1-dev",
+				"name":                     "civo-sandbox-use1-backup",
 				"backup_validation_target": true,
 				"has_backup_token":         true,
 			},
@@ -157,7 +157,7 @@ func TestRegisterBackupValidationTargetRejectsAmbiguousAcknowledgement(t *testin
 
 			client := &Client{base: server.URL, token: "fleet-test-token", hc: server.Client()}
 			err := client.Register(context.Background(), Cell{
-				Name:                   "civo-sandbox-use1-dev",
+				Name:                   "civo-sandbox-use1-backup",
 				Endpoint:               "https://api.cell.example.com",
 				Accepting:              &falseValue,
 				BackupValidationTarget: true,
@@ -178,7 +178,7 @@ func TestRegisterBackupValidationTargetRejectsAcceptingRequest(t *testing.T) {
 	}()} {
 		client := &Client{base: "http://unused.invalid", token: "fleet-test-token", hc: http.DefaultClient}
 		err := client.Register(context.Background(), Cell{
-			Name:                   "civo-sandbox-use1-dev",
+			Name:                   "civo-sandbox-use1-backup",
 			Accepting:              accepting,
 			BackupValidationTarget: true,
 		})
@@ -193,7 +193,7 @@ func TestRegisterRequiresBackupCredentialAcknowledgement(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"cell": map[string]any{
-				"name":                     "civo-sandbox-usw2-dev",
+				"name":                     "civo-sandbox-use1-serving",
 				"backup_validation_target": false,
 				"has_provision_token":      true,
 			},
@@ -207,7 +207,7 @@ func TestRegisterRequiresBackupCredentialAcknowledgement(t *testing.T) {
 		hc:    server.Client(),
 	}
 	err := client.Register(context.Background(), Cell{
-		Name:           "civo-sandbox-usw2-dev",
+		Name:           "civo-sandbox-use1-serving",
 		Endpoint:       "https://api.cell.example.com",
 		ProvisionToken: "witself_prv_provision-only",
 		BackupToken:    "witself_bak_backup-only",
@@ -239,7 +239,7 @@ func TestRegisterRequiresExactCellAcknowledgement(t *testing.T) {
 		hc:    server.Client(),
 	}
 	err := client.Register(context.Background(), Cell{
-		Name:           "civo-sandbox-usw2-dev",
+		Name:           "civo-sandbox-use1-serving",
 		Endpoint:       "https://api.cell.example.com",
 		ProvisionToken: "witself_prv_provision-only",
 		BackupToken:    "witself_bak_backup-only",
@@ -257,7 +257,7 @@ func TestRegisterRequiresCurrentResponseSchema(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "legacy.v0",
 			"cell": map[string]any{
-				"name":                     "civo-sandbox-usw2-dev",
+				"name":                     "civo-sandbox-use1-serving",
 				"backup_validation_target": false,
 				"has_backup_token":         true,
 			},
@@ -271,7 +271,7 @@ func TestRegisterRequiresCurrentResponseSchema(t *testing.T) {
 		hc:    server.Client(),
 	}
 	err := client.Register(context.Background(), Cell{
-		Name:           "civo-sandbox-usw2-dev",
+		Name:           "civo-sandbox-use1-serving",
 		Endpoint:       "https://api.cell.example.com",
 		ProvisionToken: "witself_prv_provision-only",
 		BackupToken:    "witself_bak_backup-only",
@@ -346,7 +346,7 @@ func TestValidateRegistrationCredentials(t *testing.T) {
 
 func TestCellJSONOmitsCredentialFieldsAfterRedaction(t *testing.T) {
 	raw, err := json.Marshal(Cell{
-		Name:     "civo-sandbox-usw2-dev",
+		Name:     "civo-sandbox-use1-serving",
 		Endpoint: "https://api.cell.example.com",
 	})
 	if err != nil {
@@ -371,7 +371,7 @@ func TestListCellsKeepsRedactedCredentialsEmpty(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"cells": []any{map[string]any{
-				"name":                     "civo-sandbox-usw2-dev",
+				"name":                     "civo-sandbox-use1-backup",
 				"endpoint":                 "https://api.cell.example.com",
 				"accepting":                false,
 				"backup_validation_target": true,

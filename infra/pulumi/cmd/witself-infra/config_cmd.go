@@ -45,11 +45,11 @@ cells: {}
   #     aws:
   #       profile: witwave-sandbox
   #
-  # civo-sandbox-use1-dev:
+  # civo-sandbox-use1-backup:
   #   cloud: civo
   #   account_alias: sandbox
   #   region: nyc1
-  #   role: dev
+  #   role: backup
   #   backend: local
   #   civo_node_size: g4s.kube.medium
   #   k8s_version: 1.35.0-k3s1 # Optional Civo API version; omit for latest stable.

@@ -1,8 +1,8 @@
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index e1c029c7..5c59457c 100644
+index 2b524e00..e79f9b17 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -34,8 +34,11 @@ apps:
+@@ -36,8 +36,11 @@ apps:
        enabled: true
        allowExternal: false
      metrics:
@@ -16,7 +16,7 @@ index e1c029c7..5c59457c 100644
    witselfServer:
      enabled: true
      namespace: witself
-@@ -62,6 +65,21 @@ apps:
+@@ -82,6 +85,21 @@ apps:
        validationEnabled: false
        targetName: witself-backup
      replicaCount: 2
@@ -38,7 +38,7 @@ index e1c029c7..5c59457c 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -87,6 +105,20 @@ apps:
+@@ -107,6 +125,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -59,7 +59,7 @@ index e1c029c7..5c59457c 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -136,8 +168,8 @@ apps:
+@@ -162,8 +194,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -71,10 +71,10 @@ index e1c029c7..5c59457c 100644
      enabled: true
      alerting:
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-index a9714bcd..4564dfd9 100644
+index b3760205..fba57d5d 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-@@ -20,8 +20,11 @@ apps:
+@@ -22,8 +22,11 @@ apps:
        enabled: true
        allowExternal: false
      metrics:
@@ -88,7 +88,7 @@ index a9714bcd..4564dfd9 100644
    witselfServer:
      enabled: true
      namespace: witself
-@@ -48,6 +51,21 @@ apps:
+@@ -68,6 +71,21 @@ apps:
        validationEnabled: false
        targetName: witself-backup
      replicaCount: 2
@@ -110,7 +110,7 @@ index a9714bcd..4564dfd9 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -73,6 +91,20 @@ apps:
+@@ -93,6 +111,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -131,7 +131,7 @@ index a9714bcd..4564dfd9 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -122,8 +154,8 @@ apps:
+@@ -148,8 +180,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:

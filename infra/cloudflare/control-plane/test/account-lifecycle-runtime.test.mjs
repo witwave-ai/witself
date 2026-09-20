@@ -26,7 +26,7 @@ import {
 
 const ACCOUNT = "acct_runtime";
 const SOURCE = "aws-us-west-2";
-const TARGET = "civo-phx1";
+const TARGET = "civo-fixture-target";
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";
 const SOURCE_EVACUATION_ID =
   "22222222-2222-4222-8222-222222222222";
@@ -228,7 +228,7 @@ function cell(name, endpoint, accepting = true) {
     name,
     endpoint,
     region: "us-west",
-    region_code: name === SOURCE ? "us-west-2" : "phx1",
+    region_code: name === SOURCE ? "us-west-2" : "nyc1",
     accepting,
     provision_token: `token-${name}`,
     registration_id: `reg-${name}`,

@@ -38,7 +38,7 @@ def render_platform(chart, values, *overrides)
 end
 
 cell_renders = {}
-%w[civo-sandbox-usw2-dev civo-sandbox-use1-backup].each do |cell|
+%w[civo-sandbox-use1-serving civo-sandbox-use1-backup].each do |cell|
   values = File.join(repo_root, ".gitops/cells", cell, "values.yaml")
   command("helm", "lint", platform_chart, "--values", values)
   command("helm", "lint", apps_chart, "--values", values)
@@ -50,7 +50,7 @@ cell_renders = {}
   abort "#{cell} ACME support contact missing" unless issuer&.dig("spec", "acme", "email") == "support@witwave.ai"
 end
 
-existing_group_names = %w[founder-open-plane postgresql uptime-probes].flat_map do |file|
+existing_group_names = %w[founder-open-plane postgresql postgres-backup uptime-probes].flat_map do |file|
   YAML.safe_load(File.read(File.join(platform_chart, "files", "#{file}.rules.yaml")), aliases: false).fetch("groups").map { |group| group.fetch("name") }
 end
 
@@ -96,7 +96,7 @@ abort "backup apps render must add exactly one ACME contact line" unless backup.
 assert_email_only_change(apps_chart, backup_values, email_line)
 assert_email_only_change(apps_chart, backup_values, email_line, "--set", "apps.witselfServer.chartVersion=0.0.274", "--set", "apps.witselfServer.imageTag=0.0.274")
 
-serving_render = cell_renders.fetch("civo-sandbox-usw2-dev").fetch("platform")
+serving_render = cell_renders.fetch("civo-sandbox-use1-serving").fetch("platform")
 serving_values = monitoring_values(serving_render)
 child_values_path = File.join(scratch, "monitoring-extensions-child-values.yaml")
 File.write(child_values_path, YAML.dump(serving_values))
@@ -199,7 +199,7 @@ monitors.each do |doc|
   abort "platform PodMonitor endpoint differs" unless doc.dig("spec", "podMetricsEndpoints") == [{"port" => port, "path" => "/metrics", "interval" => "30s"}]
 end
 
-serving_cell_values = File.join(repo_root, ".gitops/cells/civo-sandbox-usw2-dev/values.yaml")
+serving_cell_values = File.join(repo_root, ".gitops/cells/civo-sandbox-use1-serving/values.yaml")
 gates = %w[nodeExporter.enabled kubelet.cadvisor defaultRules.enabled certManager.enabled argocd.enabled]
 defaults = YAML.safe_load(File.read(File.join(platform_chart, "values.yaml")), aliases: false)
 gates.each do |gate|
@@ -248,7 +248,10 @@ end
   actual_names = documents(raw).select { |doc| doc["kind"] == "PodMonitor" }.map { |doc| doc.dig("metadata", "name") }
   abort "#{gate} altered independent PodMonitor gates" unless actual_names.sort == expected_names.sort
   if gate == "platform.monitoring.alerting.enabled"
-    abort "disabled alerting still emitted custom rules" unless values.fetch("additionalPrometheusRulesMap", {}).empty?
+    # PostgreSQL backup rules have a separate capability gate and must survive
+    # this open-plane alerting toggle on the current serving cell.
+    independent_rules = serving_values.fetch("additionalPrometheusRulesMap", {}).select { |name, _| name == "postgres-backup" }
+    abort "disabled alerting changed independent backup rules or retained open-plane rules" unless values.fetch("additionalPrometheusRulesMap", {}) == independent_rules
   end
 end
 stack_off = documents(render_platform(platform_chart, serving_cell_values, "--set", "platform.monitoring.enabled=false"))

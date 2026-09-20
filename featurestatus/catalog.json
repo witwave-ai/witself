@@ -141,9 +141,9 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Continuous Prometheus scraping, PVC metrics, Alertmanager routing, and a tested PagerDuty/dead-man receiver are deployed and accepted on the serving cell; other accepting and backup cells remain unmonitored, which still gates broad movement.",
+          "summary": "The replacement serving cell enables scraping, PVC metrics, routing, and PagerDuty/dead-man receivers in GitOps. Fresh recovery acceptance is required; the former cell's evidence does not cover it. Monitoring on other accepting and backup cells still gates broad movement.",
           "evidence": [
-            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
             "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
@@ -161,7 +161,7 @@
           "summary": "Account purge is enabled in enforce mode on both cells after preview review (#313), with the 720h grace unchanged. Placement remains paused until accepting destinations meet schema, headroom, monitoring, and movement-drill gates.",
           "evidence": [
             ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
-            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
             "docs/deployment-cells.md",
             "docs/launch-readiness.md",
             "docs/runbooks.md"
@@ -1272,7 +1272,7 @@
           "summary": "Core behavior is released and permanent fact deletion is enabled on both cells (#312). Retained current-release preview/apply/isolation acceptance remains open.",
           "evidence": [
             ".gitops/cells/civo-sandbox-use1-backup/values.yaml",
-            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
             "docs/fact-service.md",
             "docs/launch-readiness.md",
             "docs/runbooks.md"
@@ -1350,9 +1350,9 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Serving-cell scraping, PVC metrics, routing, and PagerDuty/dead-man rollout (#264-#266) was accepted in #267. The chart now has 19 rules, including five product-family rules with promtool tests (#357); their live loading and backup/future-cell monitoring still need retained proof.",
+          "summary": "The replacement cell enables scraping, PVC metrics, routing, and PagerDuty/dead-man receivers. Former-cell acceptance (#267) does not cover recovery. The chart has 31 rules, including five product-family rules with promtool tests (#357); live loading and backup/future-cell monitoring need retained proof.",
           "evidence": [
-            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             ".gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml",
             "docs/launch-readiness.md",
@@ -1547,7 +1547,7 @@
           "state": "conditional",
           "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; closed-account purge deletes tickets after the 30-day closure grace. API/CLI ticket creation is rate-limited per account; a default-off bounded worker resolves stale awaiting-customer tickets after a human reply. Attachment handling remains absent.",
           "evidence": [
-            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
             "docs/data-retention-policy.md",
             "docs/security-policy.md",
             "docs/support-admission-age-out-evidence.md",

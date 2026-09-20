@@ -1,6 +1,17 @@
 #!/usr/bin/env ruby
 # Render each recovery patch in an isolated fixture. An optional verified
 # kube-prometheus-stack archive also exercises the upstream stack resources.
+# Regenerate phase2.patch (1 -> 2) and phase3.patch (2 -> 3) by reconstructing
+# adjacent-phase snapshots in isolation from the phase-3 base; regenerate cell
+# values in each snapshot. Copy only the four files below into a/ (earlier phase)
+# and b/ (later phase), preserving repository-relative paths. From their parent,
+# run `git diff --no-index --no-prefix a b` to retain a/ and b/ patch prefixes
+# (exit 1 means differences). Use the exact git apply --include set:
+#   --include=.gitops/cells/catalog.yaml
+#   --include=internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
+#   --include=.gitops/cells/civo-sandbox-use1-serving/values.yaml
+#   --include=internal/gitopsvalues/generate_test.go
+# Save each diff to its phase patch, then replay both patches with this helper.
 require "yaml"
 require "open3"
 require "tmpdir"
@@ -11,14 +22,13 @@ root, stack_archive = ARGV
 abort "usage: #{$PROGRAM_NAME} REPO_ROOT [VERIFIED_STACK_ARCHIVE]" unless root
 root = File.expand_path(root)
 cell_name = "civo-sandbox-use1-serving"
-old_cell_name = "civo-sandbox-usw2-dev"
 cell_path = ".gitops/cells/#{cell_name}/values.yaml"
 fixture_paths = [".gitops/cells/catalog.yaml", cell_path,
-                 "internal/gitopsvalues/overlays/#{cell_name}.yaml.tmpl"]
+                 "internal/gitopsvalues/overlays/#{cell_name}.yaml.tmpl",
+                 "internal/gitopsvalues/generate_test.go"]
 apps_chart = File.join(root, ".gitops/charts/apps")
 platform_chart = File.join(root, ".gitops/charts/platform")
 server_chart = File.join(root, "charts/witself-server")
-reference_path = File.join(root, ".gitops/cells/#{old_cell_name}/values.yaml")
 
 def check(message, condition)
   abort "monitoring recovery: #{message}" unless condition
@@ -83,14 +93,42 @@ expected_peer = {
   "namespaceSelector" => {"matchLabels" => {"kubernetes.io/metadata.name" => "monitoring"}},
   "podSelector" => {"matchLabels" => {"app.kubernetes.io/name" => "prometheus"}}
 }
-reference_apps = render("witself-apps", apps_chart, reference_path)
-reference_pg = child_values(reference_apps, "witself-postgresql")
-# Compare with the reviewed old-cell monitoring values as committed.
-reference_monitoring = child_values(render("witself-platform", platform_chart, reference_path),
-                                   "witself-monitoring")
-reference_monitoring["commonLabels"]["witself.io/cell"] = cell_name
-
 Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
+  # Construct the fully enabled reference from the serving cell with explicit
+  # phase settings. It remains valid when the checked-in cell is in any phase;
+  # no retired cell or external deployment state supplies the expected render.
+  reference = YAML.safe_load(File.read(File.join(root, cell_path)), aliases: false)
+  reference_pins = reference.fetch("apps").fetch("witselfServer").slice("chartVersion", "imageTag")
+  monitor = {"enabled" => true, "labels" => {"release" => "witself-monitoring"}}
+  reference["apps"]["civoPostgres"]["metrics"] = {"enabled" => true, "serviceMonitor" => monitor}
+  [reference["apps"]["witselfServer"], reference["apps"]["witselfServer"].fetch("worker")].each do |component|
+    component["metrics"] = {"serviceMonitor" => monitor}
+    component["networkPolicy"] = {"metricsFrom" => [expected_peer]}
+  end
+  reference["platform"]["monitoring"] = {
+    "enabled" => true,
+    "alerting" => {"enabled" => true},
+    "collectorAlerts" => {"enabled" => false},
+    "sealedPlaneAlerts" => {"enabled" => true},
+    "memoryAlerts" => {"enabled" => false},
+    "postgresBackupAlerts" => {"enabled" => false},
+    "postgresql" => {"enabled" => true},
+    "nodeExporter" => {"enabled" => true},
+    "kubelet" => {"cadvisor" => true},
+    "defaultRules" => {"enabled" => true},
+    "certManager" => {"enabled" => true},
+    "argocd" => {"enabled" => true},
+    "uptimeProbes" => {"enabled" => true},
+    "entitlementDelivery" => {"enabled" => true},
+    "receiver" => {"kind" => "pagerduty", "secretName" => "witself-monitoring-pagerduty-v1", "secretKey" => "routing_key"},
+    "receiverDeadman" => {"secretName" => "witself-monitoring-deadman-v1", "secretKey" => "url"}
+  }
+  reference_path = File.join(fixture, "reference-cell-values.yaml")
+  File.write(reference_path, reference.to_yaml)
+  reference_apps = render("witself-apps", apps_chart, reference_path)
+  reference_pg = child_values(reference_apps, "witself-postgresql")
+  reference_monitoring = child_values(render("witself-platform", platform_chart, reference_path),
+                                     "witself-monitoring")
   fixture_paths.each do |relative|
     destination = File.join(fixture, relative)
     FileUtils.mkdir_p(File.dirname(destination))
@@ -103,6 +141,7 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
     args << File.join(root, "scripts/testdata/monitoring-recovery/phase#{phase}.patch")
     command(*args, chdir: fixture)
   end
+  original_files = fixture_paths.to_h { |relative| [relative, File.binread(File.join(fixture, relative))] }
   fixture_cell = File.join(fixture, cell_path)
   current = YAML.safe_load(File.read(fixture_cell), aliases: false)
   # The same tests remain valid after either later GitOps change lands.
@@ -130,10 +169,19 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
   (1..3).each do |phase|
     apply_phase.call(phase) if phase > 1
     label = "phase #{phase}"
+    if phase == current_phase
+      check("#{label}: phase patches must restore every checked-in fixture byte", original_files.all? do |relative, contents|
+        File.binread(File.join(fixture, relative)) == contents
+      end)
+    end
+    catalog = YAML.safe_load(File.read(File.join(fixture, ".gitops/cells/catalog.yaml")), aliases: false)
+    switches = catalog.fetch("cells").fetch(cell_name).fetch("switches")
+    check("#{label}: catalog alert switches must follow the recovery phase",
+          switches["monitoring"] == true && switches["collector_alerts"] == false && switches["sealed_plane_alerts"] == (phase == 3))
     values = YAML.safe_load(File.read(fixture_cell), aliases: false)
     check("#{label}: monitoring stack must be enabled", values.dig("platform", "monitoring", "enabled") == true)
     check("#{label}: recovery chart/image pins changed", %w[chartVersion imageTag].all? do |key|
-      values.dig("apps", "witselfServer", key) == "0.0.289"
+      values.dig("apps", "witselfServer", key) == reference_pins.fetch(key)
     end)
     apps = render("witself-apps", apps_chart, fixture_cell)
     pg = child_values(apps, "witself-postgresql")
@@ -154,16 +202,16 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
         check("#{label}: no server/worker metrics peers", metrics_ingress(policy).all? { |ingress| Array(ingress["from"]).empty? })
       end
     else
-      check("#{label}: PostgreSQL monitor must match usw2-dev", pg["metrics"] == reference_pg["metrics"])
-      check("#{label}: PostgreSQL exporter ingress must match usw2-dev", pg_ingress == metrics_ingress(reference_pg.fetch("extraDeploy").fetch(0)))
-      check("#{label}: server/worker monitors must match usw2-dev", monitors == selected(reference_server, "ServiceMonitor"))
+      check("#{label}: PostgreSQL monitor must match the serving reference", pg["metrics"] == reference_pg["metrics"])
+      check("#{label}: PostgreSQL exporter ingress must match the serving reference", pg_ingress == metrics_ingress(reference_pg.fetch("extraDeploy").fetch(0)))
+      check("#{label}: server/worker monitors must match the serving reference", monitors == selected(reference_server, "ServiceMonitor"))
       check("#{label}: expected exactly two selected Witself monitors", monitors.length == 2 && monitors.all? { |doc| doc.dig("metadata", "labels", "release") == "witself-monitoring" })
       [server, server.fetch("worker")].each do |component|
         check("#{label}: metricsFrom must require namespace AND pod labels", component.dig("networkPolicy", "metricsFrom") == [expected_peer])
       end
       %w[witself-server witself-worker].each do |name|
         actual = metrics_ingress(resource(server_documents, "NetworkPolicy", name))
-        check("#{label}: #{name} rendered metrics ingress must match usw2-dev", actual == metrics_ingress(resource(reference_server, "NetworkPolicy", name)) &&
+        check("#{label}: #{name} rendered metrics ingress must match the serving reference", actual == metrics_ingress(resource(reference_server, "NetworkPolicy", name)) &&
               actual.length == 1 && actual[0]["from"] == [expected_peer])
       end
     end
@@ -180,7 +228,7 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
       check("phase 2 must preserve phase 1 monitoring stack", monitoring == baseline_monitoring)
     else
       check("#{label}: alerting and the sealed-plane rule group enabled", %w[alerting sealedPlaneAlerts].all? { |key| values.dig("platform", "monitoring", key, "enabled") == true })
-      check("#{label}: monitoring values must match usw2-dev", monitoring == reference_monitoring)
+      check("#{label}: monitoring values must match the serving reference", monitoring == reference_monitoring)
     end
 
     next unless stack_archive
@@ -202,9 +250,9 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
       check("#{label}: rendered rules absent", selected(stack, "PrometheusRule").empty?)
       check("#{label}: Grafana and node exporter absent", stack.none? { |doc| doc.dig("metadata", "name").to_s.match?(/grafana|node-exporter/) })
     else
-      check("#{label}: rendered PagerDuty and dead-man configuration must match usw2-dev", config == alertmanager_config(reference_stack))
+      check("#{label}: rendered PagerDuty and dead-man configuration must match the serving reference", config == alertmanager_config(reference_stack))
       check("#{label}: exact immutable receiver mounts", alertmanager.dig("spec", "secrets").sort == %w[witself-monitoring-deadman-v1 witself-monitoring-pagerduty-v1])
-      check("#{label}: rendered rules must match usw2-dev with collector alerts enabled", selected(stack, "PrometheusRule") == selected(reference_stack, "PrometheusRule"))
+      check("#{label}: rendered rules must match the serving reference with collector alerts off and sealed-plane alerts on", selected(stack, "PrometheusRule") == selected(reference_stack, "PrometheusRule"))
     end
   end
 end

@@ -15,9 +15,8 @@ apps_email_pilot_profile="$apps_chart/ci/agent-email-pilot-values.yaml"
 email_production_profile="$server_chart/ci/agent-email-production-values.yaml"
 apps_email_production_profile="$apps_chart/ci/agent-email-production-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
-civo_cell="$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
+civo_cell="$repo_root/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
 civo_backup_cell="$repo_root/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
-civo_use1_cell="$repo_root/.gitops/cells/civo-sandbox-use1-dev/values.yaml"
 civo_recovery_cell="$repo_root/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
 
 render_dir="$(mktemp -d)"
@@ -34,7 +33,7 @@ live_apps_render="$render_dir/live-apps.yaml"
 agent_email_rate_cleanup_apps_render="$render_dir/agent-email-rate-cleanup-apps.yaml"
 civo_apps_render="$render_dir/civo-apps.yaml"
 civo_backup_apps_render="$render_dir/civo-backup-apps.yaml"
-civo_use1_apps_render="$render_dir/civo-use1-apps.yaml"
+civo_legacy_apps_render="$render_dir/civo-legacy-apps.yaml"
 civo_default_preset_apps_render="$render_dir/civo-default-preset-apps.yaml"
 backup_validation_render="$render_dir/backup-validation.yaml"
 backup_validation_apps_render="$render_dir/backup-validation-apps.yaml"
@@ -100,7 +99,11 @@ helm template witself-apps "$apps_chart" \
 helm template witself-apps "$apps_chart" \
   --values "$civo_backup_cell" >"$civo_backup_apps_render"
 helm template witself-apps "$apps_chart" \
-  --values "$civo_use1_cell" >"$civo_use1_apps_render"
+  --values "$civo_backup_cell" \
+  --set cell.name=civo-ci-use1-legacy \
+  --set-string apps.witselfServer.billing.endpoint= \
+  --set apps.witselfServer.chartVersion=0.0.223 \
+  --set apps.witselfServer.imageTag=0.0.223 >"$civo_legacy_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --set-string apps.civoPostgres.resourcesPreset= >"$civo_default_preset_apps_render"
@@ -485,10 +488,10 @@ apps_monitor_server="$render_dir/apps-monitor-server.yaml"
 apps_monitor_worker="$render_dir/apps-monitor-worker.yaml"
 civo_server_application="$render_dir/civo-server-application.yaml"
 civo_backup_server_application="$render_dir/civo-backup-server-application.yaml"
-civo_use1_server_application="$render_dir/civo-use1-server-application.yaml"
+civo_legacy_server_application="$render_dir/civo-legacy-server-application.yaml"
 civo_postgres_application="$render_dir/civo-postgres-application.yaml"
 civo_backup_postgres_application="$render_dir/civo-backup-postgres-application.yaml"
-civo_use1_postgres_application="$render_dir/civo-use1-postgres-application.yaml"
+civo_legacy_postgres_application="$render_dir/civo-legacy-postgres-application.yaml"
 civo_default_preset_postgres_application="$render_dir/civo-default-preset-postgres-application.yaml"
 civo_server_nested_values="$render_dir/civo-server-nested-values.yaml"
 civo_server_nested_render="$render_dir/civo-server-nested-render.yaml"
@@ -628,17 +631,17 @@ require_line "          sourceLabels:" "$apps_monitor_worker"
 require_line "          - __name__" "$apps_monitor_worker"
 extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
 extract_document Application witself-server "$civo_backup_apps_render" "$civo_backup_server_application"
-extract_document Application witself-server "$civo_use1_apps_render" "$civo_use1_server_application"
+extract_document Application witself-server "$civo_legacy_apps_render" "$civo_legacy_server_application"
 extract_document Application witself-postgresql "$civo_apps_render" "$civo_postgres_application"
 extract_document Application witself-postgresql "$civo_backup_apps_render" "$civo_backup_postgres_application"
-extract_document Application witself-postgresql "$civo_use1_apps_render" "$civo_use1_postgres_application"
+extract_document Application witself-postgresql "$civo_legacy_apps_render" "$civo_legacy_postgres_application"
 extract_document Application witself-postgresql "$civo_default_preset_apps_render" "$civo_default_preset_postgres_application"
 require_line "          resourcesPreset: micro" "$civo_postgres_application"
 reject_line "          resourcesPreset: nano" "$civo_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_backup_postgres_application"
 reject_line "          resourcesPreset: micro" "$civo_backup_postgres_application"
-require_line "          resourcesPreset: nano" "$civo_use1_postgres_application"
-reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
+require_line "          resourcesPreset: nano" "$civo_legacy_postgres_application"
+reject_line "          resourcesPreset: micro" "$civo_legacy_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
 civo_server_chart_version="$(read_witself_server_semver_scalar chartVersion "$civo_cell")"
@@ -662,19 +665,19 @@ require_sequence "$civo_server_application" \
   "            enabled: true"
 # The app-of-apps chart is reconciled before each child chart pin advances.
 # Forward the value only to cells whose child chart accepts it. The two live
-# v0.0.224 cells include it, while the configured-but-unprovisioned v0.0.223
-# cell remains a compatibility check for omission.
+# cells include it; a synthetic render pinned to v0.0.223 preserves the older
+# chart compatibility check for omission.
 require_line "          messageRateBucketCleanup:" "$civo_server_application"
 require_line "          messageRateBucketCleanup:" "$civo_backup_server_application"
-reject_line "          messageRateBucketCleanup:" "$civo_use1_server_application"
+reject_line "          messageRateBucketCleanup:" "$civo_legacy_server_application"
 # The email-specific cleanup contract first belongs to the v0.0.226 chart.
-# Both provisioned Civo cells have advanced to v0.0.226. The older GCP and
-# configured-only Civo cells remain compatibility checks for omission.
+# Both provisioned Civo cells have advanced past v0.0.226. The older GCP and
+# synthetic Civo render remain compatibility checks for omission.
 require_line "          agentEmailRateBucketCleanup:" "$agent_email_rate_cleanup_server_application"
 reject_line "          agentEmailRateBucketCleanup:" "$live_server_application"
 require_line "          agentEmailRateBucketCleanup:" "$civo_server_application"
 require_line "          agentEmailRateBucketCleanup:" "$civo_backup_server_application"
-reject_line "          agentEmailRateBucketCleanup:" "$civo_use1_server_application"
+reject_line "          agentEmailRateBucketCleanup:" "$civo_legacy_server_application"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
 extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
@@ -684,7 +687,7 @@ extract_document Deployment witself-worker "$civo_server_nested_render" "$civo_w
 
 require_line "  replicas: 2" "$civo_server_deployment"
 require_line "  replicas: 2" "$civo_worker_deployment"
-require_line '  WITSELF_CELL_NAME: "civo-sandbox-usw2-dev"' "$civo_server_config"
+require_line '  WITSELF_CELL_NAME: "civo-sandbox-use1-serving"' "$civo_server_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "true"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: "https://witself-agent-email-send.witwave.workers.dev/v1/dispatch"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE: "witself-agent-email-send"' "$civo_worker_config"
@@ -1954,9 +1957,11 @@ fi
 # PostgreSQL hardening activates the serving-cell exporter and preserves the
 # backup cell's separate pin and rollout settings. Inspect child values and
 # serving pod placement without fetching upstream charts during this gate.
+# Isolate these controls from the serving cell's independent PostgreSQL backup
+# activation; test-postgres-backup.sh above checks its exporter query and peers.
 ruby -ryaml -ropen3 - "$apps_chart" "$civo_cell" "$civo_backup_cell" \
-  "$civo_apps_render" "$civo_backup_apps_render" "$civo_server_nested_render" <<'RUBY'
-chart, serving_cell, backup_cell, serving_render, backup_render, serving_server_render = ARGV
+  "$civo_server_nested_render" <<'RUBY'
+chart, serving_cell, backup_cell, serving_server_render = ARGV
 def check(message, condition)
   abort message unless condition
 end
@@ -1967,15 +1972,16 @@ def child_values(documents, name = "witself-postgresql")
   YAML.safe_load(application(documents, name).dig("spec", "source", "helm", "values"), aliases: false)
 end
 def render(chart, cell, *overrides)
-  args = ["helm", "template", "witself-apps", chart, "--values", cell]
+  args = ["helm", "template", "witself-apps", chart, "--values", cell,
+          "--set", "apps.civoPostgres.backup.enabled=false"]
   overrides.each { |override| args.concat(["--set", override]) }
   output, errors, status = Open3.capture3(*args)
   abort errors unless status.success?
   YAML.load_stream(output).compact
 end
 
-serving = YAML.load_stream(File.read(serving_render)).compact
-backup = YAML.load_stream(File.read(backup_render)).compact
+serving = render(chart, serving_cell)
+backup = render(chart, backup_cell)
 defaults = YAML.safe_load(File.read(File.join(chart, "values.yaml")), aliases: false).dig("apps", "civoPostgres")
 check("PostgreSQL image defaults must inherit upstream values", defaults["image"].values.all? { |value| value == "" })
 check("PostgreSQL mirror opt-in must default false", defaults["allowInsecureImages"] == false)
@@ -2064,7 +2070,7 @@ exporter_only = child_values(render(chart, serving_cell, "apps.civoPostgres.metr
 check("ServiceMonitor must stay disabled when only exporter is enabled", exporter_only.dig("metrics", "serviceMonitor", "enabled") == false)
 disabled = child_values(render(chart, backup_cell, "apps.civoPostgres.networkPolicy.enabled=false"))
 check("disabling networkPolicy must not leave restrictive extraDeploy policy", disabled.dig("primary", "networkPolicy", "enabled") == false && !disabled.key?("extraDeploy"))
-_, errors, status = Open3.capture3("helm", "template", "witself-apps", chart, "--values", serving_cell, "--set", "apps.civoPostgres.metrics.enabled=false", "--set", "apps.civoPostgres.metrics.serviceMonitor.enabled=true")
+_, errors, status = Open3.capture3("helm", "template", "witself-apps", chart, "--values", serving_cell, "--set", "apps.civoPostgres.backup.enabled=false", "--set", "apps.civoPostgres.metrics.enabled=false", "--set", "apps.civoPostgres.metrics.serviceMonitor.enabled=true")
 check("ServiceMonitor without exporter must be rejected", !status.success? && errors.include?("apps.civoPostgres.metrics.serviceMonitor.enabled requires apps.civoPostgres.metrics.enabled"))
 puts "PostgreSQL deployment hardening rendering checks passed"
 RUBY

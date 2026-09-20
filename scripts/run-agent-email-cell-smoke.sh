@@ -554,7 +554,8 @@ snapshot_cell_source() {
     .data.WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED=="false" and
     .data.WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN=="witmail.net" and
     ((.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS // "")=="") and
-    (.data.WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE==$cell) and
+    (.data.WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE | type=="string" and
+      test("\\A[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\z")) and
     (.data.WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON | fromjson | type=="object")
   ' "$config_file" >/dev/null || die "managed production receive configuration is not ready"
   "${KUBE[@]}" -n "$NAMESPACE" get service "$SERVICE" -o json >"$service_file" 2>/dev/null ||
@@ -589,6 +590,9 @@ snapshot_cell_source() {
 snapshot_cell_source initial
 SERVER_IMAGE="$(jq -er '.image' "$WORK_DIR/deployment-initial.fence.json")"
 SERVER_VERSION="${SERVER_IMAGE##*:}"
+# The deployed relay audience survives physical cell replacement and is fenced
+# separately from WITSELF_CELL_NAME in the verified ConfigMap snapshot.
+RELAY_AUDIENCE="$(jq -er '.audience' "$WORK_DIR/config-initial.fence.json")"
 
 if [ "$PHASE" = entitled ]; then
   jq -e --slurpfile state "$STATE_SNAPSHOT" '. == $state[0].deployment_fence' \
@@ -1100,7 +1104,7 @@ fi
 RELAY_RESULT="$WORK_DIR/relay-result.json"
 set +e
 node "$RELAY_HELPER" \
-  --audience "$CELL" \
+  --audience "$RELAY_AUDIENCE" \
   --agent-token-file "$AGENT_TOKEN_SNAPSHOT" \
   --expected-verdict "$EXPECTED_VERDICT" \
   --expected-owner-gate "$EXPECTED_OWNER_GATE" \

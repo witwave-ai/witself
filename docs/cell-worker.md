@@ -149,9 +149,9 @@ verified for the rollout:
 
 ```sh
 scripts/run-agent-email-receipt-proof.sh \
-  --cell civo-sandbox-usw2-dev \
+  --cell civo-sandbox-use1-serving \
   --kubeconfig /absolute/private/path/kubeconfig \
-  --context witself-civo-sandbox-usw2-dev \
+  --context witself-civo-sandbox-use1-serving \
   --namespace witself \
   --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.253 \
   --expected-config-checksum 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
@@ -359,7 +359,7 @@ Agent-email retention uses the same sequence with its own schema,
 lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
 worker ConfigMap checksum; API pods are not restarted.
 
-The active `civo-sandbox-usw2-dev` production configuration runs retention
+The checked-in `civo-sandbox-use1-serving` production configuration enables retention
 cell-wide across its accounts: two replicas, batch size 100, a one-minute
 interval, and one shared two-minute timeout per scheduled run. The Founder
 email cohort has an indefinite policy, so its mail remains ineligible for age

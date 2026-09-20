@@ -5,7 +5,7 @@ import {
   DurableTargetCellCoordinator,
 } from "../src/target-cell-coordinator.mjs";
 
-const CELL = "civo-phx1";
+const CELL = "civo-fixture-coordinator";
 const ACCOUNT = "acct_cell_guard";
 const OPERATION = "11111111-1111-4111-8111-111111111111";
 const EVACUATION = "22222222-2222-4222-8222-222222222222";
@@ -105,8 +105,8 @@ function cell(accepting = true, registration = REGISTRATION) {
   return {
     endpoint: "https://target.example",
     cloud: "civo",
-    region: "Phoenix",
-    region_code: "phx1",
+    region: "New York",
+    region_code: "nyc1",
     channel: "experimental",
     owner: "witwave",
     weight: 1,

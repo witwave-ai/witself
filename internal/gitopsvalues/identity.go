@@ -16,7 +16,6 @@ var regionCodes = map[string]string{
 	"us-east1":  "use1",
 	"us-west2":  "usw2",
 	"nyc1":      "use1",
-	"phx1":      "usw2",
 }
 
 func resolveCell(name string, cfg *Catalog) (templateData, error) {

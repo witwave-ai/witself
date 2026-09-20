@@ -112,19 +112,23 @@ func TestBackupEvidenceVerifyCmdSingleCellFlag(t *testing.T) {
 	}
 }
 
-func TestBackupEvidenceVerifyCmdRejectsLegacyCellFlag(t *testing.T) {
-	root := t.TempDir()
-	dir := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "0a1b2c3d")
-	stderr := captureStderr(t, func() {
-		code := backupEvidenceCmd([]string{
-			"verify", "--release", "0.0.258", "--cell", "civo-sandbox-usw2-dev", dir,
+func TestBackupEvidenceVerifyCmdRejectsUnreviewedCellFlag(t *testing.T) {
+	for _, cell := range []string{"civo-fixture-use1-unreviewed", "civo-sandbox-usw2-dev"} {
+		t.Run(cell, func(t *testing.T) {
+			root := t.TempDir()
+			dir := writeBackupEvidenceFixture(t, root, cell, "0.0.258", "0a1b2c3d")
+			stderr := captureStderr(t, func() {
+				code := backupEvidenceCmd([]string{
+					"verify", "--release", "0.0.258", "--cell", cell, dir,
+				})
+				if code != 1 {
+					t.Fatalf("expected exit 1 for unreviewed cell, got %d", code)
+				}
+			})
+			if !strings.Contains(stderr, "cell_unsupported") {
+				t.Fatalf("expected unsupported-cell finding, got %q", stderr)
+			}
 		})
-		if code != 1 {
-			t.Fatalf("expected exit 1 for legacy cell, got %d", code)
-		}
-	})
-	if !strings.Contains(stderr, "cell_unsupported") {
-		t.Fatalf("expected unsupported-cell finding, got %q", stderr)
 	}
 }
 

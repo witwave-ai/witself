@@ -69,7 +69,7 @@ case "${1:-} ${2:-}" in
     fi
     service_type=ClusterIP
     cluster_ip=10.96.12.34
-    service_cell=civo-sandbox-usw2-dev
+    service_cell=civo-sandbox-use1-serving
     if [ "$scenario" = service_public ]; then
       service_type=LoadBalancer
     fi
@@ -269,7 +269,7 @@ run_canary() {
     FAKE_SENSITIVE_MARKER=receiver-private-marker \
     bash "$canary" \
       --context founder-context \
-      --cell civo-sandbox-usw2-dev \
+      --cell civo-sandbox-use1-serving \
       --out "$work_dir/output/evidence.json" \
       "$@" \
       >"$work_dir/stdout" 2>"$work_dir/stderr"
@@ -445,7 +445,7 @@ require_call 'delete --raw=/apis/monitoring.coreos.com/v1/namespaces/monitoring/
 [ "$(file_mode "$work_dir/output/evidence.json")" = 600 ]
 jq -e '
   .schema == "witself.monitoring-alert-canary.v1" and
-  .cell == "civo-sandbox-usw2-dev" and
+  .cell == "civo-sandbox-use1-serving" and
   .firing_observed == true and
   .firing_dwell_seconds == 45 and
   .rule_false_observed == true and

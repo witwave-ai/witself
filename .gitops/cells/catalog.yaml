@@ -52,13 +52,6 @@ cells:
       domain_documentation_only: true
       memory_alerts: false
       postgres_backup: false
-  civo-sandbox-use1-dev:
-    cloud: civo
-    region: nyc1
-    domain: cells.witself.witwave.ai
-    overlay: civo-sandbox-use1-dev.yaml.tmpl
-    switches:
-      domain_documentation_only: true
   civo-sandbox-use1-serving:
     cloud: civo
     region: nyc1
@@ -72,13 +65,3 @@ cells:
       sealed_plane_alerts: true
       postgres_backup: true
       memory_alerts: false
-  civo-sandbox-usw2-dev:
-    cloud: civo
-    region: phx1
-    domain: cells.witself.witwave.ai
-    overlay: civo-sandbox-usw2-dev.yaml.tmpl
-    switches:
-      domain_documentation_only: true
-      monitoring: true
-      collector_alerts: false
-      sealed_plane_alerts: true

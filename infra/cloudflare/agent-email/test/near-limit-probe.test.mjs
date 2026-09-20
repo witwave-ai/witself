@@ -25,7 +25,7 @@ const baseEnvironment = {
   AGENT_EMAIL_LARGE_PAYLOAD_FROM: "canary@send.witmail.net",
   AGENT_EMAIL_LARGE_PAYLOAD_TO: "large-payload.abcdefghijklmnop@witmail.net",
   WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT:
-    "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai",
+    "https://api.civo-sandbox-use1-serving.cells.witself.witwave.ai",
   WITSELF_EMAIL_LARGE_PAYLOAD_TOKEN: "witself-token",
   AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS: "600",
 };
@@ -106,8 +106,8 @@ test("large-payload probe configuration is fenced to production identities", () 
   assert.equal(largePayloadProbeConfiguration({
     ...baseEnvironment,
     WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT:
-      "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com",
-  }).endpoint, "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com");
+      "https://api.11111111-2222-4333-8444-555555555555.k8s.civo.com",
+  }).endpoint, "https://api.11111111-2222-4333-8444-555555555555.k8s.civo.com");
 
   assert.throws(() => largePayloadProbeConfiguration({
     ...baseEnvironment,
@@ -128,7 +128,7 @@ test("large-payload probe configuration is fenced to production identities", () 
   assert.throws(() => largePayloadProbeConfiguration({
     ...baseEnvironment,
     WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT:
-      "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai/v1",
+      "https://api.civo-sandbox-use1-serving.cells.witself.witwave.ai/v1",
   }), /root HTTPS URL of one production cell/);
   assert.throws(() => largePayloadProbeConfiguration({
     ...baseEnvironment,

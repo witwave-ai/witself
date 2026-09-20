@@ -97,7 +97,7 @@ chmod +x "$TEST_ROOT/bin/"*
 export TEST_LOG="$TEST_ROOT/commands" SOURCE_ROOT
 export PATH="$TEST_ROOT/bin:$PATH"
 
-for cells in "civo-sandbox-use1-dev,$SERVING" "$BACKUP,civo-sandbox-usw2-other" "$SERVING,$BACKUP"; do
+for cells in "civo-synthetic-unreviewed,$SERVING" "$BACKUP,civo-synthetic-other" "$SERVING,$BACKUP"; do
   for mode in real dry; do
     : >"$TEST_LOG"
     args=("$VERSION" --cells "$cells" --backup-evidence "$EVIDENCE_A"
@@ -121,7 +121,7 @@ for selection in default explicit; do
   if [ "$selection" = explicit ]; then args+=(--cells "$BACKUP,$SERVING"); fi
   bash "$TRAIN" "${args[@]}" >"$TEST_ROOT/output" 2>&1 || fail "$selection reviewed-cell pair was rejected"
 done
-bash "$TRAIN" "$VERSION" --cells "civo-sandbox-use1-dev,$SERVING" \
+bash "$TRAIN" "$VERSION" --cells "civo-synthetic-unreviewed,$SERVING" \
   --no-schema-change --dry-run >"$TEST_ROOT/output" 2>&1 || fail 'custom no-schema-change pair was rejected'
 
 # Exercise the real live-version guard with two local desired-state snapshots.

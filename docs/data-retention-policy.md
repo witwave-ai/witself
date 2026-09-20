@@ -59,7 +59,7 @@ a change to the retention windows themselves.
 
 The checked-in production configuration is:
 
-| Retention class / chart flags | `civo-sandbox-usw2-dev` (serving) | `civo-sandbox-use1-backup` (rollback) |
+| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (rollback) |
 |---|---|---|
 | Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` |
 | Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `false` / `preview` (inactive defaults) |

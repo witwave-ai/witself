@@ -12,7 +12,7 @@ import {
 
 const ACCOUNT = "acct_backup";
 const SOURCE = "aws-us-west-2";
-const TARGET = "civo-phx1";
+const TARGET = "civo-fixture-target";
 const SCHEDULED_AT = Date.parse("2026-07-25T12:34:00.000Z");
 const NOW = new Date("2026-07-25T12:35:00.000Z");
 const TRAILER_SHA256 = "a".repeat(64);

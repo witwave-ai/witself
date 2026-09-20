@@ -212,14 +212,14 @@ func TestBackupValidationTargetRendersAsIsolatedPurpose(t *testing.T) {
 	accepting := false
 	target := true
 	st := cellState{
-		name: "civo-sandbox-use1-dev",
+		name: "civo-sandbox-use1-backup",
 		entry: cellEntry{
 			Cloud:                  strPtr("civo"),
 			Region:                 strPtr("nyc1"),
 			BackupValidationTarget: &target,
 		},
 		fleet: &fleet.Cell{
-			Name:                   "civo-sandbox-use1-dev",
+			Name:                   "civo-sandbox-use1-backup",
 			Accepting:              &accepting,
 			BackupValidationTarget: true,
 			HasBackupToken:         true,

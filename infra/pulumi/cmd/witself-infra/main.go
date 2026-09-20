@@ -109,7 +109,6 @@ var legacyRegionCodes = map[string]string{
 	// Civo regions. Civo has a smaller regional footprint, so these map to
 	// the nearest canonical placement geography.
 	"nyc1": "use1",
-	"phx1": "usw2",
 	"fra1": "euc1",
 	"lon1": "euw2",
 	"mum1": "aps1",

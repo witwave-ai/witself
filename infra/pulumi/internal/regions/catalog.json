@@ -73,11 +73,6 @@
           "region": "westus2",
           "name": "West US 2",
           "match": "native"
-        },
-        "civo": {
-          "region": "phx1",
-          "name": "Phoenix 1",
-          "match": "nearest"
         }
       }
     },

@@ -222,12 +222,12 @@ failures for about one minute, then recovered. Workers reconnected without
 restarting, `kubectl top` worked, and node memory usage was 84% on the 2.3-GiB
 node.
 
-Batch B prepares **`civo-sandbox-usw2-dev`**, the two-node serving cell with an
-existing monitoring stack and PagerDuty receiver. Its desired state has two
-server replicas and the existing two workers, each with a `minAvailable: 1`
-PDB and hostname topology spread (`maxSkew: 1`, `ScheduleAnyway`). This avoids
-the chart's zone constraint on the single-zone cell while allowing placement
-when capacity is uneven. Resource Metrics API installation inherits the same
+Batch B prepared the former two-node serving cell with an existing monitoring
+stack and PagerDuty receiver. The replacement **`civo-sandbox-use1-serving`**
+retains that configuration. Its desired state has two server replicas and the existing two workers, each with a `minAvailable: 1`
+PDB and hostname topology spread (`maxSkew: 1`, `DoNotSchedule`). This uses
+hostnames in the single-zone cell and prevents new placements from exceeding
+the allowed skew. Resource Metrics API installation inherits the same
 two Metrics Server replicas as the backup cell, requesting 100m CPU/200Mi each
 with no CPU/memory limits. Avatar compaction is enabled as a config-only change
 after all writers reached 0.0.273.
