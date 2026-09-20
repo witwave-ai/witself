@@ -945,7 +945,6 @@ test("completed authority reprepare requires a verified older cell snapshot", as
     ["same revision conflicting content", {
       ...currentSnapshot, revision: target.revision,
     }],
-    ["newer cell", { ...currentSnapshot, revision: target.revision + 1 }],
   ]) {
     await t.test(name, async () => {
       const events = [];
@@ -960,6 +959,42 @@ test("completed authority reprepare requires a verified older cell snapshot", as
       assert.equal(response.status, 502);
       assert.equal(requests.some(({ body }) => body.reprepare_completed === true), false);
       assert.equal(requests.some(({ body }) => body.mode === "complete"), false);
+    });
+  }
+});
+
+test("stale preparation reports a verified superseding cell as a conflict", async (t) => {
+  for (const alreadyPrepared of [false, true]) {
+    await t.test(alreadyPrepared ? "compensates prepared domain" : "no prepared dimensions", async () => {
+      const events = [];
+      const requests = [];
+      const env = environment();
+      env.AGENT_EMAIL_DOMAINS = alreadyPrepared
+        ? authorityNamespace("domain", events, undefined, target, requests)
+        : staleAuthorityNamespace("domain", events, requests);
+      env.REALM_EMAIL_ALIASES = staleAuthorityNamespace("alias", events, requests);
+      const newer = { ...currentSnapshot, revision: target.revision + 1 };
+      let reads = 0;
+      const response = await handleInternalBridgeRequest(request(), env, async (_url, init) => {
+        assert.equal(init.method, "GET", "superseded target must never write to the cell");
+        reads += 1;
+        return Response.json(newer);
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), {
+        schema_version: "witself.v0",
+        error: "cell plan snapshot supersedes plan-fit target",
+      });
+      assert.equal(reads, 1);
+      assert.equal(requests.some(({ body }) => body.reprepare_completed === true), false);
+      assert.deepEqual(events, alreadyPrepared
+        ? ["domain:prepare", "alias:prepare", "domain:complete"]
+        : ["domain:prepare"]);
+      if (alreadyPrepared) {
+        const compensation = requests.at(-1).body;
+        assert.equal(compensation.plan_revision, newer.revision);
+        assert.equal(compensation.plan_snapshot_hash, newer.snapshot_hash);
+      }
     });
   }
 });
