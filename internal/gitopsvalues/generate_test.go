@@ -17,10 +17,17 @@ func TestCommittedValuesMatchGenerator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(generated) != 8 {
-		t.Fatalf("generated %d cells, want 8", len(generated))
+	cfg, err := loadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generated) != len(cfg.Cells) {
+		t.Fatalf("generated %d cells, want %d catalog cells", len(generated), len(cfg.Cells))
 	}
 	for _, cell := range sortedCells(generated) {
+		if _, ok := cfg.Cells[cell]; !ok {
+			t.Fatalf("generated cell %s is not in the catalog", cell)
+		}
 		path := filepath.Join(root, filepath.FromSlash(valuesRel(cell)))
 		committed, err := os.ReadFile(path)
 		if err != nil {
