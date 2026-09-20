@@ -677,6 +677,31 @@ that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
 
+### Cell identity after a same-name re-endpoint
+
+The serving cell created on 2026-09-19 is the Kubernetes cluster
+`witself-civo-sandbox-use1-serving` (server `WITSELF_CELL_NAME=civo-sandbox-use1-serving`),
+but it is registered in the fleet registry under the name of the cell it
+replaced, `civo-sandbox-usw2-dev`, with that cell's `registration_id`. The
+coordinator's same-instance rule allowed the endpoint change without
+re-placing accounts, and the agent-email audience and dispatch key id
+(`civo-sandbox-usw2-dev`, `civo-sandbox-usw2-dev-2026-08`) are projected by
+the edge under that name. Decision (2026-09-20): keep the registry name until
+a deliberate cell-rename lifecycle exists; renaming today would require
+evacuating and restoring every account and re-issuing the agent-email
+dispatch key. Operators must therefore read `civo-sandbox-usw2-dev` in
+`witself-admin cells` output as the live serving cell, and
+`civo-sandbox-use1-serving` in GitOps, kubectl contexts and Pulumi state.
+
+### Restore transport: `kubectl exec -i` can hang after `pg_restore` exits
+
+During the 2026-09-19 restore, `kubectl exec -i` into the PostgreSQL pod with
+the dump on stdin did not return after `pg_restore` finished; the restore had
+completed and the verification query proved it. Prefer a Kubernetes Job that
+reads the dump from a volume or object storage, or run `pg_restore` with a
+`timeout` and verify with the documented row check rather than waiting on the
+exec session.
+
 ### After restoring a cell from backup: entitlement re-delivery
 
 A PostgreSQL restore can put the cell's plan revision behind the control
