@@ -267,7 +267,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			succeeded := reconcileErr == nil && mutationErr == nil
 			cfg.LifecycleObserver.complete(time.Now(), summary,
 				succeeded)
-			writeJSON(w, http.StatusOK, map[string]any{
+			response := map[string]any{
 				"schema_version": "witself.v0",
 				"plan_lifecycle": map[string]any{
 					"scanned":           summary.Scanned,
@@ -277,7 +277,12 @@ func Register(mux *http.ServeMux, cfg Config) error {
 					"succeeded":         succeeded,
 					"billing_mutations": summary.BillingMutations,
 				},
-			})
+			}
+			if cfg.Providers["stripe"] != nil {
+				response["stripe_observation"] = cfg.LifecycleObserver.StripeSnapshot(
+					time.Now(), cfg.Manager.StripeWebhookReplays())
+			}
+			writeJSON(w, http.StatusOK, response)
 		})
 	}
 
@@ -1778,6 +1783,9 @@ func webhook(cfg Config, name string, p billing.Provider) http.HandlerFunc {
 		// webhook payloads are a few KiB.
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		events, err := p.HandleWebhook(r)
+		if name == "stripe" {
+			cfg.LifecycleObserver.observeStripeVerification(err == nil)
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "webhook rejected")
 			return

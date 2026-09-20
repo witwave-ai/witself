@@ -1,3 +1,5 @@
+import { stripeObservation, stripeObservationLines } from "./stripe-observation.mjs";
+
 // The cursor remains private. Public projection contains only closed outcomes
 // and observation times, never account ids, cursors, plans or error details.
 export const PLAN_LIFECYCLE_CURSOR_KEY = "config:plan_lifecycle_cursor";
@@ -106,13 +108,15 @@ async function buildCheckpoint(stored, cursor, next, result, base) {
   return document;
 }
 
-export async function writeDeliveryCheckpoint(directory, stored, cursor, next, result) {
+export async function writeDeliveryCheckpoint(directory, stored, cursor, next, result, stripe) {
   const base = { cursor: next, updated_at: new Date().toISOString() };
   let document = base;
   try {
     // Construction is pure: a late digest result cannot perform a write or
     // replace the outer fallback envelope after this independent deadline.
     document = await deliveryBounded(() => buildCheckpoint(stored, cursor, next, result, base), 1000);
+    const observation = stripeObservation(stripe, base.updated_at);
+    if (observation && document !== base) document.stripe_observation = observation;
   } catch {
     // Monitoring cannot prevent the pre-existing cursor update.
     // Keep the original envelope.
@@ -163,5 +167,6 @@ export async function entitlementDeliveryLines(env) {
     lines.push(`# HELP ${PREFIX}${name} Account observations over the last acknowledged page or complete traversal; pending and failed overlap and must not be summed.`, `# TYPE ${PREFIX}${name} gauge`);
     for (const outcome of OUTCOMES) lines.push(`${PREFIX}${name}{outcome="${outcome}"} ${values[outcome]}`);
   }
+  lines.push(...stripeObservationLines(document.stripe_observation, document.updated_at));
   return lines;
 }

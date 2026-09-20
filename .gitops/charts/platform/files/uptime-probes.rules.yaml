@@ -86,3 +86,25 @@ groups:
         annotations:
           summary: Synthetic uptime probes are being skipped because the run budget is exhausted.
           runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfStripeWebhookRejections
+        # More than nine rejected webhook requests per fifteen minutes, sustained.
+        expr: sum(rate(witself_cp_stripe_webhook_events_total{outcome="rejected"}[15m])) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane-stripe
+          witself_alert: "true"
+        annotations:
+          summary: The control-plane Stripe webhook rejection rate is elevated.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfBillingReconciliationStalled
+        # Age alone is insufficient: require recent failed reconciliation attempts.
+        expr: witself_cp_billing_reconciliation_lag_seconds > 900 and increase(witself_cp_billing_reconciliation_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane-stripe
+          witself_alert: "true"
+        annotations:
+          summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
+          runbook: docs/observability-and-operations.md#synthetic-uptime-probes

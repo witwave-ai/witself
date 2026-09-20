@@ -718,7 +718,8 @@ export async function runScheduledPlanLifecycle(env, containerFetch) {
       return { ran: true, succeeded: false };
     }
 
-    await writeDeliveryCheckpoint(env.DIRECTORY, stored, cursor, page.next_cursor, result);
+    await writeDeliveryCheckpoint(env.DIRECTORY, stored, cursor, page.next_cursor, result,
+      doc.stripe_observation);
     console.log(
       "plan-lifecycle: scheduled tick " +
       `scanned=${result.scanned} seeded=${result.seeded} ` +

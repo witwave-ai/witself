@@ -107,6 +107,67 @@ type PlanLifecycleObserver struct {
 	mutationItemsTotal       [7]uint64
 	mutationScanCappedTotal  uint64
 	mutationLastSuccessEpoch float64
+	stripeVerified           uint64
+	stripeRejected           uint64
+	reconciliationFailures   uint64
+	oldestPendingAt          *time.Time
+	reconciliationObserved   bool
+	reconciliationComplete   bool
+}
+
+// StripeObservation is the value-free snapshot persisted by the existing
+// Worker lifecycle cron for its probe exposition. Counters have process
+// lifetime. OldestPendingAt is the earliest retained observation from bounded,
+// pre-reconciliation billing-mutation scans, not a fleet-global backlog claim.
+type StripeObservation struct {
+	SchemaVersion          int                 `json:"schema_version"`
+	WebhookEvents          StripeWebhookEvents `json:"webhook_events"`
+	ReconciliationFailures uint64              `json:"reconciliation_failures"`
+	OldestPendingAt        *time.Time          `json:"oldest_pending_at"`
+	ReconciliationObserved bool                `json:"reconciliation_observed"`
+	ReconciliationComplete bool                `json:"reconciliation_complete"`
+	ObservedAt             time.Time           `json:"observed_at"`
+}
+
+// StripeWebhookEvents deliberately has a fixed vocabulary and no identities.
+// Replayed is a subset of verified deliveries whose normalized receipt had
+// already been durably processed. Verified also includes zero-event deliveries
+// and deliveries whose later lifecycle processing failed.
+type StripeWebhookEvents struct {
+	Verified uint64 `json:"verified"`
+	Rejected uint64 `json:"rejected"`
+	Replayed uint64 `json:"replayed"`
+}
+
+func (o *PlanLifecycleObserver) observeStripeVerification(verified bool) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if verified {
+		o.stripeVerified++
+	} else {
+		o.stripeRejected++
+	}
+}
+
+// StripeSnapshot returns only fixed fields suitable for the authenticated
+// lifecycle tick response; scraping never has to wake the control-plane process.
+func (o *PlanLifecycleObserver) StripeSnapshot(now time.Time, replayed uint64) StripeObservation {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return StripeObservation{
+		SchemaVersion: 1,
+		WebhookEvents: StripeWebhookEvents{
+			Verified: o.stripeVerified, Rejected: o.stripeRejected, Replayed: replayed,
+		},
+		ReconciliationFailures: o.reconciliationFailures,
+		OldestPendingAt:        cloneTime(o.oldestPendingAt),
+		ReconciliationObserved: o.reconciliationObserved,
+		ReconciliationComplete: o.reconciliationComplete,
+		ObservedAt:             now.UTC(),
+	}
 }
 
 // NewPlanLifecycleObserver returns an enabled status projection.
@@ -154,6 +215,24 @@ func (o *PlanLifecycleObserver) complete(now time.Time, summary PlanLifecycleSum
 	}
 	if view.ScanCapped {
 		o.mutationScanCappedTotal++
+	}
+	// A failed/capped scan must not turn an unknown backlog into a zero lag,
+	// or forget an older known pending receipt. Only a successful uncapped
+	// observation can replace (including clear) the retained timestamp.
+	o.reconciliationComplete = view.Succeeded && !view.ScanCapped
+	if o.reconciliationComplete {
+		o.oldestPendingAt = cloneTime(view.OldestObservedPendingAt)
+		o.reconciliationObserved = true
+	} else {
+		if view.OldestObservedPendingAt != nil && (o.oldestPendingAt == nil || view.OldestObservedPendingAt.Before(*o.oldestPendingAt)) {
+			o.oldestPendingAt = cloneTime(view.OldestObservedPendingAt)
+		}
+		o.reconciliationObserved = o.oldestPendingAt != nil
+	}
+	o.reconciliationFailures += uint64(max(0, summary.Failed)) + uint64(max(0, view.Failed))
+	if !view.Succeeded && view.Failed == 0 {
+		// A list/scan failure may have no item-level failure to count.
+		o.reconciliationFailures++
 	}
 }
 

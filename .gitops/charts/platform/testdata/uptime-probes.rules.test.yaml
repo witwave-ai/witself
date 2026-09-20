@@ -2,6 +2,174 @@ rule_files:
   - ../files/uptime-probes.rules.yaml
 evaluation_interval: 1m
 tests:
+  - name: Stripe webhook rejection rate requires five minutes and clears after recovery
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="rejected",job="witself-probes",instance="control-plane"}'
+        values: 0+60x20 1200+0x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane Stripe webhook rejection rate is elevated.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 20m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane Stripe webhook rejection rate is elevated.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 35m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+  - name: verified and replayed webhooks and a low rejection rate do not page
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="verified"}'
+        values: 0+600x30
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="replayed"}'
+        values: 0+600x30
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="rejected"}'
+        values: 0+0.3x30
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+  - name: webhook rejection rate exactly at the threshold does not page
+    interval: 100s
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="rejected"}'
+        values: 0+1x24
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+  - name: reconciliation requires both old work and recent failures for five minutes and clears on catchup
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="stalled"}'
+        values: 901+0x20 0+0x20
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="stalled"}'
+        values: 0+1x41
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="threshold"}'
+        values: 900+0x41
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="threshold"}'
+        values: 0+1x41
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="young"}'
+        values: 899+0x41
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="young"}'
+        values: 0+1x41
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="old-but-not-failing"}'
+        values: 1200+0x41
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="old-but-not-failing"}'
+        values: 100+0x41
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: stalled
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 20m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: stalled
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 21m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+  - name: reconciliation clears after failures stop even if old work remains
+    interval: 1m
+    input_series:
+      - series: witself_cp_billing_reconciliation_lag_seconds
+        values: 901+0x40
+      - series: witself_cp_billing_reconciliation_failures_total
+        values: 0+1x10 10+0x30
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - eval_time: 25m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+  - name: absent control-plane Stripe series do not page before activation
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+  - name: reconciliation does not join failures from a different scrape target or page on an absent metric
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="lag-only"}'
+        values: 1200+0x30
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="failures-only"}'
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+  - name: counter resets without new rejected webhooks or reconciliation failures do not page
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="rejected"}'
+        values: 100+0x5 0+0x25
+      - series: witself_cp_billing_reconciliation_lag_seconds
+        values: 1200+0x31
+      - series: witself_cp_billing_reconciliation_failures_total
+        values: 100+0x5 0+0x25
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfStripeWebhookRejections
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts: []
   - name: target failures preserve the failing target and require ten minutes
     interval: 1m
     input_series:
