@@ -543,6 +543,18 @@ jobs:
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
 
+      - name: Install pinned cell Secret tools
+        run: |
+          go install github.com/getsops/sops/v3/cmd/sops@v3.13.3
+          go install filippo.io/age/cmd/age@v1.3.2
+          go install filippo.io/age/cmd/age-keygen@v1.3.2
+          ruby -e 'require "json"; require "yaml"; require "open3"'
+
+      - name: Cell Secret ciphertext and offline round-trip checks
+        run: |
+          make check-cell-secrets
+          bash scripts/test-cell-secrets.sh
+
       - name: gitops cell values drift check
         run: |
           bash scripts/gitops-cell-values.sh --check

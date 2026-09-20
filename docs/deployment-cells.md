@@ -299,6 +299,13 @@ versioned Secret. Set the new Secret name and key in a separate config-only
 rollout. Both fields participate in the pod checksums; pre-`0.0.245` strict
 child schemas never receive the empty field.
 
+Keep the managed Civo cells' operator-applied agent-email Secrets in the
+[Cell operator Secrets (SOPS) workflow](runbooks.md#cell-operator-secrets-sops).
+Whole-document encryption preserves their exact data bytes for a rebuild;
+rotation creates a new immutable name before changing its values reference.
+The age custody identity remains on the operator side, outside Git, CI and
+the cells.
+
 Serving replicas do only a bounded read-only check that each configured account
 exists in the cell and is active or suspended, plus one optional canary
 membership check. They do not scan agents and never provision mailboxes during

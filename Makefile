@@ -111,7 +111,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status gitops-cell-values build check check-go-mod-tidy govulncheck check-infra
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -336,9 +336,13 @@ check-go-mod-tidy: ## Verify both Go modules are tidy without modifying them
 govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+check-cell-secrets: ## Reject plaintext or invalid cell Secret artifacts without a decryption identity
+	bash scripts/cell-secrets.sh check
+
 check: ## Run CI's exact local gate set — run before every push
 	bash scripts/check-conflict-markers.sh
 	bash scripts/test-conflict-markers.sh
+	$(MAKE) check-cell-secrets
 	$(MAKE) check-go-mod-tidy
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
@@ -370,6 +374,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	npm --prefix infra/cloudflare/control-plane test
 	npm --prefix infra/cloudflare/control-plane run bundle:check
 	bash scripts/test-helm-rollout.sh
+	bash scripts/test-cell-secrets.sh
 	bash scripts/gitops-cell-values.sh --check
 	bash scripts/test-gitops-cell-values.sh
 	bash scripts/test-roll-cell-gate.sh

@@ -851,7 +851,10 @@ For operator activation on a provisioned cell:
    keep those passwords out of shell arguments, Git, and command output. Supply
    the same passwords in the Secret below.
 2. Create these **two backup Secrets** in the PostgreSQL namespace (`witself`),
-   using the normal secret-provisioning workflow. Do not commit their contents.
+   using the [Cell operator Secrets (SOPS) workflow](runbooks.md#cell-operator-secrets-sops)
+   for the managed Civo cells. Commit only whole-document encrypted artifacts;
+   never commit their plaintext contents. The SOPS custody identity is separate
+   from the PostgreSQL backup encryption identity described below.
 
    | Default Secret name | Keys |
    | --- | --- |

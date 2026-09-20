@@ -510,6 +510,86 @@ witself account status --account <name>          # says "archived — awaiting p
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
+## Cell operator Secrets (SOPS)
+
+Cell operator Secrets are stored as whole-document SOPS binary ciphertext
+under `.gitops/secrets/<cell>/<namespace>/<name>.sops`. The public repository
+exposes those paths and SOPS envelope metadata, including the age public
+recipient; Kubernetes data key names and vendor details inside the manifest
+remain encrypted. Never commit plaintext manifests or use `stringData`.
+Argo CD does not decrypt this directory. See the
+[layout and artifact rules](../.gitops/secrets/README.md).
+
+Keep the private age identity only in the 1Password item
+`witself-cell-secrets-age`, never in CI or a cell. Install Bash, Ruby, SOPS,
+age, kubectl and the 1Password CLI on the operator workstation.
+`scripts/cell-secrets.sh` uses an explicitly set `SOPS_AGE_KEY_FILE`, or reads
+`op://Private/witself-cell-secrets-age/credential` into an ephemeral mode-0600
+identity file removed on exit. Never pass the identity as an argument.
+
+For initial population, run `export` once for each inventory entry below;
+the command reads only the explicitly selected `witself-<cell>` context
+and encrypts the manifest in memory. Export requires the existing Secret
+to be immutable and adds `metadata.annotations["witself.io/cell"]` to bind
+the encrypted manifest to that cell. For example:
+
+```sh
+scripts/cell-secrets.sh export civo-sandbox-use1-serving monitoring/witself-monitoring-pagerduty-v1
+make check-cell-secrets
+```
+
+Review and commit only ciphertext. For a rebuild, restore the named
+kubeconfig context and run:
+
+```sh
+scripts/cell-secrets.sh decrypt-apply civo-sandbox-use1-serving --diff-names
+scripts/cell-secrets.sh decrypt-apply civo-sandbox-use1-serving --dry-run
+scripts/cell-secrets.sh decrypt-apply civo-sandbox-use1-serving
+```
+
+`decrypt-apply <cell>` restores all files for that cell, or accepts selected
+`<namespace>/<name>` arguments. Both inspection
+modes read cluster state; `--dry-run` uses client-side kubectl dry run.
+Plaintext is piped to kubectl without a disk file. An existing immutable
+Secret with identical data and type is a no-op; different data refuses before
+apply and reports only the name and namespace.
+Run restores during an operator maintenance window: the read before apply
+does not fence concurrent cluster changes. Export retains only the manifest
+contract and the cell annotation, removing existing server metadata, labels
+and annotations.
+
+Rotate by supplying a complete immutable Secret with a new `-vN` name to
+`scripts/cell-secrets.sh encrypt <cell> - --rotate` through private stdin.
+Include `metadata.annotations["witself.io/cell"]` equal to the selected
+cell; the tool preserves the complete manifest bytes and checks this
+annotation, namespace and name against the artifact path before apply.
+The name must be unused throughout the cell, a predecessor must exist in
+the same cell and namespace, and the version must increase. Existing
+ciphertext is never overwritten. An unversioned predecessor can begin at
+`-v1`. Prepare the values reference change in
+the source overlay and run `make gitops-cell-values`; apply the new Secret
+before rolling out the reference. Once all consumers use the new name,
+delete the old cluster Secret and retire the old ciphertext file. If the
+age identity may have been exposed, replace it and rotate every Secret
+value. Git history keeps old ciphertext forever; re-encrypting old values
+does not revoke access to those historical values.
+
+The recovery inventory supplied for 2026-09-20 names these eight Secrets
+in `civo-sandbox-use1-serving`:
+
+- `monitoring/witself-monitoring-pagerduty-v1`
+- `monitoring/witself-monitoring-deadman-v1`
+- `witself/witself-agent-email-provider-event-v2`
+- `witself/witself-agent-email-outbound-dispatch-v1`
+- `witself/witself-agent-email-receive-cohort-v1`
+- `witself/witself-agent-email-retry-canary-v1`
+- `witself/witself-postgresql-backup-age`
+- `witself/witself-postgresql-backup-r2`
+
+`civo-sandbox-use1-backup` has none of these in that inventory. This change
+ships no populated Secret files; the inventory is an operator checklist,
+not evidence of current cluster state or completed repository population.
+
 ## PostgreSQL image pin: how to re-pin
 
 Read the running PostgreSQL container's image ID using the reviewed cell's
