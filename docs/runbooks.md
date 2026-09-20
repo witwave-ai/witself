@@ -3249,6 +3249,31 @@ never quarantine evidence. To recover later, replace the archived projection
 with a newly validated archive identity through a separately reviewed recovery
 workflow; do not delete or rewrite the quarantined object in place.
 
+### Directory routing after a same-name re-endpoint
+
+For an endpoint change under the same fleet registry cell name, the public
+`GET /v1/directory/<account>` route reads the current `cell:<name>` HTTPS
+endpoint and region fields. Resend-verification also resolves the current
+registry endpoint. Once this Worker change ships, rewriting each
+`acct:<account>` row after a re-endpoint is no longer required for clients or
+resend-verification, but remains recommended so the stored fallback is not
+stale.
+
+The registry's region fields win whenever present, including empty strings;
+only absent or null fields retain the account's stored region hints. The cell
+coordinator uses empty strings as defaults for these fields. A missing cell
+row or invalid HTTPS endpoint leaves the directory's entire stored account
+route unchanged and makes resend-verification use the stored account endpoint.
+Directory registry reads and public responses use a 60-second cache window,
+subject to KV propagation.
+
+### Cell identity after a same-name re-endpoint
+
+The account row's `cell_registration_id` and `epoch` remain unchanged even if
+the registry's `registration_id` differs: an endpoint refresh is not proof that
+the account was placed on a replacement cell instance. Preserve that fence;
+use the restore lifecycle above when placement on another instance is needed.
+
 ## Diagnose an interrupted restore or source finalization
 
 Successful restore no longer requires normal-path SQL cleanup on a losing

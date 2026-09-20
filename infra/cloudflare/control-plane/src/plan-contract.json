@@ -61,5 +61,47 @@
       "minimum": 1,
       "maximum": 36500
     }
-  }
+  },
+  "plan_fit_dimensions": [
+    {
+      "dimension": "realms",
+      "scope": "account"
+    },
+    {
+      "dimension": "operator_seats",
+      "scope": "account"
+    },
+    {
+      "dimension": "agents",
+      "scope": "account"
+    },
+    {
+      "dimension": "agents_per_realm",
+      "scope": "realm"
+    },
+    {
+      "dimension": "stored_memory",
+      "scope": "agent"
+    },
+    {
+      "dimension": "stored_fact",
+      "scope": "agent"
+    },
+    {
+      "dimension": "stored_secret",
+      "scope": "agent"
+    },
+    {
+      "dimension": "agent_email_attachment_storage_bytes",
+      "scope": "account"
+    },
+    {
+      "dimension": "agent_email_realm_aliases_per_realm",
+      "scope": "realm"
+    },
+    {
+      "dimension": "agent_email_custom_domains_per_account",
+      "scope": "account"
+    }
+  ]
 }
