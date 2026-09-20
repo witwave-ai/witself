@@ -20,7 +20,8 @@ apps:
       enabled: true
       allowExternal: false
     metrics:
-      enabled: true
+      # Keep exporter ingress closed until the monitoring CRDs are healthy.
+      enabled: false
   witselfServer:
     enabled: true
     namespace: witself
@@ -145,8 +146,12 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
+  # Recovery phase 1: install the stack and CRDs with null-routed Alertmanager.
+  # Scrape discovery and receiver routing follow in separate GitOps changes.
   monitoring:
     enabled: {{.Monitoring}}
+    alerting:
+      enabled: false
     collectorAlerts:
       enabled: {{.CollectorAlerts}}
     sealedPlaneAlerts:

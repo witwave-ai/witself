@@ -65,7 +65,7 @@ cells:
     overlay: civo-sandbox-use1-serving.yaml.tmpl
     switches:
       domain_documentation_only: true
-      monitoring: false
+      monitoring: true
       collector_alerts: false
       sealed_plane_alerts: false
   civo-sandbox-usw2-dev:

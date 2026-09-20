@@ -153,6 +153,10 @@ chart_archive="$tmp/${chart_name}-${chart_version}.tgz"
 helm template witself-monitoring "$chart_archive" \
   --namespace monitoring --include-crds --values "$child_values" >"$child_render"
 
+# Reuse the checksum-verified archive for the replacement cell's actual
+# phase patches, including CRDs, null routing, receiver mounts, and rules.
+ruby "$repo_root/scripts/testdata/test-monitoring-recovery.rb" "$repo_root" "$chart_archive"
+
 # Probe scraping and its rules stay default-off, even when alerting is enabled.
 # The serving cell opts in without adding any receiver credentials.
 ruby -ryaml -e '
