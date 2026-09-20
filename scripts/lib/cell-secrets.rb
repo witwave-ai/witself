@@ -26,6 +26,16 @@ module CellSecrets
     end
   end
 
+  # Duplicate JSON keys are refused by the parser itself where the json gem
+  # supports it (allow_duplicate_key), otherwise by UniqueObject's []= hook.
+  # Newer parsers may collapse duplicates before object_class sees them.
+  def self.parse_json(raw)
+    JSON.parse(raw, object_class: UniqueObject, allow_duplicate_key: false)
+  rescue ArgumentError => e
+    raise unless e.message.include?('allow_duplicate_key')
+    JSON.parse(raw, object_class: UniqueObject)
+  end
+
   def self.fail!(message)
     raise Refusal, message
   end
@@ -84,7 +94,7 @@ module CellSecrets
   end
 
   def self.json(raw)
-    JSON.parse(raw, object_class: UniqueObject)
+    parse_json(raw)
   end
 
   def self.config
