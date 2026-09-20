@@ -181,8 +181,9 @@ func TestCatalogPostgresBackupSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, cell := range cfg.Cells {
-		if cell.Switches.PostgresBackup {
-			t.Errorf("%s activates postgres_backup; every checked-in cell must stay dark", name)
+		supported := name == "civo-sandbox-use1-serving" || name == "civo-sandbox-use1-backup"
+		if cell.Switches.PostgresBackup && !supported {
+			t.Errorf("%s activates postgres_backup; only the two reviewed Civo cells may", name)
 		}
 	}
 }
@@ -251,7 +252,12 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
 }
 
 func TestGeneratedValuesPostgresBackupsDefaultOff(t *testing.T) {
-	generated, err := generateAll(repoRoot(t))
+	root := repoRoot(t)
+	generated, err := generateAll(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCatalog(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,10 +266,11 @@ func TestGeneratedValuesPostgresBackupsDefaultOff(t *testing.T) {
 		backup := values.Apps.CivoPostgres.Backup.Enabled
 		alerts := values.Platform.Monitoring.PostgresBackupAlerts.Enabled
 		if cell == "civo-sandbox-use1-serving" || cell == "civo-sandbox-use1-backup" {
+			want := cfg.Cells[cell].Switches.PostgresBackup
 			if backup == nil || alerts == nil {
-				t.Errorf("%s must explicitly disable both backup and backup alerts", cell)
-			} else if *backup || *alerts {
-				t.Errorf("%s unexpectedly enables backup or backup alerts", cell)
+				t.Errorf("%s must explicitly set both backup and backup alerts", cell)
+			} else if *backup != want || *alerts != want {
+				t.Errorf("%s backup/backup-alert flags must match its catalog switch (%v)", cell, want)
 			}
 		} else if backup != nil || alerts != nil {
 			t.Errorf("%s unexpectedly includes a PostgreSQL backup switch", cell)

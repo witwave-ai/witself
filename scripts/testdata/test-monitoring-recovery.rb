@@ -31,7 +31,12 @@ def command(*args, **options)
 end
 
 def render(release, chart, values, *options)
-  YAML.load_stream(command("helm", "template", release, chart, "--values", values, *options)).compact
+  # Backups are orthogonal to the monitoring phases: render every phase with the
+  # backup switch off so the reconstructed phase 1 has no exporter regardless of
+  # the cell's live postgres_backup setting.
+  backup_off = ["--set", "apps.civoPostgres.backup.enabled=false",
+                "--set", "platform.monitoring.postgresBackupAlerts.enabled=false"]
+  YAML.load_stream(command("helm", "template", release, chart, "--values", values, *backup_off, *options)).compact
 end
 
 def resource(documents, kind, name)
