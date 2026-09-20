@@ -789,8 +789,8 @@ successful restore drill and the other acceptance prerequisites complete.
 ### Civo PostgreSQL pre-migration backup
 
 The two reviewed Civo production databases use standalone PostgreSQL on an
-in-cluster persistent volume. `civo-sandbox-usw2-dev` is the serving cell despite
-its legacy name. `civo-sandbox-use1-backup` is the empty, isolated rollback-only
+in-cluster persistent volume. `civo-sandbox-use1-serving` in NYC1 is the serving
+cell. `civo-sandbox-use1-backup` is the empty, isolated rollback-only
 drill target, registered `backup_validation_target=true` and `accepting=false`;
 do not place or commit restored accounts there unless it is deliberately
 reclassified.
@@ -798,7 +798,7 @@ Before changing either cell's GitOps image or chart to a release that may
 advance the schema, create a separate logical
 backup with [`scripts/civo-pre-migration-backup.sh`](../scripts/civo-pre-migration-backup.sh).
 This is a hard gate for both `civo-sandbox-use1-backup` and
-`civo-sandbox-usw2-dev`; an account-level R2 snapshot or the existence of the
+`civo-sandbox-use1-serving`; an account-level R2 snapshot or the existence of the
 persistent volume does not satisfy it.
 
 The script is intentionally narrower than a general database administration
@@ -863,9 +863,9 @@ scripts/civo-pre-migration-backup.sh \
   --restore-image "$RESTORE_IMAGE"
 
 scripts/civo-pre-migration-backup.sh \
-  --cell civo-sandbox-usw2-dev \
-  --kubeconfig "${WITSELF_CIVO_USW2_KUBECONFIG:?set the owner-only kubeconfig}" \
-  --context "${WITSELF_CIVO_USW2_CONTEXT:?set the exact context}" \
+  --cell civo-sandbox-use1-serving \
+  --kubeconfig "${WITSELF_CIVO_USE1_SERVING_KUBECONFIG:?set the owner-only serving kubeconfig}" \
+  --context witself-civo-sandbox-use1-serving \
   --release "$VERSION" \
   --output-dir "$BACKUP_ROOT" \
   --age-recipient-file "$AGE_RECIPIENTS" \
@@ -897,7 +897,7 @@ never decrypts an artifact:
 witself-admin backup-evidence verify \
   --release "${RELEASE_VERSION:?without the v prefix}" \
   "$BACKUP_ROOT"/<use1-backup-id> \
-  "$BACKUP_ROOT"/<usw2-dev-backup-id>
+  "$BACKUP_ROOT"/<use1-serving-backup-id>
 ```
 
 The command exits 0 only when every gate property holds for both reviewed
@@ -924,7 +924,8 @@ disposable cluster into the backup script's fixed 4&nbsp;GiB tmpfs. `--evidence-
 JSON summary create-only with mode 0600 and never overwrites an existing
 file; record it alongside the manifest's `backup_id` and
 `ciphertext_sha256` in the private rollout record. `--cell CELL` (repeatable)
-narrows the required-cell set for partial checks, and `--max-age DURATION`
+narrows the required-cell set within the reviewed pair for partial checks;
+other cell names are rejected. `--max-age DURATION`
 optionally rejects evidence older than an operator-chosen bound; the gate
 itself expresses currency through the exact target release, so no default
 age limit is imposed. The command verifies retained evidence; it does not

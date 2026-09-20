@@ -77,7 +77,7 @@ if [ "$NO_SCHEMA_CHANGE" = true ] && [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ]; then
   die "--no-schema-change and --backup-evidence are mutually exclusive"
 fi
 if [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
-  die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for civo-sandbox-use1-backup and civo-sandbox-usw2-dev, or attest --no-schema-change"
+  die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for civo-sandbox-use1-backup and civo-sandbox-use1-serving, or attest --no-schema-change"
 fi
 
 # Version must match Witself's release tag shape. Anything else and the

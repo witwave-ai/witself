@@ -70,7 +70,7 @@ const (
 
 // ReviewedCells is the closed set of source cells the backup script
 // accepts. The verifier refuses evidence claiming any other cell.
-var ReviewedCells = []string{"civo-sandbox-use1-backup", "civo-sandbox-usw2-dev"}
+var ReviewedCells = []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"}
 
 var (
 	releasePattern     = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)

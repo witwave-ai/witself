@@ -4,6 +4,11 @@ Status: draft. This document captures the go-forward deployment topology for bot
 managed Witself Cloud and self-hosted Witself: a fleet of independent cells under a
 thin global control plane. Decided 2026-06-28.
 
+> **Recovery note:** `civo-sandbox-usw2-dev` was lost with the PHX1 decommission
+> on 2026-09-19; its fleet registry name is temporarily retained. The replacement
+> serving cell is `civo-sandbox-use1-serving` in NYC1; the release train rolls
+> `civo-sandbox-use1-backup` first, then this replacement.
+
 Narrative-memory amendment (accepted 2026-07-14): cells have no backend memory
 inference provider. Account movement uses source freeze or placement-epoch
 fencing, clears imported leases, and rebuilds derived indexes under
@@ -224,8 +229,8 @@ after the schema-compatible cell release has been published. An outbound plan
 entitlement, cell worker, adapter dispatch gate, event-delivery gate, or Queue
 subscription never implicitly enables any other layer.
 
-Current production state is narrower than the catalog and intentionally differs
-from those defaults. The multi-account `civo-sandbox-usw2-dev` cell runs two
+The application `0.0.253` production snapshot was narrower than the catalog and
+differed from those defaults. The multi-account `civo-sandbox-usw2-dev` cell ran two
 worker replicas; receive, adapter dispatch, lifecycle delivery, and the
 `email.sending` subscription are enabled only for the exact Founder email
 cohort, while receipt replay remains off. Agent-email retention is cell-wide and
@@ -447,7 +452,7 @@ CELL="${CANARY_CELL:?set CANARY_CELL}"
 # Schema-advancing release: both verified Civo pre-migration artifact directories.
 scripts/roll-cell.sh "$CELL" "$VERSION" \
   --backup-evidence "$BACKUP_ROOT"/<use1-backup-id> \
-  --backup-evidence "$BACKUP_ROOT"/<usw2-dev-backup-id>
+  --backup-evidence "$BACKUP_ROOT"/<use1-serving-backup-id>
 # Release that cannot advance the schema: attest that explicitly instead.
 scripts/roll-cell.sh "$CELL" "$VERSION" --no-schema-change
 git diff -- ".gitops/cells/${CELL}/values.yaml"

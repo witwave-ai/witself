@@ -33,7 +33,7 @@ CASE_OUTPUT="$TEST_ROOT/case.output"
 BASELINE="$TEST_ROOT/values.baseline.yaml"
 ROLLED="$TEST_ROOT/values.rolled.yaml"
 EVIDENCE_A="$TEST_ROOT/evidence/civo-sandbox-use1-backup"
-EVIDENCE_B="$TEST_ROOT/evidence/civo-sandbox-usw2-dev"
+EVIDENCE_B="$TEST_ROOT/evidence/civo-sandbox-use1-serving"
 ORIGINAL_PATH="$PATH"
 DEFAULT_ROLL_PATH="$STUB_BIN:$ORIGINAL_PATH"
 ROLL_PATH="$DEFAULT_ROLL_PATH"
@@ -172,7 +172,7 @@ if run_roll "$CELL" "$VERSION" >"$CASE_OUTPUT" 2>&1; then
 fi
 expect_output "docs/runbooks.md" "missing gate options"
 expect_output "civo-sandbox-use1-backup" "missing gate options"
-expect_output "civo-sandbox-usw2-dev" "missing gate options"
+expect_output "civo-sandbox-use1-serving" "missing gate options"
 assert_values "$BASELINE" "missing gate options"
 
 # The explicit no-schema-change attestation proceeds without the verifier.
@@ -276,7 +276,7 @@ assert_values "$ROLLED" "override verifier"
 
 # An option-looking --backup-evidence value is rejected before the verifier
 # runs, so it can never be parsed as a verifier flag that narrows the gate.
-for smuggled in --cell=civo-sandbox-usw2-dev --no-schema-change -relative-dir ""; do
+for smuggled in --cell=civo-sandbox-use1-serving --no-schema-change -relative-dir ""; do
   reset_case
   if run_roll "$CELL" "$VERSION" \
     --backup-evidence "$smuggled" \

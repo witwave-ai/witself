@@ -84,10 +84,11 @@ operator setup. The container-reaching CP `/v1/version` probe is disabled by the
 `CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED: "false"`, pinned in the template and
 both generated-config and deployed-version verification. It is omitted from
 results and metrics while disabled. The serving cell's scrape job and alert
-rules arrive through its
-normal GitOps sync, with `platform.monitoring.uptimeProbes.enabled` default off
-and enabled only in `civo-sandbox-usw2-dev`. No probe-specific `deploy:plans`
-step is needed. See [Synthetic uptime probes](observability-and-operations.md#synthetic-uptime-probes)
+rules arrive through normal GitOps sync when monitoring is enabled, with
+`platform.monitoring.uptimeProbes.enabled` default off. The replacement serving
+cell `civo-sandbox-use1-serving` keeps monitoring disabled in its values file.
+No probe-specific `deploy:plans` step is needed. See
+[Synthetic uptime probes](observability-and-operations.md#synthetic-uptime-probes)
 for targets, result fields, alert routing, and the existing-plan cost rationale.
 Cell probes remain active without warming the CP container. Future CP-target
 activation requires a reviewed cost decision because the five-minute probe
