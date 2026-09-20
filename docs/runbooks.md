@@ -586,9 +586,15 @@ in `civo-sandbox-use1-serving`:
 - `witself/witself-postgresql-backup-age`
 - `witself/witself-postgresql-backup-r2`
 
-`civo-sandbox-use1-backup` has none of these in that inventory. This change
-ships no populated Secret files; the inventory is an operator checklist,
-not evidence of current cluster state or completed repository population.
+`civo-sandbox-use1-backup` has none of these in that inventory. All eight
+were populated on 2026-09-20 with `export` from the live serving cell, and
+`decrypt-apply civo-sandbox-use1-serving --diff-names` reported every file
+identical to the cluster at that time. The inventory above is the dated
+names-only record; re-run the inspection before trusting it as current
+cluster state. The private identity is read from the 1Password item
+`witself-cell-secrets-age` by its field ID `credential` (the field's label
+is "identity (AGE-SECRET-KEY, private)"); the item also carries the public
+`recipient`, which must equal the pin in `.gitops/secrets/.sops.yaml`.
 
 ## PostgreSQL image pin: how to re-pin
 
