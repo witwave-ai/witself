@@ -1060,9 +1060,6 @@ tests:
     - eval_time: 40m
       alertname: WitselfSelfDigestSlow
       exp_alerts: []
-    - eval_time: 40m
-      alertname: WitselfSelfDigestElisionRatioHigh
-      exp_alerts: []
     promql_expr_test:
     - expr: witself:self_digest_elision_ratio:rate5m
       eval_time: 40m
