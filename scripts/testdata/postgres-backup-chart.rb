@@ -36,7 +36,9 @@ defaults = YAML.safe_load(File.read(File.join(chart, 'values.yaml')), aliases: f
 check('backup must default off', defaults.dig('apps', 'civoPostgres', 'backup', 'enabled') == false)
 
 [cell, backup_cell].each do |values|
-  disabled = documents(chart, values)
+  # Render the dark case explicitly: a cell may have activated backups in its
+  # committed values, and this unit proves the off state regardless.
+  disabled = documents(chart, values, 'apps.civoPostgres.backup.enabled=false')
   check('dark backup must not render a CronJob or ConfigMap on either cell', !disabled.any? do |doc|
     %w[CronJob ConfigMap].include?(doc['kind']) && doc.dig('metadata', 'name') == 'witself-postgresql-backup'
   end)

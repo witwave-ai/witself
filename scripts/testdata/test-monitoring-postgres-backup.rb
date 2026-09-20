@@ -55,9 +55,11 @@ end
 %w[civo-sandbox-use1-serving civo-sandbox-use1-backup].each do |cell|
   values_path = File.join(root, '.gitops/cells', cell, 'values.yaml')
   values = YAML.safe_load(File.read(values_path))
-  abort "#{cell}: backup must remain default off" unless values.dig('apps', 'civoPostgres', 'backup', 'enabled') == false &&
-    values.dig('platform', 'monitoring', 'postgresBackupAlerts', 'enabled') == false
-  cases << ["#{cell}-disabled", values_path, [], false]
+  backup_on = values.dig('apps', 'civoPostgres', 'backup', 'enabled')
+  abort "#{cell}: backup and backup-alert flags must be explicit and equal" unless [true, false].include?(backup_on) &&
+    values.dig('platform', 'monitoring', 'postgresBackupAlerts', 'enabled') == backup_on
+  cases << ["#{cell}-disabled", values_path,
+            ['--set', 'apps.civoPostgres.backup.enabled=false', '--set', 'platform.monitoring.postgresBackupAlerts.enabled=false'], false]
   cases << ["#{cell}-enabled", values_path,
             ['--set', 'apps.civoPostgres.backup.enabled=true', '--set', 'platform.monitoring.postgresBackupAlerts.enabled=true'],
             cell == 'civo-sandbox-use1-serving']
@@ -84,7 +86,8 @@ cases.each do |name, values_path, overrides, enabled|
     without = render_parent.call(values_path)
     abort "#{name}: backup activation changed alert routing or receiver mounts" unless values['alertmanager'] == without['alertmanager']
     abort "#{name}: backup activation enabled unrelated alerts" unless
-      (values.fetch('additionalPrometheusRulesMap').keys - ['postgres-backup']).sort == without.fetch('additionalPrometheusRulesMap', {}).keys.sort
+      (values.fetch('additionalPrometheusRulesMap').keys - ['postgres-backup']).sort ==
+        (without.fetch('additionalPrometheusRulesMap', {}).keys - ['postgres-backup']).sort
   end
 
   values_path = File.join(tmp, "backup-#{name}-child-values.yaml")
