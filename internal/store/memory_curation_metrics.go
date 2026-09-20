@@ -29,6 +29,8 @@ type memoryCurationMetrics struct {
 	leaseEvents map[string]uint64
 }
 
+// MemoryCurationCounters returns the committed, value-free curation run-transition,
+// lease-event and operation counters accumulated by this process.
 func (s *Store) MemoryCurationCounters() MemoryCurationCounters {
 	m := &s.memoryCurationMetrics
 	m.mu.Lock()
@@ -55,6 +57,9 @@ type MemoryCurationQueueMetrics struct {
 	QueueAgeSeconds float64
 }
 
+// ReadMemoryCurationQueueMetrics reads the cell's curation queue for the pending
+// request count and the age of the oldest due unclaimed request; it never
+// returns request or account identifiers.
 func (s *Store) ReadMemoryCurationQueueMetrics(ctx context.Context) (MemoryCurationQueueMetrics, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
