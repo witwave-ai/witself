@@ -52,16 +52,8 @@ groups:
         annotations:
           summary: Self-digest read p95 latency exceeds 1.5 seconds.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
-      - alert: WitselfSelfDigestElisionRatioHigh
-        expr: (sum(rate(witself_self_digest_reads_total{elided="true"}[5m])) / sum(rate(witself_self_digest_reads_total[5m]))) >= 0.5
-        for: 30m
-        labels:
-          severity: warning
-          service: witself-server
-          witself_alert: "true"
-        annotations:
-          summary: At least half of self-digest reads elide entries.
-          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - record: witself:self_digest_elision_ratio:rate5m
+        expr: sum(rate(witself_self_digest_reads_total{elided="true"}[5m])) / sum(rate(witself_self_digest_reads_total[5m]))
       - alert: WitselfWorkerJobStopped
         expr: max by (job) (witself_worker_job_running) < 1
         for: 5m

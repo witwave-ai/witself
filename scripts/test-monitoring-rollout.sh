@@ -495,8 +495,8 @@ ruby -ryaml -e '
   abort "watchdog must always fire" unless watchdog["expr"] == "vector(1)"
   abort "watchdog must carry the dead-man label" unless watchdog.dig("labels", "witself_watchdog") == "true"
   abort "watchdog must never reach the incident route" if watchdog.dig("labels", "witself_alert")
-  unlabelled = rules.reject { |rule| rule.dig("labels", "witself_alert") == "true" }.map { |rule| rule["alert"] }
-  abort "every rule except the watchdog must reach the incident route: #{unlabelled.inspect}" unless unlabelled == ["WitselfWatchdog"]
+  unlabelled = rules.select { |rule| rule["alert"] }.reject { |rule| rule.dig("labels", "witself_alert") == "true" }.map { |rule| rule["alert"] }
+  abort "every alert except the watchdog must reach the incident route: #{unlabelled.inspect}" unless unlabelled == ["WitselfWatchdog"]
   deadman_route = alertmanager_route_of.call("witself-deadman")
   group_seconds = deadman_route.fetch("group_interval")[/\d+/].to_i * 60
   repeat_seconds = deadman_route.fetch("repeat_interval")[/\d+/].to_i * 60
