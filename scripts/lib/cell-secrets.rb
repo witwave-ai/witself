@@ -26,13 +26,11 @@ module CellSecrets
     end
   end
 
-  # Duplicate JSON keys are refused by the parser itself where the json gem
-  # supports it (allow_duplicate_key), otherwise by UniqueObject's []= hook.
-  # Newer parsers may collapse duplicates before object_class sees them.
+  # Duplicate JSON keys are refused structurally before parsing.
   def self.parse_json(raw)
-    JSON.parse(raw, object_class: UniqueObject, allow_duplicate_key: false)
-  rescue ArgumentError => e
-    raise unless e.message.include?('allow_duplicate_key')
+    # JSON is a YAML subset: the AST walk in yaml() sees every mapping key,
+    # including duplicates that some json parsers collapse before any hook.
+    yaml(raw)
     JSON.parse(raw, object_class: UniqueObject)
   end
 
