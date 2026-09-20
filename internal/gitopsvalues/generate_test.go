@@ -113,13 +113,20 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
 		if name == "civo-sandbox-usw2-dev" {
 			continue
 		}
+		if name == "civo-sandbox-use1-serving" {
+			// Recovery phase 3 explicitly enables both groups after scrape verification.
+			if !cell.Switches.Monitoring || !cell.Switches.CollectorAlerts || !cell.Switches.SealedPlaneAlerts {
+				t.Error("replacement serving cell must enable monitoring and both alert groups")
+			}
+			continue
+		}
 		if cell.Switches.SealedPlaneAlerts {
 			t.Errorf("%s unexpectedly sets sealed_plane_alerts", name)
 		}
 	}
 }
 
-func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
+func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCells(t *testing.T) {
 	generated, err := generateAll(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +141,12 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
 			}
 			if hasCollector {
 				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
+			}
+			continue
+		}
+		if cell == "civo-sandbox-use1-serving" {
+			if !hasSealed || !hasCollector {
+				t.Errorf("%s missing recovery phase-3 alert groups", valuesRel(cell))
 			}
 			continue
 		}
