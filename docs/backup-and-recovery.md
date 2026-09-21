@@ -786,6 +786,100 @@ future incident that genuinely requires cutover needs a separately designed
 and reviewed promotion protocol. Alias activation remains off until a
 successful restore drill and the other acceptance prerequisites complete.
 
+### Switch the PostgreSQL database image to GHCR
+
+Publication and cell activation are separate. The release's `mirror-postgresql`
+job publishes approved content to `ghcr.io/witwave-ai/images/postgresql`. It first
+checks for the digest in GHCR and reuses it for the new release tag, copying from
+Docker Hub only when that digest has not yet been mirrored. A mirror failure
+does not block publication of the server release; it blocks selecting that
+release's missing mirror tag.
+The backup and serving cells currently have different upstream digests; the
+release preserves both with tags `VERSION-civo-sandbox-use1-backup` and
+`VERSION-civo-sandbox-use1-serving`. Never substitute one cell's tag for the other.
+`images/postgresql/mirror.json` records the reviewed digests, the known original
+source tag, `latest`, and each pinned image's version from its image config
+labels. The digest determines the exact image content; neither `latest` nor the
+chart version establishes the PostgreSQL build version.
+
+Schedule the switch in a maintenance window. Changing the registry/repository
+changes the StatefulSet pod template and restarts PostgreSQL even though its
+image bytes remain identical. Expect about one minute of server outage while
+both server replicas crash-loop as PostgreSQL restarts, as documented in the
+serving-cell overlay; two replicas and PDBs do not mask this database outage.
+Collect fresh, verified backup evidence for both cells immediately before the
+switch, following the
+[Civo backup procedure](#civo-postgresql-pre-migration-backup), with the intended
+target release. Always pass that evidence with `--backup-evidence`; never use
+`--no-schema-change` for this restart operation.
+
+After the first release containing the mirror:
+
+1. Open the `witwave-ai` organization's GitHub Packages page, select
+   **images/postgresql**, open **Package settings**, and change its visibility
+   to **Public** once. This is the same manual visibility step as the backup
+   image. The rollout resolver and cell kubelets pull anonymously; private
+   package access is not sufficient. Verify anonymous resolution before rolling.
+2. Require the target server release to be published and the separate mirror
+   job to succeed, including its source/destination digest checks, signatures,
+   SBOM attestations, and provenance. A published server release alone does not
+   prove mirror availability. Use a reviewed checkout containing this
+   generator and the target `vVERSION` tag locally. A tag that predates the
+   mirror or an absent/inaccessible mirror cannot be selected by the helper.
+3. Roll and verify the backup cell first through the same helper and normal
+   reviewed GitOps process. Its PostgreSQL content remains at its own digest.
+   Then prepare the serving cell switch:
+
+   ```sh
+   VERSION="${RELEASE_VERSION:?set the published version without v}"
+   scripts/roll-cell.sh civo-sandbox-use1-serving "$VERSION" --postgres-image \
+     --backup-evidence "${BACKUP_CELL_EVIDENCE:?set the backup-cell evidence directory}" \
+     --backup-evidence "${SERVING_CELL_EVIDENCE:?set the serving-cell evidence directory}"
+   bash scripts/gitops-cell-values.sh --check
+   bash scripts/test-helm-rollout.sh
+   bash scripts/test-roll-cell-gate.sh
+   ```
+
+   For the backup-cell step use `civo-sandbox-use1-backup` in the same command.
+   Keep both fresh evidence arguments for each cell's switch. The helper updates
+   the server release pins too, so assess the whole release. Add `--backup-image` only if
+   also selecting that release's separate backup tool image.
+4. Review the generated diff: only the server release pins,
+   `apps.civoPostgres.image.{registry,repository,tag,digest}`, and
+   `apps.civoPostgres.allowInsecureImages: true` should change (plus backup image
+   pins if explicitly requested). The PostgreSQL digest must remain unchanged.
+   The Bitnami chart requires this explicit verification bypass for a reviewed
+   mirror; it applies to all child containers, including the metrics exporter.
+   Do not edit the overlay, catalog, backup schedule, or Secret references.
+5. Complete the owner's commit, full gate, review, and merge; reconcile Argo in
+   the scheduled maintenance window. Wait for the PostgreSQL restart and the
+   expected roughly one-minute server crash-loop to settle. Verify database and
+   server readiness, the PostgreSQL container's GHCR
+   reference and digest, and confirm backup/monitoring health before proceeding.
+   Retain the previous generated values for an owner-reviewed Git revert if
+   image pulling fails; reverting can restart PostgreSQL again and restores the
+   Docker Hub dependency.
+
+Ordinary server rolls and generator checks/writes preserve the selected
+PostgreSQL registry, repository, and tag; the overlay owns its digest. Repeat
+`--postgres-image` to select another release's mirror tag; the helper refuses a
+digest that changes the current cell's content.
+This procedure does not upgrade PostgreSQL. The chart package and optional
+metrics-exporter image still depend on their existing upstream registries.
+
+For a future PostgreSQL image change, edit the cell's digest in
+`internal/gitopsvalues/overlays/<cell>.yaml.tmpl` and its matching digest and
+upstream metadata in `images/postgresql/mirror.json`, then run
+`bash scripts/gitops-cell-values.sh --write`. Publish a release and require its
+mirror job to succeed before using
+`scripts/roll-cell.sh CELL VERSION --postgres-image` with fresh backup evidence
+to select the new release tag.
+After a cell has switched to GHCR, `--write` propagates the new overlay digest
+while preserving the old release tag, producing `:<old tag>@<new digest>`.
+The new digest may be unavailable in GHCR until the next release mirrors it;
+complete publication and the `--postgres-image` roll before reconciling this
+intermediate values change.
+
 ### Scheduled PostgreSQL backups
 
 The cell apps chart includes a **default-off** daily logical dump to Cloudflare

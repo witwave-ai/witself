@@ -48,7 +48,7 @@ func Check(root string, out io.Writer) error {
 // Write regenerates every cell values file and replaces committed files that
 // differ. Files that already match are left untouched.
 func Write(root string, out io.Writer) error {
-	generated, err := generateAll(root)
+	generated, err := generateAllMode(root, true)
 	if err != nil {
 		return err
 	}

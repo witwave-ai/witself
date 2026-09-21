@@ -21,6 +21,13 @@ func RollCell(root, cell, version, digest string, out io.Writer) error {
 // atomic write as the server pins. A nil backup preserves the existing image.
 // The caller must resolve both digests before calling this function.
 func RollCellWithBackupImage(root, cell, version, digest string, backup *BackupImagePins, out io.Writer) error {
+	return RollCellWithImages(root, cell, version, digest, backup, nil, out)
+}
+
+// RollCellWithImages optionally selects the published PostgreSQL mirror together
+// with the backup and server images in one atomic write. Omitted image selections
+// preserve existing pins. The mirror must preserve the cell's existing content.
+func RollCellWithImages(root, cell, version, digest string, backup *BackupImagePins, postgres *PostgresImagePins, out io.Writer) error {
 	if !releaseVersionPattern.MatchString(version) {
 		return fmt.Errorf("release version must look like MAJOR.MINOR.PATCH")
 	}
@@ -34,6 +41,17 @@ func RollCellWithBackupImage(root, cell, version, digest string, backup *BackupI
 		if backup.Repository == "" || backup.Tag != version || !imageDigestPattern.MatchString(backup.Digest) {
 			return fmt.Errorf("backup release pin requires a repository, release-matching tag, and sha256 digest")
 		}
+	}
+	if postgres != nil {
+		if err := postgres.validate(); err != nil {
+			return err
+		}
+		if postgres.Registry != "ghcr.io" || postgres.Repository != "witwave-ai/images/postgresql" || postgres.Tag != version+"-"+cell || !imageDigestPattern.MatchString(postgres.Digest) {
+			return fmt.Errorf("PostgreSQL mirror pin requires the GHCR mirror, release-and-cell-matching tag, and sha256 digest")
+		}
+		selected := *postgres
+		selected.allowInsecureImages, selected.allowInsecureImagesSet = true, true
+		postgres = &selected
 	}
 	cfg, err := loadCatalog(root)
 	if err != nil {
@@ -58,8 +76,17 @@ func RollCellWithBackupImage(root, cell, version, digest string, backup *BackupI
 	if !bytes.Equal(before, expected) {
 		return fmt.Errorf("%s differs from generated output; resolve drift before rolling", valuesRel(cell))
 	}
+	if postgres != nil {
+		existing, err := parsePostgresImagePins(before)
+		if err != nil {
+			return err
+		}
+		if existing == nil || existing.Digest == "" || existing.Digest != postgres.Digest {
+			return fmt.Errorf("PostgreSQL mirror digest must equal the cell's existing pinned image digest")
+		}
+	}
 	pins := serverPins{ChartVersion: version, ImageTag: version, ImageDigest: digest}
-	rolled, err := generateCellWithImagePins(root, cell, cfg, charts, &pins, backup)
+	rolled, err := generateCellWithImagePins(root, cell, cfg, charts, &pins, backup, postgres)
 	if err != nil {
 		return err
 	}
@@ -79,6 +106,9 @@ func RollCellWithBackupImage(root, cell, version, digest string, backup *BackupI
 	_, _ = fmt.Fprintf(out, "gitops cell values: rolled %s chartVersion, imageTag, and imageDigest\n", cell)
 	if backup != nil {
 		_, _ = fmt.Fprintln(out, "gitops cell values: pinned PostgreSQL backup image repository, tag, and digest")
+	}
+	if postgres != nil {
+		_, _ = fmt.Fprintln(out, "gitops cell values: pinned PostgreSQL mirror registry, repository, tag, and digest")
 	}
 	return nil
 }

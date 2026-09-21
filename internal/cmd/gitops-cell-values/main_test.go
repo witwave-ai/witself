@@ -25,6 +25,11 @@ func TestRollFlagsRequireAnExclusiveCompleteMode(t *testing.T) {
 		{name: "backup without roll", args: []string{"--write", "--backup-image-repository", "postgres"}, want: "backup image repository, tag, and digest require --roll-cell"},
 		{name: "backup lacks tag and digest", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--backup-image-repository", "postgres"}, want: "must all be supplied"},
 		{name: "backup lacks repository", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--backup-image-tag", "0.0.1", "--backup-image-digest", "invalid"}, want: "must all be supplied"},
+		{name: "postgres without roll", args: []string{"--write", "--postgres-image-registry", "ghcr.io"}, want: "PostgreSQL image registry, repository, tag, and digest require --roll-cell"},
+		{name: "postgres lacks repository tag and digest", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--postgres-image-registry", "ghcr.io"}, want: "must all be supplied"},
+		{name: "postgres lacks registry", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--postgres-image-repository", "witwave-ai/images/postgresql", "--postgres-image-tag", "0.0.1-cell", "--postgres-image-digest", "invalid"}, want: "must all be supplied"},
+		{name: "postgres lacks tag", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--postgres-image-registry", "ghcr.io", "--postgres-image-repository", "witwave-ai/images/postgresql", "--postgres-image-digest", "invalid"}, want: "must all be supplied"},
+		{name: "postgres lacks digest", args: []string{"--roll-cell", "cell", "--version", "0.0.1", "--image-digest", "invalid", "--postgres-image-registry", "ghcr.io", "--postgres-image-repository", "witwave-ai/images/postgresql", "--postgres-image-tag", "0.0.1-cell"}, want: "must all be supplied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "stderr")

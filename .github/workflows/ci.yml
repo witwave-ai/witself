@@ -14,11 +14,11 @@ concurrency:
 
 jobs:
   # Keep this required check named exactly go. Mirror the Go jobs in release.yml;
-  # the pre-tag backup image tripwire must also succeed before merges.
+  # both pre-tag PostgreSQL image tripwires must also succeed before merges.
   go:
     name: go
     if: ${{ always() }}
-    needs: [go-rest, go-store, go-infra, postgres-backup-image, provider-contract-evidence]
+    needs: [go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -29,9 +29,10 @@ jobs:
           GO_STORE_RESULT: ${{ needs.go-store.result }}
           GO_INFRA_RESULT: ${{ needs.go-infra.result }}
           BACKUP_IMAGE_RESULT: ${{ needs.postgres-backup-image.result }}
+          POSTGRES_MIRROR_RESULT: ${{ needs.postgres-image-mirror.result }}
           PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}
         run: |
-          for result in "$BACKUP_IMAGE_RESULT" "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
+          for result in "$BACKUP_IMAGE_RESULT" "$POSTGRES_MIRROR_RESULT" "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
             if [ "$result" != success ]; then
               echo "A required CI gate did not succeed: $result" >&2
               exit 1
@@ -229,6 +230,22 @@ jobs:
         env:
           CI: "true"
         run: make check-postgres-backup-image
+
+  postgres-image-mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install digest-preserving registry copier
+        # Ubuntu 24.04 ships Skopeo 1.13.3. The helper also rejects < 1.5,
+        # which cannot enforce --preserve-digests, if ubuntu-latest changes.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+      - name: Verify PostgreSQL upstream copies before tagging
+        env:
+          CI: "true"
+        run: make check-postgres-image-mirror
 
   release-config:
     runs-on: ubuntu-latest
