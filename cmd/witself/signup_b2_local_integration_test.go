@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/version"
 	"io"
 	"net/url"
 	"os"
@@ -162,6 +163,28 @@ func b2CLIReadJSON(t *testing.T, raw []byte, target any) {
 	}
 }
 
+func b2CLICheckToolchain(artifactGoVersion string, goMod []byte) error {
+	var toolchain string
+	for _, line := range strings.Split(string(goMod), "\n") {
+		line, _, _ = strings.Cut(line, "//")
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "toolchain" {
+			continue
+		}
+		if toolchain != "" || len(fields) != 2 || !version.IsValid(fields[1]) {
+			return errors.New("B2 go.mod must contain one valid pinned toolchain directive")
+		}
+		toolchain = fields[1]
+	}
+	if toolchain == "" {
+		return errors.New("B2 go.mod is missing a pinned toolchain directive")
+	}
+	if artifactGoVersion != toolchain {
+		return fmt.Errorf("B2 artifact Go version %q does not match go.mod toolchain %q", artifactGoVersion, toolchain)
+	}
+	return nil
+}
+
 func b2CLILoadInputs(t *testing.T) b2CLIInputs {
 	t.Helper()
 	input := b2CLIInputs{
@@ -218,8 +241,21 @@ func b2CLILoadInputs(t *testing.T) b2CLIInputs {
 	}
 	input.commit, input.tree = receipt.Before.Commit, receipt.Before.Tree
 	info, err := buildinfo.ReadFile(input.binary)
-	if err != nil || info.Path != "github.com/witwave-ai/witself/cmd/witself" || info.GoVersion != "go1.26.6" {
+	if err != nil || info.Path != "github.com/witwave-ai/witself/cmd/witself" {
 		t.Fatal("B2 artifact is not the pinned Go Witself CLI")
+	}
+	// WITSELF_B2_CLI_BINARY supplies a prebuilt artifact, so pin its toolchain to
+	// this checkout's go.mod rather than the toolchain running this test binary.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve B2 source location failed")
+	}
+	goMod, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "..", "..", "go.mod"))
+	if err != nil {
+		t.Fatalf("read B2 go.mod toolchain: %v", err)
+	}
+	if err := b2CLICheckToolchain(info.GoVersion, goMod); err != nil {
+		t.Fatal(err)
 	}
 	settings := map[string]string{}
 	for _, setting := range info.Settings {
@@ -237,10 +273,6 @@ func b2CLILoadInputs(t *testing.T) b2CLIInputs {
 	if err != nil || !evidenceInfo.IsDir() || evidenceInfo.Mode()&os.ModeSymlink != 0 ||
 		(runtime.GOOS != "windows" && evidenceInfo.Mode().Perm()&0o077 != 0) {
 		t.Fatal("B2 evidence root must be pre-created privately by the execution owner")
-	}
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve B2 source location failed")
 	}
 	input.adapter = filepath.Join(filepath.Dir(thisFile), "..", "..", "infra", "cloudflare",
 		"control-plane", "test", "fixtures", "signup-b2-cli-loopback.mjs")
