@@ -1,0 +1,71 @@
+{{- if .Values.egressPolicy.enabled }}
+{{- if and (hasKey .Values.podLabels "app.kubernetes.io/component") (ne (index .Values.podLabels "app.kubernetes.io/component") "server") }}
+{{- fail "egressPolicy.enabled requires podLabels app.kubernetes.io/component to remain server" }}
+{{- end }}
+{{- $root := . -}}
+{{- $policy := .Values.egressPolicy -}}
+{{- $roles := list "server" -}}
+{{- if .Values.worker.enabled -}}
+{{- $roles = append $roles "worker" -}}
+{{- end -}}
+{{- range $role := $roles }}
+{{- $stem := trimSuffix "-server" (include "witself-server.fullname" $root) | trunc 49 | trimSuffix "-" -}}
+{{- $labels := include "witself-server.labels" $root -}}
+{{- $selector := printf "%s\napp.kubernetes.io/component: server" (include "witself-server.selectorLabels" $root) -}}
+{{- $policyName := printf "%s-%s-egress" $stem $role -}}
+{{- $external := list -}}
+{{- if eq $role "worker" -}}
+{{- $labels = include "witself-server.workerLabels" $root -}}
+{{- $selector = include "witself-server.workerSelectorLabels" $root -}}
+{{- $external = $policy.agentEmailCIDRs -}}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $policyName }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $policy.postgresNamespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+              app.kubernetes.io/instance: witself-postgresql
+              app.kubernetes.io/component: primary
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- if $external }}
+    - to:
+        {{- range $cidr := uniq $external }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}
+{{- end }}

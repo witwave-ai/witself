@@ -1,4 +1,8 @@
 {{- if .Values.apps.witselfServer.enabled }}
+{{/* 0.0.293 is a placeholder: it must equal the first release that ships the egress-capable child chart. */}}
+{{- if and .Values.egressPolicy.enabled (not (semverCompare ">=0.0.293" .Values.apps.witselfServer.chartVersion)) -}}
+{{- fail "egressPolicy.enabled requires apps.witselfServer.chartVersion >= 0.0.293 with server/worker egress support" -}}
+{{- end -}}
 {{- $bootstrap := .Values.apps.witselfServer.secrets.bootstrap -}}
 {{- $db := .Values.apps.witselfServer.secrets.database -}}
 {{- $bootstrapTargetName := default "witself-bootstrap" $bootstrap.targetName -}}
@@ -190,6 +194,11 @@
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "metrics" $metricsValues "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- with .Values.apps.witselfServer.imageDigest -}}
 {{- $_ := set $serverValues.image "digest" . -}}
+{{- end -}}
+{{- if .Values.egressPolicy.enabled -}}
+{{- $egress := deepCopy .Values.egressPolicy -}}
+{{- $_ := set $egress "postgresNamespace" .Values.apps.civoPostgres.namespace -}}
+{{- $_ := set $serverValues "egressPolicy" $egress -}}
 {{- end -}}
 {{- if $billingEndpoint -}}
 {{- $_ := set $serverValues "billing" (dict "endpoint" $billingEndpoint) -}}

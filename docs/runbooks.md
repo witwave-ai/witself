@@ -625,6 +625,126 @@ and the resulting image ID after sync. Re-pin the rollback-only
 cell's digest to the other is a separate image-alignment change, not merely
 recording its current image.
 
+## Enable cell egress isolation
+
+`egressPolicy.enabled` ships `false` in both the apps and server charts. Leave
+it disabled until the following preflight succeeds. This runbook describes a
+later rollout; adding the chart capability does not authorize or perform that
+rollout. The destination matrix and enforcement limits are in
+[cell egress isolation](deployment-cells.md#cell-egress-isolation-shipped-disabled).
+
+1. Release and deploy charts containing the policy **before** enabling it.
+   Both checked-in live cells pin `apps.witselfServer.chartVersion: 0.0.289`.
+   The apps chart refuses enabled egress with a child chart below `0.0.293`;
+   this placeholder minimum must equal the release that actually ships the
+   feature. Inspect that exact child-chart artifact and render both charts:
+   server DNS + PostgreSQL, worker DNS + PostgreSQL + agent-email, PostgreSQL
+   DNS only, and backup Job DNS + PostgreSQL + R2 when enabled. Keep generated
+   cell values sourced from their overlays; this feature adds no catalog switch.
+2. Verify Cilium on the reviewed Civo context. The provisioning code selects
+   Cilium, not Flannel/kube-router. **Neither live enforcement settings nor
+   DNS-proxy capability were inspected for this change.** Run these read-only
+   checks with the reviewed cell's existing kubeconfig/context; repeat the
+   in-agent commands for every Cilium pod listed:
+
+   ```sh
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     get pods -l k8s-app=cilium -o wide
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     get configmap cilium-config \
+     -o jsonpath='{.data.enable-policy}{"\n"}{.data.enable-l7-proxy}{"\n"}'
+   # Set CILIUM_POD to one of the observed pod names, then repeat for each pod.
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     exec "$CILIUM_POD" -c cilium-agent -- cilium-dbg version
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     exec "$CILIUM_POD" -c cilium-agent -- cilium-dbg config --all
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     exec "$CILIUM_POD" -c cilium-agent -- cilium-dbg status --verbose
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     exec "$CILIUM_POD" -c cilium-agent -- cilium-dbg endpoint list
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" -n kube-system \
+     get pods -l k8s-app=kube-dns --show-labels
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" \
+     get networkpolicies.networking.k8s.io -A
+   kubectl --kubeconfig "$CELL_KUBECONFIG" --context "$CELL_CONTEXT" \
+     get ciliumnetworkpolicies.cilium.io,ciliumclusterwidenetworkpolicies.cilium.io -A
+   ```
+
+   On older Cilium releases whose in-agent binary is named `cilium`, use that
+   binary in the `exec` commands. Check effective `PolicyEnforcement` against
+   configured `enable-policy`: `default` or `always` can enforce; `never` cannot.
+   Missing ConfigMap keys require checking the installed version's effective
+   defaults, not assuming enforcement. Confirm endpoint egress enforcement
+   after reconciliation. Inspect selected policies for additive broad grants,
+   and check database labels/namespaces and actual service/NAT paths.
+   The DNS peer **assumes CoreDNS pods labelled `k8s-app: kube-dns` in
+   `kube-system`**; a different resolver or NodeLocal DNS path needs review.
+   For the FQDN follow-up, verify `enable-l7-proxy=true`, healthy proxy status,
+   and DNS redirects after a separately reviewed `rules.dns` test policy.
+   Zero redirects without such a policy is not proof that DNS proxying is
+   unavailable. See [Cilium config commands](https://docs.cilium.io/en/stable/cmdref/cilium-dbg_config/)
+   and [Cilium status checks](https://docs.cilium.io/en/stable/operations/troubleshooting/).
+   Configuration output and test renders do not prove traffic enforcement.
+3. Prepare only the address groups used by each role: `agentEmailCIDRs` for
+   workers and `r2CIDRs` for backup Jobs. Keep `controlPlaneCIDRs` and
+   `stripeCIDRs` empty; they grant nothing to the current cell roles. Resolve
+   each reviewed endpoint through the cell's resolver and record its complete
+   A/AAAA set, TTL, destination owner, refresh owner, and change procedure.
+   Prefer exact `/32` or `/128` hosts where stable; for anycast services,
+   reviewed published provider ranges are acceptable within the schema bounds
+   (IPv4 `/16`–`/32`, IPv6 `/32`–`/128`). Broader published prefixes are
+   rejected; review the narrower ranges actually needed rather than importing
+   an entire broader range. Record provider range refresh ownership too.
+   Empty lists deny that group's external access.
+   Shared Cloudflare or Stripe addresses cannot enforce hostname separation.
+   If that residual access is unacceptable, hold enablement and complete the
+   [Cilium FQDN follow-up](deployment-cells.md#follow-up-cilium-fqdn-policy) or a
+   separately reviewed proxy design. FQDN address learning also does not bind
+   TLS identities. Do not treat current DNS answers as permanent address pins.
+4. Start with **`civo-sandbox-use1-backup`** for a **boot smoke test only**:
+   its checked-in configuration has no agent-email outbound dispatch, no
+   PostgreSQL backup Job, and no monitoring stack. It exercises DNS and
+   PostgreSQL connectivity; it is not a canary for serving-cell external
+   dependencies. Preserve its non-accepting, rollback-only role. In a reviewed
+   configuration change, set top-level `egressPolicy.enabled: true` in apps
+   inputs. The database namespace is automatic; standalone server installs
+   set `egressPolicy.postgresNamespace`. Observe policy reconciliation, then
+   test fresh DNS over UDP/TCP and application database connections.
+5. Test denied connections from disposable pods with the same selectors as
+   each protected workload: unrelated internet and in-cluster destinations,
+   unapproved ports, server HTTPS, and PostgreSQL-primary HTTPS must fail.
+   A server must not inherit the worker's agent-email grant or the backup
+   Job's R2 grant. Check metrics scraping wherever monitoring is installed.
+   Reusing an established connection does not prove policy enforcement.
+6. Prepare **`civo-sandbox-use1-serving`** separately. Its enabled PostgreSQL
+   backup Job requires the **#503 preinstalled structured backup image first**;
+   the apps chart refuses egress enablement with the legacy APK-installing
+   image. Render that prerequisite and the role-specific address inventory
+   before proceeding. The backup-cell smoke test supplies no email or R2
+   canary coverage; record that gap. Validate those paths in a separately
+   reviewed representative canary setup, or keep serving enablement held
+   until an operator accepts a bounded serving validation plan.
+7. After accepting the smoke-test evidence and the serving validation plan,
+   enable the serving cell through the reviewed GitOps inputs. Require fresh
+   worker dispatch and backup-Job PostgreSQL/R2 connections, rejected unrelated
+   destinations, real agent-email delivery/provider receipts, a completed
+   encrypted R2 PostgreSQL backup and existing restore verification, API/worker
+   readiness, and metrics. Watch
+   `witself_postgres_backup_last_success_timestamp_seconds`, attempt results,
+   failures, and exporter scrape health. Use the established receive, outbound,
+   and provider-event canary workflows; the replacement serving cell retains
+   a legacy receive audience, so follow the recovery-aware procedure. Verify
+   address-refresh behavior and retain value-free evidence and the exact
+   reviewed configuration for each cell.
+
+For rollback, revert `egressPolicy.enabled` to `false` through the same reviewed
+GitOps inputs and verify all affected Applications have reconciled. This removes
+the added server/worker/backup restrictions and restores the prior PostgreSQL
+egress shape; it deliberately restores the previous unrestricted-egress posture.
+Do not disable the cluster's policy controller as a rollback technique. Keep
+the address inventory maintained while enabled, and repeat the relevant probes
+after endpoint, DNS, CNI, namespace, label, or policy changes.
+
 ## Back up both reviewed Civo databases before a migration
 
 Before running `scripts/roll-cell.sh` for a release that can advance the

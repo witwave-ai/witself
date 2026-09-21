@@ -1,0 +1,58 @@
+{{- if .Values.egressPolicy.enabled }}
+{{- $pg := .Values.apps.civoPostgres -}}
+{{- if not (and $pg.enabled (eq .Values.cell.cloud "civo")) }}
+{{- fail "egressPolicy.enabled requires in-cell Civo PostgreSQL" }}
+{{- end }}
+{{- if $pg.backup.enabled }}
+{{- if or (kindIs "string" $pg.backup.image) (not $pg.backup.image.repository) }}
+{{- fail "egressPolicy.enabled requires a preinstalled apps.civoPostgres.backup.image.repository; legacy backup images download packages" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: witself-postgresql-backup-egress
+  namespace: {{ $pg.namespace | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: witself-postgresql-backup
+      witself.io/cell: {{ .Values.cell.name | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $pg.namespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+              app.kubernetes.io/instance: witself-postgresql
+              app.kubernetes.io/component: primary
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- if .Values.egressPolicy.r2CIDRs }}
+    - to:
+        {{- range $cidr := uniq .Values.egressPolicy.r2CIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}
+{{- end }}
