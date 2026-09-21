@@ -1,6 +1,6 @@
 # Witself Data Processing Addendum
 
-**Version 2026-09-21 · Effective 2026-09-21**
+**Version 2026-09-15 · Effective 2026-09-15**
 
 This DPA applies where Witwave LLC processes personal data in your content
 on your behalf. It is incorporated into the
@@ -47,7 +47,7 @@ tenant content is added here, with notice, before use.
 | Subprocessor | Entity / region | Role |
 |---|---|---|
 | Cloudflare, Inc. | US (global network) | Control plane (Workers/KV/R2/Durable Objects), account metadata, account backup and evacuation archives (R2; provider-managed encryption at rest), inbound/outbound agent-email edge, signup Turnstile |
-| Civo Ltd | US (New York, NY, NYC1; serving and backup cells) | Current deployment-cell infrastructure: compute and in-cell PostgreSQL holding agent content |
+| Civo Ltd | US regions (Phoenix, AZ; New York, NY) | Current deployment-cell infrastructure: compute and in-cell PostgreSQL holding agent content |
 | Stripe, Inc. | US | Billing and payments (card data goes directly to Stripe) |
 | GitHub, Inc. | US | Source hosting, CI, and public incident-comms issues (no tenant content) |
 | PagerDuty, Inc. | US | Operational alerting (alert metadata only, no tenant content) |
