@@ -226,9 +226,10 @@ func TestCleanMCPStdioShutdownClassification(t *testing.T) {
 		err   error
 		clean bool
 	}{
+		{name: "SDK clean EOF", err: nil, clean: true},
 		{name: "direct EOF", err: io.EOF, clean: true},
 		{name: "wrapped EOF", err: fmt.Errorf("outer: %w", io.EOF), clean: true},
-		{name: "SDK in-flight EOF", err: errors.New("server is closing: EOF"), clean: true},
+		{name: "unwrapped legacy SDK text", err: errors.New("server is closing: EOF"), clean: false},
 		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, clean: false},
 		{name: "SDK unexpected EOF", err: errors.New("server is closing: unexpected EOF"), clean: false},
 		{name: "parse failure", err: errors.New("parse error: EOF"), clean: false},
@@ -246,6 +247,40 @@ func TestCleanMCPStdioShutdownClassification(t *testing.T) {
 type discardWriteCloser struct{ io.Writer }
 
 func (discardWriteCloser) Close() error { return nil }
+
+func TestMCPServerInputShutdown(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "idle EOF"},
+		{name: "whitespace EOF", input: " \n\t"},
+		{name: "malformed JSON", input: "{invalid}\n", wantErr: true},
+		{name: "truncated JSON", input: `{"jsonrpc":`, wantErr: true},
+		{name: "invalid JSON-RPC", input: "{}\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			err := server.Run(ctx, &mcp.IOTransport{
+				Reader: io.NopCloser(strings.NewReader(tc.input)),
+				Writer: discardWriteCloser{Writer: io.Discard},
+			})
+			if ctx.Err() != nil {
+				t.Fatalf("MCP server did not terminate on input: %v", ctx.Err())
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SDK input shutdown error = %v, want error = %t", err, tc.wantErr)
+			}
+			if got := isCleanMCPStdioShutdown(err); got != !tc.wantErr {
+				t.Fatalf("isCleanMCPStdioShutdown(%v) = %t, want %t", err, got, !tc.wantErr)
+			}
+		})
+	}
+}
 
 func TestMCPServerInFlightEOFIsCleanShutdown(t *testing.T) {
 	entered := make(chan struct{})
@@ -298,8 +333,8 @@ func TestMCPServerInFlightEOFIsCleanShutdown(t *testing.T) {
 	close(release)
 	select {
 	case err := <-done:
-		if err == nil || err.Error() != "server is closing: EOF" {
-			t.Fatalf("SDK in-flight EOF error = %v, want exact closing EOF", err)
+		if err != nil {
+			t.Fatalf("SDK v1.8.0 in-flight EOF error = %v, want nil", err)
 		}
 		if !isCleanMCPStdioShutdown(err) {
 			t.Fatalf("SDK in-flight EOF was not classified as clean: %v", err)
