@@ -1,6 +1,22 @@
 cell:
   name: ""
 
+# One dark switch for server, worker, PostgreSQL and its separate backup Job.
+# Forwarded to the server chart only when enabled; requires a chart release
+# carrying egressPolicy support. No cell/catalog activation is made here.
+# Prefer exact hosts (/32 or /128); reviewed provider ranges for anycast services
+# may be IPv4 /16 or narrower, or IPv6 /32 or narrower.
+egressPolicy:
+  enabled: false
+  # The child PostgreSQL namespace is derived from apps.civoPostgres.namespace.
+  # Reserved groups: current cell workloads do not call the control plane/Stripe.
+  controlPlaneCIDRs: []
+  # Only the separate PostgreSQL backup Job receives the R2 grant.
+  r2CIDRs: []
+  # Only the worker receives the agent-email dispatch grant.
+  agentEmailCIDRs: []
+  stripeCIDRs: []
+
 gitops:
   project: default
   repoURL: https://github.com/witwave-ai/witself

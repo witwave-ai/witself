@@ -57,7 +57,7 @@ spec:
             enabled: true
             size: {{ $pg.storage | quote }}
           resourcesPreset: {{ default "nano" $pg.resourcesPreset }}
-          {{- if or (not $pg.networkPolicy.enabled) (not $pg.networkPolicy.allowExternal) }}
+          {{- if or .Values.egressPolicy.enabled (not $pg.networkPolicy.enabled) (not $pg.networkPolicy.allowExternal) }}
           networkPolicy:
             # The upstream restrictive policy retains generic client peers.
             # Disable it; strict mode supplies the same resource via extraDeploy.
@@ -102,7 +102,7 @@ spec:
             labels:
               {{- toYaml $pg.metrics.serviceMonitor.labels | nindent 14 }}
           {{- end }}
-        {{- if and $pg.networkPolicy.enabled (not $pg.networkPolicy.allowExternal) }}
+        {{- if or .Values.egressPolicy.enabled (and $pg.networkPolicy.enabled (not $pg.networkPolicy.allowExternal)) }}
         # Reuse the upstream policy's identity so Argo updates it in place.
         extraDeploy:
           - apiVersion: networking.k8s.io/v1
@@ -120,7 +120,24 @@ spec:
                 - Ingress
                 - Egress
               egress:
+                {{- if .Values.egressPolicy.enabled }}
+                # The primary serves SQL; the separately selected backup Job
+                # owns R2 uploads. Replies to allowed ingress are stateful.
+                - to:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                      podSelector:
+                        matchLabels:
+                          k8s-app: kube-dns
+                  ports:
+                    - protocol: UDP
+                      port: 53
+                    - protocol: TCP
+                      port: 53
+                {{- else }}
                 - {}
+                {{- end }}
               ingress:
                 - ports:
                     - protocol: TCP

@@ -138,6 +138,91 @@ cell model, not a problem:
 
 Because cells are isolated, a bad release is contained to the cells it reached.
 
+## Cell egress isolation (shipped disabled)
+
+The apps and server charts expose one `egressPolicy.enabled` switch, defaulting
+to `false`. The apps chart passes the policy to its server chart and applies it
+to Civo PostgreSQL and the optional PostgreSQL backup Job. No live cell values,
+generator overlays, or catalog switches enable this policy. When disabled,
+existing manifests retain their previous network behavior. Enabling requires
+a separate reviewed rollout under the
+[egress enablement runbook](runbooks.md#enable-cell-egress-isolation).
+
+The policy grants each process only its current outbound dependencies. External
+lists permit TCP 443 to approved IPv4 `/16`–`/32` or IPv6 `/32`–`/128` prefixes.
+Prefer exact hosts (`/32`, `/128`) where stable; bounded published provider
+ranges are acceptable for anycast-fronted services. Empty lists grant no
+external access.
+
+| Destination | Initiating process and grant | Configuration and purpose |
+| --- | --- | --- |
+| CoreDNS in `kube-system`, label `k8s-app: kube-dns`, UDP/TCP 53 | Server, worker, PostgreSQL primary, backup Job | Resolve service and approved external names. Namespace and pod selectors must match together. |
+| PostgreSQL primary, TCP 5432 | Server, worker, backup Job | The `postgresql` name, `witself-postgresql` instance, and `primary` component labels select the in-cell database. The apps chart supplies `apps.civoPostgres.namespace`; standalone server installs use `egressPolicy.postgresNamespace`. |
+| `self.witwave.ai`, TCP 443 | Clients outside these cell workloads; no cell egress grant | Cell billing configuration advertises the control-plane endpoint to clients. `controlPlaneCIDRs` remains available and empty by default but grants nothing to the current roles. |
+| Approved account-specific Cloudflare R2 endpoint, TCP 443 | Backup Job only in this policy; application R2 clients run in the separate control plane | `r2CIDRs`. The backup endpoint comes from its existing Secret. Server, worker, and PostgreSQL primary receive no R2 grant. |
+| Approved agent-email edge endpoint, TCP 443 | Worker only | `agentEmailCIDRs`. The serving worker dispatches to `witself-agent-email-send.witwave.workers.dev/v1/dispatch`; include any separately configured edge host only after review. |
+| `api.stripe.com`, TCP 443 | Separate control plane; no cell egress grant | `stripeCIDRs` remains available and empty by default but grants nothing to the current roles. The cell server does not initiate Stripe calls. |
+| Metrics scrape connections | Replies from scraped workloads to existing allowed ingress sources | Server and worker metrics remain governed by their `metricsFrom` ingress rules; PostgreSQL exporter ingress remains separate. Replies need no outbound grant to Prometheus. |
+
+The server receives DNS and PostgreSQL only; the worker additionally receives
+agent-email dispatch; the backup Job additionally receives R2. Keep unused
+groups empty. There is no cell Kubernetes API grant, and the chart defaults to
+`automountServiceAccountToken: false`. Inbound agent-email relay and provider
+callbacks need no outbound connection to their senders. The backup Job must use
+the #503 structured preinstalled image because legacy runtime APK installation
+requires extra destinations. The PostgreSQL primary itself allows DNS only for
+new outbound connections.
+
+### Cilium enforcement on Civo
+
+The Civo provisioning path in `infra/pulumi/internal/cell/civo.go` explicitly
+sets `Cni: "cilium"`; these cells use Cilium, not the default Flannel/kube-router
+combination sometimes associated with K3s. Cilium supports the portable
+`networking.k8s.io/v1` NetworkPolicy objects emitted here. Its
+`policyEnforcementMode` / `enable-policy` setting must allow enforcement:
+`default` enforces the selected policy directions, `always` enforces policy
+for all endpoints, and `never` disables enforcement. See
+[Cilium policy enforcement modes](https://docs.cilium.io/en/stable/security/policy/intro/).
+
+**Civo's installed Cilium enforcement settings and DNS-proxy capability were
+not inspected live for this change.** The provisioning choice does not establish
+those settings. Use the exact per-agent config, status, and endpoint checks in
+the [enablement runbook](runbooks.md#enable-cell-egress-isolation), then prove
+fresh allowed and denied connections before enabling a cell.
+
+Native NetworkPolicy uses pod/namespace selectors, IP ranges, protocols, and
+ports. It cannot bind an external address to a DNS name, TLS identity, or HTTP
+path. Keep this portable approach now: reviewed address sets render as
+`ipBlock` peers. Operators must refresh host A/AAAA answers before expiry,
+maintain any approved provider-prefix inventory, and remove obsolete entries.
+The chart installs no DNS-to-policy controller.
+
+### Follow-up: Cilium FQDN policy
+
+For Cloudflare-fronted destinations, prefer `CiliumNetworkPolicy.toFQDNs` in a
+follow-up once the live DNS-proxy capability is confirmed. It learns addresses
+from proxied DNS replies instead of requiring manual address updates. Cilium
+requires `enable-l7-proxy=true` and DNS interception rules (`toPorts.rules.dns`)
+for that path; an L4 UDP/TCP 53 grant alone does not activate it. Verify proxy
+health and observed DNS redirects with a separately reviewed test policy before
+replacing these portable policies. See
+[Cilium DNS-based policy](https://docs.cilium.io/en/stable/security/policy/layer3/#dns-based).
+
+Shared provider addresses admit other tenants or hostnames on the same IP and
+port, whether allowed through exact hosts, provider ranges, or learned DNS
+addresses. Overlap can make a Stripe address reachable through a worker's
+agent-email grant even without a Stripe grant. DNS permits arbitrary queries,
+including potential tunneling. This is IP-level containment, not TLS hostname
+isolation.
+
+Policies are additive: another matching allow-all policy defeats these limits.
+Established replies are implicitly allowed; existing connections and service
+NAT require runtime checks. Resident-node traffic, host-network pods, and
+non-TCP/UDP/SCTP protocols have additional limitations. See
+[Kubernetes NetworkPolicy semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
+Consequently, “everything else denied” describes new selected pod connections
+within these enforcement limits; it is not an absolute exfiltration guarantee.
+
 ## Retired literal-route compatibility receive mode
 
 The original bounded receive mode is retained only for compatibility with the
