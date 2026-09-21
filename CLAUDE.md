@@ -26,7 +26,7 @@ scripts/run-gate.sh --log /tmp/check.log check
 
 ## Tests that pass by not running
 
-Two traps in this repository produce a green result that proves nothing:
+Three traps in this repository produce a green result that proves nothing:
 
 - **PostgreSQL integration tests skip silently** when
   `WITSELF_TEST_DATABASE_URL` is unset. A local `make check` without a
@@ -44,6 +44,13 @@ Two traps in this repository produce a green result that proves nothing:
   so `check-infra` fails on a missing wrangler until `npm ci` has run in each
   worker directory. That failure is environmental, not a code defect — but do
   not paper over it, install and re-run.
+
+- **The roll-state matrix needs a verified PostgreSQL child chart.** The
+  runner fetches and verifies it. `WITSELF_TEST_SKIP_POSTGRESQL_CHART=1`
+  skips the child-chart row loudly with a `NOT RUN test-civo-postgres-chart`
+  line on stderr; a run with that line in its output is not a full gate, and
+  the knob does not make `check-infra` work offline (the fetch contract
+  checks still need the verified chart).
 
 Prefer timing assertions that are proportional to the fixture's own timings
 over absolute wall-clock bounds, which flake on a loaded machine.

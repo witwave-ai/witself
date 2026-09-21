@@ -36,7 +36,7 @@ end
   expected = upstream.merge('global' => {'security' => {'allowInsecureImages' => true}}, 'image' => overrides.transform_keys { |key| key.delete_prefix('image.') })
   check('GHCR selection must forward exactly the image and explicit verification opt-in', mirrored == expected)
 
-  output, errors, status = render(chart, cell, *args)
+  output, errors, status = render(chart, cell, *args, '--set', 'apps.civoPostgres.allowInsecureImages=false')
   check('mirror alone must not implicitly enable substitution', status.success? && !postgres_values(output).key?('global'))
   %w[sha256:short SHA256:invalid].each do |digest|
     _, _, status = render(chart, cell, '--set-string', "apps.civoPostgres.image.digest=#{digest}")

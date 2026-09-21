@@ -29,7 +29,12 @@ apps_chart = File.join(root, ".gitops/charts/apps")
 cell = File.join(root, ".gitops/cells/civo-sandbox-use1-backup/values.yaml")
 def child_values(chart, cell, overrides)
   args = ["helm", "template", "witself-apps", chart, "--values", cell]
-  overrides.each { |key, value| args.concat(["--set", "apps.civoPostgres.#{key}=#{value}"]) }
+  # A real cell may already select an approved mirror. Start each child-chart
+  # case at the upstream image and explicit verification boundary, preserving
+  # the cell's reviewed digest; each case then controls its own mirror opt-in.
+  baseline = {"image.registry" => "registry-1.docker.io", "image.repository" => "bitnami/postgresql",
+              "allowInsecureImages" => false}
+  baseline.merge(overrides).each { |key, value| args.concat(["--set", "apps.civoPostgres.#{key}=#{value}"]) }
   docs = YAML.load_stream(command(*args)).compact
   app = docs.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-postgresql" }
   check("missing PostgreSQL Application", app)
