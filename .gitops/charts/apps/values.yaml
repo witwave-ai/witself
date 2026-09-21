@@ -38,6 +38,8 @@ apps:
     # working set requires a larger preset.
     resourcesPreset: nano
     # Empty fields inherit the upstream image (including its unpinned tag).
+    # roll-cell.sh --postgres-image selects the published per-cell GHCR mirror
+    # and its unchanged upstream digest, with the explicit opt-in below.
     image:
       registry: ""
       repository: ""

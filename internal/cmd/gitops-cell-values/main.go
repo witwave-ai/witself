@@ -25,9 +25,13 @@ func run(args []string) int {
 	backupRepository := fs.String("backup-image-repository", "", "optional backup image repository for --roll-cell; requires tag and digest")
 	backupTag := fs.String("backup-image-tag", "", "backup image release tag for --roll-cell")
 	backupDigest := fs.String("backup-image-digest", "", "backup image sha256 digest for --roll-cell")
+	postgresRegistry := fs.String("postgres-image-registry", "", "optional PostgreSQL mirror registry for --roll-cell; requires repository, tag, and digest")
+	postgresRepository := fs.String("postgres-image-repository", "", "PostgreSQL mirror repository for --roll-cell")
+	postgresTag := fs.String("postgres-image-tag", "", "PostgreSQL mirror release-and-cell tag for --roll-cell")
+	postgresDigest := fs.String("postgres-image-digest", "", "PostgreSQL mirror sha256 digest for --roll-cell; must preserve the existing image content")
 	root := fs.String("root", ".", "repository root containing .gitops/cells")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST\n         [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST] [--root PATH]\n")
+		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST\n         [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST]\n         [--postgres-image-registry REGISTRY --postgres-image-repository REPOSITORY --postgres-image-tag TAG --postgres-image-digest DIGEST] [--root PATH]\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -64,11 +68,19 @@ func run(args []string) int {
 		}
 		backup = &gitopsvalues.BackupImagePins{Repository: *backupRepository, Tag: *backupTag, Digest: *backupDigest}
 	}
+	var postgres *gitopsvalues.PostgresImagePins
+	if *postgresRegistry != "" || *postgresRepository != "" || *postgresTag != "" || *postgresDigest != "" {
+		if *rollCell == "" || *postgresRegistry == "" || *postgresRepository == "" || *postgresTag == "" || *postgresDigest == "" {
+			_, _ = fmt.Fprintln(os.Stderr, "error: PostgreSQL image registry, repository, tag, and digest require --roll-cell and must all be supplied")
+			return 2
+		}
+		postgres = &gitopsvalues.PostgresImagePins{Registry: *postgresRegistry, Repository: *postgresRepository, Tag: *postgresTag, Digest: *postgresDigest}
+	}
 	var err error
 	if *check {
 		err = gitopsvalues.Check(*root, os.Stdout)
 	} else if *rollCell != "" {
-		err = gitopsvalues.RollCellWithBackupImage(*root, *rollCell, *version, *imageDigest, backup, os.Stdout)
+		err = gitopsvalues.RollCellWithImages(*root, *rollCell, *version, *imageDigest, backup, postgres, os.Stdout)
 	} else {
 		err = gitopsvalues.Write(*root, os.Stdout)
 	}

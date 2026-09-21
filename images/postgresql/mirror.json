@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "source_registry": "registry-1.docker.io",
+  "source_repository": "bitnami/postgresql",
+  "destination_repository": "ghcr.io/witwave-ai/images/postgresql",
+  "cells": {
+    "civo-sandbox-use1-serving": {
+      "digest": "sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f",
+      "upstream_tag": "latest",
+      "upstream_version": "18.4.0"
+    },
+    "civo-sandbox-use1-backup": {
+      "digest": "sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049",
+      "upstream_tag": "latest",
+      "upstream_version": "18.4.0"
+    }
+  },
+  "upstream_metadata_note": "Both cells originally selected the mutable latest tag. upstream_version is read from each digest-pinned linux/amd64 image config org.opencontainers.image.version label; the per-cell digest remains the authoritative build identity."
+}

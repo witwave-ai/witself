@@ -5,13 +5,31 @@ set -euo pipefail
 
 die() { echo "error: image digest resolution failed: $*" >&2; exit 2; }
 repository=ghcr.io/witwave-ai/images/witself-server
-if [ "$#" -eq 3 ] && [ "$2" = --repository ]; then
-  repository=$3
-elif [ "$#" -ne 1 ]; then
-  die "expected a release version [--repository ghcr.io/OWNER/IMAGE]"
-fi
+[ "$#" -ge 1 ] || die "expected a release version [--repository ghcr.io/OWNER/IMAGE] [--tag TAG]"
 version=$1
+shift
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
+tag=$version
+repository_set=false
+tag_set=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repository)
+      [ "$#" -ge 2 ] && [ "$repository_set" = false ] || die "expected one repository value"
+      repository=$2
+      repository_set=true
+      shift 2
+      ;;
+    --tag)
+      [ "$#" -ge 2 ] && [ "$tag_set" = false ] || die "expected one tag value"
+      tag=$2
+      tag_set=true
+      shift 2
+      ;;
+    *) die "unexpected image resolver argument" ;;
+  esac
+done
+[[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "invalid image tag"
 [[ "$repository" =~ ^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)+$ ]] || die "repository must be a canonical ghcr.io image repository without a tag or digest"
 repository=${repository#ghcr.io/}
 for tool in curl jq shasum; do
@@ -37,7 +55,7 @@ unset auth
 if ! curl -q --fail --silent --show-error --connect-timeout 10 --max-time 60 \
   --config - --header "Accept: $accept" \
   --dump-header "$work_dir/headers" --output "$work_dir/manifest" \
-  "https://ghcr.io/v2/$repository/manifests/$version" <<EOF_AUTH
+  "https://ghcr.io/v2/$repository/manifests/$tag" <<EOF_AUTH
 header = "Authorization: Bearer $bearer"
 EOF_AUTH
 then

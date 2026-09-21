@@ -111,7 +111,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -346,6 +346,10 @@ check-postgres-backup-image: ## Build and smoke-test the backup image; Docker is
 	bash scripts/test-postgres-backup-image-check.sh
 	bash scripts/check-postgres-backup-image.sh
 
+check-postgres-image-mirror: ## Verify digest-preserving local copies; Skopeo is mandatory in CI
+	bash scripts/test-postgres-image-mirror-check.sh
+	bash scripts/check-postgres-image-mirror.sh
+
 check: ## Run CI's exact local gate set — run before every push
 	bash scripts/check-conflict-markers.sh
 	bash scripts/test-conflict-markers.sh
@@ -365,6 +369,7 @@ check: ## Run CI's exact local gate set — run before every push
 	@echo "check: all gates green"
 
 check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
+	$(MAKE) check-postgres-image-mirror
 	go test ./internal/plans -run '^TestWorkerPlanContract'
 	cd infra/pulumi && go vet ./...
 	cd infra/pulumi && go build ./...

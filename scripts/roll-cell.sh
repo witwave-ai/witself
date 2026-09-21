@@ -3,7 +3,9 @@
 # version. Scoped: only apps.witselfServer.chartVersion, imageTag and
 # imageDigest are changed through the cell-values generator. --backup-image
 # also pins the purpose-built PostgreSQL backup image at the same release;
-# without it, any existing backup pin is preserved. Upstream chart
+# without it, any existing backup pin is preserved. --postgres-image mirrors
+# this cell's existing PostgreSQL digest through its release-specific GHCR tag;
+# without it, the PostgreSQL image pin is preserved. Upstream chart
 # versions (cert-manager, external-dns, external-secrets, keda,
 # metrics-server) are OFF-LIMITS to this script by design.
 #
@@ -12,7 +14,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <cell-name> <version> [--backup-image] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
+  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
 }
 
 die() {
@@ -23,11 +25,16 @@ die() {
 BACKUP_EVIDENCE=()
 NO_SCHEMA_CHANGE=false
 PIN_BACKUP_IMAGE=false
+PIN_POSTGRES_IMAGE=false
 POSITIONAL=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --backup-image)
       PIN_BACKUP_IMAGE=true
+      shift
+      ;;
+    --postgres-image)
+      PIN_POSTGRES_IMAGE=true
       shift
       ;;
     --backup-evidence)
@@ -82,6 +89,9 @@ VERSION="${POSITIONAL[1]}"
 if [ "$NO_SCHEMA_CHANGE" = true ] && [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ]; then
   usage
   die "--no-schema-change and --backup-evidence are mutually exclusive"
+fi
+if [ "$PIN_POSTGRES_IMAGE" = true ] && [ "$NO_SCHEMA_CHANGE" = true ]; then
+  die "PostgreSQL image switch requires fresh --backup-evidence; --no-schema-change cannot cover the StatefulSet restart"
 fi
 if [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
   die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for civo-sandbox-use1-backup and civo-sandbox-use1-serving, or attest --no-schema-change"
@@ -150,6 +160,48 @@ if [ "$PIN_BACKUP_IMAGE" = true ]; then
   fi
 fi
 
+POSTGRES_REPOSITORY=ghcr.io/witwave-ai/images/postgresql
+POSTGRES_TAG="${VERSION}-${CELL}"
+if [ "$PIN_POSTGRES_IMAGE" = true ]; then
+  if ! POSTGRES_SCHEMA=$(git -C "$REPO_ROOT" show "${RELEASE_REF}:.gitops/charts/apps/values.schema.json" 2>/dev/null); then
+    die "release v${VERSION} apps chart has no readable values.schema.json; cannot verify PostgreSQL image pin support"
+  fi
+  if ! printf '%s' "$POSTGRES_SCHEMA" | jq -e '
+    .properties.apps.properties.civoPostgres.properties |
+      (.allowInsecureImages.type == "boolean") and
+      (.image.properties | .registry and .repository and .tag and .digest)
+  ' >/dev/null 2>&1; then
+    die "release v${VERSION} apps chart does not declare PostgreSQL image registry, repository, tag, and digest with allowInsecureImages; refusing an unenforceable PostgreSQL pin"
+  fi
+
+  # The release descriptor identifies the exact bytes its mirror job publishes.
+  # Compare its selected cell to this checkout before resolving a release tag;
+  # neither newer local metadata nor an unrelated cell authorizes a DB upgrade.
+  POSTGRES_DESCRIPTOR=images/postgresql/mirror.json
+  if ! RELEASE_POSTGRES_CONFIG=$(git -C "$REPO_ROOT" show "${RELEASE_REF}:${POSTGRES_DESCRIPTOR}" 2>/dev/null); then
+    die "release v${VERSION} has no PostgreSQL mirror descriptor; refusing an unpublished mirror"
+  fi
+  postgres_source_digest() {
+    jq -er --arg cell "$CELL" --arg destination "$POSTGRES_REPOSITORY" '
+      select(.schema_version == 1 and
+        .source_registry == "registry-1.docker.io" and
+        .source_repository == "bitnami/postgresql" and
+        .destination_repository == $destination) |
+      .cells[$cell] | select(.upstream_tag | type == "string" and test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")) |
+      .digest | select(type == "string" and test("^sha256:[a-f0-9]{64}$"))
+    '
+  }
+  if ! POSTGRES_SOURCE_DIGEST=$(printf '%s' "$RELEASE_POSTGRES_CONFIG" | postgres_source_digest 2>/dev/null); then
+    die "release v${VERSION} has no valid PostgreSQL mirror source for cell $CELL"
+  fi
+  if ! LOCAL_POSTGRES_SOURCE_DIGEST=$(postgres_source_digest <"$REPO_ROOT/$POSTGRES_DESCRIPTOR" 2>/dev/null); then
+    die "checkout has no valid PostgreSQL mirror source for cell $CELL"
+  fi
+  if [ "$POSTGRES_SOURCE_DIGEST" != "$LOCAL_POSTGRES_SOURCE_DIGEST" ]; then
+    die "release v${VERSION} PostgreSQL source differs from this checkout; refusing a database image change"
+  fi
+fi
+
 # Resolve and verify the complete registry manifest before the generator can
 # change any pin. A failed lookup never leaves a tag-only partial roll.
 if ! DIGEST=$(bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION"); then
@@ -162,6 +214,15 @@ if [ "$PIN_BACKUP_IMAGE" = true ]; then
   fi
   ROLL_ARGS+=(--backup-image-repository "$BACKUP_REPOSITORY" --backup-image-tag "$VERSION" --backup-image-digest "$BACKUP_DIGEST")
 fi
+if [ "$PIN_POSTGRES_IMAGE" = true ]; then
+  if ! POSTGRES_DIGEST=$(bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION" --repository "$POSTGRES_REPOSITORY" --tag "$POSTGRES_TAG"); then
+    die "PostgreSQL mirror digest resolution failed; rollout aborted before any values file edit (verify release mirror publication and GHCR visibility)"
+  fi
+  if [ "$POSTGRES_DIGEST" != "$POSTGRES_SOURCE_DIGEST" ]; then
+    die "PostgreSQL mirror digest does not match the release upstream digest; rollout aborted before any values file edit"
+  fi
+  ROLL_ARGS+=(--postgres-image-registry ghcr.io --postgres-image-repository witwave-ai/images/postgresql --postgres-image-tag "$POSTGRES_TAG" --postgres-image-digest "$POSTGRES_DIGEST")
+fi
 
 BEFORE=$(mktemp "${TMPDIR:-/tmp}/witself-roll-cell-before.XXXXXX")
 trap 'rm -f -- "$BEFORE"' EXIT
@@ -172,6 +233,9 @@ bash "$REPO_ROOT/scripts/gitops-cell-values.sh" "${ROLL_ARGS[@]}"
 ROLL_SUMMARY="apps.witselfServer.chartVersion + imageTag + imageDigest"
 if [ "$PIN_BACKUP_IMAGE" = true ]; then
   ROLL_SUMMARY+="; backup image pinned to $BACKUP_REPOSITORY:$VERSION by digest"
+fi
+if [ "$PIN_POSTGRES_IMAGE" = true ]; then
+  ROLL_SUMMARY+="; PostgreSQL image mirrored to $POSTGRES_REPOSITORY:$POSTGRES_TAG at its existing digest"
 fi
 echo "rolled $CELL to $VERSION ($ROLL_SUMMARY)"
 echo "diff:"
