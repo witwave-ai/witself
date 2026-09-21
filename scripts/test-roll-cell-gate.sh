@@ -346,6 +346,8 @@ for line in Path(baseline).read_text().splitlines(keepends=True):
         in_postgres_image = True
     elif line.strip() and not line.startswith('      '):
         in_postgres_image = False
+    if with_postgres == 'true' and in_postgres and line.startswith('    allowInsecureImages:'):
+        continue
     if with_postgres == 'true' and in_postgres and line == '    image:\n':
         line = '    allowInsecureImages: true\n' + line
     if with_postgres == 'true' and in_postgres_image:
@@ -356,6 +358,8 @@ for line in Path(baseline).read_text().splitlines(keepends=True):
                     '      tag: "' + version + '-' + cell + '"\n')
         elif line.startswith('      digest:'):
             line = '      digest: ' + Path(digest_file + '.postgres').read_text() + '\n'
+        elif line.startswith('      tag:'):
+            continue
     if with_backup == 'true' and in_postgres and in_backup and line.startswith('      enabled:'):
         line += ('      image:\n'
                  '        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"\n'

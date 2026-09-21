@@ -72,7 +72,7 @@ func TestRollBackupImagePreservesOtherBytesAndRegenerates(t *testing.T) {
 			root := copyGenerationFixture(t)
 			serverDigest := "sha256:" + strings.Repeat("a", 64)
 			backup := &BackupImagePins{Repository: backupReleaseRepository, Tag: "0.0.999", Digest: "sha256:" + strings.Repeat("b", 64)}
-			// Establish the independent server-only output, then add only the
+			// Establish the independent server-only output, then replace only the
 			// expected backup block to compare every other byte and every cell.
 			if err := RollCell(root, cell, backup.Tag, serverDigest, io.Discard); err != nil {
 				t.Fatal(err)
@@ -90,15 +90,7 @@ func TestRollBackupImagePreservesOtherBytesAndRegenerates(t *testing.T) {
 			for name, body := range before {
 				expected := body
 				if name == cell {
-					// The first backup mapping is civoPostgres; witselfServer.backup
-					// must remain entirely untouched.
-					backupStart := bytes.Index(body, []byte("    backup:\n"))
-					if backupStart < 0 {
-						t.Fatal("fixture lacks backup mapping")
-					}
-					enabledStart := backupStart + len("    backup:\n")
-					end := enabledStart + bytes.IndexByte(body[enabledStart:], '\n') + 1
-					expected = []byte(string(body[:end]) + block + string(body[end:]))
+					expected = setFixtureYAMLField(t, body, "apps.civoPostgres.backup.image", block, "enabled")
 				}
 				if !bytes.Equal(after[name], expected) {
 					t.Fatalf("backup pin changed unrelated bytes in %s", name)
@@ -150,7 +142,7 @@ func TestBackupImagePinsRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			body = bytes.Replace(body, []byte("    backup:\n      enabled: true\n"), []byte("    backup:\n      enabled: true\n      image: "+image+"\n"), 1)
+			body = setFixtureYAMLField(t, body, "apps.civoPostgres.backup.image", "      image: "+image+"\n", "enabled")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +180,7 @@ func TestGenerationRejectsMalformedBackupImage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			body = bytes.Replace(body, []byte("    backup:\n"), []byte("    backup:\n      image: "+image+"\n"), 1)
+			body = setFixtureYAMLField(t, body, "apps.civoPostgres.backup.image", "      image: "+image+"\n", "enabled")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -241,7 +233,7 @@ func TestRollBackupImageFailureLeavesAllCellsUntouched(t *testing.T) {
 				if name == "drift" {
 					body = append(body, []byte("# operator edit\n")...)
 				} else {
-					body = bytes.Replace(body, []byte("    backup:\n"), []byte("    backup:\n      image: {repository: postgres, tag: \"18\", digest: false}\n"), 1)
+					body = setFixtureYAMLField(t, body, "apps.civoPostgres.backup.image", "      image: {repository: postgres, tag: \"18\", digest: false}\n", "enabled")
 				}
 				if err := os.WriteFile(path, body, 0o600); err != nil {
 					t.Fatal(err)

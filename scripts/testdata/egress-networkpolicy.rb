@@ -193,10 +193,12 @@ Dir.mktmpdir('witself-egress-policy-') do |temporary|
     check("#{cell} child explicit off must be byte-identical to default", server_off == render(server_chart, child_path, {'egressPolicy.enabled' => false}))
     check('dark server render must not select any pod for egress isolation', policies(documents(server_off)).empty?)
 
-    # Disable the orthogonal backup job here; its independent policy is tested
-    # below with a preinstalled-tools image. No checked-in cell file is edited.
+    # Select an older child explicitly so a normal server chart roll cannot
+    # turn this negative case into a supported activation. Disable the
+    # orthogonal backup job; its independent policy is tested below.
     _, errors, status = helm(apps_chart, values, {
       'egressPolicy' => apps_enabled,
+      'apps.witselfServer.chartVersion' => '0.0.291',
       'apps.civoPostgres.backup.enabled' => false
     }, release: 'witself-apps')
     check("#{cell} pinned child chart must reject partial egress activation",

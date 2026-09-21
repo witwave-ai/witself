@@ -87,6 +87,20 @@ func TestPostgresOverlayDigestRemainsGeneratorSourceOfTruth(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				root := copyGenerationFixture(t)
 				path := filepath.Join(root, filepath.FromSlash(valuesRel(cell)))
+				// Start both branches from the overlay's upstream selection even
+				// when the committed cell already carries a mirror roll.
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body = setFixtureYAMLField(t, body, "apps.civoPostgres.allowInsecureImages", "", "")
+				body = setFixtureYAMLField(t, body, "apps.civoPostgres.image", "    image: {}\n", "")
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := Write(root, io.Discard); err != nil {
+					t.Fatal(err)
+				}
 				pins, err := readPostgresImagePins(path)
 				if err != nil || pins == nil || pins.Digest == "" {
 					t.Fatal("fixture lacks PostgreSQL pins")
@@ -222,9 +236,13 @@ func TestRollPostgresMirrorPreservesContentAndRegenerates(t *testing.T) {
 			for name, body := range before {
 				expected := body
 				if name == cell {
-					expected = bytes.Replace(expected, []byte("    image:\n"), []byte("    allowInsecureImages: true\n    image:\n"), 1)
-					expected = bytes.Replace(expected, []byte("      registry: "+upstream.Registry+"\n"), []byte("      registry: \""+mirror.Registry+"\"\n"), 1)
-					expected = bytes.Replace(expected, []byte("      repository: "+upstream.Repository+"\n"), []byte("      repository: \""+mirror.Repository+"\"\n      tag: \""+mirror.Tag+"\"\n"), 1)
+					block := "    image:\n      registry: \"" + mirror.Registry + "\"\n      repository: \"" + mirror.Repository + "\"\n      tag: \"" + mirror.Tag + "\"\n      digest: " + mirror.Digest + "\n"
+					if upstream.allowInsecureImagesSet {
+						expected = setFixtureYAMLField(t, expected, "apps.civoPostgres.allowInsecureImages", "    allowInsecureImages: true\n", "")
+					} else {
+						block = "    allowInsecureImages: true\n" + block
+					}
+					expected = setFixtureYAMLField(t, expected, "apps.civoPostgres.image", block, "")
 				}
 				if !bytes.Equal(after[name], expected) {
 					t.Fatalf("PostgreSQL mirror changed unrelated bytes in %s", name)
@@ -337,12 +355,8 @@ func TestGenerationRejectsMalformedPostgresImageWithoutWrites(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			start := bytes.Index(body, []byte("    image:\n"))
-			end := bytes.Index(body, []byte("    networkPolicy:\n"))
-			if start < 0 || end <= start {
-				t.Fatal("fixture lacks PostgreSQL image block")
-			}
-			body = []byte(string(body[:start]) + tc.selection + string(body[end:]))
+			body = setFixtureYAMLField(t, body, "apps.civoPostgres.allowInsecureImages", "", "")
+			body = setFixtureYAMLField(t, body, "apps.civoPostgres.image", tc.selection, "")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}

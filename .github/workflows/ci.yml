@@ -588,6 +588,19 @@ jobs:
           bash scripts/gitops-cell-values.sh --check
           bash scripts/test-gitops-cell-values.sh
 
+      - name: Fetch PostgreSQL child chart
+        timeout-minutes: 4
+        run: |
+          chart=$(bash scripts/fetch-test-postgresql-chart.sh)
+          printf 'WITSELF_TEST_POSTGRESQL_CHART=%s\n' "$chart" >> "$GITHUB_ENV"
+
+      - name: PostgreSQL child chart fetch contract checks
+        run: bash scripts/test-fetch-test-postgresql-chart.sh
+
+      - name: cell roll state contract checks
+        timeout-minutes: 20
+        run: bash scripts/test-cell-roll-states.sh
+
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh
 

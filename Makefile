@@ -24,6 +24,9 @@ DASHBOARD_ACCEPTANCE_OUT ?= evidence/dashboard-acceptance
 # root-module test run, where Go applies the limit to every package.
 STORE_TEST_TIMEOUT ?= 30m
 
+# Each roll state owns its fixture and homes; serialize with an override if needed.
+WITSELF_ROLL_STATES_JOBS ?= 4
+
 MEMORY_LOAD_QUALITY_RESULTS     ?= /tmp/witself-memory-load-quality.json
 MEMORY_LOAD_QUALITY_SEED        ?= 20260717
 MEMORY_LOAD_QUALITY_NOISE       ?= 250
@@ -391,6 +394,8 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-cell-secrets.sh
 	bash scripts/gitops-cell-values.sh --check
 	bash scripts/test-gitops-cell-values.sh
+	WITSELF_ROLL_STATES_JOBS=$(WITSELF_ROLL_STATES_JOBS) bash scripts/test-cell-roll-states.sh
+	bash scripts/test-fetch-test-postgresql-chart.sh
 	bash scripts/test-roll-cell-gate.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh

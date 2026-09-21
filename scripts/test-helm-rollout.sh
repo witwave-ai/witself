@@ -1985,6 +1985,23 @@ end
 
 serving = render(chart, serving_cell)
 backup = render(chart, backup_cell)
+serving_config = YAML.safe_load(File.read(serving_cell), aliases: false)
+backup_config = YAML.safe_load(File.read(backup_cell), aliases: false)
+# Real rolls can change registry/repository/tag and the explicit mirror opt-in;
+# child rendering must preserve the selected cell values in either roll state.
+def check_postgres_image(documents, config, label)
+  pg = child_values(documents)
+  selected = config.dig("apps", "civoPostgres")
+  image = selected.fetch("image").reject { |_, value| value.nil? || value == "" }
+  check("#{label} PostgreSQL must forward the selected image", pg["image"] == image)
+  if selected["allowInsecureImages"] == true
+    check("#{label} PostgreSQL must forward explicit mirror opt-in", pg["global"] == {"security" => {"allowInsecureImages" => true}})
+  else
+    check("#{label} PostgreSQL must retain upstream image validation", !pg.key?("global"))
+  end
+end
+check_postgres_image(serving, serving_config, "serving")
+check_postgres_image(backup, backup_config, "backup")
 defaults = YAML.safe_load(File.read(File.join(chart, "values.yaml")), aliases: false).dig("apps", "civoPostgres")
 check("PostgreSQL image defaults must inherit upstream values", defaults["image"].values.all? { |value| value == "" })
 check("PostgreSQL mirror opt-in must default false", defaults["allowInsecureImages"] == false)
@@ -2001,8 +2018,6 @@ check("PostgreSQL policy defaults must retain upstream behavior", defaults["netw
 end
 
 pg = child_values(serving)
-check("serving PostgreSQL must pin its own running digest", pg["image"] == {"registry" => "registry-1.docker.io", "repository" => "bitnami/postgresql", "digest" => "sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f"})
-check("serving PostgreSQL must retain upstream image validation", !pg.key?("global"))
 check("serving PostgreSQL exporter and selected ServiceMonitor must be enabled", pg["metrics"] == {"enabled" => true, "serviceMonitor" => {"enabled" => true, "namespace" => "witself", "interval" => "30s", "labels" => {"release" => "witself-monitoring"}}})
 check("serving PostgreSQL must replace the broader upstream policy", pg.dig("primary", "networkPolicy") == {"enabled" => false, "allowExternal" => false})
 check("serving compaction must be enabled", child_values(serving, "witself-server").dig("avatar", "payloadCompaction", "enabled") == true)
@@ -2017,12 +2032,8 @@ server_documents = YAML.load_stream(File.read(serving_server_render)).compact
 end
 
 pg = child_values(backup)
-check("backup PostgreSQL pin changed", pg["image"] == {"registry" => "registry-1.docker.io", "repository" => "bitnami/postgresql", "digest" => "sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049"})
-check("backup PostgreSQL must retain upstream image validation", !pg.key?("global"))
 check("backup has no monitoring stack", pg["metrics"] == {"enabled" => false})
 check("backup compaction must be enabled", child_values(backup, "witself-server").dig("avatar", "payloadCompaction", "enabled") == true)
-backup_config = YAML.safe_load(File.read(backup_cell), aliases: false)
-serving_config = YAML.safe_load(File.read(serving_cell), aliases: false)
 check("backup and serving Metrics Server activation changed", backup_config.dig("platform", "metricsServer", "enabled") == true && serving_config.dig("platform", "metricsServer", "enabled") == true)
 server_config = backup_config.dig("apps", "witselfServer")
 check("backup replica/PDB/topology must stay unchanged", server_config["replicaCount"] == 1 && server_config.dig("podDisruptionBudget", "enabled") == false && server_config["topologySpreadConstraints"] == [] && server_config.dig("worker", "replicaCount") == 2 && server_config.dig("worker", "podDisruptionBudget", "enabled") == false && server_config.dig("worker", "topologySpreadConstraints") == [])

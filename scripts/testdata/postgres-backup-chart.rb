@@ -13,7 +13,17 @@ def check(message, condition)
 end
 
 def render(chart, cell, *overrides)
+  # Mode is part of this fixture, not a property of the last committed roll.
+  # Select legacy mode explicitly unless the case supplies its own image. Keep
+  # --set separate from --set-json: Helm processes those flag groups in a fixed
+  # order, so an unconditional reset would overwrite a case's structured image.
   args = ['helm', 'template', 'witself-apps', chart, '--values', cell]
+  selected_image = overrides.any? do |value|
+    value.is_a?(Hash) ? value.key?('apps.civoPostgres.backup.image') : value.start_with?('apps.civoPostgres.backup.image=')
+  end
+  unless selected_image
+    %w[repository tag digest].each { |field| args.concat(['--set', "apps.civoPostgres.backup.image.#{field}="]) }
+  end
   overrides.each do |value|
     if value.is_a?(Hash)
       value.each { |key, entry| args.concat(['--set-json', "#{key}=#{JSON.generate(entry)}"]) }
@@ -94,6 +104,21 @@ end
 
 repository = 'ghcr.io/witwave-ai/images/witself-postgres-backup'
 digest = 'sha256:' + ('a' * 64)
+# Exercise the operator-facing --set form as well as the typed object cases.
+# Together with the explicit empty-field --set baseline above, both runner
+# modes are independent of the committed cell's current backup image.
+set_args = ['helm', 'template', 'witself-apps', chart, '--values', cell,
+            '--set', 'apps.civoPostgres.backup.enabled=true']
+{'repository' => repository, 'tag' => '0.0.999', 'digest' => digest}.each do |field, value|
+  set_args.concat(['--set', "apps.civoPostgres.backup.image.#{field}=#{value}"])
+end
+set_output, _, set_status = Open3.capture3(*set_args)
+check('explicit preinstalled --set mode must render', set_status.success?)
+set_job = named(YAML.load_stream(set_output).compact, 'CronJob', 'witself-postgresql-backup')
+set_container = set_job.dig('spec', 'jobTemplate', 'spec', 'template', 'spec', 'containers').fetch(0)
+check('explicit --set pins must select the preinstalled runner', set_container['image'] == "#{repository}@#{digest}" &&
+  set_container['command'] == ['/bin/bash', '/scripts/backup.sh'] &&
+  set_container.fetch('env').include?({'name' => 'WITSELF_POSTGRES_BACKUP_IMAGE_MODE', 'value' => 'preinstalled'}))
 [
   [{'repository' => repository, 'tag' => '0.0.999'}, "#{repository}:0.0.999"],
   [{'repository' => repository, 'tag' => '0.0.999', 'digest' => ''}, "#{repository}:0.0.999"],
