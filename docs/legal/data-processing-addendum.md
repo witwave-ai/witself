@@ -1,6 +1,6 @@
 # Witself Data Processing Addendum
 
-**Version 2026-09-20 · Effective 2026-09-20**
+**Version 2026-09-21 · Effective 2026-09-21**
 
 This DPA applies where Witwave LLC processes personal data in your content
 on your behalf. It is incorporated into the
