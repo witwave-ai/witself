@@ -1166,10 +1166,7 @@ func mcpCmd(args []string) int {
 		}
 	}
 	server := newWitselfMCPServerForRuntimeOptions(backend, cfg.Runtime, command.Server)
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		if isCleanMCPStdioShutdown(err) {
-			return 0
-		}
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); !isCleanMCPStdioShutdown(err) {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
 	}
@@ -1223,11 +1220,10 @@ func parseMCPServeCommandOptions(args []string, output io.Writer) (mcpServeComma
 }
 
 func isCleanMCPStdioShutdown(err error) bool {
-	// go-sdk v1.6.1 formats the underlying EOF with %v when stdin closes
-	// while a request is finishing, so that specific path cannot be matched
-	// with errors.Is. Keep the textual fallback exact so malformed input and
-	// unexpected EOFs remain visible failures.
-	return errors.Is(err, io.EOF) || (err != nil && err.Error() == "server is closing: EOF")
+	// go-sdk v1.8.0 returns nil for clean stdin EOF, including after in-flight
+	// requests finish: its connection wait filters both read and wrapped write
+	// EOFs. Retain errors.Is for EOF-shaped errors without hiding other failures.
+	return err == nil || errors.Is(err, io.EOF)
 }
 
 func newWitselfMCPServer(backend witselfMCPBackend) *mcp.Server {
