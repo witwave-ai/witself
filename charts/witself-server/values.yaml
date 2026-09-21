@@ -12,6 +12,22 @@
 
 replicaCount: 1
 
+# Shipped dark. Native Kubernetes NetworkPolicy enforces IPs/ports, not hostnames.
+# Prefer exact hosts (/32 or /128); reviewed provider ranges for anycast services
+# may be IPv4 /16 or narrower, or IPv6 /32 or narrower. Empty lists deny HTTPS.
+# See docs/deployment-cells.md and docs/runbooks.md before enabling.
+egressPolicy:
+  enabled: false
+  postgresNamespace: witself
+  # Reserved: cell server/worker do not initiate control-plane or R2 requests.
+  # The apps chart separately grants r2CIDRs to its PostgreSQL backup Job.
+  controlPlaneCIDRs: []
+  r2CIDRs: []
+  # Only the worker receives this HTTPS grant; server egress is DNS/PostgreSQL.
+  agentEmailCIDRs: []
+  # Reserved: managed Stripe requests originate in the control plane.
+  stripeCIDRs: []
+
 # Keep a ready replica serving while a replacement becomes stable. The
 # maxUnavailable: 0 default matters even for a single-replica self-hosted
 # install: upgrades surge a replacement instead of intentionally dropping the
@@ -449,7 +465,7 @@ podDisruptionBudget:
 
 # Default-deny ingress, opened only for the three ports. Health is always
 # reachable (kubelet probes); api and metrics ingress can be narrowed with
-# selectors. Egress is left open until the server gains outbound dependencies.
+# selectors. Egress is independently restricted by the default-off switch above.
 networkPolicy:
   enabled: true
   # Sources allowed to reach the api port. Empty = allow from any in-cluster
