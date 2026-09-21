@@ -35,6 +35,48 @@ witself-admin invite disable launch-2026
 The account is remembered locally as `default` (binding in
 `~/.witself/config.json`, token under `~/.witself/tokens/accounts/`).
 
+## Publish the legal pages
+
+The public `self.witwave.ai/legal*` pages live in the separate `witself-legal`
+Worker in `web/legal/`, which bundles the Markdown in `docs/legal/`. A
+control-plane deploy does not publish these pages. Publish from the same clean
+release tag worktree used for the control-plane deploy, after that tag's release
+workflow succeeds. Confirm that `git status --porcelain` is empty and that
+`git describe --tags --exact-match HEAD` identifies the intended release tag.
+
+From the root of that worktree, run:
+
+```sh
+cd infra/cloudflare/control-plane
+npm ci
+npm run deploy:legal
+```
+
+`deploy:legal` runs exactly
+`wrangler deploy --config ../../../web/legal/wrangler.toml`, using the local
+Wrangler installed from the committed lockfile. It uses the legal Worker's own
+configuration and does not run the control-plane config renderer or require its
+deploy inputs such as `EMAIL_DIRECTORY_KV_ID`. Normal Cloudflare deployment
+authentication is still required.
+
+After publication, verify both served Version/Effective lines:
+
+```sh
+curl --fail --silent --show-error -H 'Accept: text/markdown' \
+  https://self.witwave.ai/legal/privacy | grep '^\*\*Version '
+curl --fail --silent --show-error -H 'Accept: text/markdown' \
+  https://self.witwave.ai/legal/dpa | grep '^\*\*Version '
+```
+
+Require each line, including its Effective date, to match the corresponding
+`docs/legal/privacy-policy.md` or `docs/legal/data-processing-addendum.md` header
+in the release tag; an old line means publication is not complete. The legal
+Worker derives the consent versions in `/legal/versions.json` from those
+Markdown headers, and the control plane reads the Terms and Privacy versions
+through its `LEGAL_DOCUMENTS` service binding. Deploy the legal Worker and the
+control plane from the same tag so the published text and signup consent stay
+aligned. See the [release checklist](release-and-build.md#current-automated-release-and-rollout-boundary).
+
 ## Check account status
 
 New accounts start **pending**: nothing works until the emailed verification

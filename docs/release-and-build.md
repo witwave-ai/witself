@@ -58,19 +58,38 @@ downgrade guard compares versions from image tags for tag-only images and uses
 the `chartVersion` and `imageTag` recorded alongside the matching digest for
 digest-pinned images, refusing a newer live pin or an unrecognized digest.
 
-The public plan Worker and the Cloudflare control-plane Worker/container are
-also separate deployments. Deploy both from the same clean, exactly tagged
-checkout only after its release workflow succeeds:
+The public plan Worker, legal Worker (`witself-legal`), and Cloudflare
+control-plane Worker/container are separate deployments. Deploy all three from
+the same clean, exactly tagged checkout only after its release workflow succeeds:
 
 ```sh
 cd infra/cloudflare/control-plane
 npm ci
 export EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set the dedicated 32-character agent-email KV namespace id}"
 npm run deploy:plans
+npm run deploy:legal
 npm run deploy
 ```
 
-Both commands use the committed Wrangler lock. The control-plane renderer
+All three commands use the committed Wrangler lock. `npm run deploy:legal`
+runs `wrangler deploy --config ../../../web/legal/wrangler.toml` independently
+of the control-plane config renderer; a control-plane deploy does not publish
+`self.witwave.ai/legal*`. After publication, verify both Version/Effective lines:
+
+```sh
+curl --fail --silent --show-error -H 'Accept: text/markdown' \
+  https://self.witwave.ai/legal/privacy | grep '^\*\*Version '
+curl --fail --silent --show-error -H 'Accept: text/markdown' \
+  https://self.witwave.ai/legal/dpa | grep '^\*\*Version '
+```
+
+Require them to match the Privacy Policy and DPA Markdown headers in the release
+tag, including each Effective date. The legal Worker's consent manifest derives
+its versions from those headers, and the control plane reads its Terms and
+Privacy versions through `LEGAL_DOCUMENTS`; both deployments must use the same
+tag. See [Publish the legal pages](runbooks.md#publish-the-legal-pages).
+
+The control-plane renderer
 injects the release version, full commit, and commit timestamp as Docker build
 arguments, and `npm run deploy` polls `/v1/version` until all four identity
 fields match. The renderer rejects a dirty checkout and a HEAD without exactly
@@ -105,7 +124,7 @@ would prevent the container's ten-minute idle shutdown. Flip the template's
 plain variable and both verifier pins together in source, then use the normal
 CP deploy; do not add a secret or change the gate out of band.
 
-The managed outbound agent-email sending adapter is a third, separately gated
+The managed outbound agent-email sending adapter is another separately gated
 Cloudflare deployment. The tag workflow validates its committed lockfile,
 tests, and Worker bundle but intentionally does not provision its Email Sending
 domain, Queues, Durable Objects, secrets, signer cohort, or event targets. Run
