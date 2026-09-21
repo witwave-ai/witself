@@ -258,7 +258,12 @@ lines = []
 in_server = False
 in_postgres = False
 in_backup = False
+skip_backup_image = False
 for line in Path(baseline).read_text().splitlines(keepends=True):
+    if skip_backup_image:
+        if line.startswith('        '):
+            continue
+        skip_backup_image = False
     if line == '  witselfServer:\n':
         in_server = True
     elif line.strip() and not line.startswith('    '):
@@ -271,6 +276,11 @@ for line in Path(baseline).read_text().splitlines(keepends=True):
         in_backup = True
     elif line.strip() and not line.startswith('      '):
         in_backup = False
+    # Rebuild only the opted-in backup image at its canonical position. The
+    # PostgreSQL image and a server-only roll's existing backup pins stay intact.
+    if with_backup == 'true' and in_backup and line.startswith('      image:'):
+        skip_backup_image = True
+        continue
     if with_backup == 'true' and in_postgres and in_backup and line.startswith('      enabled:'):
         line += ('      image:\n'
                  '        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"\n'
@@ -278,6 +288,10 @@ for line in Path(baseline).read_text().splitlines(keepends=True):
                  '        digest: ' + Path(digest_file + '.backup').read_text() + '\n')
     if in_server and line.startswith('    chartVersion:'):
         line = '    chartVersion: ' + version + '\n'
+    # The generated digest belongs immediately after imageTag; discard any
+    # prior pin instead of appending a second imageDigest key to expectations.
+    if in_server and line.startswith('    imageDigest:'):
+        continue
     if in_server and line.startswith('    imageTag:'):
         line = ('    imageTag: ' + version + '\n    imageDigest: ' +
                 Path(digest_file).read_text() + '\n')
@@ -296,6 +310,65 @@ expect_output() {
   grep -Fq -- "$expected" "$CASE_OUTPUT" ||
     fail "$label did not print '$expected'"
 }
+
+# Exercise both starting states regardless of the repository's current pins.
+# Build fixture inputs independently of the expected-output builder above.
+python3 - "$BASELINE" "$TEST_ROOT" <<'EOF_BASELINES'
+from pathlib import Path
+import re
+import sys
+
+baseline, root = map(Path, sys.argv[1:])
+for state in ('unpinned', 'stale'):
+    def server(match):
+        block = re.sub(r'^    imageDigest:.*\n', '', match[0], flags=re.M)
+        if state == 'stale':
+            block = re.sub(r'(^    imageTag:.*\n)',
+                           r'\g<1>    imageDigest: sha256:' + 'a' * 64 + '\n',
+                           block, flags=re.M)
+        return block
+
+    def postgres(match):
+        def backup(backup_match):
+            block = re.sub(r'^      image:[^\n]*\n(?:        [^\n]*\n)*',
+                           '', backup_match[0], flags=re.M)
+            if state == 'stale':
+                block = re.sub(r'(^      enabled:.*\n)',
+                               r'\g<1>      image:\n'
+                               '        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"\n'
+                               '        tag: "0.0.1"\n'
+                               '        digest: sha256:' + 'b' * 64 + '\n',
+                               block, flags=re.M)
+            return block
+        return re.sub(r'^    backup:\n.*?(?=^    \S|\Z)', backup, match[0], flags=re.M | re.S)
+
+    values = re.sub(r'^  witselfServer:\n.*?(?=^  \S|\Z)', server,
+                    baseline.read_text(), flags=re.M | re.S)
+    values = re.sub(r'^  civoPostgres:\n.*?(?=^  \S|\Z)', postgres,
+                    values, flags=re.M | re.S)
+    (root / ('values.' + state + '.yaml')).write_text(values)
+EOF_BASELINES
+
+COMMITTED_BASELINE="$BASELINE"
+for baseline_state in unpinned stale; do
+  BASELINE="$TEST_ROOT/values.$baseline_state.yaml"
+  for with_backup in false true; do
+    reset_case
+    "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+      fail "$baseline_state baseline has generation drift"
+    roll_args=("$CELL" "$VERSION" --no-schema-change)
+    if [ "$with_backup" = true ]; then roll_args+=(--backup-image); fi
+    run_roll "${roll_args[@]}" >"$CASE_OUTPUT" 2>&1 ||
+      fail "$baseline_state baseline roll (backup=$with_backup) failed"
+    assert_values "$ROLLED" "$baseline_state baseline roll (backup=$with_backup)" "$with_backup"
+    "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+      fail "$baseline_state baseline roll (backup=$with_backup) did not survive generation"
+    if [ "$with_backup" = false ] && grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG"; then
+      fail "$baseline_state server-only roll contacted backup registry"
+    fi
+  done
+done
+BASELINE="$COMMITTED_BASELINE"
 
 # No gate selection fails closed and explains the documented two-cell gate.
 reset_case
