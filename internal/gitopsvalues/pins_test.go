@@ -149,7 +149,7 @@ func TestRollCellFailureLeavesAllValuesUntouched(t *testing.T) {
 				if name == "drift" {
 					body = append(body, []byte("# operator edit\n")...)
 				} else {
-					body = bytes.Replace(body, []byte("  witselfServer:\n"), []byte("  witselfServer:\n    imageDigest: sha256:short\n"), 1)
+					body = setFixtureYAMLField(t, body, "apps.witselfServer.imageDigest", "    imageDigest: sha256:short\n", "imageTag")
 				}
 				if err := os.WriteFile(path, body, 0o600); err != nil {
 					t.Fatal(err)
@@ -236,4 +236,65 @@ func readCellFixtureBytes(t *testing.T, root string) map[string][]byte {
 		bodies[cell] = body
 	}
 	return bodies
+}
+
+// setFixtureYAMLField replaces only the named field's original lines. If the
+// field is absent, it inserts after the named sibling; an empty replacement
+// removes it. Looking up the full YAML path keeps backup.image distinct from
+// civoPostgres.image and preserves every byte outside the selected field.
+// Expectations use this independent text edit rather than the production pin
+// writer, and malformed fixtures replace valid pins instead of duplicating them.
+func setFixtureYAMLField(t *testing.T, body []byte, path, replacement, after string) []byte {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Content) != 1 {
+		t.Fatal("fixture must contain one YAML document")
+	}
+	parts := strings.Split(path, ".")
+	parent := doc.Content[0]
+	field := func(node *yaml.Node, name string) (key, value *yaml.Node) {
+		if node.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				if node.Content[i].Value == name {
+					return node.Content[i], node.Content[i+1]
+				}
+			}
+		}
+		return nil, nil
+	}
+	for _, part := range parts[:len(parts)-1] {
+		_, parent = field(parent, part)
+		if parent == nil {
+			t.Fatalf("fixture lacks parent mapping for %s", path)
+		}
+	}
+	var lastLine func(*yaml.Node) int
+	lastLine = func(node *yaml.Node) int {
+		last := node.Line
+		for _, child := range node.Content {
+			if line := lastLine(child); line > last {
+				last = line
+			}
+		}
+		return last
+	}
+	key, value := field(parent, parts[len(parts)-1])
+	var start, end int
+	if key != nil {
+		start, end = key.Line-1, lastLine(value)
+	} else {
+		if replacement == "" {
+			return body
+		}
+		_, anchor := field(parent, after)
+		if anchor == nil {
+			t.Fatalf("fixture lacks insertion anchor for %s", path)
+		}
+		start, end = lastLine(anchor), lastLine(anchor)
+	}
+	lines := strings.SplitAfter(string(body), "\n")
+	return []byte(strings.Join(lines[:start], "") + replacement + strings.Join(lines[end:], ""))
 }
