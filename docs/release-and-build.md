@@ -681,12 +681,68 @@ tools and never invokes `apk`. Missing tools fail the Job. See the
 for the first-release activation procedure. Publication alone changes neither
 the backup schedule nor any cell's values.
 
+The database PostgreSQL mirror is separate from the backup tool image:
+
+- Image package: `ghcr.io/witwave-ai/images/postgresql`
+- Approved digests and upstream source metadata: `images/postgresql/mirror.json`
+- Tags: `VERSION-civo-sandbox-use1-serving` and `VERSION-civo-sandbox-use1-backup`
+
+The descriptor records each pin's known original source tag as `latest` and
+its `upstream_version` from the pinned image's config labels. The approved
+digest determines exact content. Do not infer the PostgreSQL version from the
+chart version or resolve today's mutable `latest` to describe either pin.
+
+The `mirror-postgresql` release job checks GHCR for each approved digest first.
+When present, it copies from GHCR to create the new release tag; only a digest
+not yet mirrored is copied from Docker Hub. Every manifest and platform is
+copied with digest preservation required, then the destination digest is
+verified against the approved source. It does not rebuild PostgreSQL or alter
+the manifest to attach metadata. Signatures, SPDX SBOM attestations, and
+GitHub provenance are separate artifacts attached to the unchanged digest.
+Each release signs and attests the digest again so a retry can repair an
+incomplete publication; the image's presence in GHCR alone does not prove that
+an earlier release completed its signatures and attestations.
+An existing single-platform manifest stays single-platform: synthesizing a
+multi-platform index would change its digest and requires a separate image
+change. An existing index retains all its platforms.
+Each cell retains its own existing PostgreSQL content; the cells' source
+digests differ. Server release publication does not depend on this mirror job:
+a mirror failure leaves ordinary server releases available, but prevents
+`roll-cell.sh --postgres-image` from selecting an absent or inaccessible mirror
+tag. Require both the published server release and successful mirror publication
+before activation. Manual snapshot runs publish no mirror. The mirror has no
+`latest` channel.
+
+PR-time CI installs skopeo on `ubuntu-latest` and runs
+`make check-postgres-image-mirror`, which copies to temporary local image
+directories with digest verification. This exercises the
+runner package installation, required copy flags, and initial Docker Hub fetch
+before a release tag is created; it does not publish a GHCR image.
+The same target runs under `make check-infra`. Locally it reports
+`skipped: no skopeo` when Skopeo is absent; CI requires Skopeo and cannot skip.
+With the current two-cell descriptor, the tripwire anonymously pulls two
+multi-architecture images from Docker Hub per PR. This rate-limit exposure is
+accepted; add a Docker Hub login step if anonymous pull limits start failing
+the job.
+
+`scripts/roll-cell.sh CELL VERSION --postgres-image` selects that cell's release
+tag only after verifying the mirror has the same digest as the cell's existing
+pin. Regeneration and ordinary server rolls preserve the selected registry,
+repository, and tag; an explicit `--write` propagates overlay digest changes.
+See
+[the PostgreSQL mirror runbook](backup-and-recovery.md#switch-the-postgresql-database-image-to-ghcr)
+for the one-time public-visibility step, backup-first activation, and maintenance
+window. The switch restarts PostgreSQL and requires fresh `--backup-evidence`
+for both cells; `--no-schema-change` is not permitted for this operation.
+Publishing this image changes no cell values or overlays.
+
 Container publishing should use GitHub Packages / GHCR with public visibility.
 Initial package paths should be:
 
 - `ghcr.io/witwave-ai/images/witself`
 - `ghcr.io/witwave-ai/images/witself-server`
 - `ghcr.io/witwave-ai/images/witself-postgres-backup`
+- `ghcr.io/witwave-ai/images/postgresql`
 
 ## Homebrew
 

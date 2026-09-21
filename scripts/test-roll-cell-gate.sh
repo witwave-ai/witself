@@ -41,6 +41,7 @@ ADMIN_BIN=
 ADMIN_EXIT=0
 REGISTRY_CASE=index
 BACKUP_REGISTRY_CASE=index
+POSTGRES_REGISTRY_CASE=index
 REGISTRY_LOG="$TEST_ROOT/registry.log"
 
 mkdir -p \
@@ -60,7 +61,55 @@ mkdir -p "$REPO_ROOT/.gitops/charts"
 cp -R "$SOURCE_ROOT/.gitops/charts/apps" "$REPO_ROOT/.gitops/charts/"
 cp -R "$SOURCE_ROOT/.gitops/charts/platform" "$REPO_ROOT/.gitops/charts/"
 cp "$SOURCE_ROOT/scripts/resolve-server-image-digest.sh" "$REPO_ROOT/scripts/"
-(cd "$SOURCE_ROOT" && go build -o "$TEST_ROOT/generator" ./internal/cmd/gitops-cell-values)
+mkdir -p "$REPO_ROOT/images/postgresql"
+cp "$SOURCE_ROOT/images/postgresql/mirror.json" "$REPO_ROOT/images/postgresql/"
+# The fixture source digest is calculated from the same exact bytes returned by
+# the offline registry below. It deliberately differs from the real deployment.
+# Compile a fixture-local generator so its embedded overlays and generated
+# values agree on the synthetic content. Never let disk override the overlay.
+GENERATOR_ROOT="$TEST_ROOT/generator-source"
+mkdir -p "$GENERATOR_ROOT/internal/cmd"
+cp "$SOURCE_ROOT/go.mod" "$SOURCE_ROOT/go.sum" "$GENERATOR_ROOT/"
+cp -R "$SOURCE_ROOT/internal/gitopsvalues" "$GENERATOR_ROOT/internal/"
+cp -R "$SOURCE_ROOT/internal/cmd/gitops-cell-values" "$GENERATOR_ROOT/internal/cmd/"
+python3 - "$REPO_ROOT/images/postgresql/mirror.json" "$REPO_ROOT/.gitops/cells" "$GENERATOR_ROOT/internal/gitopsvalues/overlays" <<'EOF_POSTGRES_SOURCE'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+descriptor, cells, overlays = map(str, sys.argv[1:])
+config = json.loads(Path(descriptor).read_text())
+for cell in config['cells']:
+    # Distinct shapes prove per-cell source selection. An upstream single
+    # manifest must remain single; an upstream index must remain an index.
+    single = cell.endswith('-serving')
+    body = {'schemaVersion': 2,
+            'mediaType': 'application/vnd.oci.image.manifest.v1+json' if single else 'application/vnd.oci.image.index.v1+json',
+            'annotations': {'fixture.repository': 'witwave-ai/images/postgresql'}}
+    if single:
+        body.update(config={'digest': 'sha256:' + '1' * 64, 'size': 42}, layers=[])
+    else:
+        body['manifests'] = [
+            {'digest': 'sha256:' + char * 64, 'size': 42,
+             'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+             'platform': {'os': 'linux', 'architecture': arch}}
+            for char, arch in [('1', 'amd64'), ('2', 'arm64')]]
+    digest = 'sha256:' + hashlib.sha256(json.dumps(body).encode()).hexdigest()
+    config['cells'][cell]['digest'] = digest
+    values = Path(cells) / cell / 'values.yaml'
+    text, count = re.subn(r'(?m)^(      digest: )sha256:[a-f0-9]{64}$',
+                          lambda match: match[1] + digest, values.read_text())
+    assert count == 1
+    values.write_text(text)
+    overlay = Path(overlays) / (cell + '.yaml.tmpl')
+    text, count = re.subn(r'(?m)^(      digest: )sha256:[a-f0-9]{64}$',
+                          lambda match: match[1] + digest, overlay.read_text())
+    assert count == 1
+    overlay.write_text(text)
+Path(descriptor).write_text(json.dumps(config))
+EOF_POSTGRES_SOURCE
+(cd "$GENERATOR_ROOT" && go build -o "$TEST_ROOT/generator" ./internal/cmd/gitops-cell-values)
 cat >"$REPO_ROOT/scripts/gitops-cell-values.sh" <<'EOF_GENERATOR'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -100,7 +149,12 @@ cp "$TEST_ROOT/apps-schema-current.json" "$BACKUP_RELEASE_SCHEMA"
 git -C "$REPO_ROOT" add -- .gitops/charts/apps/values.schema.json
 git -C "$REPO_ROOT" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
   commit -qm 'Release with backup image pin support'
+git -C "$REPO_ROOT" -c tag.gpgsign=false tag v1.2.6
+git -C "$REPO_ROOT" add -- images/postgresql/mirror.json
+git -C "$REPO_ROOT" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  commit -qm 'Release with PostgreSQL mirror source'
 git -C "$REPO_ROOT" -c tag.gpgsign=false tag "v$VERSION"
+cp "$REPO_ROOT/images/postgresql/mirror.json" "$TEST_ROOT/postgres-mirror.baseline.json"
 printf '%s\n' '{"properties":{"image":{"properties":{"tag":{"type":"string"}}}}}' >"$RELEASE_SCHEMA"
 
 # The curl shim cannot access a network. It checks exact registry URLs and
@@ -121,9 +175,10 @@ if url == 'https://ghcr.io/token':
     repository = scope.removeprefix('scope=repository:').removesuffix(':pull')
 else:
     repository = url.removeprefix('https://ghcr.io/v2/').split('/manifests/')[0]
-assert repository in ['witwave-ai/images/witself-server', 'witwave-ai/images/witself-postgres-backup']
+assert repository in ['witwave-ai/images/witself-server', 'witwave-ai/images/witself-postgres-backup', 'witwave-ai/images/postgresql']
 backup = repository.endswith('/witself-postgres-backup')
-case = os.environ['WITSELF_BACKUP_REGISTRY_CASE' if backup else 'WITSELF_REGISTRY_CASE']
+postgres = repository.endswith('/postgresql')
+case = os.environ['WITSELF_POSTGRES_REGISTRY_CASE' if postgres else 'WITSELF_BACKUP_REGISTRY_CASE' if backup else 'WITSELF_REGISTRY_CASE']
 with open(os.environ['WITSELF_REGISTRY_LOG'], 'a') as log:
     log.write(('auth' if url.endswith('/token') else 'manifest') + ' ' + repository + '\n')
 if url == 'https://ghcr.io/token':
@@ -138,7 +193,8 @@ if url == 'https://ghcr.io/token':
     else:
         print(json.dumps({'token': 'synthetic-anonymous-pull'}))
     sys.exit(0)
-assert url == 'https://ghcr.io/v2/' + repository + '/manifests/1.2.3'
+tag = '1.2.3-' + os.environ['WITSELF_POSTGRES_CELL'] if postgres else '1.2.3'
+assert url == 'https://ghcr.io/v2/' + repository + '/manifests/' + tag
 assert 'Authorization: Bearer synthetic-anonymous-pull' in sys.stdin.read()
 accept = args[args.index('--header') + 1]
 for media_type in ['application/vnd.oci.image.index.v1+json',
@@ -168,7 +224,7 @@ if case == 'empty-index':
     body['manifests'] = []
 raw = json.dumps(body).encode() if case != 'invalid-json' else b'not-json'
 digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
-Path(os.environ['WITSELF_EXPECTED_DIGEST'] + ('.backup' if backup else '')).write_text(digest)
+Path(os.environ['WITSELF_EXPECTED_DIGEST'] + ('.postgres' if postgres else '.backup' if backup else '')).write_text(digest)
 header_digest = digest
 if case == 'malformed':
     header_digest = 'sha256:invalid'
@@ -219,12 +275,14 @@ chmod +x "$OVERRIDE_ADMIN"
 
 reset_case() {
   cp "$BASELINE" "$VALUES"
-  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$TEST_ROOT/expected-digest" "$TEST_ROOT/expected-digest.backup"
+  cp "$TEST_ROOT/postgres-mirror.baseline.json" "$REPO_ROOT/images/postgresql/mirror.json"
+  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$TEST_ROOT/expected-digest" "$TEST_ROOT/expected-digest.backup" "$TEST_ROOT/expected-digest.postgres"
   ROLL_PATH="$DEFAULT_ROLL_PATH"
   ADMIN_BIN=
   ADMIN_EXIT=0
   REGISTRY_CASE=index
   BACKUP_REGISTRY_CASE=index
+  POSTGRES_REGISTRY_CASE=index
 }
 
 run_roll() {
@@ -233,6 +291,8 @@ run_roll() {
     export WITSELF_TEST_GENERATOR="$TEST_ROOT/generator"
     export WITSELF_REGISTRY_CASE="$REGISTRY_CASE"
     export WITSELF_BACKUP_REGISTRY_CASE="$BACKUP_REGISTRY_CASE"
+    export WITSELF_POSTGRES_REGISTRY_CASE="$POSTGRES_REGISTRY_CASE"
+    export WITSELF_POSTGRES_CELL="$CELL"
     export WITSELF_REGISTRY_LOG="$REGISTRY_LOG"
     export WITSELF_EXPECTED_DIGEST="$TEST_ROOT/expected-digest"
     export WITSELF_ADMIN_LOG="$ADMIN_LOG"
@@ -250,14 +310,15 @@ assert_values() {
   local expected=$1 label=$2
   if [ "$expected" = "$ROLLED" ]; then
     # Pin-only expected diff, calculated independently of the generator.
-    python3 - "$BASELINE" "$ROLLED" "$VERSION" "$TEST_ROOT/expected-digest" "${3:-false}" <<'EOF_EXPECTED'
+    python3 - "$BASELINE" "$ROLLED" "$VERSION" "$TEST_ROOT/expected-digest" "${3:-false}" "${4:-false}" "$CELL" <<'EOF_EXPECTED'
 from pathlib import Path
 import sys
-baseline, rolled, version, digest_file, with_backup = sys.argv[1:]
+baseline, rolled, version, digest_file, with_backup, with_postgres, cell = sys.argv[1:]
 lines = []
 in_server = False
 in_postgres = False
 in_backup = False
+in_postgres_image = False
 for line in Path(baseline).read_text().splitlines(keepends=True):
     if line == '  witselfServer:\n':
         in_server = True
@@ -271,6 +332,20 @@ for line in Path(baseline).read_text().splitlines(keepends=True):
         in_backup = True
     elif line.strip() and not line.startswith('      '):
         in_backup = False
+    if in_postgres and line == '    image:\n':
+        in_postgres_image = True
+    elif line.strip() and not line.startswith('      '):
+        in_postgres_image = False
+    if with_postgres == 'true' and in_postgres and line == '    image:\n':
+        line = '    allowInsecureImages: true\n' + line
+    if with_postgres == 'true' and in_postgres_image:
+        if line.startswith('      registry:'):
+            line = '      registry: "ghcr.io"\n'
+        elif line.startswith('      repository:'):
+            line = ('      repository: "witwave-ai/images/postgresql"\n'
+                    '      tag: "' + version + '-' + cell + '"\n')
+        elif line.startswith('      digest:'):
+            line = '      digest: ' + Path(digest_file + '.postgres').read_text() + '\n'
     if with_backup == 'true' and in_postgres and in_backup and line.startswith('      enabled:'):
         line += ('      image:\n'
                  '        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"\n'
@@ -335,6 +410,9 @@ expect_output "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + image
   "server-only roll summary"
 if grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG"; then
   fail 'server-only roll contacted backup registry before opt-in'
+fi
+if grep -Fq 'witwave-ai/images/postgresql' "$REGISTRY_LOG"; then
+  fail 'server-only roll contacted PostgreSQL registry before opt-in'
 fi
 
 # Two evidence directories are passed once, in order, before pins are edited.
@@ -560,4 +638,174 @@ for repository in 'ghcr.io/witwave-ai/images/witself-postgres-backup:latest' 'ot
   [ ! -e "$REGISTRY_LOG" ] || fail 'invalid repository reached registry'
 done
 
-printf 'roll cell backup gate and server/backup image digest tests passed\n'
+# PostgreSQL mirroring requires the exact target release schema and descriptor,
+# even though the current checkout has support for both.
+for release in 1.2.4 1.2.5 1.2.6; do
+  reset_case
+  if run_roll "$CELL" "$release" --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+    fail "release $release without PostgreSQL mirror support succeeded"
+  fi
+  case "$release" in
+    1.2.4) expect_output 'cannot verify PostgreSQL image pin support' "PostgreSQL release $release" ;;
+    1.2.5) expect_output 'does not declare PostgreSQL image registry, repository, tag, and digest' "PostgreSQL release $release" ;;
+    1.2.6) expect_output 'has no PostgreSQL mirror descriptor' "PostgreSQL release $release" ;;
+  esac
+  [ ! -e "$REGISTRY_LOG" ] || fail "unsupported PostgreSQL release $release contacted registry"
+  assert_values "$BASELINE" "unsupported PostgreSQL release $release"
+done
+
+# Each registry response must verify against its own bytes and the pinned
+# upstream digest, and all optional image resolutions precede the single write.
+for with_backup in false true; do
+  reset_case
+  extra_args=()
+  if [ "$with_backup" = true ]; then extra_args+=(--backup-image); fi
+  run_roll "$CELL" "$VERSION" --postgres-image ${extra_args[@]+"${extra_args[@]}"} --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+    fail "PostgreSQL mirror roll (with backup $with_backup) did not proceed"
+  assert_values "$ROLLED" "PostgreSQL mirror roll (with backup $with_backup)" "$with_backup" true
+  expect_output "PostgreSQL image mirrored to ghcr.io/witwave-ai/images/postgresql:$VERSION-$CELL at its existing digest" \
+    'PostgreSQL mirror roll summary'
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+    fail 'PostgreSQL mirror roll did not survive generation'
+done
+
+# Ordinary rolls preserve PostgreSQL mirror pins and need no mirror registry.
+cp "$VALUES" "$TEST_ROOT/postgres-pinned-values"
+rm -f "$REGISTRY_LOG"
+POSTGRES_REGISTRY_CASE=unreachable
+run_roll "$CELL" "$VERSION" --no-schema-change >"$CASE_OUTPUT" 2>&1 ||
+  fail 'ordinary roll failed with an existing PostgreSQL mirror pin'
+cmp -s "$VALUES" "$TEST_ROOT/postgres-pinned-values" || fail 'ordinary roll changed existing PostgreSQL mirror pin'
+if grep -Fq 'witwave-ai/images/postgresql' "$REGISTRY_LOG"; then
+  fail 'ordinary roll unnecessarily refreshed an existing PostgreSQL mirror pin'
+fi
+POSTGRES_REGISTRY_CASE=index
+run_roll "$CELL" "$VERSION" --backup-image --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+  fail 'explicit PostgreSQL reroll failed'
+assert_values "$ROLLED" 'explicit PostgreSQL reroll' true true
+
+# Missing/private release images and invalid manifest responses never write any
+# pin, even after server and backup resolution have succeeded.
+for kind in auth-unreachable auth-empty auth-invalid unreachable redirect missing malformed mismatch duplicate unsupported empty-index invalid-json; do
+  reset_case
+  POSTGRES_REGISTRY_CASE=$kind
+  if run_roll "$CELL" "$VERSION" --backup-image --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+    fail "$kind PostgreSQL registry response unexpectedly succeeded"
+  fi
+  expect_output 'PostgreSQL mirror digest resolution failed' "$kind PostgreSQL registry response"
+  grep -Fq 'manifest witwave-ai/images/witself-postgres-backup' "$REGISTRY_LOG" ||
+    fail 'PostgreSQL failure fixture did not first resolve backup image'
+  assert_values "$BASELINE" "$kind PostgreSQL registry response"
+done
+
+# A valid registry digest for different bytes is still not the mirror of the
+# release's approved upstream image (including a child replacing its index).
+for kind in single docker-single list; do
+  reset_case
+  POSTGRES_REGISTRY_CASE=$kind
+  if run_roll "$CELL" "$VERSION" --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+    fail "$kind PostgreSQL source substitution unexpectedly succeeded"
+  fi
+  expect_output 'does not match the release upstream digest' "$kind PostgreSQL source substitution"
+  assert_values "$BASELINE" "$kind PostgreSQL source substitution"
+done
+
+# Local source metadata cannot silently select a different image than the
+# exact release descriptor. Unknown cells also fail before registry access.
+for mutation in digest source missing-cell missing-upstream-tag invalid-upstream-tag; do
+  reset_case
+  python3 - "$REPO_ROOT/images/postgresql/mirror.json" "$CELL" "$mutation" <<'EOF_MUTATE_SOURCE'
+import json
+from pathlib import Path
+import sys
+path, cell, mutation = sys.argv[1:]
+config = json.loads(Path(path).read_text())
+if mutation == 'digest':
+    config['cells'][cell]['digest'] = 'sha256:' + 'f' * 64
+elif mutation == 'source':
+    config['source_repository'] = 'unreviewed/postgresql'
+elif mutation == 'missing-upstream-tag':
+    del config['cells'][cell]['upstream_tag']
+elif mutation == 'invalid-upstream-tag':
+    config['cells'][cell]['upstream_tag'] = '../bad'
+else:
+    del config['cells'][cell]
+Path(path).write_text(json.dumps(config))
+EOF_MUTATE_SOURCE
+  if run_roll "$CELL" "$VERSION" --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+    fail "PostgreSQL local descriptor $mutation unexpectedly succeeded"
+  fi
+  [ ! -e "$REGISTRY_LOG" ] || fail "PostgreSQL local descriptor $mutation contacted registry"
+  assert_values "$BASELINE" "PostgreSQL local descriptor $mutation"
+done
+
+# A valid published mirror cannot change an operator's existing content pin.
+reset_case
+python3 - "$VALUES" <<'EOF_MUTATE_CURRENT_SOURCE'
+from pathlib import Path
+import re
+import sys
+path = Path(sys.argv[1])
+path.write_text(re.sub(r'(?m)^(      digest: )sha256:[a-f0-9]{64}$',
+                      lambda match: match[1] + 'sha256:' + 'f' * 64, path.read_text()))
+EOF_MUTATE_CURRENT_SOURCE
+cp "$VALUES" "$TEST_ROOT/postgres-current-values"
+if run_roll "$CELL" "$VERSION" --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+  fail 'PostgreSQL mirror changed an existing database content pin'
+fi
+expect_output "PostgreSQL image digest drift" 'existing PostgreSQL content pin'
+cmp -s "$VALUES" "$TEST_ROOT/postgres-current-values" || fail 'failed PostgreSQL mirror changed existing values'
+
+# The reference change restarts PostgreSQL even without a schema migration.
+reset_case
+if run_roll "$CELL" "$VERSION" --postgres-image --no-schema-change >"$CASE_OUTPUT" 2>&1; then
+  fail 'PostgreSQL image switch accepted the no-schema-change bypass'
+fi
+expect_output 'PostgreSQL image switch requires fresh --backup-evidence' 'PostgreSQL evidence requirement'
+[ ! -e "$REGISTRY_LOG" ] || fail 'PostgreSQL evidence bypass contacted registry'
+[ ! -e "$ADMIN_LOG" ] || fail 'PostgreSQL evidence bypass invoked verifier'
+assert_values "$BASELINE" 'PostgreSQL evidence requirement'
+
+# PostgreSQL opt-in cannot bypass the original backup evidence gate.
+reset_case
+ADMIN_EXIT=1
+if run_roll "$CELL" "$VERSION" --postgres-image --backup-evidence "$EVIDENCE_A" >"$CASE_OUTPUT" 2>&1; then
+  fail 'PostgreSQL image opt-in bypassed failed evidence gate'
+fi
+[ ! -e "$REGISTRY_LOG" ] || fail 'failed PostgreSQL opt-in gate contacted registry'
+assert_values "$BASELINE" 'PostgreSQL image opt-in evidence failure'
+
+# The serving cell selects its own release tag and distinct approved upstream
+# bytes. In this fixture its upstream is a single manifest, not a rebuilt index.
+(
+  reset_case
+  CELL=civo-sandbox-use1-serving
+  VALUES="$REPO_ROOT/.gitops/cells/$CELL/values.yaml"
+  BASELINE="$TEST_ROOT/serving-values.baseline.yaml"
+  cp "$VALUES" "$BASELINE"
+  POSTGRES_REGISTRY_CASE=single
+  run_roll "$CELL" "$VERSION" --postgres-image --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+    fail 'serving PostgreSQL mirror did not preserve its distinct single manifest'
+  assert_values "$ROLLED" 'serving PostgreSQL mirror' false true
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+    fail 'serving PostgreSQL mirror did not survive generation'
+)
+
+# Explicit registry tag validation rejects paths, options, and duplicates
+# before curl; the PostgreSQL success cases prove valid suffixed tags work.
+for tag in '' '-bad' '../tag' 'a/b' 'a?b' 'a@b' 'a b'; do
+  reset_case
+  if PATH="$DEFAULT_ROLL_PATH" WITSELF_REGISTRY_LOG="$REGISTRY_LOG" \
+    bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION" --tag "$tag" >"$CASE_OUTPUT" 2>&1; then
+    fail 'resolver accepted an invalid image tag'
+  fi
+  [ ! -e "$REGISTRY_LOG" ] || fail 'invalid image tag reached registry'
+done
+reset_case
+if PATH="$DEFAULT_ROLL_PATH" WITSELF_REGISTRY_LOG="$REGISTRY_LOG" \
+  bash "$REPO_ROOT/scripts/resolve-server-image-digest.sh" "$VERSION" --tag valid --tag duplicate >"$CASE_OUTPUT" 2>&1; then
+  fail 'resolver accepted duplicate image tags'
+fi
+[ ! -e "$REGISTRY_LOG" ] || fail 'duplicate image tags reached registry'
+
+printf 'roll cell backup gate and server/backup/PostgreSQL image digest tests passed\n'

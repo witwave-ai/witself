@@ -61,10 +61,14 @@ func generateCell(root string, name string, cfg *Catalog, charts chartPins) ([]b
 }
 
 func generateCellWithPins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins) ([]byte, error) {
-	return generateCellWithImagePins(root, name, cfg, charts, override, nil)
+	return generateCellWithImagePins(root, name, cfg, charts, override, nil, nil)
 }
 
-func generateCellWithImagePins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins, backupOverride *BackupImagePins) ([]byte, error) {
+func generateCellWithImagePins(root string, name string, cfg *Catalog, charts chartPins, override *serverPins, backupOverride *BackupImagePins, postgresOverride *PostgresImagePins) ([]byte, error) {
+	return generateCellWithImagePinsMode(root, name, cfg, charts, override, backupOverride, postgresOverride, false)
+}
+
+func generateCellWithImagePinsMode(root string, name string, cfg *Catalog, charts chartPins, override *serverPins, backupOverride *BackupImagePins, postgresOverride *PostgresImagePins, writeTemplateDigest bool) ([]byte, error) {
 	data, err := resolveCell(name, cfg)
 	if err != nil {
 		return nil, err
@@ -82,6 +86,13 @@ func generateCellWithImagePins(root string, name string, cfg *Catalog, charts ch
 	backupPins := backupOverride
 	if backupPins == nil {
 		backupPins, err = readBackupImagePins(valuesPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	postgresPins := postgresOverride
+	if postgresPins == nil {
+		postgresPins, err = readPostgresImagePins(valuesPath)
 		if err != nil {
 			return nil, err
 		}
@@ -124,10 +135,32 @@ func generateCellWithImagePins(root string, name string, cfg *Catalog, charts ch
 	if err != nil {
 		return nil, err
 	}
-	return addBackupImagePins(body, backupPins)
+	body, err = addBackupImagePins(body, backupPins)
+	if err != nil {
+		return nil, err
+	}
+	if writeTemplateDigest && postgresOverride == nil && postgresPins != nil && postgresPins.Registry != "" {
+		// Only an explicit --write may repair digest drift. The overlay owns
+		// content; persisted values own registry/repository/tag and the opt-in.
+		// Explicit roll overrides must still pass the content-preserving guard.
+		templatePins, err := parsePostgresImagePins(body)
+		if err != nil {
+			return nil, err
+		}
+		if templatePins != nil {
+			selected := *postgresPins
+			selected.Digest = templatePins.Digest
+			postgresPins = &selected
+		}
+	}
+	return addPostgresImagePins(body, postgresPins)
 }
 
 func generateAll(root string) (map[string][]byte, error) {
+	return generateAllMode(root, false)
+}
+
+func generateAllMode(root string, writeTemplateDigest bool) (map[string][]byte, error) {
 	cfg, err := loadCatalog(root)
 	if err != nil {
 		return nil, err
@@ -150,7 +183,7 @@ func generateAll(root string) (map[string][]byte, error) {
 	sort.Strings(names)
 	out := make(map[string][]byte, len(names))
 	for _, name := range names {
-		body, err := generateCell(root, name, cfg, charts)
+		body, err := generateCellWithImagePinsMode(root, name, cfg, charts, nil, nil, nil, writeTemplateDigest)
 		if err != nil {
 			return nil, err
 		}
