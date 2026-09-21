@@ -20,6 +20,10 @@ apps:
     authSecretName: witself-postgresql-auth
     backup:
       enabled: true
+      image:
+        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"
+        tag: "0.0.292"
+        digest: sha256:e36e8eb063319bc7e41664750b7f4c41742c7ce825dda1f6b6c984aec06e2901
     storage: 8Gi
     # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
     # Micro adds headroom; the other Civo cells inherit nano.
