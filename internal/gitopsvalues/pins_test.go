@@ -5,11 +5,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
 )
+
+// existingServerDigestLine matches a server image digest pin already present
+// in a committed cell values file.
+var existingServerDigestLine = regexp.MustCompile(`(?m)^    imageDigest: sha256:[0-9a-f]{64}\n`)
 
 func TestReadServerPinsDigest(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
@@ -98,6 +103,9 @@ func TestRollCellPreservesAllOtherBytesAndRegenerates(t *testing.T) {
 					t.Fatal(err)
 				}
 				expected := bytes.Replace(old, []byte("    chartVersion: "+docPins.Apps.WitselfServer.ChartVersion+"\n"), []byte("    chartVersion: 0.0.999\n"), 1)
+				// A baseline that already carries a digest pin (every cell after its
+				// first pinned roll) is rewritten in place, not appended to.
+				expected = existingServerDigestLine.ReplaceAll(expected, nil)
 				expected = bytes.Replace(expected, []byte("    imageTag: "+docPins.Apps.WitselfServer.ImageTag+"\n"), []byte("    imageTag: 0.0.999\n    imageDigest: "+digest+"\n"), 1)
 				if !bytes.Equal(expected, after[name]) {
 					t.Fatal("roll changed bytes outside server pins")
