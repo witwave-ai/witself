@@ -11,14 +11,12 @@ fencing, clears imported leases, and rebuilds derived indexes under
 
 > **Sealed-plane custody amendment (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> cell-rooted KMS design below. Cells store ciphertext, wrapped per-field DEKs,
+> [client-custodied vault plan](client-custodied-agent-vault.md) define
+> client-side custody for agent secrets. Cells store ciphertext, wrapped per-field DEKs,
 > and public AVK metadata in PostgreSQL; they hold no agent AVK and expose no
 > server-decrypt path. Moving an account copies the encrypted vault unchanged
 > and requires no source/destination KMS re-wrap. An authorized client must
-> separately possess the matching AVK. References below to a sealed-plane KMS,
-> cloud-rooted secret key material, or cross-cloud KMS re-wrap are retained only
-> as superseded design history.
+> separately possess the matching AVK.
 
 ## Decision
 
@@ -39,7 +37,8 @@ A cell is one complete, independent Witself stack in a single cloud account/regi
 - PostgreSQL for the open plane (memories, facts, messaging, and optional
   migration-0032 JSONB vectors) — see
   [storage.md](storage.md)
-- KMS for the sealed plane (secrets), rooted in that cell's cloud — see
+- PostgreSQL ciphertext, AVK-wrapped per-field DEKs, and public vault metadata
+  for the sealed plane (secrets); AVKs remain in authorized clients — see
   [storage.md](storage.md) and [key-hierarchy.md](key-hierarchy.md)
 - Blob/object storage for attachments
 
@@ -652,11 +651,11 @@ Per plane:
   [backup-and-recovery.md](backup-and-recovery.md)). Immutable vector profiles and
   client-supplied JSONB vector rows move in that archive. Only derived full-text
   indexes and any future optional ANN projection are rebuilt in the destination.
-- **Sealed plane** (secrets) is KMS-rooted per cell/cloud, so migration **re-wraps**
-  keys under the destination KMS: an audited decrypt-at-source / re-encrypt-at-dest
-  pass. The plaintext data keys are unwrapped under cell A's KMS and re-wrapped under
-  cell B's KMS; the operation is audited end to end (see
-  [key-hierarchy.md](key-hierarchy.md)).
+- **Sealed plane** (secrets) moves as unchanged ciphertext, AVK-wrapped
+  per-field DEKs, public vault metadata, and value-free lifecycle history.
+  Neither cell unwraps keys or decrypts values; the authorized client must
+  separately possess the matching AVK after import. The migration remains
+  audited end to end (see [key-hierarchy.md](key-hierarchy.md)).
 
 Migration emits `tenant.migration_started`, `tenant.migration_completed`, and
 `tenant.migration_failed`. After repoint, clients re-resolve and route to cell B.

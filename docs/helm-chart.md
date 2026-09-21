@@ -5,8 +5,8 @@ artifact for Witself.
 
 > **Current sealed-plane boundary (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> KMS-rooted chart target below. The current backend stores ciphertext and
+> [client-custodied vault plan](client-custodied-agent-vault.md) define
+> client-side custody for agent secrets. The current backend stores ciphertext and
 > public AVK metadata but has no decrypt key or server-decrypt path. The chart
 > implements no `sealedPlane`/`kms` values and the server implements no
 > `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`, or
@@ -14,8 +14,6 @@ artifact for Witself.
 > agent secrets. The current chart also has no migration Job:
 > `witself-server serve` applies embedded forward Goose migrations before
 > becoming Ready.
-> Sections below that prescribe KMS or a sealed-plane feature switch are
-> retained only as superseded target history.
 
 Narrative-memory decision (accepted 2026-07-14): the chart does not configure a
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
@@ -39,9 +37,9 @@ Witself reuses the shared platform spine for deployment. The chart skeleton
 (Deployment, Service, ServiceAccount, ConfigMap, Ingress, NetworkPolicy,
 monitors, autoscaling, disruption budget) is intentionally the
 same. PostgreSQL carries canonical open-plane data (memories + facts) and its
-deterministic lexical indexes. KMS provider config is present only for the
-sealed plane (secrets + TOTP). There is no server-side model/provider block or
-AI egress rule. An open-plane-only deployment requires no KMS configuration. See
+deterministic lexical indexes. The sealed plane (secrets + TOTP) stores
+client-encrypted fields and AVK-wrapped DEKs. There is no server-side
+model/provider block, AI egress rule, or agent-secret KMS configuration. See
 [encryption-model.md](encryption-model.md) and
 [key-hierarchy.md](key-hierarchy.md).
 
@@ -82,8 +80,7 @@ agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
 - Make migrations controlled and reviewable.
 - Keep model execution, vector generation, and their credentials out of the
   backend chart.
-- Make KMS provider configuration explicit and required only when the sealed
-  plane is enabled.
+- Keep agent vault keys and sensitive-value cryptography in the active client.
 - Render Kubernetes resources that security teams can inspect.
 - Stay portable across Kubernetes distributions where practical.
 
@@ -93,8 +90,7 @@ Production chart defaults should assume:
 
 - External PostgreSQL with the features required by the canonical relational
   and lexical-memory schema.
-- External KMS-compatible key management when the sealed plane is enabled
-  (`aws-kms`, `gcp-kms`, `azure-key-vault`, or `local-dev` for tests/demos).
+- Client-held AVKs for sealed values; no backend decrypt-key dependency.
 - Optional external object/blob storage for exports, attachments, and backups.
 - TLS termination through ingress, gateway, or load balancer.
 - Non-root container execution where practical.
@@ -212,7 +208,7 @@ access for ordinary identity, policy, group, or messaging operations.
 
 Service account annotations should support cloud-native identity systems such as
 IRSA, Workload Identity, or equivalent mechanisms, primarily so the workload can
-reach PostgreSQL, KMS (when the sealed plane is enabled), and object/blob storage
+reach PostgreSQL and object/blob storage
 without static credentials.
 
 ## Network Policy
@@ -233,9 +229,8 @@ Default-deny posture, opened only where required:
 - Ingress to the health port (`health`) only from the kubelet and cluster-
   internal diagnostics; never from public ingress.
 - Egress to PostgreSQL for the system of record.
-- Egress to the configured KMS endpoint when the sealed plane is enabled, for
-  envelope encryption and reveal operations. `local-dev` and a disabled sealed
-  plane require no KMS egress.
+- Agent-secret encryption and reveal need no server KMS egress; cryptography
+  happens in the active client.
 - Egress to object/blob storage when exports, attachments, or backups are
   enabled.
 - Egress to the billing/payment provider when managed billing is enabled
@@ -255,21 +250,10 @@ database:
   existingSecret:
     name: witself-database
     urlKey: database-url
-
-sealedPlane:
-  enabled: true
-
-kms:
-  provider: aws-kms
-  keyRef: arn:aws:kms:us-east-1:123456789012:key/example
-  existingSecret:
-    name: witself-kms
-    envFrom: true
 ```
 
-The `kms` block is only consumed when `sealedPlane.enabled` is true. When the
-sealed plane is disabled, secrets and TOTP are not served, no KMS provider is
-configured, and the `kms` block can be omitted entirely.
+The chart implements no `kms` or `sealedPlane` values block. Agent secrets
+use client-side custody and require no backend KMS settings.
 
 Recommended values should prefer:
 
@@ -288,17 +272,17 @@ There is intentionally no `embeddings` values block, model setting, or AI
 provider Secret. Client inference credentials must never be mounted into the
 backend pod.
 
+For infrastructure credentials, the existing secret-handling rule remains:
 KMS provider credentials are referenced exclusively through an existing Secret
-(or through cloud workload identity, which is preferred). The `kms.keyRef` is a
-key identifier — an ARN, resource name, or key URI — not key material; the chart
-never holds the CMK and never holds a per-realm KEK or per-secret DEK. The
-referenced Secret carries only the provider credentials the server needs to call
-KMS. Those credentials are never a plaintext value in the chart, never a CLI
-flag, and never logged. When the sealed plane is disabled or the provider is
-`local-dev`, the KMS Secret reference can be omitted. This config governs only
-the sealed plane; secret and TOTP values are KMS-wrapped, reveal-gated, and are
-never embedded, recalled, placed in the self-digest, or plaintext-exported. See
-[encryption-model.md](encryption-model.md) and
+(or through cloud workload identity, which is preferred).
+Those credentials are never a plaintext value in the chart, never a CLI
+flag, and never logged.
+
+The backend does not receive agent vault keys, unwrapped DEKs, or sensitive
+plaintext. Only the active client encrypts and decrypts sensitive fields,
+generates passwords, and calculates TOTP codes. Secret and TOTP values remain
+reveal-gated and are never embedded, recalled, placed in the self-digest, or
+plaintext-exported. See [encryption-model.md](encryption-model.md) and
 [key-hierarchy.md](key-hierarchy.md).
 
 ## Client Inference Boundary
@@ -315,40 +299,30 @@ optional storage/query acceleration switch. It still must not contain generation
 provider, model, credential, or provider-egress settings. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
-## KMS Provider
+<a id="kms-provider"></a>
 
-The sealed plane (secrets + TOTP) uses KMS-backed envelope encryption
-(CMK -> per-realm KEK -> per-secret/field DEK). When the sealed plane is enabled,
-the KMS provider is a required, capability-gated deployment dependency. The
-provider selection is plumbed through config and an existing Secret (or
-workload identity), not hard-coded. See
+## Sealed-Plane Client Custody
+
+The sealed plane (secrets + TOTP) uses client-side envelope encryption:
+the AVK wraps per-field DEKs, and the client uses those DEKs to encrypt or
+decrypt values. The chart deploys ciphertext storage and redacted inventory,
+without a KMS provider or backend key custody. See
 [key-hierarchy.md](key-hierarchy.md).
 
 Chart behavior:
 
-- Gate the sealed plane with `sealedPlane.enabled`. When it is false, no KMS
-  values are required and the server does not serve secrets or TOTP.
-- Select the provider with `kms.provider` (`aws-kms`, `gcp-kms`,
-  `azure-key-vault`, or `local-dev` for tests and demos), mapped to
-  `WITSELF_KMS_PROVIDER`.
-- Identify the customer master key with `kms.keyRef` (an ARN, resource name, or
-  key URI), mapped to `WITSELF_KMS_KEY_ID`. This is a key identifier, never key
-  material.
-- Supply provider credentials only through `kms.existingSecret` (injected via
-  `envFrom`) or, preferably, through cloud workload identity. The chart never
-  carries the CMK, KEK, or DEK.
-- Treat the sealed plane as required-when-enabled: readiness gates on KMS
-  reachability only when `sealedPlane.enabled` is true. The open plane stays
-  available even when KMS is unreachable; PostgreSQL remains the hard gate for
-  the open plane. See [storage.md](storage.md).
-- Key rotation (per-realm KEK) is an explicit, audited maintenance operation and
-  is never a chart upgrade side effect.
+- Do not mount client AVKs or unwrapped data keys into backend pods.
+- Do not configure agent-vault KMS variables or KMS egress for secret reveal.
+- Keep readiness tied to backend storage and startup state, without a
+  client-key or agent-secret KMS readiness gate. See [storage.md](storage.md).
+- AVK enrollment, recovery, and rotation belong to the client lifecycle;
+  chart upgrades must not rotate or recover an AVK.
 
 The chart must never write the CMK identifier's backing credentials, a KEK, a
 DEK, or any KMS credential into a ConfigMap, log line, metric label, annotation,
-or rendered manifest. KMS-wrapped secret values are never embedded, recalled,
-placed in the self-digest, or plaintext-exported. KMS loss renders sealed-plane
-values unrecoverable (crypto-shred) and does not affect the open plane.
+or rendered manifest. Client-encrypted secret values are never embedded,
+recalled, placed in the self-digest, or plaintext-exported. Restoring backend
+ciphertext alone does not restore a missing client AVK.
 
 ## Migrations
 
@@ -431,16 +405,6 @@ database:
     name: witself-database
     urlKey: database-url
 
-sealedPlane:
-  enabled: true
-
-kms:
-  provider: aws-kms
-  keyRef: arn:aws:kms:us-east-1:123456789012:key/example
-  existingSecret:
-    name: witself-kms
-    envFrom: true
-
 audit:
   retentionDays: 365
 
@@ -484,12 +448,11 @@ securityContext:
 ```
 
 This values shape is illustrative. Exact names can change during
-implementation, but the safety posture should not. The `kms` block is required
-only when `sealedPlane.enabled` is true: the open plane (memories + facts) keeps
-ordinary data-at-rest encryption at the storage layer, while the sealed plane
-(secrets + TOTP) uses KMS-backed envelope encryption. Optional field-level
-redaction of `sensitive` facts is a capability of the open plane and is distinct
-from the sealed plane's reveal-gated, KMS-wrapped secrets; see
+implementation, but the safety posture should not. The open plane (memories +
+facts) keeps ordinary data-at-rest encryption at the storage layer, while the
+sealed plane (secrets + TOTP) uses client-side envelope encryption. Optional
+field-level redaction of `sensitive` facts is a capability of the open plane and
+is distinct from the sealed plane's reveal-gated, client-encrypted secrets; see
 [storage.md](storage.md), [encryption-model.md](encryption-model.md), and
 [key-hierarchy.md](key-hierarchy.md).
 
@@ -548,8 +511,6 @@ Expected handoff data:
 - Namespace.
 - Service account annotations for workload identity.
 - Database connection secret name and key for PostgreSQL.
-- KMS provider, key identifier (`kms.keyRef`), and the Secret name/key (or
-  workload identity) holding its credentials, when the sealed plane is enabled.
 - Object/blob storage bucket or container for exports, attachments, and backups.
 - Ingress host or public URL.
 - Secret Store CSI or External Secrets references when used.
@@ -576,9 +537,8 @@ Required checks once the chart exists:
   Secrets, sidecars, or egress rules.
 - Check that liveness, readiness, startup, and metrics paths render correctly.
 - Check ServiceMonitor and PodMonitor enabled and disabled render paths.
-- Check the `kms` block and KMS egress render only when `sealedPlane.enabled` is
-  true and the provider is not `local-dev`, and that no KMS block is required for
-  an open-plane-only install.
+- Check that agent secrets introduce no server KMS settings, decrypt keys, or
+  per-secret KMS egress.
 - Package and publish the chart to
   `ghcr.io/witwave-ai/charts/witself-server`.
 - Sign or provenance-attest the chart package.

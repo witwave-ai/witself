@@ -11,9 +11,9 @@ Narrative-memory amendment (accepted 2026-07-14): use
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md) and
 [ADR 0002](decisions/0002-client-side-narrative-memory.md) for the narrative
 shape, full version snapshots, evidence/lineage, `superseded` state, client
-curation plans, lexical baseline, and optional client-supplied vectors. They
-supersede this draft's server embedding-provider and autonomous-consolidation
-language.
+curation plans, lexical baseline, and optional client-supplied vectors.
+Clients supply memory and query vectors under immutable vector profiles;
+the backend never generates embeddings or performs autonomous consolidation.
 
 This doc pins the memory data model, lifecycle, and recall. It is the companion
 to [facts-model.md](facts-model.md) (the deterministic, name-addressed payload

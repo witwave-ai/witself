@@ -19,8 +19,8 @@ not post-v0 features. This roadmap begins after that closeout boundary.
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVK custody for agent secrets. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -53,7 +53,7 @@ V0 should stay focused on the core agent self/identity store:
 - The sealed credential plane as a defined v0 slice that may be staged after the
   open-plane core: secret CRUD with redaction and explicit reveal, password
   generation, authenticator-app TOTP enrollment and code generation, runtime
-  secret references and injection, per-realm KEK envelope encryption, and secret
+  secret references and injection, client AVK envelope encryption, and secret
   grants/realm roles (see [secret-model.md](secret-model.md),
   [totp-2fa.md](totp-2fa.md), [encryption-model.md](encryption-model.md), and
   [key-hierarchy.md](key-hierarchy.md)).
@@ -279,7 +279,7 @@ contract owes. Previously tracked as issue #67.
 These extend the sealed credential plane. V0 ships authenticator-app style TOTP
 first (see [totp-2fa.md](totp-2fa.md)). All of the modalities below keep the
 sealed-plane carve-outs: any seed or credential material they introduce is
-KMS-backed sealed material, is never embedded, recalled, placed in the
+client-encrypted sealed material, is never embedded, recalled, placed in the
 self-digest, or plaintext-exported, and is reveal-gated.
 
 ### SMS And Email-Code 2FA
@@ -308,7 +308,7 @@ approval channel rather than bypass it.
 Passkey support is post-v0. It needs a WebAuthn/passkey agent story, origin and
 browser binding decisions, recovery behavior, and a clear security model for
 agents using credentials that are normally tied to a user device. Any stored
-passkey material is sealed-plane material under the per-realm KEK envelope
+passkey material is sealed-plane material under the client AVK envelope
 (see [key-hierarchy.md](key-hierarchy.md)).
 
 ### Hardware Security Keys
@@ -323,7 +323,7 @@ deployment constraints for containers and Kubernetes workloads.
 
 Browser-session handoff is post-v0. It could eventually help agents complete
 browser logins without exposing credentials broadly, but it changes the trust
-model around browser automation, session cookies, server-side decrypt, runtime
+model around browser automation, session cookies, client-side reveal, runtime
 injection, and support diagnostics.
 
 V0 provides secrets, TOTP codes, secret references, and runtime injection through
@@ -431,10 +431,10 @@ cells and collaboration share one registry
   plane (memories and facts) moves through the existing first-class
   export/import. Compatible client-supplied vectors and their immutable profiles
   may move with the archive; otherwise the destination immediately uses lexical
-  recall until an authorized client supplies a new profile. The sealed plane is
-  KMS-rooted per cell, so migration re-wraps
-  keys under the destination KMS via an audited decrypt-at-source /
-  re-encrypt-at-destination ceremony. Migration is bounded but not free (see
+  recall until an authorized client supplies a new profile. Sealed-plane
+  ciphertext, wrapped DEKs, and public AVK bindings move without a cloud key
+  rewrap. The destination client receives the AVK separately through protected
+  transfer, recovery, or enrollment; backend cells never handle secret plaintext (see
   [backup-and-recovery.md](backup-and-recovery.md) and [storage.md](storage.md)).
 - Billing aggregates at the account level: when one account's realms span cells,
   per-realm usage is rolled up to the account
@@ -551,32 +551,30 @@ remains a PII/redaction flag, not an encryption boundary. A credential belongs
 in the sealed plane (a secret), not in a `sensitive` fact
 (see [facts-model.md](facts-model.md) and [secret-model.md](secret-model.md)).
 
-### Client-Held / BYOK Decrypt Over The Wire
+### Client-Held Decrypt And Remaining Gates
 
-True client-held decrypt over the wire — where a client (or the operator's own
-KMS) unwraps the per-secret/field DEK so a remote backend returns only
-ciphertext — is post-v0. This applies only to the sealed plane. V0 remote
-backends (managed and self-hosted) are server-mediated and advertise
-`client_side_decrypt: false` on the sealed plane; local-dev mode decrypts with a
-local passphrase-derived key. The envelope and capability seams for this already
-exist (see the V0 crypto subset in [key-hierarchy.md](key-hierarchy.md) and
-[encryption-model.md](encryption-model.md)).
+Client-held decryption is the implemented sealed-plane model: remote and local
+backends return one authorized encrypted field package; the active client uses
+its AVK to unwrap the field DEK and reveal the value or calculate a TOTP code.
+A bearer token alone cannot perform reveal. The backend has no plaintext
+custody mode and no agent-vault KMS provider. See
+[key-hierarchy.md](key-hierarchy.md) and [encryption-model.md](encryption-model.md).
 
-Promotion changes how `secret reveal` and `totp code` return values, so the
-reveal ceremony, audit attribution, and the `server_side_decrypt` flag on
-reveal/code events must stay coherent across both decrypt modes. The open plane
-is unaffected: memories and facts are ordinary data-at-rest and do not flow
-through the envelope.
+Remaining gates cover the larger live runtime/cloud certification and deferred
+operations, including runtime injection, updates, grants, and group/cross-agent
+sharing. Those features must preserve client key possession and value-free
+backend material-delivery audit; see
+[sealed-plane-acceptance.md](sealed-plane-acceptance.md). The open plane remains
+ordinary identity data outside the sealed envelope.
 
-### Per-Realm Cryptographic Isolation
+### Per-Agent Cryptographic Custody
 
-Cryptographic isolation between realms against a compromised backend deployment
-role (least-privilege per-realm KMS grants or per-realm CMKs) is post-v0. V0
-isolates tenants by authorization and `realm_id` query scoping, accepting a
-tenant-wide blast radius under a single CMK plus a single deployment role
-(see [encryption-model.md](encryption-model.md) and [storage.md](storage.md)).
-Each realm already has its own KEK; promotion tightens the grant boundary around
-those KEKs rather than introducing a new key tier.
+Each agent's AVK stays in its active client; the backend stores public key
+identity and ciphertext bound to account, realm, owner, and field scope. A
+compromised deployment credential does not provide an AVK. Cross-agent/group
+secret sharing remains deferred until cryptographic possession can match the
+planned authorization grants; backend roles alone cannot reveal a field. See
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ### Plaintext Secret Export As Break-Glass
 
@@ -585,7 +583,8 @@ high-risk break-glass feature if it is ever built. It is explicitly distinct fro
 the v0 plaintext identity export, which covers only the open plane (memories and
 facts) and never includes secrets (see
 [backup-and-recovery.md](backup-and-recovery.md)). V0 secret backup is
-encrypted-only (envelope plus KMS key identity, never plaintext).
+encrypted-only (ciphertext, wrapped DEKs, and public AVK identity, never
+sensitive plaintext or the AVK).
 
 Any future plaintext secret export must require deliberate operator
 authorization, strong confirmation, an audited reason, clear warnings,
@@ -749,8 +748,7 @@ A post-v0 feature should move into an active release plan only when it has:
   integrity and authenticity of identity data (memory-poisoning, unauthorized
   curation/forgetting, cross-agent write abuse, sender spoofing); for
   sealed-plane features it is framed around secret confidentiality (leakage,
-  KMS/role compromise, reveal abuse, server-side-decrypt TCB expansion, and
-  tenant blast radius).
+  client/AVK compromise, reveal abuse, and authenticated scope violations).
 - Clear principal, permission, and policy behavior, including how it interacts
   with the default-deny cross-agent policy engine.
 - CLI, API, MCP, and JSON contract changes where applicable.

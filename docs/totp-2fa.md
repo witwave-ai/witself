@@ -3,8 +3,7 @@
 > **Custody amendment (accepted 2026-07-18):**
 > [the client-custodied vault plan](client-custodied-agent-vault.md) stores a
 > TOTP enrollment as a sensitive client-encrypted field. URI parsing and code
-> generation happen locally; KMS-backed or server-generated code paths below
-> are superseded.
+> generation happen locally; the backend stores only the encrypted payload.
 
 > **Current implementation boundary:** enroll by including one sensitive
 > `kind: "totp"` field with `otpauth_uri` in `witself secret create --file` or
@@ -42,12 +41,12 @@ governed by [authorization-and-roles.md](authorization-and-roles.md).
 ## Goals
 
 - Make the common authenticator-app TOTP role work well inside Witself in v0.
-- Let an authorized agent request a current one-time code through the CLI, MCP,
-  or API when a login flow requires it.
+- Let an authorized agent generate a current one-time code in the active CLI
+  or MCP client when a login flow requires it.
 - Keep the seed sealed: import/setup/export takes a more privileged path than
   ordinary code generation, and the agent login surface never sees the seed.
-- Carry non-sensitive TOTP metadata (issuer, account label, algorithm, digits,
-  period) as ordinary queryable columns so `totp show` answers without unwrapping.
+- Keep TOTP metadata (issuer, account label, algorithm, digits, period) inside
+  the encrypted payload; `totp show` decrypts locally and returns it seed-free.
 
 ## Scope (v0)
 
@@ -64,12 +63,12 @@ The expected login flow:
   [secret-model.md](secret-model.md)).
 - Agent retrieves or fills the password (a secret field).
 - Agent requests a current 2FA code from Witself (`witself totp code`).
-- Witself returns the current generated code through the authorized CLI, MCP, or
-  API path, never the seed.
+- The active Witself client returns the current generated code through the
+  authorized CLI or MCP path, never the seed. The API returns ciphertext only.
 
-A TOTP enrollment hangs off a secret. It is keyed by `secret_id`, so the code
-path resolves directly without enumerating fields. One live enrollment per
-secret.
+A TOTP enrollment is one sensitive field on a secret. The implemented code
+path selects both the secret and the field; dedicated convenience commands
+below remain target behavior.
 
 ## Enroll
 
@@ -113,9 +112,9 @@ Ownership is unified across the platform: a TOTP enrollment is owned by an
 its secret. There is no separate "shared" scope; a shared 2FA login is a
 group-owned secret.
 
-On enrollment, the seed is encrypted into an envelope and discarded in plaintext.
-The non-sensitive metadata is stored as ordinary columns. Enrollment emits
-`totp.enrolled`.
+On enrollment, the active client encrypts the seed and TOTP parameters together
+in one sensitive payload. The backend receives only its envelope. The dedicated
+enrollment target emits `totp.enrolled`; current enrollment uses secret create.
 
 ## Code generation
 
@@ -137,11 +136,11 @@ Flags:
 | `--remaining` | Include seconds remaining in the current period. |
 | `--reason TEXT` | Audit reason for code generation. |
 
-Code generation unwraps the seed envelope per the
-[key hierarchy](key-hierarchy.md) (client-side decrypt where the client holds key
-material, server-mediated decrypt for token-only pods, behind the capability
-switch), computes the code, and returns it. The returned result carries the code
-and timing metadata, **never the seed**:
+Code generation happens in the active client. It unwraps the field DEK with
+the matching AVK, decrypts and parses the TOTP payload, and computes the code
+locally per the [key hierarchy](key-hierarchy.md). The backend returns only
+encrypted field material. The client result carries the code and timing
+metadata, **never the seed**:
 
 ```json
 {
@@ -166,7 +165,8 @@ generation emits `totp.code` and meters the `totp_code` dimension (see
 
 `witself totp show NAME` returns the non-sensitive TOTP metadata — issuer,
 account label, algorithm, digits, period — **with the seed redacted**. This is
-the safe inspection path and does not unwrap the envelope.
+the seed-free inspection path: the active client decrypts and parses the
+envelope locally, so it still requires the matching AVK.
 
 Flags:
 
@@ -207,42 +207,25 @@ the wrapping key material does (see [encryption-model.md](encryption-model.md)).
 
 ## Sealed-seed storage model
 
-The seed is stored only as a per-ciphertext envelope, never as a plaintext
-column. The enrollment row lives in `totp_enrollments` (see
-[data-model.md](data-model.md)), keyed by `secret_id` with one live row per
-secret:
+The seed and TOTP parameters are stored together in one sensitive field
+payload. The active client parses the setup URI, encrypts the payload with a
+fresh field DEK, and wraps that DEK with the agent's AVK. The backend stores
+ciphertext in `secret_fields` and the wrapped DEK in `secret_deks`; it has no
+plaintext seed or queryable TOTP-parameter columns. See
+[data-model.md](data-model.md) and
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
-```sql
-CREATE UNIQUE INDEX ux_totp_enrollments_secret
-  ON totp_enrollments (secret_id)
-  WHERE deleted_at IS NULL;
-```
-
-The row separates two distinct algorithm columns:
-
-- `algorithm` — the **non-sensitive TOTP HMAC hash** (`SHA1` | `SHA256` |
-  `SHA512`), surfaced by `totp show`.
-- `aead_algorithm` — the **envelope's AEAD primitive** (`XCHACHA20_POLY1305` |
-  `AES_256_GCM`).
-
-Because the whole row is always an envelope, the seed envelope columns
-(`ciphertext`, `nonce`, `aead_algorithm`, `dek_id`, `kms_provider`,
-`aad_context`) are `NOT NULL`. The seed's wrapping follows the
-[key hierarchy](key-hierarchy.md): CMK → per-realm KEK → per-secret/field DEK.
-TOTP seeds are a default site for an **opt-in per-field DEK** so the seed gets its
-own DEK distinct from the secret's other fields.
-
-The envelope binds authenticated associated data (AAD) from stable identifiers
-only, with the domain tag `"totp-seed"`. AAD deliberately excludes any rotating
-KEK version, so KEK rotation provably cannot affect AAD. The wrapped DEK lives in
-`secret_deks` and is referenced by `dek_id`; KEK rotation re-wraps exactly that
-one row.
+The TOTP HMAC algorithm (`SHA1`, `SHA256`, or `SHA512`) is inside the encrypted
+payload. It is distinct from the envelope's AES-256-GCM algorithm. Value AAD
+uses the TOTP payload domain and immutable field bindings; the separate wrap
+AAD binds AVK identity/version and wrap revision. AVK rotation re-wraps the DEK
+in the active client without changing the field ciphertext.
 
 | Stored | Plane | Treatment |
 |---|---|---|
-| Seed | sealed | Envelope only. Never plaintext at rest, never embedded/recalled/in-digest/plaintext-exported. Returned only via `totp show --reveal-seed`. |
-| Generated code | — | Computed on demand, returned by `totp code`, never persisted. Never in audit. |
-| Issuer, account, algorithm, digits, period | metadata | Ordinary queryable columns; returned by `totp show`. |
+| Seed | sealed | Client-encrypted payload only. Never plaintext at rest, never embedded/recalled/in-digest/plaintext-exported. |
+| Generated code | — | Computed on demand in the active client, returned by `totp code`, never persisted by Witself or placed in audit. |
+| Issuer, account, algorithm, digits, period | sealed payload | Encrypted with the seed; `totp show` decrypts locally and returns seed-free metadata. |
 
 Audit rows MUST NEVER store the seed or any generated code. Audit events for
 TOTP: `totp.enrolled`, `totp.code`, `totp.seed_revealed`, `totp.deleted` (see
@@ -264,15 +247,16 @@ open cross-agent read/curate verbs — TOTP access composes through grants and
 realm roles in [authorization-and-roles.md](authorization-and-roles.md), not the
 open-plane policy engine.
 
-Code generation is also surfaced through MCP (`witself.totp.code`) and the API
-(`POST /v1/totp/{secret_id}:code`). Both are value-returning and are disabled by
-the MCP `--no-value-tools` switch alongside `secret.reveal`; `--read-only`
-disables mutations such as `totp.enroll` and `totp.delete`. See
+Code generation is also surfaced through the active MCP client
+(`witself.totp.code`). The backend API authorizes encrypted field access and
+returns ciphertext, never a generated code. MCP `--no-value-tools` disables
+value-returning client tools alongside `secret.reveal`; `--read-only` disables
+mutations. Dedicated `totp.enroll` and `totp.delete` remain target tools. See
 [mcp-tools.md](mcp-tools.md).
 
 ## Related
 
 - [secret-model.md](secret-model.md) — the sealed-plane secret model TOTP hangs off.
 - [encryption-model.md](encryption-model.md) — sealed-plane confidentiality model.
-- [key-hierarchy.md](key-hierarchy.md) — CMK → per-realm KEK → DEK envelope.
+- [key-hierarchy.md](key-hierarchy.md) — client-held AVK → field DEK envelope.
 - [authorization-and-roles.md](authorization-and-roles.md) — scopes, realm roles, grants.

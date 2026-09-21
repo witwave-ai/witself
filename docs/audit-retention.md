@@ -14,8 +14,8 @@ below now follows client-authored capture and curation plans. Autonomous
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVK custody for agent secrets. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -109,9 +109,9 @@ Audit records must never include:
   `secret.reveal` or `totp.code` record proves the reveal happened, never the
   value revealed. See [secret-model.md](secret-model.md) and
   [totp-2fa.md](totp-2fa.md).
-- Key material of any layer: CMK, per-realm KEK, or per-secret/field DEK
-  (wrapped or unwrapped). A `key.rotated` record carries key ids and the KMS
-  key identity only. See [key-hierarchy.md](key-hierarchy.md).
+- Agent vault keys and field DEKs (wrapped or unwrapped). Vault rotation
+  records carry public key identities and value-free lifecycle coordinates
+  only. See [key-hierarchy.md](key-hierarchy.md).
 
 Audit records may include non-sensitive context such as:
 
@@ -346,17 +346,17 @@ claim id, lease, or idempotency material.
 
 ### Sealed Plane: Secrets
 
-Sealed-plane events attribute mutation and, critically, *reveal* of secret
-material — the confidentiality question Witpass audit existed to answer, now one
-family within the integrity log. Every record names the owning agent or group
+Sealed-plane events attribute mutation and authorized encrypted material
+delivery. Local reveal and TOTP calculation happen only in the active client;
+backend events cannot attest that those operations occurred. Every record names the owning agent or group
 and the enclosing realm; none ever carries a field value (see
 [Audit Content Rules](#audit-content-rules)). See
 [secret-model.md](secret-model.md) and [encryption-model.md](encryption-model.md).
 
 - `secret.created`
-- `secret.updated` (records the changed-field set and new version, never values)
-- `secret.renamed`
-- `secret.copied`
+- `secret.updated` (target; records the changed-field set and new version, never values)
+- `secret.renamed` (target)
+- `secret.copied` (target)
 - `secret.archived`
 - `secret.restored`
 - `secret.deleted` (guarded tombstone delete; metadata is exactly `agent_id`,
@@ -364,33 +364,34 @@ and the enclosing realm; none ever carries a field value (see
   secret metadata and field/DEK rows are removed, while a minimal value-free
   tombstone remains; irreversible purge of that tombstone is a separate future
   action)
-- `secret.reveal` (the explicit, audited reveal ceremony for a single field;
-  records the secret id, field id, and result, never the plaintext. Carries the
-  `server_side_decrypt` flag — `true` when the server transiently unwrapped the
-  DEK and returned plaintext over TLS for a token-only pod, `false` for the
-  client-held-key decrypt path. See [key-hierarchy.md](key-hierarchy.md).)
-- `secret.grant` (a grant to another agent or group; records grantee and scope)
-- `secret.revoke` (requires reason)
+- `secret.material.delivered` (the backend's authorized delivery of one encrypted
+  field package; records value-free scope and field coordinates, never the
+  plaintext). The active client performs reveal using its AVK; a backend event
+  cannot prove that local decryption occurred. See [key-hierarchy.md](key-hierarchy.md).
+- `secret.grant` (target; a grant to another agent or group; records grantee and scope)
+- `secret.revoke` (target; requires reason)
 
 ### Sealed Plane: TOTP
 
 TOTP enrollments are sealed-plane material colocated with a secret; the seed is
 high-value and never leaves the envelope except through the audited reveal path.
-See [totp-2fa.md](totp-2fa.md).
+See [totp-2fa.md](totp-2fa.md). The names below are target event vocabulary;
+current backend events describe encrypted seed-material delivery only.
 
 - `totp.enrolled`
-- `totp.code` (generates a current code; the value-returning operation gated by
-  `totp:code`. Records the secret id and result, never the code or seed; carries
-  the `server_side_decrypt` flag with the same meaning as `secret.reveal`.)
+- `totp.code` (target client-side event for a locally calculated code; never
+  records the code or seed. The implemented backend records encrypted seed
+  material access and cannot attest to local code generation.)
 - `totp.seed_revealed` (reveals the Base32 seed/otpauth URI for re-enrollment;
   the high-value reveal, gated by `totp:code`, never recording the seed itself)
 - `totp.deleted`
 
 ### Sealed Plane: Key Management
 
-- `key.rotated` (per-realm KEK rotation; re-wraps the affected DEKs without
-  touching plaintext secrets, records key ids and KMS key identity only, never
-  key material. See [key-hierarchy.md](key-hierarchy.md).)
+- Vault rotation records describe AVK lifecycle transitions and client-created
+  DEK rewraps without plaintext secrets or key material. The backend stages
+  wrappers and atomically commits the accepted rotation; see
+  [key-hierarchy.md](key-hierarchy.md).
 
 ### Authentication, Agent, and Token Lifecycle
 
@@ -561,7 +562,7 @@ Metering rules:
   `warn`, `throttle`, or `block`, the same overage model used across dimensions.
 
 The full set of metered dimensions (active agents, stored memories, stored
-facts, recalls/reads, memory writes, embedding operations, vector storage,
+facts, recalls/reads, memory writes, client-vector writes, vector storage,
 cross-agent accesses, security groups, messages sent/delivered, audit retention,
 and general API volume) is defined in
 [billing-and-limits.md](billing-and-limits.md).

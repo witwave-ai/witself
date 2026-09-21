@@ -2,29 +2,25 @@
 
 > **Sealed-plane custody amendment (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-> [client-custodied vault plan](client-custodied-agent-vault.md) supersede KMS
-> as the sealed-plane root. PostgreSQL remains authoritative for ciphertext,
+> [client-custodied vault plan](client-custodied-agent-vault.md) define the
+> client-held agent vault key as the sealed-plane root. PostgreSQL remains authoritative for ciphertext,
 > wrapped DEKs, public metadata, receipts, usage, and audit; it never stores the
 > agent vault key or a sensitive plaintext value.
 
-Status: evolving; the sealed-plane sections below the amendment are historical
-until rewritten against ADR 0003. Last reviewed 2026-07-18. Production Witself starts
-with PostgreSQL as the system of record for both planes, universal full-text
-retrieval, optional portable JSONB storage for client-supplied vectors, an
-object/blob adapter added on demand, Goose for database migrations, and a
-provider-shaped KMS abstraction
-(AWS KMS first) that backs the SEALED plane. Storage is two-tier: the OPEN plane
+Status: evolving. Production Witself starts with PostgreSQL as the system of
+record for both planes, universal full-text retrieval, optional portable JSONB
+storage for client-supplied vectors, an object/blob adapter added on demand,
+and Goose for database migrations. Storage is two-tier: the OPEN plane
 (memories + facts) is ordinary data-at-rest; the SEALED plane (secrets + TOTP)
-is KMS-backed envelope encryption. KMS is **required when the sealed plane is
-enabled** and is not a dependency for an open-plane-only deployment.
+is envelope-encrypted by the active client under its agent vault key (AVK).
+The backend stores ciphertext and redacted inventory without the AVK.
 
-Open-plane amendment (accepted 2026-07-14): PostgreSQL remains the sole
-authoritative memory store, but
-[narrative-memory-and-curation.md](narrative-memory-and-curation.md) supersedes
-the server-side embedding-provider boundary. Full-text retrieval is universal;
-optional memory/query vectors are generated and supplied by clients. Object
-storage and local outboxes are archive/delivery mechanisms, not live memory
-sources.
+Open-plane decision (accepted 2026-07-14): PostgreSQL remains the sole
+authoritative memory store, as specified by
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+Full-text retrieval is universal; optional memory/query vectors are generated
+and supplied by clients. The backend never computes embeddings. Object storage
+and local outboxes are archive/delivery mechanisms, not live memory sources.
 
 ## Decision
 
@@ -53,15 +49,16 @@ PostgreSQL holds both planes. OPEN-plane state:
 - Idempotency records.
 - Capability and backend configuration metadata when needed.
 
-SEALED-plane state (present only when the sealed plane is enabled):
+SEALED-plane state:
 
 - Secret metadata (template, label, owner, timestamps) and non-sensitive fields
-  such as usernames, URLs, issuers, and labels as ordinary queryable values.
+  such as usernames, URLs, and labels as ordinary queryable values.
 - Encrypted sensitive field blobs (envelope-encrypted; never plaintext columns).
-- Encrypted TOTP seed material (envelope-encrypted high-value sealed material).
-- Secret grants and TOTP enrollments.
-- Per-realm KEK wrapping state (`realm_keys`) and per-secret/field DEK state
-  (`secret_deks`); see [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage).
+- Encrypted TOTP field payloads, including the seed and TOTP parameters; the
+  active client decrypts and parses them locally.
+- Secret grants and standalone TOTP enrollments remain deferred targets.
+- Public agent vault key metadata (`agent_vault_keys`) and AVK-wrapped
+  per-field DEKs (`secret_deks`); see [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage).
 
 The two planes have opposite storage postures and must coexist coherently:
 
@@ -70,8 +67,8 @@ The two planes have opposite storage postures and must coexist coherently:
   keep them out of queryable columns and no encrypted-blob-only storage rule.
   Witself protects the *integrity and authenticity* of identity data here.
 - **SEALED plane.** Secret values and TOTP seeds are confidentiality-critical.
-  They are stored only as KMS-backed envelope ciphertext (CMK → per-realm KEK →
-  per-secret/field DEK), are reveal-gated, and are **never embedded, never
+  Clients encrypt them with per-field DEKs wrapped by the AVK. The backend
+  stores only ciphertext; values are reveal-gated and **never embedded, never
   returned by semantic recall, never in the self-digest, and never in a
   plaintext export**. See [Data-At-Rest Note](#data-at-rest-note),
   [encryption-model.md](encryption-model.md), and
@@ -203,16 +200,18 @@ view of the domain objects in [data-model.md](data-model.md) and
 - `secret_grants` — `grt_…` id, secret, grantee (agent or group), granted
   scopes, granting actor, timestamps. The sealed-plane cross-agent/operator
   access path; see [authorization-and-roles.md](authorization-and-roles.md).
-- `totp_enrollments` — `totp_…` id, owning secret/account, issuer, label, and
-  the envelope-encrypted seed material (DEK id, AEAD algorithm, nonce,
-  ciphertext). Seeds are high-value sealed material; see [totp-2fa.md](totp-2fa.md).
-- `realm_keys` — `kek_…` id, realm, KMS provider, CMK key id, wrapped per-realm
-  KEK ciphertext, rotation generation, timestamps. One active KEK generation per
-  realm; see [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage)
-  and [key-hierarchy.md](key-hierarchy.md).
-- `secret_deks` — `dek_…` id, realm, owning secret/field, wrapping `kek_…`, AEAD
-  algorithm, wrapped DEK ciphertext, generation. Per-secret/field data keys are
-  wrapped by the realm KEK, never stored unwrapped.
+- TOTP payloads — sensitive `secret_fields` containing the encrypted seed and
+  parameters together. The active client decrypts and parses the payload for
+  seed-free metadata or code calculation; there is no implemented standalone
+  `totp_enrollments` table. See [totp-2fa.md](totp-2fa.md).
+- `agent_vault_keys` — public AVK identifiers, versions, fingerprints, and
+  lifecycle state; never the AVK bytes. See
+  [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage) and
+  [key-hierarchy.md](key-hierarchy.md).
+- `secret_deks` — per-field data-key identifiers, AVK version, wrapping nonce,
+  wrapped DEK ciphertext, and wrapping revision. Clients wrap and unwrap the
+  data keys; the backend never stores an unwrapped key.
+
 - `attachments` — `att_…` id, owning secret, envelope-encrypted blob reference
   (object/blob when oversized); see
   [secret-size-and-attachments.md](secret-size-and-attachments.md).
@@ -283,43 +282,20 @@ Vector storage size may remain a metered dimension; see
 
 ## KMS Posture
 
-The sealed plane is backed by a key-management service. KMS is a **required
-dependency when the sealed plane is enabled** and is not required for an
-open-plane-only deployment — an account that only uses memories and facts never
-needs a KMS provider configured. This is the two-tier posture: the open plane
-relies on ordinary data-at-rest encryption (managed RDS/disk), while the sealed
-plane relies on KMS envelope encryption.
+Agent-secret custody does not depend on KMS. The active client holds the AVK
+and performs encryption, decryption, password generation, and TOTP calculation.
+The backend has no agent-vault KMS provider setting, unwrap authority, or
+sensitive-value-returning route. The open plane relies on ordinary data-at-rest
+encryption (managed RDS/disk); sealed values additionally use client-side
+envelope encryption.
 
-The KMS boundary is provider-shaped from day one because sealed-plane key
-custody is a real server responsibility. Initial provider names:
-
-- `aws-kms`
-- `gcp-kms`
-- `azure-key-vault`
-- `local-dev`
-
-`local-dev` exists for tests, demos, and `witself-server serve --dev`. It is not
-a production KMS provider.
-
-KMS is **per cell**. A cell is one complete, independent Witself stack in a
-single cloud account/region, and its sealed plane is rooted in that cell's own
-KMS (its CMK → per-realm KEK → per-secret/field DEK hierarchy). No CMK, KEK, or
-DEK is shared across cells, and the thin global control plane holds only routing
-metadata (realm/account → home cell + endpoint + signing key) — never tenant
-data and never key material. Moving a tenant between cells therefore re-roots its
-sealed plane under the destination cell's KMS; see
-[Cross-Cell KMS Re-Wrap](#cross-cell-kms-re-wrap) and
+Each cell stores its tenants' ciphertext, wrapped DEKs, and public vault
+metadata. The thin global control plane holds only routing metadata
+(realm/account → home cell + endpoint + signing key), never tenant data or
+key material. Moving an account copies encrypted vault state unchanged and
+requires the matching AVK in the authorized client. See
+[Cross-Cell Vault Portability](#cross-cell-vault-portability) and
 [deployment-cells.md](deployment-cells.md).
-
-Managed Witself Cloud uses AWS KMS first, alongside AWS RDS for PostgreSQL and
-S3; see [First Cloud Target](#first-cloud-target). Self-hosted
-deployments that enable the sealed plane select a provider through server
-configuration:
-
-```text
-WITSELF_KMS_PROVIDER=aws-kms
-WITSELF_KMS_KEY_ID=arn:aws:kms:...
-```
 
 Provider-specific credentials should come from workload identity, cloud
 identity, mounted secret files, or deployment-native secret managers. They must
@@ -328,17 +304,12 @@ repository. Managed cloud must not expose raw KMS credentials to the
 application; the server uses deployment identity and tightly scoped IAM
 permissions.
 
-Readiness gates differ per plane. PostgreSQL and its full-text facilities gate
-the open plane. Migration-0032 vector-profile operations use ordinary
-PostgreSQL and require no extension; lexical recall remains healthy without any
-vector rows. A future ANN projection must never become a readiness gate. KMS
-readiness gates
-**only the sealed plane**: when the sealed plane is enabled, the server must be
-able to reach the configured KMS provider and unwrap the active per-realm KEK
-before serving secret reveal, TOTP code, or value-returning reference
-resolution. Open-plane reads never gate on KMS availability. The capability
-contract reports `client_side_decrypt` and `server_side_decrypt` availability;
-see [key-hierarchy.md](key-hierarchy.md).
+PostgreSQL and its full-text facilities gate the open plane. Migration-0032
+vector-profile operations use ordinary PostgreSQL and require no extension;
+lexical recall remains healthy without any vector rows. A future ANN projection
+must never become a readiness gate. Agent secrets add no KMS readiness gate:
+the server stores encrypted material, while client key availability controls
+local reveal. Capabilities describe this ciphertext-only backend contract.
 
 ## Sealed-Plane Encryption Storage
 
@@ -357,24 +328,19 @@ Rules:
   codes, raw tokens, passphrases, plaintext private keys, payment credentials,
   or wallet credentials; see [audit-retention.md](audit-retention.md).
 
-The envelope is a CMK → per-realm KEK → per-secret/field DEK hierarchy. The
-relational shape that holds it is two tables:
+The envelope is client-custodied: the AVK wraps each sensitive field's DEK,
+and that DEK encrypts the field value. PostgreSQL stores:
 
-- `realm_keys` — the per-realm KEK (`kek_…`), wrapped by the KMS CMK
-  identified by `WITSELF_KMS_KEY_ID`. The KEK ciphertext, the KMS provider and
-  CMK id, and the rotation generation live here; the unwrapped KEK exists only
-  in memory after a KMS unwrap.
-- `secret_deks` — the per-secret/per-field DEK (`dek_…`), wrapped by the active
-  realm KEK. Sensitive field and TOTP-seed ciphertext records the wrapping
-  `dek_…`, the AEAD algorithm (`XCHACHA20_POLY1305` or `AES_256_GCM`), and the
-  nonce.
+- `agent_vault_keys` — public AVK identity, fingerprint, version, and lifecycle
+  metadata. The key bytes remain with the client.
+- `secret_deks` — AVK-wrapped per-field DEKs and wrapping metadata. Sensitive
+  field ciphertext records its DEK identifier, AEAD algorithm, and nonce.
 
-Decrypt is hybrid behind one capability switch: `client_side_decrypt` (the
-client holds key material and the server returns wrapped material) is the
-default where the client can hold keys; `server_side_decrypt` lets token-only
-pods perform the unwrap server-side, expanding the trusted computing base and
-recorded on the reveal/code audit event. The exact envelope format and rotation
-design are tracked by [encryption-model.md](encryption-model.md) and
+Only the authorized active client unwraps the DEK and decrypts the value.
+A token alone cannot reveal a secret; the backend never receives the AVK or
+plaintext key material. Password generation and TOTP calculation also happen
+in the active client. The exact envelope and rotation contracts are tracked by
+[encryption-model.md](encryption-model.md) and
 [key-hierarchy.md](key-hierarchy.md); the schema is in
 [data-model.md](data-model.md).
 
@@ -384,59 +350,41 @@ recall**, **never in the self-digest**, **never ingested** from
 CLAUDE.md/AGENTS.md, and **never written to a plaintext export**. Secret backup
 is encrypted-only; see [Backup And Restore Implications](#backup-and-restore-implications).
 
-## Cross-Cell KMS Re-Wrap
+<a id="cross-cell-kms-re-wrap"></a>
+
+## Cross-Cell Vault Portability
 
 Witself deploys as a fleet of independent cells under a thin global control
-plane: each cell is one complete, independent stack (its own PostgreSQL, KMS,
-and blob store) and holds the full data
-and key material for the tenants homed on it. The control plane holds only
-routing metadata — the
-realm/account → home cell + endpoint + signing key mapping — and **no tenant
-data and no key material**. See [deployment-cells.md](deployment-cells.md).
+plane. Each cell is one complete, independent stack with its own PostgreSQL
+and blob store, holding tenant data and encrypted vault state. The control
+plane holds only routing metadata — the realm/account → home cell, endpoint,
+and signing key mapping — and **no tenant data and no key material**. See
+[deployment-cells.md](deployment-cells.md).
 
-Because KMS is per cell (see [KMS Posture](#kms-posture)), the sealed plane's
-CMK → per-realm KEK → per-secret/field DEK hierarchy is rooted in the *home
-cell's* KMS. A tenant's wrapped KEK and wrapped DEKs only resolve under that
-cell's CMK; nothing in another cell can unwrap them. This is the same
-blast-radius containment the open plane gets from per-cell Postgres.
+Moving an account from cell A to cell B copies sensitive-field ciphertext,
+wrapped DEKs, and public AVK metadata unchanged. Neither source nor destination
+unwraps a key, decrypts a value, or re-roots the vault in cloud infrastructure.
+The authorized client continues to use the same matching AVK after the move.
+Client AVK rotation is a separate lifecycle operation described by
+[key-hierarchy.md](key-hierarchy.md).
 
-Moving a realm/account from cell A to cell B therefore cannot just copy the
-encrypted blobs — cell B's KMS cannot unwrap material rooted in cell A's CMK. The
-sealed plane migrates by an audited **re-wrap**:
+The migration is audited through `tenant.migration_started`,
+`tenant.migration_completed`, or `tenant.migration_failed`, per
+[deployment-cells.md](deployment-cells.md) and
+[audit-retention.md](audit-retention.md). After the control-plane mapping is
+repointed to cell B, clients re-resolve their home cell and route to B directly.
 
-- **Decrypt-at-source.** Under cell A's KMS, unwrap the per-realm KEK and unwrap
-  each affected DEK (key-on-key; the at-rest `ciphertext` is never decrypted and
-  no secret value or TOTP seed is exposed).
-- **Re-encrypt-at-dest.** Under cell B's KMS, mint the destination-rooted
-  per-realm KEK and re-wrap the DEKs beneath it, writing the destination
-  `realm_keys` / `secret_deks` rows. The DEK ciphertext stays put; only the
-  wrapping changes, exactly as in the in-cell KEK re-wrap of
-  [key-hierarchy.md](key-hierarchy.md) (Rotation, Re-Wrap, And Backfill), here
-  crossing a cloud/KMS boundary rather than rotating in place.
-
-The plaintext DEKs transit only in memory on the migration path and are zeroized
-after; CMK-rooted plaintext secret values and TOTP seeds are never materialized.
-The operation is audited end to end — it emits `tenant.migration_started`,
-`tenant.migration_completed`, or `tenant.migration_failed` alongside the
-sealed-plane re-wrap, per [deployment-cells.md](deployment-cells.md) and the
-audit-event registry in [audit-retention.md](audit-retention.md). After the
-control-plane mapping is repointed to cell B, clients re-resolve their home cell
-and route to B directly.
-
-The open plane (memories, facts, messaging) moves over the same migration by the
-first-class export/import path rather than a re-wrap, since it carries no KMS
-envelope. Full-text indexes are rebuilt in the destination. Optional vector
-rows move with their immutable profiles as canonical schema-32 archive data;
-any future ANN projection is rebuilt. A profile with no vector rows still leaves
-the destination fully functional through lexical recall. See
+The open plane (memories, facts, messaging) moves through the first-class
+export/import path. Full-text indexes are rebuilt in the destination. Optional
+vector rows move with their immutable profiles as canonical schema-32 archive
+data; any future ANN projection is rebuilt. A profile with no vector rows still
+leaves the destination fully functional through lexical recall. See
 [backup-and-recovery.md](backup-and-recovery.md) and
 [Backup And Restore Implications](#backup-and-restore-implications).
 
-Open decisions (tracked in [deployment-cells.md](deployment-cells.md), not
-resolved here): whether the placement/migration unit is the account or the realm,
-and whether cutover uses a brief read-only freeze or dual-write + reconcile —
-either way the sealed-plane re-wrap is the same audited decrypt-at-source /
-re-encrypt-at-dest pass.
+Placement and cutover decisions remain tracked in
+[deployment-cells.md](deployment-cells.md). They do not change the client-custody
+boundary or require cloud-key re-wrapping.
 
 ## Migration Tool
 
@@ -522,8 +470,8 @@ self-hosted Terraform. GCP and Azure remain planned follow-up targets; see
 ## Data-At-Rest Note
 
 Decision: encryption is two-tier, matched to the plane. The open plane uses
-ordinary data-at-rest protection for identity data; the sealed plane uses a KMS
-envelope for secret material.
+ordinary data-at-rest protection for identity data; the sealed plane uses
+client-side envelope encryption for secret material.
 
 Open-plane posture:
 
@@ -541,16 +489,14 @@ Open-plane posture:
 
 Sealed-plane posture:
 
-- When the sealed plane is enabled, secret values and TOTP seeds are
-  KMS-envelope-encrypted (CMK → per-realm KEK → per-secret/field DEK) and stored
-  only as ciphertext, with a reveal ceremony gating value-returning operations.
-  KMS is required for this plane; see [KMS Posture](#kms-posture),
+- The active client encrypts secret values and TOTP seeds with per-field DEKs
+  wrapped by its AVK. The backend stores only ciphertext; explicit client
+  reveal gates value-returning operations. See [KMS Posture](#kms-posture),
   [Sealed-Plane Encryption Storage](#sealed-plane-encryption-storage), and
   [encryption-model.md](encryption-model.md).
-- Losing KMS key material makes the affected realm's secret values and TOTP
-  seeds unrecoverable (crypto-shred). This blast radius is confined to the
-  sealed plane: it does **not** affect memories, facts, policies, groups, or
-  messages.
+- Losing every matching AVK copy and usable client recovery path makes sealed
+  values unrecoverable. This does **not** affect memories, facts, policies,
+  groups, or messages.
 
 The cross-agent authorization and audit scaffolding for the open plane lives in
 [access-policy.md](access-policy.md); the sealed-plane confidentiality model
@@ -571,15 +517,15 @@ recall is restored from PostgreSQL content and rebuilt full-text indexes:
 - Migration version.
 - Immutable vector profile definitions when vector rows are retained, so the
   restored rows are interpreted consistently.
-- Server configuration needed to reconnect to storage and, when the sealed
-  plane is enabled, KMS. There is no backend model-provider configuration.
-- KMS key identity and rotation metadata when the sealed plane is enabled, so
-  the encrypted secret backup can be unwrapped.
+- Server configuration needed to reconnect to storage. There is no backend
+  model-provider configuration.
+- Public AVK metadata, wrapped DEKs, and vault lifecycle rows needed to preserve
+  the encrypted vault. Matching AVK custody and recovery remain client concerns.
 
 Open-plane identity (memories + facts) is plaintext-exportable; that stays the
 headline backup/restore feature. The sealed plane is **never in the plaintext
-export** — secret backup is encrypted-only (envelope ciphertext plus KMS key
-identity, never plaintext), and `witself export` excludes secret values and TOTP
+export** — secret backup is encrypted-only (envelope ciphertext, wrapped DEKs,
+and public AVK metadata, never plaintext), and `witself export` excludes secret values and TOTP
 seeds; see [backup-and-recovery.md](backup-and-recovery.md).
 
 Backups must not include raw tokens, raw database, object-store, or KMS
@@ -592,11 +538,11 @@ Recovery characteristics specific to Witself:
   vector rows restore optional vector coverage after their derived indexes are
   rebuilt. When vector rows are absent, an authorized client may regenerate and
   resubmit them; the backend never performs that inference.
-- Losing KMS key material (when the sealed plane is enabled) makes the affected
-  realm's secret values and TOTP seeds unrecoverable — crypto-shred — but does
-  not affect memories, facts, policies, groups, or messages. The open plane is
-  recoverable from the Postgres backup independent of KMS. This split blast
-  radius must be documented for managed and self-hosted deployments.
+- Restoring encrypted vault rows does not restore the client AVK. Without a
+  matching key copy or usable client recovery path, sealed values remain
+  inaccessible. Memories, facts, policies, groups, and messages are recoverable
+  from the Postgres backup independently of client AVK custody. This boundary
+  must be documented for managed and self-hosted deployments.
 
 The backup, export, and recovery policy is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).

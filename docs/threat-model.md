@@ -13,8 +13,9 @@ client-supplied vectors follow
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVKs, client encryption/decryption, and ciphertext-only backend
+material access. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -27,7 +28,7 @@ authenticity*, plus the *confidentiality of PII* the open plane holds. The
 **sealed plane** (secrets + TOTP) is credential material: the adversary's aim
 there is to read or exfiltrate a value, so the sealed-plane posture centers on
 *confidentiality* — envelope encryption, reveal-gating, and containing
-KMS/role/tenant blast radius. The two postures are opposite-facing but coexist
+client-key and tenant blast radius. The two postures are opposite-facing but coexist
 in one asset list, one attacker model, and one set of controls below. The split
 is the master decision; see [requirements.md](requirements.md),
 [encryption-model.md](encryption-model.md), and
@@ -71,7 +72,7 @@ The product's first duty for the sealed plane is to keep credential material
 secret:
 
 - Secret field values and TOTP seeds are stored only as ciphertext under
-  envelope encryption (`CMK → per-realm KEK → per-secret/field DEK`) and are
+  client-authored envelope encryption (`AVK → per-sensitive-field DEK`) and are
   never an ordinary database column (confidentiality at rest; see
   [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md)).
@@ -80,10 +81,10 @@ secret:
   digest, plaintext export, ingest, or a generic decrypt endpoint (reveal
   discipline / sealed-plane carve-out).
 - The set of components that ever hold sealed plaintext (the trusted computing
-  base) stays minimal: client-side decrypt is the default; server-side decrypt
-  is a narrow, capability-gated, audited exception (TCB containment).
-- Loss of KMS key material crypto-shreds sealed secret values only; it must not
-  affect the open plane (containment of crypto-shred).
+  base) stays in the active client: the backend stores ciphertext and redacted
+  inventory and never receives the AVK (TCB containment).
+- Loss of every matching AVK and usable recovery copy can make sealed values
+  unrecoverable; it does not affect the open plane (key-loss containment).
 
 The product should assume attackers will try to:
 
@@ -104,8 +105,8 @@ The product should assume attackers will try to:
   Terraform state, Helm values, CI artifacts, or crash dumps.
 - Trick an agent into revealing an unrelated secret, or abuse a token, grant, or
   realm role to reveal another agent's or group's secret.
-- Compromise KMS, the deployment KMS role, or the `server_side_decrypt` path to
-  unwrap reachable per-realm KEKs and read sealed material across tenants.
+- Compromise an active client or its local AVK storage to unwrap that agent's
+  field DEKs and read sealed material.
 - Abuse the reveal/TOTP-code operations at volume, or smuggle sealed plaintext
   out through a non-reveal channel (recall, digest, export, ingest).
 - Publish a forged, shadowed, or look-alike realm/agent **card** — an unsigned
@@ -128,9 +129,9 @@ The product should assume attackers will try to:
 - Compromise the **thin global control plane** to corrupt placement or
   realm→cell routing — redirecting a tenant's traffic, poisoning the federation
   trust registry, or attempting to use it as a pivot into a cell.
-- Exploit the **cross-cloud KMS** path during a tenant **migration** between
-  cells (decrypt-at-source / re-encrypt-at-destination) to capture sealed
-  plaintext in flight or widen the sealed-plane blast radius across clouds.
+- Exploit a tenant **migration** between cells to corrupt encrypted vault
+  state or redirect its separately protected client-key transfer. Archives
+  carry ciphertext unchanged; source and destination backends never decrypt it.
 - Compromise self-hosted deployment configuration.
 - Abuse managed-service billing, support, or account flows.
 
@@ -173,10 +174,10 @@ Sealed-plane (credential) high-value assets:
   behind every generated code; protected far more strongly than a code itself.
 - **Generated TOTP codes** — short-lived but exfiltration-worthy during their
   validity window.
-- **Encryption keys and key material** — per-realm KEKs (`kek_...`),
-  per-secret/field DEKs (`dek_...`), the CMK and KMS credentials/grants, and
-  any self-hosted/BYOK local realm passphrase. Compromise of these breaks
-  sealed-plane confidentiality at scale.
+- **Encryption keys and key material** — client-held AVKs, per-sensitive-field
+  DEKs (`dek_...`), enrollment pairing material, and recovery passphrases.
+  Compromise of these threatens the affected agent's sealed values; none is a
+  backend plaintext asset.
 
 Sensitive supporting assets:
 
@@ -256,17 +257,14 @@ Trust boundaries:
 - `witself` CLI to managed or self-hosted `witself-server`.
 - MCP client to `witself mcp serve`.
 - `witself-server` to storage adapters (PostgreSQL, optional object/blob).
-- `witself-server` to the KMS or key-management provider (`aws-kms`, `gcp-kms`,
-  `azure-key-vault`, `local-dev`) — present only when the sealed plane is
-  enabled; the boundary that unwraps per-realm KEKs and thus gates all
-  sealed-plane confidentiality.
-- Client (CLI / local `mcp serve` / `witself run`) to its held or derived key
-  material for client-side decrypt — the default sealed-plane decrypt boundary,
-  where plaintext appears in the trusted client runtime and not on the server.
-- `witself-server` to a managed token-only ephemeral pod over the
-  `server_side_decrypt` path — the structural exception where sealed plaintext
-  appears transiently inside `witself-server` and its KMS-capable deployment IAM
-  identity (see [encryption-model.md](encryption-model.md),
+- Active client (CLI / local `mcp serve`, and planned `witself run`) to its
+  matching AVK — the sealed-plane decrypt boundary. Plaintext and unwrapped
+  DEKs remain in the trusted client runtime; the backend never holds them.
+- Active client to a separately enrolled installation or an offline recovery
+  artifact — protected key transfer and local recovery must preserve the AVK
+  boundary. The backend relays encrypted enrollment capsules and stores only
+  public key metadata; token-only pods cannot reveal values (see
+  [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md)).
 - The authorized inference client to any local or remote model it selects for
   curation or vector generation. This client-controlled boundary may expose
@@ -305,12 +303,11 @@ Helm values, Terraform state examples, metrics, or model-visible AI output, and
 (c) cross-agent and message-driven writes are attributed and policy-checked
 below the frontend, and (d) sealed plaintext crosses the fewest boundaries
 possible — never a client-vector, export, digest, or ingest boundary,
-and across the KMS/server-side-decrypt boundary only under an audited,
-capability-gated reveal. The agent-to-agent, client-inference, and
-server-side-decrypt boundaries carry the highest-novelty risk: the first is an
-identity-integrity boundary, the second is a client-controlled PII/privacy
-boundary, and the last is a sealed-plane confidentiality boundary that
-transiently expands the plaintext TCB.
+and into an explicitly selected client use only after authorized encrypted
+material access. The agent-to-agent, client-inference, and client-vault
+boundaries carry the highest-novelty risk: the first is an identity-integrity
+boundary, the second is a client-controlled PII/privacy boundary, and the last
+is the sealed-plane confidentiality boundary. The backend never decrypts.
 
 ## Attacker Model
 
@@ -341,12 +338,12 @@ Witself should consider:
 - An attacker trying to exfiltrate sealed plaintext through a non-reveal
   channel — memory recall, the self-digest, plaintext export, or
   CLAUDE.md/AGENTS.md ingest — bypassing the reveal ceremony.
-- A compromised `witself-server`, deployment KMS role, or `server_side_decrypt`
-  path unwrapping any reachable per-realm KEK; under the v0 single-CMK +
-  single-deployment-role model this is a tenant-wide blast radius (see
+- A compromised active client exposing its AVK, unwrapped DEKs, or plaintext.
+  A compromised backend can instead corrupt or delete reachable ciphertext or
+  expose public inventory without possessing the AVK (see
   [key-hierarchy.md](key-hierarchy.md)).
 - An attacker with a database snapshot or object-storage bucket holding
-  sealed-plane ciphertext, attempting offline decryption without KMS access.
+  sealed-plane ciphertext, attempting offline decryption without the AVK.
 - A malicious or buggy MCP client.
 - A network attacker between CLI and backend.
 - A fake or malicious login page attempting to trick an operator during setup.
@@ -374,9 +371,8 @@ Symmetrically, Witself cannot fully protect a sealed secret after it is
 intentionally revealed to an agent, process, browser, or human. For the sealed
 plane the system should minimize reveal scope, prefer runtime injection
 (`witself run`) and reference resolution over printing values, keep plaintext
-out of every persistent channel, audit every reveal/code/server-side-decrypt
-event, and contain the blast radius of a KMS/role compromise so it does not
-extend to the open plane.
+out of persistent channels, audit authorized encrypted material access, and
+keep each agent's AVK separate from bearer tokens and backend storage.
 
 ## Core Assumptions
 
@@ -404,16 +400,14 @@ extend to the open plane.
 - Sealed-plane secret values and TOTP seeds are encrypted at rest under
   envelope encryption and are never ordinary database columns; Base64 is only a
   binary-safe encoding, not a security boundary.
-- KMS is a required dependency only when the sealed plane is enabled; an
-  open-plane-only deployment does not need it. Loss of KMS key material may make
-  some or all sealed secret values unrecoverable (crypto-shred) and affects the
-  sealed plane only — never the open plane (see
+- The sealed plane has no cloud-KMS dependency. Loss of every usable matching
+  AVK and recovery copy may make that agent's sealed values unrecoverable;
+  open-plane data does not depend on the AVK (see
   [encryption-model.md](encryption-model.md),
   [backup-and-recovery.md](backup-and-recovery.md)).
-- Client-side decrypt is the default for clients that can hold key material;
-  server-side decrypt is a narrow, capability-advertised, policy-gated, audited
-  exception (the everyday path only for managed token-only pods), and is always
-  distinguishable in API/CLI/MCP/audit from client-side decrypt.
+- Client encryption/decryption requires the matching AVK. Token-only clients
+  retain redacted inventory access but cannot reveal values or calculate TOTP
+  codes; the backend has no plaintext fallback.
 - Sealed-plane plaintext is released only by the reveal-gated operations and is
   never embedded, recalled, placed in the self-digest, plaintext-exported, or
   ingested.
@@ -457,13 +451,12 @@ Required controls:
   an authorized read of a single open-plane record returns the value, with no
   secret-style reveal ceremony (the reveal ceremony is sealed-plane only).
 - Envelope encryption for all sealed-plane field values and TOTP seeds
-  (`CMK → per-realm KEK → per-secret/field DEK`, `XCHACHA20_POLY1305` or
-  `AES_256_GCM`), with plaintext never written to an ordinary column (see
+  (`client-held AVK → per-sensitive-field DEK`, AES-256-GCM), with plaintext never written to an ordinary column (see
   [encryption-model.md](encryption-model.md), [key-hierarchy.md](key-hierarchy.md)).
 - Reveal-gated value release for the sealed plane: `secret:reveal` /
   `totp:code` are the only value-returning operations, each audited
-  (`secret.reveal`, `totp.code`), with no generic decrypt endpoint; the
-  `server_side_decrypt` flag distinguishes server-mediated reveals.
+  through value-free encrypted-material access audit. The active client
+  reveals or calculates the requested value; the backend has no decrypt endpoint.
 - Sealed-plane carve-out enforced at the data layer: secret values and TOTP
   seeds are never embedded, recalled, placed in the self-digest,
   plaintext-exported, or ingested (see [memory-model.md](memory-model.md),
@@ -472,11 +465,11 @@ Required controls:
   grants (`secret:grant`) and realm roles — no open-plane Policy engine governs
   secrets (see [authorization-and-roles.md](authorization-and-roles.md),
   [access-policy.md](access-policy.md)).
-- Minimal sealed-plane TCB: client-side decrypt default; server-side decrypt
-  narrow, capability-gated, audited, and reserved for managed token-only pods
-  and explicitly enabled workflows.
-- Encrypted-only sealed-plane backup (envelope + KMS key identity, never
-  plaintext); sealed material excluded from the plaintext identity export and
+- Minimal sealed-plane TCB: encryption, decryption, password generation, and
+  TOTP calculation happen in the active client. The backend stores ciphertext
+  and redacted inventory.
+- Encrypted-only sealed-plane backup (envelope + public AVK metadata, never
+  the AVK or plaintext); sealed material excluded from the plaintext identity export and
   from any digest/ingest path (see [backup-and-recovery.md](backup-and-recovery.md)).
 - Audit records that never contain memory content, fact values, message bodies
   or payloads, client-supplied vectors, sealed secret values, TOTP seeds,
@@ -516,9 +509,9 @@ Required controls:
   incident, not a tenant-data breach; **blast-radius isolation per cell** (a
   tenant is homed on one isolated cell, with no shared data store across cells)
   so a cell compromise stays contained to that cell's tenants; and a bounded,
-  audited **cross-cloud KMS re-wrap** for tenant migration (decrypt at the source
-  cell, re-encrypt under the destination cell's KMS) that never persists or logs
-  plaintext (see [deployment-cells.md](deployment-cells.md),
+  audited **encrypted archive/import** for tenant migration that preserves
+  ciphertext and supplies the matching AVK separately to the active client
+  (see [deployment-cells.md](deployment-cells.md),
   [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md)).
 
 ## Two-Plane Security Posture
@@ -545,26 +538,21 @@ Open-plane (identity) posture:
 
 Sealed-plane (credential) posture:
 
-- Secret field values and TOTP seeds are stored only as ciphertext under the
-  `CMK → per-realm KEK → per-secret/field DEK` envelope; the wrapping keys live
-  behind KMS (or a local key-management boundary for self-hosted/BYOK). KMS is
-  a required dependency when the sealed plane is enabled (see
+- Secret field values and TOTP payloads are encrypted by the active client
+  under the `AVK → per-sensitive-field DEK` hierarchy. The backend stores
+  ciphertext and public key metadata, with no cloud-KMS vault root (see
   [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md)).
-- Client-side decrypt is the structurally enforced default where a client can
-  hold key material; the managed token-only ephemeral pod runs reveal/TOTP over
-  the capability-gated `server_side_decrypt` path, which transiently puts
-  plaintext and the DEK inside `witself-server` plus its KMS-capable deployment
-  IAM identity.
-- Under the v0 single-CMK + single-deployment-role model, a compromised
-  server/role can unwrap any reachable per-realm KEK — a **tenant-wide blast
-  radius**. Per-realm *cryptographic* isolation against that role
-  (least-privilege per-realm KMS grants or per-realm CMKs) is deferred; v0
-  isolation against ordinary co-tenants is authorization + `realm_id` query
-  scoping. This is the load-bearing residual sealed-plane risk; see
-  [key-hierarchy.md](key-hierarchy.md).
-- Loss of KMS key material crypto-shreds sealed secret values only, never the
-  open plane; there is no v0 managed break-glass plaintext decrypt path.
+- The matching client-held AVK is required for sensitive use. Token-only pods
+  cannot reveal values or calculate TOTP codes; neither the bearer token nor
+  operator/backend access supplies the missing key.
+- Each agent has its own AVK and authenticated envelope bindings. Authorization
+  and query scoping remain necessary for integrity and availability: a
+  compromised token or backend may corrupt/delete reachable ciphertext or
+  expose public inventory, but cannot decrypt it without the AVK.
+- Loss of all usable matching AVKs and recovery copies may make the affected
+  sealed values unrecoverable. It does not affect the open plane; there is no
+  managed break-glass plaintext recovery.
 
 Open posture details that need implementation design:
 
@@ -577,10 +565,9 @@ Open posture details that need implementation design:
   stale, missing, or incompatible client vectors and coverage are surfaced.
 - Whether self-hosted and managed deployments share identical or configurable
   field-level-encryption and audit-integrity options.
-- Whether to promote per-realm cryptographic isolation (per-realm KMS grants or
-  CMKs) from deferred to required, given the expanded TCB of server-side
-  decrypt and the tenant-wide blast radius (tracked in
-  [key-hierarchy.md](key-hierarchy.md)).
+- Future grants/group ownership and additional installation proof-of-possession
+  must preserve the client-held AVK boundary (tracked in
+  [client-custodied-agent-vault.md](client-custodied-agent-vault.md)).
 
 ## AI-Specific Risks
 
@@ -749,24 +736,25 @@ privacy risks above:
   plaintext channel; an attacker (or coaxed agent) overuses them, or uses a
   grant beyond its intent. Mitigated by `secret:reveal`/`totp:code` gating,
   per-field grant narrowing, realm-role scoping, rate limits, and audit.
-- **KMS / deployment-role compromise.** Whoever can call KMS as the deployment
-  identity can unwrap reachable per-realm KEKs. Under v0's single-CMK +
-  single-role model this is a tenant-wide blast radius; per-realm cryptographic
-  isolation is deferred (see [key-hierarchy.md](key-hierarchy.md)).
-- **Server-side-decrypt TCB expansion.** For managed token-only pods the server
-  transiently holds the DEK and plaintext. The control is to keep that path
-  narrow, capability-gated, audited (`server_side_decrypt` flag), and never
-  persisting/logging plaintext — not to pretend the server never sees it.
-- **Tenant blast radius.** Sealed material is isolated against ordinary
-  co-tenants by authorization + `realm_id` query scoping, not by per-tenant
-  cryptography in v0; a backend bug or compromised role crosses that line.
+- **Client-key compromise.** An attacker with an active client's matching AVK
+  and encrypted material can unwrap field DEKs and read that agent's values.
+  Local key custody, protected enrollment/recovery, and limited plaintext
+  lifetime define this boundary (see [key-hierarchy.md](key-hierarchy.md)).
+- **Client plaintext exposure.** The active client temporarily holds unwrapped
+  DEKs, TOTP seeds, generated codes, and deliberately revealed values. Keep
+  these out of persistent channels and minimize deliberate value-tool use.
+  The backend never handles that plaintext.
+- **Tenant blast radius.** Authorization and scoped queries protect encrypted
+  inventory integrity and availability. Per-agent AVKs prevent backend or
+  token possession alone from becoming offline plaintext access.
 - **Offline ciphertext theft.** A stolen database snapshot or object-storage
-  bucket yields only ciphertext; it is useless without KMS access, which is the
-  point of the envelope.
-- **Crypto-shred.** Loss of KMS key material renders sealed secret values
-  permanently unrecoverable. This is contained to the sealed plane and never
-  affects open-plane memories/facts (see
+  bucket yields ciphertext and public metadata; decrypting sensitive values
+  still requires the matching client-held AVK.
+- **Key loss.** Losing every usable matching AVK and recovery copy can make
+  sealed values unrecoverable. This does not erase retained metadata or affect
+  open-plane memories/facts (see
   [backup-and-recovery.md](backup-and-recovery.md)).
+
 - **Carve-out leakage.** Any path that would embed, recall, digest,
   plaintext-export, or ingest a secret value defeats the whole model; the
   carve-out is enforced at the data layer, not by convention (see
@@ -845,17 +833,14 @@ incident, deliberately not a tenant-data breach. See
   shared data store, and a tenant is homed on exactly one cell. A cell compromise
   is therefore contained to that cell's tenants; it does not reach tenants homed
   on other cells, which preserves the same per-tenant containment goal as the
-  sealed-plane KMS blast-radius discipline above.
-- **Cross-cloud KMS during migration.** Moving a tenant between cells (possibly
-  across clouds) requires a **KMS re-wrap**: decrypt sealed material at the source
-  cell, re-encrypt it under the destination cell's KMS. The exposure window is the
-  migration, where plaintext exists transiently and two clouds' KMS are in play.
-  Mitigated by making migration a bounded, audited operation
-  (`tenant.migration_started` / `tenant.migration_completed` /
-  `tenant.migration_failed`), never persisting or logging the transient
-  plaintext, leaning on the first-class export/import for the open plane and the
-  sealed-plane KMS re-wrap for secrets, and scoping each cell's KMS to its own
-  tenants (see [storage.md](storage.md),
+  client-key and tenant isolation discipline above.
+- **Encrypted vault migration.** Moving a tenant between cells, including
+  across clouds, carries byte-identical ciphertext, wrapped DEKs, and public
+  key metadata through account archive/import. The AVK travels separately
+  through protected client transfer, recovery, or enrollment; neither cell
+  decrypts values. Migration must preserve ciphertext integrity and keep key
+  recovery separate from the archive. It does not depend on source-cloud KMS
+  access (see [storage.md](storage.md),
   [backup-and-recovery.md](backup-and-recovery.md),
   [key-hierarchy.md](key-hierarchy.md)).
 
@@ -971,10 +956,10 @@ Self-hosted deployments add infrastructure risks:
 - Public ingress without TLS, exposing the identity API.
 - Weak database/backup controls over PostgreSQL holding memories, facts, PII,
   and optional client-supplied vector indexes, and over sealed-plane ciphertext
-  in `secrets`, `secret_fields`, `totp_enrollments`, `secret_deks`, and
-  `realm_keys`.
+  in `secrets`, `secret_fields`, and `secret_deks`, with public AVK bindings.
 - Misconfigured KMS keys, over-broad KMS grants, or a KMS key/grant deletion
-  that crypto-shreds sealed secret values.
+  affecting infrastructure-encrypted volumes, backups, or deployment material.
+  Agent vault values remain encrypted under the separate client-held AVK.
 - Logs shipped to third-party systems without redaction, leaking PII or
   identity content.
 - Metrics or alert labels that leak memory/fact content, fact names, message
@@ -988,7 +973,8 @@ Mitigations:
 - Terraform state and secret policy.
 - Helm values that reference existing Kubernetes Secrets instead of embedding
   raw database, token, or KMS credentials; least-privilege KMS
-  grants/workload identity for the sealed plane when enabled.
+  grants/workload identity for infrastructure-encrypted storage and deployment
+  material. Agent-secret operations use client-held AVKs.
 - Workload identity support.
 - NetworkPolicy templates with no model-provider egress requirement for
   `witself-server`; unrelated server egress remains allow-listed.
@@ -997,7 +983,7 @@ Mitigations:
   no identity content.
 - Production self-host support only after migrations, backups (including vector
   data and encrypted sealed-plane material), re-index guidance, KMS
-  provisioning and key-rotation guidance for the sealed plane, and operational
+  provisioning for infrastructure, client AVK recovery/rotation guidance, and operational
   guidance are real (see [self-hosting.md](self-hosting.md),
   [helm-chart.md](helm-chart.md),
   [terraform-infrastructure.md](terraform-infrastructure.md), and
@@ -1023,8 +1009,8 @@ Initial non-goals:
 - Protecting a sealed secret after an authorized actor reveals it and copies it
   elsewhere; the control is minimizing reveal scope and preferring runtime
   injection, not pursuing the secret after release.
-- A v0 managed break-glass plaintext-decrypt path, or recovery of sealed secret
-  values after KMS key material is lost (crypto-shred).
+- A managed break-glass plaintext-decrypt path, or recovery of sealed values
+  after every matching AVK and usable recovery copy is lost.
 - Replacing cloud-provider IAM, KMS, database backup, or Kubernetes security
   responsibilities in self-hosted deployments.
 - Preventing identity-content egress from an authorized client that deliberately
@@ -1047,10 +1033,9 @@ Revisit this threat model when:
 - The token model changes, or actor/sender derivation is altered.
 - Soft-delete, retention-window, or hard-delete behavior changes.
 - Identity export/import behavior or `sensitive` handling changes.
-- Server-side decrypt behavior, the capability switch, or the client/server
-  decrypt split changes.
-- The key hierarchy, KMS provider model, per-realm KEK/DEK scheme, or
-  per-realm cryptographic-isolation stance changes.
+- The client encryption/decryption boundary or encrypted-material API changes.
+- The AVK/DEK hierarchy, client key lifecycle, or per-agent cryptographic
+  binding changes. Infrastructure KMS changes remain deployment review triggers.
 - Secret grants, realm roles, or the sealed-plane authorization model change.
 - New 2FA modalities (SMS, email, push, passkeys, hardware keys) are added.
 - The sealed-plane carve-out (embed/recall/digest/export/ingest exclusions) is
@@ -1059,7 +1044,8 @@ Revisit this threat model when:
   allow-list/consent model, the cross-realm message envelope, or the relay
   topology changes (post-v0).
 - The multi-cloud cell model, the global control plane's surface, tenant
-  placement/migration, or the cross-cloud KMS re-wrap changes (post-v0).
+  placement/migration, or encrypted archive/import and separate client-key
+  transfer change (post-v0).
 - Payment or crypto payment providers are integrated.
 - The Helm chart or Terraform modules become production-supported.
 - The internal support/admin (or AI support/admin) path is designed.

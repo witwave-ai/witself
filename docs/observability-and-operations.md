@@ -73,10 +73,10 @@ probes. See
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-side custody for agent secrets. The backend holds no AVK key material,
+calls no KMS for agent secrets, and never decrypts secret values.
+Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
 
 ## Decision
@@ -105,8 +105,9 @@ is instrumented for memory operations, deterministic recall, optional vector
 validation/search, curation state, fact operations, policy decisions,
 cross-agent access, groups, and inter-agent
 messaging; its threat focus is the **integrity and authenticity** of identity
-data. The **sealed plane** (secrets and TOTP) is instrumented for secret
-operations, reveals, TOTP codes, and KMS calls; its threat focus is the
+data. The **sealed plane** (secrets and TOTP) has proposed instrumentation for
+secret operations and value-free client reports of reveal and TOTP use; its
+threat focus is the
 **confidentiality** of credential material. The privacy rules tighten across
 both: metrics and logs must never carry memory content, fact values, message
 bodies, or embedding vectors, and must never carry secret values, TOTP seeds,
@@ -158,13 +159,15 @@ Probe semantics:
 | Endpoint | Purpose | Dependency checks |
 |---|---|---|
 | `/livez` | Process is alive and should not be restarted. | Minimal process-local checks only. |
-| `/readyz` | Server can safely receive traffic. | Storage, migrations, KMS reachability when the sealed plane is enabled, and read-only maintenance state. |
+| `/readyz` | Server can safely receive traffic. | Storage, migrations, and read-only maintenance state; agent-secret custody adds no KMS dependency. |
 | `/startupz` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
 | `/healthz` | Alias for the liveness probe. | Minimal process-local checks only. |
 
 Liveness should be conservative. A transient database, object-store, or KMS
 failure should normally make readiness fail, not
-force Kubernetes to restart a healthy process.
+force Kubernetes to restart a healthy process. This applies to required
+infrastructure dependencies; agent-secret encryption and reveal add no backend
+KMS dependency.
 
 Readiness should fail when:
 
@@ -173,10 +176,6 @@ Readiness should fail when:
 - PostgreSQL full-text facilities required for universal recall are unavailable.
 - Migration-0032 vector tables are missing or invalid. This gates vector
   operations, not lexical memory traffic; no extension is required.
-- Required KMS operations cannot complete when the sealed plane is enabled.
-  KMS is a hard readiness gate only for sealed-plane deployments; an
-  open-plane-only deployment does not depend on KMS (see
-  [storage.md](storage.md) and [key-hierarchy.md](key-hierarchy.md)).
 - The server is intentionally in a mode that should not accept ordinary
   traffic.
 - The server is draining or shutting down.
@@ -188,8 +187,8 @@ support disabled remains ready for all universal memory operations.
 
 Startup should cover slow boot paths such as config validation, first database
 connection, migration status checks, full-text index availability,
-migration-0032 vector-table validation, and KMS provider client initialization when the
-sealed plane is enabled.
+and migration-0032 vector-table validation. Agent vault keys stay with clients;
+startup does not initialize an agent-secret KMS provider.
 
 ## Prometheus Metrics
 
@@ -219,10 +218,8 @@ Initial metric families should include:
 | `witself_fact_limit_rejections_total` | Implemented non-retryable current-fact capacity refusals. Its bounded labels are exactly `limit_dimension="stored_fact"` and operation from the closed set `create` or `confirm`; it never carries account, realm, agent, subject, predicate, fact/candidate id, usage, maximum, value, or error text. Phase B activates finite defaults only after migration 0078 reconciles every target cell. |
 | `witself_memory_limit_rejections_total` | Implemented non-retryable active-memory capacity refusals. Its bounded labels are exactly `limit_dimension="stored_memory"` and operation from the closed set `create`, `supersede`, `restore`, `reactivate`, or `curation_apply`; it never carries account, realm, agent, memory, plan, usage, maximum, content, or error-text labels. |
 | `witself_plan_limit_rejections_total` | Implemented non-retryable realm and agent create refusals. Its bounded labels are `limit_dimension="realms"`, legacy `"agents"`, or `"agents_per_realm"`, plus `operation="create"`; it never carries an account, realm, agent, resource name, or error text. |
-| `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
-| `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
-| `witself_kms_operations_total` | KMS envelope operations by provider, operation (`generate_data_key`, `encrypt`, `decrypt`, `rotate`), and result. Present only when the sealed plane is enabled. |
-| `witself_kms_operation_duration_seconds` | KMS operation latency histogram by provider and operation. Present only when the sealed plane is enabled. |
+| `witself_secret_reveals_total` | Proposed value-free client reveal reports by principal kind, owner kind, and result. Only the active client decrypts the value; the metric must never carry it. |
+| `witself_totp_operations_total` | Proposed TOTP operation events by operation, owner kind, and result. TOTP calculation happens in the active client; the metric must never carry a generated code or seed. |
 | `witself_memory_operations_total` | Memory domain operations by operation (`add`, `read`, `list`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`, `evidence_resolve`, `delete`), authenticated principal kind, and result. Authentication or request-decoding failures remain visible in the HTTP family rather than being misreported as completed domain calls. |
 | `witself_memory_recalls_total` | Recall requests by mode (`lexical`, `hybrid`), authenticated principal kind, and result. |
 | `witself_memory_recall_duration_seconds` | Recall latency histogram by mode and authenticated principal kind. |
@@ -409,16 +406,12 @@ breakdown in `route_lookup_result`, grouped only by `result`, `evidence`, and
 `route_kind`. This makes `cp_error` on `custom_domain` routes directly visible
 without exposing a customer domain or tenant identifier.
 Metric names can evolve during implementation, but the coverage categories
-should remain. The sealed-plane families (`witself_secret_operations_total`,
-`witself_secret_reveals_total`, `witself_totp_operations_total`,
-`witself_kms_operations_total`, and `witself_kms_operation_duration_seconds`)
-count events and never carry payload: no secret value, field value, TOTP seed,
-generated code, or key material ever appears in a metric or its labels. They
-are present only when the sealed plane is enabled. The `server_side_decrypt`
-label on the reveal and TOTP families records which decrypt path served the
-value — `true` for token-only pods where the server mediates decryption,
-`false` for client-held decryption — per the hybrid model in
-[key-hierarchy.md](key-hierarchy.md).
+should remain. Proposed sealed-plane operation, reveal-report, and TOTP-report
+families count events and never carry payload: no secret value, field value,
+TOTP seed, generated code, or key material ever appears in a metric or its
+labels. Encryption, decryption, password generation, and TOTP calculation
+happen in the active client. There is no backend decrypt-mode label or
+agent-secret KMS operation family. See [key-hierarchy.md](key-hierarchy.md).
 
 The cross-realm collaboration families
 (`witself_conversations_total`, `witself_relay_envelopes_total`,
@@ -530,13 +523,10 @@ Allowed labels should be low cardinality and pre-normalized, such as:
   profile id, model name, dimensions, or vector value.
 - `backend_kind`, such as `managed`, `self_hosted`, or `local`.
 - `store_backend`, `object_store_provider`.
-- `kms_provider`, the KMS provider family for sealed-plane operations, such as
-  `aws_kms`, `gcp_kms`, `azure_key_vault`, or `local_dev`. It must never carry a
-  key id, key ARN, endpoint URL, or key material.
-- `server_side_decrypt`, `true` or `false`, recording which decrypt path served
-  a reveal or TOTP code: `true` when the server mediates decryption for a
-  token-only pod, `false` for client-held decryption. It never carries a key,
-  a value, or any plaintext.
+- Sealed-plane event labels must describe value-free operations and results,
+  without agent-secret KMS provider or backend decrypt-mode dimensions. The
+  backend has no decrypt key and receives no sensitive plaintext.
+
 - `reason_class`, a small normalized set such as `missing`, `stale`,
   `incompatible`, `non_finite`, `wrong_dimension`, or `unauthorized`, for
   optional-vector validation and fallback events.
@@ -580,8 +570,8 @@ Expected log fields:
 - Owner kind (`self`, `other_agent`, or `group`) for identity operations.
 - Permission verb and decision for policy-gated operations.
 - Recall mode and bounded vector coverage class for recall operations.
-- KMS provider, KMS operation, and the `server_side_decrypt` flag for
-  sealed-plane reveal, TOTP code, and key operations.
+- Value-free operation and result for sealed-plane ciphertext access and
+  client-reported reveal or TOTP use; never a decrypted value or client key.
 - Backend kind.
 - Stable error code when an operation fails.
 
@@ -901,11 +891,9 @@ Initial alert candidates:
 - Curation request backlog, lease expiry, fencing conflict, or failed plan
   application above a baseline.
 - Storage operation failures.
-- KMS operation failures (sealed plane).
+- Sealed-plane ciphertext-storage or client-reported key-lifecycle failures.
 - Secret reveal spikes (possible credential-exfiltration signal).
 - TOTP code generation spikes.
-- Server-side-decrypt reveal rate above a baseline (token-only pods serving
-  values; expands the decrypt trust boundary).
 - Cross-agent access denials above a baseline (possible policy or abuse signal).
 - Cross-agent curate/forget spikes (possible memory-poisoning or write abuse).
 - Sustained active-memory capacity refusals by bounded operation (capacity or
@@ -1150,7 +1138,7 @@ Required checks once the server and chart exist:
 - Tests proving `owner_kind` only ever takes `self`, `other_agent`, or `group`
   for access-perspective metrics, and only `agent` or `group` for
   data-ownership metrics, and never an agent name, group name, or realm id.
-- Tests proving `server_side_decrypt` only ever takes `true` or `false`.
+- Tests proving sealed-plane telemetry exposes no backend decrypt-mode label.
 - Tests proving memory content, fact values, message bodies, and embedding
   vectors never appear in metrics, logs, or health responses.
 - Tests proving active-memory refusal labels are restricted to
@@ -1163,8 +1151,8 @@ Required checks once the server and chart exist:
 - Tests proving secret values, secret/field names, TOTP seeds, generated TOTP
   codes, KMS key material, data keys, and private keys never appear in metrics,
   logs, or health responses.
-- Tests proving the `kms_provider` label carries only the provider family and
-  never a key id, ARN, endpoint, or key material.
+- Tests proving sealed-plane telemetry does not register agent-secret KMS
+  operation metrics or provider labels; all value cryptography remains client-side.
 - Tests proving no backend model-provider label/config/health path is
   registered, and vector metrics never carry a profile id, model name,
   dimensions, query text, endpoint, credential, or vector value.

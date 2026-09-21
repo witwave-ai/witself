@@ -21,9 +21,8 @@ exact-request journal. The MCP create tool requires the equivalent
 Secret update/rename/copy/grants,
 group/operator ownership, TOTP enroll/delete convenience commands, references,
 and runtime injection remain planned. Encryption, TOTP calculation, AVK
-enrollment/recovery, and rotation are client-side under the separate AVK; every
-KMS/server-decrypt description below
-is superseded by [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and
+enrollment/recovery, and rotation are client-side under the separate AVK, as
+defined by [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and
 [the implementation plan](client-custodied-agent-vault.md).
 
 Every CLI operation that can access a local AVK requires the selected installed
@@ -5740,5 +5739,5 @@ open-plane (memory/fact/identity) core ships first; the sealed credential plane
 (`password generate`, `secret`, `run`, `totp`) is a defined v0 slice that
 validates generated passwords, reveal-gated secrets, runtime injection, and
 authenticator-style 2FA, and may be staged after the open-plane core. Sealed-plane
-commands also exercise the envelope/KMS dependency, which is required only when
-the sealed plane is enabled.
+commands also exercise client-side envelope encryption under the agent vault
+key; the backend stores ciphertext and redacted inventory.

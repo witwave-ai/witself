@@ -469,8 +469,9 @@ Chart requirements:
 
 - Production values should assume external PostgreSQL and optional external
   object/blob storage. No backend model/provider configuration is permitted.
-  KMS is optional and demoted: field-level encryption of `sensitive` facts is a
-  capability, not a default chart dependency.
+  Agent secrets use client-held AVKs and client-side envelope encryption;
+  they require no backend KMS configuration. The `sensitive` fact flag controls
+  redaction, not secret-value encryption.
 - Raw database passwords, KMS credentials, provider secrets, tokens,
   passphrases, private keys, and wallet credentials must not be placed directly
   in default values.

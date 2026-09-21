@@ -6,8 +6,8 @@
 > current Go transport structs. Sensitive plaintext, AVKs, enrollment private
 > keys, pairing secrets, recovery passphrases/artifacts, and backend inference
 > are never server response fields. The authoritative implemented shapes are in
-> [Current Client-Custodied Shapes](#current-client-custodied-shapes); older
-> KMS/server-decrypt examples are historical target-only material.
+> [Current Client-Custodied Shapes](#current-client-custodied-shapes); local
+> value-returning output is separate from backend encrypted material delivery.
 
 Status: evolving contract. This document defines JSON shared by CLI `--json`,
 MCP tool results, managed API responses, self-hosted API responses, and local
@@ -50,9 +50,8 @@ the *confidentiality* of secret material: active clients encrypt values under a
 client-custodied agent vault key, the backend returns only encrypted one-field
 material, and local clients perform deliberate reveal or TOTP generation.
 Inventory is redacted by default. Sealed material is never embedded, recalled,
-included in the self-digest, or plaintext-exported. The amendment above controls
-wherever older target examples below still show KMS-rooted or server-decrypt
-shapes.
+included in the self-digest, or plaintext-exported. These custody rules apply
+to both implemented and target examples below.
 
 Once implementation starts, exact JSON Schemas should be generated from the Go
 contract structs used by the shared core. This keeps CLI, MCP, managed API,
@@ -462,13 +461,6 @@ no current server or CLI implements that rail.
     "totp": {
       "supported": true
     },
-    "client_side_decrypt": {
-      "supported": true
-    },
-    "server_side_decrypt": {
-      "supported": false,
-      "reason": "client_custodied"
-    },
     "billing": {
       "supported": false,
       "reason": "not_configured"
@@ -558,11 +550,9 @@ Rules:
   defined v0 slice that may be staged after the open-plane core; an
   open-plane-only deployment reports `supported: false` with a stable `reason`
   (see [v0-scope.md](v0-scope.md)).
-- `client_side_decrypt` is the only agent-vault custody mode. Implementations
-  that expose these target capability names report it supported and report
-  `server_side_decrypt` unsupported with a stable `client_custodied` reason.
-  No agent-vault `kms_provider` is returned because cloud KMS is not in this
-  decrypt path.
+- The active client is the only agent-vault decrypt owner. The backend has no
+  plaintext custody mode or vault KMS capability; it returns authorized
+  ciphertext packages for local use with the client's AVK.
 - Capability responses never include secret values, TOTP seeds, TOTP codes,
   passphrases, private keys, key material, or wrapped key blobs. The sealed plane
   is never embedded, recalled, in the self-digest, or plaintext-exported.
@@ -4167,12 +4157,13 @@ candidate reason, raw idempotency key, or value-derived request fingerprint.
 
 ## Audit Event
 
-Used by `audit list` and `audit show`.
+Illustrative target shape for `audit list` and `audit show`. The current backend
+records encrypted material delivery; it cannot attest to local reveal.
 
 ```json
 {
   "id": "aud_123",
-  "action": "secret.reveal",
+  "action": "secret.material.delivered",
   "actor": {
     "kind": "agent",
     "id": "agent_456",
@@ -4193,8 +4184,7 @@ Used by `audit list` and `audit show`.
   "reason": "CI runner needs the deploy token",
   "timestamp": "2026-06-26T18:00:00Z",
   "metadata": {
-    "field": "password",
-    "server_side_decrypt": true
+    "field": "password"
   }
 }
 ```
@@ -4575,11 +4565,12 @@ account/realm/owner scope, public AVK metadata, and `ciphertext_bytes`.
 `state: "restored"` and public `key` metadata. No JSON shape accepts or emits a
 recovery passphrase or AVK bytes.
 
-### Historical Target-Only Sealed Shapes
+### Target Inventory And Local Value-Returning Shapes
 
-The KMS-rooted summaries, server-side reveal/TOTP, grants, and password API
-examples below predate ADR 0003. They are not emitted by the schema-56 server;
-the current shapes above are authoritative.
+The broader inventory and grant examples below remain target product shapes;
+the current shapes above are authoritative for the schema-56 server. Reveal,
+TOTP, and password examples describe active-client output only; the backend
+returns ciphertext and redacted inventory.
 
 ### Secret Summary
 
@@ -4674,17 +4665,13 @@ Rules:
 
 ### Secret Reveal Result
 
-Used only by explicit reveal operations (`secret reveal`,
-`POST /v1/secrets/{secret_id}:reveal`). This is the sealed plane's audited
-value-returning ceremony; the open plane has no equivalent. The shape is
-selected by backend/realm capability ([Capability Result](#capability-result),
-[key-hierarchy.md](key-hierarchy.md)): `server_side_decrypt` returns the
-decrypted value; `client_side_decrypt` returns ciphertext plus the envelope and
-key-unwrap material so the client decrypts locally — no plaintext crosses the
-wire.
+Used only by an explicit local `secret reveal` operation. The backend's
+`POST /v1/secrets/{secret_id}/fields/{field_id}:access` returns the encrypted
+material shape in [Current Client-Custodied Shapes](#current-client-custodied-shapes),
+never a sensitive value. The active client uses its AVK to unwrap the field DEK
+and decrypt locally. A bearer token alone cannot reveal a field.
 
-Server-mediated shape (`server_side_decrypt`, e.g. managed token-only pods — the
-v0 over-the-wire path):
+Illustrative local output:
 
 ```json
 {
@@ -4697,91 +4684,27 @@ v0 over-the-wire path):
     "sensitive": true,
     "value": "generated-password",
     "value_encoding": "plain"
-  },
-  "decrypt_mode": "server_side",
-  "audit_event_id": "aud_123",
-  "expires_at": null
-}
-```
-
-Client-held shape (`client_side_decrypt`, BYOK over the wire): **post-v0** —
-remote v0 backends advertise `client_side_decrypt: false` and do not emit this
-shape (see [key-hierarchy.md](key-hierarchy.md) V0 crypto subset). No plaintext
-`value`; the client unwraps the DEK and AEAD-opens the ciphertext per the
-[key-hierarchy.md](key-hierarchy.md) client-held step list.
-
-```json
-{
-  "secret": {
-    "id": "sec_123",
-    "name": "github/builder"
-  },
-  "field": {
-    "name": "password",
-    "sensitive": true,
-    "value": null,
-    "value_encoding": null
-  },
-  "decrypt_mode": "client_side",
-  "envelope": {
-    "ciphertext": "<base64>",
-    "nonce": "<base64>",
-    "aead_algorithm": "XCHACHA20_POLY1305",
-    "dek_id": "dek_123",
-    "dek_version": 1,
-    "kms_provider": "aws-kms",
-    "aad_context": {
-      "realm_id": "realm_123",
-      "secret_id": "sec_123",
-      "field": "password",
-      "owner_kind": "agent",
-      "domain": "secret-field"
-    }
-  },
-  "key_material": {
-    "kek_id": "kek_123",
-    "wrapped_dek": "<base64>",
-    "wrapped_kek": "<base64>",
-    "kms_provider": "aws-kms",
-    "kms_key_ref": "arn:aws:kms:...",
-    "encryption_context": {
-      "realm_id": "realm_123",
-      "purpose": "realm-kek",
-      "kek_id": "kek_123",
-      "key_version": 1
-    }
-  },
-  "audit_event_id": "aud_123",
-  "expires_at": null
+  }
 }
 ```
 
 Rules:
 
-- Reveal responses are the only secret responses that contain a sensitive value,
-  and only in the `server_side` shape; the `client_side` shape carries
-  ciphertext and wrapped key material, never plaintext.
-- `decrypt_mode` (`server_side` | `client_side`) tells the client which shape it
-  received and must match the advertised capability.
-- `aead_algorithm` is `XCHACHA20_POLY1305` or `AES_256_GCM`. The canonical
-  `wrapped_dek` and its current wrapping-KEK pointer live on the `secret_deks`
-  row; the envelope references the DEK by `dek_id` and records the **frozen**
-  `dek_version` (see [key-hierarchy.md](key-hierarchy.md)). `key_material` MAY be
-  returned inline (as above) or fetched once via a key-material endpoint keyed by
-  `kek_id` and cached.
-- `aad_context` is reconstructed strictly from stored envelope fields and binds
-  ciphertext to its logical slot (`realm_id`, `secret_id`, field, `owner_kind`,
-  `domain`); the `encryption_context` binds the KMS KEK unwrap to
-  `realm_id` + purpose + `kek_id`/`key_version`.
-- Reveals include `audit_event_id` when audit is available and `expires_at` when
-  the reveal carries a TTL or lease. The server-mediated path emits
-  `secret.reveal` with the `server_side_decrypt` flag (see
-  [audit-retention.md](audit-retention.md)).
+- Sensitive plaintext appears only in deliberately selected active-client
+  output; ordinary inventory remains redacted.
+- The encrypted HTTP package carries ciphertext, a client-wrapped field DEK,
+  and public AVK identity. It contains no AVK or plaintext DEK.
+- The client authenticates the package's account, realm, owner, field,
+  generation, and key coordinates before returning a value. See
+  [key-hierarchy.md](key-hierarchy.md).
+- The backend audits encrypted material access with value-free metadata. It
+  cannot attest that a local reveal succeeded and has no plaintext custody mode.
 
 ### TOTP Code Result
 
-Used by `totp code` and `POST /v1/totp/{secret_id}:code`. An explicit,
-audited sealed-plane value-returning op. The TOTP seed (`totp-seed`) is
+Used by local `totp code` after authorized encrypted seed-material access.
+The active client decrypts the seed with its AVK and calculates the code;
+there is no backend code route. The TOTP seed (`totp-seed`) is
 high-value sealed material and is **never** returned by `totp code`.
 
 ```json
@@ -4795,9 +4718,7 @@ high-value sealed material and is **never** returned by `totp code`.
   "digits": 6,
   "period_seconds": 30,
   "remaining_seconds": 18,
-  "expires_at": "2026-06-26T18:00:30Z",
-  "decrypt_mode": "server_side",
-  "audit_event_id": "aud_124"
+  "expires_at": "2026-06-26T18:00:30Z"
 }
 ```
 
@@ -4807,14 +4728,15 @@ Rules:
   never returned here and is never embedded, recalled, in the self-digest, or
   plaintext-exported. The seed is revealed only through the more privileged
   `totp:enroll` path (see [totp-2fa.md](totp-2fa.md)).
-- `decrypt_mode` mirrors the [Secret Reveal Result](#secret-reveal-result)
-  custody modes; the server-mediated path emits `totp.code` with the
-  `server_side_decrypt` flag.
+- This is illustrative active-client output, separate from the encrypted
+  [material package](#current-client-custodied-shapes). Backend events record
+  material delivery only and never the code, seed, or success of local calculation.
 
 ### Password Generate Result
 
-Used by `password generate` and `POST /v1/password:generate`. Generation does not
-touch the sealed store unless the caller also writes the value into a secret.
+Used by local `password generate`; password generation happens in the active
+client and has no backend generation route. It does not touch the sealed store
+unless the client also encrypts and writes the value into a secret.
 
 ```json
 {

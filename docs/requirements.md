@@ -120,8 +120,9 @@ not the production model.
   work, and one active agent processes at most one fenced request per turn.
 - Let agents set, get, list, and delete their own facts, and promote a fact to
   primary.
-- Let agents recall memories **semantically by default** through embedding-backed
-  similarity search, combined with keyword, tag, kind, and time filters.
+- Let agents recall memories through PostgreSQL lexical search, with optional
+  semantic similarity when clients supply compatible vector profiles, memory
+  vectors, and query vectors, combined with keyword, tag, kind, and time filters.
 - Let agents access other agents' memories and facts only under explicit,
   evaluable policy, with a default-deny stance.
 - Let agents and operators organize agents into named security groups that act as
@@ -254,14 +255,15 @@ token or operator credential has explicit permission.
 
 A realm is the operator-owned container for a group of named agents. It is the
 scope that holds agents, agent-owned and group-owned memories, facts, and secrets,
-security groups, policies, messages, secret grants, the per-realm KEK (in
-`realm_keys`), audit records, and billing or usage limits. The realm is the rename
-of the Witpass "vault" and is the top-level managed object in Witself; the former
-per-vault KEK is now the per-realm KEK (see [Key Hierarchy](#key-hierarchy)).
+security groups, policies, messages, future secret grants, public agent-vault
+key identities, audit records, and billing or usage limits. The realm is the
+rename of the Witpass "vault" and is the top-level managed object in Witself;
+sealed values use each owning agent's client-held AVK (see
+[Key Hierarchy](#key-hierarchy)).
 
 In the managed service, billing attaches at the account level and usage rolls up
 by realm: plans, usage limits, agent caps, stored-memory and stored-fact limits,
-recall/embedding limits, message limits, and rate limits are measured per realm.
+recall/client-vector limits, message limits, and rate limits are measured per realm.
 
 An operator or realm admin can inspect identity state across all agents in the
 realm. This includes listing all agent-owned and group-owned memories and facts,
@@ -1003,8 +1005,8 @@ Export posture:
 Sealed-plane carve-out (#2): the whole-account archive includes client-encrypted
 secret/TOTP envelopes, wrapped per-field DEKs, public AVK bindings, and
 value-free lifecycle history. It never contains plaintext secret values or TOTP
-seeds, an AVK or recovery artifact, raw token material, or a server-side decrypt
-path. A secret reference may appear in a memory or fact, but it resolves to
+seeds, an AVK or recovery artifact, raw token material, or a backend plaintext
+custody path. A secret reference may appear in a memory or fact, but it resolves to
 plaintext only through the reveal ceremony, never through export.
 
 Import posture:
@@ -1264,61 +1266,47 @@ is the encryption reconciliation from the consolidation (carve-out #1).
   envelope, and no reveal for the open plane. Optional field-level encryption of
   `sensitive` facts remains a capability, not a pillar (see
   [Data-At-Rest Note](#data-at-rest-note)).
-- **Sealed plane** uses KMS-backed envelope encryption: a root CMK wraps a
-  per-realm KEK (`kek_`), which wraps a per-secret/field DEK (`dek_`). Field
-  ciphertext uses an AEAD (`XCHACHA20_POLY1305` or `AES_256_GCM`). Plaintext
-  secret material never lands in ordinary database columns.
-- **Hybrid custody behind one capability switch.** `client_side_decrypt` is the
-  default where the client (CLI, local MCP runtime, local agent) can hold or derive
-  key material; the server returns ciphertext + envelope metadata and the client
-  unwraps. `server_side_decrypt` is the capability-gated path for managed
-  token-only ephemeral pods that hold only a bearer token and cannot reach KMS — on
-  that path the server transiently sees the DEK and plaintext, advertised honestly
-  via the capability flag and flagged on the reveal/code audit event. The trade-off
-  is analyzed in [key-hierarchy.md](key-hierarchy.md) and
-  [encryption-model.md](encryption-model.md).
-- **KMS as a conditional dependency.** KMS providers are `aws-kms`, `gcp-kms`,
-  `azure-key-vault`, and `local-dev` (the local-dev provider wraps the same
-  KEK/DEK structure with a `WITSELF_PASSPHRASE_FILE`-derived key, for tests and
-  `witself-server serve --dev` only). KMS is required and a readiness gate **only
-  when the sealed plane is enabled**; an open-plane-only deployment requires no
-  KMS. PostgreSQL is the open-plane readiness dependency; optional vector indexes
-  are not.
-- **Crypto-shred posture.** Loss of the CMK/KMS access renders sealed secret
-  values unrecoverable (crypto-shred). This does **not** affect the open plane,
-  whose plaintext identity data is recoverable from ordinary backups and export.
+- **Sealed plane** uses client-side envelope encryption: a per-agent AVK wraps
+  a fresh DEK for each sensitive field generation. The active client encrypts
+  and decrypts using `AES_256_GCM_RANDOM_NONCE_V1`; the backend stores only
+  ciphertext, wrapped DEKs, public key identity, and redacted inventory.
+- **Client custody.** The server returns one authorized encrypted field package.
+  The active client holds the AVK, unwraps the field DEK, and performs reveal or
+  TOTP calculation locally. Password generation is also client-local. A bearer
+  token alone cannot reveal a sensitive field, and no plaintext custody
+  capability is available on the backend.
+- **Dependencies.** Agent-vault custody requires no backend KMS provider.
+  PostgreSQL remains the server storage dependency; local key availability is
+  checked by the client and fails closed when absent or mismatched.
+- **Key-loss posture.** Loss of every AVK copy and recovery path makes encrypted
+  fields unrecoverable. The backend cannot reconstruct the key. Ordinary
+  open-plane backup recovery is independent of the AVK.
 
-The encryption model is tracked in [encryption-model.md](encryption-model.md), the
-key custody analysis in [key-hierarchy.md](key-hierarchy.md), and the storage and
-KMS provider configuration in [storage.md](storage.md).
+The encryption and custody contracts are tracked in
+[encryption-model.md](encryption-model.md), [key-hierarchy.md](key-hierarchy.md),
+and [storage.md](storage.md).
 
 ### Key Hierarchy
 
-Decision: the sealed plane uses a three-level key hierarchy, scoping who can call
-unwrap and bounding per-realm blast radius.
+Decision: the sealed plane uses a client-custodied, per-agent key hierarchy.
 
+```text
+Agent Vault Key (AVK)                         held only by active clients
+  └─ wraps ─> per-sensitive-field-generation DEK    wrapped_dek in secret_deks
+       └─ encrypts ─> field ciphertext             stored by the backend
 ```
-CMK (KMS Customer Master Key)
-  └─ wraps ─> per-realm KEK (kek_...)            one per realm, in realm_keys
-       └─ wraps ─> per-secret/field DEK (dek_...)  wrapped_dek in secret_deks
-```
 
-- **Root CMK.** A KMS Customer Master Key under the `WITSELF_KMS_PROVIDER`
-  abstraction (`aws-kms` via an ARN in `WITSELF_KMS_KEY_ID` for managed v0; the
-  other providers for self-hosting/BYOK; `local-dev` for dev). In managed mode the
-  CMK lives in Witself's KMS; in self-hosted/BYOK mode it lives in the operator's
-  own KMS.
-- **Per-realm KEK** (`kek_` prefix). A 256-bit symmetric KEK generated per realm
-  and stored wrapped in `realm_keys` (the rename of the Witpass per-vault KEK in
-  `vault_keys`). Per-realm KEKs give per-tenant cryptographic separation and bound
-  the blast radius of a compromised DEK.
-- **Per-secret/field DEK** (`dek_` prefix). The DEK that the AEAD uses on field
-  ciphertext, stored wrapped in `secret_deks`. V0 ships per-secret DEKs;
-  per-field DEKs are opt-in/deferred.
+- **Agent Vault Key.** The client holds the AVK independently of the bearer
+  token; the backend stores only public key identity and lifecycle metadata.
+- **Field DEK.** The client creates a fresh DEK for each sensitive field
+  generation, seals the value, and wraps the DEK with its AVK.
+- **Rotation.** The client rewraps field DEKs under a new AVK while field
+  ciphertext remains unchanged. The server stages wrappers and atomically
+  commits the accepted rotation without receiving keys or plaintext.
 
-`key.rotated` (KEK rotation) is an audited maintenance event. The full custody
-analysis, v0 crypto subset, and BYOK/per-realm-CMK deferrals are in
-[key-hierarchy.md](key-hierarchy.md).
+Enrollment, recovery, rotation, and the exact authenticated scope are defined
+in [key-hierarchy.md](key-hierarchy.md) and
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ### Reveal and Value-Returning Operations
 
@@ -1330,9 +1318,10 @@ plane does not. This is carve-out #3.
   `witself run` injection. Each is explicit, audited, and metered (`secret_read`,
   `totp_code`, `runtime_injection`).
 - The reveal ceremony requires the `secret:reveal` (or `totp:code`) scope, honors
-  grants and realm roles, records a `secret.reveal` / `totp.code` audit event, and
-  carries the `server_side_decrypt` flag on that event when the server-mediated
-  path was used.
+  the current agent-ownership boundary, and records encrypted material delivery
+  with value-free audit metadata. The active client performs decryption and
+  calculation; the backend cannot attest that either local operation occurred.
+  Grants and cross-agent/group secret access remain deferred.
 - The open plane has **no reveal**. `memory read` and `fact get` return values
   through an ordinary authorized read; `sensitive` memories/facts use lightweight
   display redaction, not encryption and not a reveal. The "data is plainly
@@ -1481,7 +1470,7 @@ Required operational surfaces:
 - Structured JSON logs with request IDs and strict redaction.
 - Low-cardinality metric labels that use route templates rather than raw paths.
 - Metrics for core customer and agent activity, including memory operations,
-  recall and embedding operations, fact operations, policy decisions (allow/deny),
+  recall and client-vector operations, fact operations, policy decisions (allow/deny),
   cross-agent accesses, group operations, message send/deliver/read,
   authentication, token lifecycle, audit events, usage metering, limit decisions,
   storage, vector storage, migrations, and HTTP latency.
@@ -1674,7 +1663,7 @@ Platform:
 - Audit retention and stored audit volume.
 - General managed-service API request volume.
 
-Recalls, embedding operations, cross-agent accesses, messages, secret reads, TOTP
+Recalls, client-vector writes, cross-agent accesses, messages, secret reads, TOTP
 code generation, and runtime injection should be metered even when pricing remains
 tiered because they represent real service load and security-relevant use.
 
@@ -2004,11 +1993,11 @@ including:
 - Group create, delete, member add/remove, and group-owned record changes.
 - Message send, deliver, read, and ack.
 - Identity export and import.
-- Secret create, update, rename, copy, archive, restore, delete, reveal, grant,
-  and revoke (the `server_side_decrypt` flag is recorded on reveal).
-- TOTP enroll, code generation, seed reveal, and delete (the `server_side_decrypt`
-  flag is recorded on code generation).
-- Per-realm KEK rotation (`key.rotated`).
+- Secret create, archive, restore, delete, and encrypted material delivery;
+  update, rename, copy, and grants remain target operations.
+- TOTP seed-material delivery, with no backend attestation of client-local
+  decryption or code calculation. Dedicated enrollment/removal remain targets.
+- Client-driven AVK enrollment and rotation lifecycle transitions.
 - Agent lifecycle operations.
 - Token create, rotate, revoke, and failed token use.
 - Operator/admin override actions.
@@ -2026,7 +2015,7 @@ material). Error messages, logs, and JSON responses must follow the same rule.
 Audit may include non-sensitive context such as record ids (including `sec_`,
 `fld_`, `grt_`, `totp_`, `kek_`), owner agent/group, kinds, tags, fact and secret
 names, field names, policy and grant ids, message ids, recipient, the
-`server_side_decrypt` flag, and decision outcome.
+encrypted material-delivery coordinates, and decision outcome.
 
 Audit records for current billing and payment actions may include non-sensitive
 context such as account ID, realm ID, invoice ID, subscription ID, payment
@@ -2102,14 +2091,15 @@ current code. Initial event names include:
 - `secret.archived`
 - `secret.restored`
 - `secret.deleted`
-- `secret.reveal` (carries the `server_side_decrypt` flag)
+- `secret.material.delivered` (authorized encrypted field-package delivery)
 - `secret.grant`
 - `secret.revoke`
 - `totp.enrolled`
-- `totp.code` (carries the `server_side_decrypt` flag)
+- `totp.code` (target client-local calculation event; the backend only records
+  encrypted seed-material delivery)
 - `totp.seed_revealed`
 - `totp.deleted`
-- `key.rotated` (per-realm KEK rotation)
+- AVK rotation lifecycle events (client-created DEK wrappers; value-free metadata)
 - `billing.subscription.created`
 - `billing.subscription.updated`
 - `billing.subscription.canceled`
@@ -2180,10 +2170,10 @@ Local bootstrap decision:
 Witself should design the managed cloud backend as the default hosted product
 backend. When Witself is offered as a service, memories, facts, optional derived vectors,
 policies, security groups, messages, agent metadata, envelope-encrypted secrets
-and TOTP enrollments, the per-realm KEK and wrapped DEKs, secret grants, audit
-records, and usage counters are expected to be stored remotely in Witself-operated
-cloud infrastructure. The CMK lives in the managed KMS; plaintext secret material
-is never stored.
+and TOTP fields, public AVK identities and wrapped DEKs, future secret grants,
+audit records, and usage counters are expected to be stored remotely in
+Witself-operated cloud infrastructure. The AVK stays with the active client;
+plaintext secret material is never stored by the backend.
 
 Managed backend requirements:
 
@@ -2256,14 +2246,14 @@ API contract requirements:
   `opportunistic_curation`, unsupported `automatic_capture` and
   `scheduled_curation` (foreground checkpoint handling and the explicit legacy
   client-owned auto tooling do not change this server response), and, when the
-  sealed plane is enabled, the KMS provider and the decrypt-custody capability
-  flags `client_side_decrypt` / `server_side_decrypt` (see
+  sealed plane is enabled, the client-custody capability and encrypted
+  material-access support (see
   [Encryption (Two-Tier)](#encryption-two-tier)).
 - Use resource-oriented `/v1` REST-ish routes with plural resources, including
   the open-plane `/v1/memories`, `/v1/facts`, `/v1/policies`, `/v1/groups`, and
   `/v1/messages`, the coordination resource `/v1/message-requests`, the
   curation resources `/v1/memory-curation-requests` and
-  `/v1/memory-curation-runs`, and the sealed-plane `/v1/secrets` and `/v1/totp`.
+  `/v1/memory-curation-runs`, and the sealed-plane `/v1/secrets` and `/v1/vault`.
 - In addition to the curation preflight endpoint, expose all 14 curation
   request/run/status routes: request create/list/get/start; run get/inputs/
   renew/plan submit/plan review/apply/cancel/abandon/rollback; and value-free
@@ -2285,15 +2275,13 @@ API contract requirements:
   `/v1/message-requests/{request_id}`, plus `POST` actions `:offer`, `:decline`,
   `:select`, `:cancel`, `:claim`, `:renew`, `:release`, and `:complete` on a
   request id.
-- Use the sealed-plane action subroutes
-  `/v1/secrets/{secret_id}:reveal` (returns one sensitive field; carries the
-  `client_side_decrypt` ciphertext-and-envelope shape or the `server_side_decrypt`
-  plaintext shape per the active capability),
-  `/v1/secrets/{secret_id}:rotate`, `/v1/secrets/{secret_id}:archive`,
-  `/v1/secrets/{secret_id}:restore`, `/v1/secrets/{secret_id}:grant`,
-  `/v1/secrets/{secret_id}:revoke`, `/v1/totp/{totp_id}:code` (returns a current
-  code), and `/v1/password:generate` (password/passphrase generation). All use
-  `POST`, never `GET`.
+- Use the implemented sealed-plane material subroute
+  `POST /v1/secrets/{secret_id}/fields/{field_id}:access` to return one encrypted
+  field package. The active client decrypts it with its AVK, performs TOTP
+  calculation, and generates passwords locally. Archive/restore/delete and AVK
+  enrollment/rotation use the routes in [api-routes.md](api-routes.md).
+  Secret update, grants, group ownership, and runtime injection remain deferred;
+  there are no backend plaintext reveal, TOTP-code, or password-generation routes.
 - Expose implemented `GET /v1/self` as the JSON self-digest plus value-free
   memory checkpoint. Keep the explicit Witself-only `POST /v1/remember`
   convenience action, the `GET /v1/self?format=` digest-emit renderer, and
@@ -2636,11 +2624,13 @@ Tenant migration (move a realm/account between cells):
 - Export from cell A -> import into cell B -> repoint the control-plane mapping ->
   cut over.
 - **Open plane** (memories/facts) moves via the existing first-class export/import
-  (embeddings recomputed at the destination, or moved if the model matches; see
+  (client vectors and profiles move with the archive, or an authorized client
+  supplies replacements; the destination never computes embeddings; see
   [Identity Export and Import](#identity-export-and-import)).
-- **Sealed plane** (secrets) is KMS-rooted per cell/cloud, so migration **re-wraps**
-  keys under the destination KMS (audited decrypt-at-source / re-encrypt-at-dest; see
-  [Key Hierarchy](#key-hierarchy)). Bounded, but not free.
+- **Sealed plane** (secrets) moves as ciphertext, wrapped field DEKs, and public
+  AVK bindings. The AVK is supplied separately to the destination client through
+  protected transfer, recovery, or enrollment; cells never decrypt or re-encrypt
+  secret plaintext during the move. See [Key Hierarchy](#key-hierarchy).
 
 Open decisions (document, do not resolve):
 
@@ -2707,20 +2697,19 @@ Open-plane posture:
 
 Sealed-plane posture:
 
-- The sealed plane (secrets, TOTP seeds) IS the encryption pillar: KMS-backed
-  envelope encryption (CMK → per-realm KEK → per-secret/field DEK) with the reveal
-  ceremony. KMS is a required dependency and readiness gate **only when the sealed
-  plane is enabled**; an open-plane-only deployment needs no KMS. The model is
-  tracked in [encryption-model.md](encryption-model.md) and
-  [key-hierarchy.md](key-hierarchy.md), with KMS provider config and the
-  `realm_keys`/`secret_deks` tables in [storage.md](storage.md).
+- The sealed plane (secrets, TOTP seeds) uses client-side envelope encryption
+  (per-agent AVK → per-field-generation DEK) and deliberate local reveal.
+  PostgreSQL stores ciphertext, wrapped DEKs, and public AVK identities; no
+  backend KMS provider or plaintext custody path is required. The model is
+  tracked in [encryption-model.md](encryption-model.md),
+  [key-hierarchy.md](key-hierarchy.md), and [storage.md](storage.md).
 
 This is tracked in [storage.md](storage.md).
 
 ### Production Storage
 
 Decision: use PostgreSQL as the authoritative data source, migration-0032
-portable JSONB vector data, a KMS-provider abstraction for the sealed plane,
+portable JSONB vector data, client-created sealed-plane envelopes,
 object/blob storage where the data shape needs it, and Goose for database
 migrations.
 
@@ -2731,8 +2720,8 @@ Storage posture:
   migration `0032` immutable vector profiles/exact JSONB rows. Any future
   pgvector/ANN projection is rebuildable acceleration only.
   Sealed-plane envelope
-  ciphertext, the `realm_keys` (wrapped per-realm KEK), and `secret_deks` (wrapped
-  per-secret/field DEK) live in Postgres too.
+  ciphertext, public `agent_vault_keys` identities, and `secret_deks` (wrapped
+  field-generation DEKs) live in Postgres too; AVKs remain in the active client.
 - Object/blob storage is for large exports, diagnostic bundles, support
   attachments, encrypted secret attachments, backup artifacts, and future
   import/export jobs.
@@ -2743,13 +2732,12 @@ Storage posture:
 - Sealed-plane secret field values and TOTP seeds are stored only as envelope
   ciphertext; plaintext secret material never becomes an ordinary database column.
 
-KMS posture (sealed plane only):
+Agent-vault custody posture:
 
-- KMS providers are `aws-kms` (managed v0 first), `gcp-kms`, `azure-key-vault`, and
-  `local-dev`. The provider is selected by `WITSELF_KMS_PROVIDER` and the key by
-  `WITSELF_KMS_KEY_ID`. KMS is required and a readiness gate only when the sealed
-  plane is enabled; PostgreSQL remains the open-plane readiness gate. The
-  KMS provider config and key tables are detailed in [storage.md](storage.md).
+- The active client encrypts, decrypts, generates passwords, and calculates
+  TOTP codes. Backend storage and readiness do not depend on a vault KMS
+  provider; the client verifies the matching local AVK before sensitive work.
+  The exact key and envelope contracts are detailed in [storage.md](storage.md).
 
 Optional vector posture:
 
@@ -2860,11 +2848,11 @@ The sealed-plane secret model and lifecycle are tracked in
 The full data model for both planes (realm/account/operator/agent/token tables;
 open-plane versioned memories plus optional JSONB vector rows, facts, policies,
 security_groups, group_members, messages, audit, usage; and sealed-plane secrets,
-secret_fields, secret_grants, totp_enrollments, realm_keys, secret_deks,
-attachments) is tracked in [data-model.md](data-model.md).
+secret_fields, agent_vault_keys, secret_deks, enrollment/rotation tables, and
+deferred grants, standalone TOTP enrollments, and attachments) is tracked in [data-model.md](data-model.md).
 
 The sealed-plane confidentiality and envelope-encryption model is tracked in
-[encryption-model.md](encryption-model.md), and the CMK → per-realm KEK → DEK key
+[encryption-model.md](encryption-model.md), and the client-held AVK → field-generation DEK key
 hierarchy in [key-hierarchy.md](key-hierarchy.md).
 
 The role/scope model spanning both planes (open-plane memory/fact/policy/group/

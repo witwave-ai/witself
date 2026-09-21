@@ -144,16 +144,16 @@ deployment cells under a thin global control plane.
 - [data-model.md](data-model.md): the full relational data model across both
   planes — realm/account/operator/agent/token tables, open-plane tables
   (versioned memories, evidence and lineage, facts, avatars, policies, groups,
-  messages, audit, usage), and sealed-plane tables (secrets, secret_fields,
-  secret_grants, totp_enrollments, realm_keys, secret_deks, attachments).
+  messages, audit, usage), and sealed-plane inventory, encrypted fields,
+  wrapped DEKs, public AVK bindings, and vault-key lifecycle records.
 - [storage.md](storage.md): authoritative PostgreSQL storage, deterministic
   full-text retrieval, optional client-supplied vectors, object/blob usage,
   infrastructure encryption, client-custodied secret envelopes, and Goose
   migrations.
-- [encryption-model.md](encryption-model.md): the earlier KMS-rooted sealed-plane
-  confidentiality draft, superseded for vault custody by ADR 0003.
-- [key-hierarchy.md](key-hierarchy.md): the earlier CMK/realm-KEK hierarchy,
-  superseded for vault custody by ADR 0003.
+- [encryption-model.md](encryption-model.md): client-side sealed-plane
+  confidentiality under the agent vault key, as defined by ADR 0003.
+- [key-hierarchy.md](key-hierarchy.md): the client-held agent vault key and
+  wrapped data-key hierarchy defined by ADR 0003.
 - [cloud-targets.md](cloud-targets.md): Civo's current production-cell role,
   AWS-first managed-PostgreSQL certification, and the portable cloud targets.
 - [memory-cloud-conformance.md](memory-cloud-conformance.md): the executable

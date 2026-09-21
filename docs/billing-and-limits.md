@@ -1265,7 +1265,7 @@ Plans should define soft and hard limits for:
 - Stored facts.
 - Memory recalls and reads.
 - Memory writes (add/adjust).
-- Embedding operations.
+- Client-vector writes.
 - Vector storage size.
 - General data-at-rest storage size.
 - Cross-agent accesses.
@@ -1282,7 +1282,7 @@ Plans should define soft and hard limits for:
 - Audit retention and stored audit volume.
 
 The five sealed-plane dimensions meter the credential plane only. They never
-count toward, and are never derived from, the open-plane recall, embedding, or
+count toward, and are never derived from, the open-plane recall, client-vector, or
 digest paths: secrets and TOTP seeds are never embedded, recalled, placed in the
 self-digest, or plaintext-exported, and their values surface only through the
 reveal-gated paths (see [secret-model.md](secret-model.md) and
@@ -1322,7 +1322,7 @@ Witself should meter these dimensions internally in v0:
 | `api_request` | General API burden and abuse control. |
 | `audit_event` | Audit retention size and compliance cost. |
 
-Recalls, embedding operations, cross-agent accesses, and messages must be metered
+Recalls, client-vector writes, cross-agent accesses, and messages must be metered
 even if v0 pricing stays tiered. They create real backend load and
 security-relevant usage signals — the integrity-and-authenticity signals of the
 open plane.
@@ -1387,9 +1387,9 @@ Notes on a few dimensions:
   secret material (see [storage.md](storage.md)).
 - `encrypted_storage_byte` is the sealed-plane companion to `storage_byte`. It
   measures the envelope-encrypted secret bytes (ciphertext, wrapped DEKs, and
-  attachments) governed by the CMK→per-realm KEK→per-secret/field DEK hierarchy.
-  It is metered separately because the sealed plane is a distinct storage and
-  KMS cost driver (see [encryption-model.md](encryption-model.md),
+  future attachments) created by active clients under the AVK→field-DEK hierarchy.
+  It is metered separately because the sealed plane has distinct ciphertext
+  storage and backup costs (see [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md), and
   [secret-size-and-attachments.md](secret-size-and-attachments.md)).
 - `secret_read` increments on the reveal-gated value-returning paths only —
@@ -1461,7 +1461,7 @@ Recommended defaults:
 | Stored facts | `block` for hard cap, `warn` near cap. |
 | Memory recalls/reads | `throttle` or `warn`; block only for abuse or hard caps. |
 | Memory writes | `throttle` or `warn`; block only for abuse or hard caps. |
-| Embedding operations | `throttle` or `warn`; block only for abuse or hard caps. |
+| Client-vector writes | `throttle` or `warn`; block only for abuse or hard caps. |
 | Vector storage size | `warn` near cap, `block` at hard cap. |
 | General data-at-rest storage size | `warn` near cap, `block` at hard cap. |
 | Cross-agent accesses | `throttle` or `warn`; block only for abuse or hard caps. |
@@ -1594,9 +1594,10 @@ shape can exist before the backend supports live billing or crypto settlement.
 The live catalog sets the Personal, Professional, and Team plan names, monthly
 prices ($0, $30, and $250), included quantities, and feature entitlements.
 Overage policy, usage conversion, future catalog changes, and Enterprise terms
-remain business follow-up. The embedding-operation and vector-storage
-dimensions in particular carry real provider cost and should be observed before
-fixed overage pricing is set. On the sealed plane, `secret_read`, `totp_code`,
+remain business follow-up. Client-vector writes and vector storage create
+validation, search, storage, and backup load that should be observed before
+fixed overage pricing is set. Model inference costs remain with the client;
+the backend never computes embeddings. On the sealed plane, `secret_read`, `totp_code`,
 and `encrypted_storage_byte` carry real envelope-storage cost and should be
 observed on the same basis (see [key-hierarchy.md](key-hierarchy.md)).
 

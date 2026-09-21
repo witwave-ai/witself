@@ -5,14 +5,15 @@ security response, and supported-surface policy before implementation.
 
 Narrative-memory amendment (accepted 2026-07-14): memory inference and vector
 generation are client-side. Security scope now includes curator credentials,
-untrusted transcript evidence, fencing/plans, and client-supplied vectors; any
-backend embedding-provider assumptions below are superseded by
+untrusted transcript evidence, fencing/plans, and client-supplied vectors, as
+defined in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVKs, client encryption/decryption, and ciphertext-only backend
+material access. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -54,8 +55,8 @@ Reports should include:
   data, for example cross-agent access bypass, policy misevaluation,
   security-group escalation, forged message senders, or memory poisoning.
 - Whether the issue affects confidentiality of sealed-plane secret material, for
-  example secret-value leakage, a reveal or authorization bypass, KMS or key
-  mishandling, or unintended server-side decryption.
+  example secret-value leakage, a reveal or authorization bypass, AVK or DEK
+  mishandling, or unintended backend plaintext handling.
 - Whether memory content, fact values, message bodies or payloads, PII,
   embedding vectors, secret values, TOTP seeds, generated TOTP codes, raw
   agent/operator tokens, payment data, or other customer data may have been
@@ -82,8 +83,8 @@ because it can corrupt or destroy identity data rather than merely expose it.
 
 Confidentiality-impacting reports against the sealed plane are likewise treated
 as high severity by default: a confirmed secret-value leak, reveal or
-authorization bypass, KMS or key-handling flaw, or unintended server-side
-decrypt can expose secret material that the envelope encryption and reveal
+authorization bypass, AVK or DEK-handling flaw, or unintended backend plaintext
+handling can expose secret material that the envelope encryption and reveal
 ceremony are meant to keep sealed.
 
 These targets may change once Witself has a formal security operations process.
@@ -115,12 +116,11 @@ security remains outside the server boundary except where submitted data
 crosses the Witself API. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
-The KMS-provider abstraction (`aws-kms`, `gcp-kms`, `azure-key-vault`,
-`local-dev`) is the sealed plane's required dependency when that plane is
-enabled. Issues that let secret material be decrypted, exported, or logged in
-plaintext outside the reveal path, that mishandle the CMK / per-realm KEK /
-per-secret-or-field DEK envelope, or that cause unintended server-side decrypt,
-are in scope; see [key-hierarchy.md](key-hierarchy.md) and
+The sealed plane uses client-held AVKs and per-sensitive-field DEKs, with no
+cloud-KMS agent-secret dependency. Issues that expose an AVK or unwrapped DEK,
+let secret material be decrypted, exported, or logged outside authorized
+client use, or introduce a backend plaintext path are in scope; see
+[key-hierarchy.md](key-hierarchy.md) and
 [encryption-model.md](encryption-model.md).
 
 ## Sensitive Data Handling
@@ -261,31 +261,34 @@ Reveal / authorization bypass:
 - Scope-constraint bypass where a scope limited by realm, owning agent, group,
   or secret path is not actually enforced on a value-returning path.
 
-KMS / key handling:
+Client vault key handling:
 
-- Mishandling of the CMK → per-realm KEK → per-secret-or-field DEK envelope:
-  reused, predictable, cross-realm, or cross-secret DEKs, or a missing AEAD
-  integrity check (`XCHACHA20_POLY1305`, `AES_256_GCM`); see
-  [key-hierarchy.md](key-hierarchy.md).
+- Mishandling of the AVK → per-sensitive-field DEK envelope: reused,
+  predictable, cross-agent, or cross-secret DEKs, or a missing AES-256-GCM
+  integrity check; see [key-hierarchy.md](key-hierarchy.md).
+- AVKs or unwrapped DEKs sent to the backend, logs, audit, diagnostics, or
+  account archives, or key material used across a mismatched owner scope.
+- Rotation accepting incomplete or incorrectly bound DEK wrappers, changing
+  value ciphertext unexpectedly, or committing without the required recovery
+  disposition.
+- A missing or mismatched local AVK causing a token-only fallback or replacement
+  key generation instead of a closed failure.
+
+Infrastructure key handling:
+
 - DEKs, KEKs, or KMS credentials persisted, cached, logged, or exported in
   plaintext, or key material crossing a realm boundary.
-- KEK rotation that leaves prior DEKs decryptable when they should be retired,
-  or that breaks the crypto-shred property on KMS-key destruction.
-- KMS-provider misconfiguration (`aws-kms`, `gcp-kms`, `azure-key-vault`,
-  `local-dev`) that silently weakens or disables envelope encryption rather
-  than failing closed.
 
-Server-side decrypt:
+Client custody violations:
 
-- The `server_side_decrypt` capability decrypting secret material when
-  `client_side_decrypt` was the contracted posture, or expanding the trusted
-  computing base beyond what the capability switch authorizes; see
-  [encryption-model.md](encryption-model.md).
-- Plaintext secret values lingering server-side after a server-mediated reveal,
-  in memory, temp storage, or response buffers, beyond the reveal that
-  authorized them.
-- A reveal flowing through server-side decrypt without the `server_side_decrypt`
-  flag being set on the audit event; see [audit-retention.md](audit-retention.md).
+- Any backend operation receiving an AVK, decrypting a sensitive value, or
+  generating a password or TOTP code; these operations belong in the active
+  client under [encryption-model.md](encryption-model.md).
+- Plaintext secret values escaping deliberate client use into backend memory,
+  temporary storage, or response buffers that should contain only ciphertext.
+- Encrypted material access without value-free audit, or an audit event that
+  falsely asserts successful client decryption/use; see
+  [audit-retention.md](audit-retention.md).
 
 The following classes cover cross-realm collaboration, which is post-v0:
 realm-local inter-agent messaging ships in v0, but cross-realm federation is the
@@ -346,7 +349,7 @@ Before public disclosure, Witself maintainers should:
   misattributed, and whether affected realms must re-verify identity state.
 - Assess secret-confidentiality impact: whether secret values or TOTP seeds may
   have been exposed, and whether affected realms must rotate exposed secrets,
-  re-enroll TOTP, or rotate the per-realm KEK; see
+  re-enroll TOTP, or rotate the affected agent AVK in the active client; see
   [key-hierarchy.md](key-hierarchy.md).
 - Patch or mitigate the issue.
 - Publish fixed releases or operational mitigations.
@@ -381,9 +384,10 @@ whether operators should audit recent cross-agent activity, review policy and
 group state, or restore affected memories or facts.
 
 When a vulnerability affected secret confidentiality, reveal authorization, key
-handling, or server-side decrypt, release notes should also state whether
-operators should rotate exposed secrets, re-enroll TOTP, rotate the per-realm
-KEK, review reveal and grant audit records, or change KMS configuration.
+handling, or the client custody boundary, release notes should also state
+whether operators should rotate exposed secrets, re-enroll TOTP, rotate the
+affected AVK in the active client, or review encrypted-material access audit.
+Infrastructure incidents may separately require changes to KMS configuration.
 
 ## Out Of Scope
 

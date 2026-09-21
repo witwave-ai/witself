@@ -3,8 +3,8 @@
 > **Sealed-plane API amendment (accepted 2026-07-18):**
 > [the client-custodied vault plan](client-custodied-agent-vault.md) controls
 > secret routes and wire shapes. The backend authorizes and returns one sealed
-> field package at a time but never decrypts it; older server-side reveal and
-> KMS capability shapes below are superseded.
+> field package at a time but never decrypts it; the active client uses its
+> agent vault key for reveal and TOTP calculation.
 
 Status: draft. This document defines the initial public HTTP API contract for
 managed Witself Cloud, self-hosted `witself-server`, and local development
@@ -64,8 +64,8 @@ vault key and the backend stores and authorizes ciphertext-only field packages.
 Inventory is redacted, exact material delivery is audited, and encrypted vault
 state is included in account archives without the agent vault key. Secret
 material is never embedded, recalled, included in the self-digest, or written
-to a plaintext identity export. The amendment above controls wherever the
-older target sections below still describe a KMS-rooted or server-decrypt path.
+to a plaintext identity export. The active client owns encryption and
+decryption throughout the sealed-plane contract.
 
 ## Transport Requirements
 
@@ -460,8 +460,6 @@ Examples of feature flags:
 - `totp`
 - `password_generate`
 - `runtime_injection`
-- `client_side_decrypt`
-- `server_side_decrypt`
 - `cross_realm_collaboration`
 - `federation`
 - `agent_card`
@@ -471,30 +469,21 @@ In v0.0.x the `features` are reported as `{"supported": false, "reason":
 "not_implemented"}` until each subsystem ships.
 
 The `secrets`, `totp`, `password_generate`, and `runtime_injection` flags report
-whether the sealed plane — the KMS-backed credential side of Witself, distinct
-from the open plane of memories and facts — is enabled on this backend. The open
-plane (memories, facts, recall, digest) does not require KMS and stays available
-even when the sealed plane is disabled; the sealed plane requires a configured
-KMS provider, so these flags are off on an open-plane-only deployment. The
-sealed plane carries hard carve-outs: secret and TOTP material is never embedded,
-never returned by semantic recall, never in the self-digest, never in the
-plaintext identity export, and never ingested from `CLAUDE.md`/`AGENTS.md`. The
-sealed-plane model is tracked in [secret-model.md](secret-model.md) and
+supported operations independently. Sensitive values are encrypted and decrypted
+by the active client using its agent vault key (AVK). The backend stores
+ciphertext and redacted inventory, and returns one authorized encrypted field
+package for local reveal or TOTP calculation. Password generation also occurs
+in the active client. No cloud KMS provider is required for agent-vault custody.
+Secret and TOTP material is never embedded, returned by semantic recall,
+included in the self-digest or plaintext identity export, or ingested from
+`CLAUDE.md`/`AGENTS.md`. See [secret-model.md](secret-model.md) and
 [totp-2fa.md](totp-2fa.md).
 
-`client_side_decrypt` and `server_side_decrypt` must be advertised honestly per
-backend and realm and select the reveal/TOTP response shape (see
-[key-hierarchy.md](key-hierarchy.md) and [json-contracts.md](json-contracts.md)).
-A managed token-only backend MUST advertise `server_side_decrypt: true` and
-returns a decrypted `field.value` plus `value_encoding`; a client-side-decrypt
-backend returns ciphertext plus envelope metadata and the key-unwrap material,
-with no plaintext. Clients use capability discovery to know which path applies
-before a reveal. When the sealed plane is enabled, the `secrets`/`totp` flags are
-nested objects that also report the active `kms_provider` (`aws-kms`, `gcp-kms`,
-`azure-key-vault`, or `local-dev`) and the per-realm key state, so callers know
-which decrypt path and KMS dependency are in effect. The CMK→per-realm KEK→
-per-secret/field DEK hierarchy is tracked in [key-hierarchy.md](key-hierarchy.md)
-and [encryption-model.md](encryption-model.md).
+The active client is the only agent-vault decrypt owner; there is no backend
+plaintext custody mode or agent-vault KMS capability. The bearer token authorizes
+encrypted material access but cannot replace possession of the AVK. The
+implemented wire shapes are in [json-contracts.md](json-contracts.md); the
+AVK-to-field-DEK hierarchy is in [key-hierarchy.md](key-hierarchy.md).
 
 The implemented surface advertises `memories`, `memory_recall`,
 `memory_supersede`, `memory_permanent_delete`, and
@@ -784,9 +773,8 @@ Initial route groups:
 | `/v1/message-requests` | Implemented message-backed realm open jobs: create/list/detail plus candidate offer/decline, coordinator client-ranked select/cancel, and selected-agent claim/renew/release/atomic-complete actions. |
 | `/v1/conversations` | Target: cross-realm conversation/task resource. |
 | `/v1/federation/peers` | Target: accepted peer-realm registry for cross-realm collaboration. |
-| `/v1/secrets` | Sealed-plane secret create, show, list, scan, reveal, update, rename, copy, archive, restore, delete, grant, and revoke. |
-| `/v1/totp` | Sealed-plane TOTP enrollment, metadata, code generation, and deletion. |
-| `/v1/password` | Stateless password generation (`:generate`). |
+| `/v1/secrets` | Agent-owned encrypted create, redacted inventory, one-field material access, archive, restore, and tombstone delete. Update, copy, and grants remain deferred. |
+| `/v1/vault` | Public AVK identities and encrypted enrollment/rotation lifecycle. TOTP calculation and password generation are active-client operations. |
 | `/v1/audit` | Audit event list and show. |
 | `/v1/billing` | Plans, usage, limits, subscription, payment methods, hosted provider sessions, invoices, and crypto payment flows. |
 | `/v1/support` | Support tickets and comments. |
@@ -862,7 +850,7 @@ Billing usage and limit endpoints should expose plan-tier usage rather than raw
 per-call billing in v0. Backends should return deterministic `rate_limited` or
 `limit_exceeded` errors when a plan or service-protection limit throttles or
 blocks an operation. The Witself metered dimensions (active agents, stored
-memories and facts, recalls/reads, writes, embedding operations, vector storage,
+memories and facts, recalls/reads, writes, client-vector writes, vector storage,
 cross-agent accesses, groups, and messages, plus the sealed-plane dimensions
 stored secrets, secret reads, TOTP codes, runtime injections, and encrypted
 storage bytes) are defined in [billing-and-limits.md](billing-and-limits.md).
@@ -946,13 +934,12 @@ identity data under normal authorization; reading a `sensitive` record is an
 ordinary authorized read, not a reveal ceremony, and `sensitive` facts use
 lightweight redaction rather than the sealed-plane reveal ceremony.
 
-The sealed plane is the exception: `POST /v1/secrets/{secret_id}:reveal` and
-`POST /v1/totp/{secret_id}:code` are the explicit, audited, reveal-gated
-value-returning operations, and `POST /v1/password:generate` returns a freshly
-generated password once. These are the only sealed-plane routes that emit
-plaintext; secret and TOTP material is never embedded, recalled, in the
-self-digest, or in the plaintext identity export. Token create and token rotate
-remain the open-plane routes that return a raw token exactly once.
+The sealed plane returns one encrypted field package through
+`POST /v1/secrets/{secret_id}/fields/{field_id}:access`; the active client uses
+its AVK for local reveal and TOTP calculation and generates passwords locally.
+No backend secret route emits sensitive plaintext. Secret and TOTP material is
+never embedded, recalled, in the self-digest, or in the plaintext identity
+export. Token create and token rotate still return a raw token exactly once.
 
 Initial action and curation-workflow routes (curation uses durable slash
 subresources rather than colon verbs):
@@ -1007,14 +994,12 @@ POST /v1/message-requests/{request_id}:renew
 POST /v1/message-requests/{request_id}:release
 POST /v1/message-requests/{request_id}:complete
 POST /v1/tokens/{token_id}:rotate
-POST /v1/secrets/{secret_id}:reveal
+POST /v1/secrets/{secret_id}/fields/{field_id}:access
 POST /v1/secrets/{secret_id}:rotate
 POST /v1/secrets/{secret_id}:archive
 POST /v1/secrets/{secret_id}:restore
 POST /v1/secrets/{secret_id}:grant
 POST /v1/secrets/{secret_id}:revoke
-POST /v1/totp/{secret_id}:code
-POST /v1/password:generate
 ```
 
 Notes on specific actions and workflows:
@@ -1200,31 +1185,19 @@ Notes on specific actions and workflows:
 - `:rotate` (on `/v1/tokens`) issues a replacement token and returns the raw
   value once; the prior token is revoked immediately or after an explicit grace
   period.
-- `:reveal` (on `/v1/secrets`) is the sealed plane's explicit, audited,
-  reveal-gated value path. It is a `POST` because the requested `field` and audit
-  `reason` travel in the body and because the returned plaintext or unwrap
-  material must never appear in a URL. It requires `secret:reveal`, is metered as
-  `secret_read`, and is audited as `secret.reveal`. Its response shape is
-  selected by capability discovery:
-  - When the backend advertises `server_side_decrypt: true` (managed token-only
-    pods), the server unwraps the DEK against the per-realm KEK in KMS and
-    returns a decrypted `field.value` plus `value_encoding`; the audit record
-    carries the `server_side_decrypt` flag.
-  - When the backend advertises `client_side_decrypt: true`, the response
-    returns ciphertext, AEAD/envelope metadata, and the wrapped key material with
-    no plaintext; the client unwraps locally.
-
-  The two shapes are defined in [json-contracts.md](json-contracts.md) and the
-  key hierarchy in [key-hierarchy.md](key-hierarchy.md). Revealed values are
-  never embedded, recalled, placed in the self-digest, or written to the
-  plaintext export.
-- `:code` (on `/v1/totp`) returns a current TOTP code (and the seconds
-  remaining) for an enrolled secret. It requires `totp:code`, is metered as
-  `totp_code`, and is audited as `totp.code`. Like `:reveal`, the generated code
-  and the underlying seed are sealed material: never logged, embedded, recalled,
-  in the digest, or in the plaintext export. The seed itself is high-value sealed
-  material revealed only through its own audited path. See
-  [totp-2fa.md](totp-2fa.md).
+- `:access` (on `/v1/secrets/{secret_id}/fields/{field_id}`) is the
+  implemented explicit, audited material-delivery path. Its `POST` response
+  contains exactly one encrypted field and wrapped-DEK package, never sensitive
+  plaintext. The active client uses its AVK to unwrap the DEK and reveal the
+  field locally. The package must never appear in a URL, log, or audit payload.
+  See [json-contracts.md](json-contracts.md) and
+  [key-hierarchy.md](key-hierarchy.md). Revealed values are never embedded,
+  recalled, placed in the self-digest, or written to the plaintext export.
+- TOTP calculation is a client operation: the active client obtains the
+  authorized encrypted seed package, decrypts it locally, and calculates the
+  current code. There is no backend `:code` route. Neither the seed nor the
+  generated code enters backend logs, recall, the digest, or plaintext export.
+  See [totp-2fa.md](totp-2fa.md).
 - `:rotate` (on `/v1/secrets`) writes a new secret version (new per-secret/field
   DEK), keeping prior versions per retention; it requires `secret:update` and is
   audited as `secret.updated`. `:archive` and `:restore` are the soft-delete pair
@@ -1240,11 +1213,11 @@ Notes on specific actions and workflows:
   The current vault wrapper requires a full agent principal
   (`internal/server/secret.go:467-476`); the target open-plane
   [access policy](access-policy.md) does not grant secret access.
-- `:generate` (on `/v1/password`) is a stateless generator: it returns a freshly
-  generated password once and creates no resource. It is a `POST` because the
-  generated value must never appear in a URL; the returned value is sealed
-  material (never logged, embedded, recalled, in the digest, or in the plaintext
-  export). See [secret-model.md](secret-model.md).
+- Password generation is local to the active client; there is no backend
+  `/v1/password:generate` route. Generated values are sealed material and must
+  never appear in logs, recall, the digest, or plaintext export. Persisting a
+  generated password requires client-side encryption before the write. See
+  [secret-model.md](secret-model.md).
 
 Cross-agent/group fact and narrative-memory mutations, their audit `reason`
 and preview guardrails, and deciding-policy attribution remain targets under
@@ -1291,12 +1264,11 @@ payment flows, Witself support workflows, and internal admin workflows may be
 disabled unless configured by the operator. Direct memory and lexical recall
 require PostgreSQL but no model provider. Implemented vectors are
 client-supplied, optional, and stored as portable PostgreSQL JSONB; pgvector is
-not required. The sealed plane (secrets, TOTP, password generation, runtime
-injection) is optional and requires a configured KMS provider; when no KMS
-provider is configured the `secrets`/`totp` capabilities are off and the sealed-
-plane routes return deterministic `unsupported_operation`. Enabling the sealed
-plane gates readiness on the KMS provider; it does not affect the open-plane
-memory path.
+not required. The sealed plane stores client-created ciphertext and redacted
+inventory. The active client needs the matching AVK for encryption, decryption,
+and TOTP calculation; password generation is local too. Agent-vault custody
+adds no backend KMS readiness dependency. Deferred sealed operations remain
+capability-gated; see [api-routes.md](api-routes.md).
 
 Local development mode should support enough API behavior to exercise the CLI,
 MCP adapter, JSON contracts, and integration tests. It exercises the same model-

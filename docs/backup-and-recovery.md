@@ -11,8 +11,8 @@ key material.
 
 > **Sealed-plane custody amendment (accepted 2026-07-19):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> KMS-dependent backup and recovery design below. Schema-56 account archives
+> [client-custodied vault plan](client-custodied-agent-vault.md) define the
+> client-custodied backup and recovery boundary. Schema-56 account archives
 > carry public AVK bindings, secret metadata, sensitive-field ciphertext,
 > wrapped per-field DEKs, terminal enrollment/rotation history and receipts,
 > and value-free secret mutation receipts. They never carry an AVK, local key
@@ -21,8 +21,7 @@ key material.
 > cells and require no KMS identity, source-cloud unwrap, or destination
 > re-wrap. An authorized client must separately provide the matching AVK after
 > import by protected local-key transfer, recovery-artifact import, or
-> enrollment from another active installation. Later KMS-loss, realm-KEK, and
-> cross-cloud KMS sections are superseded history. The provider-native
+> enrollment from another active installation. The provider-native
 > pre-migration database backup procedures remain current and mandatory where
 > stated.
 
@@ -167,8 +166,8 @@ the index from imported tickets, and Down removes only the index. The release
 must follow the schema-change backup and migration procedure and cannot use a
 `--no-schema-change` attestation.
 
-Later instructions to reconnect a backend embedding provider or run server-side
-re-embedding are superseded.
+The backend never computes embeddings during backup, restore, or migration;
+clients supply any replacement vectors and their immutable profiles.
 
 ## Decision
 
@@ -200,22 +199,23 @@ V0 posture (open plane — memories + facts):
 
 V0 posture (sealed plane — secrets + TOTP):
 
-- Secret backup is **encrypted-only**: the at-rest AEAD envelope (`ciphertext`,
-  `nonce`, `aead_algorithm`, `dek_id`, `dek_version`, `kms_provider`,
-  `aad_context`) plus the `realm_keys`/`secret_deks` wrapping rows and KMS key
-  identity + rotation metadata. Never plaintext secret values, never TOTP seeds
-  or codes, never key material. See [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
+- Secret backup is **encrypted-only**: sensitive-field ciphertext and envelope
+  metadata, AVK-wrapped per-field DEKs, public AVK bindings, and value-free
+  lifecycle history and receipts. Never plaintext secret values, TOTP seeds or
+  codes, or client key material. See
+  [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
 - Secrets and TOTP seeds are **excluded from plaintext export**. The whole-account
   `witself export` archive carries their client-encrypted envelopes and public,
   value-free lifecycle state, but never emits a plaintext secret value, seed,
   AVK, or recovery artifact. See
   [Identity Export And Import](#identity-export-and-import) and
   [key-hierarchy.md](key-hierarchy.md).
-- Sealed-plane recovery depends on KMS key material being retained.
-  **CMK loss = the sealed plane is crypto-shredded** (every per-realm KEK, hence
-  every DEK, hence all secret values and TOTP seeds become permanently
-  unrecoverable); the open plane is unaffected. There is no managed break-glass
-  decrypt. See [KMS-Loss And Crypto-Shred Posture](#kms-loss-and-crypto-shred-posture).
+- Sealed-plane recovery requires a matching client AVK, supplied through
+  protected local-key transfer, recovery-artifact import, or enrollment from
+  another active installation. A backend restore does not recover a lost AVK;
+  the open plane is unaffected. There is no managed break-glass decrypt. See
+  [Client-Key Loss And Recovery](#client-key-loss-and-recovery).
+
 - Secrets/TOTP seeds are sealed material: never embedded, never returned by
   semantic recall, never in the self-digest, never plaintext-exported, never
   ingested from CLAUDE.md/AGENTS.md. The only value-returning paths are the
@@ -225,8 +225,7 @@ V0 posture (sealed plane — secrets + TOTP):
 Managed cloud recovery restores both planes: customer identity data, encrypted
 secret material, and service availability. Self-hosted operators are responsible
 for backing up Postgres, object/blob storage when used, migration version,
-server configuration, and — when the sealed plane is enabled — KMS key identity
-and rotation metadata. Client-vector profiles/rows are ordinary PostgreSQL and
+server configuration, public AVK bindings, and vault lifecycle metadata. Client-vector profiles/rows are ordinary PostgreSQL and
 schema-32 archive data, not backend provider configuration.
 
 The threat framing is **dual**: integrity and authenticity of open-plane
@@ -249,23 +248,21 @@ Production backups should include:
   schema-32 archive (see [Client-Supplied Vectors](#client-supplied-vectors)).
 - Object/blob storage backup when object storage is used (large exports,
   diagnostic bundles, support attachments, backup artifacts).
-- Encrypted sealed-plane material when the sealed plane is enabled: the at-rest
-  secret/TOTP envelopes (`ciphertext` and envelope columns) and the
-  `realm_keys` / `secret_deks` wrapping rows. These ride in the Postgres backup
-  as ciphertext; they are useless without KMS unwrap authority. See
+- Encrypted sealed-plane material: sensitive-field envelopes and AVK-wrapped
+  per-field DEKs. These ride in the PostgreSQL backup as ciphertext; only a
+  client with the matching AVK can recover their values. See
   [Sealed-Plane Secret Backup](#sealed-plane-secret-backup) and
   [storage.md](storage.md).
-- KMS key identity and rotation metadata when the sealed plane is enabled:
-  `kms_provider`, the CMK reference (`kms_key_ref`, e.g. AWS KMS key ARN), the
-  per-realm `key_version` and KEK rotation generation — identity and metadata
-  only, **never key material or raw KMS credentials**. See
-  [key-hierarchy.md](key-hierarchy.md).
+- Public AVK identity, version, fingerprint, and value-free lifecycle history
+  and receipts. Client AVKs and recovery artifacts remain outside the backend
+  backup. See [key-hierarchy.md](key-hierarchy.md).
+
 - Migration version, so a restored database is matched to a compatible
   `witself-server` build. See [storage.md](storage.md).
 - Immutable client-vector profile identity (provider/model/recipe, dimensions,
   distance metric, and normalization) for every retained vector row.
-- Server configuration needed to reconnect to storage and, when the sealed
-  plane is enabled, KMS. The server has no embedding-provider credentials.
+- Server configuration needed to reconnect to storage. The server has no
+  embedding-provider credentials or agent-vault KMS configuration.
 - Helm release values without raw secrets. See [helm-chart.md](helm-chart.md).
 - Terraform state stored outside the public repo and protected as sensitive
   infrastructure state. See
@@ -294,8 +291,8 @@ Production backups must not include:
 - Raw agent or operator tokens (only token hashes and token metadata).
 - Database URLs, embedding-provider credentials, or other provider secrets.
 - Raw KMS credentials, unwrapped KEKs/DEKs, or any sealed-plane key material —
-  the backup carries KMS key *identity* and rotation metadata only, never key
-  material. See [key-hierarchy.md](key-hierarchy.md).
+  the backup carries public AVK bindings and encrypted wrapping metadata only,
+  never client key material. See [key-hierarchy.md](key-hierarchy.md).
 - Plaintext secret values, TOTP seeds, or generated TOTP codes. Sealed-plane
   material is present in the backup only as the at-rest AEAD envelope
   (ciphertext), never decrypted. See [Sealed-Plane Secret Backup](#sealed-plane-secret-backup).
@@ -309,7 +306,7 @@ Open-plane identity content (memory `content`, fact `value`,
 message `body`/`payload`) **is** present in the backup payload by design —
 Witself stores and restores it in clear. Sealed-plane secret values and TOTP
 seeds are the deliberate inverse: present only as encrypted envelope ciphertext
-and never recoverable from the backup without KMS unwrap authority.
+and never recoverable from the backup without the matching client AVK.
 
 ## Sealed-Plane Secret Backup
 
@@ -320,26 +317,20 @@ surface and backup/restore never touches it.
 
 What a secret backup contains:
 
-- The at-rest AEAD envelope per sensitive field and per TOTP seed —
-  `ciphertext`, `nonce`, `aead_algorithm`, `dek_id`, `dek_version`,
-  `kms_provider`, `aad_context` — exactly as stored. The envelope is identical
-  whatever the reveal mode (`client_side_decrypt` / `server_side_decrypt`), so
-  the backup shape does not vary by custody mode. See
+- Sensitive-field ciphertext, AEAD algorithm, nonce, DEK identifier, and
+  associated envelope metadata, exactly as stored. Encryption and decryption
+  happen only in the active client. See
   [encryption-model.md](encryption-model.md).
-- The wrapping rows: `realm_keys` (per-realm `wrapped_kek`, `key_version`,
-  `kms_provider`, `kms_key_ref`, rotation metadata) and `secret_deks` (canonical
-  `wrapped_dek`, current `kek_id`, DEK generation). These are stored only
-  KMS-wrapped / KEK-wrapped; the backup never holds an unwrapped KEK or DEK. See
-  [key-hierarchy.md](key-hierarchy.md) and [storage.md](storage.md).
-- KMS key identity and rotation metadata: `kms_provider`, `kms_key_ref` (the CMK
-  reference, e.g. AWS KMS key ARN), the per-realm `key_version`, and the KEK/CMK
-  rotation generation — so a restore reconnects to the correct CMK and resolves
-  the current wrapping KEK through `secret_deks.kek_id`. Identity and metadata
-  only; **never** the CMK, KEK, DEK, or raw KMS credentials.
-- Sealed-plane non-sensitive metadata that lives outside the envelope (secret
-  names, templates, usernames/URLs/issuers, grants `grt_…`, `owner ∈ {agent,
-  group}`), so secrets restore with their structure intact. This metadata is not
-  crypto-shredded by KMS loss (see below).
+- `secret_deks` wrapping rows: per-field DEKs encrypted under the AVK, with
+  the public AVK version and wrapping metadata. The backup never holds an
+  unwrapped data key. See [key-hierarchy.md](key-hierarchy.md) and
+  [storage.md](storage.md).
+- Public AVK bindings, terminal enrollment/rotation history, and value-free
+  lifecycle and secret-mutation receipts. The archive fence described above
+  excludes unresolved enrollment and rotation work from a logical account move.
+- Sealed-plane non-sensitive metadata that lives outside the envelope, such as
+  secret labels, templates, and usernames/URLs/issuers, so secrets restore with
+  their structure intact. Losing a client AVK does not erase this metadata.
 
 What it must never contain: plaintext secret values, TOTP seeds, generated TOTP
 codes, unwrapped KEKs or DEKs, the CMK, or raw KMS credentials. The sealed plane
@@ -347,49 +338,43 @@ is **never embedded, never recalled, never in the self-digest, never
 plaintext-exported, never ingested**; the encrypted backup is the one and only
 way secret material leaves the live store, and it leaves as ciphertext.
 
-Restoring a secret backup re-lands the envelopes and wrapping rows as ciphertext
-and re-binds them to the retained KMS key identity. The values themselves stay
-sealed until an authorized, audited reveal — restore never decrypts. A restore
-into a realm whose CMK is gone re-lands ciphertext that can never be unwrapped
-(see [KMS-Loss And Crypto-Shred Posture](#kms-loss-and-crypto-shred-posture)).
+Restoring a secret backup re-lands the envelopes, AVK-wrapped DEKs, and public
+vault bindings unchanged. Restore never decrypts values or unwraps keys. An
+authorized client must separately provide the matching AVK before local reveal;
+restoring ciphertext cannot recreate a missing client key.
 
-## KMS-Loss And Crypto-Shred Posture
+<a id="kms-loss-and-crypto-shred-posture"></a>
 
-The sealed plane roots every value in `CMK → per-realm KEK → per-secret/field
-DEK`. Loss of the CMK (deletion, scheduled-deletion, a disabled key, or a
-withdrawn key policy/IAM) makes every per-realm KEK unwrappable, hence every DEK
-unwrappable, hence **all secret values and TOTP seeds permanently
-unrecoverable** — in both custody modes, since both depend on unwrapping the
-same envelope. This is intentional crypto-shredding and is the same posture
-[key-hierarchy.md](key-hierarchy.md), [encryption-model.md](encryption-model.md),
-and [storage.md](storage.md) mandate.
+## Client-Key Loss And Recovery
 
-- **The open plane is unaffected.** Memories, facts, primary flags, edit
-  history, policies, group membership, messages, and audit are ordinary
-  data-at-rest with no envelope; they survive CMK loss untouched and restore in
-  clear. CMK loss crypto-shreds the sealed plane only.
-- **Crypto-shred covers secret values only, not metadata/PII.** CMK loss renders
-  secret values and TOTP seeds unrecoverable but does not erase sealed-plane
-  metadata (secret names, usernames/URLs/issuers) or the audit/operator PII held
-  under retention. Erasing that metadata is a separate, metadata-level action.
-  See [data-model.md](data-model.md).
+The sealed plane roots sensitive values in the client-held AVK and per-field
+DEKs. Losing every matching AVK copy and usable client recovery path makes the
+values inaccessible; retaining backend ciphertext alone cannot recover them.
+See [key-hierarchy.md](key-hierarchy.md),
+[encryption-model.md](encryption-model.md), and [storage.md](storage.md).
+
+- **The open plane is unaffected by AVK loss.** Memories, facts, primary flags,
+  edit history, policies, group membership, messages, and audit remain ordinary
+  data-at-rest and restore independently of the client vault key.
+- **Key loss does not erase metadata/PII.** Secret labels,
+  usernames/URLs/issuers, and audit/operator PII remain subject to their
+  retention rules. Erasing that metadata is a separate action. See
+  [data-model.md](data-model.md).
 - **No managed break-glass decrypt.** Managed recovery restores service
   availability, operator account access, encrypted secret material, and the open
   plane — never plaintext secrets. There is no support path that decrypts secret
   values.
-- **Loss surface by custody mode.** Server-mediated managed mode concentrates
-  the loss point in one CMK plus the deployment IAM identity. Client-held / BYOK
-  mode adds an independent loss point — the operator-held key or passphrase; if
-  the operator loses it, those realms are unrecoverable by construction.
+- **Recovery is client-side.** An authorized client supplies the matching AVK
+  through protected local-key transfer, recovery-artifact import, or enrollment
+  from another active installation. Password generation, decryption, and TOTP
+  calculation remain in that active client.
 
-Required mitigations to keep crypto-shred a *deliberate* outcome rather than an
-accident: enable KMS key rotation with retained prior versions; use deletion
-windows with pending-deletion alarms; consider multi-region CMK replication for
-managed; and for BYOK require explicit operator consent at realm creation with
-prominent warnings and push toward multi-region CMK / key-policy backups /
-operator-controlled passphrase escrow. Backups carry KMS key identity + rotation
-metadata so a restore reconnects to a *retained* CMK — they cannot resurrect a
-destroyed one.
+For recovery-gated schema-56 rotation, the client decrypt-verifies an artifact
+before commit; production certification requires an independent
+recovery destination. Backend backups carry encrypted vault state and public
+lifecycle metadata, never the client key or recovery passphrase/artifact.
+This recovery contract does not claim to implement irreversible crypto-shred;
+see [sealed-plane-acceptance.md](sealed-plane-acceptance.md).
 
 ## Client-Supplied Vectors
 
@@ -573,11 +558,9 @@ Restore should validate:
   owner-scoped memory version/content hash, valid dimensions/components/hash,
   and valid chronology. An archive from before schema 32 may upgrade with zero
   vector coverage without blocking lexical recall.
-- When the sealed plane is enabled: that the retained KMS key identity
-  (`kms_provider`, `kms_key_ref`) resolves to a reachable CMK and that the
-  `realm_keys` / `secret_deks` wrapping rows restore consistently, so restored
-  envelopes can be unwrapped by an authorized, audited reveal later. Restore
-  never decrypts the envelopes itself.
+- Sealed-field envelopes, AVK-wrapped DEKs, public vault bindings, and lifecycle
+  rows restore consistently. Only an authorized client with the matching AVK
+  can subsequently reveal values; restore never decrypts the envelopes.
 
 Restore should reconstruct integrity-critical structures in dependency order:
 
@@ -593,18 +576,18 @@ Restore should reconstruct integrity-critical structures in dependency order:
 6. Policies, so the default-deny access surface is restored before cross-agent
    access resumes.
 7. Messages and per-recipient delivery/read/ack state.
-8. When the sealed plane is enabled: `realm_keys` and `secret_deks` wrapping
-   rows, then the secret/field/TOTP envelopes and grants (`grt_…`), re-bound to
-   the retained KMS key identity. These restore as ciphertext; no decryption
-   occurs during restore.
+8. Public AVK bindings, secret metadata, sensitive-field envelopes, wrapped
+   `secret_deks`, and value-free vault lifecycle rows in their archive
+   dependency order. These restore as ciphertext and public metadata; no
+   decryption occurs during restore.
 9. Audit records, when included.
 
 Open-plane restore does **not** require KMS or any key-material custody — there
 is no plaintext-exposure exception to manage, because identity data is plaintext
 by design. Sealed-plane restore re-lands ciphertext and wrapping rows and
-requires the retained KMS key identity to be reconnectable for later reveal; if
-the CMK is gone, the restored secret ciphertext is crypto-shredded and cannot be
-unwrapped (see [KMS-Loss And Crypto-Shred Posture](#kms-loss-and-crypto-shred-posture)).
+requires the matching AVK in the authorized client for later reveal. A lost
+client key cannot be recreated from the restored database (see
+[Client-Key Loss And Recovery](#client-key-loss-and-recovery)).
 Restore never exposes plaintext secret values. Restore and recovery actions are
 audited.
 
@@ -616,18 +599,19 @@ encrypted secret material, and service availability.
 - Recovery restores memories, facts (with primary flags), memory edit history,
   policies, group membership, group-owned records, messages, and audit for the
   affected realms.
-- When the sealed plane is enabled, recovery also re-lands the encrypted secret
-  envelopes and the `realm_keys` / `secret_deks` wrapping rows, re-bound to the
-  retained CMK. It never restores plaintext secrets and provides no break-glass
-  decrypt; secret values stay sealed until an authorized, audited reveal. See
-  [KMS-Loss And Crypto-Shred Posture](#kms-loss-and-crypto-shred-posture).
+- Recovery also re-lands encrypted secret envelopes, AVK-wrapped per-field
+  DEKs, public vault bindings, and value-free lifecycle state. It never restores
+  plaintext secrets or client AVK bytes. Secret values stay sealed until an
+  authorized client provides the matching key and performs local reveal. See
+  [Client-Key Loss And Recovery](#client-key-loss-and-recovery).
+
 - **Open-plane** recovery does not depend on KMS key material; there is no
   scenario where identity becomes unrecoverable because a key was lost. Loss of
   the Postgres system of record and all its backups is the limiting risk for
   identity, which is why backups are the operational safeguard.
-- **Sealed-plane** recovery does depend on the CMK being retained: CMK loss
-  crypto-shreds secret values and TOTP seeds for the affected realms while
-  leaving the open plane intact.
+- **Sealed-plane** value recovery requires the matching client AVK or a usable
+  client recovery path. Restoring the database alone cannot recover a lost AVK;
+  the open plane remains independent of that client key.
 - Lexical recall is immediately available after index rebuild. Restored vector
   coverage reflects the imported profile/rows and may be zero for an older
   archive; the backend does not schedule re-embedding.
@@ -987,12 +971,12 @@ Self-hosted operators own:
 - Migration version tracking and upgrade ordering. See [storage.md](storage.md).
 - Client-vector profile retention for every vector row; no backend
   embedding-provider configuration exists.
-- When the sealed plane is enabled: KMS key retention, rotation, and access
-  policy — the CMK under the configured `WITSELF_KMS_PROVIDER`
-  (`aws-kms` / `gcp-kms` / `azure-key-vault`), with rotation enabled and prior
-  versions retained — plus backing up KMS key identity and rotation metadata
-  (never key material). See [key-hierarchy.md](key-hierarchy.md) and
+- Public vault bindings and encrypted lifecycle-state backup. Matching AVK
+  custody, enrollment, rotation, and recovery artifacts remain client
+  responsibilities; backend backups never carry client key material. See
+  [key-hierarchy.md](key-hierarchy.md) and
   [self-host-support.md](self-host-support.md).
+
 - Terraform state protection. See
   [terraform-infrastructure.md](terraform-infrastructure.md).
 - Helm values and Kubernetes Secret protection. See
@@ -1004,9 +988,9 @@ where lost key material makes identity unrecoverable. If a self-hosted operator
 loses the Postgres system of record and all backups, identity data is lost; this
 is the single operational failure mode for identity that self-hosters must guard
 against. For the **sealed plane**, there is an additional, deliberate failure
-mode: if the operator loses required CMK key material, Witself cannot recover the
-affected secret values or TOTP seeds — crypto-shred by construction, while the
-open plane remains recoverable from Postgres. Production self-host support is
+mode: if every matching client AVK and usable recovery path is lost, Witself
+cannot recover the affected secret values or TOTP seeds, while the open plane
+remains recoverable from Postgres. Production self-host support is
 paid or contracted once backup/restore, migrations, upgrade, observability, and
 disaster recovery are real. See [self-host-support.md](self-host-support.md).
 
@@ -1029,15 +1013,13 @@ Migration is dual-plane, matching the two postures above:
   so no KMS custody is involved. Migration-0032
   client-supplied vector profiles/rows move in the same archive under the
   [Client-Supplied Vectors](#client-supplied-vectors) validation rules.
-- **Sealed plane (secrets + TOTP)** is KMS-rooted per cell/cloud, so it cannot be
-  carried as a plaintext export. Migration performs an audited **KMS re-wrap**:
-  the data keys are unwrapped under cell A's CMK and re-encrypted under cell B's
-  CMK (decrypt-at-source / re-encrypt-at-dest), exactly the
-  [Sealed-Plane Secret Backup](#sealed-plane-secret-backup) envelope rebound to a
-  new key identity. Secret *values* are never exported in plaintext and the
-  reveal ceremony is never exercised; the move re-lands ciphertext under the
-  destination CMK. See [key-hierarchy.md](key-hierarchy.md) and
-  [storage.md](storage.md).
+- **Sealed plane (secrets + TOTP)** moves as unchanged sensitive-field
+  ciphertext, AVK-wrapped DEKs, public vault bindings, and value-free lifecycle
+  state under the account archive fence. Neither cell unwraps keys or reveals
+  values; no source-cloud or destination-cloud KMS operation is needed. The
+  authorized client must separately possess the matching AVK after import. See
+  [Sealed-Plane Secret Backup](#sealed-plane-secret-backup),
+  [key-hierarchy.md](key-hierarchy.md), and [storage.md](storage.md).
 
 Agent-email mailboxes, messages, aliases, permanent domain-route reservations,
 send controls, outbound messages, provider-event receipts, and recipient
@@ -1081,13 +1063,12 @@ A managed or self-hosted restore should proceed in this order:
    projection separately. For an older archive, report zero vector coverage.
 6. Restore server configuration and reconnect to storage. No backend embedding
    provider is involved.
-7. When the sealed plane is enabled: reconnect to KMS, confirm the retained
-   `kms_provider` / `kms_key_ref` resolves to a reachable CMK, and verify the
-   `realm_keys` / `secret_deks` wrapping rows restored consistently — a probe
-   KEK unwrap (without revealing any secret value) confirms the chain is
-   reconnectable. If the CMK is unreachable or gone, the restored secret
-   ciphertext is crypto-shredded; the open plane is still fully restored. See
-   [key-hierarchy.md](key-hierarchy.md).
+7. Verify that sealed-field ciphertext, wrapped DEKs, public AVK bindings, and
+   value-free lifecycle rows restored consistently. Do not unwrap keys during
+   restore. For subsequent client reveal, the authorized client must separately
+   provide the matching AVK through local-key transfer, recovery-artifact import,
+   or enrollment. See [key-hierarchy.md](key-hierarchy.md).
+
 8. Verify integrity invariants: fact-name uniqueness per owner, at-most-one
    primary per logical kind per owner, group membership and admins, policy
    bindings (default-deny surface), memory edit-history continuity, curation

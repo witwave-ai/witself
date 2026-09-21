@@ -1428,8 +1428,8 @@ into scope; it does not change the database or plan protocol.
 
 ### Phase 0 — Freeze And Reconcile The Contract (complete)
 
-- Mark the old server-side embedding, native-only narrative routing, and
-  autonomous consolidation designs as superseded.
+- Define client-supplied vectors, portable narrative routing, and client-authored
+  curation as the memory contract.
 - Freeze memory JSON, evidence/lineage relations, plan primitives, idempotency,
   optimistic concurrency, lifecycle/delete semantics, cursor/fencing state
   machines, wire fields, audit events, scopes, and capability names.

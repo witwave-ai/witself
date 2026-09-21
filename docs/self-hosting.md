@@ -9,18 +9,16 @@ for current readiness gates.
 Narrative-memory decision (accepted 2026-07-14): self-hosted memory requires
 PostgreSQL but no backend AI, model, or embedding-provider credential. Curation
 and any optional vector generation run in clients. Client-supplied vector
-profiles remain a future, unsupported capability as specified by
+profiles and optional JSONB vector rows are implemented as specified by
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
-storage-encryption references are unaffected. KMS, realm-KEK, server-decrypt,
-and cross-cloud re-wrap passages retained below are superseded design history,
-not implementation guidance.
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-side custody for agent secrets. The backend holds no AVK key material,
+calls no KMS for agent secrets, and never decrypts secret values.
+Ordinary infrastructure KMS and
+storage-encryption references are unaffected.
 
 ## Positioning
 

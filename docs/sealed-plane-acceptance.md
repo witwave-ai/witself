@@ -11,9 +11,9 @@ acceptance contract.
 
 This is the release gate for the client-custodied agent vault defined by
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. Where an
-older sealed-plane document still describes a cloud-KMS vault root or
-server-side decryption, ADR 0003 and this gate take precedence.
+[Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. ADR 0003
+and this gate define the custody boundary: the client holds the agent vault
+key and decrypts locally; the backend stores ciphertext and redacted inventory.
 
 ## Implemented schema-56 lifecycle gate
 
