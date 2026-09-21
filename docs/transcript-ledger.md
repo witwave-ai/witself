@@ -333,9 +333,9 @@ matching prompt text, and also excludes deliberately ephemeral sessions such as
 `codex exec --ephemeral` and non-persisted app-server threads. Witself neither
 captures nor emits automatic memory hydration for those sessions. This boundary
 is enforced by the `witself` binary that the managed Codex hook runner executes,
-so the exclusion takes effect only once that executable carries this release;
-until then an older hooked binary can still queue ephemeral events, which each
-flush by the new build re-quarantines. Witself keeps a value-free,
+so the exclusion requires `v0.0.273` or later in that executable. An older hooked
+binary can still queue ephemeral events, which each flush by an upgraded build
+re-quarantines. Witself keeps a value-free,
 session-hash-named audit marker under
 `~/.witself/capture/skipped/codex/` containing only `schema_version`, `runtime`,
 `reason`, `session_hash`, `first_seen`, `last_seen`, `events`, `hook_events`,
@@ -368,12 +368,13 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
   liveness options remain undecided. The delegation orchestrator must wire
   this call into job completion.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
-  persistence-boundary exclusion was merged on `main` by
-  [PR #341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but
-  remains unreleased; `v0.0.272` is `9dc2f3d`. It takes effect only after a
-  release containing `fcf6e1c` is installed as the hooked binary. Until then,
-  keep using the fresh-subject-per-run workaround in
-  [memory-runtime-acceptance.md](memory-runtime-acceptance.md#older-codex-hook-binaries-require-fresh-subjects).
+  persistence-boundary exclusion shipped in `v0.0.273` via
+  [PR #341](https://github.com/witwave-ai/witself/pull/341). With that release
+  or later installed as the hooked binary, pathless Codex sessions are
+  structurally excluded at capture and queued pathless events are quarantined.
+  No per-run subject rotation is needed for this exclusion; see
+  [memory-runtime-acceptance.md](memory-runtime-acceptance.md#codex-pathless-sessions-are-structurally-excluded)
+  for the separate certification-fixture and window-isolation requirements.
 
 Captured content is NUL-safe: NUL bytes and their JSON escape sequences are
 replaced with U+FFFD in bodies at capture (both the hook and batch-assembly

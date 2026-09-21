@@ -202,17 +202,19 @@ required to work around parent exit. Running
 remains useful belt-and-braces: it drains currently uploadable events and
 reports delivery errors. Older hooked binaries still need this workaround.
 
-### Older Codex hook binaries require fresh subjects
+### Codex pathless sessions are structurally excluded
 
-The [#336](https://github.com/witwave-ai/witself/issues/336) capture exclusion
-was merged on `main` by
-[#341](https://github.com/witwave-ai/witself/pull/341) at `fcf6e1c`, but remains
-unreleased; `v0.0.272` is `9dc2f3d`. It takes effect only after a release
-containing `fcf6e1c` is installed as the hooked binary. Until then, Codex
-desktop background agents can be captured under a freshly bound subject and
-make `prepare` refuse its pending memory checkpoint. Keep creating the synthetic
-Codex subject immediately before each run (and mint a fresh one after that
-refusal) until the hooked executable is upgraded.
+Since Witself `v0.0.273`, the
+[#336](https://github.com/witwave-ai/witself/issues/336) capture exclusion,
+shipped by [#341](https://github.com/witwave-ai/witself/pull/341), structurally
+excludes Codex hooks with no `transcript_path` before session state or outbox
+events are written. This covers non-persisted desktop background sessions and
+`codex exec --ephemeral`; already-queued pathless Codex events are quarantined
+instead of uploaded. With `v0.0.273` or later installed as the hooked binary,
+no per-run subject rotation is needed to work around background-session capture.
+The fresh synthetic agents required for certification and retries above remain
+necessary for fixture isolation and exact-prompt uniqueness. Persisted sessions
+still share the runtime binding, so the window-isolation guidance below applies.
 
 ### Autonomous windows must not overlap other sessions on the binding
 
