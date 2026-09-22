@@ -16,7 +16,11 @@ func TestPanelsFitBeforeOuterCropAndKeepFooter(t *testing.T) {
 		for panel := range panelNames {
 			openPanel(t, m, panel)
 			_, iw, dw, h := m.layout()
-			for _, box := range []string{m.box(m.inventoryView(iw-4, h-2), iw, h, true), m.box(m.vp.View(), dw, h, true)} {
+			boxes := []string{m.box(m.vp.View(), dw, h, true)}
+			if iw > 0 {
+				boxes = append(boxes, m.box(m.inventoryView(iw-4, h-2), iw, h, true))
+			}
+			for _, box := range boxes {
 				if lipgloss.Height(box) != h {
 					t.Fatalf("%s box height=%d, want %d", panelNames[panel], lipgloss.Height(box), h)
 				}

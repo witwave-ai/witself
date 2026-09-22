@@ -81,6 +81,8 @@ type Model struct {
 	states                        [7]panelState
 	self                          object
 	selfStatus                    string
+	summaryView, summaryRow       int
+	summaryASCII                  bool
 	panel, focus, sub             int // focus: inventory, detail scroll, detail actions
 	subKey                        string
 	width, height                 int
@@ -124,6 +126,7 @@ func New(ctx context.Context, src Source, o Options) *Model {
 		theme = "auto"
 	}
 	m := &Model{ctx: ctx, cancel: cancel, source: src, opts: o, width: 80, height: 24, theme: theme, self: object{}, blocked: map[dashboard.Resource]string{}, expanded: map[int]bool{}, vp: viewport.New(40, 15), selfStatus: "loading"}
+	m.summaryRow = 1 // Start on the first category with a defined activity metric.
 	if ValidTheme(o.Theme) {
 		m.themeRevision = 1
 	}
@@ -413,6 +416,8 @@ func (m *Model) refresh() tea.Cmd {
 		}
 		q := url.Values{"limit": {"100"}}
 		switch panel {
+		case 0:
+			read(dashboard.ResourceSummary, "", nil)
 		case 1:
 			read(dashboard.ResourceTranscripts, "", nil)
 			if selectedID != "" {
@@ -696,7 +701,7 @@ func (m *Model) applyFetch(msg fetchedMsg) tea.Cmd {
 		m.clearPrivate()
 	}
 	changed := oldKey != s.key
-	if changed {
+	if changed && (m.panel != 0 || m.summaryView == 3) {
 		m.clearPrivate()
 		m.sub = 0
 		m.subKey = ""
@@ -1084,6 +1089,11 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 		return nil
+	}
+	if m.panel == 0 {
+		if handled, cmd := m.summaryKey(k); handled {
+			return cmd
+		}
 	}
 	switch k {
 	case "b", "w":

@@ -191,6 +191,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /{$}", secure(cfg, session, http.HandlerFunc(indexHandler)))
 	mux.Handle("GET /static/", secure(cfg, session, http.FileServerFS(staticFS)))
 	mux.Handle("GET /api/self", secure(cfg, session, selfHandler(cfg)))
+	mux.Handle("GET /api/summary", secure(cfg, session, summaryHandler(newSummaryCollector(cfg))))
 	mux.Handle("GET /api/themes", secure(cfg, session, http.HandlerFunc(themesHandler)))
 	// THE SOLE WRITE EXCEPTION (ADR 0004): /api/prefs is the only route on
 	// this proxy that has ever forwarded a mutation, and PUT here reaches

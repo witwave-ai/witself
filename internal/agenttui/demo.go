@@ -116,6 +116,8 @@ func (d *demoSource) Read(ctx context.Context, r dashboard.ReadRequest) (json.Ra
 		return nil, err
 	}
 	switch r.Resource {
+	case dashboard.ResourceSummary:
+		return encode(object{"summary": demoSummary()})
 	case dashboard.ResourceSelf:
 		return encode(demoSelf())
 	case dashboard.ResourceThemes:

@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const { summaryData, openDetails } = require("./overview_harness.cjs");
 
 // The app's route() does not return its transcript request chains. Once all
 // controlled fetch/JSON promises have settled, a full event-loop turn lets
@@ -54,7 +55,7 @@ function dom(check) {
       this.listeners.get(name).push(listener);
     }
     dispatch(name) {
-      for (const listener of this.listeners.get(name) || []) listener({ target: this });
+      for (const listener of this.listeners.get(name) || []) listener.call(this, { target: this });
     }
     focus() { activeElement = this; }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -218,11 +219,16 @@ function fixture(t) {
     assert.equal(d.listenerCount(), 0, "transcript navigation fixture cleanup failed: DOM listeners remain");
     t.diagnostic("transcript navigation fixture drained all owned responses and streams");
   });
+  const summaryTimers = new Map();
+  let nextSummaryTimer = 0;
+  t.after(() => summaryTimers.clear());
   const sandbox = {
-    module: { exports: {} }, window, document: d.document, URLSearchParams,
+    module: { exports: {} }, window, document: d.document, URLSearchParams, AbortController,
+    setTimeout(fn, delay) { const id = ++nextSummaryTimer; summaryTimers.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { summaryTimers.delete(id); },
     fetch(url, options) {
-      check(typeof url === "string" && /^(?:\/api\/self|\/api\/transcripts|\/api\/transcripts\/tx_(?:alpha|beta)\?(?:tail=true&limit=200|after_sequence=3&limit=500))$/.test(url), "unexpected fetch URL");
-      check(options && options.credentials === "same-origin" && Object.keys(options).length === 1, "unexpected fetch options");
+      check(url === "/api/summary" || typeof url === "string" && /^(?:\/api\/self|\/api\/transcripts|\/api\/transcripts\/tx_(?:alpha|beta)\?(?:tail=true&limit=200|after_sequence=3&limit=500))$/.test(url), "unexpected fetch URL");
+      check(options && options.credentials === "same-origin" && Object.keys(options).length === (url === "/api/summary" ? 2 : 1), "unexpected fetch options");
       const request = {
         url, headers: deferred(check), body: deferred(check), jsonCalls: 0, status: null, networkFailure: false,
         releaseHeaders(status = 200) {
@@ -238,6 +244,7 @@ function fixture(t) {
         },
       };
       requests.push(request);
+      if (url === "/api/summary") { request.releaseHeaders(); request.body.resolve(summaryData()); }
       return request.headers.promise;
     },
     EventSource: class {
@@ -272,8 +279,8 @@ function fixture(t) {
       app.route();
       h.healthy();
       const added = requests.slice(start);
-      assert.deepEqual(added.map((request) => request.url), [url], "transcript navigation fixture: route request inventory");
-      return added[0];
+      assert.deepEqual(added.map((request) => request.url), hash === "#/overview" ? ["/api/summary", url] : [url], "transcript navigation fixture: route request inventory");
+      return added.find((r) => r.url !== "/api/summary");
     },
     async headers(request, status = 200) {
       request.releaseHeaders(status);
@@ -357,7 +364,8 @@ function beginDetail(h, id = "tx_alpha", anchored = false) {
 async function overview(h) {
   const request = h.begin("#/overview", "/api/self");
   await h.finish(request, { identity: { agent_name: "Synthetic navigator" }, salient_memories: [{ id: "mem_overview", snippet: "current overview response" }] });
-  visible(h, "#/overview", "overview", "inventory", "current overview response");
+  openDetails(h);
+  visible(h, "#/overview", "overview", "Agent summary", "current overview response");
 }
 async function currentDetail(h, id = "tx_beta") {
   const request = beginDetail(h, id);
@@ -419,7 +427,7 @@ test("transcript navigation renders and filters current inventory", options, asy
   input.value = "";
   input.dispatch("input");
   assert.deepEqual(h.nodes.view.querySelectorAll(".row").map((row) => row.style.display), ["", ""], "clearing the filter restores both rows");
-  assert.equal(h.requests.length, 2, "filtering makes no additional request");
+  assert.equal(h.requests.length, 3, "filtering makes no additional request");
   baseline(t);
 });
 

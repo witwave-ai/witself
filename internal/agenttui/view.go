@@ -47,6 +47,9 @@ func (m *Model) layout() (rail, inventory, detail, height int) {
 		rail = 18
 	}
 	remaining := m.width - rail
+	if m.panel == 0 && m.summaryView != 3 {
+		return rail, 0, remaining, height
+	}
 	if remaining < 60 {
 		return rail, 0, remaining, height
 	}
@@ -308,10 +311,14 @@ func (m *Model) footer() string {
 	if m.filterEditing {
 		return " / filtering  Enter keep  Esc cancel"
 	}
+	if m.panel == 0 {
+		if m.width < 80 {
+			return " o/l/e/d views  ? help  q quit"
+		}
+		return " o overview  l timeline  e updates  d details  b browser  ? help  q quit"
+	}
 	actions := "Enter detail"
 	switch m.panel {
-	case 0:
-		actions = "Enter open memory"
 	case 1:
 		actions = "[ ] entry  x expand"
 	case 2:
@@ -366,7 +373,7 @@ func (m *Model) overlayView(w, h int) string {
 		return crop(strings.Join(ls, "\n"), w, h)
 	}
 	help := []string{
-		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "All reads use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
+		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Summary", "o / l / e        Overview / Timeline / Recent updates", "d                Workspace details and salient memories", "a                Toggle plain ASCII graph characters", "Tab              Switch category selection and scrolling", "Enter            Open the selected category", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "All reads use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
 	}
 	lines := []string{}
 	for _, l := range help {
@@ -487,8 +494,12 @@ func (m *Model) renderDetail(follow bool) {
 	}
 }
 func (m *Model) overview(d *detailWriter) {
+	if m.summaryView != 3 {
+		m.summaryOverview(d)
+		return
+	}
 	d.heading("A clear view of your workspace")
-	d.dim("Choose a panel with 1–7. Salient memories open with Enter.")
+	d.dim("o overview · l timeline · e updates · Enter opens a salient memory")
 	counts := obj(obj(m.self["index"])["counts"])
 	d.line("")
 	names := []string{"transcripts", "facts", "memories", "messages", "secrets"}

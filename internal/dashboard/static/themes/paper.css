@@ -11,3 +11,14 @@
   --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+:root {
+  --summary-ops: #365ca1;
+  --summary-trn: #00677c;
+  --summary-fct: #59616a;
+  --summary-mem: #7551a2;
+  --summary-sec: #85540d;
+  --summary-eml: #257245;
+  --summary-msg: #a04373;
+  --summary-muted: #626258;
+}

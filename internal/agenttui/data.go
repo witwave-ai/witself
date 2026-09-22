@@ -289,6 +289,8 @@ func decode(r dashboard.Resource, raw json.RawMessage) (object, error) {
 	}
 	out := object{}
 	switch r {
+	case dashboard.ResourceSummary:
+		return projectSummary(raw)
 	case dashboard.ResourceSelf:
 		out = pick(o, "observational dashboard_version poll_interval_ms")
 		out["identity"] = pick(obj(o["identity"]), "agent_name realm_name agent_id realm_id")

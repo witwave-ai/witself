@@ -38,6 +38,7 @@ const (
 	ResourceEmailSent
 	ResourceSecrets
 	ResourceSecret
+	ResourceSummary
 )
 
 // ReadRequest addresses a console resource, never an HTTP method or URL.
@@ -76,6 +77,7 @@ type Reader struct {
 	cfg       Config
 	factReads factReadCapability
 	secrets   secretsCapability
+	summary   *summaryCollector
 }
 
 // NewReader validates the fixed cell endpoint without contacting it. Endpoint
@@ -101,7 +103,7 @@ func NewReader(cfg Config) (*Reader, error) {
 		cfg.PollInterval = defaultPollInterval
 	}
 	cfg.AccessToken = ""
-	return &Reader{cfg: cfg}, nil
+	return &Reader{cfg: cfg, summary: newSummaryCollector(cfg)}, nil
 }
 
 // Read returns the existing handler's JSON projection. Every call has a
@@ -119,6 +121,8 @@ func (r *Reader) Read(ctx context.Context, in ReadRequest) (json.RawMessage, err
 	var needsID bool
 	limit := 100
 	switch in.Resource {
+	case ResourceSummary:
+		handler, path = summaryHandler(r.summary), "/api/summary"
 	case ResourceSelf:
 		handler, path = selfHandler(r.cfg), "/api/self"
 	case ResourceThemes:

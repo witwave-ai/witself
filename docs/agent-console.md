@@ -36,7 +36,7 @@ too. Its sole write is its own size-capped, validated theme preference.
 
 | Panel | Presented | Deliberately absent |
 |---|---|---|
-| Overview | Agent identity, avatar, value-free checkpoints, salient-memory summaries, memory/fact capacity, and the cell-applied enforced plan plus closed agent-domain entitlement and retention projection | Domain mutations; account, subscription, payment, provider, pending-transition, and billing administration; cross-agent usage; feature-progress authority |
+| Overview | Shared colored summary with inventory, recorded hourly activity, bounded recent updates, and value-free checkpoints; identity and avatar; workspace details with salient memories, capacity, enforced plan and retention | Private content in the summary; combined totals across activity units; domain mutations; billing administration; cross-agent usage; feature-progress authority |
 | Transcripts | Observational transcript inventory and entries | Append, retention-policy changes, and evidence mutation |
 | Facts | Observational redacted inventory and history; one explicit exact reveal where authorized | Set, propose, confirm, reject, or delete |
 | Memories | Redacted inventory, detail, version history, and evidence | Create, adjust, curate, supersede, forget, restore, or delete |
@@ -49,6 +49,21 @@ Received senders, subjects, provider-supplied authentication/spam results, and
 provider-neutral outbound error codes remain untrusted external data. The proxy
 rebuilds both email projections through narrow allow lists and the browser
 renders them only as text.
+
+The summary's Overview, Timeline, and Recent updates views share the terminal's
+category colors, codes, and metric meanings. Facts and active memories have
+exact counts when available; other inventory counts are bounded recent pages.
+Recorded activity uses 24 UTC hour buckets, including the partial current hour:
+transcript entries, fact deliveries, secret accesses, accepted email sends,
+and messages sent. These are separate units, not a combined transaction count
+or a complete audit trail. Transactions and memory activity history remain
+explicitly unavailable. Recent updates describe observations from loaded
+records, not every change. See the [terminal summary guide](agent-tui.md#visual-summary).
+
+The local `/api/summary` projection is passive, content-free, identity-scoped,
+and cached for at most 30 seconds. Browser refresh runs only while Overview is
+visible, keeps the selected view and keyboard focus, and labels retained data
+as stale after failure. Workspace details open explicitly beneath the summary.
 
 Conversations fetches a received message's body only when Show body is selected,
 using the existing recipient-only observational peek API. The local proxy

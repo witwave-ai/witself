@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const { summaryData, openDetails } = require("./overview_harness.cjs");
 
 // The app's route() does not return its memory request chains. Once all
 // controlled fetch/JSON promises have settled, a full event-loop turn lets
@@ -53,7 +54,7 @@ function dom(check) {
       this.listeners.get(name).push(listener);
     }
     dispatch(name) {
-      for (const listener of this.listeners.get(name) || []) listener({ target: this });
+      for (const listener of this.listeners.get(name) || []) listener.call(this, { target: this });
     }
     focus() { activeElement = this; }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -190,11 +191,16 @@ function fixture(t) {
     assert.ok(sources.every((source) => source.closed && source.listeners.size === 0), "memory navigation fixture cleanup failed: streams remain");
     t.diagnostic("memory navigation fixture drained all owned responses and streams");
   });
+  const summaryTimers = new Map();
+  let nextSummaryTimer = 0;
+  t.after(() => summaryTimers.clear());
   const sandbox = {
-    module: { exports: {} }, window, document: d.document, URLSearchParams,
+    module: { exports: {} }, window, document: d.document, URLSearchParams, AbortController,
+    setTimeout(fn, delay) { const id = ++nextSummaryTimer; summaryTimers.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { summaryTimers.delete(id); },
     fetch(url, options) {
-      check(typeof url === "string" && /^(?:\/api\/self|\/api\/memories\?limit=100|\/api\/memories\/mem_[a-z]+(?:\/history\?limit=50)?)$/.test(url), "unexpected fetch URL");
-      check(options && options.credentials === "same-origin" && Object.keys(options).length === 1, "unexpected fetch options");
+      check(url === "/api/summary" || typeof url === "string" && /^(?:\/api\/self|\/api\/memories\?limit=100|\/api\/memories\/mem_[a-z]+(?:\/history\?limit=50)?)$/.test(url), "unexpected fetch URL");
+      check(options && options.credentials === "same-origin" && Object.keys(options).length === (url === "/api/summary" ? 2 : 1), "unexpected fetch options");
       const request = {
         url, headers: deferred(check), body: deferred(check), jsonCalls: 0, status: null,
         releaseHeaders(status = 200) {
@@ -210,6 +216,7 @@ function fixture(t) {
         },
       };
       requests.push(request);
+      if (url === "/api/summary") { request.releaseHeaders(); request.body.resolve(summaryData()); }
       return request.headers.promise;
     },
     EventSource: class {
@@ -235,8 +242,8 @@ function fixture(t) {
       app.route();
       h.healthy();
       const added = requests.slice(start);
-      assert.deepEqual(added.map((request) => request.url), urls, "memory navigation fixture: route request inventory");
-      return added;
+      assert.deepEqual(added.map((request) => request.url), hash === "#/overview" ? ["/api/summary", ...urls] : urls, "memory navigation fixture: route request inventory");
+      return added.filter((r) => r.url !== "/api/summary");
     },
     async headers(request, status = 200) {
       request.releaseHeaders(status);
@@ -299,8 +306,9 @@ async function overview(h) {
   const [request] = h.begin("#/overview", ["/api/self"]);
   navigation(h, "#/overview", "overview", "overview");
   await h.finish(request, { identity: { agent_name: "Synthetic navigator" }, salient_memories: [{ id: "mem_overview", snippet: "current overview response" }] });
+  openDetails(h);
   h.settled([request]);
-  visible(h, "#/overview", "overview", "overview", "inventory", "current overview response");
+  visible(h, "#/overview", "overview", "overview", "Agent summary", "current overview response");
 }
 
 async function finishList(h, owned, label) {
@@ -351,7 +359,7 @@ test("memory navigation renders current inventory", options, async (t) => {
   input.value = "second";
   input.dispatch("input");
   assert.deepEqual(h.nodes.view.querySelectorAll(".row").map((row) => row.style.display), ["none", ""], "current inventory keeps its client-side filter");
-  assert.equal(h.requests.length, 2, "filtering makes no additional request");
+  assert.equal(h.requests.length, 3, "filtering makes no additional request");
 });
 
 test("memory navigation renders current detail and history", options, async (t) => {

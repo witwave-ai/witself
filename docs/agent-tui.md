@@ -9,6 +9,31 @@ seven sections: Overview, Transcripts, Facts, Memories, Conversations, Email,
 and Secrets. The terminal uses a colored monogram instead of rendering the
 avatar image. Avatar lifecycle notices remain visible on Overview.
 
+## Visual summary
+
+Overview shares the web console's passive summary: one colored, labeled row
+for Transactions, Transcripts, Facts, Memories, Secrets, Email, and Messages.
+Press `o` for Overview, `l` for Timeline, `e` for Recent updates, or `d` for
+workspace details, capacity, plan, retention, and salient memories. Use arrow
+keys to select a category and Enter to open it. Tab switches to scrolling;
+`a` switches graphs to ASCII characters.
+
+Inventory and recorded activity are separate. Facts and active-memory counts
+are exact when available; other counts describe a bounded page of recent
+records. Sparklines scale independently per row. Timeline uses fixed count
+ranges across 24 UTC hour buckets, including the partial current hour.
+The graph labels identify entries recorded, fact deliveries, secret accesses,
+accepted email sends, and messages sent. These quantities have different units
+and are never combined into a total. Metering may omit unrecorded activity.
+Transactions have no defined metric yet, and memory activity history is
+unavailable. Missing or disabled data never becomes a zero graph.
+
+Updates show only category, timestamp, and a fixed description from the bounded
+loaded records; they are not a complete audit log. Pending-work notices do not
+imply unread-message counts. The summary does not show private record content
+or fetch revealed values. It refreshes through a shared passive projection
+cached for at most 30 seconds; a failed refresh labels retained data as stale.
+
 ## Quick access
 
 Select a fact or secret field and press `v` to reveal or hide it. Press `c` to
