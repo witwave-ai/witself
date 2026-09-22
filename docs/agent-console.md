@@ -4,6 +4,13 @@ Status: implemented as the loopback-only `witself dashboard` command. The
 stable feature-status id remains `agent-dashboard`; “Agent Console” is the
 product-facing name for this local presentation surface.
 
+The native [agent terminal workspace](agent-tui.md) is available through
+`witself tui`. It shares these passive projections without a local web server,
+uses a monogram instead of an avatar image, and adds deliberate locally
+decrypted secret-field reveal and clipboard access. The browser's Secrets
+panel remains metadata-only. Press `b` in the TUI to start or reuse a verified
+console and open it in the browser; `w` provides status and start/stop controls.
+
 The canonical [Feature Status](feature-status.md) scorecard owns readiness.
 This document defines what the Console presents and deliberately does not
 present. [ADR 0004](decisions/0004-local-agent-dashboard.md) owns the local

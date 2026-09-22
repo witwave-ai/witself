@@ -36,6 +36,12 @@ var (
 
 func main() {
 	args := os.Args[1:]
+	if len(args) == 1 && args[0] == tuiConsoleChildArgument {
+		os.Exit(runTUIConsoleChild(os.Stdin, os.Stdout))
+	}
+	if len(args) == 1 && args[0] == tuiConsoleBrowserArgument {
+		os.Exit(runTUIConsoleBrowserChild(os.Stdin))
+	}
 	// Hook commands serialize the integration's exact WITSELF_HOME as an
 	// argument. Apply it before any startup migration or cleanup can inspect
 	// local state; transcriptHook validates the same binding again before use.
@@ -188,6 +194,8 @@ func run(args []string) int {
 		return mcpCmd(args[1:])
 	case "dashboard":
 		return dashboardCmd(args[1:])
+	case "tui":
+		return tuiCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -4258,6 +4266,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
 	cliout.Line(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
+	cliout.Line(w, "  witself tui [--agent NAME] [--demo]  Open the native agent terminal workspace")
 	cliout.Line(w, "  witself help                 Show this help")
 	cliout.Line(w)
 	cliout.Line(w, "Cloud commands take --account NAME (a local account name; when omitted,")

@@ -39,6 +39,9 @@ type RegistryEntry struct {
 	AgentID       string    `json:"agent_id"`
 	AgentName     string    `json:"agent_name"`
 	Account       string    `json:"account"`
+	AccountID     string    `json:"account_id,omitempty"`
+	RealmID       string    `json:"realm_id,omitempty"`
+	Endpoint      string    `json:"endpoint,omitempty"`
 	Realm         string    `json:"realm"`
 	Port          int       `json:"port"`
 	PID           int       `json:"pid"`
