@@ -423,6 +423,12 @@ jobs:
           -run '^(TestWindowsAccountProvisionJournalSyncBoundary|TestAccountProvisionJournalLifecycle|TestAccountProvisionBeginResyncsAmbiguousPromotionBeforeReturningCandidate|TestAccountCreateResumesAmbiguousProvisionWithSameID|TestAccountCreateSuccessfulSuccessorSavesCredentialAndRecoversOffline|TestAccountCreatePendingReconsentRequiresDurabilityBeforeRemoteRegistration|TestAccountProvisionWindowsPrivateCreationBeforeWrite|TestAccountProvisionWindowsPrivateDescriptorPolicy|TestAccountProvisionWindowsPrivateHandleRejectsUnsafeACLWithoutRepair|TestAccountProvisionWindowsPrivateCreationPreservesExistingObjects|TestAccountProvisionWindowsPrivateHandleIdentityFences|TestAccountProvisionWindowsPrivateHandleRejectsReparsePath|TestWindowsAccountProvisionMissingParentRefusesWithoutMutation|TestWindowsAccountProvisionReparseParentRefusesWithoutMutation|TestWindowsAccountProvisionUnsafeExistingHomeIsNotRepaired|TestWindowsAccountProvisionFixedAnchorDurabilityReplay|TestWindowsAccountProvisionExistingLockReestablishesPublication|TestWindowsAccountProvisionTemporaryDeletionBindsIdentity|TestWindowsAccountProvisionRetainedAncestorsBlockReplacement|TestWindowsAccountProvisionAvailabilityRejectsUnsafeConfigWithoutRepair|TestWindowsAccountProvisionTemporaryCreationIsPrivateBeforeWrite)$'
           -count=1
 
+      - name: Native agent terminal and web console lifecycle
+        run: >-
+          go test ./cmd/witself ./internal/agenttui ./internal/dashboard
+          -run '^(TestTUIConsole|TestAgentTUI|TestConsole|TestRegistryInstance|TestReleaseRegistryInstance|TestClaimManagedRegistryEntry)'
+          -count=1 -timeout=5m
+
       - name: Managed instruction platform primitives
         run: >-
           go test ./cmd/witself
