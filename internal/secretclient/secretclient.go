@@ -916,6 +916,19 @@ func (s *Service) Get(ctx context.Context, secretID string) (*client.Secret, err
 // RevealField retrieves exactly one encrypted package and decrypts it locally.
 // The caller owns the returned plaintext buffer and must clear it after use.
 func (s *Service) RevealField(ctx context.Context, secretID, fieldID, idempotencyKey string) ([]byte, error) {
+	return s.revealField(ctx, secretID, fieldID, idempotencyKey, false)
+}
+
+// RevealExistingField performs one deliberate non-TOTP field access using only an
+// already matching local/backend vault key. It never generates, registers,
+// publishes, replaces, or enrolls a key. This is suitable for an interactive
+// viewer that must not turn a reveal action into vault setup. The caller owns
+// the returned plaintext buffer and must clear it after use.
+func (s *Service) RevealExistingField(ctx context.Context, secretID, fieldID, idempotencyKey string) ([]byte, error) {
+	return s.revealField(ctx, secretID, fieldID, idempotencyKey, true)
+}
+
+func (s *Service) revealField(ctx context.Context, secretID, fieldID, idempotencyKey string, existingOnly bool) ([]byte, error) {
 	secretID = strings.TrimSpace(secretID)
 	fieldID = strings.TrimSpace(fieldID)
 	if !validGeneratedID(secretID, "sec") || !validGeneratedID(fieldID, "fld") {
@@ -929,7 +942,23 @@ func (s *Service) RevealField(ctx context.Context, secretID, fieldID, idempotenc
 	if err != nil {
 		return nil, err
 	}
-	avk, err := s.reconcileVaultKey(ctx, identity)
+	var avk *sealed.AgentVaultKey
+	if existingOnly {
+		observation, observeErr := s.observeVaultKey(ctx, identity)
+		if observeErr != nil {
+			return nil, observeErr
+		}
+		if observation.status.State != VaultKeyStateMatch {
+			observation.local.Clear()
+			if observation.status.State == VaultKeyStateMismatch {
+				return nil, ErrKeyMismatch
+			}
+			return nil, ErrKeyUnavailable
+		}
+		avk = observation.local
+	} else {
+		avk, err = s.reconcileVaultKey(ctx, identity)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -940,6 +969,9 @@ func (s *Service) RevealField(ctx context.Context, secretID, fieldID, idempotenc
 	}
 	if material.SecretID != secretID || material.FieldID != fieldID {
 		return nil, ErrIntegrity
+	}
+	if existingOnly && material.FieldKind == "totp" {
+		return nil, ErrInvalidInput
 	}
 	domain, ok := fieldDomain(material.FieldKind)
 	if !ok {

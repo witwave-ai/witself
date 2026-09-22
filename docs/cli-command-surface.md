@@ -140,6 +140,7 @@ plumbing, not a customer workflow.
 | `witself` | `token` | implemented | — |
 | `witself` | `totp` | implemented | — |
 | `witself` | `transcript` | implemented | — |
+| `witself` | `tui` | implemented | — |
 | `witself` | `uninstall` | implemented | — |
 | `witself` | `usage` | implemented | — |
 | `witself` | `vault` | implemented | — |
@@ -680,6 +681,7 @@ witself
   export
   mcp serve|tools
   dashboard serve|status|stop
+  tui [--agent NAME] [--demo]
   config get|set|list|unset  # target; not implemented
   completion  # target; not implemented
 ```
@@ -5728,6 +5730,38 @@ variants may change form, palette, and defining details, but only the one
 agent-chosen final candidate is submitted. It is available to a self token only
 under `agent_self_managed`; otherwise an account operator uses `avatar operator
 reset`. It is not a permanent purge command.
+
+## `witself tui`
+
+**Family status: implemented.**
+
+Open the native agent terminal workspace with the same agent selection as the
+browser Agent Console:
+
+```sh
+witself tui --agent atlas
+witself tui --account work --realm studio --agent atlas
+witself tui --demo
+witself tui --demo --theme paper
+```
+
+The seven sections are Overview, Transcripts, Facts, Memories, Conversations,
+Email, and Secrets. Use the number keys to switch sections, `/` to filter, and
+`?` for keyboard help. `v` reveals or hides one selected fact or non-TOTP secret
+field; `c` copies that value without displaying it first. Secret decryption
+stays local and requires the matching enrolled vault key. Ordinary lists stay
+redacted. The TUI does not initialize, replace, or enroll a key.
+
+An interactive input and output terminal is required. `--demo` uses only
+synthetic in-process data and accepts no account or connection flags. It does
+not resolve credentials, start a listener, or contact a cell. `--theme` accepts
+`auto`, `console`, `paper`, `midnight`, `amber`, or `high-contrast`; when omitted,
+the workspace loads the saved console preference. `--poll` controls active-view
+refresh from `1s` to `1m` (default `2s`). For scripts, use the existing domain
+commands with `--json`.
+
+See [Agent terminal workspace](agent-tui.md) for shortcuts, privacy boundaries,
+and clipboard behavior.
 
 ## `witself dashboard`
 

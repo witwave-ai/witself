@@ -188,6 +188,8 @@ func run(args []string) int {
 		return mcpCmd(args[1:])
 	case "dashboard":
 		return dashboardCmd(args[1:])
+	case "tui":
+		return tuiCmd(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -4258,6 +4260,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
 	cliout.Line(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
+	cliout.Line(w, "  witself tui [--agent NAME] [--demo]  Open the native agent terminal workspace")
 	cliout.Line(w, "  witself help                 Show this help")
 	cliout.Line(w)
 	cliout.Line(w, "Cloud commands take --account NAME (a local account name; when omitted,")
