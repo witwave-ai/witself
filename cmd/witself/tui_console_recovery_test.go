@@ -7,15 +7,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agenttui"
+	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/dashboard"
 )
 
@@ -105,6 +108,88 @@ func TestTUIConsoleRetainsCleanupFenceAfterLockTimeout(t *testing.T) {
 	}
 	if status, err := c.Start(context.Background()); err != nil || status.State != agenttui.ConsoleRunning || !status.Owned {
 		t.Fatalf("cleanup retry did not recover: state=%v error=%v", status.State, err)
+	}
+}
+
+func TestTUIConsoleSlowBrowserDoesNotBlockServeCleanup(t *testing.T) {
+	consoleTestHome(t)
+	conn := consoleTestBackend(t, nil)
+	owner := consoleTestController(context.Background(), t, conn)
+	if _, err := owner.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	child := owner.child
+	reuser := consoleTestController(context.Background(), t, conn)
+	entered := make(chan struct{})
+	reuser.opener = func(ctx context.Context, _ string) error {
+		close(entered)
+		select {
+		case <-time.After(2800 * time.Millisecond):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	opened := make(chan error, 1)
+	go func() { _, err := reuser.Open(context.Background()); opened <- err }()
+	select {
+	case <-entered:
+	case err := <-opened:
+		t.Fatalf("synthetic opener was not reached: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("synthetic opener timed out")
+	}
+	child.closePipe()
+	select {
+	case <-child.done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("console shutdown did not complete")
+	}
+	if err := <-opened; err != nil {
+		t.Fatalf("synthetic browser launch: %v", err)
+	}
+	// Inspect before owner.Close can repair the record: serve cleanup must be
+	// sufficient for an ordinary standalone console with no retained owner.
+	if _, err := dashboard.ReadRegistryInstance(owner.identity.AgentID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("slow browser stranded the exiting console's registry record")
+	}
+}
+
+func TestTUIConsoleChildIdentityBudgetMatchesParent(t *testing.T) {
+	consoleTestHome(t)
+	identity := client.SelfIdentity{
+		AccountID: "acc_" + strings.Repeat("a", 16), AgentID: "agt_" + strings.Repeat("b", 16),
+		RealmID: "realm_" + strings.Repeat("c", 16), AgentName: strings.Repeat("a", 255), RealmName: strings.Repeat("r", 255),
+	}
+	// Match the production self envelope, including capacities which are
+	// always present and cannot be trimmed even with content flags disabled.
+	digest := client.SelfDigest{SchemaVersion: "witself.v0", Identity: identity,
+		PrimaryFacts: []client.SelfFact{}, SalientMemories: []client.SelfMemory{},
+		FactCapacity: &client.FactLimitStatus{Unlimited: true}, MemoryCapacity: &client.MemoryLimitStatus{Unlimited: true},
+		Index: client.SelfIndex{Kinds: []string{}, Tags: []string{}, Counts: map[string]int{}}, Elided: true,
+	}
+	raw, err := json.Marshal(digest)
+	if err != nil || len(raw) <= 1024 || len(raw) > 8192 {
+		t.Fatal("fixture does not exercise the valid identity budget boundary")
+	}
+	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		budget := 8192 // Same default as the production self handler.
+		if value := r.URL.Query().Get("max_bytes"); value != "" {
+			budget, _ = strconv.Atoi(value)
+		}
+		if len(raw) > budget {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(raw)
+	}))
+	defer cell.Close()
+	if _, err := client.GetSelf(context.Background(), cell.URL, consoleFakeToken, client.SelfOptions{Observational: true}); err != nil {
+		t.Fatal("parent identity fixture failed")
+	}
+	bootstrap := tuiConsoleBootstrap{Identity: identity, Connection: agentConnection{Endpoint: cell.URL, Token: consoleFakeToken, AccountID: identity.AccountID}}
+	if err := verifyConsoleChildIdentity(context.Background(), bootstrap); err != nil {
+		t.Fatal("managed console rejected an identity accepted by parent startup")
 	}
 }
 

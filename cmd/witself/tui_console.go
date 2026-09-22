@@ -195,10 +195,7 @@ func (c *tuiConsole) Open(ctx context.Context) (agenttui.ConsoleStatus, error) {
 	launchCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	matched, err := dashboard.WithRegistryInstance(launchCtx, entry, func() error {
-		if launchCtx.Err() != nil {
-			return errConsoleCanceled
-		}
-		return c.opener(launchCtx, entry.AccessURL)
+		return launchCtx.Err()
 	})
 	if err != nil {
 		return status, errConsoleOpen
@@ -209,6 +206,13 @@ func (c *tuiConsole) Open(ctx context.Context) (agenttui.ConsoleStatus, error) {
 			return status, err
 		}
 		return status, errConsoleConflict
+	}
+	// The exact instance was rechecked immediately before opening. Do not
+	// hold its discovery lock while waiting on an OS association handler:
+	// independent shutdown must still be able to release its registry record.
+	// The access token is scoped to that instance; a replacement cannot adopt it.
+	if launchCtx.Err() != nil || c.opener(launchCtx, entry.AccessURL) != nil {
+		return status, errConsoleOpen
 	}
 	return status, nil
 }

@@ -163,7 +163,9 @@ func runTUIConsoleChild(input io.Reader, output io.Writer) int {
 }
 
 func verifyConsoleChildIdentity(ctx context.Context, bootstrap tuiConsoleBootstrap) error {
-	query := url.Values{"observational": {"true"}, "max_bytes": {"1024"}}
+	// Match ordinary client startup's default budget. Valid long names and
+	// unconditionally included capacity blocks can exceed the minimum 1 KiB.
+	query := url.Values{"observational": {"true"}, "max_bytes": {"8192"}}
 	for _, key := range []string{"include_facts", "include_salient", "include_sensitive", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint", "include_plan_entitlements"} {
 		query.Set(key, "false")
 	}
