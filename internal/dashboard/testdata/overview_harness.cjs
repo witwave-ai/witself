@@ -1,0 +1,431 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const vm = require("node:vm");
+
+// The app's route() does not return its Overview request chain. Once all
+// controlled fetch/JSON promises have settled, a full event-loop turn lets
+// their real success/catch continuations finish, without elapsed-time sleeps.
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+// This adapter supplies DOM operations only. The real app owns navigation,
+// rendering, filtering and request decisions. Browser layout is not simulated.
+function dom(check) {
+  const elements = [], writes = [];
+  const decode = (text) => text.replace(/&(?:amp|lt|gt|quot|#39|ndash);/g, (entity) => ({
+    "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&ndash;": "–",
+  }[entity]));
+  let activeElement = null;
+  class Element {
+    constructor(tagName = "div") {
+      this.tagName = tagName;
+      this.attrs = {};
+      this.children = [];
+      this.parentNode = null;
+      this.ownText = "";
+      this.style = {};
+      this.listeners = new Map();
+      this.value = "";
+      this.classList = {
+        contains: (name) => (this.attrs.class || "").split(/\s+/).includes(name),
+        toggle: (name, force) => {
+          const classes = new Set((this.attrs.class || "").split(/\s+/).filter(Boolean));
+          const add = force === undefined ? !classes.has(name) : Boolean(force);
+          if (add) classes.add(name); else classes.delete(name);
+          this.attrs.class = [...classes].join(" ");
+          return add;
+        },
+      };
+      elements.push(this);
+    }
+    get id() { return this.attrs.id; }
+    getAttribute(name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; }
+    setAttribute(name, value) {
+      this.attrs[name] = String(value);
+      if (name === "value") this.value = String(value);
+    }
+    removeAttribute(name) { delete this.attrs[name]; }
+    addEventListener(name, listener) {
+      if (!this.listeners.has(name)) this.listeners.set(name, []);
+      this.listeners.get(name).push(listener);
+    }
+    dispatch(name) {
+      for (const listener of this.listeners.get(name) || []) listener.call(this, { target: this });
+    }
+    focus(options) { activeElement = this; this.focusOptions = options; }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+    get textContent() { return this.ownText + this.children.map((child) => child.textContent).join(""); }
+    set textContent(value) {
+      for (const child of this.children) child.parentNode = null;
+      this.children = [];
+      this.ownText = String(value);
+    }
+    set innerHTML(value) {
+      value = String(value);
+      if (this.id === "view") writes.push(value);
+      this.textContent = "";
+      this.appendHTML(value);
+    }
+    appendHTML(value) {
+      const stack = [this];
+      for (const token of value.match(/<[^>]*>|[^<]+/g) || []) {
+        if (token.startsWith("</")) {
+          const closing = /^<\/([a-z0-9-]+)>$/i.exec(token);
+          check(closing && stack.length > 1 && stack.at(-1).tagName === closing[1], "unbalanced closing tag");
+          stack.pop();
+        } else if (token.startsWith("<")) {
+          const match = /^<([a-z0-9-]+)([^>]*)>$/i.exec(token);
+          check(match, "unsupported markup");
+          const element = new Element(match[1]);
+          for (const attr of match[2].matchAll(/([a-z0-9_-]+)(?:="([^"]*)")?/gi)) {
+            element.setAttribute(attr[1], decode(attr[2] || ""));
+          }
+          element.parentNode = stack.at(-1);
+          stack.at(-1).children.push(element);
+          if (!token.endsWith("/>") && !["input", "br", "hr", "img"].includes(element.tagName)) stack.push(element);
+        } else {
+          const element = new Element("#text");
+          element.ownText = decode(token);
+          element.parentNode = stack.at(-1);
+          stack.at(-1).children.push(element);
+        }
+      }
+      check(stack.length === 1, "unclosed markup");
+    }
+    matches(selector) {
+      if (selector.startsWith("#")) return this.id === selector.slice(1);
+      const [tag, ...classes] = selector.split(".");
+      return (!tag || this.tagName === tag) && classes.every((name) => this.classList.contains(name));
+    }
+    querySelectorAll(selector) {
+      return this.children.flatMap((child) => [
+        ...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector),
+      ]);
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) if (node.matches(selector)) return node;
+      return null;
+    }
+  }
+  const nodes = Object.fromEntries([
+    "view", "breadcrumb", "agent-name", "realm-name", "agent-id", "version",
+    "status-poll", "status-addr", "status-upstream", "status-sse", "live-dot", "live-label",
+  ].map((id) => {
+    const element = new Element();
+    element.setAttribute("id", id);
+    return [id, element];
+  }));
+  // Read the actual rail markup; an empty collection or inert toggle would
+  // make current-navigation assertions vacuous.
+  const index = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8");
+  const railMarkup = /<nav class="rail">([\s\S]*?)<\/nav>/.exec(index);
+  check(railMarkup, "missing real rail markup");
+  const rail = new Element("nav");
+  rail.innerHTML = railMarkup[1];
+  check(rail.querySelectorAll("a").length === 7, "expected seven real navigation links");
+  return {
+    nodes, rail, writes,
+    document: {
+      get activeElement() { return activeElement; },
+      getElementById(id) { return nodes[id] || nodes.view.querySelector("#" + id); },
+      querySelector(selector) {
+        check(selector === ".entry.anchored", "unexpected document selector");
+        return nodes.view.querySelector(selector);
+      },
+      querySelectorAll(selector) {
+        check(selector === ".rail a", "unexpected document selector");
+        return rail.querySelectorAll("a");
+      },
+    },
+    clearListeners() { for (const element of elements) element.listeners.clear(); },
+    listenerCount() { return elements.reduce((sum, element) => sum + element.listeners.size, 0); },
+  };
+}
+
+function deferred(check) {
+  let resolve, reject;
+  const pending = { settled: false, promise: new Promise((yes, no) => { resolve = yes; reject = no; }) };
+  for (const [name, settle] of [["resolve", resolve], ["reject", reject]]) {
+    pending[name] = (value) => {
+      check(!pending.settled, "response settled twice");
+      pending.settled = true;
+      settle(value);
+    };
+  }
+  return pending;
+}
+
+function fixture(t, config = {}) {
+  let now = Date.parse("2026-09-22T16:23:00Z"), nextTimer = 0;
+  const timers = new Map();
+  const faults = [], requests = [], sources = [];
+  const check = (condition, message) => {
+    if (condition) return;
+    faults.push(message);
+    throw new Error("overview navigation fixture: " + message);
+  };
+  const d = dom(check);
+  const window = { location: { hash: "#/overview", host: "localhost" }, matchMedia: null };
+  const drained = (request) => request.headers.settled && request.body.settled && (request.jsonCalls === 1 || (request.url === "/api/summary" && request.status >= 400));
+  // Register before loading the app. Even a semantic failure must drain every
+  // owned response, close every source and clear attached/detached listeners.
+  t.after(async () => {
+    const errors = [];
+    try {
+      sandbox.module.exports.summaryState.active = false;
+      timers.clear();
+      for (const request of requests) if (!request.headers.settled) request.releaseHeaders();
+      await nextTurn();
+      for (const request of requests) {
+        if (!request.body.settled) request.body.resolve({ identity: {}, entries: [] });
+      }
+      await nextTurn();
+      if (!requests.every(drained)) errors.push("responses did not drain");
+      if (faults.length) errors.push("fixture operation failed");
+    } finally {
+      for (const source of sources) {
+        source.close();
+        source.listeners.clear();
+        source.onopen = null;
+        source.onerror = null;
+      }
+      d.clearListeners();
+    }
+    assert.equal(errors.length, 0, "overview navigation fixture cleanup failed: " + errors.join(", "));
+    assert.ok(sources.every((source) => source.closed && source.listeners.size === 0), "overview navigation fixture cleanup failed: streams remain");
+    assert.equal(d.listenerCount(), 0, "overview navigation fixture cleanup failed: DOM listeners remain");
+    t.diagnostic("overview navigation fixture drained all owned responses and streams");
+  });
+  const sandbox = {
+    module: { exports: {} }, window, document: d.document, URLSearchParams, AbortController,
+    Date: class extends Date { static now() { return now; } },
+    setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    fetch(url, options) {
+      check(url === "/api/summary" || url === "/api/self" || url === "/api/transcripts/tx_current?tail=true&limit=200", "unexpected fetch URL");
+      check(options && options.credentials === "same-origin" && Object.keys(options).length === (url === "/api/summary" ? 2 : 1), "unexpected fetch options");
+      const request = {
+        url, options, headers: deferred(check), body: deferred(check), jsonCalls: 0, status: null,
+        releaseHeaders(status = 200) {
+          request.status = status;
+          request.headers.resolve({
+            ok: status >= 200 && status < 300, status,
+            json() {
+              check(request.jsonCalls === 0, "JSON read repeated");
+              request.jsonCalls++;
+              return request.body.promise;
+            },
+          });
+        },
+      };
+      requests.push(request);
+      if (url === "/api/summary" && !config.controlledSummary) {
+        request.releaseHeaders();
+        request.body.resolve(summaryData());
+      }
+      return request.headers.promise;
+    },
+    EventSource: class {
+      constructor(url) {
+        check(url === "/api/events" || url === "/api/events?transcript=tx_current&after_sequence=20", "unexpected stream URL");
+        this.url = url;
+        this.closed = false;
+        this.closeCalls = 0;
+        this.listeners = new Map();
+        sources.push(this);
+      }
+      addEventListener(name, listener) {
+        check(!this.listeners.has(name), "duplicate stream listener");
+        this.listeners.set(name, listener);
+      }
+      close() { this.closed = true; this.closeCalls++; }
+      emit(name, body) {
+        check(!this.closed && sandbox.module.exports.state.eventSource === this, "event delivery requires the open current source");
+        check(name === "self" && this.listeners.has(name), "unexpected stream delivery");
+        this.listeners.get(name)({ data: JSON.stringify(body) });
+      }
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8"), sandbox, { filename: "app.js" });
+  const h = {
+    ...d, window, requests, sources, timers,
+    async advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
+      await nextTurn();
+    },
+    app: sandbox.module.exports,
+    healthy() { assert.deepEqual(faults, [], "overview navigation fixture: recorded operation failure"); },
+    begin(hash, url) {
+      const start = requests.length;
+      window.location.hash = hash;
+      h.app.route();
+      h.healthy();
+      assert.deepEqual(requests.slice(start).map((request) => request.url), hash === "#/overview" ? ["/api/summary", url] : [url], "overview navigation fixture: route request inventory");
+      return requests.at(-1);
+    },
+    async headers(request, status = 200) {
+      request.releaseHeaders(status);
+      await nextTurn();
+      h.healthy();
+      assert.equal(request.jsonCalls, 1, "overview navigation fixture: JSON consumption must begin");
+      assert.equal(request.body.settled, false, "overview navigation fixture: JSON must remain controlled");
+    },
+    pending(request, phase) {
+      assert.equal(request.headers.settled, phase === "JSON", "overview navigation fixture: pending headers boundary");
+      assert.equal(request.body.settled, false, "overview navigation fixture: pending JSON boundary");
+      assert.equal(request.jsonCalls, phase === "JSON" ? 1 : 0, "overview navigation fixture: pending JSON consumption");
+    },
+    async finish(request, body, status = 200) {
+      if (!request.headers.settled) await h.headers(request, status);
+      assert.equal(request.status, status, "overview navigation fixture: response status mismatch");
+      request.body.resolve(body);
+      await nextTurn();
+      h.healthy();
+      assert.ok(drained(request), "overview navigation fixture: incomplete controlled response");
+    },
+    async jsonFailure(request, label) {
+      if (!request.headers.settled) await h.headers(request);
+      assert.equal(request.status, 200, "overview navigation fixture: JSON rejection follows successful headers");
+      request.body.reject(new Error(label));
+      await nextTurn();
+      h.healthy();
+      assert.ok(drained(request), "overview navigation fixture: incomplete controlled rejection");
+    },
+  };
+  return h;
+}
+
+// Convert state by value into this realm. A reference to state.self would
+// conceal mutations, and comparing VM object prototypes is not a UI oracle.
+const valueCopy = (value) => JSON.parse(JSON.stringify(value));
+const headerIDs = ["agent-name", "realm-name", "agent-id", "version", "status-poll", "status-addr"];
+const headerVector = (h) => headerIDs.map((id) => h.nodes[id].textContent);
+function selfData(label, number) {
+  return {
+    identity: { agent_name: label + " agent <literal>", realm_name: label + " realm", agent_id: "ag_" + label },
+    dashboard_version: "0.0." + number,
+    poll_interval_ms: number * 1000,
+    index: { counts: { transcripts: 4, memories: 7, secrets: 2, facts: 3 } },
+    salient_memories: [{ id: "mem_" + label, snippet: label + " salient <literal>", kind: "note", salience: 0.75 }],
+    memory_checkpoint: { pending: true }, message_checkpoint: { pending: true },
+    email_checkpoint: { pending: true }, avatar_checkpoint: { pending: true },
+    observational: true,
+  };
+}
+function headerMatches(h, self) {
+  assert.deepEqual(headerVector(h), [
+    self.identity.agent_name, self.identity.realm_name, self.identity.agent_id,
+    "v" + self.dashboard_version, "poll " + self.poll_interval_ms / 1000 + "s", "localhost",
+  ], "current header reflects the complete self response");
+  assert.deepEqual(valueCopy(h.app.state.self), self, "current self state reflects the complete response by value");
+}
+function navigation(h, hash, crumb) {
+  const section = hash === "#/overview" ? "overview" : "transcripts";
+  assert.equal(h.window.location.hash, hash, "selected route hash");
+  const links = h.rail.querySelectorAll("a");
+  assert.equal(links.length, 7, "navigation assertions have seven real links");
+  assert.deepEqual(links.filter((link) => link.classList.contains("active")).map((link) => link.getAttribute("data-nav")), [section], "only the selected rail link is active");
+  assert.equal(links.find((link) => link.getAttribute("data-nav") === section).getAttribute("href"), "#/" + section, "active link represents the selected section");
+  assert.equal(h.nodes.breadcrumb.textContent, crumb, "breadcrumb identifies the selected view");
+}
+function visible(h, hash, crumb, heading, content) {
+  h.healthy();
+  navigation(h, hash, crumb);
+  assert.ok(h.writes.length > 0, "a real view render occurred");
+  assert.equal(h.nodes.view.querySelector("h2")?.textContent, heading, "current view heading");
+  assert.ok(h.nodes.view.textContent.includes(content), "current view contains its distinct response");
+  assert.equal(h.nodes.view.querySelector(".error"), null, "current success is not an error");
+}
+function beginOverview(h) {
+  const request = h.begin("#/overview", "/api/self");
+  navigation(h, "#/overview", "overview");
+  return request;
+}
+async function currentOverview(h, self = selfData("initial", 3)) {
+  const request = beginOverview(h);
+  await h.finish(request, self);
+  openDetails(h);
+  visible(h, "#/overview", "overview", "Agent summary", self.salient_memories[0].snippet);
+  headerMatches(h, self);
+  assert.equal(h.app.state.eventSource.url, "/api/events", "current Overview owns the general stream");
+  assert.equal(h.app.state.eventSource.closed, false, "current Overview stream is open");
+}
+async function currentDetail(h) {
+  const request = h.begin("#/transcripts/tx_current", "/api/transcripts/tx_current?tail=true&limit=200");
+  navigation(h, "#/transcripts/tx_current", "transcripts / tx_current");
+  await h.finish(request, {
+    transcript: { id: "tx_current", title: "Current transcript" },
+    entries: [{ sequence: 20, role: "assistant", body: "current transcript content <literal>" }],
+  });
+  visible(h, "#/transcripts/tx_current", "transcripts / tx_current", "Current transcript live tail", "current transcript content <literal>");
+  assert.equal(h.nodes.view.querySelector("literal"), null, "current detail content stays escaped");
+  assert.equal(h.app.state.seenSequences.tx_current, 20, "current detail has a positive rendered cursor");
+  assert.equal(h.app.state.eventSource.url, "/api/events?transcript=tx_current&after_sequence=20", "current detail owns its seeded stream");
+  assert.equal(h.app.state.eventSource.closed, false, "current detail source is open");
+}
+function emitSelf(h, self) {
+  const source = h.app.state.eventSource;
+  source.emit("self", self);
+  h.healthy();
+  headerMatches(h, self);
+  assert.equal(h.app.state.eventSource, source, "current self frame retains source identity");
+}
+function destination(t, h) {
+  h.healthy();
+  const hash = h.window.location.hash;
+  const crumb = hash === "#/overview" ? "overview" : "transcripts / tx_current";
+  navigation(h, hash, crumb);
+  assert.equal(h.nodes.view.querySelector(".error"), null, "new destination completed successfully");
+  const before = {
+    hash, crumb, content: h.nodes.view.textContent, writes: h.writes.length,
+    header: headerVector(h), self: valueCopy(h.app.state.self),
+    source: h.app.state.eventSource, sources: h.sources.length,
+    closes: h.app.state.eventSource.closeCalls, requests: h.requests.length,
+  };
+  assert.ok(before.content && h.nodes.view.querySelector("h2") && before.writes, "new destination is nonempty before old response");
+  assert.ok(before.self.identity.agent_name && before.header.every(Boolean), "new destination has a nonempty current header and state");
+  assert.equal(before.source.closed, false, "new destination has an open current source");
+  t.diagnostic("overview navigation current destination established");
+  return before;
+}
+function unchangedAfter(h, before, oracle) {
+  h.healthy();
+  assert.equal(h.nodes.view.textContent, before.content, oracle);
+  navigation(h, before.hash, before.crumb);
+  assert.deepEqual(headerVector(h), before.header, "old Overview response preserves the current header");
+  assert.deepEqual(valueCopy(h.app.state.self), before.self, "old Overview response preserves current self state");
+  assert.equal(h.writes.length, before.writes, "old Overview response does not repaint the current view");
+  assert.equal(h.requests.length, before.requests, "old Overview response makes no follow-on request");
+  assert.equal(h.sources.length, before.sources, "old Overview response does not create a source");
+  assert.equal(h.app.state.eventSource, before.source, "old Overview response preserves source identity");
+  assert.equal(before.source.closeCalls, before.closes, "old Overview response does not close the current source");
+  assert.equal(before.source.closed, false, "current source remains open");
+}
+function baseline(t) { t.diagnostic("overview navigation current baseline established"); }
+
+function openDetails(h) {
+  const details = h.document.getElementById("workspace-details");
+  details.open = true;
+  details.dispatch("toggle");
+}
+function summaryData() {
+  const units = [null, "entries recorded", "recorded deliveries", null, "recorded accesses", "accepted sends", "messages sent"];
+  const dimensions = ["", "transcript_entry_write", "fact_returned", "", "secret_read", "email_sent", "message_sent"];
+  return { summary: {
+    schema: "witself.agent-summary.v1", generated_at: "2026-09-22T16:23:00Z", refresh_after_seconds: 30,
+    window: { since: "2026-09-21T17:00:00Z", until: "2026-09-22T16:23:00Z", bucket: "hour", timezone: "UTC", partial_current_bucket: true },
+    categories: ["transactions", "transcripts", "facts", "memories", "secrets", "email", "messages"].map((key, i) => ({
+      key, label: "UNTRUSTED LABEL", code: "UNTRUSTED CODE",
+      inventory: { status: i === 0 ? "unavailable" : "available", count: i === 0 ? null : i, exact: i === 2 || i === 3, label: "UNTRUSTED INVENTORY" },
+      activity: units[i] ? { status: "available", bins: Array(24).fill(i), total: 24 * i, unit: units[i], dimension: dimensions[i] } : { status: "unavailable" },
+    })),
+    recent: [{ key: "transcripts", at: "2026-09-22T16:00:00Z", action: "transcript updated" }],
+    checkpoints: ["memory", "message", "email", "avatar"].map((key) => ({ key, label: "UNTRUSTED CHECKPOINT", status: "clear" })),
+  } };
+}
+module.exports = { fixture, valueCopy, headerVector, selfData, headerMatches, navigation, visible, beginOverview, currentOverview, currentDetail, emitSelf, destination, unchangedAfter, baseline, openDetails, summaryData, nextTurn };

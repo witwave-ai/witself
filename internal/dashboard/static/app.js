@@ -557,6 +557,7 @@
   var transcriptViewGeneration = 0;
 
   function route() {
+    stopSummary();
     overviewViewGeneration++;
     factViewGeneration++;
     memoryViewGeneration++;
@@ -685,7 +686,230 @@
       '<div class="dim">source: cell-applied snapshot · display only</div></div>';
   }
 
+  // A closed, content-free projection: never render server labels or metadata.
+  var summaryCategories = [
+    { key: "transactions", code: "OPS", name: "Transactions", unit: null, dimension: "", actions: [] },
+    { key: "transcripts", code: "TRN", name: "Transcripts", unit: "entries recorded", dimension: "transcript_entry_write", actions: ["transcript updated", "transcript created"], route: "transcripts" },
+    { key: "facts", code: "FCT", name: "Facts", unit: "recorded deliveries", dimension: "fact_returned", actions: [], route: "facts" },
+    { key: "memories", code: "MEM", name: "Memories", unit: null, dimension: "", actions: ["memory updated", "memory created"], route: "memories" },
+    { key: "secrets", code: "SEC", name: "Secrets", unit: "recorded accesses", dimension: "secret_read", actions: ["secret updated", "secret created"], route: "secrets" },
+    { key: "email", code: "EML", name: "Email", unit: "accepted sends", dimension: "email_sent", actions: ["email received"], route: "email" },
+    { key: "messages", code: "MSG", name: "Messages", unit: "messages sent", dimension: "message_sent", actions: ["message received"], route: "conversations" },
+  ];
+  var summaryState = { report: null, view: "overview", failed: false, active: false,
+    timer: null, deadline: null, controller: null, request: null, generation: 0, nextAt: 0 };
+  var summaryInterval = 30000;
+
+  function summaryNumber(n) { return Number.isSafeInteger(n) && n >= 0; }
+  function summaryDate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value)) { return null; }
+    var date = new Date(value);
+    // Reject calendar rollovers such as February 30 as well as invalid dates.
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 19) === value.slice(0, 19) ? date.toISOString() : null;
+  }
+  function normalizeSummary(body) {
+    var s = body && body.summary;
+    if (!s || s.schema !== "witself.agent-summary.v1" || s.refresh_after_seconds !== 30 ||
+        !summaryDate(s.generated_at) || !Array.isArray(s.categories) || s.categories.length !== 7 ||
+        !Array.isArray(s.recent) || s.recent.length > 12 || !Array.isArray(s.checkpoints) || s.checkpoints.length !== 4) {
+      throw new Error("Invalid summary");
+    }
+    var w = s.window;
+    var hour = 3600000, endHour = Math.floor(Date.parse(s.generated_at) / hour) * hour;
+    if (!w || !summaryDate(w.since) || !summaryDate(w.until) || w.timezone !== "UTC" || w.bucket !== "hour" ||
+        w.partial_current_bucket !== true || Date.parse(w.since) !== endHour - 23 * hour ||
+        Date.parse(w.until) < endHour || Date.parse(w.until) >= endHour + hour) { throw new Error("Invalid window"); }
+    var categories = summaryCategories.map(function (def) {
+      var matches = s.categories.filter(function (c) { return c && c.key === def.key; });
+      if (matches.length !== 1) { throw new Error("Invalid categories"); }
+      var raw = matches[0], inv = raw.inventory || {}, act = raw.activity || {};
+      var expectedExact = def.key === "facts" || def.key === "memories";
+      var inventory = { status: "unavailable", count: null, exact: false,
+        label: def.key === "memories" ? "active memories" : def.key === "facts" ? "facts" : "recent records · bounded" };
+      if (def.key !== "transactions" && inv.status === "disabled") { inventory.status = "disabled"; }
+      if (def.key !== "transactions" && inv.status === "available" &&
+          summaryNumber(inv.count) && inv.exact === expectedExact) {
+        inventory.status = "available"; inventory.count = inv.count; inventory.exact = expectedExact;
+      }
+      var activity = { status: def.unit && act.status === "disabled" ? "disabled" : "unavailable" };
+      if (def.unit && act.status === "available" && act.unit === def.unit && act.dimension === def.dimension &&
+          Array.isArray(act.bins) && act.bins.length === 24 && act.bins.every(summaryNumber) &&
+          summaryNumber(act.total) && act.bins.reduce(function (a, b) { return a + b; }, 0) === act.total) {
+        activity = { status: "available", bins: act.bins.slice(), total: act.total, unit: def.unit };
+      }
+      return { def: def, inventory: inventory, activity: activity };
+    });
+    var recent = s.recent.filter(function (r) {
+      return r && summaryCategories.some(function (c) {
+        return c.key === r.key && c.actions.indexOf(r.action) >= 0;
+      }) && summaryDate(r.at) && Date.parse(r.at) <= Date.parse(s.generated_at);
+    }).map(function (r) { return { key: r.key, at: summaryDate(r.at), action: r.action }; })
+      .sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); });
+    var checkpoints = [
+      ["memory", "Memory curation"], ["message", "Messaging work"], ["email", "Email"], ["avatar", "Avatar lifecycle"],
+    ].map(function (pair) {
+      var found = s.checkpoints.filter(function (c) { return c && c.key === pair[0]; });
+      var status = found.length === 1 && ["pending", "clear", "disabled", "unavailable"].indexOf(found[0].status) >= 0 ? found[0].status : "unavailable";
+      return { label: pair[1], status: status };
+    });
+    return { generated: summaryDate(s.generated_at), since: summaryDate(w.since), until: summaryDate(w.until),
+      categories: categories, recent: recent, checkpoints: checkpoints };
+  }
+  function summaryName(def) {
+    return '<span class="summary-name"><b>' + def.code + '</b> ' + def.name + '</span>';
+  }
+  function summaryInventory(inv) {
+    if (inv.status !== "available") { return '<span class="summary-muted">' + inv.status + '</span>'; }
+    return esc(inv.count) + '<small>' + inv.label + '</small>';
+  }
+  function summaryAmount(act) {
+    if (act.status !== "available") { return '<span class="summary-muted">' + act.status + '</span>'; }
+    return esc(act.total) + '<small>' + act.unit + '</small>';
+  }
+  function summaryPattern(act, timeline) {
+    if (act.status !== "available") { return '<span class="summary-muted">' + act.status + '</span>'; }
+    var max = Math.max.apply(null, act.bins), chars = "▁▂▃▄▅▆▇█";
+    return '<span class="summary-pattern" role="img" aria-label="Hourly quantities, oldest first: ' + act.bins.join(", ") + '">' +
+      act.bins.map(function (n) {
+        var glyph = timeline ? (n === 0 ? "." : n <= 2 ? "░" : n <= 5 ? "▒" : n <= 9 ? "▓" : "█") :
+          (n === 0 ? "·" : chars[Math.max(0, Math.ceil(n / max * 8) - 1)]);
+        return '<span aria-hidden="true">' + glyph + '</span>';
+      }).join("") + '</span>';
+  }
+  function renderSummary() {
+    if (!summaryState.active || !$("summary-body")) { return; }
+    var report = summaryState.report, stale = report && (summaryState.failed || Date.now() - Date.parse(report.generated) > 60000);
+    $("summary-status").textContent = report ?
+      (summaryState.failed ? "Refresh failed · stale report · retry in 30 seconds" : stale ? "Stale report" : "Recorded snapshot") + ' · Generated ' + report.generated :
+      (summaryState.failed ? "Summary unavailable · refresh failed · retry in 30 seconds" : "Loading summary…");
+    $("summary-status").classList.toggle("summary-stale", !!stale || summaryState.failed);
+    if (!report) { $("summary-body").innerHTML = '<p class="summary-muted">No report available.</p>'; return; }
+    var activeID = document.activeElement && document.activeElement.id;
+    var timeline = summaryState.view === "timeline", html;
+    if (summaryState.view === "recent") {
+      html = '<h3>Updates from loaded records</h3><p class="summary-muted">Latest 12 observations from loaded first pages of up to 100 records per source; not a complete audit log.</p>' +
+        (report.recent.length ? report.recent.map(function (r) {
+          var def = summaryCategories.filter(function (c) { return c.key === r.key; })[0];
+          return '<div class="summary-update summary-' + def.key + '"><time datetime="' + r.at + '">' + r.at.slice(0, 19).replace("T", " ") + ' UTC' + '</time>' + summaryName(def) + '<span>' + r.action + '</span></div>';
+        }).join("") : '<p class="summary-muted">No recognized updates in loaded records.</p>');
+    } else {
+      html = '<div class="summary-columns' + (timeline ? ' summary-timeline' : '') + '" aria-hidden="true"><span>Category</span>' +
+        (timeline ? '' : '<span>Inventory</span>') + '<span>Hourly pattern</span><span>Measured quantity</span></div>';
+      if (timeline) {
+        html += '<p class="summary-muted">' + report.since.slice(0, 16).replace("T", " ") + ' → ' + report.until.slice(0, 16).replace("T", " ") + ' UTC</p>';
+      }
+      html += report.categories.map(function (c) {
+        var def = c.def, tag = def.route ? 'a' : 'div';
+        return '<' + tag + ' id="summary-row-' + def.key + '" class="summary-row summary-' + def.key + (timeline ? ' summary-timeline' : '') + '"' +
+          (def.route ? ' href="#/' + def.route + '"' : '') + '>' + summaryName(def) +
+          (timeline ? '' : '<span class="summary-inventory">' + summaryInventory(c.inventory) + '</span>') +
+          summaryPattern(c.activity, timeline) + '<span class="summary-amount">' + summaryAmount(c.activity) + '</span></' + tag + '>';
+      }).join("");
+      html += '<p class="summary-muted">' + (timeline ? '. 0 · ░ 1–2 · ▒ 3–5 · ▓ 6–9 · █ 10+ per hour; each row names its measure.' :
+        'Patterns scaled per row; not a volume comparison. Bounded recent records are not inventory totals.') + '</p>';
+      html += '<p class="summary-muted">Transactions: inventory and history unavailable. Memories: history unavailable; no defined metric.</p>';
+    }
+    $("summary-body").innerHTML = html;
+    if (activeID && activeID.indexOf("summary-row-") === 0 && $(activeID)) { $(activeID).focus({ preventScroll: true }); }
+    $("summary-checkpoints").innerHTML = report.checkpoints.map(function (c) {
+      return '<span class="summary-checkpoint"><span>' + c.label + '</span> <b>' + c.status + '</b></span>';
+    }).join("");
+  }
+  function stopSummary() {
+    summaryState.active = false;
+    summaryState.generation++;
+    if (summaryState.timer !== null) { clearTimeout(summaryState.timer); summaryState.timer = null; }
+    if (summaryState.deadline !== null) { clearTimeout(summaryState.deadline); summaryState.deadline = null; }
+    if (summaryState.controller) { summaryState.controller.abort(); summaryState.controller = null; }
+    summaryState.request = null;
+  }
+  function scheduleSummary() {
+    if (!summaryState.active || document.hidden || summaryState.request || summaryState.timer !== null) { return; }
+    summaryState.timer = setTimeout(function () {
+      summaryState.timer = null;
+      refreshSummary();
+    }, Math.max(0, summaryState.nextAt - Date.now()));
+  }
+  function refreshSummary() {
+    if (!summaryState.active || document.hidden || summaryState.request) { return; }
+    if (Date.now() < summaryState.nextAt) { scheduleSummary(); return; }
+    var generation = summaryState.generation;
+    summaryState.nextAt = Date.now() + summaryInterval;
+    var controller = new AbortController();
+    summaryState.controller = controller;
+    var timeout = new Promise(function (_, reject) {
+      summaryState.deadline = setTimeout(function () {
+        controller.abort();
+        reject(new Error("Summary timeout"));
+      }, 15000);
+    });
+    var responseBody = fetch("/api/summary", { credentials: "same-origin", signal: controller.signal })
+      .then(function (response) {
+        if (!response.ok) { throw new Error("Summary unavailable"); }
+        return response.json();
+      });
+    summaryState.request = Promise.race([responseBody, timeout]).then(function (body) {
+        if (!summaryState.active || generation !== summaryState.generation) { return; }
+        summaryState.report = normalizeSummary(body);
+        summaryState.failed = false;
+        renderSummary();
+      }).catch(function () {
+        if (!summaryState.active || generation !== summaryState.generation) { return; }
+        summaryState.failed = true;
+        renderSummary();
+      }).finally(function () {
+        if (!summaryState.active || generation !== summaryState.generation) { return; }
+        if (summaryState.deadline !== null) { clearTimeout(summaryState.deadline); summaryState.deadline = null; }
+        summaryState.request = null;
+        summaryState.controller = null;
+        // Slow or failed requests never create a rapid retry loop.
+        summaryState.nextAt = Date.now() + summaryInterval;
+        scheduleSummary();
+      });
+  }
+  function summaryVisibilityChanged() {
+    if (!summaryState.active) { return; }
+    if (document.hidden) {
+      if (summaryState.timer !== null) { clearTimeout(summaryState.timer); summaryState.timer = null; }
+    } else { renderSummary(); refreshSummary(); }
+  }
+  function mountOverview() {
+    $("view").innerHTML = '<section class="agent-summary" aria-label="Agent summary"><h2>Agent summary</h2>' +
+      '<p class="summary-muted">Recorded activity · 24 hourly buckets · UTC · current hour partial</p>' +
+      '<div class="summary-views" role="group" aria-label="Summary view">' +
+      [["overview", "Overview"], ["timeline", "Timeline"], ["recent", "Recent updates"]].map(function (pair) {
+        return '<button type="button" id="summary-view-' + pair[0] + '" aria-pressed="' + (summaryState.view === pair[0]) + '">' + pair[1] + '</button>';
+      }).join("") + '</div><p id="summary-status" role="status"></p><div id="summary-body"></div>' +
+      '<div id="summary-checkpoints" aria-label="Checkpoints"></div></section>' +
+      '<details id="workspace-details"><summary>Workspace details</summary><div id="workspace-content"></div></details>' +
+      '<div id="overview-self-status" role="status"></div>';
+    ["overview", "timeline", "recent"].forEach(function (view) {
+      $("summary-view-" + view).addEventListener("click", function () {
+        summaryState.view = view;
+        ["overview", "timeline", "recent"].forEach(function (name) {
+          $("summary-view-" + name).setAttribute("aria-pressed", String(name === view));
+        });
+        renderSummary();
+      });
+    });
+    $("workspace-details").addEventListener("toggle", function () {
+      // Native toggle events are queued and may arrive after navigation.
+      if (this !== $("workspace-details")) { return; }
+      if (this.open && state.self) { renderOverview(state.self); }
+      else { $("workspace-content").innerHTML = ""; }
+    });
+    summaryState.active = true;
+    summaryState.nextAt = 0;
+    renderSummary();
+    refreshSummary();
+  }
+
   function renderOverview(self) {
+    var details = $("workspace-details");
+    if ($("overview-self-status")) { $("overview-self-status").textContent = ""; }
+    if (!details || !details.open) { return; }
+    var focused = document.activeElement;
+    var focusedHref = focused && focused.closest && focused.closest("#workspace-content") ? focused.getAttribute("href") : null;
     var counts = (self.index && self.index.counts) || {};
     var cards = Object.keys(counts).sort().map(function (key) {
       var card = '<div class="card"><div class="num">' + esc(counts[key]) + '</div><div class="label">' + esc(key) + "</div></div>";
@@ -703,7 +927,7 @@
     if (self.message_checkpoint && self.message_checkpoint.pending) { checkpoints.push({ label: "messaging work pending" }); }
     if (self.email_checkpoint && self.email_checkpoint.pending) { checkpoints.push({ label: "email pending", href: "#/email" }); }
     if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
-    $("view").innerHTML =
+    $("workspace-content").innerHTML =
       '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
       planEntitlementsHTML(self.plan_entitlements) +
       factCapacityHTML(self.fact_capacity) +
@@ -718,18 +942,28 @@
       '<div class="panel"><h2>reads</h2><div class="dim">' +
       (self.observational === false ? "cell has no observational hooks; plain reads in use" : "observational reads only — viewing never records usage") +
       "</div></div>";
+    if (focusedHref !== null) {
+      var replacement = Array.prototype.find.call($("workspace-content").querySelectorAll("a"), function (link) {
+        return link.getAttribute("href") === focusedHref;
+      });
+      (replacement || details.querySelector("summary")).focus({ preventScroll: true });
+    }
   }
 
   function viewOverview() {
     var generation = overviewViewGeneration;
     breadcrumb([{ label: "overview" }]);
+    mountOverview();
     openEvents(null);
+    var selfFrame = state.lastSelfData;
     fetchJSON("/api/self").then(function (self) {
-      if (generation !== overviewViewGeneration) { return; }
+      if (generation !== overviewViewGeneration || selfFrame !== state.lastSelfData) { return; }
       renderHeader(self);
       renderOverview(self);
     }).catch(function (err) {
-      if (generation === overviewViewGeneration) { showError(err); }
+      if (generation === overviewViewGeneration && selfFrame === state.lastSelfData) {
+        $("overview-self-status").textContent = "Workspace details unavailable · self refresh failed";
+      }
     });
   }
 
@@ -1965,6 +2199,10 @@
   // Browsers do not define module, so the production boot path is unchanged.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      normalizeSummary: normalizeSummary,
+      summaryState: summaryState,
+      refreshSummary: refreshSummary,
+      summaryVisibilityChanged: summaryVisibilityChanged,
       state: state,
       route: route,
       mergeMessages: mergeMessages,
@@ -2001,6 +2239,7 @@
   $("status-addr").textContent = window.location.host;
   $("view").addEventListener("click", onRevealClick);
   $("view").addEventListener("click", onMessageBodyClick);
+  document.addEventListener("visibilitychange", summaryVisibilityChanged);
   window.addEventListener("hashchange", route);
   route();
 })();

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
 )
@@ -84,6 +85,14 @@ func New(cfg Config) http.Handler {
 		}
 		var response any
 		switch r.URL.Path {
+		case "/v1/usage":
+			since, e1 := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
+			until, e2 := time.Parse(time.RFC3339, r.URL.Query().Get("until"))
+			if e1 != nil || e2 != nil || !until.After(since) || r.URL.Query().Get("group_by") != "hour" {
+				write(http.StatusBadRequest, map[string]string{"error": "invalid fixture interval"})
+				return
+			}
+			response = map[string]any{"usage": SummaryUsage(cfg.Identity, since, until)}
 		case "/v1/self":
 			if cfg.MinimalSelf {
 				response = SelfDigest(cfg.Identity)

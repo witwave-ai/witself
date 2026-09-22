@@ -11,3 +11,14 @@
   --font-ui: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+:root {
+  --summary-ops: #72a8ff;
+  --summary-trn: #55cfdf;
+  --summary-fct: #b0bed0;
+  --summary-mem: #bd9aff;
+  --summary-sec: #edbf67;
+  --summary-eml: #75d19c;
+  --summary-msg: #f199c5;
+  --summary-muted: #c9aa68;
+}

@@ -339,7 +339,8 @@ async function exerciseConversationBodyPreview(page, expect, requests, pending) 
   assert.deepEqual(requests, [expectedRequest]);
   await reveal(2);
   await page.locator('a[data-nav="overview"]').click();
-  await expect(page.locator('#view h2').filter({ hasText: /^inventory(?:$| )/ }).first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Agent summary', exact: true })).toBeVisible();
+  await expect.poll(() => pending.size).toBe(0);
   await expect(page.locator('#view')).not.toContainText(fixture);
   await expect(page.locator('.message-body-content')).toHaveCount(0);
   await page.locator('a[data-nav="conversations"]').click();
@@ -454,13 +455,25 @@ export async function run(args) {
         await pageBounded((async () => {
           await page.evaluate(hash => { location.hash = hash; }, panel.hash);
           await expect(page.locator(`a[data-nav="${panel.name}"]`)).toHaveClass(/active/);
-          const heading = panel.name === 'overview' ? 'inventory' : panel.name === 'email' ? 'received email' : panel.name;
+          const heading = panel.name === 'overview' ? 'Agent summary' : panel.name === 'email' ? 'received email' : panel.name;
           await expect(page.locator('#view h2').filter({ hasText: new RegExp(`^${heading}(?:$| )`) }).first()).toBeVisible();
-          await expect(page.locator('#view .row').first()).toBeVisible();
           if (panel.name === 'overview') {
+            await expect(page.locator('.summary-row')).toHaveCount(7);
+            await expect(page.locator('.summary-pattern')).toHaveCount(5);
+            await expect(page.locator('#summary-row-memories')).toContainText('active memories');
+            await expect(page.locator('#summary-row-transcripts')).toContainText('recent records');
+            await expect(page.locator('#workspace-content')).toBeEmpty();
+            for (const view of ['timeline', 'recent', 'overview']) {
+              await page.locator('#summary-view-' + view).click();
+              await expect(page.locator('#summary-view-' + view)).toHaveAttribute('aria-pressed', 'true');
+            }
+            await page.locator('#workspace-details > summary').click();
             await expect(page.locator('#view')).toContainText('Enforced plan & entitlements');
             await expect(page.locator('#view')).toContainText('standard');
-          }
+            await expect(page.locator('#workspace-content .row').first()).toBeVisible();
+            await page.locator('#workspace-details > summary').click();
+            await expect(page.locator('#workspace-content')).toBeEmpty();
+          } else { await expect(page.locator('#view .row').first()).toBeVisible(); }
           if (panel.name === 'email') {
             await expect(page.locator('.email-row:not(.email-sent-row)').first()).toContainText('safe subject');
             await expect(page.locator('.email-sent-row').first()).toContainText('safe sent subject');
