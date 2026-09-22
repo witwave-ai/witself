@@ -25,6 +25,10 @@ var agentTUITerminal = func() bool {
 	return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
 }
 
+var createTUIConsole = func(ctx context.Context, conn agentConnection, identity client.SelfIdentity, poll time.Duration) agenttui.ConsoleController {
+	return newTUIConsole(ctx, conn, identity, poll)
+}
+
 var runAgentTUI = func(ctx context.Context, source agenttui.Source, opts agenttui.Options) error {
 	model := agenttui.New(ctx, source, opts)
 	defer model.Close()
@@ -106,6 +110,12 @@ func agentTUI(ctx context.Context, args []string) int {
 			conn.AccountName, _, _ = secretLocalSelectors(*account, self.Identity.RealmName, self.Identity.AgentName)
 		}
 		source = &tuiSecretSource{Source: source, connection: conn, identity: self.Identity}
+		opts.Console = createTUIConsole(ctx, conn, self.Identity, *poll)
+		defer func() {
+			if err := opts.Console.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "witself: local web console cleanup did not complete; check its status before restarting")
+			}
+		}()
 	}
 	clipboard := newTUIClipboard()
 	defer clipboard.Close()

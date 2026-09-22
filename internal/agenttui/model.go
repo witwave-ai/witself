@@ -34,6 +34,8 @@ type Options struct {
 	PollInterval                 time.Duration
 	Demo                         bool
 	Copy                         func(context.Context, string) error
+	// Console is optional. The caller owns its Close lifecycle after the TUI exits.
+	Console ConsoleController
 }
 
 var panelNames = []string{"Overview", "Transcripts", "Facts", "Memories", "Conversations", "Email", "Secrets"}
@@ -75,6 +77,7 @@ type Model struct {
 	closed                        atomic.Bool
 	private                       privateState
 	privateBusy                   bool
+	console                       consoleModel
 	states                        [7]panelState
 	self                          object
 	selfStatus                    string
@@ -144,6 +147,10 @@ func (m *Model) closeLocked() {
 		return
 	}
 	m.cancel()
+	m.console.generation++
+	if m.console.cancel != nil {
+		m.console.cancel()
+	}
 	m.clearPrivate()
 	m.vp.SetContent("")
 }
@@ -190,7 +197,7 @@ func (m *Model) Init() tea.Cmd {
 		o, _ := decode(dashboard.ResourcePreferences, raw)
 		return prefsMsg{revision: rev, theme: str(obj(o["prefs"]), "theme")}
 	}
-	return tea.Batch(m.tick(), m.refresh(), prefs)
+	return tea.Batch(m.tick(), m.refresh(), prefs, m.consoleTick(), m.consoleRun(consoleCheck))
 }
 
 type tickMsg struct{}
@@ -940,6 +947,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
+	case consoleTickMsg:
+		return m, tea.Batch(m.consoleTick(), m.consoleRun(consoleCheck))
+	case consoleMsg:
+		return m, m.consoleResult(msg)
 	case tea.WindowSizeMsg:
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
@@ -1040,6 +1051,9 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 		m.renderDetail(false)
 		return m.refresh()
 	}
+	if m.overlay == "console" {
+		return m.consoleKey(k)
+	}
 	if m.overlay != "" {
 		switch k {
 		case "esc", "q", "?":
@@ -1072,6 +1086,14 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	switch k {
+	case "b", "w":
+		m.clearPrivate()
+		m.renderDetail(false)
+		if k == "w" {
+			m.overlay = "console"
+			return m.consoleRun(consoleCheck)
+		}
+		return m.consoleRun(consoleOpen)
 	case "q":
 		m.closeLocked()
 		return tea.Quit

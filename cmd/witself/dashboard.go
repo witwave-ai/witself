@@ -7,6 +7,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -224,13 +226,13 @@ func stopDashboardEntry(entry dashboard.RegistryEntry) error {
 }
 
 // dashboardEntryReleased reports whether the signaled serve's registry entry
-// is gone (graceful shutdown removes it) or already belongs to another PID.
+// is gone (graceful shutdown removes it) or belongs to another exact instance.
 func dashboardEntryReleased(entry dashboard.RegistryEntry) bool {
 	current, err := dashboard.ReadRegistryEntry(entry.AgentID)
 	if err != nil {
 		return errors.Is(err, os.ErrNotExist)
 	}
-	return current.PID != entry.PID
+	return !dashboard.SameRegistryInstance(current, entry)
 }
 
 // dashboardServe resolves the agent connection and hands a bound loopback
@@ -329,7 +331,17 @@ var launchBrowser = func(url string) error {
 // loopback listener until ctx is canceled, registering the serve in
 // ~/.witself/dashboards for local discovery and removing it on shutdown.
 func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Config, entry dashboard.RegistryEntry, openBrowser bool) int {
+	return serveDashboardLifecycle(ctx, listener, cfg, entry, openBrowser, os.Stderr, nil)
+}
+
+// A non-nil ready callback selects the private managed lifecycle: no banner,
+// no CLI browser wrapper, and no replacement of an unverified registry record.
+func serveDashboardLifecycle(ctx context.Context, listener net.Listener, cfg dashboard.Config, entry dashboard.RegistryEntry, openBrowser bool, output io.Writer, ready func() error) int {
+	defer func() { _ = listener.Close() }()
 	port := listenerPort(listener)
+	entry.SchemaVersion = dashboard.RegistrySchemaVersion
+	entry.AccountID, entry.RealmID = cfg.Identity.AccountID, cfg.Identity.RealmID
+	entry.Endpoint, _ = normalizeConsoleEndpoint(cfg.Endpoint)
 	entry.Port = port
 	entry.PID = os.Getpid()
 	entry.URL = fmt.Sprintf("http://127.0.0.1:%d/", port)
@@ -341,7 +353,7 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 	ctx, releaseStop, err := registerDashboardStop(ctx, entry)
 	if err != nil {
 		_ = listener.Close()
-		fmt.Fprintf(os.Stderr, "witself: register dashboard shutdown: %v\n", err)
+		_, _ = fmt.Fprintf(output, "witself: register dashboard shutdown: %v\n", err)
 		return 1
 	}
 	defer releaseStop()
@@ -349,11 +361,12 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 	mux := http.NewServeMux()
 	if err := dashboard.Register(mux, cfg); err != nil {
 		_ = listener.Close()
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
 		return 1
 	}
 	srv := &http.Server{
 		Handler:           mux,
+		ErrorLog:          log.New(output, "", 0),
 		ReadHeaderTimeout: 5 * time.Second,
 		// Derive every request context from the serve ctx so signal-driven
 		// shutdown also ends open SSE streams; otherwise Shutdown waits its
@@ -370,6 +383,7 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
+		_ = srv.Close()
 	}
 
 	// Claim the registry slot only once this process answers on its port:
@@ -377,46 +391,61 @@ func serveDashboard(ctx context.Context, listener net.Listener, cfg dashboard.Co
 	// liveness probe of the winner must see the marker header. Two serves
 	// racing past the pre-bind check therefore resolve to exactly one
 	// registered survivor; the loser backs off without deleting its entry.
-	survivor, claimed, err := dashboard.ClaimRegistryEntry(entry)
+	var survivor dashboard.RegistryEntry
+	var claimed bool
+	if ready != nil {
+		claimed, err = dashboard.ClaimManagedRegistryEntry(ctx, entry)
+	} else {
+		survivor, claimed, err = dashboard.ClaimRegistryEntry(entry)
+	}
 	if err != nil {
 		backOff()
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
 		return 1
 	}
 	if !claimed {
 		backOff()
-		fmt.Fprintf(os.Stderr, "witself: a dashboard for agent %q is already serving on %s (pid %d); stop it first\n",
+		_, _ = fmt.Fprintf(output, "witself: a dashboard for agent %q is already serving on %s (pid %d); stop it first\n",
 			survivor.AgentName, survivor.URL, survivor.PID)
 		return 1
 	}
 	defer func() {
-		if err := dashboard.ReleaseRegistryEntry(entry.AgentID, entry.PID); err != nil {
-			fmt.Fprintf(os.Stderr, "witself: warning: remove dashboard registry entry: %v\n", err)
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := dashboard.ReleaseRegistryInstance(releaseCtx, entry); err != nil {
+			_, _ = fmt.Fprintf(output, "witself: warning: remove dashboard registry entry: %v\n", err)
 		}
 	}()
-	fmt.Fprintf(os.Stderr, "witself dashboard: serving agent %s on %s\n",
+	if ready != nil {
+		if ctx.Err() != nil || ready() != nil {
+			backOff()
+			return 1
+		}
+	}
+	_, _ = fmt.Fprintf(output, "witself dashboard: serving agent %s on %s\n",
 		entry.AgentName, entry.AccessURL)
-	if openBrowser {
+	if openBrowser && ready == nil {
 		// Fire-and-forget: a launch failure only warns — the banner URL still
 		// works — and nothing waits on the browser process.
 		if err := launchBrowser(entry.AccessURL); err != nil {
-			fmt.Fprintf(os.Stderr, "witself dashboard: warning: open browser: %v\n", err)
+			_, _ = fmt.Fprintf(output, "witself dashboard: warning: open browser: %v\n", err)
 		}
 	}
 
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
 		return 1
 	}
+	defer func() { _ = srv.Close() }()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "witself dashboard: shut down with connections still open: %v\n", err)
+		_, _ = fmt.Fprintf(output, "witself dashboard: shut down with connections still open: %v\n", err)
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "witself dashboard: shut down cleanly")
+	_, _ = fmt.Fprintln(output, "witself dashboard: shut down cleanly")
 	return 0
 }
 

@@ -3,10 +3,12 @@
 package dashboard
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,6 +19,13 @@ import (
 // the handle. Other dashboard processes may still open the file and block in
 // LockFileEx, preserving the Unix flock serialization contract.
 func lockRegistryClaim(path string) (func(), error) {
+	return lockRegistryClaimContext(context.Background(), path)
+}
+
+func lockRegistryClaimContext(ctx context.Context, path string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -53,9 +62,21 @@ func lockRegistryClaim(path string) (func(), error) {
 		return nil, fmt.Errorf("dashboard: adopt registry claim lock %s", path)
 	}
 	overlapped := &windows.Overlapped{}
-	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("dashboard: lock registry claim %s: %w", path, err)
+	for {
+		err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			_ = file.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	if err := validateLockedRegistryFile(path, file); err != nil {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)

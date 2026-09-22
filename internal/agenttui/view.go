@@ -113,6 +113,9 @@ func (m *Model) view() string {
 	}
 	badge := lipgloss.NewStyle().Foreground(lipgloss.Color(c.bg)).Background(lipgloss.Color(c.accent)).Bold(true).Render(" " + monogram + " ")
 	brand := badge + " " + m.style(c.fg).Bold(true).Render("witself") + m.style(c.dim).Render(" / agent workspace")
+	if m.width < 60 {
+		brand = badge + " " + m.style(c.fg).Bold(true).Render("witself")
+	}
 	status := "● live"
 	if m.paused {
 		status = "Ⅱ paused"
@@ -124,6 +127,9 @@ func (m *Model) view() string {
 	}
 	if m.opts.Demo {
 		status += " · DEMO"
+	}
+	if web := m.consoleBadge(); web != "" {
+		status += " · " + web
 	}
 	status += fmt.Sprintf(" · %s", m.opts.PollInterval)
 	right := m.style(c.accent).Render(status)
@@ -293,6 +299,9 @@ func stateLabel(s string) string {
 	}
 }
 func (m *Model) footer() string {
+	if m.overlay == "console" {
+		return " s start  b open  x stop  Esc close"
+	}
 	if m.overlay != "" {
 		return " ↑↓ scroll/select  Enter choose  Esc close  Ctrl+C quit"
 	}
@@ -312,20 +321,20 @@ func (m *Model) footer() string {
 	case 4:
 		actions = "[ ] message  v body"
 	case 5:
-		actions = "s sent/received"
+		actions = "s mailbox"
 		if !m.sent {
 			actions += "  u unread  a unacked"
 		}
 	case 6:
 		actions = "[ ] field  v reveal  c copy"
 	}
-	prefix := "1–7  Tab focus  / filter  "
-	if m.width < 110 {
-		prefix = "1–7  Tab panes  / find  "
-	}
-	suffix := "  ? help  q quit"
+	prefix := "1–7 Tab /  "
+	suffix := "  b browser  w web  ? help  q quit"
 	if m.width >= 110 {
-		suffix = "  r refresh  p pause  t theme  ? help  q quit"
+		suffix = "  b browser  w web  r refresh  p pause  t theme  ? help  q quit"
+	}
+	if m.width < 80 {
+		return " b browser  w web  ? help  q quit"
 	}
 	return " " + prefix + actions + suffix
 }
@@ -334,6 +343,9 @@ func (m *Model) overlayView(w, h int) string {
 		return ""
 	}
 	c := m.colors()
+	if m.overlay == "console" {
+		return m.consoleView(w, h)
+	}
 	if m.overlay == "theme" {
 		ls := []string{m.style(c.accent).Bold(true).Render("Choose your atmosphere"), "Shared with the web console. Auto uses a dark default.", ""}
 		for i, n := range themeNames {
@@ -354,7 +366,7 @@ func (m *Model) overlayView(w, h int) string {
 		return crop(strings.Join(ls, "\n"), w, h)
 	}
 	help := []string{
-		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "All reads use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
+		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "All reads use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
 	}
 	lines := []string{}
 	for _, l := range help {

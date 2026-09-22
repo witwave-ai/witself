@@ -531,7 +531,8 @@ remain separate follow-on work.
 For a native terminal workspace, run `witself tui --agent scout`, or explore
 `witself tui --demo` without connecting an account. It includes all seven
 console sections, themes, live updates, and quick fact/secret-field reveal and
-clipboard shortcuts. See the [terminal workspace guide](docs/agent-tui.md).
+clipboard shortcuts. Press `b` to open its web console or `w` to start and stop
+it. See the [terminal workspace guide](docs/agent-tui.md).
 
 One command serves a loopback-only, content-read-only Agent Console for a
 single agent. Its seven live panels are overview, transcripts, facts,

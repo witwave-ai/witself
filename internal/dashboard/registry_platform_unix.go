@@ -3,10 +3,13 @@
 package dashboard
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,6 +19,13 @@ import (
 // liveness probe plus one atomic write). The lock file persists after release;
 // it holds no state.
 func lockRegistryClaim(path string) (func(), error) {
+	return lockRegistryClaimContext(context.Background(), path)
+}
+
+func lockRegistryClaimContext(ctx context.Context, path string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -28,9 +38,21 @@ func lockRegistryClaim(path string) (func(), error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("dashboard: adopt registry claim lock %s", path)
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("dashboard: lock registry claim %s: %w", path, err)
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			_ = file.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	if err := validateLockedRegistryFile(path, file); err != nil {
 		_ = unix.Flock(fd, unix.LOCK_UN)

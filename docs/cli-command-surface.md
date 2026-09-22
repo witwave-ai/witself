@@ -5752,6 +5752,11 @@ field; `c` copies that value without displaying it first. Secret decryption
 stays local and requires the matching enrolled vault key. Ordinary lists stay
 redacted. The TUI does not initialize, replace, or enroll a key.
 
+`b` starts or reuses the selected agent's verified web console and opens the
+default browser. `w` shows status and controls: `s` start, `b` open, `x` stop,
+and `r` check. Quitting stops a console started by this TUI; a reused console
+keeps running unless explicitly stopped. Demo never opens a browser.
+
 An interactive input and output terminal is required. `--demo` uses only
 synthetic in-process data and accepts no account or connection flags. It does
 not resolve credentials, start a listener, or contact a cell. `--theme` accepts

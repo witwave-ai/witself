@@ -20,7 +20,8 @@ explicit unavailable state. TOTP enrollment seeds cannot be revealed; use
 `witself totp code` for a current code. Binary fields use base64, like the CLI.
 
 Lists and searches remain redacted. Revealed values are kept separately from
-passive view data and cleared on hide, navigation, manual refresh, exit, or a 30-second reveal timeout.
+passive view data and cleared on hide, navigation, manual refresh, web-console
+controls, exit, or a 30-second reveal timeout.
 They are not written to saved preferences or logs. Terminal output strips
 untrusted control sequences; copying preserves the exact value. The UI's
 in-memory clearing is not a guarantee of forensic erasure from process memory,
@@ -35,11 +36,40 @@ clear runs after 45 seconds or when the workspace exits. This can overwrite a
 later clipboard value copied in another app; clipboard history and synced
 devices can retain copies.
 
+## Web console, one key away
+
+Press `b` to open the selected agent's web console in your default browser.
+The workspace starts a local console when needed and reuses an existing one
+only after verifying its canonical account, realm, and agent identity.
+Press `w` for its status and controls:
+
+| Key | Action |
+| --- | --- |
+| `s` | Start without opening the browser |
+| `b` / Enter | Start or reuse, then open the browser |
+| `x` | Stop the selected agent's verified console |
+| `r` | Check its current status |
+| Esc | Close the controls |
+
+The header shows whether the console is on or off. The controls distinguish
+**started here** from an **existing session**. Quitting the TUI stops a console
+it started; a reused console stays running unless you explicitly stop it.
+If the browser cannot open, the console stays available and `b` retries.
+Unverifiable registry records are left untouched and shown as an identity
+conflict. Demo mode never starts a server or opens a browser.
+
+The managed console runs in a separate child process, so stopping it does not
+quit the TUI. Its connection credentials pass through a private pipe. Access
+URLs never appear in the TUI, its status messages, or ordinary errors. Browser
+opening uses the operating system's native opener on macOS, Linux, and Windows;
+it occurs on the computer running the TUI.
+
 ## Observation and deliberate access
 
 Passive panels share the existing Agent Console handler projections, invoked
-in process. There is no local HTTP listener, browser session token, registry
-entry, or background daemon. Broad fact reads retain the observational
+in process. Ordinary terminal browsing does not start a local HTTP listener,
+create a browser session token, or register a console. Those are created only
+when you explicitly start or open the web console. Broad fact reads retain the observational
 capability check, secret inventories exclude all field values, and email shows
 only its bounded metadata projection.
 

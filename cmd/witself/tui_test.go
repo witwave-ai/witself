@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/agenttui"
 	"github.com/witwave-ai/witself/internal/client"
@@ -26,9 +27,9 @@ func isolateAgentTUI(t *testing.T) {
 	for _, key := range []string{"WITSELF_ACCOUNT", "WITSELF_REALM", "WITSELF_AGENT"} {
 		t.Setenv(key, "")
 	}
-	oldTerminal, oldRunner := agentTUITerminal, runAgentTUI
+	oldTerminal, oldRunner, oldConsole := agentTUITerminal, runAgentTUI, createTUIConsole
 	agentTUITerminal = func() bool { return true }
-	t.Cleanup(func() { agentTUITerminal, runAgentTUI = oldTerminal, oldRunner })
+	t.Cleanup(func() { agentTUITerminal, runAgentTUI, createTUIConsole = oldTerminal, oldRunner, oldConsole })
 }
 
 func TestAgentTUIDemoDoesNotResolveConnection(t *testing.T) {
@@ -38,9 +39,13 @@ func TestAgentTUIDemoDoesNotResolveConnection(t *testing.T) {
 	t.Setenv("WITSELF_AGENT", "missing-agent")
 	t.Setenv("WITSELF_REALM", "missing-realm")
 	called := false
+	createTUIConsole = func(context.Context, agentConnection, client.SelfIdentity, time.Duration) agenttui.ConsoleController {
+		t.Fatal("demo initialized a console controller")
+		return nil
+	}
 	runAgentTUI = func(ctx context.Context, source agenttui.Source, opts agenttui.Options) error {
 		called = true
-		if !opts.Demo || opts.Agent != "Atlas" || opts.Realm != "studio" || opts.Theme != "paper" {
+		if !opts.Demo || opts.Agent != "Atlas" || opts.Realm != "studio" || opts.Theme != "paper" || opts.Console != nil {
 			t.Fatal("demo options did not describe the synthetic workspace")
 		}
 		if _, err := source.Read(ctx, dashboard.ReadRequest{Resource: dashboard.ResourceSelf}); err != nil {
@@ -104,6 +109,15 @@ func TestAgentTUIAuthenticatesIdentityAndUsesObservationalReader(t *testing.T) {
 				t.Fatal(err)
 			}
 			called := false
+			console := &testTUIConsoleCleanup{}
+			created := 0
+			createTUIConsole = func(ctx context.Context, conn agentConnection, id client.SelfIdentity, poll time.Duration) agenttui.ConsoleController {
+				created++
+				if ctx.Err() != nil || conn.Endpoint != cell.URL || id != identity || poll != 2*time.Second {
+					t.Fatal("console lost the verified connection")
+				}
+				return console
+			}
 			runAgentTUI = func(ctx context.Context, source agenttui.Source, opts agenttui.Options) error {
 				called = true
 				secretSource, ok := source.(*tuiSecretSource)
@@ -113,20 +127,30 @@ func TestAgentTUIAuthenticatesIdentityAndUsesObservationalReader(t *testing.T) {
 				if opts.Agent != "atlas" || opts.Realm != "default" || opts.Demo {
 					t.Fatal("incorrect authenticated options")
 				}
+				if opts.Console != console || console.closed != 0 {
+					t.Fatal("console lifecycle not owned by application")
+				}
 				_, err := source.Read(ctx, dashboard.ReadRequest{Resource: dashboard.ResourceSelf})
 				return err
 			}
 			got := agentTUI(context.Background(), []string{"--account", "work", "--agent", "atlas", "--endpoint", cell.URL, "--token-file", tokenFile})
 			if mismatch {
-				if got != 1 || called || requests != 1 {
+				if got != 1 || called || requests != 1 || created != 0 {
 					t.Fatalf("identity mismatch was not rejected: exit=%d runner=%v requests=%d", got, called, requests)
 				}
-			} else if got != 0 || !called || requests != 2 {
+			} else if got != 0 || !called || requests != 2 || created != 1 || console.closed != 1 {
 				t.Fatalf("matching identity did not start reader: exit=%d runner=%v requests=%d", got, called, requests)
 			}
 		})
 	}
 }
+
+type testTUIConsoleCleanup struct {
+	agenttui.ConsoleController // Any operation before the UI asks is a test failure.
+	closed                     int
+}
+
+func (c *testTUIConsoleCleanup) Close() error { c.closed++; return nil }
 
 func TestTUIClipboardClearIsFencedToLatestCopy(t *testing.T) {
 	var writes []string

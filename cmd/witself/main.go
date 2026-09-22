@@ -36,6 +36,12 @@ var (
 
 func main() {
 	args := os.Args[1:]
+	if len(args) == 1 && args[0] == tuiConsoleChildArgument {
+		os.Exit(runTUIConsoleChild(os.Stdin, os.Stdout))
+	}
+	if len(args) == 1 && args[0] == tuiConsoleBrowserArgument {
+		os.Exit(runTUIConsoleBrowserChild(os.Stdin))
+	}
 	// Hook commands serialize the integration's exact WITSELF_HOME as an
 	// argument. Apply it before any startup migration or cleanup can inspect
 	// local state; transcriptHook validates the same binding again before use.
