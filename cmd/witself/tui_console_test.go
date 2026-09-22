@@ -552,6 +552,9 @@ func TestTUIConsolePrivateBootstrapAndReadiness(t *testing.T) {
 	var diagnostics bytes.Buffer
 	command.Stdin, command.Stdout, command.Stderr = reader, outputWriter, &diagnostics
 	command.Env = consoleChildEnvironment()
+	// This subprocess is the test executable. Coverage instrumentation needs a
+	// private output directory to avoid its own warning on otherwise quiet stderr.
+	command.Env = append(command.Env, "GOCOVERDIR="+t.TempDir())
 	if strings.Contains(strings.Join(command.Args, " ")+strings.Join(command.Env, " "), conn.Token) {
 		t.Fatal("credential outside bootstrap")
 	}
