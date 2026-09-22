@@ -1735,7 +1735,9 @@ func (s *Store) ListAgentEmails(
 	scope AgentEmailPilotScope,
 	p Principal,
 	filter AgentEmailFilter,
-) (AgentEmailPage, error) {
+) (activityResult AgentEmailPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "email.list")
+	defer func() { finishActivity(int64(len(activityResult.Messages)), &activityErr) }()
 	if err := requireAgentEmailPilotPrincipal(scope, p); err != nil {
 		return AgentEmailPage{}, err
 	}
@@ -1816,7 +1818,9 @@ func (s *Store) ReadAgentEmail(
 	scope AgentEmailPilotScope,
 	p Principal,
 	messageID string,
-) (AgentEmailMessage, error) {
+) (activityResult AgentEmailMessage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "email.read")
+	defer func() { finishActivity(1, &activityErr) }()
 	msg, err := s.transitionAgentEmail(ctx, scope, p, messageID, false, false)
 	if err != nil {
 		return AgentEmailMessage{}, err

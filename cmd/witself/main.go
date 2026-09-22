@@ -2995,6 +2995,7 @@ func usageCmd(args []string) int {
 	untilRaw := fs.String("until", "", "report end (RFC3339; default: now)")
 	groupBy := fs.String("group-by", "day", "time bucket: hour or day")
 	allowTruncation := fs.Bool("allow-truncation", false, "allow partial usage results when the server row cap is exceeded")
+	activityReport := fs.Bool("activity", false, "show recorded operations and memory changes (hourly, nonbilling)")
 	var dimensions csvListFlag
 	fs.Var(&dimensions, "dimension", "usage dimension (repeatable or comma-separated)")
 	jsonOut := jsonFlag(fs)
@@ -3004,6 +3005,17 @@ func usageCmd(args []string) int {
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "usage: witself usage [--account NAME] [--realm NAME] (--agent NAME | --endpoint URL --token-file FILE)")
 		return 2
+	}
+	if *activityReport {
+		if len(dimensions) != 0 || *allowTruncation || (flagWasPassed(fs, "group-by") && *groupBy != "hour") {
+			fmt.Fprintln(os.Stderr, "witself: --activity uses hourly buckets and does not accept --dimension or --allow-truncation")
+			return 2
+		}
+		*groupBy = "hour"
+		if !flagWasPassed(fs, "since") {
+			// Let the server anchor its shared 24-bucket window to until.
+			*sinceRaw = ""
+		}
 	}
 	now := time.Now().UTC()
 	since, err := parseUsageStart(*sinceRaw, now)
@@ -3029,6 +3041,9 @@ func usageCmd(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
+	}
+	if *activityReport {
+		return printAgentActivity(ctx, conn, since, until, *jsonOut)
 	}
 	report, err := client.GetUsage(ctx, conn.Endpoint, conn.Token, client.UsageQuery{
 		Since: since, Until: until, Bucket: *groupBy, Dimensions: dimensions,

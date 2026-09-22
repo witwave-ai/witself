@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -56,6 +57,7 @@ type DeleteFactResult struct {
 // canonical address are physically removed while subjects, aliases, usage,
 // and the account audit ledger remain intact.
 func (s *Store) DeleteFact(ctx context.Context, p Principal, in DeleteFactInput) (DeleteFactResult, error) {
+	ctx = activity.DefaultOperation(ctx, "facts.delete")
 	if p.Kind != PrincipalAgent {
 		return DeleteFactResult{}, ErrFactForbidden
 	}
@@ -231,6 +233,9 @@ func (s *Store) DeleteFact(ctx context.Context, p Principal, in DeleteFactInput)
 	out.DeletedAt = &deletedAt
 	out.ReceiptID = receiptID
 	out.Applied = true
+	if err := recordActivityOperationTx(ctx, tx, p, "facts.delete", receiptID, 1); err != nil {
+		return DeleteFactResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return DeleteFactResult{}, err
 	}

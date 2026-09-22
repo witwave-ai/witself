@@ -69,7 +69,11 @@ func projectSummaryUsage(s *Summary, want client.SelfIdentity, report client.Usa
 	for _, i := range dimensions {
 		a := &s.Categories[i].Activity
 		a.Status = "available"
-		a.Bins = append([]int64{}, sums[i].bins[:]...)
+		a.Bins = make([]*int64, 24)
+		for j, v := range sums[i].bins {
+			n := v
+			a.Bins[j] = &n
+		}
 		n := sums[i].quantity
 		a.Total = &n
 	}

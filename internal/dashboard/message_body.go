@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 )
 
@@ -29,7 +30,7 @@ func messageBodyHandler(cfg Config) http.Handler {
 			writeJSONError(w, http.StatusBadRequest, "invalid message preview request")
 			return
 		}
-		message, err := client.PeekMessage(r.Context(), cfg.Endpoint, cfg.BearerToken, id)
+		message, err := client.PeekMessage(activity.WithDeliberate(r.Context()), cfg.Endpoint, cfg.BearerToken, id)
 		if err != nil {
 			status := http.StatusBadGateway
 			if errors.Is(err, client.ErrNotFound) {

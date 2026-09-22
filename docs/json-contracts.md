@@ -634,6 +634,13 @@ Repeated `dimension` query parameters select this closed vocabulary:
 | Facts | `fact_returned` |
 | Secrets | `stored_secret`, `secret_read`, `encrypted_storage_byte`, `totp_code`, `runtime_injection` |
 | Email | `email_received`, `email_sent`, `email_address`, `email_storage_byte` |
+| Core operations | `operation_read`, `operation_write`, `operation_read_record`, `operation_write_record` |
+| Memory changes | `memory_created`, `memory_revised`, `memory_archived`, `memory_restored`, `memory_deleted` |
+| Activity coverage | `activity_tracking_started` |
+
+Unfiltered usage queries retain the original transcript, messaging, fact,
+secret, and email dimensions. Select the new dimensions explicitly, or use
+the dedicated activity report below, which also supplies recording coverage.
 
 Vocabulary membership does not imply that a dimension currently emits events.
 Unknown dimensions are rejected on new event input and usage queries and
@@ -653,6 +660,58 @@ totals are partial and the CLI warns on stderr, including in JSON mode. Narrow
 `--since`/`--until`, use a coarser `--group-by`, or explicitly accept partial
 totals. The route has no cursor pagination. Optional `realm_name` and
 `agent_name` provide display names; neither changes the token-derived scope.
+
+## Agent Activity Report
+
+`GET /v1/activity` returns the authenticated agent's value-free report inside
+`activity`; `witself usage --activity --json` prints the report itself:
+
+```json
+{
+  "activity": {
+    "schema": "witself.agent-activity.v1",
+    "catalog": "core-records.v1",
+    "account_id": "acc_123",
+    "realm_id": "rlm_123",
+    "agent_id": "agent_123",
+    "since": "2026-09-21T00:00:00Z",
+    "until": "2026-09-22T00:00:00Z",
+    "bucket": "hour",
+    "tracking_since": null,
+    "points": [],
+    "totals": [],
+    "truncated": false
+  }
+}
+```
+
+The query accepts only `since`, `until`, and `group_by=hour`. Buckets are
+selected by start time: `since` is rounded down to a UTC hour, and each
+`bucket_start` must be before `until`. A nonaligned `until` includes that
+hour's current rollup, not an individual event-time cutoff. The default covers
+24 buckets including the current partial hour, and the maximum window is
+31 days. Reports never silently truncate. Points and totals use the same
+fields as usage reports, with this closed dimension/unit mapping:
+
+| Dimensions | Unit |
+|---|---|
+| `operation_read`, `operation_write` | `operation` |
+| `operation_read_record`, `operation_write_record` | `record` |
+| `memory_created`, `memory_revised`, `memory_archived`, `memory_restored`, `memory_deleted` | `change` |
+
+Operation and change quantities equal their event counts. Record quantities
+can exceed event counts because one operation can return or affect multiple
+records. Zero-record operations omit the companion record event. Totals sum
+the returned hourly points separately for each dimension and unit.
+
+`tracking_since` is the immutable first-recording timestamp, even when it
+falls outside the selected window. Null means no recording has started and
+requires empty arrays. The marker itself (`activity_tracking_started`, unit
+`activation`) is excluded from this report. Earlier history is unknown, the
+activation hour may be partial, and the marker does not certify complete
+coverage from older clients or replicas. These are cooperative, nonbilling
+metrics; the [activity guide](agent-activity.md) defines the bounded catalog,
+exact-retry behavior, passive exclusions, and memory lifecycle mapping.
 
 ## Memory Summary
 

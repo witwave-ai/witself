@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -64,7 +66,7 @@ var usageDimensions = [...]string{
 }
 
 func validUsageDimension(dimension string) bool {
-	return slices.Contains(usageDimensions[:], dimension)
+	return slices.Contains(usageDimensions[:], dimension) || activity.Unit(dimension) != ""
 }
 
 var (
@@ -184,12 +186,18 @@ func (s *Store) GetAgentUsage(ctx context.Context, p Principal, query UsageQuery
 		if err := rows.Scan(&point.Dimension, &point.Unit, &point.BucketStart, &point.Quantity, &point.EventCount); err != nil {
 			return UsageReport{}, err
 		}
+		if unit := activity.Unit(point.Dimension); unit != "" && (unit != point.Unit || point.Quantity <= 0 || point.EventCount <= 0 || unit != "record" && point.Quantity != point.EventCount || unit == "record" && point.Quantity < point.EventCount) {
+			return UsageReport{}, ErrUsageInputInvalid
+		}
 		report.Points = append(report.Points, point)
 		key := point.Dimension + "\x00" + point.Unit
 		total := totals[key]
 		if total == nil {
 			total = &UsageTotal{Dimension: point.Dimension, Unit: point.Unit}
 			totals[key] = total
+		}
+		if activity.Unit(point.Dimension) != "" && (total.Quantity > math.MaxInt64-point.Quantity || total.EventCount > math.MaxInt64-point.EventCount) {
+			return UsageReport{}, ErrUsageInputInvalid
 		}
 		total.Quantity += point.Quantity
 		total.EventCount += point.EventCount
@@ -349,6 +357,11 @@ func validateUsageEventInput(in *usageEventInput) error {
 	if !validUsageDimension(in.Dimension) || !usageShortNamePattern.MatchString(in.Unit) ||
 		!usageShortNamePattern.MatchString(in.SubjectType) {
 		return fmt.Errorf("invalid usage event dimension, unit, or subject type")
+	}
+	if unit := activity.Unit(in.Dimension); unit != "" {
+		if in.Unit != unit || unit != "record" && in.Quantity != 1 {
+			return fmt.Errorf("invalid activity unit or quantity")
+		}
 	}
 	if in.Quantity <= 0 || len(in.SubjectID) == 0 || len(in.SubjectID) > 256 ||
 		len(in.IdempotencyKey) == 0 || len(in.IdempotencyKey) > 512 {

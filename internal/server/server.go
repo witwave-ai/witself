@@ -468,6 +468,7 @@ type Config struct {
 	GetTranscript                  func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 	GetTranscriptPage              func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
 	GetTranscriptPageObservational func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
+	GetActivity                    func(ctx context.Context, p DomainPrincipal, query ActivityQuery) (ActivityReport, error)
 	GetUsage                       func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
 	SetFact                        func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
 	GetFactLimitStatus             func(ctx context.Context, p DomainPrincipal) (FactLimitStatus, error)
@@ -2903,6 +2904,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ListFactSubjects != nil {
 			mux.HandleFunc("GET /v1/fact-subjects", listFactSubjectsHandler(cfg.AuthenticatePrincipal, cfg.ListFactSubjects))
 		}
+		if cfg.GetActivity != nil {
+			mux.HandleFunc("GET /v1/activity", activityHandler(cfg.AuthenticatePrincipal, cfg.GetActivity))
+		}
 		if cfg.GetUsage != nil {
 			mux.HandleFunc("GET /v1/usage", usageHandler(cfg.AuthenticatePrincipal, cfg.GetUsage))
 		}
@@ -3052,7 +3056,7 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return securityResponseHeaders(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux)))))
+	return securityResponseHeaders(activityContextMux(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))))
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})

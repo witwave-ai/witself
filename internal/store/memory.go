@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -345,6 +346,7 @@ type MemoryHistoryPage struct {
 
 // CaptureMemory commits a durable version-one memory and evidence capsule.
 func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemoryInput) (MemoryMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.capture")
 	if p.Kind != PrincipalAgent {
 		return MemoryMutationResult{}, ErrMemoryForbidden
 	}
@@ -450,6 +452,9 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 	if err := s.logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
 		return MemoryMutationResult{}, err
 	}
+	if err := recordActivityOperationTx(ctx, tx, p, "memories.capture", memoryID, 1); err != nil {
+		return MemoryMutationResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return MemoryMutationResult{}, err
 	}
@@ -457,7 +462,9 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 }
 
 // GetMemory returns the current head with full authorized content and evidence.
-func (s *Store) GetMemory(ctx context.Context, p Principal, memoryID string) (Memory, error) {
+func (s *Store) GetMemory(ctx context.Context, p Principal, memoryID string) (activityResult Memory, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "memories.get")
+	defer func() { finishActivity(1, &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return Memory{}, ErrMemoryForbidden
 	}
@@ -468,7 +475,9 @@ func (s *Store) GetMemory(ctx context.Context, p Principal, memoryID string) (Me
 }
 
 // ListMemories returns deterministic current-head inventory ordered by activity.
-func (s *Store) ListMemories(ctx context.Context, p Principal, opts MemoryListOptions) (MemoryPage, error) {
+func (s *Store) ListMemories(ctx context.Context, p Principal, opts MemoryListOptions) (activityResult MemoryPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "memories.list")
+	defer func() { finishActivity(int64(len(activityResult.Memories)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return MemoryPage{}, ErrMemoryForbidden
 	}
@@ -654,7 +663,9 @@ func (s *Store) CountMemories(ctx context.Context, p Principal, opts MemoryListO
 // GetMemoryHistoryPage returns one bounded page of immutable snapshots oldest
 // first. Version rows and their evidence use two bounded queries regardless of
 // the requested page size, avoiding a query per version.
-func (s *Store) GetMemoryHistoryPage(ctx context.Context, p Principal, memoryID string, opts MemoryHistoryOptions) (MemoryHistoryPage, error) {
+func (s *Store) GetMemoryHistoryPage(ctx context.Context, p Principal, memoryID string, opts MemoryHistoryOptions) (activityResult MemoryHistoryPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "memories.history")
+	defer func() { finishActivity(int64(len(activityResult.Versions)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return MemoryHistoryPage{}, ErrMemoryForbidden
 	}
@@ -725,6 +736,7 @@ func (s *Store) GetMemoryHistoryPage(ctx context.Context, p Principal, memoryID 
 
 // AdjustMemory appends a new version containing a normalized partial update.
 func (s *Store) AdjustMemory(ctx context.Context, p Principal, memoryID string, in AdjustMemoryInput) (MemoryMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.adjust")
 	if p.Kind != PrincipalAgent {
 		return MemoryMutationResult{}, ErrMemoryForbidden
 	}
@@ -748,16 +760,19 @@ func (s *Store) AdjustMemory(ctx context.Context, p Principal, memoryID string, 
 
 // ForgetMemory appends a version that removes a memory from active recall.
 func (s *Store) ForgetMemory(ctx context.Context, p Principal, memoryID string, in MemoryLifecycleInput) (MemoryMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.forget")
 	return s.lifecycleMemory(ctx, p, memoryID, "forgotten", in)
 }
 
 // RestoreMemory appends a version that restores a previously forgotten memory.
 func (s *Store) RestoreMemory(ctx context.Context, p Principal, memoryID string, in MemoryLifecycleInput) (MemoryMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.restore")
 	return s.lifecycleMemory(ctx, p, memoryID, "restored", in)
 }
 
 // ReactivateMemory appends a version that makes a superseded memory active again.
 func (s *Store) ReactivateMemory(ctx context.Context, p Principal, memoryID string, in MemoryLifecycleInput) (MemoryMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.reactivate")
 	return s.lifecycleMemory(ctx, p, memoryID, "reactivated", in)
 }
 
@@ -976,6 +991,10 @@ func (s *Store) mutateMemory(
 		return MemoryMutationResult{}, err
 	}
 	if err := s.logMemoryVersionEventTx(ctx, tx, p, out); err != nil {
+		return MemoryMutationResult{}, err
+	}
+	op := map[string]string{"adjusted": "memories.adjust", "forgotten": "memories.forget", "restored": "memories.restore", "reactivated": "memories.reactivate"}[operation]
+	if err := recordActivityOperationTx(ctx, tx, p, op, fmt.Sprintf("%s:%d", memoryID, next.Version), 1); err != nil {
 		return MemoryMutationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1409,6 +1428,9 @@ func insertMemoryVersionTx(ctx context.Context, tx pgx.Tx, m Memory) (time.Time,
 			return time.Time{}, ErrMemoryIdempotencyConflict
 		}
 		return time.Time{}, fmt.Errorf("insert memory version: %w", err)
+	}
+	if err := recordMemoryVersionActivityTx(ctx, tx, m); err != nil {
+		return time.Time{}, err
 	}
 	return createdAt, nil
 }

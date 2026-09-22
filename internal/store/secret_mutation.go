@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/witwave-ai/witself/internal/activity"
 )
 
 // RegisterVaultKey binds public AVK identity to the authenticated agent. It
@@ -127,6 +129,7 @@ func (s *Store) RegisterVaultKey(ctx context.Context, p Principal, in RegisterVa
 // CreateSecret atomically stores public metadata plus client-encrypted field
 // envelopes. No plaintext sensitive value is accepted by this type or SQL.
 func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretInput) (SecretMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "secrets.create")
 	if err := requireSelfSecretPrincipal(p); err != nil {
 		return SecretMutationResult{}, err
 	}
@@ -272,6 +275,9 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 	if err != nil {
 		return SecretMutationResult{}, err
 	}
+	if err := recordActivityOperationTx(ctx, tx, p, "secrets.create", fmt.Sprintf("%s:%d", receipt.TargetID, receipt.ResultRevision), 1); err != nil {
+		return SecretMutationResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return SecretMutationResult{}, err
 	}
@@ -281,12 +287,14 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 // ArchiveSecret reversibly removes one self-owned secret from ordinary list,
 // show, and material-access paths.
 func (s *Store) ArchiveSecret(ctx context.Context, p Principal, secretID string, in SecretLifecycleInput) (SecretMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "secrets.archive")
 	return s.mutateSecretLifecycle(ctx, p, secretID, "secret_archive", in)
 }
 
 // RestoreSecret returns one self-owned archived secret to ordinary reads. Its
 // live name must still be available for that agent.
 func (s *Store) RestoreSecret(ctx context.Context, p Principal, secretID string, in SecretLifecycleInput) (SecretMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "secrets.restore")
 	return s.mutateSecretLifecycle(ctx, p, secretID, "secret_restore", in)
 }
 
@@ -295,6 +303,7 @@ func (s *Store) RestoreSecret(ctx context.Context, p Principal, secretID string,
 // remains for durable replay, disaster recovery, and audit correlation; ordinary
 // reads exclude it and retained capacity is released immediately.
 func (s *Store) DeleteSecret(ctx context.Context, p Principal, secretID string, in SecretLifecycleInput) (SecretMutationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "secrets.delete")
 	return s.mutateSecretLifecycle(ctx, p, secretID, "secret_delete", in)
 }
 
@@ -498,6 +507,10 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 	secret, err := getSecretWithDeleted(ctx, tx, p, secretID, true, true,
 		operation == "secret_delete")
 	if err != nil {
+		return SecretMutationResult{}, err
+	}
+	op := map[string]string{"secret_archive": "secrets.archive", "secret_restore": "secrets.restore", "secret_delete": "secrets.delete"}[operation]
+	if err := recordActivityOperationTx(ctx, tx, p, op, fmt.Sprintf("%s:%d", receipt.TargetID, receipt.ResultRevision), 1); err != nil {
 		return SecretMutationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

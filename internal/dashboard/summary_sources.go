@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 )
 
@@ -29,6 +30,7 @@ func summaryGET(ctx context.Context, cfg Config, path string) (map[string]json.R
 	if cfg.BearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	}
+	req.Header.Set(activity.ObservationHeader, "1")
 	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
 	if err != nil {
 		return nil, "unavailable"
@@ -39,6 +41,9 @@ func summaryGET(ctx context.Context, cfg Config, path string) (map[string]json.R
 		return nil, "unavailable"
 	}
 	fields := summaryObject(body)
+	if resp.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/v1/activity?") {
+		return nil, "server_update_needed"
+	}
 	if resp.StatusCode != http.StatusOK {
 		// Only the typed feature switch is a disabled source. Never infer state
 		// from human-readable errors, generic 403, enrollment, or missing routes.
@@ -85,8 +90,10 @@ func collectSummary(ctx context.Context, cfg Config, now time.Time) Summary {
 	paths := []string{summarySelfPath(), "/v1/transcripts", "/v1/memories?limit=100", "/v1/secrets?include_fields=false&limit=100", "/v1/messages?direction=inbox&limit=100", "/v1/email?limit=100"}
 	var usage client.UsageReport
 	var usageAvailable bool
-	jobs := make(chan int, len(paths)+1)
-	for i := 0; i <= len(paths); i++ {
+	var activity map[string]json.RawMessage
+	activityStatus := "unavailable"
+	jobs := make(chan int, len(paths)+2)
+	for i := 0; i <= len(paths)+1; i++ {
 		jobs <- i
 	}
 	close(jobs)
@@ -97,7 +104,9 @@ func collectSummary(ctx context.Context, cfg Config, now time.Time) Summary {
 				if ctx.Err() != nil {
 					continue
 				}
-				if i == len(paths) {
+				if i == len(paths)+1 {
+					activity, activityStatus = readSummaryActivity(ctx, cfg, s.Window)
+				} else if i == len(paths) {
 					usage, usageAvailable = readSummaryUsage(ctx, cfg, s.Window)
 				} else {
 					sources[i].fields, sources[i].status = summaryGET(ctx, cfg, paths[i])
@@ -112,6 +121,7 @@ func collectSummary(ctx context.Context, cfg Config, now time.Time) Summary {
 	if usageAvailable {
 		projectSummaryUsage(&s, cfg.Identity, usage)
 	}
+	projectSummaryActivity(&s, cfg.Identity, activity, activityStatus)
 	// Failures are independent: a bad self or memory list cannot erase valid
 	// usage, and an unavailable inbox cannot erase outbound recorded activity.
 	for _, p := range []struct {

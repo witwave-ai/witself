@@ -54,7 +54,9 @@ func getCurrentVaultKey(ctx context.Context, q secretQuerier, p Principal) (*Vau
 
 // GetSecret returns one redacted structured secret owned by the authenticated
 // agent. Sensitive values and envelopes are never selected by this path.
-func (s *Store) GetSecret(ctx context.Context, p Principal, secretID string) (Secret, error) {
+func (s *Store) GetSecret(ctx context.Context, p Principal, secretID string) (activityResult Secret, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "secrets.show")
+	defer func() { finishActivity(1, &activityErr) }()
 	if err := requireSelfSecretPrincipal(p); err != nil {
 		return Secret{}, err
 	}
@@ -159,7 +161,9 @@ type secretCursor struct {
 
 // ListSecrets performs bounded PostgreSQL search over public metadata and
 // explicitly non-sensitive field values only.
-func (s *Store) ListSecrets(ctx context.Context, p Principal, options SecretListOptions) (SecretPage, error) {
+func (s *Store) ListSecrets(ctx context.Context, p Principal, options SecretListOptions) (activityResult SecretPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "secrets.inventory")
+	defer func() { finishActivity(int64(len(activityResult.Secrets)), &activityErr) }()
 	if err := requireSelfSecretPrincipal(p); err != nil {
 		return SecretPage{}, err
 	}
@@ -281,7 +285,9 @@ func decodeSecretCursor(value string) (secretCursor, error) {
 
 // AccessSecretField returns one ciphertext/wrapped-DEK package and records
 // encrypted material delivery. Decryption remains entirely client-side.
-func (s *Store) AccessSecretField(ctx context.Context, p Principal, secretID, fieldID string, in AccessSecretFieldInput) (SecretMaterial, error) {
+func (s *Store) AccessSecretField(ctx context.Context, p Principal, secretID, fieldID string, in AccessSecretFieldInput) (activityResult SecretMaterial, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "secrets.access")
+	defer func() { finishActivity(1, &activityErr) }()
 	if err := requireSelfSecretPrincipal(p); err != nil {
 		return SecretMaterial{}, err
 	}

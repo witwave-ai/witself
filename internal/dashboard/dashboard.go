@@ -44,6 +44,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/avatar"
 	"github.com/witwave-ai/witself/internal/client"
 )
@@ -291,7 +292,7 @@ func secure(cfg Config, session string, next http.Handler) http.Handler {
 				"missing or invalid access token (open the ?token= URL printed at startup)")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(activity.WithObservation(r.Context())))
 	})
 }
 
@@ -1319,9 +1320,10 @@ func factRevealHandler(cfg Config) http.Handler {
 			writeJSONError(w, http.StatusBadRequest, "subject and predicate are required")
 			return
 		}
-		fact, err := client.GetFactObservational(r.Context(), cfg.Endpoint, cfg.BearerToken, subject, predicate)
+		ctx := activity.WithDeliberate(r.Context())
+		fact, err := client.GetFactObservational(ctx, cfg.Endpoint, cfg.BearerToken, subject, predicate)
 		if err != nil && isObservationalUnavailable(err) {
-			fact, err = client.GetFact(r.Context(), cfg.Endpoint, cfg.BearerToken, subject, predicate)
+			fact, err = client.GetFact(ctx, cfg.Endpoint, cfg.BearerToken, subject, predicate)
 		}
 		if err != nil {
 			writeUpstreamError(w, err)

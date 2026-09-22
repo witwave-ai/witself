@@ -459,7 +459,12 @@ export async function run(args) {
           await expect(page.locator('#view h2').filter({ hasText: new RegExp(`^${heading}(?:$| )`) }).first()).toBeVisible();
           if (panel.name === 'overview') {
             await expect(page.locator('.summary-row')).toHaveCount(7);
-            await expect(page.locator('.summary-pattern')).toHaveCount(5);
+            await expect(page.locator('.summary-pattern')).toHaveCount(7);
+            await expect(page.locator('#summary-row-transactions')).toContainText('Operations');
+            await expect(page.locator('#summary-row-transactions')).toContainText('Records written: 4');
+            await expect(page.locator('#summary-row-memories')).toContainText('Deleted: 9');
+            await expect(page.locator('#summary-row-memories')).toContainText('first tracked hour partial');
+            await expect(page.locator('#summary-row-transactions .summary-pattern')).toHaveAttribute('aria-label', /unknown/);
             await expect(page.locator('#summary-row-memories')).toContainText('active memories');
             await expect(page.locator('#summary-row-transcripts')).toContainText('recent records');
             await expect(page.locator('#workspace-content')).toBeEmpty();

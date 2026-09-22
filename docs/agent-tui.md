@@ -12,10 +12,11 @@ avatar image. Avatar lifecycle notices remain visible on Overview.
 ## Visual summary
 
 Overview shares the web console's passive summary: one colored, labeled row
-for Transactions, Transcripts, Facts, Memories, Secrets, Email, and Messages.
+for Operations, Transcripts, Facts, Memories, Secrets, Email, and Messages.
 Press `o` for Overview, `l` for Timeline, `e` for Recent updates, or `d` for
 workspace details, capacity, plan, retention, and salient memories. Use arrow
-keys to select a category and Enter to open it. Tab switches to scrolling;
+keys to select a category and inspect its breakdown below the rows; Enter opens
+a record category. Operations has no inventory. Tab switches to scrolling;
 `a` switches graphs to ASCII characters.
 
 Inventory and recorded activity are separate. Facts and active-memory counts
@@ -25,8 +26,24 @@ ranges across 24 UTC hour buckets, including the partial current hour.
 The graph labels identify entries recorded, fact deliveries, secret accesses,
 accepted email sends, and messages sent. These quantities have different units
 and are never combined into a total. Metering may omit unrecorded activity.
-Transactions have no defined metric yet, and memory activity history is
-unavailable. Missing or disabled data never becomes a zero graph.
+Operations (OPS, compatibility key `transactions`) counts recorded successful
+bounded reads plus writes. Its breakdown keeps reads, writes, records read,
+and records written separate; a page is one read and a batch is one write.
+Memories retains exact active inventory and graphs created, revised, archived,
+restored, and deleted changes, with each quantity in the selected-row detail.
+These cooperative, nonbilling metrics cover the core-record catalog, not every
+network request or administrative action.
+
+The two new graphs show `?` before the durable tracking marker. Zero means a
+valid report with no recorded activity after coverage began. The first tracked
+hour and current hour are partial; totals describe only the recorded portion
+of this window, and older clients may omit activity. No history is backfilled.
+**Not tracked yet** means no marker; **Server update needed** means the activity
+endpoint returned 404; **Unavailable** means an error or invalid report;
+**Disabled** requires an explicit feature refusal. The five legacy activity
+rows remain independent when the new endpoint is absent.
+See [agent activity metrics](agent-activity.md) for the covered operations and
+retry, batch, and record-count rules.
 
 Updates show only category, timestamp, and a fixed description from the bounded
 loaded records; they are not a complete audit log. Pending-work notices do not

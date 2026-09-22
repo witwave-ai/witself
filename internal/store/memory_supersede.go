@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -66,6 +67,7 @@ type SupersedeMemoryResult struct {
 // of active replacement memories with required evidence, and connects every
 // replacement version to the exact new source version in one transaction.
 func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMemoryInput) (SupersedeMemoryResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.supersede")
 	if p.Kind != PrincipalAgent {
 		return SupersedeMemoryResult{}, ErrMemoryForbidden
 	}
@@ -271,6 +273,9 @@ func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMe
 		if err := s.logMemoryVersionEventTx(ctx, tx, p, out.Replacements[i]); err != nil {
 			return SupersedeMemoryResult{}, err
 		}
+	}
+	if err := recordActivityOperationTx(ctx, tx, p, "memories.supersede", in.IdempotencyKey, int64(1+len(out.Replacements))); err != nil {
+		return SupersedeMemoryResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return SupersedeMemoryResult{}, err

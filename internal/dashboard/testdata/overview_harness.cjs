@@ -417,12 +417,17 @@ function summaryData() {
   const units = [null, "entries recorded", "recorded deliveries", null, "recorded accesses", "accepted sends", "messages sent"];
   const dimensions = ["", "transcript_entry_write", "fact_returned", "", "secret_read", "email_sent", "message_sent"];
   return { summary: {
-    schema: "witself.agent-summary.v1", generated_at: "2026-09-22T16:23:00Z", refresh_after_seconds: 30,
+    schema: "witself.agent-summary.v2", generated_at: "2026-09-22T16:23:00Z", refresh_after_seconds: 30,
     window: { since: "2026-09-21T17:00:00Z", until: "2026-09-22T16:23:00Z", bucket: "hour", timezone: "UTC", partial_current_bucket: true },
     categories: ["transactions", "transcripts", "facts", "memories", "secrets", "email", "messages"].map((key, i) => ({
       key, label: "UNTRUSTED LABEL", code: "UNTRUSTED CODE",
-      inventory: { status: i === 0 ? "unavailable" : "available", count: i === 0 ? null : i, exact: i === 2 || i === 3, label: "UNTRUSTED INVENTORY" },
-      activity: units[i] ? { status: "available", bins: Array(24).fill(i), total: 24 * i, unit: units[i], dimension: dimensions[i] } : { status: "unavailable" },
+      inventory: { status: i === 0 ? "not_applicable" : "available", count: i === 0 ? null : i, exact: i === 2 || i === 3, label: "UNTRUSTED INVENTORY" },
+      activity: i === 0 || i === 3 ? {
+        status: "available", unit: i === 0 ? "recorded operations" : "memory changes", dimension: i === 0 ? "operation" : "memory_change",
+        bins: Array.from({length:24}, (_, h) => h < 6 ? null : h === 6 ? (i === 0 ? 3 : 15) : 0), total: i === 0 ? 3 : 15,
+        coverage: { tracking_since: "2026-09-21T23:17:00Z", partial_first_bucket: true },
+        breakdown: (i === 0 ? ["operation_read", "operation_write", "operation_read_record", "operation_write_record"] : ["memory_created", "memory_revised", "memory_archived", "memory_restored", "memory_deleted"]).map((dimension,j) => ({ dimension, unit: i === 3 ? "change" : j < 2 ? "operation" : "record", total: j+1 }))
+      } : units[i] ? { status: "available", bins: Array(24).fill(i), total: 24 * i, unit: units[i], dimension: dimensions[i] } : { status: "unavailable" },
     })),
     recent: [{ key: "transcripts", at: "2026-09-22T16:00:00Z", action: "transcript updated" }],
     checkpoints: ["memory", "message", "email", "avatar"].map((key) => ({ key, label: "UNTRUSTED CHECKPOINT", status: "clear" })),

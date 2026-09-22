@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -100,6 +101,7 @@ func (s *Store) ApplyCuration(
 	runID string,
 	in ApplyMemoryCurationInput,
 ) (ApplyMemoryCurationResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.curation_apply")
 	if p.Kind != PrincipalAgent {
 		return ApplyMemoryCurationResult{}, ErrMemoryCurationForbidden
 	}
@@ -334,6 +336,19 @@ func (s *Store) ApplyCuration(
 	if followUp != nil {
 		receipt.FollowUpRequestID = followUp.ID
 		receipt.FollowUpGeneration = followUp.RequestGeneration
+	}
+	// Record affected core heads, candidates and explicit relation-only changes.
+	var activityRecords int64
+	for _, result := range actionResults {
+		activityRecords += int64(len(result.AfterHeads) + len(result.CandidateIDs))
+		if result.Operation == "relate" {
+			activityRecords += int64(len(result.RelationIDs))
+		}
+	}
+	if activityRecords > 0 {
+		if err := recordActivityOperationTx(ctx, tx, p, "memories.curation_apply", receiptID, activityRecords); err != nil {
+			return ApplyMemoryCurationResult{}, err
+		}
 	}
 	observeMemoryCurationTransitionTx(tx, MemoryCurationRunPlanned, MemoryCurationRunApplied)
 	if err := tx.Commit(ctx); err != nil {

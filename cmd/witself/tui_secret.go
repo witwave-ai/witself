@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agenttui"
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
@@ -24,7 +25,7 @@ type tuiSecretSource struct {
 }
 
 func (s *tuiSecretSource) RevealSecret(ctx context.Context, secretID, fieldID string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(activity.WithDeliberate(ctx), 10*time.Second)
 	defer cancel()
 	accountName, account, err := local.ResolveAccount(s.connection.AccountName)
 	if err != nil || account.ID != s.identity.AccountID {

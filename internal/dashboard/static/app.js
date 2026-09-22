@@ -688,10 +688,10 @@
 
   // A closed, content-free projection: never render server labels or metadata.
   var summaryCategories = [
-    { key: "transactions", code: "OPS", name: "Transactions", unit: null, dimension: "", actions: [] },
+    { key: "transactions", code: "OPS", name: "Operations", unit: "recorded operations", dimension: "operation", actions: [] },
     { key: "transcripts", code: "TRN", name: "Transcripts", unit: "entries recorded", dimension: "transcript_entry_write", actions: ["transcript updated", "transcript created"], route: "transcripts" },
     { key: "facts", code: "FCT", name: "Facts", unit: "recorded deliveries", dimension: "fact_returned", actions: [], route: "facts" },
-    { key: "memories", code: "MEM", name: "Memories", unit: null, dimension: "", actions: ["memory updated", "memory created"], route: "memories" },
+    { key: "memories", code: "MEM", name: "Memories", unit: "memory changes", dimension: "memory_change", actions: ["memory updated", "memory created"], route: "memories" },
     { key: "secrets", code: "SEC", name: "Secrets", unit: "recorded accesses", dimension: "secret_read", actions: ["secret updated", "secret created"], route: "secrets" },
     { key: "email", code: "EML", name: "Email", unit: "accepted sends", dimension: "email_sent", actions: ["email received"], route: "email" },
     { key: "messages", code: "MSG", name: "Messages", unit: "messages sent", dimension: "message_sent", actions: ["message received"], route: "conversations" },
@@ -709,7 +709,7 @@
   }
   function normalizeSummary(body) {
     var s = body && body.summary;
-    if (!s || s.schema !== "witself.agent-summary.v1" || s.refresh_after_seconds !== 30 ||
+    if (!s || s.schema !== "witself.agent-summary.v2" || s.refresh_after_seconds !== 30 ||
         !summaryDate(s.generated_at) || !Array.isArray(s.categories) || s.categories.length !== 7 ||
         !Array.isArray(s.recent) || s.recent.length > 12 || !Array.isArray(s.checkpoints) || s.checkpoints.length !== 4) {
       throw new Error("Invalid summary");
@@ -718,7 +718,7 @@
     var hour = 3600000, endHour = Math.floor(Date.parse(s.generated_at) / hour) * hour;
     if (!w || !summaryDate(w.since) || !summaryDate(w.until) || w.timezone !== "UTC" || w.bucket !== "hour" ||
         w.partial_current_bucket !== true || Date.parse(w.since) !== endHour - 23 * hour ||
-        Date.parse(w.until) < endHour || Date.parse(w.until) >= endHour + hour) { throw new Error("Invalid window"); }
+        Date.parse(w.until) !== Math.floor(Date.parse(s.generated_at) / 1000) * 1000) { throw new Error("Invalid window"); }
     var categories = summaryCategories.map(function (def) {
       var matches = s.categories.filter(function (c) { return c && c.key === def.key; });
       if (matches.length !== 1) { throw new Error("Invalid categories"); }
@@ -731,12 +731,8 @@
           summaryNumber(inv.count) && inv.exact === expectedExact) {
         inventory.status = "available"; inventory.count = inv.count; inventory.exact = expectedExact;
       }
-      var activity = { status: def.unit && act.status === "disabled" ? "disabled" : "unavailable" };
-      if (def.unit && act.status === "available" && act.unit === def.unit && act.dimension === def.dimension &&
-          Array.isArray(act.bins) && act.bins.length === 24 && act.bins.every(summaryNumber) &&
-          summaryNumber(act.total) && act.bins.reduce(function (a, b) { return a + b; }, 0) === act.total) {
-        activity = { status: "available", bins: act.bins.slice(), total: act.total, unit: def.unit };
-      }
+      if (def.key === "transactions") { inventory = { status: "not_applicable", label: "activity only" }; }
+      var activity = normalizeSummaryActivity(act, def, w);
       return { def: def, inventory: inventory, activity: activity };
     });
     var recent = s.recent.filter(function (r) {
@@ -755,23 +751,85 @@
     return { generated: summaryDate(s.generated_at), since: summaryDate(w.since), until: summaryDate(w.until),
       categories: categories, recent: recent, checkpoints: checkpoints };
   }
+  var summaryMeasures = [
+    ["operation_read", "operation", "Reads"], ["operation_write", "operation", "Writes"],
+    ["operation_read_record", "record", "Records read"], ["operation_write_record", "record", "Records written"],
+    ["memory_created", "change", "Created"], ["memory_revised", "change", "Revised"],
+    ["memory_archived", "change", "Archived"], ["memory_restored", "change", "Restored"], ["memory_deleted", "change", "Deleted"]
+  ];
+  function normalizeSummaryActivity(a, def, w) {
+    var bad = { status: "unavailable" }, modern = def.key === "transactions" || def.key === "memories";
+    if (a.unit !== def.unit || a.dimension !== def.dimension) { return bad; }
+    var breakdown = a.breakdown == null ? [] : a.breakdown, coverage = a.coverage;
+    if (coverage != null && (typeof coverage !== "object" || Array.isArray(coverage))) { return bad; }
+    if ((a.bins != null && !Array.isArray(a.bins)) || !Array.isArray(breakdown)) { return bad; }
+    if (["unavailable", "disabled", "server_update_needed"].indexOf(a.status) >= 0) {
+      if ((!modern && a.status === "server_update_needed") || a.total != null || (a.bins && a.bins.length) || coverage || breakdown.length) { return bad; }
+      return { status: a.status };
+    }
+    if (!Array.isArray(a.bins) || a.bins.length !== 24) { return bad; }
+    if (a.status === "not_tracked") {
+      return modern && a.total == null && coverage && coverage.tracking_since === null && coverage.partial_first_bucket === false &&
+        !breakdown.length && a.bins.every(function (n) { return n === null; }) ? { status: "not_tracked" } : bad;
+    }
+    if (a.status !== "available" || !summaryNumber(a.total)) { return bad; }
+    var tracking = null, hour = 3600000, since = Date.parse(w.since);
+    if (modern) {
+      if (!coverage || !summaryDate(coverage.tracking_since)) { return bad; }
+      tracking = Date.parse(coverage.tracking_since);
+      if (tracking <= Date.parse("0001-01-01T00:00:00Z") || tracking > Date.parse(w.until) || coverage.partial_first_bucket !== (tracking >= since)) { return bad; }
+    } else if (coverage || breakdown.length) { return bad; }
+    var total = 0;
+    for (var i = 0; i < 24; i++) {
+      var n = a.bins[i], unknown = tracking !== null && since + i * hour < Math.floor(tracking / hour) * hour;
+      if (unknown) { if (n !== null) { return bad; } continue; }
+      if (!summaryNumber(n) || !summaryNumber(total + n)) { return bad; } total += n;
+    }
+    if (total !== a.total) { return bad; }
+    var safeBreakdown = [];
+    if (modern) {
+      var defs = def.key === "transactions" ? summaryMeasures.slice(0, 4) : summaryMeasures.slice(4);
+      if (breakdown.length !== defs.length) { return bad; }
+      total = 0;
+      for (var j = 0; j < defs.length; j++) {
+        var b = breakdown[j], d = defs[j];
+        if (!b || b.dimension !== d[0] || b.unit !== d[1] || !summaryNumber(b.total)) { return bad; }
+        if (def.key === "memories" || j < 2) { total += b.total; if (!summaryNumber(total)) { return bad; } }
+        safeBreakdown.push({ label: d[2], total: b.total });
+      }
+      if (total !== a.total) { return bad; }
+    }
+    return { status: "available", bins: a.bins.slice(), total: a.total, unit: def.unit, breakdown: safeBreakdown,
+      coverage: modern ? { tracking: summaryDate(coverage.tracking_since), partial: coverage.partial_first_bucket } : null };
+  }
+  function summaryStateLabel(status) {
+    return ({ not_tracked: "Not tracked yet", server_update_needed: "Server update needed", unavailable: "Unavailable", disabled: "Disabled" })[status] || "Unavailable";
+  }
+  function summaryBreakdown(act) {
+    if (!act.coverage) { return ""; }
+    return '<span class="summary-breakdown">' + act.breakdown.map(function (b) {
+      return '<span>' + b.label + ': ' + b.total + '</span>';
+    }).join('') + '</span><small class="summary-coverage">Recorded portion of this window; tracking since ' + act.coverage.tracking +
+      (act.coverage.partial ? '; first tracked hour partial' : '') + '; current hour partial. Earlier bins unknown; older clients may omit activity.</small>';
+  }
   function summaryName(def) {
     return '<span class="summary-name"><b>' + def.code + '</b> ' + def.name + '</span>';
   }
   function summaryInventory(inv) {
+    if (inv.status === "not_applicable") { return '<span class="summary-muted">activity only</span>'; }
     if (inv.status !== "available") { return '<span class="summary-muted">' + inv.status + '</span>'; }
     return esc(inv.count) + '<small>' + inv.label + '</small>';
   }
   function summaryAmount(act) {
-    if (act.status !== "available") { return '<span class="summary-muted">' + act.status + '</span>'; }
-    return esc(act.total) + '<small>' + act.unit + '</small>';
+    if (act.status !== "available") { return '<span class="summary-muted">' + summaryStateLabel(act.status) + '</span>'; }
+    return esc(act.total) + '<small>' + act.unit + (act.coverage ? ' · tracked portion' : '') + '</small>';
   }
   function summaryPattern(act, timeline) {
-    if (act.status !== "available") { return '<span class="summary-muted">' + act.status + '</span>'; }
+    if (act.status !== "available") { return '<span class="summary-muted">' + summaryStateLabel(act.status) + '</span>'; }
     var max = Math.max.apply(null, act.bins), chars = "▁▂▃▄▅▆▇█";
-    return '<span class="summary-pattern" role="img" aria-label="Hourly quantities, oldest first: ' + act.bins.join(", ") + '">' +
+    return '<span class="summary-pattern" role="img" aria-label="Hourly quantities, oldest first: ' + act.bins.map(function (n) { return n === null ? "unknown" : n; }).join(", ") + '">' +
       act.bins.map(function (n) {
-        var glyph = timeline ? (n === 0 ? "." : n <= 2 ? "░" : n <= 5 ? "▒" : n <= 9 ? "▓" : "█") :
+        var glyph = n === null ? "?" : timeline ? (n === 0 ? "." : n <= 2 ? "░" : n <= 5 ? "▒" : n <= 9 ? "▓" : "█") :
           (n === 0 ? "·" : chars[Math.max(0, Math.ceil(n / max * 8) - 1)]);
         return '<span aria-hidden="true">' + glyph + '</span>';
       }).join("") + '</span>';
@@ -803,11 +861,11 @@
         return '<' + tag + ' id="summary-row-' + def.key + '" class="summary-row summary-' + def.key + (timeline ? ' summary-timeline' : '') + '"' +
           (def.route ? ' href="#/' + def.route + '"' : '') + '>' + summaryName(def) +
           (timeline ? '' : '<span class="summary-inventory">' + summaryInventory(c.inventory) + '</span>') +
-          summaryPattern(c.activity, timeline) + '<span class="summary-amount">' + summaryAmount(c.activity) + '</span></' + tag + '>';
+          summaryPattern(c.activity, timeline) + '<span class="summary-amount">' + summaryAmount(c.activity) + '</span>' + summaryBreakdown(c.activity) + '</' + tag + '>';
       }).join("");
-      html += '<p class="summary-muted">' + (timeline ? '. 0 · ░ 1–2 · ▒ 3–5 · ▓ 6–9 · █ 10+ per hour; each row names its measure.' :
+      html += '<p class="summary-muted">' + (timeline ? '? unknown · . 0 · ░ 1–2 · ▒ 3–5 · ▓ 6–9 · █ 10+ per hour; each row names its measure.' :
         'Patterns scaled per row; not a volume comparison. Bounded recent records are not inventory totals.') + '</p>';
-      html += '<p class="summary-muted">Transactions: inventory and history unavailable. Memories: history unavailable; no defined metric.</p>';
+      html += '<p class="summary-muted">Operations count recorded reads and writes; records have separate quantities. Memory changes count created, revised, archived, restored and deleted records/versions. No combined activity total.</p>';
     }
     $("summary-body").innerHTML = html;
     if (activeID && activeID.indexOf("summary-row-") === 0 && $(activeID)) { $(activeID).focus({ preventScroll: true }); }
@@ -875,7 +933,7 @@
   }
   function mountOverview() {
     $("view").innerHTML = '<section class="agent-summary" aria-label="Agent summary"><h2>Agent summary</h2>' +
-      '<p class="summary-muted">Recorded activity · 24 hourly buckets · UTC · current hour partial</p>' +
+      '<p class="summary-muted">Recorded activity · 24 hourly buckets · UTC · current hour partial · cache 30s</p>' +
       '<div class="summary-views" role="group" aria-label="Summary view">' +
       [["overview", "Overview"], ["timeline", "Timeline"], ["recent", "Recent updates"]].map(function (pair) {
         return '<button type="button" id="summary-view-' + pair[0] + '" aria-pressed="' + (summaryState.view === pair[0]) + '">' + pair[1] + '</button>';

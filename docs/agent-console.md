@@ -55,15 +55,26 @@ category colors, codes, and metric meanings. Facts and active memories have
 exact counts when available; other inventory counts are bounded recent pages.
 Recorded activity uses 24 UTC hour buckets, including the partial current hour:
 transcript entries, fact deliveries, secret accesses, accepted email sends,
-and messages sent. These are separate units, not a combined transaction count
-or a complete audit trail. Transactions and memory activity history remain
-explicitly unavailable. Recent updates describe observations from loaded
+and messages sent. Operations adds recorded reads plus writes, with separate
+reads, writes, records-read and records-written quantities. Memories keeps
+exact active inventory and adds created, revised, archived, restored and deleted
+changes. Fixed subtext exposes both breakdowns in Overview and Timeline.
+These are separate units, not a combined transaction count or a complete audit
+trail. New totals describe only the recorded portion: `?` marks unknown bins
+before tracking, and the first tracked hour and current hour are partial.
+Older clients may omit activity. **Not tracked yet** means no durable marker;
+**Server update needed** means `/v1/activity` returned 404; errors or invalid
+reports are **Unavailable**, and explicit feature refusal is **Disabled**.
+The five legacy `/v1/usage` metrics work independently on older servers.
+See [agent activity metrics](agent-activity.md) for the counting rules.
+Recent updates describe observations from loaded
 records, not every change. See the [terminal summary guide](agent-tui.md#visual-summary).
 
 The local `/api/summary` projection is passive, content-free, identity-scoped,
 and cached for at most 30 seconds. Browser refresh runs only while Overview is
 visible, keeps the selected view and keyboard focus, and labels retained data
-as stale after failure. Workspace details open explicitly beneath the summary.
+as stale after failure. The footer says cache 30s; polling can pause or vary.
+Workspace details open explicitly beneath the summary.
 
 Conversations fetches a received message's body only when Show body is selected,
 using the existing recipient-only observational peek API. The local proxy

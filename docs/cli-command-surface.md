@@ -2094,10 +2094,11 @@ witself usage --account default --agent scott \
 | `--agent NAME` | Local agent selector. Default: `WITSELF_AGENT`; required for managed credential lookup. |
 | `--endpoint URL` | Explicit cell endpoint; use with `--token-file` for an unmanaged credential. |
 | `--token-file PATH` | Explicit agent token file; requires `--endpoint`. |
-| `--since TIMESTAMP_OR_DURATION` | Window start; RFC3339 or positive duration such as `30d`/`24h`. Default: `30d`. |
+| `--activity` | Select recorded Operations and memory changes; hourly only, with a 24-bucket default and a 31-day maximum window. |
+| `--since TIMESTAMP_OR_DURATION` | Window start; RFC3339 or positive duration such as `30d`/`24h`. Default: `30d`, or the server's 24-bucket window with `--activity`. |
 | `--until TIMESTAMP` | RFC3339 window end. Default: now. |
 | `--dimension DIMENSION` | Filter a usage dimension. Repeatable; comma-separated values also work. |
-| `--group-by hour\|day` | UTC rollup size. Default: `day`. |
+| `--group-by hour\|day` | UTC rollup size. Default: `day`, or `hour` with `--activity`. |
 | `--allow-truncation` | Opt in to partial results above the 10,000-point cap. Default: disabled. |
 | `--json` | Emit identity scope, window, points, totals for returned points, and `truncated`. |
 
@@ -2116,6 +2117,16 @@ Initial transcript dimensions are `transcript_created`,
 `transcript_storage_byte`. This is product usage, not a Stripe or billing view;
 future realm/account billing commands aggregate from the same portable event
 ledger subject to operator permissions.
+
+Use `witself usage --activity --agent scott` for the same Operations and memory
+change quantities shown by the agent consoles. Add `--json` for the validated
+activity report, including its persistent recording-start marker. This mode
+defaults to hourly buckets covering the current partial hour and the preceding
+23 hours. It rejects `--dimension`, `--allow-truncation`, and daily buckets;
+`--since` and `--until` can select a window of at most 31 days. Reading the
+report does not add an operation. Older servers report that an update is needed.
+See [agent activity metrics](agent-activity.md) for the covered catalog and
+the distinction between unknown history and recorded zero activity.
 
 ## `witself session`
 

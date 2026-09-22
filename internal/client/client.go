@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/activity"
 )
 
 // ErrUnauthorized wraps 401 responses so callers can distinguish invalid-auth
@@ -377,6 +379,21 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	// Activity intent is independent of the legacy observational query flag.
+	req.Header.Del(activity.RequestIDHeader)
+	req.Header.Del(activity.ObservationHeader)
+	if activity.IsObservation(ctx) {
+		req.Header.Set(activity.ObservationHeader, "1")
+	} else {
+		key := activity.RequestID(ctx)
+		if key == "" {
+			key = activity.NewRequestID()
+		}
+		if !activity.ValidRequestID(key) {
+			return errors.New("invalid activity request ID")
+		}
+		req.Header.Set(activity.RequestIDHeader, key)
+	}
 	// API endpoints are credential audiences, not browser destinations. Never
 	// follow redirects: Go may preserve Authorization across same-host and
 	// subdomain redirects, and it does not make an HTTPS-to-HTTP downgrade an
@@ -407,6 +424,17 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 		return responseError(resp, "request failed: "+resp.Status)
 	}
 	if out != nil {
+		if bounded, ok := out.(interface{ maxResponseBytes() int64 }); ok {
+			limit := bounded.maxResponseBytes()
+			body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+			if err != nil || int64(len(body)) > limit {
+				return errors.New("invalid bounded response")
+			}
+			if err := json.Unmarshal(body, out); err != nil {
+				return errors.New("invalid bounded response")
+			}
+			return nil
+		}
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}

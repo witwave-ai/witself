@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/testenv"
 )
@@ -191,7 +192,7 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 	if _, err := st.ListAgentEmails(ctx, disabledScope, owner, AgentEmailFilter{Limit: 10}); !errors.Is(err, ErrAgentEmailPilotDisabled) {
 		t.Fatalf("disabled list error = %v", err)
 	}
-	page, err := st.ListAgentEmails(ctx, scope, owner, AgentEmailFilter{Unacked: true, Limit: 10})
+	page, err := st.ListAgentEmails(activity.WithRequestID(ctx, activity.NewRequestID()), scope, owner, AgentEmailFilter{Unacked: true, Limit: 10})
 	if err != nil || len(page.Messages) != 3 {
 		t.Fatalf("owner page = %#v / %v", page, err)
 	}
@@ -207,11 +208,13 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 	if _, err := st.ReadAgentEmail(ctx, scope, bystander, first.ID); !errors.Is(err, ErrAgentEmailNotFound) {
 		t.Fatalf("bystander read error = %v", err)
 	}
-	read, err := st.ReadAgentEmail(ctx, scope, owner, first.ID)
+	read, err := st.ReadAgentEmail(activity.WithRequestID(ctx, activity.NewRequestID()), scope, owner, first.ID)
 	if err != nil || !strings.Contains(read.Text, "123456") || strings.Contains(read.Text, "secret attachment") ||
 		read.TextKind != "text/plain" || read.ReadState.ReadAt == nil {
 		t.Fatalf("explicit read = %#v / %v", read, err)
 	}
+	requireActivityAction(t, st, owner, "email.list", 1)
+	requireActivityAction(t, st, owner, "email.read", 1)
 	if _, err := st.MarkAgentEmailCodeConsumed(ctx, scope, owner, first.ID); err != nil {
 		t.Fatal(err)
 	}

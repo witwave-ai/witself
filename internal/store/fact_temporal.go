@@ -65,7 +65,9 @@ func (s *Store) UpcomingFactsObservational(ctx context.Context, p Principal, opt
 	return s.upcomingFacts(ctx, p, opts, false)
 }
 
-func (s *Store) upcomingFacts(ctx context.Context, p Principal, opts UpcomingFactOptions, recordUsage bool) ([]FactOccurrence, error) {
+func (s *Store) upcomingFacts(ctx context.Context, p Principal, opts UpcomingFactOptions, recordUsage bool) (activityResult []FactOccurrence, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "facts.upcoming")
+	defer func() { finishActivity(int64(len(activityResult)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return nil, ErrFactForbidden
 	}

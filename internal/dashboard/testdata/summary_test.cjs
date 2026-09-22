@@ -23,17 +23,17 @@ test("summary separates dimensions, closes labels, preserves zero/disabled/unava
   cats[1].activity.bins.fill(0); cats[1].activity.total = 0;
   cats[2].inventory.count = null;
   cats[3].inventory.status = "disabled";
-  cats[4].activity.status = "disabled";
+  cats[4].activity.status = "disabled"; cats[4].activity.bins = []; cats[4].activity.total = null;
   const h = await loaded(t, data);
   assert.deepEqual(node(h, "summary-body").querySelectorAll(".summary-name").map((n) => n.textContent), [
-    "OPS Transactions", "TRN Transcripts", "FCT Facts", "MEM Memories", "SEC Secrets", "EML Email", "MSG Messages",
+    "OPS Operations", "TRN Transcripts", "FCT Facts", "MEM Memories", "SEC Secrets", "EML Email", "MSG Messages",
   ]);
   assert.equal(node(h, "summary-row-transactions").tagName, "div");
   assert.equal(node(h, "summary-row-messages").getAttribute("href"), "#/conversations");
   assert.match(node(h, "summary-row-transcripts").textContent, /0entries recorded/);
   assert.match(node(h, "summary-row-facts").textContent, /unavailable/);
-  assert.match(node(h, "summary-row-memories").textContent, /disabled.*unavailable/);
-  assert.match(node(h, "summary-row-secrets").textContent, /4recent records · bounded.*disabled/);
+  assert.match(node(h, "summary-row-memories").textContent, /disabled.*memory changes/);
+  assert.match(node(h, "summary-row-secrets").textContent, /4recent records · bounded.*Disabled/);
   assert.match(text(h), /Bounded recent records are not inventory totals/);
   assert.doesNotMatch(text(h), /UNTRUSTED|grand total|total activity|360/);
   assert.equal(node(h, "summary-body").querySelectorAll(".summary-amount").length, 7, "only per-category quantities");
@@ -196,7 +196,7 @@ for (const malformed of ["-1", -1, 0.5, Number.MAX_SAFE_INTEGER + 1, null, NaN, 
     data.summary.categories[1].activity.bins[3] = malformed;
     data.summary.categories[2].inventory.count = malformed;
     const h = await loaded(t, data);
-    assert.match(node(h, "summary-row-transcripts").querySelector(".summary-amount").textContent, /unavailable/);
+    assert.match(node(h, "summary-row-transcripts").querySelector(".summary-amount").textContent, /Unavailable/);
     assert.match(node(h, "summary-row-facts").querySelector(".summary-inventory").textContent, /unavailable/);
   });
 }
@@ -329,7 +329,7 @@ test("summary never invents transaction inventory or undefined history", options
       data.summary.categories[index].activity = { status, bins: Array(24).fill(1), total: 24, unit: "messages sent", dimension: "message_sent" };
     }
     const report = h.app.normalizeSummary(data);
-    assert.equal(report.categories[0].inventory.status, "unavailable");
+    assert.equal(report.categories[0].inventory.status, "not_applicable");
     assert.equal(report.categories[0].activity.status, "unavailable");
     assert.equal(report.categories[3].activity.status, "unavailable");
   }
@@ -346,4 +346,56 @@ test("summary respects exact inventory contracts and omits future observations",
  assert.equal(report.categories[2].inventory.status,"unavailable");
  assert.equal(report.recent.length,0);
  assert.equal(report.categories[3].inventory.label,"active memories");
+});
+
+test("Operations and memory changes expose all fixed breakdowns and partial coverage in both charts", options, async (t) => {
+ const h=await loaded(t);
+ for (const view of ["overview","timeline"]) {
+  select(h,view);
+  const ops=node(h,"summary-row-transactions"), mem=node(h,"summary-row-memories");
+  for (const label of ["Reads: 1","Writes: 2","Records read: 3","Records written: 4"]) assert.ok(ops.textContent.includes(label));
+  for (const label of ["Created: 1","Revised: 2","Archived: 3","Restored: 4","Deleted: 5"]) assert.ok(mem.textContent.includes(label));
+  assert.match(ops.textContent,/3recorded operations · tracked portion/);
+  assert.match(mem.textContent,/15memory changes · tracked portion/);
+  assert.match(ops.textContent,/first tracked hour partial; current hour partial/);
+  assert.doesNotMatch(ops.textContent,/unavailable/i);
+  const graph=ops.querySelector('.summary-pattern');
+  assert.equal(graph.children.length,24);
+  assert.match(graph.getAttribute('aria-label'),/unknown, unknown, unknown, unknown, unknown, unknown, 3, 0/);
+  assert.equal(graph.children[0].textContent,'?');
+  assert.notEqual(graph.children[7].textContent,'?');
+ }
+ select(h,"recent");assert.match(text(h),/not a complete audit log/);
+ assert.match(h.nodes.view.textContent,/cache 30s/);
+});
+for (const [status,label] of [["not_tracked","Not tracked yet"],["server_update_needed","Server update needed"],["unavailable","Unavailable"],["disabled","Disabled"]]) {
+ test('new activity status '+status,options,async(t)=>{
+  const data=summaryData();
+  for (const i of [0,3]) {
+   const a=data.summary.categories[i].activity;
+   a.status=status;a.bins=status==='not_tracked'?Array(24).fill(null):[];a.total=null;delete a.breakdown;delete a.coverage;
+   if(status==='not_tracked')a.coverage={tracking_since:null,partial_first_bucket:false};
+  }
+  const h=await loaded(t,data);
+  for(const view of ['overview','timeline']) {
+   select(h,view);
+   assert.ok(node(h,'summary-row-transactions').textContent.includes(label));
+   assert.ok(node(h,'summary-row-memories').textContent.includes(label));
+   assert.match(node(h,'summary-row-transcripts').textContent,/entries recorded/);
+  }
+ });
+}
+test('new activity refuses wrong coverage, units, dimensions, breakdown and aggregate overflow',options,async(t)=>{
+ const h=fixture(t);
+ for(const index of [0,3])for(const mutate of [
+  a=>delete a.coverage,a=>a.coverage.tracking_since=null,a=>a.coverage.tracking_since='2099-01-01T00:00:00Z',
+  a=>a.coverage.partial_first_bucket=false,a=>a.bins[0]=0,a=>a.bins[7]=null,
+  a=>a.breakdown.pop(),a=>a.breakdown[0].total=null,a=>delete a.breakdown[0].total,
+  a=>a.breakdown[0].unit='record',a=>a.breakdown[0].dimension='PRIVATE',a=>a.breakdown[0]=a.breakdown[1],
+  a=>a.breakdown[0].total++,a=>a.breakdown[0].total=Number.MAX_SAFE_INTEGER,
+  a=>a.bins[6]=Infinity,a=>a.total=NaN,a=>a.dimension='fact_returned',a=>a.unit='record',
+ ]) {
+  const data=summaryData();mutate(data.summary.categories[index].activity);
+  assert.equal(h.app.normalizeSummary(data).categories[index].activity.status,'unavailable');
+ }
 });
