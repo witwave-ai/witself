@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/witwave-ai/witself/internal/activity"
 )
 
 // Resource is the closed set of passive console projections. Sensitive fact
@@ -273,7 +275,7 @@ func (r *Reader) invoke(ctx context.Context, handler http.Handler, method, path,
 		(method != http.MethodGet && (method != http.MethodPut || path != "/api/prefs")) {
 		return nil, &ReaderError{Status: http.StatusBadRequest}
 	}
-	ctx, cancel := context.WithTimeout(ctx, readerTimeout)
+	ctx, cancel := context.WithTimeout(activity.WithObservation(ctx), readerTimeout)
 	defer cancel()
 	if ctx.Err() != nil {
 		return nil, &ReaderError{Status: http.StatusGatewayTimeout}

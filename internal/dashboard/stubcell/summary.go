@@ -28,3 +28,23 @@ func SummaryUsage(id client.SelfIdentity, since, until time.Time) client.UsageRe
 	}
 	return r
 }
+
+// SummaryActivity is a synthetic partial-coverage report for both consoles.
+// It never uses accounts, registry, credentials or a database.
+func SummaryActivity(id client.SelfIdentity, since, until time.Time) map[string]any {
+	tracking := since.Add(6*time.Hour + 17*time.Minute)
+	points, totals := []map[string]any{}, []map[string]any{}
+	for i, d := range []struct{ dimension, unit string }{
+		{"operation_read", "operation"}, {"operation_write", "operation"}, {"operation_read_record", "record"}, {"operation_write_record", "record"},
+		{"memory_created", "change"}, {"memory_revised", "change"}, {"memory_archived", "change"}, {"memory_restored", "change"}, {"memory_deleted", "change"},
+	} {
+		n := int64(i + 1)
+		events := n
+		if d.unit == "record" {
+			events = 1
+		}
+		points = append(points, map[string]any{"dimension": d.dimension, "unit": d.unit, "quantity": n, "event_count": events, "bucket_start": tracking.Truncate(time.Hour)})
+		totals = append(totals, map[string]any{"dimension": d.dimension, "unit": d.unit, "quantity": n, "event_count": events})
+	}
+	return map[string]any{"schema": "witself.agent-activity.v1", "catalog": "core-records.v1", "account_id": id.AccountID, "realm_id": id.RealmID, "agent_id": id.AgentID, "since": since, "until": until, "bucket": "hour", "tracking_since": tracking, "points": points, "totals": totals, "truncated": false}
+}

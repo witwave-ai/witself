@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/testenv"
@@ -141,11 +142,12 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 	if _, err := st.QueueAgentEmail(ctx, p, changed); !errors.Is(err, ErrAgentEmailOutboundConflict) {
 		t.Fatalf("changed replay error = %v", err)
 	}
-	shown, err := st.GetAgentEmailOutbound(ctx, p, direct.ID)
+	requireActivityAction(t, st, p, "email.send", 1)
+	shown, err := st.GetAgentEmailOutbound(activity.WithRequestID(ctx, activity.NewRequestID()), p, direct.ID)
 	if err != nil || shown.bodyText != "" || shown.ProviderMessageID != "" {
 		t.Fatalf("public get leaked private fields = %#v / %v", shown, err)
 	}
-	page, err := st.ListAgentEmailOutbox(ctx, p, AgentEmailOutboundFilter{Limit: 1})
+	page, err := st.ListAgentEmailOutbox(activity.WithRequestID(ctx, activity.NewRequestID()), p, AgentEmailOutboundFilter{Limit: 1})
 	if err != nil || len(page.Messages) != 1 || page.Messages[0].ID != direct.ID ||
 		page.Messages[0].bodyText != "" {
 		t.Fatalf("outbox page = %#v / %v", page, err)
@@ -201,6 +203,9 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireActivityAction(t, st, p, "email.reply", 1)
+	requireActivityAction(t, st, p, "email.outbox_list", 1)
+	requireActivityAction(t, st, p, "email.outbox_detail", 1)
 	if reply.ToAddress != "reply@example.com" ||
 		reply.Subject != "Re: inbound topic" || reply.ThreadKey != inbound.ID ||
 		reply.ReplyToInboundMessageID != inbound.ID {

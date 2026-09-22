@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -153,6 +154,7 @@ type FactListOptions struct {
 // SetFact appends an immutable assertion and atomically resolves the fact to
 // it. An existing assertion is retained and linked through supersedes_id.
 func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact, error) {
+	ctx = activity.DefaultOperation(ctx, "facts.set")
 	if p.Kind != PrincipalAgent {
 		return Fact{}, ErrFactForbidden
 	}
@@ -254,6 +256,9 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 
 	out, err := getFactTx(ctx, tx, p, factID, "", "", true)
 	if err != nil {
+		return Fact{}, err
+	}
+	if err := recordActivityOperationTx(ctx, tx, p, "facts.set", assertionID, 1); err != nil {
 		return Fact{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -363,7 +368,9 @@ func (s *Store) GetFactObservational(ctx context.Context, p Principal, subject, 
 	return s.getFact(ctx, p, subject, predicate, false)
 }
 
-func (s *Store) getFact(ctx context.Context, p Principal, subject, predicate string, recordUsage bool) (Fact, error) {
+func (s *Store) getFact(ctx context.Context, p Principal, subject, predicate string, recordUsage bool) (activityResult Fact, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "facts.exact")
+	defer func() { finishActivity(1, &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return Fact{}, ErrFactForbidden
 	}
@@ -395,15 +402,24 @@ func (s *Store) ListFactsObservational(ctx context.Context, p Principal, opts Fa
 	return s.listFacts(ctx, p, opts, false)
 }
 
-func (s *Store) listFacts(ctx context.Context, p Principal, opts FactListOptions, recordUsage bool) ([]Fact, error) {
+func (s *Store) listFacts(ctx context.Context, p Principal, opts FactListOptions, recordUsage bool) (activityResult []Fact, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "facts.list")
+	defer func() { finishActivity(int64(len(activityResult)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return nil, ErrFactForbidden
 	}
 	return s.listFactsWithUsage(ctx, p, opts, recordUsage)
 }
 
-// FactHistory returns source assertions newest first without changing usage.
-func (s *Store) FactHistory(ctx context.Context, p Principal, factID string) ([]FactAssertion, error) {
+// maxFactHistoryAssertions bounds both recursive traversal and returned records.
+// Oversized histories fail closed because this endpoint has no paging contract.
+const maxFactHistoryAssertions = 1000
+
+// FactHistory returns bounded source assertions newest first without changing
+// legacy retrieval usage. It never silently returns a partial assertion chain.
+func (s *Store) FactHistory(ctx context.Context, p Principal, factID string) (activityResult []FactAssertion, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "facts.history")
+	defer func() { finishActivity(int64(len(activityResult)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return nil, ErrFactForbidden
 	}
@@ -419,18 +435,21 @@ func (s *Store) FactHistory(ctx context.Context, p Principal, factID string) ([]
 		SELECT parent.*, child.chain_depth + 1
 		FROM fact_assertions parent
 		JOIN history child ON parent.id = child.supersedes_id
-		WHERE parent.account_id = $2
+		WHERE parent.account_id = $2 AND child.chain_depth < $3
 	)
 		SELECT id, fact_id, value_type, value, recurrence, source_kind, source_ref, confidence,
 		       observed_at, confirmed_at, valid_from, valid_until,
 		       COALESCE(supersedes_id, ''), created_at
-		FROM history ORDER BY chain_depth`, factID, p.AccountID)
+		FROM history ORDER BY chain_depth`, factID, p.AccountID, maxFactHistoryAssertions)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []FactAssertion{}
 	for rows.Next() {
+		if len(out) == maxFactHistoryAssertions {
+			return nil, fmt.Errorf("%w: fact history exceeds %d assertions", ErrFactInputInvalid, maxFactHistoryAssertions)
+		}
 		var a FactAssertion
 		if err := rows.Scan(&a.ID, &a.FactID, &a.ValueType, &a.Value, &a.Recurrence,
 			&a.SourceKind, &a.SourceRef, &a.Confidence, &a.ObservedAt,

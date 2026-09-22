@@ -44,7 +44,7 @@ func TestSummaryProjectionRejectsMalformedAndDropsContent(t *testing.T) {
 		{"overflow", func(s *dashboard.Summary) { v := summarySafeMax + 1; s.Categories[1].Inventory.Count = &v }},
 		{"wrong dimension", func(s *dashboard.Summary) { s.Categories[1].Activity.Dimension = "email_received" }},
 		{"short history", func(s *dashboard.Summary) { s.Categories[1].Activity.Bins = s.Categories[1].Activity.Bins[:23] }},
-		{"negative bin", func(s *dashboard.Summary) { s.Categories[1].Activity.Bins[0] = -1 }},
+		{"negative bin", func(s *dashboard.Summary) { *s.Categories[1].Activity.Bins[0] = -1 }},
 		{"wrong total", func(s *dashboard.Summary) { *s.Categories[1].Activity.Total++ }},
 		{"private verb", func(s *dashboard.Summary) { s.Recent[0].Action = "PRIVATE_CANARY" }},
 		{"unknown checkpoint", func(s *dashboard.Summary) { s.Checkpoints[0].Key = "untrusted" }},
@@ -191,6 +191,47 @@ func TestSummaryLayoutsAndASCII(t *testing.T) {
 		for _, r := range summaryGraph(a, timeline, true) {
 			if r > 127 {
 				t.Fatal("non-ASCII graph")
+			}
+		}
+	}
+}
+
+func TestSummaryOperationsMemoryBreakdownsAndUnknown(t *testing.T) {
+	m := testModel(t, NewDemoSource())
+	settle(t, m, m.refresh())
+	s := obj(m.states[0].data[dashboard.ResourceSummary]["summary"])
+	for _, i := range []int{0, 3} {
+		a := obj(list(s, "categories")[i]["activity"])
+		for _, timeline := range []bool{false, true} {
+			graph := summaryGraph(a, timeline, true)
+			if !strings.HasPrefix(graph, "?") || strings.Count(graph, "?") != 6 {
+				t.Fatalf("unknown history: %s", graph)
+			}
+			if !strings.Contains(graph, ".") {
+				t.Fatal("zero lost")
+			}
+		}
+	}
+	for _, view := range []int{0, 1} {
+		m.summaryView = view
+		for _, i := range []int{0, 3} {
+			m.summaryRow = i
+			d := &detailWriter{width: 120, m: m}
+			m.summaryOverview(d)
+			text := ansi.Strip(strings.Join(d.lines, "\n"))
+			for _, term := range []string{"first tracked hour", "cache 30s", "current hour"} {
+				if !strings.Contains(strings.ToLower(text), term) {
+					t.Fatalf("missing %s: %s", term, text)
+				}
+			}
+			want := []string{"Reads: 1", "Writes: 2", "Records read: 3", "Records written: 4"}
+			if i == 3 {
+				want = []string{"Created: 1", "Revised: 2", "Archived: 3", "Restored: 4", "Deleted: 5"}
+			}
+			for _, term := range want {
+				if !strings.Contains(text, term) {
+					t.Fatalf("missing %s", term)
+				}
 			}
 		}
 	}

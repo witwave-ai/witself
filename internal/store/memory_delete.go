@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -80,6 +81,7 @@ type memoryDeleteSnapshot struct {
 // authority; this store boundary enforces token-derived ownership, exact
 // optimistic guards, retry safety, and the physical scrub transaction.
 func (s *Store) DeleteMemory(ctx context.Context, p Principal, in DeleteMemoryInput) (DeleteMemoryResult, error) {
+	ctx = activity.DefaultOperation(ctx, "memories.delete")
 	if p.Kind != PrincipalAgent {
 		return DeleteMemoryResult{}, ErrMemoryForbidden
 	}
@@ -217,6 +219,12 @@ func (s *Store) DeleteMemory(ctx context.Context, p Principal, in DeleteMemoryIn
 			"retry_shield_count": strconv.FormatInt(out.RetryShieldCount, 10),
 		},
 	}); err != nil {
+		return DeleteMemoryResult{}, err
+	}
+	if err := recordActivityOperationTx(ctx, tx, p, "memories.delete", receiptID, 1); err != nil {
+		return DeleteMemoryResult{}, err
+	}
+	if err := recordMemoryActivityTx(ctx, tx, p, "memory_deleted", receiptID); err != nil {
 		return DeleteMemoryResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

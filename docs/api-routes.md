@@ -170,6 +170,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/message-requests`
 - `/v1/transcripts`
 - `/v1/usage`
+- `/v1/activity`
 - `/v1/conversations`
 - `/v1/federation`
 - `/v1/tokens`
@@ -628,6 +629,9 @@ POST /v1/transcripts/{transcript_id}/entries:batch
 # Token-derived product usage. V0 is deliberately agent-self only.
 GET  /v1/usage
 
+# Value-free core-record operations and memory changes. Agent-self only.
+GET  /v1/activity
+
 # Cross-realm conversation/task resource (post-v0 collaboration).
 GET  /v1/conversations
 GET  /v1/conversations/{conversation_id}
@@ -709,6 +713,16 @@ returns HTTP 422 with `code: usage_query_too_large`, an `error` message stating
 the cap and remedies, and `max_rows: 10000`, without a usage report. The matched
 row count is omitted because only cap+1 rows are read. There is no cursor.
 Narrow `--since`/`--until`, choose a coarser `--group-by`, or opt in explicitly.
+
+`GET /v1/activity` is a passive, agent-only report of recorded core data
+operations and memory changes. It accepts RFC3339 `since` and `until` and
+`group_by=hour`; the default covers 24 UTC hour buckets, including the current
+partial hour. Windows are limited to 31 days after rounding the start down.
+Unknown or duplicate parameters are rejected. The response wraps
+`witself.agent-activity.v1` in `activity`, with canonical identity, hourly
+points, totals, a nullable persistent `tracking_since`, and `truncated: false`.
+See [Agent Activity Report](json-contracts.md#agent-activity-report) and the
+[activity guide](agent-activity.md) for units, coverage, and retry semantics.
 
 `POST /v1/support/tickets` admits at most 10 new tickets per account in a
 rolling 60-second window by default, shared across the account's operators and

@@ -426,6 +426,7 @@ func serve() int {
 			}
 			return toServerUsageReport(report), nil
 		}
+		configureActivity(&cfg, st)
 		configureMemory(&cfg, st)
 		configureMemoryCuration(&cfg, st)
 		configureFactMutations(&cfg, st, factDeletionEnabled)

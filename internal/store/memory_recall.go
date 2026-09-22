@@ -116,7 +116,9 @@ type memoryRecallCursorBinding struct {
 // ranked by deterministic lexical, salience, and recency signals. Later pages
 // reconstruct those heads from immutable versions; no model or embedding
 // provider is involved.
-func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryRecallOptions) (MemoryRecallPage, error) {
+func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryRecallOptions) (activityResult MemoryRecallPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "memories.recall")
+	defer func() { finishActivity(int64(len(activityResult.Hits)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return MemoryRecallPage{}, ErrMemoryForbidden
 	}

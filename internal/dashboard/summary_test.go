@@ -50,6 +50,8 @@ func summaryTestBackend(t *testing.T, now time.Time) http.HandlerFunc {
 				t.Error("unbounded or hook self request")
 			}
 			writeJSON(w, map[string]any{"identity": testIdentity, "index": map[string]any{"counts": map[string]any{"facts": 321, "memories": 207}}, "memory_checkpoint": map[string]any{"pending": true, "request_id": "POISON_FENCE"}, "message_checkpoint": map[string]any{"pending": false, "enabled": true}, "email_checkpoint": map[string]any{"pending": true, "enabled": false}, "avatar_checkpoint": map[string]any{"pending": true, "unavailable": true, "reason": "POISON_REASON"}, "salient_memories": []any{"POISON_CONTENT"}, "primary_facts": []any{"POISON_VALUE"}})
+		case "/v1/activity":
+			http.NotFound(w, r)
 		case "/v1/usage":
 			q := r.URL.Query()
 			expected := []string{"transcript_entry_write", "fact_returned", "secret_read", "email_sent", "message_sent"}
@@ -134,7 +136,7 @@ func TestSummaryProjectionPassiveAndContentFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := envelope.Summary
-	if s.Schema != "witself.agent-summary.v1" || s.RefreshAfterSeconds != 30 || !s.GeneratedAt.Equal(summaryTestNow) || len(s.Categories) != 7 || len(s.Recent) != 12 || len(s.Checkpoints) != 4 {
+	if s.Schema != "witself.agent-summary.v2" || s.RefreshAfterSeconds != 30 || !s.GeneratedAt.Equal(summaryTestNow) || len(s.Categories) != 7 || len(s.Recent) != 12 || len(s.Checkpoints) != 4 {
 		t.Fatalf("shape: %+v", s)
 	}
 	for i, code := range []string{"OPS", "TRN", "FCT", "MEM", "SEC", "EML", "MSG"} {
@@ -148,10 +150,10 @@ func TestSummaryProjectionPassiveAndContentFree(t *testing.T) {
 			t.Fatalf("inventory %+v", c)
 		}
 	}
-	if s.Categories[0].Inventory.Status != "unavailable" || s.Categories[3].Activity.Status != "unavailable" || s.Categories[5].Inventory.Status != "disabled" || s.Categories[5].Inventory.Count != nil {
+	if s.Categories[0].Inventory.Status != "not_applicable" || s.Categories[3].Activity.Status != "server_update_needed" || s.Categories[5].Inventory.Status != "disabled" || s.Categories[5].Inventory.Count != nil {
 		t.Fatal("unknown/disabled semantics")
 	}
-	if *s.Categories[2].Activity.Total != 2 || s.Categories[2].Activity.Bins[23] != 2 || *s.Categories[1].Activity.Total != 0 || len(s.Categories[1].Activity.Bins) != 24 {
+	if *s.Categories[2].Activity.Total != 2 || *s.Categories[2].Activity.Bins[23] != 2 || *s.Categories[1].Activity.Total != 0 || len(s.Categories[1].Activity.Bins) != 24 {
 		t.Fatal("activity bins")
 	}
 	for i, status := range []string{"pending", "clear", "disabled", "unavailable"} {
@@ -164,11 +166,11 @@ func TestSummaryProjectionPassiveAndContentFree(t *testing.T) {
 			t.Fatal("recent projection")
 		}
 	}
-	if calls.Load() != 7 {
+	if calls.Load() != 8 {
 		t.Fatalf("calls %d", calls.Load())
 	}
 	second, err := reader.Read(t.Context(), ReadRequest{Resource: ResourceSummary})
-	if err != nil || string(second) != string(raw) || calls.Load() != 7 {
+	if err != nil || string(second) != string(raw) || calls.Load() != 8 {
 		t.Fatal("cache reuse", err)
 	}
 	for _, request := range []ReadRequest{{Resource: ResourceSummary, ID: "id"}, {Resource: ResourceSummary, Query: url.Values{"limit": {"1"}}}} {
@@ -385,22 +387,22 @@ func TestSummaryCacheTTLHourRolloverAndCopies(t *testing.T) {
 	first.Checkpoints[0].Status = "poison"
 	now = now.Add(14 * time.Second)
 	second, err := c.get(t.Context())
-	if err != nil || calls.Load() != 7 || second.Categories[1].Inventory.Status != "available" || *second.Categories[1].Inventory.Count != 0 || second.Checkpoints[0].Status == "poison" {
+	if err != nil || calls.Load() != 8 || second.Categories[1].Inventory.Status != "available" || *second.Categories[1].Inventory.Count != 0 || second.Checkpoints[0].Status == "poison" {
 		t.Fatal("cache copy", err)
 	}
 	now = now.Add(time.Second)
 	third, err := c.get(t.Context())
-	if err != nil || calls.Load() != 14 || !third.GeneratedAt.Equal(now) {
+	if err != nil || calls.Load() != 16 || !third.GeneratedAt.Equal(now) {
 		t.Fatal("hour rollover", err)
 	}
 	now = now.Add(29 * time.Second)
 	_, _ = c.get(t.Context())
-	if calls.Load() != 14 {
+	if calls.Load() != 16 {
 		t.Fatal("early expiry")
 	}
 	now = now.Add(time.Second)
 	_, _ = c.get(t.Context())
-	if calls.Load() != 21 {
+	if calls.Load() != 24 {
 		t.Fatal("TTL expiry")
 	}
 	clone := emptySummary(now)
@@ -410,11 +412,11 @@ func TestSummaryCacheTTLHourRolloverAndCopies(t *testing.T) {
 	c.cached = &clone
 	c.mu.Unlock()
 	out, _ := c.get(t.Context())
-	out.Categories[1].Activity.Bins[0] = 9
+	*out.Categories[1].Activity.Bins[0] = 9
 	*out.Categories[1].Activity.Total = 9
 	out.Recent[0].Action = "poison"
 	out, _ = c.get(t.Context())
-	if out.Categories[1].Activity.Bins[0] != 0 || *out.Categories[1].Activity.Total != 0 || out.Recent[0].Action == "poison" {
+	if *out.Categories[1].Activity.Bins[0] != 0 || *out.Categories[1].Activity.Total != 0 || out.Recent[0].Action == "poison" {
 		t.Fatal("shared cached slice or pointer")
 	}
 }
@@ -477,7 +479,7 @@ func TestSummaryRegisterGuardsAndReaderSameProjection(t *testing.T) {
 	if strings.TrimSpace(w.Body.String()) != strings.TrimSpace(string(raw)) {
 		t.Fatal("different projections")
 	}
-	if calls.Load() != 14 {
+	if calls.Load() != 16 {
 		t.Fatal("collectors shared process state")
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/api/summary", nil)
@@ -565,7 +567,7 @@ func TestSummaryCoalescingCancellationAndConcurrency(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("survivor blocked")
 	}
-	if calls.Load() != 7 || peak.Load() > 3 {
+	if calls.Load() != 8 || peak.Load() > 3 {
 		t.Fatalf("calls %d peak %d", calls.Load(), peak.Load())
 	}
 }
@@ -684,12 +686,12 @@ func TestSummaryPartialCacheRecoveryAndSourceIndependence(t *testing.T) {
 	healthy.Store(true)
 	now = now.Add(29 * time.Second)
 	cached, err := c.get(t.Context())
-	if err != nil || calls.Load() != 7 || cached.Categories[2].Inventory.Status != "unavailable" {
+	if err != nil || calls.Load() != 8 || cached.Categories[2].Inventory.Status != "unavailable" {
 		t.Fatal("partial TTL", err)
 	}
 	now = now.Add(time.Second)
 	recovered, err := c.get(t.Context())
-	if err != nil || calls.Load() != 14 || *recovered.Categories[2].Inventory.Count != 11 || *recovered.Categories[3].Inventory.Count != 12 {
+	if err != nil || calls.Load() != 16 || *recovered.Categories[2].Inventory.Count != 11 || *recovered.Categories[3].Inventory.Count != 12 {
 		t.Fatal("recovery", err)
 	}
 	if recovered.Categories[5].Inventory.Status != "disabled" || recovered.Categories[5].Activity.Status != "available" || len(recovered.Recent) != 1 {

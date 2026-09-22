@@ -2,12 +2,17 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/activity"
 )
 
 // Transcript is one append-only visible interaction thread.
@@ -136,8 +141,19 @@ func ListTranscripts(ctx context.Context, endpoint, token string) ([]Transcript,
 func GetTranscript(ctx context.Context, endpoint, token, transcriptID string) (TranscriptDetail, error) {
 	var out TranscriptDetail
 	var after int64
+	key := activity.RequestID(ctx)
+	if !activity.IsObservation(ctx) && key != "" && !activity.ValidRequestID(key) {
+		return TranscriptDetail{}, errors.New("invalid activity request ID")
+	}
 	for {
-		page, err := GetTranscriptPage(ctx, endpoint, token, transcriptID, TranscriptPageOptions{AfterSequence: after, Limit: 500})
+		// Derive one bounded page key from the caller's retry scope. With no
+		// caller key, doJSON generates a fresh random key for each actual request.
+		pageCtx := ctx
+		if key != "" && !activity.IsObservation(ctx) {
+			digest := sha256.Sum256([]byte("transcript-page\x00" + key + "\x00" + transcriptID + "\x00" + strconv.FormatInt(after, 10)))
+			pageCtx = activity.WithRequestID(ctx, hex.EncodeToString(digest[:]))
+		}
+		page, err := GetTranscriptPage(pageCtx, endpoint, token, transcriptID, TranscriptPageOptions{AfterSequence: after, Limit: 500})
 		if err != nil {
 			return TranscriptDetail{}, err
 		}

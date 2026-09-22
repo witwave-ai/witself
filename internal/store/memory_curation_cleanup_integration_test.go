@@ -127,10 +127,24 @@ func TestMemoryCurationOwnerDeleteCascadesGraphPostgres(t *testing.T) {
 		t.Fatalf("other owner graph before delete = %#v", otherBefore)
 	}
 
-	// The ordinary hard-delete workflow removes the owner's value-bearing
-	// domain rows before removing the principal. Their curation input rows
-	// cascade with the immutable memory versions; the remaining planned graph
-	// must then disappear solely through the lane ownership root.
+	targetUsageBefore := memoryCurationOwnerUsageCounts(ctx, t, st, target)
+	otherUsageBefore := memoryCurationOwnerUsageCounts(ctx, t, st, other)
+	for table, count := range targetUsageBefore {
+		if count == 0 {
+			t.Fatalf("target %s rows after capture = 0, want activity usage", table)
+		}
+	}
+	for table, count := range otherUsageBefore {
+		if count == 0 {
+			t.Fatalf("other %s rows after capture = 0, want activity usage", table)
+		}
+	}
+
+	// This fixture exercises physical owner removal, whereas production
+	// DeleteAgent soft-deletes the agent and retains its usage ledger. Explicitly
+	// remove the target's domain and usage rows before deleting the principal.
+	// Curation inputs referencing immutable memory versions cascade with them;
+	// the remaining planned graph must disappear through the lane ownership root.
 	if _, err := st.pool.Exec(ctx, `
 		DELETE FROM memories
 		WHERE account_id=$1 AND realm_id=$2 AND owner_kind='agent' AND owner_id=$3`,
@@ -154,8 +168,20 @@ func TestMemoryCurationOwnerDeleteCascadesGraphPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM usage_rollups
+		WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`,
+		target.AccountID, target.RealmID, target.ID); err != nil {
+		t.Fatalf("delete target usage rollups before principal cleanup: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM usage_events
+		WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`,
+		target.AccountID, target.RealmID, target.ID); err != nil {
+		t.Fatalf("delete target usage events before principal cleanup: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM agents WHERE id=$1`, target.ID); err != nil {
-		_ = tx.Rollback(ctx)
 		t.Fatalf("delete curation owner: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -171,6 +197,10 @@ func TestMemoryCurationOwnerDeleteCascadesGraphPostgres(t *testing.T) {
 	if !reflect.DeepEqual(otherAfter, otherBefore) {
 		t.Fatalf("other owner graph changed during target cleanup\nbefore: %#v\nafter:  %#v", otherBefore, otherAfter)
 	}
+	otherUsageAfter := memoryCurationOwnerUsageCounts(ctx, t, st, other)
+	if !reflect.DeepEqual(otherUsageAfter, otherUsageBefore) {
+		t.Fatalf("other owner usage changed during target cleanup\nbefore: %#v\nafter:  %#v", otherUsageBefore, otherUsageAfter)
+	}
 	var otherExists bool
 	if err := st.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agents WHERE id=$1)`, other.ID).
 		Scan(&otherExists); err != nil {
@@ -179,6 +209,27 @@ func TestMemoryCurationOwnerDeleteCascadesGraphPostgres(t *testing.T) {
 	if !otherExists {
 		t.Fatal("other owner was removed by target cleanup")
 	}
+}
+
+func memoryCurationOwnerUsageCounts(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	owner Principal,
+) map[string]int64 {
+	t.Helper()
+	counts := make(map[string]int64, 2)
+	for _, table := range []string{"usage_events", "usage_rollups"} {
+		var count int64
+		if err := st.pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE account_id=$1 AND realm_id=$2 AND agent_id=$3`, table),
+			owner.AccountID, owner.RealmID, owner.ID,
+		).Scan(&count); err != nil {
+			t.Fatalf("count %s for owner %s: %v", table, owner.ID, err)
+		}
+		counts[table] = count
+	}
+	return counts
 }
 
 func memoryCurationOwnerGraphCounts(

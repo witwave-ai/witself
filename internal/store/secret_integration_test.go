@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/sealed"
@@ -128,6 +129,15 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 	if err != nil || !replayed.Receipt.Replayed || replayed.Secret.ID != secretID {
 		t.Fatalf("replayed secret = %#v / %v", replayed, err)
 	}
+	requireActivityAction(t, source, p, "secrets.create", 1)
+	if _, err := source.GetSecret(activity.WithRequestID(ctx, activity.NewRequestID()), p, secretID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.ListSecrets(activity.WithRequestID(ctx, activity.NewRequestID()), p, SecretListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	requireActivityAction(t, source, p, "secrets.show", 1)
+	requireActivityAction(t, source, p, "secrets.inventory", 1)
 	conflicting := create
 	conflicting.Description = "different request"
 	if _, err := source.CreateSecret(ctx, p, conflicting); !errors.Is(err, ErrSecretIdempotencyConflict) {
@@ -175,7 +185,7 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 		t.Fatalf("ciphertext search leaked a match = %#v / %v", sealedSearch, err)
 	}
 
-	material, err := source.AccessSecretField(ctx, p, secretID, passwordFieldID,
+	material, err := source.AccessSecretField(activity.WithDeliberate(activity.WithObservation(activity.WithRequestID(ctx, activity.NewRequestID()))), p, secretID, passwordFieldID,
 		AccessSecretFieldInput{IdempotencyKey: "read-password"})
 	if err != nil {
 		t.Fatal(err)
@@ -185,6 +195,7 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 		t.Fatalf("opened material = %q / %v", cleartext, err)
 	}
 	clear(cleartext)
+	requireActivityAction(t, source, p, "secrets.access", 1)
 	if _, err := source.AccessSecretField(ctx, peerPrincipal, secretID, passwordFieldID,
 		AccessSecretFieldInput{IdempotencyKey: "peer-read"}); !errors.Is(err, ErrSecretFieldNotFound) {
 		t.Fatalf("peer access error = %v", err)
@@ -327,6 +338,8 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 		restored.Receipt.ResultRevision != restored.Secret.RowVersion || restored.Receipt.Replayed {
 		t.Fatalf("restored secret = %#v / %v", restored, err)
 	}
+	requireActivityAction(t, source, p, "secrets.archive", 2)
+	requireActivityAction(t, source, p, "secrets.restore", 1)
 	restoreReplay, err := source.RestoreSecret(ctx, p, secretID, restoreInput)
 	if err != nil || !restoreReplay.Receipt.Replayed ||
 		restoreReplay.Secret.RowVersion != restored.Secret.RowVersion ||
@@ -482,6 +495,7 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 	if _, err := destination.GetSecret(ctx, p, deletedSecretID); !errors.Is(err, ErrSecretNotFound) {
 		t.Fatalf("imported deleted secret ordinary get = %v", err)
 	}
+	requireActivityAction(t, destination, p, "secrets.delete", 1)
 	deleteReplay, err := destination.DeleteSecret(ctx, p, deletedSecretID,
 		deleteBeforeExport)
 	if err != nil || !deleteReplay.Receipt.Replayed ||

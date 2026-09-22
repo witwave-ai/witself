@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/plans"
 )
@@ -375,6 +376,7 @@ func requireCollaborationEnabled(ctx context.Context, tx pgx.Tx, accountID strin
 // token-derived realm and atomically creates the immutable message and its
 // bounded send-time delivery snapshot.
 func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInput) (Message, error) {
+	ctx = activity.DefaultOperation(ctx, "messages.send")
 	if p.Kind != PrincipalAgent {
 		return Message{}, ErrMessageForbidden
 	}
@@ -429,6 +431,7 @@ func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInpu
 // are all derived inside the transaction. Reading or acknowledging the parent
 // remains a separate operation.
 func (s *Store) ReplyMessage(ctx context.Context, p Principal, parentMessageID string, in ReplyMessageInput) (Message, error) {
+	ctx = activity.DefaultOperation(ctx, "messages.reply")
 	if p.Kind != PrincipalAgent {
 		return Message{}, ErrMessageForbidden
 	}
@@ -1108,6 +1111,15 @@ func (s *Store) insertMessageTargetsTx(
 			return Message{}, fmt.Errorf("record message delivered usage: %w", err)
 		}
 	}
+	// Only the newly inserted domain effect can establish activity. Both retry
+	// exits above (including the unique-index race with an older writer) omit it.
+	// Internal fanout/completion paths have no send/reply request descriptor.
+	if op, _ := activity.Operation(ctx); op == "messages.send" || op == "messages.reply" {
+		if err := recordActivityOperationTx(ctx, tx, p, op, msg.ID, 1); err != nil {
+			return Message{}, err
+		}
+	}
+
 	return msg, nil
 }
 
@@ -1122,7 +1134,9 @@ func messageDeliveredUsageQuantity(targets []messageDeliveryTarget) int64 {
 }
 
 // ListMessages returns metadata-only mailbox rows; listing does not mark read.
-func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFilter) (MessagePage, error) {
+func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFilter) (activityResult MessagePage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "messages.list")
+	defer func() { finishActivity(int64(len(activityResult.Messages)), &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return MessagePage{}, ErrMessageForbidden
 	}
@@ -1218,9 +1232,12 @@ func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFil
 }
 
 // PeekMessage returns recipient-visible content without changing delivery,
-// processing, audit, or usage state. It revalidates and locks the live caller
-// scope just like the other messaging reads, but never transitions the delivery.
-func (s *Store) PeekMessage(ctx context.Context, p Principal, messageID string) (Message, error) {
+// processing, audit, or legacy usage state. An explicit activity request can
+// record a nonbilling read. It revalidates and locks the live caller scope just
+// like the other messaging reads, but never transitions the delivery.
+func (s *Store) PeekMessage(ctx context.Context, p Principal, messageID string) (activityResult Message, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "messages.peek")
+	defer func() { finishActivity(1, &activityErr) }()
 	if p.Kind != PrincipalAgent {
 		return Message{}, ErrMessageForbidden
 	}
@@ -1253,7 +1270,9 @@ func (s *Store) PeekMessage(ctx context.Context, p Principal, messageID string) 
 }
 
 // ReadMessage returns content to the recipient and idempotently marks it read.
-func (s *Store) ReadMessage(ctx context.Context, p Principal, messageID string) (Message, error) {
+func (s *Store) ReadMessage(ctx context.Context, p Principal, messageID string) (activityResult Message, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "messages.read")
+	defer func() { finishActivity(1, &activityErr) }()
 	return s.transitionMessage(ctx, p, strings.TrimSpace(messageID), false)
 }
 

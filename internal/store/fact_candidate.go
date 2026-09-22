@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 )
 
@@ -60,6 +61,7 @@ const (
 // ProposeFact stores a pending candidate and marks it conflict when a different
 // resolved value already occupies the exact subject/predicate address.
 func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFactInput) (FactCandidate, error) {
+	ctx = activity.DefaultOperation(ctx, "facts.propose")
 	if p.Kind != PrincipalAgent {
 		return FactCandidate{}, ErrFactForbidden
 	}
@@ -189,6 +191,9 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 	if err != nil {
 		return FactCandidate{}, fmt.Errorf("insert fact candidate: %w", err)
 	}
+	if err := recordActivityOperationTx(ctx, tx, p, "facts.propose", candidateID, 1); err != nil {
+		return FactCandidate{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return FactCandidate{}, err
 	}
@@ -314,6 +319,7 @@ func (s *Store) RejectFactCandidate(ctx context.Context, p Principal, candidateI
 // RejectFactCandidateIdempotent closes one candidate and replays the result
 // when the same decision key is retried after a lost response.
 func (s *Store) RejectFactCandidateIdempotent(ctx context.Context, p Principal, candidateID, idempotencyKey string) (FactCandidate, error) {
+	ctx = activity.DefaultOperation(ctx, "facts.reject")
 	if p.Kind != PrincipalAgent {
 		return FactCandidate{}, ErrFactForbidden
 	}
@@ -392,6 +398,9 @@ func (s *Store) RejectFactCandidateIdempotent(ctx context.Context, p Principal, 
 	if err != nil {
 		return FactCandidate{}, err
 	}
+	if err := recordActivityOperationTx(ctx, tx, p, "facts.reject", candidateID, 1); err != nil {
+		return FactCandidate{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return FactCandidate{}, err
 	}
@@ -407,6 +416,7 @@ func (s *Store) ConfirmFactCandidate(ctx context.Context, p Principal, candidate
 // ConfirmFactCandidateIdempotent promotes one candidate and replays the
 // resulting fact when the same decision key is retried.
 func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal, candidateID, idempotencyKey string) (Fact, error) {
+	ctx = activity.DefaultOperation(ctx, "facts.confirm")
 	if p.Kind != PrincipalAgent {
 		return Fact{}, ErrFactForbidden
 	}
@@ -557,6 +567,9 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 	}
 	out, err := getFactTx(ctx, tx, p, factID, "", "", true)
 	if err != nil {
+		return Fact{}, err
+	}
+	if err := recordActivityOperationTx(ctx, tx, p, "facts.confirm", candidateID, 1); err != nil {
 		return Fact{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

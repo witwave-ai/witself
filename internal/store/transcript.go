@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/nulsafe"
 )
@@ -113,6 +114,7 @@ type TranscriptPage struct {
 
 // CreateTranscript creates an empty transcript for the token-derived agent.
 func (s *Store) CreateTranscript(ctx context.Context, accountID, realmID, agentID string, in CreateTranscriptInput) (Transcript, error) {
+	ctx = activity.DefaultOperation(ctx, "transcripts.create")
 	in, err := normalizeCreateTranscriptInput(in)
 	if err != nil {
 		return Transcript{}, err
@@ -176,6 +178,11 @@ func (s *Store) CreateTranscript(ctx context.Context, accountID, realmID, agentI
 			return Transcript{}, err
 		}
 	}
+	if out.ID == transcriptID {
+		if err := recordActivityOperationTx(ctx, tx, Principal{Kind: PrincipalAgent, AccountID: accountID, RealmID: realmID, ID: agentID}, "transcripts.create", out.ID, 1); err != nil {
+			return Transcript{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Transcript{}, err
 	}
@@ -184,6 +191,7 @@ func (s *Store) CreateTranscript(ctx context.Context, accountID, realmID, agentI
 
 // AppendTranscriptEntry appends one immutable entry.
 func (s *Store) AppendTranscriptEntry(ctx context.Context, accountID, realmID, agentID, transcriptID string, in AppendTranscriptEntryInput) (TranscriptEntry, error) {
+	ctx = activity.DefaultOperation(ctx, "transcripts.append")
 	entries, err := s.AppendTranscriptEntries(ctx, accountID, realmID, agentID, transcriptID, []AppendTranscriptEntryInput{in})
 	if err != nil {
 		return TranscriptEntry{}, err
@@ -194,6 +202,7 @@ func (s *Store) AppendTranscriptEntry(ctx context.Context, accountID, realmID, a
 // AppendTranscriptEntries appends a bounded batch under one transcript lock.
 // Existing matching external ids are returned, making outbox retries safe.
 func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID, agentID, transcriptID string, inputs []AppendTranscriptEntryInput) ([]TranscriptEntry, error) {
+	ctx = activity.DefaultOperation(ctx, "transcripts.append")
 	if len(inputs) == 0 || len(inputs) > maxTranscriptAppendBatch {
 		return nil, fmt.Errorf("%w: entries batch must contain 1-%d items", ErrTranscriptInputInvalid, maxTranscriptAppendBatch)
 	}
@@ -365,6 +374,11 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			}
 		}
 	}
+	if len(insertedIDs) > 0 {
+		if err := recordActivityOperationTx(ctx, tx, p, "transcripts.append", usageBatchKey(insertedIDs), int64(len(insertedIDs))); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -409,7 +423,9 @@ func rawJSONEqual(a, b json.RawMessage) bool {
 
 // ListTranscripts returns newest-active first. Agents see only their own;
 // operators see every transcript in the account.
-func (s *Store) ListTranscripts(ctx context.Context, p Principal) ([]Transcript, error) {
+func (s *Store) ListTranscripts(ctx context.Context, p Principal) (activityResult []Transcript, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "transcripts.list")
+	defer func() { finishActivity(int64(len(activityResult)), &activityErr) }()
 	if p.Kind != PrincipalAgent && p.Kind != PrincipalOperator {
 		return nil, ErrTranscriptForbidden
 	}
@@ -510,7 +526,9 @@ func (s *Store) GetTranscriptPageObservational(ctx context.Context, p Principal,
 	return s.getTranscriptPage(ctx, p, transcriptID, opts, false)
 }
 
-func (s *Store) getTranscriptPage(ctx context.Context, p Principal, transcriptID string, opts TranscriptPageOptions, recordUsage bool) (TranscriptPage, error) {
+func (s *Store) getTranscriptPage(ctx context.Context, p Principal, transcriptID string, opts TranscriptPageOptions, recordUsage bool) (activityResult TranscriptPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "transcripts.page")
+	defer func() { finishActivity(int64(len(activityResult.Entries)), &activityErr) }()
 	if p.Kind != PrincipalAgent && p.Kind != PrincipalOperator {
 		return TranscriptPage{}, ErrTranscriptForbidden
 	}

@@ -444,3 +444,7 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
   .main { padding: .6rem; min-height: 0; }
   .statusbar { white-space: normal; gap: .25rem .75rem; overflow-x: visible; }
 }
+
+.summary-breakdown { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .25rem 1rem; font-size: .75rem; color: var(--lane); }
+.summary-breakdown > span { white-space: nowrap; }
+.summary-row .summary-coverage { grid-column: 1 / -1; color: var(--summary-muted); font-size: .7rem; }

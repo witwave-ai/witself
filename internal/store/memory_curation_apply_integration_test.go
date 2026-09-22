@@ -184,6 +184,9 @@ func TestMemoryCurationApplyPostgres(t *testing.T) {
 	if relationCount != 2 {
 		t.Fatalf("relation count = %d, want 2", relationCount)
 	}
+	requireActivityAction(t, st, p, "memories.curation_apply", 1)
+	requireActivity(t, st, p, "memory_created", 2)
+	requireActivity(t, st, p, "memory_revised", 1)
 	replayed, err := st.ApplyCuration(ctx, p, started.Run.ID, applyInput)
 	if err != nil || !replayed.Receipt.Replayed || replayed.Receipt.ID != applied.Receipt.ID {
 		t.Fatalf("apply replay = %#v / %v", replayed, err)
@@ -305,6 +308,9 @@ func TestMemoryCurationApplyPostgres(t *testing.T) {
 				cursorPositions[interval.SourceKind+"\x00"+interval.SourceStreamID], position)
 		}
 	}
+	requireActivityAction(t, st, p, "memories.curation_apply", 1)
+	requireActivity(t, st, p, "memory_archived", 1)
+	requireActivity(t, st, p, "memory_restored", 1)
 	rollbackReplay, err := st.RollbackCuration(ctx, p, started.Run.ID, rollbackInput)
 	if err != nil || !rollbackReplay.Receipt.Replayed ||
 		rollbackReplay.Receipt.ID != rolledBack.Receipt.ID {

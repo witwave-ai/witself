@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/plans"
@@ -253,6 +254,7 @@ func (s *Store) QueueAgentEmail(
 	p Principal,
 	in SendAgentEmailInput,
 ) (AgentEmailOutboundMessage, error) {
+	ctx = activity.DefaultOperation(ctx, "email.send")
 	if err := requireAgentEmailOutboundPrincipal(p); err != nil {
 		return AgentEmailOutboundMessage{}, err
 	}
@@ -271,6 +273,7 @@ func (s *Store) ReplyAgentEmail(
 	inboundMessageID string,
 	in ReplyAgentEmailInput,
 ) (AgentEmailOutboundMessage, error) {
+	ctx = activity.DefaultOperation(ctx, "email.reply")
 	if err := requireAgentEmailOutboundPrincipal(p); err != nil {
 		return AgentEmailOutboundMessage{}, err
 	}
@@ -419,6 +422,13 @@ func (s *Store) queueAgentEmailDraft(
 			"commit outbound agent-email storage savepoint: %w", err,
 		)
 	}
+	op := "email.send"
+	if draft.requestKind == AgentEmailOutboundRequestReply {
+		op = "email.reply"
+	}
+	if err := recordActivityOperationTx(ctx, tx, p, op, msg.ID, 1); err != nil {
+		return AgentEmailOutboundMessage{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentEmailOutboundMessage{}, err
 	}
@@ -431,7 +441,9 @@ func (s *Store) ListAgentEmailOutbox(
 	ctx context.Context,
 	p Principal,
 	filter AgentEmailOutboundFilter,
-) (AgentEmailOutboundPage, error) {
+) (activityResult AgentEmailOutboundPage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "email.outbox_list")
+	defer func() { finishActivity(int64(len(activityResult.Messages)), &activityErr) }()
 	if err := requireAgentEmailOutboundPrincipal(p); err != nil {
 		return AgentEmailOutboundPage{}, err
 	}
@@ -501,7 +513,9 @@ func (s *Store) GetAgentEmailOutbound(
 	ctx context.Context,
 	p Principal,
 	sendID string,
-) (AgentEmailOutboundMessage, error) {
+) (activityResult AgentEmailOutboundMessage, activityErr error) {
+	ctx, finishActivity := s.beginActivityRead(ctx, p, "email.outbox_detail")
+	defer func() { finishActivity(1, &activityErr) }()
 	if err := requireAgentEmailOutboundPrincipal(p); err != nil {
 		return AgentEmailOutboundMessage{}, err
 	}
