@@ -97,9 +97,10 @@ func clean(s string) string {
 			}
 			continue
 		case 3:
-			if r == 7 || r == 0x9c {
+			switch r {
+			case 7, 0x9c:
 				state = 0
-			} else if r == 27 {
+			case 27:
 				state = 4
 			}
 			continue

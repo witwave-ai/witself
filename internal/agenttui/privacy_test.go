@@ -97,7 +97,9 @@ func TestPassiveViewsNeverRevealOrPreview(t *testing.T) {
 				return nil, err
 			}
 			var o object
-			json.Unmarshal(raw, &o)
+			if err := json.Unmarshal(raw, &o); err != nil {
+				return nil, err
+			}
 			for _, msg := range list(o, "messages") {
 				msg["body"] = "BODY-CANARY"
 				msg["payload"] = "PAYLOAD-CANARY"
@@ -130,7 +132,7 @@ func TestPrivateFactCopyExactAndDisplaySanitized(t *testing.T) {
 	f := newFake()
 	exact := "DEMO-value\x1b]52;c;bad\a\x1b[31mRED\x1b[0m\tend\r\n"
 	var owned json.RawMessage
-	f.reveal = func(ctx context.Context, s, p string) (json.RawMessage, error) {
+	f.reveal = func(_ context.Context, s, p string) (json.RawMessage, error) {
 		owned, _ = encode(object{"fact": object{"id": "fact_private", "subject": s, "predicate": p, "value": exact}})
 		return owned, nil
 	}
@@ -138,7 +140,7 @@ func TestPrivateFactCopyExactAndDisplaySanitized(t *testing.T) {
 	openPanel(t, m, 2)
 	settle(t, m, m.choose(2))
 	copied := ""
-	m.opts.Copy = func(ctx context.Context, s string) error { copied = s; return nil }
+	m.opts.Copy = func(_ context.Context, s string) error { copied = s; return nil }
 	msg := runPrivate(t, m, m.privateRead(true))
 	if copied != exact {
 		t.Fatal("copy used sanitized rather than exact value")
@@ -149,7 +151,7 @@ func TestPrivateFactCopyExactAndDisplaySanitized(t *testing.T) {
 	if strings.Contains(fmt.Sprintf("%+v", msg), "DEMO-value") || strings.Contains(m.View(), "DEMO-value") {
 		t.Fatal("copy displayed value or put it in message")
 	}
-	msg = runPrivate(t, m, m.privateRead(false))
+	runPrivate(t, m, m.privateRead(false))
 	text, _, _, status := m.privateView()
 	if text != clean(exact) || status != "visible" {
 		t.Fatal("safe reveal missing")
@@ -251,7 +253,7 @@ func TestMessagePreviewLifecycleBoundsAndSentRefusal(t *testing.T) {
 	fail := false
 	oversize := false
 	var owned json.RawMessage
-	f.preview = func(ctx context.Context, id string) (json.RawMessage, error) {
+	f.preview = func(ctx context.Context, _ string) (json.RawMessage, error) {
 		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 10*time.Second {
 			t.Fatal("preview missing deadline")
 		}

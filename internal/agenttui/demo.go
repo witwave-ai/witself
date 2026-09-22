@@ -45,7 +45,7 @@ func demoTranscripts() []any {
 }
 func demoEntries(id string) []any {
 	type turn struct{ role, body string }
-	turns := []turn{}
+	var turns []turn
 	switch id {
 	case "tr_wayfinding":
 		turns = []turn{

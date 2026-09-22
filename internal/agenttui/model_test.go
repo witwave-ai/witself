@@ -443,7 +443,7 @@ func TestEvidenceJumpAndSalientOutsideInventory(t *testing.T) {
 func TestThemePreferenceRaceAndLocalFallback(t *testing.T) {
 	f := newFake()
 	stored := ""
-	f.store = func(ctx context.Context, s string) (json.RawMessage, error) {
+	f.store = func(_ context.Context, s string) (json.RawMessage, error) {
 		stored = s
 		return nil, errors.New("private error")
 	}

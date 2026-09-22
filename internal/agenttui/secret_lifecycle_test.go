@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/witwave-ai/witself/internal/dashboard"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/witwave-ai/witself/internal/dashboard"
 )
 
 func TestSecretRevealCopyAndExpiry(t *testing.T) {
@@ -41,7 +42,7 @@ func TestSecretRevealCopyAndExpiry(t *testing.T) {
 	if text, _, _, _ := m.privateView(); text == "" {
 		t.Fatal("stale timer hid current reveal")
 	}
-	m.Update(privateExpiredMsg{generation: msg.generation})
+	m.Update(privateExpiredMsg(msg))
 	if text, _, _, _ := m.privateView(); text != "" || strings.Contains(m.vp.View(), "SYNTHETIC") {
 		t.Fatal("expiry retained reveal")
 	}

@@ -187,7 +187,12 @@ func TestBoundaryPreviewPassiveProjectionAndPersistence(t *testing.T) {
 			return raw, e
 		}
 		var o object
-		json.Unmarshal(raw, &o)
+		if e != nil {
+			return nil, e
+		}
+		if err := json.Unmarshal(raw, &o); err != nil {
+			return nil, err
+		}
 		for _, msg := range list(o, "messages") {
 			msg["body"] = "PASSIVE_CANARY"
 			msg["payload"] = object{"value": "PAYLOAD_CANARY"}

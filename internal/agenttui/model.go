@@ -39,6 +39,7 @@ type Options struct {
 var panelNames = []string{"Overview", "Transcripts", "Facts", "Memories", "Conversations", "Email", "Secrets"}
 var themeNames = []string{"auto", "console", "paper", "midnight", "amber", "high-contrast"}
 
+// ValidTheme reports whether s names a supported theme.
 func ValidTheme(s string) bool {
 	for _, n := range themeNames {
 		if s == n {
@@ -103,6 +104,7 @@ type Model struct {
 
 var _ tea.Model = (*Model)(nil)
 
+// New creates a terminal workspace using the supplied console source.
 func New(ctx context.Context, src Source, o Options) *Model {
 	if ctx == nil {
 		ctx = context.Background()
@@ -163,6 +165,8 @@ func (m *Model) privateView() (string, string, string, string) {
 	defer m.private.Unlock()
 	return m.private.text, m.private.kind, m.private.key, m.private.status
 }
+
+// Init starts the initial refresh, preference read, and polling timer.
 func (m *Model) Init() tea.Cmd {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
@@ -368,7 +372,7 @@ func (m *Model) refresh() tea.Cmd {
 					out.results = append(out.results, readResult{resource: r, status: "disabled"})
 					return nil
 				}
-				if reason := locked[r]; reason != "" && !(selfReady && known && b) {
+				if reason := locked[r]; reason != "" && (!selfReady || !known || !b) {
 					out.results = append(out.results, readResult{resource: r, status: reason})
 					return nil
 				}
@@ -855,11 +859,12 @@ func (m *Model) privateRead(copyOnly bool) tea.Cmd {
 		} else {
 			var raw json.RawMessage
 			var err error
-			if kind == "fact" {
+			switch kind {
+			case "fact":
 				raw, err = src.RevealFact(ctx, subject, predicate)
-			} else if kind == "memory" {
+			case "memory":
 				raw, err = src.Read(ctx, dashboard.ReadRequest{Resource: dashboard.ResourceMemory, ID: key})
-			} else {
+			default:
 				raw, err = src.PreviewMessage(ctx, key)
 			}
 			defer clear(raw)
@@ -872,20 +877,21 @@ func (m *Model) privateRead(copyOnly bool) tea.Cmd {
 			if d.Decode(&o) != nil {
 				return finish("", "unavailable")
 			}
-			if kind == "memory" {
+			switch kind {
+			case "memory":
 				mem := obj(o["memory"])
 				b, ok := mem["content"].(string)
 				if !ok || str(mem, "id") != key || flag(mem, "redacted") {
 					return finish("", "unavailable")
 				}
 				exact = b
-			} else if kind == "message" {
+			case "message":
 				b, ok := o["body"].(string)
 				if !ok {
 					return finish("", "unavailable")
 				}
 				exact = b
-			} else {
+			default:
 				f := obj(o["fact"])
 				if str(f, "id") != key || str(f, "subject") != subject || str(f, "predicate") != predicate {
 					return finish("", "unavailable")
@@ -925,6 +931,8 @@ func exactValue(v any) string {
 	}
 	return string(b)
 }
+
+// Update applies terminal events and generation-fenced source results.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
@@ -983,7 +991,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.private.Unlock()
 		m.renderDetail(false)
 		if expire {
-			return m, tea.Tick(30*time.Second, func(time.Time) tea.Msg { return privateExpiredMsg{generation: msg.generation} })
+			return m, tea.Tick(30*time.Second, func(time.Time) tea.Msg { return privateExpiredMsg(msg) })
 		}
 	case privateExpiredMsg:
 		m.private.Lock()

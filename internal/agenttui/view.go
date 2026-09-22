@@ -91,6 +91,8 @@ func crop(s string, w, h int) string {
 	}
 	return strings.Join(ls, "\n")
 }
+
+// View renders the workspace for the current terminal dimensions.
 func (m *Model) View() string {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()

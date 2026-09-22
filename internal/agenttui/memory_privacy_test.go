@@ -3,10 +3,11 @@ package agenttui
 import (
 	"context"
 	"encoding/json"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/witwave-ai/witself/internal/dashboard"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/witwave-ai/witself/internal/dashboard"
 )
 
 func TestSensitiveMemoryRequiresDeliberateRead(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 // reveals and message body previews require their separate, explicit methods.
 type Resource uint8
 
+// Supported resources share the existing browser console projections.
 const (
 	ResourceSelf Resource = iota + 1
 	ResourceThemes
@@ -217,8 +218,8 @@ func (r *Reader) StoreTheme(ctx context.Context, theme string) (json.RawMessage,
 	return r.invoke(ctx, prefsHandler(r.cfg), http.MethodPut, "/api/prefs", "", nil, body)
 }
 
-func readerString(value string, max int) bool {
-	return len(value) <= max && utf8.ValidString(value) &&
+func readerString(value string, maxBytes int) bool {
+	return len(value) <= maxBytes && utf8.ValidString(value) &&
 		!strings.ContainsFunc(value, unicode.IsControl)
 }
 

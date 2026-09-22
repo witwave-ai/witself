@@ -381,15 +381,16 @@ func TestReaderSecretCapabilityReuse(t *testing.T) {
 			var lists, details atomic.Int32
 			r, _ := newTestReader(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				rejectSecretMutations(t, req)
-				if req.URL.Path == "/v1/secrets" {
+				switch req.URL.Path {
+				case "/v1/secrets":
 					lists.Add(1)
 					if supported {
 						writeJSON(w, map[string]any{"items": []any{}})
 						return
 					}
-				} else if req.URL.Path == "/v1/secrets/unknown-123" {
+				case "/v1/secrets/unknown-123":
 					details.Add(1)
-				} else {
+				default:
 					t.Errorf("unexpected path %s", req.URL.Path)
 				}
 				writeJSONError(w, 404, "private missing secret")
