@@ -11,7 +11,7 @@
 <header class="topbar">
   <div class="brand">Witself <span>/ agent console</span></div>
   <div class="topbar-right">
-    <span class="live"><span id="live-dot" class="dot"></span><span id="live-label">connecting</span></span>
+    <span class="live"><span id="live-dot" class="dot"></span><span id="live-label" role="status" aria-live="polite" aria-atomic="true" title="SSE transport connection">Connecting</span></span>
     <span id="version" class="version"></span>
     <label class="theme-label">theme
       <!-- options are the embedded theme packs, filled from /api/themes -->
@@ -29,16 +29,17 @@
       </div>
     </div>
     <div class="rail-links">
-    <a href="#/overview" data-nav="overview">overview</a>
-    <a href="#/transcripts" data-nav="transcripts">transcripts</a>
-    <a href="#/facts" data-nav="facts">facts</a>
-    <a href="#/memories" data-nav="memories">memories</a>
-    <a href="#/conversations" data-nav="conversations">conversations</a>
-    <a href="#/email" data-nav="email">email</a>
-    <a href="#/secrets" data-nav="secrets">secrets</a>
+    <a href="#/overview" data-nav="overview">Overview</a>
+    <a href="#/transcripts" data-nav="transcripts">Transcripts</a>
+    <a href="#/facts" data-nav="facts">Facts</a>
+    <a href="#/memories" data-nav="memories">Memories</a>
+    <a href="#/conversations" data-nav="conversations">Conversations</a>
+    <a href="#/email" data-nav="email">Email</a>
+    <a href="#/secrets" data-nav="secrets">Secrets</a>
     </div>
   </nav>
   <main class="main">
+    <div id="source-status" class="source-status" role="status" aria-live="polite" aria-atomic="true"></div>
     <div id="breadcrumb" class="breadcrumb"></div>
     <div id="view" class="view"></div>
   </main>

@@ -353,11 +353,11 @@ test("Operations and memory changes expose all fixed breakdowns and partial cove
  for (const view of ["overview","timeline"]) {
   select(h,view);
   const ops=node(h,"summary-row-transactions"), mem=node(h,"summary-row-memories");
-  for (const label of ["Reads: 1","Writes: 2","Records read: 3","Records written: 4"]) assert.ok(ops.textContent.includes(label));
-  for (const label of ["Created: 1","Revised: 2","Archived: 3","Restored: 4","Deleted: 5"]) assert.ok(mem.textContent.includes(label));
-  assert.match(ops.textContent,/3recorded operations · tracked portion/);
-  assert.match(mem.textContent,/15memory changes · tracked portion/);
-  assert.match(ops.textContent,/first tracked hour partial; current hour partial/);
+  for (const label of ["Reads: 1","Writes: 2","Records read: 3","Records written: 4"]) assert.ok(node(h,"summary-details-transactions").textContent.includes(label));
+  for (const label of ["Created: 1","Revised: 2","Archived: 3","Restored: 4","Deleted: 5"]) assert.ok(node(h,"summary-details-memories").textContent.includes(label));
+  assert.match(ops.textContent,/3recorded operations · partial coverage/);
+  assert.match(mem.textContent,/15memory changes · partial coverage/);
+  assert.match(node(h,"summary-details-transactions").textContent,/first tracked hour partial; current hour partial/);
   assert.doesNotMatch(ops.textContent,/unavailable/i);
   const graph=ops.querySelector('.summary-pattern');
   assert.equal(graph.children.length,24);
@@ -398,4 +398,69 @@ test('new activity refuses wrong coverage, units, dimensions, breakdown and aggr
   const data=summaryData();mutate(data.summary.categories[index].activity);
   assert.equal(h.app.normalizeSummary(data).categories[index].activity.status,'unavailable');
  }
+});
+
+
+test("coverage disclosures stay adjacent to links and preserve open state and focus on refresh", options, async (t) => {
+  const h = await loaded(t);
+  const details = node(h, "summary-details-memories");
+  assert.equal(details.closest("a"), null);
+  assert.equal(node(h, "summary-row-memories").getAttribute("href"), "#/memories");
+  assert.match(node(h, "summary-row-memories").textContent, /partial coverage/);
+  details.open = true;
+  node(h, "summary-disclosure-memories").focus();
+  await h.advance(30000);
+  await h.finish(reports(h).at(-1), summaryData());
+  assert.notEqual(node(h, "summary-details-memories"), details, "refresh actually rebuilt content");
+  assert.equal(node(h, "summary-details-memories").open, true);
+  assert.equal(h.document.activeElement, node(h, "summary-disclosure-memories"));
+  assert.equal(h.document.activeElement.focusOptions.preventScroll, true);
+  assert.match(node(h, "summary-details-memories").textContent, /tracking since.*first tracked hour partial.*Earlier bins unknown; older clients may omit activity/);
+  node(h, "summary-details-memories").open = false;
+  await h.advance(30000);
+  await h.finish(reports(h).at(-1), summaryData());
+  assert.equal(node(h, "summary-details-memories").open, false);
+});
+
+
+test("SSE connection and upstream degradation remain separate from snapshot freshness", options, async (t) => {
+  const h = await loaded(t);
+  const source = h.sources.at(-1);
+  source.onopen();
+  assert.equal(h.nodes["live-label"].textContent, "Connected");
+  const status = node(h, "summary-status").textContent;
+  source.listeners.get("upstream")({ data: JSON.stringify({ source: "transcripts", ok: false, message: "synthetic <literal> failure" }) });
+  assert.equal(h.nodes["live-label"].textContent, "Connected");
+  assert.match(h.nodes["source-status"].textContent, /Upstream degraded: transcripts.*Retained data may be stale/);
+  assert.doesNotMatch(h.nodes["source-status"].textContent, /literal/);
+  assert.match(h.nodes["status-upstream"].title, /synthetic <literal> failure/);
+  assert.equal(node(h, "summary-status").textContent, status);
+  source.onerror();
+  assert.equal(h.nodes["live-label"].textContent, "Reconnecting");
+  source.listeners.get("upstream")({ data: JSON.stringify({ source: "transcripts", ok: true }) });
+  assert.equal(h.nodes["source-status"].textContent, "");
+  assert.equal(h.nodes["live-label"].textContent, "Reconnecting");
+});
+
+test("unchanged freshness states are not announced on each poll", options, async (t) => {
+  const h = await loaded(t);
+  const freshness = node(h, "summary-freshness");
+  let announcements = 0;
+  const textProperty = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(freshness), 'textContent');
+  Object.defineProperty(freshness, 'textContent', {
+    get() { return textProperty.get.call(this); },
+    set(value) { announcements++; textProperty.set.call(this, value); },
+  });
+  await h.advance(30000);
+  const fresh = summaryData();
+  fresh.summary.generated_at = fresh.summary.window.until = '2026-09-22T16:23:30Z';
+  await h.finish(reports(h).at(-1), fresh);
+  assert.equal(announcements, 0, 'timestamp-only changes stay outside live status');
+  assert.match(node(h, 'summary-generated').textContent, /16:23:30/);
+  await h.advance(30000);
+  const failed = reports(h).at(-1);
+  failed.releaseHeaders(503); failed.body.resolve({});
+  await h.advance(0);
+  assert.equal(announcements, 1, 'refresh failure is announced once');
+  assert.match(freshness.textContent, /Refresh failed.*stale report/);
 });

@@ -174,18 +174,18 @@ func consoleOutcome(msg consoleMsg) string {
 	}
 	if msg.failed {
 		if msg.action == consoleOpen && msg.status.State == ConsoleRunning {
-			return "Console is running; browser could not be opened. Press b to retry."
+			return "Console is running; browser could not be opened. Use Web console: b open."
 		}
 		if msg.action == consoleStop && msg.status.State == ConsoleRunning {
-			return "Console is still running; stop did not complete. Press x to retry."
+			return "Console is still running; stop did not complete. Use Web console: x stop."
 		}
-		return "Web console action did not complete. Press w, then r to check its status."
+		return "Web console action did not complete. Use Web console: r check status."
 	}
 	switch msg.action {
 	case consoleOpen:
 		return "Web console opened in your browser."
 	case consoleStart:
-		return "Web console is running. Press b to open it."
+		return "Web console is running. Use Web console: b open."
 	case consoleStop:
 		return "Web console is off."
 	default:

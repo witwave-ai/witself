@@ -134,7 +134,7 @@ test("sent email renders only escaped lifecycle metadata and no actions", async 
   assert.equal(app.state.emailSentAvailable, true);
 
   const html = nodes.view.innerHTML;
-  assert.match(html, /sent email/);
+  assert.match(html, /Sent email/);
   assert.match(html, /newest 100 sent messages at most/);
   assert.match(html, /kind: reply&lt;script&gt;/);
   assert.match(html, /provider state: accepted&lt;img&gt;/);

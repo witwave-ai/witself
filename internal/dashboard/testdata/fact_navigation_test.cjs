@@ -388,7 +388,7 @@ async function inventory(h, rows) {
   const request = beginList(h);
   await h.finish(request, { facts: rows });
   h.settled([request]);
-  visible(h, "#/facts", "facts", "facts", "facts", rows[0].value);
+  visible(h, "#/facts", "facts", "facts", "Facts", rows[0].value);
   assert.deepEqual(h.cached(), Object.fromEntries(rows.map((row) => [row.id, row])), "real inventory keeps exact redacted rows");
 }
 
@@ -398,7 +398,7 @@ async function prime(h) {
 
 function detailVisible(h, id, value, assertion) {
   visible(h, "#/facts/" + id, "facts", "facts / " + id, "synthetic " + id.slice("fact_".length) + " · sample/value", value);
-  assert.deepEqual(h.nodes.view.querySelectorAll("h2").map((node) => node.textContent), ["synthetic " + id.slice("fact_".length) + " · sample/value", "details", "assertion history"], "selected fact and history panels are present");
+  assert.deepEqual(h.nodes.view.querySelectorAll("h2").map((node) => node.textContent), ["synthetic " + id.slice("fact_".length) + " · sample/value", "Details", "Assertion history"], "selected fact and history panels are present");
   assert.ok(h.nodes.view.textContent.includes(assertion), "current addressed assertion history is visible");
 }
 
@@ -606,3 +606,39 @@ for (const outcome of ["success", "error"]) {
     unchangedAfter(h, before, "stale cold fact history " + outcome + " replaced the current Console view");
   });
 }
+
+
+test("no matching facts clear locally without replacing private nodes or fetching", options, async (t) => {
+  const h = fixture(t);
+  await prime(h);
+  const input = h.document.getElementById("filter-facts");
+  const rows = h.nodes.view.querySelectorAll(".row");
+  const holder = h.nodes.view.querySelector(".fact-value");
+  const requests = h.requests.length;
+  input.value = "no such synthetic fact";
+  input.dispatch("input");
+  const empty = h.document.getElementById("filter-empty-facts");
+  assert.equal(empty.hidden, false);
+  assert.match(empty.textContent, /No matching facts/);
+  assert.ok(rows.every((row) => row.style.display === "none"));
+  h.document.getElementById("clear-filter-facts").dispatch("click");
+  assert.equal(input.value, "");
+  assert.equal(empty.hidden, true);
+  assert.equal(h.document.activeElement, input);
+  assert.ok(rows.every((row) => row.style.display === ""));
+  assert.equal(h.nodes.view.querySelector(".fact-value"), holder);
+  assert.equal(h.requests.length, requests);
+});
+
+test("fact detail uses full wrapping value while inventory remains a bounded preview", options, async (t) => {
+  const h = fixture(t);
+  const value = "Long synthetic value <literal> " + "word ".repeat(100);
+  await inventory(h, [fact("fact_alpha", value)]);
+  assert.equal(h.nodes.view.querySelector(".fact-detail-value"), null);
+  const request = await beginWarm(h, "fact_alpha");
+  await h.finish(request, history("assertion"));
+  const detail = h.nodes.view.querySelector(".fact-detail-value");
+  assert.equal(detail.querySelector(".value").textContent, value);
+  assert.equal(detail.querySelector("literal"), null);
+
+});

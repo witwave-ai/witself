@@ -166,7 +166,7 @@ func TestSummaryLayoutsAndASCII(t *testing.T) {
 	settle(t, m, m.refresh())
 	for _, theme := range themeNames {
 		m.theme = theme
-		for _, size := range [][2]int{{32, 20}, {60, 24}, {80, 24}, {120, 40}, {180, 50}} {
+		for _, size := range [][2]int{{1, 1}, {12, 8}, {20, 12}, {32, 20}, {60, 24}, {80, 5}, {80, 24}, {120, 40}, {180, 50}} {
 			m.width, m.height = size[0], size[1]
 			for view := 0; view < 4; view++ {
 				m.summaryView = view
@@ -222,6 +222,13 @@ func TestSummaryOperationsMemoryBreakdownsAndUnknown(t *testing.T) {
 			for _, term := range []string{"first tracked hour", "cache 30s", "current hour"} {
 				if !strings.Contains(strings.ToLower(text), term) {
 					t.Fatalf("missing %s: %s", term, text)
+				}
+			}
+			activity := obj(list(s, "categories")[i]["activity"])
+			coverage := obj(activity["coverage"])
+			for _, term := range []string{str(coverage, "tracking_since"), str(s, "generated_at"), str(activity, "unit"), "older clients may omit activity"} {
+				if !strings.Contains(text, term) {
+					t.Fatalf("lost selected coverage/quantity detail %q", term)
 				}
 			}
 			want := []string{"Reads: 1", "Writes: 2", "Records read: 3", "Records written: 4"}

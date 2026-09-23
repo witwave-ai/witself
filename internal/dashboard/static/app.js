@@ -187,7 +187,10 @@
   function filterInputHTML(section) {
     return '<input class="filter-input" id="filter-' + esc(section) + '" type="search"' +
       ' placeholder="filter\u2026" aria-label="filter ' + esc(section) + '"' +
-      ' value="' + esc(state.filters[section] || "") + '">';
+      ' value="' + esc(state.filters[section] || "") + '">' +
+      '<div class="filter-empty" id="filter-empty-' + esc(section) + '" hidden>' +
+      '<span role="status">No matching ' + esc(section) + '.</span> ' +
+      '<button type="button" class="clear-filter" id="clear-filter-' + esc(section) + '">Clear filter</button></div>';
   }
 
   function applyRowFilter(section) {
@@ -195,9 +198,14 @@
     var panel = input && input.closest ? input.closest(".panel") : null;
     if (!panel) { return; }
     var query = (state.filters[section] || "").toLowerCase();
-    panel.querySelectorAll(".row").forEach(function (row) {
-      row.style.display = !query || row.textContent.toLowerCase().indexOf(query) >= 0 ? "" : "none";
+    var rows = panel.querySelectorAll(".row"), matches = 0;
+    rows.forEach(function (row) {
+      var visible = !query || row.textContent.toLowerCase().indexOf(query) >= 0;
+      row.style.display = visible ? "" : "none";
+      if (visible) { matches++; }
     });
+    var empty = $("filter-empty-" + section);
+    if (empty) { empty.hidden = !query || !rows.length || matches > 0; }
   }
 
   function bindFilter(section) {
@@ -207,24 +215,39 @@
       state.filters[section] = input.value;
       applyRowFilter(section);
     });
+    var clear = $("clear-filter-" + section);
+    if (clear) { clear.addEventListener("click", function () {
+      input.value = "";
+      state.filters[section] = "";
+      applyRowFilter(section);
+      input.focus();
+    }); }
     applyRowFilter(section);
   }
 
   // An SSE-driven list re-render replaces the whole panel: the rebuilt input
   // carries the saved filter value but not keyboard focus, so keystrokes
   // landing mid-typing would silently go nowhere. Capture focus and caret
-  // before the innerHTML swap and restore them onto the rebuilt input after.
+  // before the innerHTML swap. Clear filter is also a keyboard focus target;
+  // if new matches remove that control, return focus to the input instead.
   function captureFilterFocus(section) {
     var active = document.activeElement;
+    if (active && active.id === "clear-filter-" + section) { return { target: "clear" }; }
     if (!active || active.id !== "filter-" + section) { return null; }
-    return { start: active.selectionStart, end: active.selectionEnd };
+    return { target: "input", start: active.selectionStart, end: active.selectionEnd };
   }
 
   function restoreFilterFocus(section, caret) {
     if (!caret) { return; }
     var input = $("filter-" + section);
     if (!input) { return; }
-    input.focus();
+    if (caret.target === "clear") {
+      var empty = $("filter-empty-" + section), clear = $("clear-filter-" + section);
+      if (empty && !empty.hidden && clear) { clear.focus({ preventScroll: true }); return; }
+      input.focus({ preventScroll: true });
+      return;
+    }
+    input.focus({ preventScroll: true });
     try { input.setSelectionRange(caret.start, caret.end); } catch (_) { /* unsupported */ }
   }
 
@@ -285,7 +308,8 @@
     var dot = $("live-dot");
     dot.classList.toggle("up", up === true);
     dot.classList.toggle("down", up === false);
-    $("live-label").textContent = up === true ? "live" : (up === false ? "offline" : "connecting");
+    var label = up === true ? "Connected" : (up === false ? "Reconnecting" : "Connecting");
+    if ($("live-label").textContent !== label) { $("live-label").textContent = label; }
     $("status-sse").textContent = "sse " + (up === true ? "connected" : (up === false ? "reconnecting" : "idle"));
   }
 
@@ -296,12 +320,11 @@
   function renderUpstreamStatus() {
     var node = $("status-upstream");
     var sources = Object.keys(state.upstreamErrors).sort();
-    if (!sources.length) {
-      node.textContent = "";
-      node.removeAttribute("title");
-      return;
-    }
-    node.textContent = "upstream degraded: " + sources.join(", ");
+    var label = sources.length ? "Upstream degraded: " + sources.join(", ") + ". Retained data may be stale." : "";
+    if (node.textContent !== label) { node.textContent = label; }
+    var top = $("source-status");
+    if (top && top.textContent !== label) { top.textContent = label; }
+    if (!sources.length) { node.removeAttribute("title"); return; }
     node.title = sources.map(function (source) {
       return source + ": " + state.upstreamErrors[source];
     }).join("\n");
@@ -629,18 +652,18 @@
   function memoryCapacityHTML(capacity) {
     if (!capacity) { return ""; }
     if (capacity.unavailable) {
-      return '<div class="panel"><h2>active memory capacity</h2><div class="dim">capacity status temporarily unavailable</div></div>';
+      return '<div class="panel"><h2>Active memory capacity</h2><div class="dim">capacity status temporarily unavailable</div></div>';
     }
     var used = Math.max(0, Number(capacity.used) || 0);
     var level = capacity.over_limit || capacity.at_limit ? "danger" : (capacity.near_limit ? "warning" : "");
     var stateLabel = capacity.over_limit ? "over limit" : (capacity.at_limit ? "at limit" : (capacity.near_limit ? "near limit" : "available"));
     if (capacity.unlimited) {
-      return '<div class="panel"><h2>active memory capacity</h2><div class="capacity-line"><a href="#/memories">' +
+      return '<div class="panel"><h2>Active memory capacity</h2><div class="capacity-line"><a href="#/memories">' +
         esc(used) + ' active</a><span class="badge">unlimited</span></div></div>';
     }
     var maximum = Math.max(0, Number(capacity.max) || 0);
     var remaining = Math.max(0, Number(capacity.remaining) || 0);
-    return '<div class="panel capacity ' + level + '"><h2>active memory capacity</h2>' +
+    return '<div class="panel capacity ' + level + '"><h2>Active memory capacity</h2>' +
       '<div class="capacity-line"><a href="#/memories">' + esc(used) + " of " + esc(maximum) +
       ' active</a><span class="badge">' + esc(stateLabel) + "</span></div>" +
       '<progress class="capacity-track" aria-label="active memory capacity" max="' +
@@ -651,18 +674,18 @@
   function factCapacityHTML(capacity) {
     if (!capacity) { return ""; }
     if (capacity.unavailable) {
-      return '<div class="panel"><h2>current fact capacity</h2><div class="dim">capacity status temporarily unavailable · fact reads and existing-fact updates remain available</div></div>';
+      return '<div class="panel"><h2>Current fact capacity</h2><div class="dim">capacity status temporarily unavailable · fact reads and existing-fact updates remain available</div></div>';
     }
     var used = Math.max(0, Number(capacity.used) || 0);
     var level = capacity.over_limit || capacity.at_limit ? "danger" : (capacity.near_limit ? "warning" : "");
     var stateLabel = capacity.over_limit ? "over limit" : (capacity.at_limit ? "at limit" : (capacity.near_limit ? "near limit" : "available"));
     if (capacity.unlimited) {
-      return '<div class="panel"><h2>current fact capacity</h2><div class="capacity-line"><a href="#/facts">' +
+      return '<div class="panel"><h2>Current fact capacity</h2><div class="capacity-line"><a href="#/facts">' +
         esc(used) + ' current</a><span class="badge">unlimited</span></div></div>';
     }
     var maximum = Math.max(0, Number(capacity.max) || 0);
     var remaining = Math.max(0, Number(capacity.remaining) || 0);
-    return '<div class="panel capacity ' + level + '"><h2>current fact capacity</h2>' +
+    return '<div class="panel capacity ' + level + '"><h2>Current fact capacity</h2>' +
       '<div class="capacity-line"><a href="#/facts">' + esc(used) + " of " + esc(maximum) +
       ' current</a><span class="badge">' + esc(stateLabel) + "</span></div>" +
       '<progress class="capacity-track" aria-label="current fact capacity" max="' +
@@ -827,12 +850,12 @@
   function summaryStateLabel(status) {
     return ({ not_tracked: "Not tracked yet", server_update_needed: "Server update needed", unavailable: "Unavailable", disabled: "Disabled" })[status] || "Unavailable";
   }
-  function summaryBreakdown(act) {
+  function summaryBreakdown(act, def) {
     if (!act.coverage) { return ""; }
-    return '<span class="summary-breakdown">' + act.breakdown.map(function (b) {
+    return '<details class="summary-details" id="summary-details-' + def.key + '"><summary id="summary-disclosure-' + def.key + '" aria-label="' + def.name + ' coverage and components">Coverage and components</summary><span class="summary-breakdown">' + act.breakdown.map(function (b) {
       return '<span>' + b.label + ': ' + b.total + '</span>';
     }).join('') + '</span><small class="summary-coverage">Recorded portion of this window; tracking since ' + act.coverage.tracking +
-      (act.coverage.partial ? '; first tracked hour partial' : '') + '; current hour partial. Earlier bins unknown; older clients may omit activity.</small>';
+      (act.coverage.partial ? '; first tracked hour partial' : '') + '; current hour partial. Earlier bins unknown; older clients may omit activity.</small></details>';
   }
   function summaryName(def) {
     return '<span class="summary-name"><b>' + def.code + '</b> ' + def.name + '</span>';
@@ -844,7 +867,7 @@
   }
   function summaryAmount(act) {
     if (act.status !== "available") { return '<span class="summary-muted">' + summaryStateLabel(act.status) + '</span>'; }
-    return esc(act.total) + '<small>' + act.unit + (act.coverage ? ' · tracked portion' : '') + '</small>';
+    return '<strong>' + esc(act.total) + '</strong><small>' + act.unit + (act.coverage ? ' · partial coverage' : '') + '</small>';
   }
   function summaryPattern(act, timeline) {
     if (act.status !== "available") { return '<span class="summary-muted">' + summaryStateLabel(act.status) + '</span>'; }
@@ -859,12 +882,17 @@
   function renderSummary() {
     if (!summaryState.active || !$("summary-body")) { return; }
     var report = summaryState.report, stale = report && (summaryState.failed || Date.now() - Date.parse(report.generated) > 60000);
-    $("summary-status").textContent = report ?
-      (summaryState.failed ? "Refresh failed · stale report · retry in 30 seconds" : stale ? "Stale report" : "Recorded snapshot") + ' · Generated ' + report.generated :
+    var freshness = report ?
+      (summaryState.failed ? "Refresh failed · stale report · retry in 30 seconds" : stale ? "Stale report" : "Recorded snapshot") :
       (summaryState.failed ? "Summary unavailable · refresh failed · retry in 30 seconds" : "Loading summary…");
+    // Announce state transitions, not the changing generated timestamp on every poll.
+    if ($("summary-freshness").textContent !== freshness) { $("summary-freshness").textContent = freshness; }
+    $("summary-generated").textContent = report ? ' · Generated ' + report.generated : '';
     $("summary-status").classList.toggle("summary-stale", !!stale || summaryState.failed);
     if (!report) { $("summary-body").innerHTML = '<p class="summary-muted">No report available.</p>'; return; }
     var activeID = document.activeElement && document.activeElement.id;
+    var openDetails = {};
+    $("summary-body").querySelectorAll(".summary-details").forEach(function (node) { openDetails[node.id] = node.open; });
     var timeline = summaryState.view === "timeline", html;
     if (summaryState.view === "recent") {
       html = '<h3>Updates from loaded records</h3><p class="summary-muted">Latest 12 observations from loaded first pages of up to 100 records per source; not a complete audit log.</p>' +
@@ -883,14 +911,15 @@
         return '<' + tag + ' id="summary-row-' + def.key + '" class="summary-row summary-' + def.key + (timeline ? ' summary-timeline' : '') + '"' +
           (def.route ? ' href="#/' + def.route + '"' : '') + '>' + summaryName(def) +
           (timeline ? '' : '<span class="summary-inventory">' + summaryInventory(c.inventory) + '</span>') +
-          summaryPattern(c.activity, timeline) + '<span class="summary-amount">' + summaryAmount(c.activity) + '</span>' + summaryBreakdown(c.activity) + '</' + tag + '>';
+          summaryPattern(c.activity, timeline) + '<span class="summary-amount">' + summaryAmount(c.activity) + '</span>' + '</' + tag + '>' + summaryBreakdown(c.activity, def);
       }).join("");
       html += '<p class="summary-muted">' + (timeline ? '? unknown · . 0 · ░ 1–2 · ▒ 3–5 · ▓ 6–9 · █ 10+ per hour; each row names its measure.' :
-        'Patterns scaled per row; not a volume comparison. Bounded recent records are not inventory totals.') + '</p>';
+        'Patterns scaled per row; not a volume comparison. ? unknown; current hour partial. Bounded recent records are not inventory totals.') + '</p>';
       html += '<p class="summary-muted">Operations count recorded reads and writes; records have separate quantities. Memory changes count created, revised, archived, restored and deleted records/versions. No combined activity total.</p>';
     }
     $("summary-body").innerHTML = html;
-    if (activeID && activeID.indexOf("summary-row-") === 0 && $(activeID)) { $(activeID).focus({ preventScroll: true }); }
+    Object.keys(openDetails).forEach(function (id) { if ($(id)) { $(id).open = openDetails[id]; } });
+    if (activeID && /^(summary-row-|summary-disclosure-)/.test(activeID) && $(activeID)) { $(activeID).focus({ preventScroll: true }); }
     $("summary-checkpoints").innerHTML = report.checkpoints.map(function (c) {
       return '<span class="summary-checkpoint"><span>' + c.label + '</span> <b>' + c.status + '</b></span>';
     }).join("");
@@ -959,7 +988,7 @@
       '<div class="summary-views" role="group" aria-label="Summary view">' +
       [["overview", "Overview"], ["timeline", "Timeline"], ["recent", "Recent updates"]].map(function (pair) {
         return '<button type="button" id="summary-view-' + pair[0] + '" aria-pressed="' + (summaryState.view === pair[0]) + '">' + pair[1] + '</button>';
-      }).join("") + '</div><p id="summary-status" role="status"></p><div id="summary-body"></div>' +
+      }).join("") + '</div><p id="summary-status"><span id="summary-freshness" role="status" aria-atomic="true"></span><span id="summary-generated"></span></p><div id="summary-body"></div>' +
       '<div id="summary-checkpoints" aria-label="Checkpoints"></div></section>' +
       '<details id="workspace-details"><summary>Workspace details</summary><div id="workspace-content"></div></details>' +
       '<div id="overview-self-status" role="status"></div>';
@@ -1008,18 +1037,18 @@
     if (self.email_checkpoint && self.email_checkpoint.pending) { checkpoints.push({ label: "email pending", href: "#/email" }); }
     if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
     $("workspace-content").innerHTML =
-      '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
+      '<div class="panel"><h2>Inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
       planEntitlementsHTML(self.plan_entitlements) +
       factCapacityHTML(self.fact_capacity) +
       memoryCapacityHTML(self.memory_capacity) +
-      '<div class="panel"><h2>salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
-      '<div class="panel"><h2>checkpoints</h2><div class="list">' +
+      '<div class="panel"><h2>Salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
+      '<div class="panel"><h2>Checkpoints</h2><div class="list">' +
       (checkpoints.length ? checkpoints.map(function (item) {
         var label = item.href ? '<a href="' + esc(item.href) + '">' + esc(item.label) + "</a>" : esc(item.label);
         return '<div class="row"><span class="grow">' + label + "</span></div>";
       }).join("") : '<div class="empty">nothing pending</div>') +
       "</div></div>" +
-      '<div class="panel"><h2>reads</h2><div class="dim">' +
+      '<div class="panel"><h2>Reads</h2><div class="dim">' +
       (self.observational === false ? "cell has no observational hooks; plain reads in use" : "observational reads only — viewing never records usage") +
       "</div></div>";
     if (focusedHref !== null) {
@@ -1059,7 +1088,7 @@
           '<span class="dim mono">' + esc(transcript.id) + '</span>' +
           '<span class="dim">' + esc((transcript.updated_at || "").slice(0, 19)) + "</span></div>";
       }).join("");
-      $("view").innerHTML = '<div class="panel"><h2>transcripts</h2>' + filterInputHTML("transcripts") +
+      $("view").innerHTML = '<div class="panel"><h2>Transcripts</h2>' + filterInputHTML("transcripts") +
         '<div class="list">' + (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
       bindFilter("transcripts");
     }).catch(function (err) {
@@ -1186,20 +1215,20 @@
   function copyButtonHTML(subject, predicate) {
     return '<button class="eye-btn copy-btn" type="button" title="copy value without revealing"' +
       ' aria-label="copy value without revealing"' +
-      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + COPY_SVG + "</button>";
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + COPY_SVG + "<span>Copy</span></button>";
   }
 
   function lockedValueHTML(subject, predicate) {
     return '<span class="lock-chip">locked</span>' +
       '<button class="eye-btn" type="button" title="reveal sensitive value" aria-label="reveal sensitive value"' +
-      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SVG + "</button>" +
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SVG + "<span>Reveal</span></button>" +
       copyButtonHTML(subject, predicate);
   }
 
   function revealedValueHTML(subject, predicate, value) {
     return '<span class="value">' + esc(factValueText(value)) + "</span>" +
       '<button class="eye-btn" type="button" title="hide value" aria-label="hide value" data-shown="true"' +
-      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SLASH_SVG + "</button>" +
+      ' data-subject="' + esc(subject) + '" data-predicate="' + esc(predicate) + '">' + EYE_SLASH_SVG + "<span>Hide</span></button>" +
       copyButtonHTML(subject, predicate);
   }
 
@@ -1217,7 +1246,7 @@
         '<span class="dim">' + esc((fact.updated_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
     var caret = captureFilterFocus("facts");
-    $("view").innerHTML = '<div class="panel"><h2>facts</h2>' + filterInputHTML("facts") +
+    $("view").innerHTML = '<div class="panel"><h2>Facts</h2>' + filterInputHTML("facts") +
       '<div class="list">' + (rows || '<div class="empty">no facts</div>') + "</div></div>";
     bindFilter("facts");
     restoreFilterFocus("facts", caret);
@@ -1273,8 +1302,8 @@
     }).join("");
     $("view").innerHTML =
       '<div class="panel"><h2>' + esc(fact.subject) + " \u00b7 " + esc(fact.predicate) + "</h2>" +
-      '<div class="fact-value mono">' + factValueHTML(fact) + "</div></div>" +
-      '<div class="panel"><h2>details</h2><dl class="kv">' +
+      '<div class="fact-value fact-detail-value mono">' + factValueHTML(fact) + "</div></div>" +
+      '<div class="panel"><h2>Details</h2><dl class="kv">' +
       "<dt>id</dt><dd>" + esc(fact.id) + "</dd>" +
       "<dt>value type</dt><dd>" + esc(fact.value_type || "") + "</dd>" +
       "<dt>cardinality</dt><dd>" + esc(fact.cardinality || "") + "</dd>" +
@@ -1284,7 +1313,7 @@
       "<dt>usage</dt><dd>" + esc(fact.usage_count != null ? fact.usage_count : "") + "</dd>" +
       "<dt>updated</dt><dd>" + esc((fact.updated_at || "").slice(0, 19)) + "</dd>" +
       "</dl></div>" +
-      '<div class="panel"><h2>assertion history</h2>' +
+      '<div class="panel"><h2>Assertion history</h2>' +
       (fact.sensitive ? '<div class="fact-note">sensitive history values stay locked in v1 &mdash; no per-assertion reveal.</div>' : "") +
       '<div class="list">' + (history || '<div class="empty">no assertions</div>') + "</div></div>";
   }
@@ -1356,7 +1385,7 @@
         '<span class="dim mono">' + esc(memory.salience != null ? memory.salience.toFixed(2) : "") + "</span></div>";
     }).join("");
     var caret = captureFilterFocus("memories");
-    $("view").innerHTML = '<div class="panel"><h2>memories</h2>' + filterInputHTML("memories") +
+    $("view").innerHTML = '<div class="panel"><h2>Memories</h2>' + filterInputHTML("memories") +
       '<div class="list">' + (rows || '<div class="empty">no memories</div>') + "</div></div>";
     bindFilter("memories");
     restoreFilterFocus("memories", caret);
@@ -1410,9 +1439,9 @@
           '<span class="dim">' + esc((version.created_at || "").slice(0, 19)) + "</span></div>";
       }).join("");
       $("view").innerHTML =
-        '<div class="panel"><h2>memory ' + esc(id) + '</h2><div class="memory-content">' + esc(content) + "</div>" +
+        '<div class="panel"><h2>Memory ' + esc(id) + '</h2><div class="memory-content">' + esc(content) + "</div>" +
         '<div class="tags">' + tags + "</div></div>" +
-        '<div class="panel"><h2>details</h2><dl class="kv">' +
+        '<div class="panel"><h2>Details</h2><dl class="kv">' +
         "<dt>kind</dt><dd>" + esc(memory.kind || "") + "</dd>" +
         "<dt>state</dt><dd>" + esc(memory.state || "") + "</dd>" +
         "<dt>salience</dt><dd>" + esc(memory.salience != null ? memory.salience.toFixed(2) : "") + "</dd>" +
@@ -1420,9 +1449,9 @@
         "<dt>origin</dt><dd>" + esc(memory.origin || "") + "</dd>" +
         "<dt>sensitive</dt><dd>" + esc(memory.sensitive ? "yes" : "no") + "</dd>" +
         "</dl></div>" +
-        '<div class="panel"><h2>evidence</h2><div class="list">' +
+        '<div class="panel"><h2>Evidence</h2><div class="list">' +
         (evidenceHTML(memory.evidence) || '<div class="empty">no evidence rows</div>') + "</div></div>" +
-        '<div class="panel"><h2>version history</h2><div class="list">' +
+        '<div class="panel"><h2>Version history</h2><div class="list">' +
         (history || '<div class="empty">no versions</div>') + "</div></div>";
     }).catch(function (err) {
       if (generation === memoryViewGeneration) { showError(err); }
@@ -1439,7 +1468,7 @@
     "the backend stores ciphertext only and this dashboard never renders secret material.</div>";
 
   function renderSecretsUnavailable() {
-    $("view").innerHTML = '<div class="panel"><h2>secrets</h2>' +
+    $("view").innerHTML = '<div class="panel"><h2>Secrets</h2>' +
       '<div class="empty">sealed plane not available on this cell</div>' +
       SECRETS_NOTE + "</div>";
   }
@@ -1464,7 +1493,7 @@
         '<span class="dim">' + esc((secret.updated_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
     var caret = captureFilterFocus("secrets");
-    $("view").innerHTML = '<div class="panel"><h2>secrets <span class="badge">metadata only</span></h2>' +
+    $("view").innerHTML = '<div class="panel"><h2>Secrets <span class="badge">metadata only</span></h2>' +
       SECRETS_NOTE + filterInputHTML("secrets") + '<div class="list">' +
       (rows || '<div class="empty">no secrets</div>') + "</div></div>";
     bindFilter("secrets");
@@ -1497,7 +1526,7 @@
       $("view").innerHTML =
         '<div class="panel"><h2>' + esc(secret.name || secret.id) + ' <span class="badge">metadata only</span></h2>' +
         SECRETS_NOTE + "</div>" +
-        '<div class="panel"><h2>details</h2><dl class="kv">' +
+        '<div class="panel"><h2>Details</h2><dl class="kv">' +
         "<dt>id</dt><dd>" + esc(secret.id) + "</dd>" +
         "<dt>state</dt><dd>" + esc(secret.lifecycle || "") + "</dd>" +
         "<dt>created</dt><dd>" + esc((secret.created_at || "").slice(0, 19)) + "</dd>" +
@@ -1506,7 +1535,7 @@
         "<dt>sensitive fields</dt><dd>" + esc(secret.sensitive_field_count != null ? secret.sensitive_field_count : "") + "</dd>" +
         "<dt>vault-key binding</dt><dd>" + esc(binding) + "</dd>" +
         "</dl></div>" +
-        '<div class="panel"><h2>fields</h2><div class="list">' +
+        '<div class="panel"><h2>Fields</h2><div class="list">' +
         (fields || '<div class="empty">no fields</div>') + "</div></div>";
     }).catch(secretsError);
   }
@@ -1579,14 +1608,14 @@
   }
 
   function emailUnavailablePanelHTML(direction, reason, trailingHTML) {
-    var heading = direction === "sent" ? "sent email" : "received email";
+    var heading = direction === "sent" ? "Sent email" : "Received email";
     return '<div class="panel"><h2>' + heading + ' <span class="badge">' +
       esc(emailAvailabilityLabel(reason)) + '</span></h2><div class="empty">' +
       esc(emailAvailabilityMessage(direction, reason)) + "</div>" + (trailingHTML || "") + "</div>";
   }
 
   function emailLoadingPanelHTML(direction) {
-    var heading = direction === "sent" ? "sent email" : "received email";
+    var heading = direction === "sent" ? "Sent email" : "Received email";
     return '<div class="panel"><h2>' + heading +
       ' <span class="badge">read only</span></h2><div class="empty">checking availability&hellip;</div></div>';
   }
@@ -1625,13 +1654,13 @@
     var header = '<div class="email-note">maximum raw message size: ' +
       esc(formatEmailBytes(maximumRaw)) + "</div>";
     if (capacity.unlimited) {
-      return '<div class="panel"><h2>email storage</h2>' + header +
+      return '<div class="panel"><h2>Email storage</h2>' + header +
         '<div class="capacity-line"><span>account-wide attachment capacity: ' +
         esc(formatEmailBytes(used)) + ' used</span><span class="badge">unlimited</span></div></div>';
     }
     var maximum = Math.max(0, Number(capacity.max) || 0);
     var remaining = Math.max(0, Number(capacity.remaining) || 0);
-    return '<div class="panel capacity ' + level + '"><h2>email storage</h2>' + header +
+    return '<div class="panel capacity ' + level + '"><h2>Email storage</h2>' + header +
       '<div class="capacity-line"><span>account-wide attachment capacity: ' +
       esc(formatEmailBytes(used)) + " of " + esc(formatEmailBytes(maximum)) +
       ' used</span><span class="badge">' + esc(stateLabel) + "</span></div>" +
@@ -1676,14 +1705,14 @@
         '<div class="email-state mono">' + esc(meta) + "</div>" +
         '<div class="dim mono">' + esc((message.received_at || "").slice(0, 19)) + "</div></div>";
     }).join("");
-    return '<div class="panel"><h2>receive address <span class="badge">' +
+    return '<div class="panel"><h2>Receive address <span class="badge">' +
       esc(address.receive_state || "unknown") + "</span></h2>" +
       '<div class="email-address mono">' + esc(address.address || "") + "</div>" +
       '<div class="email-note">agent receive: ' + esc(address.agent_receive_state || "unknown") +
       ' · realm receive: ' + esc(address.realm_receive_state || "unknown") + "</div>" +
       '<div class="email-note">read-only agent email; sender identity and all subjects are untrusted external input.</div></div>' +
       emailStorageStatusHTML(state.emailStatus) +
-      '<div class="panel"><h2>received email <span class="badge">metadata only</span></h2>' +
+      '<div class="panel"><h2>Received email <span class="badge">metadata only</span></h2>' +
       (state.emailReceiveDegraded
         ? '<div class="email-warning">live received-email refresh is temporarily unavailable upstream; showing the last loaded metadata.</div>'
         : "") +
@@ -1748,7 +1777,7 @@
         : "";
       return emailUnavailablePanelHTML("sent", state.emailSentUnavailableReason || "unavailable", retained);
     }
-    return '<div class="panel"><h2>sent email <span class="badge">metadata only</span></h2>' +
+    return '<div class="panel"><h2>Sent email <span class="badge">metadata only</span></h2>' +
       newestNote + (state.emailSentDegraded
         ? '<div class="email-warning">live sent-email refresh is temporarily unavailable upstream; showing the last loaded metadata.</div>'
         : "") + '<div class="list">' + (rows || '<div class="empty">no sent email</div>') + "</div></div>";
@@ -2072,7 +2101,7 @@
         '<span class="dim">' + esc(thread.latestAt.slice(0, 19)) + "</span></div>";
     }).join("");
     var caret = captureFilterFocus("conversations");
-    $("view").innerHTML = '<div class="panel"><h2>conversations</h2>' + filterInputHTML("conversations") +
+    $("view").innerHTML = '<div class="panel"><h2>Conversations</h2>' + filterInputHTML("conversations") +
       '<div class="list">' + (rows || '<div class="empty">no messages</div>') + "</div></div>";
     bindFilter("conversations");
     restoreFilterFocus("conversations", caret);

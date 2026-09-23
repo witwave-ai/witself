@@ -16,7 +16,7 @@ type palette struct{ bg, panel, fg, dim, accent, cyan, border, danger string }
 func (m *Model) colors() palette {
 	switch m.theme {
 	case "paper":
-		return palette{"#f6f4ef", "#fffdf8", "#2b2b28", "#77756c", "#1d7a4f", "#0f6f8f", "#dcd8cd", "#b3364a"}
+		return palette{"#f6f4ef", "#fffdf8", "#2b2b28", "#65635b", "#1d7a4f", "#0f6f8f", "#dcd8cd", "#b3364a"}
 	case "midnight":
 		return palette{"#0b1220", "#111a2e", "#d7e1f2", "#8fa1bd", "#7fb1ff", "#5bd6ea", "#22304a", "#f2708a"}
 	case "amber":
@@ -24,7 +24,7 @@ func (m *Model) colors() palette {
 	case "high-contrast":
 		return palette{"#000000", "#101010", "#ffffff", "#c8c8c8", "#ffd700", "#00e5ff", "#ffffff", "#ff8389"}
 	default:
-		return palette{"#0c1117", "#101823", "#c9d6e2", "#66788c", "#3ddc84", "#4dd7e8", "#1f2a36", "#ff6b81"} // auto: sensible dark default, without terminal probes
+		return palette{"#0c1117", "#101823", "#c9d6e2", "#8b9bad", "#3ddc84", "#4dd7e8", "#1f2a36", "#ff6b81"} // auto: sensible dark default, without terminal probes
 	}
 }
 func (m *Model) style(color string) lipgloss.Style {
@@ -120,13 +120,19 @@ func (m *Model) view() string {
 		brand = badge + " " + m.style(c.fg).Bold(true).Render("witself")
 	}
 	status := "● live"
+	statusColor := c.accent
 	if m.paused {
 		status = "Ⅱ paused"
+		statusColor = c.dim
 	} else if m.busy {
 		status = "◌ refreshing"
 	}
 	if m.selfStatus == "stale" || m.selfStatus == "unavailable" {
-		status = "● " + m.selfStatus
+		status = "! " + m.selfStatus
+		statusColor = c.danger
+		if m.paused {
+			status += " · paused"
+		}
 	}
 	if m.opts.Demo {
 		status += " · DEMO"
@@ -135,7 +141,7 @@ func (m *Model) view() string {
 		status += " · " + web
 	}
 	status += fmt.Sprintf(" · %s", m.opts.PollInterval)
-	right := m.style(c.accent).Render(status)
+	right := m.style(statusColor).Bold(m.selfStatus == "stale" || m.selfStatus == "unavailable").Render(status)
 	gap := max(1, m.width-ansi.StringWidth(brand)-ansi.StringWidth(right))
 	header := fit(brand+strings.Repeat(" ", gap)+right, m.width)
 	identity := m.style(c.fg).Render(" "+name) + m.style(c.dim).Render("  /  "+realm+"  ·  "+single(first(str(id, "agent_id"), "identity pending")))
@@ -146,7 +152,7 @@ func (m *Model) view() string {
 	header += "\n" + fit(identity, m.width)
 	rw, iw, dw, h := m.layout()
 	if rw == 0 {
-		labels := []string{"Home", "Logs", "Facts", "Memory", "Chats", "Email", "Vault"}
+		labels := []string{"Overview", "Transcr.", "Facts", "Memories", "Convs.", "Email", "Secrets"}
 		nav := []string{}
 		for i, l := range labels {
 			s := fmt.Sprintf("%d %s", i+1, l)
@@ -157,10 +163,15 @@ func (m *Model) view() string {
 			}
 			nav = append(nav, s)
 		}
-		if m.width < 60 {
-			header += "\n" + fit(fmt.Sprintf(" %d / 7  %s    1–7 switch", m.panel+1, panelNames[m.panel]), m.width)
+		compact := " " + strings.Join(nav, "  ")
+		if ansi.StringWidth(compact) > m.width {
+			active := fmt.Sprintf(" %d / 7  %s    1–7 switch", m.panel+1, panelNames[m.panel])
+			if ansi.StringWidth(active) > m.width {
+				active = fmt.Sprintf("%d %s · 1–7", m.panel+1, panelNames[m.panel])
+			}
+			header += "\n" + fit(active, m.width)
 		} else {
-			header += "\n" + fit(" "+strings.Join(nav, "  "), m.width)
+			header += "\n" + fit(compact, m.width)
 		}
 	}
 	var body string
@@ -180,7 +191,12 @@ func (m *Model) view() string {
 	footer := m.footer()
 	note := m.notice
 	if note == "" {
-		note = "Agent workspace  ·  https://self.witwave.ai/legal"
+		note = "r refresh · p pause · t theme · b browser · ? Legal"
+		if m.overlay != "" {
+			note = "Agent workspace · Legal: https://self.witwave.ai/legal"
+		} else if m.panel == 0 && m.summaryView < 2 {
+			note = "Enter open · a ASCII · " + note
+		}
 	}
 	if m.filterEditing {
 		note = "Type to filter · Enter keep · Esc cancel · Ctrl+U clear"
@@ -243,17 +259,11 @@ func (m *Model) inventoryView(w, h int) string {
 	if m.panel == 0 {
 		state = m.selfStatus
 	}
-	if state != "ready" && state != "" {
+	if state != "ready" && state != "" && len(rows) > 0 {
 		lines = append(lines, m.style(c.cyan).Render(fit(stateLabel(state), w)), "")
 	}
 	if len(rows) == 0 {
-		empty := "No items yet."
-		if s.filter != "" {
-			empty = "No matching items."
-		}
-		if state == "" || state == "loading" {
-			empty = "Loading inventory…"
-		}
+		empty := inventoryEmptyLabel(state, s.filter != "")
 		lines = append(lines, m.style(c.dim).Render(empty))
 		return crop(strings.Join(lines, "\n"), w, h)
 	}
@@ -283,6 +293,18 @@ func (m *Model) inventoryView(w, h int) string {
 	lines = append(lines, m.style(c.dim).Render(fmt.Sprintf("%d / %d  ·  %s", s.selected+1, len(rows), map[bool]string{true: "inventory focus", false: "Tab to focus"}[m.focus == 0])))
 	return crop(strings.Join(lines, "\n"), w, h)
 }
+func inventoryEmptyLabel(state string, filtered bool) string {
+	if state == "ready" {
+		if filtered {
+			return "No matching items."
+		}
+		return "No items yet."
+	}
+	if state == "" || state == "loading" {
+		return "Loading inventory…"
+	}
+	return stateLabel(state)
+}
 func stateLabel(s string) string {
 	switch s {
 	case "ready":
@@ -303,19 +325,35 @@ func stateLabel(s string) string {
 }
 func (m *Model) footer() string {
 	if m.overlay == "console" {
-		return " s start  b open  x stop  Esc close"
+		return " s start  b open  x stop  r check  Esc close  Ctrl+C quit"
+	}
+	if m.overlay == "theme" {
+		return " ↑↓ choose  Enter save  Esc cancel  Ctrl+C quit"
 	}
 	if m.overlay != "" {
-		return " ↑↓ scroll/select  Enter choose  Esc close  Ctrl+C quit"
+		return " ↑↓/PgUp/PgDn scroll  Esc close  Ctrl+C quit"
 	}
 	if m.filterEditing {
-		return " / filtering  Enter keep  Esc cancel"
+		return " / filtering  Enter keep  Esc cancel  Ctrl+C quit"
 	}
-	if m.panel == 0 {
-		if m.width < 80 {
-			return " o/l/e/d views  ? help  q quit"
+	if m.panel == 0 && m.summaryView != 3 {
+		mode := m.summaryFocusHint()
+		full := mode + "  o/l/e/d views  w web  ? help  q quit"
+		if ansi.StringWidth(full) <= m.width {
+			return full
 		}
-		return " o overview  l timeline  e updates  d details  b browser  ? help  q quit"
+		short := "Categories"
+		if m.summaryView == 2 || m.focus != 0 {
+			short = "Scroll"
+		}
+		compact := short + " · ↑↓ " + map[bool]string{true: "scroll", false: "choose"}[short == "Scroll"]
+		if m.summaryView != 2 {
+			compact += " · Tab focus"
+		}
+		if ansi.StringWidth(compact+"  ? help  q quit") <= m.width {
+			return compact + "  ? help  q quit"
+		}
+		return short + "  ? help  q quit"
 	}
 	actions := "Enter detail"
 	switch m.panel {
@@ -335,15 +373,18 @@ func (m *Model) footer() string {
 	case 6:
 		actions = "[ ] field  v reveal  c copy"
 	}
-	prefix := "1–7 Tab /  "
-	suffix := "  b browser  w web  ? help  q quit"
-	if m.width >= 110 {
-		suffix = "  b browser  w web  r refresh  p pause  t theme  ? help  q quit"
+	if m.panel == 0 {
+		actions = "o/l/e/d views  Enter memory"
 	}
-	if m.width < 80 {
-		return " b browser  w web  ? help  q quit"
+	suffix := "  w web  ? help  q quit"
+	full := " Tab focus  / filter  " + actions + suffix
+	if ansi.StringWidth(full) <= m.width {
+		return full
 	}
-	return " " + prefix + actions + suffix
+	if ansi.StringWidth(actions+suffix) <= m.width {
+		return actions + suffix
+	}
+	return "? help  q quit  w web"
 }
 func (m *Model) overlayView(w, h int) string {
 	if w <= 0 || h <= 0 {
@@ -465,10 +506,7 @@ func (m *Model) renderDetail(follow bool) {
 		}
 		if row == nil {
 			d.line("")
-			d.body("Choose an inventory row to explore its details.")
-			if m.width < 60 {
-				d.dim("Use ↑↓ to choose, Enter to focus detail.")
-			}
+			d.body(inventoryEmptyLabel(state, s.filter != ""))
 		} else {
 			switch m.panel {
 			case 1:

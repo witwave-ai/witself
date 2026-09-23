@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/witwave-ai/witself/internal/dashboard"
 )
 
@@ -208,12 +209,24 @@ func (m *Model) summaryKey(k string) (bool, tea.Cmd) {
 		m.notice = "Operations: recorded reads and writes; records are counted separately below."
 	case "tab", "shift+tab":
 		m.focus = 1 - m.focus
+		m.renderDetail(false)
 	case "/":
 		m.notice = "Enter opens a category. Use d for workspace details and salient memories."
 	default:
 		return false, nil
 	}
 	return true, nil
+}
+
+// Kept in the footer, outside the viewport, so scrolling never hides the mode.
+func (m *Model) summaryFocusHint() string {
+	if m.summaryView == 2 {
+		return "Scroll · ↑↓ scroll"
+	}
+	if m.focus != 0 {
+		return "Scroll · ↑↓ scroll · Tab categories"
+	}
+	return "Categories · ↑↓ choose · Tab scroll"
 }
 
 func (m *Model) categoryColor(i int) string {
@@ -246,30 +259,33 @@ func (m *Model) summaryOverview(d *detailWriter) {
 	if status != "ready" {
 		d.line(m.style(m.colors().danger).Render("STALE · showing the last successful summary"))
 	}
-	d.dim("Recorded activity · 24 hourly buckets · UTC")
-	d.dim("Current hour is partial · each row has its own unit")
-	d.dim("OPS/MEM totals: recorded portion only · ? before tracking")
 	w := obj(s["window"])
-	d.dim(summaryTime(str(w, "since"), "Jan 02 15:04") + " → " + summaryTime(str(w, "until"), "Jan 02 15:04") + " UTC")
-	d.line("")
+	d.dim(summaryTime(str(w, "since"), "Jan 02 15:04") + " → " + summaryTime(str(w, "until"), "Jan 02 15:04") + " UTC · 24 hourly bins")
+	scale := "per-row scales"
+	if m.summaryView == 1 {
+		scale = "hourly levels"
+	}
+	d.dim("Current hour partial · " + scale + " · distinct units; no combined total")
+	d.dim("OPS/MEM partial · ? earlier unknown · recent inventory bounded")
+	m.summaryAttention(d, s)
 	if m.summaryView == 2 {
 		m.summaryUpdates(d, s, 12)
 	} else {
-		if m.summaryView == 0 && d.width >= 64 {
+		if m.summaryView == 0 && d.width >= 74 {
 			iw := 22
 			if d.width < 88 {
 				iw = 12
 			}
-			d.dim(fit("   CATEGORY", 19) + fit("INVENTORY", iw) + fit("RECORDED ACTIVITY", 27) + "QTY")
+			d.line(m.style(m.colors().dim).Bold(true).Render(fit("   CATEGORY", 19) + fit("INVENTORY", iw) + fit("RECORDED ACTIVITY", 26) + "QUANTITY"))
 		}
 		for i, c := range list(s, "categories") {
 			m.actionOffsets = append(m.actionOffsets, len(d.lines))
 			mark := "  "
-			if i == m.summaryRow {
+			if i == m.summaryRow && m.focus == 0 {
 				mark = "> "
 			}
 			color := m.categoryColor(i)
-			label := m.style(color).Bold(true).Render(mark + str(c, "code") + " " + str(c, "label"))
+			label := m.style(color).Bold(i == m.summaryRow && m.focus == 0).Render(mark + str(c, "code") + " " + str(c, "label"))
 			inv := obj(c["inventory"])
 			inventory := str(inv, "status")
 			if i == 0 {
@@ -283,17 +299,15 @@ func (m *Model) summaryOverview(d *detailWriter) {
 			graph := summaryStateLabel(str(a, "status"))
 			switch quantity {
 			case "available":
-				quantity = str(a, "total") + " " + str(a, "unit")
+				units := []string{"ops", "entries", "deliveries", "changes", "accesses", "accepted sends", "sent"}
+				quantity = m.style(m.colors().fg).Bold(true).Render(str(a, "total")) + " " + units[i]
 				graph = summaryGraph(a, m.summaryView == 1, m.summaryASCII)
 			case "Disabled":
 				graph = "history disabled"
 			}
-			if m.summaryView == 1 {
-				d.line(label)
-				d.line("  " + m.style(color).Render(graph) + "  " + quantity)
-			} else if d.width >= 88 {
-				d.line(fit(label, 19) + fit(inventory, 22) + fit(m.style(color).Render(graph), 27) + quantity)
-			} else if d.width >= 64 {
+			iw := 22
+			if d.width < 88 {
+				iw = 12
 				shortInventory := str(inv, "status")
 				if i == 0 {
 					shortInventory = "activity"
@@ -304,21 +318,25 @@ func (m *Model) summaryOverview(d *detailWriter) {
 						shortInventory += " recent"
 					}
 				}
-				q := "—"
-				if str(a, "status") == "available" {
-					q = str(a, "total")
-				}
-				d.line(fit(label, 19) + fit(shortInventory, 12) + fit(m.style(color).Render(graph), 27) + q)
+				inventory = shortInventory
+			}
+			// Keep every bin and the complete quantity. If columns cannot fit,
+			// stack the row and let the writer wrap instead of truncating data.
+			if m.summaryView == 0 && ansi.StringWidth(label) <= 19 && ansi.StringWidth(inventory) < iw && 19+iw+26+ansi.StringWidth(quantity) <= d.width {
+				d.line(fit(label, 19) + fit(inventory, iw) + fit(m.style(color).Render(graph), 26) + quantity)
 			} else {
 				d.line(label + "  " + m.style(m.colors().dim).Render(inventory))
-				d.line("  " + m.style(color).Render(graph))
-				if str(a, "status") == "available" {
-					d.dim("  " + quantity)
+				if 2+ansi.StringWidth(graph)+2+ansi.StringWidth(quantity) <= d.width {
+					d.line("  " + m.style(color).Render(graph) + "  " + quantity)
+				} else {
+					d.line(m.style(color).Render(graph))
+					d.line(quantity)
 				}
 			}
 		}
 		selected := list(s, "categories")[m.summaryRow]
 		activity := obj(selected["activity"])
+		d.heading("Selected · " + str(selected, "label"))
 		if str(activity, "status") == "available" {
 			d.dim(str(selected, "label") + ": " + str(activity, "total") + " " + str(activity, "unit"))
 			measures := []string{}
@@ -330,7 +348,7 @@ func (m *Model) summaryOverview(d *detailWriter) {
 			}
 			coverage := obj(activity["coverage"])
 			if len(coverage) > 0 {
-				d.body("Recorded portion of this window; tracking since " + summaryTime(str(coverage, "tracking_since"), "Jan 02 15:04:05") + " UTC; earlier bins unknown.")
+				d.body("Recorded portion only; tracking since " + summaryTime(str(coverage, "tracking_since"), time.RFC3339Nano) + "; earlier bins unknown.")
 				if flag(coverage, "partial_first_bucket") {
 					d.body("First tracked hour is partial.")
 				}
@@ -345,17 +363,14 @@ func (m *Model) summaryOverview(d *detailWriter) {
 				legend = "? unknown   . 0   : 1–2   o 3–5   O 6–9   # 10+ per hour"
 			}
 			d.dim(legend)
-		} else {
-			d.dim("Sparklines scale per row · recent-record counts are bounded pages")
 		}
-		d.dim("↑↓ choose · Enter open · Tab scroll · a ASCII graphs")
-		m.summaryAttention(d, s)
+		d.dim(m.summaryFocusHint() + " · a ASCII graphs")
 		if m.summaryView == 0 {
 			m.summaryUpdates(d, s, 4)
 		}
 	}
 	d.line("")
-	d.dim("Collected " + summaryTime(str(s, "generated_at"), "Jan 02 15:04:05") + " UTC · cache 30s")
+	d.dim("Collected " + summaryTime(str(s, "generated_at"), time.RFC3339Nano) + " · cache 30s")
 	d.dim("Recorded quantities may omit unmetered activity. No combined total.")
 }
 
@@ -422,25 +437,25 @@ func summaryGraph(a object, timeline, ascii bool) string {
 }
 
 func (m *Model) summaryAttention(d *detailWriter, s object) {
-	d.heading("Needs attention")
 	known, pending := 0, 0
+	labels := []string{}
 	for _, c := range list(s, "checkpoints") {
 		switch str(c, "status") {
 		case "pending":
 			pending++
 			known++
-			d.line(m.style(m.colors().accent).Render("* " + str(c, "label") + " · work pending"))
+			labels = append(labels, str(c, "label")+" pending")
 		case "clear", "disabled":
 			known++
 		default:
-			d.dim(str(c, "label") + " · unavailable")
+			labels = append(labels, str(c, "label")+" unavailable")
 		}
 	}
 	if pending == 0 && known == 4 {
-		d.dim("No pending work reported.")
+		d.dim("Attention · no pending work reported")
 	}
-	if pending == 0 && known < 4 {
-		d.dim("Pending work could not be fully checked.")
+	if len(labels) > 0 {
+		d.line(m.style(m.colors().danger).Bold(true).Render("Attention · " + strings.Join(labels, " · ")))
 	}
 }
 
