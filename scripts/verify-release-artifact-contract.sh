@@ -326,19 +326,54 @@ validate_published_release() {
   }
   write_local_public_asset_names "$version" | LC_ALL=C sort >"$work_dir/expected-assets"
   gh api "repos/$repository/releases/tags/$tag" >"$work_dir/release.json"
-  jq -er --arg tag "$tag" --argjson expected "$expected_release_asset_count" '
+  local release_id
+  release_id=$(jq -er --arg tag "$tag" '
     if .tag_name != $tag or .draft != false or .prerelease != false
       then error("release was not the requested stable publication")
-      else .assets
-    | if length == $expected
-        and ([.[].name] | unique | length) == $expected
-        and all(.[]; .size > 0)
-        and all(.[]; .digest | test("^sha256:[0-9a-f]{64}$"))
-      then .[] | [.name, (.size | tostring), .digest] | @tsv
-      else error("expected \($expected) unique nonempty release assets")
-      end
+      elif (.id | type) != "number" then error("invalid release ID")
+      elif .id < 1 or .id > 9007199254740991 or (.id | floor) != .id
+        then error("invalid release ID")
+      else .id
     end
-  ' "$work_dir/release.json" | LC_ALL=C sort >"$work_dir/published-assets"
+  ' "$work_dir/release.json")
+  [[ $release_id =~ ^[1-9][0-9]*$ ]] || {
+    echo "error: invalid release ID" >&2
+    exit 1
+  }
+  # Embedded release assets can lag uploads. Enumerate the dedicated endpoint
+  # completely; a failed later page must not leave an acceptable partial list.
+  if ! gh api --paginate --slurp \
+    "repos/$repository/releases/$release_id/assets?per_page=100" \
+    >"$work_dir/asset-pages.json" 2>"$work_dir/asset-api.log"; then
+    echo "error: could not enumerate every release asset page" >&2
+    exit 1
+  fi
+  jq -esr --argjson expected "$expected_release_asset_count" '
+    def valid_name: (.name | type) == "string" and (.name | length) > 0;
+    def valid_size: .size | if type == "number" then . > 0 and floor == . else false end;
+    def valid_digest: .digest | if type == "string" then test("^sha256:[0-9a-f]{64}$") else false end;
+    if length != 1 or (.[0] | type) != "array" then
+      error("release asset listing must be one paginated array")
+    else .[0] end
+    | if length == 0 or any(.[]; type != "array") then
+        error("release asset listing contained invalid pages")
+      else . end
+    | length as $pages
+    | add
+    | if any(.[]; type != "object") then
+        error("release asset listing contained invalid entries")
+      else . end
+    | ([.[] | select(valid_name) | .name] | unique | length) as $unique
+    | ([.[] | select(valid_name | not)] | length) as $invalid_names
+    | ([.[] | select(.state != "uploaded")] | length) as $invalid_states
+    | ([.[] | select(valid_size | not)] | length) as $invalid_sizes
+    | ([.[] | select(valid_digest | not)] | length) as $invalid_digests
+    | if length == $expected and $unique == $expected and $invalid_names == 0
+        and $invalid_states == 0 and $invalid_sizes == 0 and $invalid_digests == 0
+      then .[] | [.name, (.size | tostring), .digest] | @tsv
+      else error("expected \($expected) unique nonempty release assets; pages=\($pages) assets=\(length) unique_names=\($unique) invalid_names=\($invalid_names) invalid_states=\($invalid_states) invalid_sizes=\($invalid_sizes) invalid_digests=\($invalid_digests)")
+      end
+  ' "$work_dir/asset-pages.json" | LC_ALL=C sort >"$work_dir/published-assets"
 
   local asset local_size local_digest
   while IFS= read -r asset; do
