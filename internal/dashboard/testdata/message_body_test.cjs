@@ -184,6 +184,98 @@ async function openThread(h) {
   assert.ok(h.preview(), "actual rendered thread contains a received preview");
 }
 
+for (const { documentScroll, footer = 0 } of [
+  { documentScroll: true }, { documentScroll: false }, { documentScroll: true, footer: 100 },
+]) {
+  test(`conversation preserves reading position with documentScroll=${documentScroll}, footer=${footer}`, async () => {
+    const h = harness();
+    const view = h.nodes.view;
+    // Model DOM replacement clamping the old scroll offset, then laying out
+    // the new content. Browser tests cover actual CSS and browser anchoring.
+    const scroller = documentScroll ? {} : view;
+    h.document.scrollingElement = documentScroll ? scroller : { scrollTop: 0, scrollHeight: 900, clientHeight: 900 };
+    let height = 5000;
+    scroller.scrollTop = 0;
+    scroller.clientHeight = footer ? 844 : 600;
+    scroller.scrollHeight = height + footer;
+    view.clientHeight = documentScroll ? height : 600;
+    view.scrollHeight = height;
+    view.getBoundingClientRect = () => ({ bottom: view.scrollHeight - scroller.scrollTop });
+    const html = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(view), "innerHTML");
+    Object.defineProperty(view, "innerHTML", {
+      get() { return html.get.call(this); },
+      set(value) {
+        html.set.call(this, value);
+        scroller.scrollTop = 0;
+        scroller.scrollHeight = height + footer;
+        view.scrollHeight = height;
+        if (documentScroll) view.clientHeight = height;
+      },
+    });
+    let documentScrolls = 0;
+    view.scrollIntoView = (options) => {
+      assert.equal(options.block, "end");
+      documentScrolls++;
+      scroller.scrollTop = height - scroller.clientHeight;
+    };
+    await openThread(h);
+    assert.ok(scroller.scrollTop >= height - scroller.clientHeight, "initial fetched render reaches tail");
+    assert.equal(documentScrolls, documentScroll ? 1 : 0);
+
+    // Arrival immediately after initial positioning, with no manual scroll.
+    // In the footer fixture the document tail remains 100px below the view.
+    height += 200;
+    h.inbox.push(metadata("immediate-arrival"));
+    h.frame();
+    assert.ok(scroller.scrollTop >= height - scroller.clientHeight, "initial positioning follows the next arrival regardless of footer height");
+
+    scroller.scrollTop = height - scroller.clientHeight - 32;
+    height += 200;
+    h.inbox.push(metadata("incoming"));
+    h.frame();
+    assert.ok(h.preview("incoming"));
+    assert.ok(scroller.scrollTop >= height - scroller.clientHeight, "near-bottom reader follows new message using pre-render geometry");
+
+    scroller.scrollTop = 320;
+    const before = h.nodes.view.innerHTML;
+    h.inbox.push(metadata("unrelated", { from: { agent_id: "other" } }));
+    h.frame();
+    assert.equal(h.nodes.view.innerHTML, before, "unrelated peer does not change displayed thread");
+    assert.equal(scroller.scrollTop, 320, "unrelated peer preserves reading position");
+    h.frame({ read_state: { state: "read" } });
+    assert.equal(scroller.scrollTop, 320, "metadata refresh preserves reading position");
+    height += 200;
+    h.inbox.push(metadata("incoming-while-reading"));
+    h.frame();
+    assert.ok(h.preview("incoming-while-reading"));
+    assert.equal(scroller.scrollTop, 320, "related arrival preserves reading position");
+
+    scroller.scrollTop = height - scroller.clientHeight - 20;
+    h.frame({ delivery: { state: "delivered" } });
+    assert.equal(scroller.scrollTop, height - scroller.clientHeight - 20, "near-bottom metadata refresh does not force follow");
+    scroller.scrollTop = 0;
+    h.inbox.push(metadata("another-unrelated", { from: { agent_id: "other" } }));
+    h.frame();
+    assert.equal(scroller.scrollTop, 0, "navigation position is preserved");
+
+    await h.navigate("#/conversations/other");
+    assert.ok(scroller.scrollTop >= height - scroller.clientHeight, "switching threads reaches tail");
+    scroller.scrollTop = 100;
+    await h.navigate("#/conversations/peer");
+    assert.ok(scroller.scrollTop >= height - scroller.clientHeight, "returning to a thread reaches tail");
+    assert.equal(h.bodyRequests().length, 0);
+  });
+}
+
+test("conversation scrolling tolerates missing adapter methods but propagates implementation errors", async () => {
+  const h = harness();
+  h.nodes.view.clientHeight = h.nodes.view.scrollHeight = 500;
+  await openThread(h);
+  assert.ok(h.preview(), "initial render works without scrollIntoView or scrollingElement");
+  h.nodes.view.scrollIntoView = () => { throw new Error("scroll implementation failed"); };
+  assert.throws(() => h.app.renderConversation("other"), /scroll implementation failed/);
+});
+
 test("passive list, thread and SSE render no bodies or sent controls", async () => {
   const h = harness();
   await openThread(h);
