@@ -417,7 +417,7 @@ test("transcript navigation renders and filters current inventory", options, asy
   await h.finish(request, { transcripts: [
     { id: "tx_alpha", title: "First <em>literal</em>" }, { id: "tx_beta", title: "Second inventory" },
   ] });
-  visible(h, "#/transcripts", "transcripts", "transcripts", "First <em>literal</em>");
+  visible(h, "#/transcripts", "transcripts", "Transcripts", "First <em>literal</em>");
   assert.equal(h.nodes.view.querySelector("em"), null, "inventory titles stay escaped");
   const input = h.document.getElementById("filter-transcripts");
   assert.ok(input, "real renderer created the transcript filter");

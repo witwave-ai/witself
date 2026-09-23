@@ -17,7 +17,7 @@ test("fact capacity HTML distinguishes unavailable, unlimited, and finite pressu
   assert.equal(app.factCapacityHTML(null), "");
 
   const unavailable = app.factCapacityHTML({ unavailable: true });
-  assert.match(unavailable, /current fact capacity/);
+  assert.match(unavailable, /Current fact capacity/);
   assert.match(unavailable, /temporarily unavailable/);
   assert.match(unavailable, /existing-fact updates remain available/);
   assert.doesNotMatch(unavailable, /<progress/);

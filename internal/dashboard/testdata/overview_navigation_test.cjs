@@ -19,11 +19,11 @@ test("overview navigation renders current inventory and checkpoints", options, a
   ]), [["facts", "3"], ["memories", "7"], ["secrets", "2"], ["transcripts", "4"]], "current inventory renders all sorted counts");
   assert.deepEqual(h.nodes.view.querySelectorAll("a.card-link").map((node) => node.getAttribute("href")), ["#/facts", "#/memories", "#/secrets"], "current inventory links retain their destination sections");
   const panels = h.nodes.view.querySelectorAll(".panel");
-  const salient = panels.find((panel) => panel.querySelector("h2")?.textContent === "salient memories");
+  const salient = panels.find((panel) => panel.querySelector("h2")?.textContent === "Salient memories");
   assert.equal(salient.querySelector("a").getAttribute("href"), "#/memories/mem_current", "current salient memory links to its detail");
   assert.equal(salient.querySelector("a").textContent, "current salient <literal>", "salient snippet remains literal text");
   assert.equal(h.nodes.view.querySelector("literal"), null, "current Overview values stay escaped");
-  const checkpoints = panels.find((panel) => panel.querySelector("h2")?.textContent === "checkpoints");
+  const checkpoints = panels.find((panel) => panel.querySelector("h2")?.textContent === "Checkpoints");
   assert.deepEqual(checkpoints.querySelectorAll(".row").map((node) => node.textContent), [
     "memory curation pending", "messaging work pending", "email pending", "avatar lifecycle pending",
   ], "current checkpoint labels retain every pending lane");

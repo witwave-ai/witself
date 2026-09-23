@@ -113,7 +113,7 @@ function dom(check) {
   }
   const nodes = Object.fromEntries([
     "view", "breadcrumb", "agent-name", "realm-name", "agent-id", "version",
-    "status-poll", "status-addr", "status-upstream", "status-sse", "live-dot", "live-label",
+    "source-status", "status-poll", "status-addr", "status-upstream", "status-sse", "live-dot", "live-label",
   ].map((id) => {
     const element = new Element();
     element.setAttribute("id", id);
@@ -433,4 +433,4 @@ function summaryData() {
     checkpoints: ["memory", "message", "email", "avatar"].map((key) => ({ key, label: "UNTRUSTED CHECKPOINT", status: "clear" })),
   } };
 }
-module.exports = { fixture, valueCopy, headerVector, selfData, headerMatches, navigation, visible, beginOverview, currentOverview, currentDetail, emitSelf, destination, unchangedAfter, baseline, openDetails, summaryData, nextTurn };
+module.exports = { dom, fixture, valueCopy, headerVector, selfData, headerMatches, navigation, visible, beginOverview, currentOverview, currentDetail, emitSelf, destination, unchangedAfter, baseline, openDetails, summaryData, nextTurn };

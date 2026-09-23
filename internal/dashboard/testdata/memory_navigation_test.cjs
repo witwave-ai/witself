@@ -352,7 +352,7 @@ test("memory navigation renders current inventory", options, async (t) => {
   const owned = beginList(h);
   await h.finish(owned[0], { items: [memory("mem_alpha", "first inventory entry"), memory("mem_beta", "second inventory entry")] });
   h.settled(owned);
-  visible(h, "#/memories", "memories", "memories", "memories", "first inventory entry");
+  visible(h, "#/memories", "memories", "memories", "Memories", "first inventory entry");
   assert.ok(h.nodes.view.textContent.includes("second inventory entry"), "current inventory has both distinct rows");
   const input = h.document.getElementById("filter-memories");
   assert.ok(input, "real renderer created the memory filter");
@@ -367,7 +367,7 @@ test("memory navigation renders current detail and history", options, async (t) 
   await overview(h);
   const owned = beginDetail(h, "mem_alpha");
   await finishDetail(h, owned, "mem_alpha", "current detail response");
-  visible(h, "#/memories/mem_alpha", "memories", "memories / mem_alpha", "memory mem_alpha", "current detail response");
+  visible(h, "#/memories/mem_alpha", "memories", "memories / mem_alpha", "Memory mem_alpha", "current detail response");
   assert.ok(h.nodes.view.textContent.includes("current detail response history"), "current history response rendered");
 });
 
@@ -407,7 +407,7 @@ for (const sameHash of [false, true]) {
       if (sameHash) {
         const current = beginList(h);
         await finishList(h, current, "new inventory visit");
-        visible(h, "#/memories", "memories", "memories", "memories", "new inventory visit");
+        visible(h, "#/memories", "memories", "memories", "Memories", "new inventory visit");
       }
       const before = currentDestination(t, h, sameHash ? "#/memories" : "#/overview", sameHash ? "memories" : "overview", sameHash ? "memories" : "overview");
       if (outcome === "error") await h.finish(old[0], { error: "old inventory failure" }, 503);
@@ -433,7 +433,7 @@ for (const sameHash of [false, true]) {
       const id = sameHash ? "mem_alpha" : "mem_beta";
       const current = beginDetail(h, id);
       await finishDetail(h, current, id, "new detail visit");
-      visible(h, "#/memories/" + id, "memories", "memories / " + id, "memory " + id, "new detail visit");
+      visible(h, "#/memories/" + id, "memories", "memories / " + id, "Memory " + id, "new detail visit");
       assert.ok(h.nodes.view.textContent.includes("new detail visit history"), "newer history completed before old response");
       const before = currentDestination(t, h, "#/memories/" + id, "memories", "memories / " + id);
       await finishDetail(h, old, "mem_alpha", "old detail response", outcome === "success" ? null : outcome);

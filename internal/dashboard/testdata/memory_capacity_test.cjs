@@ -17,7 +17,7 @@ test("memory capacity HTML distinguishes unavailable, unlimited, and finite pres
   assert.equal(app.memoryCapacityHTML(null), "");
 
   const unavailable = app.memoryCapacityHTML({ unavailable: true });
-  assert.match(unavailable, /active memory capacity/);
+  assert.match(unavailable, /Active memory capacity/);
   assert.match(unavailable, /temporarily unavailable/);
   assert.doesNotMatch(unavailable, /<progress/);
 
