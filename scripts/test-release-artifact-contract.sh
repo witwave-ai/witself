@@ -241,6 +241,8 @@ WITSELF_RELEASE_FIXTURE_REAL_GIT=$(command -v git)
 export WITSELF_RELEASE_FIXTURE_COMMIT="$full_commit"
 export WITSELF_RELEASE_FIXTURE_TAG="v$version"
 export WITSELF_RELEASE_FIXTURE_RESPONSE="$work_dir/published.json"
+export WITSELF_RELEASE_FIXTURE_ASSETS="$work_dir/asset-pages.json"
+export WITSELF_RELEASE_FIXTURE_ASSET_CALLS="$work_dir/asset-calls"
 export WITSELF_RELEASE_FIXTURE_CALLS="$work_dir/github-calls"
 export WITSELF_RELEASE_FIXTURE_ATTESTATIONS="$work_dir/attestations"
 cat >"$fixture_bin/git" <<'EOF'
@@ -260,6 +262,12 @@ if [[ $# == 4 && $1 == api && $2 == "repos/$GITHUB_REPOSITORY/commits/$WITSELF_R
   printf '%s\n' "$WITSELF_RELEASE_FIXTURE_COMMIT"
 elif [[ $# == 2 && $1 == api && $2 == "repos/$GITHUB_REPOSITORY/releases/tags/$WITSELF_RELEASE_FIXTURE_TAG" ]]; then
   cat "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+elif [[ $# == 4 && $1 == api && $2 == --paginate && $3 == --slurp &&
+        $4 == "repos/$GITHUB_REPOSITORY/releases/123/assets?per_page=100" ]]; then
+  printf '%s\n' assets >>"$WITSELF_RELEASE_FIXTURE_ASSET_CALLS"
+  cat "$WITSELF_RELEASE_FIXTURE_ASSETS"
+  # A later HTTP page may fail after valid JSON has already been received.
+  [[ ${WITSELF_RELEASE_FIXTURE_ASSET_FAILURE:-0} == 0 ]] || exit 1
 elif [[ $# == 14 && $1 == attestation && $2 == verify &&
         $4 == --repo && $5 == "$GITHUB_REPOSITORY" &&
         $6 == --signer-workflow && $7 == "$GITHUB_REPOSITORY/.github/workflows/release.yml" &&
@@ -283,10 +291,14 @@ while IFS= read -r asset; do
   jq -cn --arg name "$asset" \
     --argjson size "$(wc -c <"$dist_dir/$asset" | tr -d '[:space:]')" \
     --arg digest "sha256:$(sha256_file "$dist_dir/$asset")" \
-    '{name:$name,size:$size,digest:$digest}'
+    '{name:$name,size:$size,digest:$digest,state:"uploaded"}'
 done <"$work_dir/public-asset-names" | jq -s --arg tag "v$version" \
-  '{tag_name:$tag,draft:false,prerelease:false,assets:.}' >"$work_dir/published.good.json"
-cp "$work_dir/published.good.json" "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+  '{id:123,tag_name:$tag,draft:false,prerelease:false,assets:.}' >"$work_dir/published.good.json"
+# The embedded list is deliberately stale; only dedicated enumeration is used.
+jq '.assets | [.[0:27], .[27:]]' "$work_dir/published.good.json" >"$work_dir/asset-pages.good.json"
+jq '.assets = []' "$work_dir/published.good.json" >"$work_dir/release.good.json"
+cp "$work_dir/release.good.json" "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+cp "$work_dir/asset-pages.good.json" "$WITSELF_RELEASE_FIXTURE_ASSETS"
 published_verifier=(env "PATH=$fixture_bin:$PATH"
   bash "$repo_root/scripts/verify-release-artifact-contract.sh"
   published "$dist_dir" "v$version" "$GITHUB_REPOSITORY" "$full_commit")
@@ -303,20 +315,64 @@ cmp "$work_dir/expected-attestations" "$work_dir/actual-attestations" || {
   exit 1
 }
 
-jq --arg name "$provider_evidence_name" '.assets |= map(select(.name != $name))' \
-  "$work_dir/published.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
-assert_refusal 'missing published evidence asset' 'expected 55 unique nonempty release assets' "${published_verifier[@]}"
-jq --arg name "$provider_evidence_name" '.assets += [.assets[] | select(.name == $name)]' \
-  "$work_dir/published.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
-assert_refusal 'duplicate published evidence asset' 'expected 55 unique nonempty release assets' "${published_verifier[@]}"
-jq --arg name "$provider_evidence_name" \
-  '(.assets[] | select(.name == $name) | .digest) = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-  "$work_dir/published.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
-assert_refusal 'wrong published evidence digest' 'asset names, sizes, or SHA-256 digests differed' "${published_verifier[@]}"
-jq --arg name "$provider_evidence_name" '(.assets[] | select(.name == $name) | .size) += 1' \
-  "$work_dir/published.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
-assert_refusal 'wrong published evidence size' 'asset names, sizes, or SHA-256 digests differed' "${published_verifier[@]}"
+# Stable identity must be established before any asset-list request.
+for invalid_id in null 0 -1 1.5 '"123"' true '{}' 9007199254740992; do
+  jq --argjson id "$invalid_id" '.id = $id' "$work_dir/release.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
+  : >"$WITSELF_RELEASE_FIXTURE_ASSET_CALLS"
+  assert_refusal 'invalid release ID' 'invalid release ID' "${published_verifier[@]}"
+  [[ ! -s $WITSELF_RELEASE_FIXTURE_ASSET_CALLS ]] || { echo 'error: invalid ID reached asset API' >&2; exit 1; }
+done
+for identity_filter in 'del(.id)' '.tag_name = "v9.8.8"' '.draft = true' '.prerelease = true'; do
+  jq "$identity_filter" "$work_dir/release.good.json" >"$WITSELF_RELEASE_FIXTURE_RESPONSE"
+  : >"$WITSELF_RELEASE_FIXTURE_ASSET_CALLS"
+  assert_refusal 'invalid stable release identity' 'release' "${published_verifier[@]}"
+  [[ ! -s $WITSELF_RELEASE_FIXTURE_ASSET_CALLS ]] || { echo 'error: invalid identity reached asset API' >&2; exit 1; }
+done
+cp "$work_dir/release.good.json" "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+
+# Never accept a complete-looking partial response from a failed transport.
+assert_refusal 'later page API failure' 'could not enumerate every release asset page' \
+  env WITSELF_RELEASE_FIXTURE_ASSET_FAILURE=1 "${published_verifier[@]}"
+for malformed_pages in '{}' '[{}]' '[[null]]' '[]' 'null'; do
+  printf '%s\n' "$malformed_pages" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+  assert_refusal 'invalid paginated response shape' 'release asset listing' "${published_verifier[@]}"
+done
+printf '%s\n' '{' >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'malformed paginated JSON' 'parse error' "${published_verifier[@]}"
+cat "$work_dir/asset-pages.good.json" "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'multiple paginated documents' 'one paginated array' "${published_verifier[@]}"
+jq '.[0:1]' "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'truncated page set' 'assets=27' "${published_verifier[@]}"
+jq '.[1] += [.[0][0]]' "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'duplicate across pages' 'assets=56 unique_names=55' "${published_verifier[@]}"
+
+# These cases retain a valid embedded inventory: it must never be a fallback.
 cp "$work_dir/published.good.json" "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+jq --arg name "$provider_evidence_name" '[add | map(select(.name != $name))]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'missing published evidence asset' 'expected 55 unique nonempty release assets' "${published_verifier[@]}"
+jq --arg name "$provider_evidence_name" '[add | . + [.[] | select(.name == $name)]]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'duplicate published evidence asset' 'expected 55 unique nonempty release assets' "${published_verifier[@]}"
+jq '[add | . + [.[0] | .name = "unexpected-public-asset"]]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'extra distinct asset' 'assets=56 unique_names=56' "${published_verifier[@]}"
+for invalid_filter in '.[0].state = "starter"' '.[0].size = 0' '.[0].size = "1"' '.[0].size = 1.5' '.[0].digest = null' '.[0].digest = "bad"' '.[0].name = null'; do
+  jq "[add | $invalid_filter]" "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+  assert_refusal 'invalid asset metadata' 'expected 55 unique nonempty release assets' "${published_verifier[@]}"
+done
+jq '[add | .[0].state = "starter" | .[1].size = 0 | .[2].digest = null]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'value-free rejection diagnostics' 'invalid_states=1 invalid_sizes=1 invalid_digests=1' "${published_verifier[@]}"
+jq --arg name "$provider_evidence_name" \
+  '[add | (.[] | select(.name == $name) | .digest) = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'wrong published evidence digest' 'asset names, sizes, or SHA-256 digests differed' "${published_verifier[@]}"
+jq --arg name "$provider_evidence_name" '[add | (.[] | select(.name == $name) | .size) += 1]' \
+  "$work_dir/asset-pages.good.json" >"$WITSELF_RELEASE_FIXTURE_ASSETS"
+assert_refusal 'wrong published evidence size' 'asset names, sizes, or SHA-256 digests differed' "${published_verifier[@]}"
+cp "$work_dir/release.good.json" "$WITSELF_RELEASE_FIXTURE_RESPONSE"
+cp "$work_dir/asset-pages.good.json" "$WITSELF_RELEASE_FIXTURE_ASSETS"
 : >"$WITSELF_RELEASE_FIXTURE_CALLS"
 printf '%s\n' '{' >"$dist_dir/$provider_evidence_name"
 assert_refusal 'invalid evidence before published API use' 'provider contract evidence did not match' "${published_verifier[@]}"
@@ -333,4 +389,4 @@ assert_refusal 'unsigned evidence before published API use' 'exactly one provide
   exit 1
 }
 
-printf 'Release artifact contract fixtures passed: local and published success, 25 archive subjects, %d provider evidence refusals\n' "$refusal_count"
+printf 'Release artifact contract fixtures passed: local and published success, 25 archive subjects, %d evidence and asset refusals\n' "$refusal_count"
