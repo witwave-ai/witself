@@ -10,6 +10,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const SCHEMA = 'witself.dashboard-acceptance.v1';
 export const PANELS = ['overview', 'transcripts', 'facts', 'memories', 'conversations', 'email', 'secrets'];
+// Exact rendered heading names, including the metadata-only badges.
+const PANEL_HEADINGS = {
+  overview: 'Agent summary', transcripts: 'Transcripts', facts: 'Facts', memories: 'Memories',
+  conversations: 'Conversations', email: 'Received email metadata only', secrets: 'Secrets metadata only',
+};
 export const CHECKS = ['a_bare_url', 'b_authentication', 'c_panels', 'd_redaction', 'e_lifecycle'];
 const CANARY = 'STUB_SECRET_CANARY';
 const TIMEOUT = 60_000;
@@ -344,7 +349,7 @@ async function exerciseConversationBodyPreview(page, expect, requests, pending) 
   await expect(page.locator('#view')).not.toContainText(fixture);
   await expect(page.locator('.message-body-content')).toHaveCount(0);
   await page.locator('a[data-nav="conversations"]').click();
-  await expect(page.locator('#view h2').filter({ hasText: /^conversations(?:$| )/ }).first()).toBeVisible();
+  await expect(page.locator('#view').getByRole('heading', { level: 2, name: PANEL_HEADINGS.conversations, exact: true })).toBeVisible();
   await page.locator('#view .row a').first().click();
   await expect(received.getByRole('button', { name: 'Show body', exact: true })).toBeVisible();
   await expect(body).toBeHidden();
@@ -438,7 +443,7 @@ export async function run(args) {
       requireThat(cookie?.httpOnly && cookie.sameSite === 'Strict', 'cookie_policy');
       assert.equal(await page.evaluate(() => document.cookie), '');
       await expect.poll(() => pending.size).toBe(0);
-      await expect(page.locator('#live-label')).toHaveText('live');
+      await expect(page.locator('#live-label')).toHaveText('Connected');
       // Full-page navigation destroys EventSources without calling close().
       replaceStreams();
       assert.equal((await page.goto(cleanURL, { waitUntil: 'load' })).status(), 200);
@@ -455,15 +460,20 @@ export async function run(args) {
         await pageBounded((async () => {
           await page.evaluate(hash => { location.hash = hash; }, panel.hash);
           await expect(page.locator(`a[data-nav="${panel.name}"]`)).toHaveClass(/active/);
-          const heading = panel.name === 'overview' ? 'Agent summary' : panel.name === 'email' ? 'received email' : panel.name;
-          await expect(page.locator('#view h2').filter({ hasText: new RegExp(`^${heading}(?:$| )`) }).first()).toBeVisible();
+          await expect(page.locator('#view').getByRole('heading', { level: 2, name: PANEL_HEADINGS[panel.name], exact: true })).toBeVisible();
           if (panel.name === 'overview') {
             await expect(page.locator('.summary-row')).toHaveCount(7);
             await expect(page.locator('.summary-pattern')).toHaveCount(7);
             await expect(page.locator('#summary-row-transactions')).toContainText('Operations');
-            await expect(page.locator('#summary-row-transactions')).toContainText('Records written: 4');
-            await expect(page.locator('#summary-row-memories')).toContainText('Deleted: 9');
-            await expect(page.locator('#summary-row-memories')).toContainText('first tracked hour partial');
+            // Coverage now lives in sibling disclosures, outside the row links.
+            for (const category of ['transactions', 'memories']) {
+              await expect(page.locator(`#summary-details-${category} .summary-breakdown`)).toBeHidden();
+              await page.locator(`#summary-disclosure-${category}`).click();
+              await expect(page.locator(`#summary-details-${category} .summary-breakdown`)).toBeVisible();
+            }
+            await expect(page.locator('#summary-details-transactions .summary-breakdown').getByText('Records written: 4', { exact: true })).toBeVisible();
+            await expect(page.locator('#summary-details-memories .summary-breakdown').getByText('Deleted: 9', { exact: true })).toBeVisible();
+            await expect(page.locator('#summary-details-memories .summary-coverage')).toContainText('first tracked hour partial');
             await expect(page.locator('#summary-row-transactions .summary-pattern')).toHaveAttribute('aria-label', /unknown/);
             await expect(page.locator('#summary-row-memories')).toContainText('active memories');
             await expect(page.locator('#summary-row-transcripts')).toContainText('recent records');
@@ -482,14 +492,14 @@ export async function run(args) {
           if (panel.name === 'email') {
             await expect(page.locator('.email-row:not(.email-sent-row)').first()).toContainText('safe subject');
             await expect(page.locator('.email-sent-row').first()).toContainText('safe sent subject');
-            await expect(page.getByRole('heading', { name: 'email storage', exact: true })).toBeVisible();
+            await expect(page.getByRole('heading', { name: 'Email storage', exact: true })).toBeVisible();
             await expect(page.getByRole('progressbar', { name: 'account-wide attachment capacity' })).toBeVisible();
           }
           if (panel.name === 'conversations') {
             await exerciseConversationBodyPreview(page, expect, messageDetailRequests, pending);
           }
           await expect.poll(() => pending.size, { timeout: TIMEOUT }).toBe(0);
-          await expect(page.locator('#live-label')).toHaveText('live');
+          await expect(page.locator('#live-label')).toHaveText('Connected');
           await expect(page.locator('#status-upstream')).toHaveText('');
           await capturePanel(page, panel, out, privateValues);
           captured = true;
