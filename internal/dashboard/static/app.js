@@ -143,6 +143,28 @@
     }
   }
 
+  // --- portrait ---------------------------------------------------------
+  function initAvatarDialog() {
+    var trigger = $("avatar-trigger"), dialog = $("avatar-dialog"), close = $("avatar-close");
+    // Older embedded browsers and lightweight DOM consumers may omit dialogs.
+    if (!trigger || !dialog || !close) { return; }
+    if (typeof dialog.showModal !== "function" || typeof dialog.close !== "function") {
+      trigger.disabled = true;
+      return;
+    }
+    trigger.addEventListener("click", function () {
+      if (dialog.open) { return; }
+      dialog.showModal();
+      close.focus();
+    });
+    close.addEventListener("click", function () { dialog.close(); });
+    dialog.addEventListener("cancel", function (event) {
+      event.preventDefault();
+      dialog.close();
+    });
+    dialog.addEventListener("close", function () { trigger.focus(); });
+  }
+
   // --- data -------------------------------------------------------------
   function fetchJSON(path) {
     return fetch(path, { credentials: "same-origin" }).then(function (resp) {
@@ -2080,6 +2102,18 @@
 
   function renderConversation(key) {
     var view = $("view");
+    // Capture geometry before replacing DOM: rebuilding a long thread can
+    // clamp its scroll offset even when we do not request tail positioning.
+    var documentScroller = document.scrollingElement;
+    var viewTop = view.scrollTop;
+    var documentTop = documentScroller ? documentScroller.scrollTop : 0;
+    var scroller = view.clientHeight >= view.scrollHeight && documentScroller ? documentScroller : view;
+    // Match the conversation edge used by scrollIntoView on mobile; the
+    // document can continue below it with a wrapped status footer.
+    var distanceToBottom = scroller === documentScroller ?
+      view.getBoundingClientRect().bottom - documentScroller.clientHeight :
+      scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+    var nearBottom = distanceToBottom <= 64;
     var previous = Object.create(null);
     if (messageBodyView && messageBodyView.key === key) {
       view.querySelectorAll(".message-preview").forEach(function (node) {
@@ -2091,6 +2125,17 @@
     }
     var thread = null;
     buildThreads().forEach(function (candidate) { if (candidate.key === key) { thread = candidate; } });
+    // Only identities are retained, never body values or rendered HTML. The
+    // owner exists before fetch completes, so an absent ID set means first render.
+    var renderedIDs = messageBodyView.renderedIDs;
+    var nextIDs = Object.create(null);
+    var hasNewMessage = false;
+    (thread ? thread.messages : []).forEach(function (msg) {
+      var id = msg._dir + " " + msg.id;
+      nextIDs[id] = true;
+      if (!renderedIDs || !renderedIDs[id]) { hasNewMessage = true; }
+    });
+    var follow = !renderedIDs || (hasNewMessage && nearBottom);
     var bubbles = thread ? thread.messages.map(bubbleHTML).join("") : "";
     $("view").innerHTML = '<div class="panel"><h2>' + esc(thread ? thread.label : key) +
       ' <span class="badge">read-only</span></h2>' +
@@ -2109,7 +2154,18 @@
     Object.keys(previous).forEach(function (id) { setMessageBodyPreview(previous[id], "hidden"); });
     if (messageBodyPending && !view.contains(messageBodyPending.node)) { cancelMessageBodyRequest(); }
     updateMessageBodyButtons();
-    view.scrollTop = view.scrollHeight;
+    messageBodyView.renderedIDs = nextIDs;
+    if (follow) {
+      view.scrollTop = view.scrollHeight;
+      // Mobile lets the view grow with its contents; check the new layout.
+      // Lightweight DOM adapters may omit scrolling methods.
+      if (view.clientHeight >= view.scrollHeight && typeof view.scrollIntoView === "function") {
+        view.scrollIntoView({ block: "end" });
+      }
+    } else {
+      view.scrollTop = viewTop;
+      if (documentScroller) { documentScroller.scrollTop = documentTop; }
+    }
   }
 
   // At most one active body fetch exists. The token holds only request
@@ -2294,6 +2350,7 @@
     return;
   }
   initTheme();
+  initAvatarDialog();
   $("status-addr").textContent = window.location.host;
   $("view").addEventListener("click", onRevealClick);
   $("view").addEventListener("click", onMessageBodyClick);

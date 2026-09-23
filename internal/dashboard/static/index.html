@@ -9,13 +9,7 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="identity">
-    <span class="avatar-box"><img id="avatar" src="/api/avatar.svg" alt="agent avatar"></span>
-    <div class="identity-text">
-      <div id="agent-name" class="agent-name">&hellip;</div>
-      <div class="agent-meta"><span id="realm-name"></span><span class="sep">&middot;</span><span id="agent-id" class="mono"></span></div>
-    </div>
-  </div>
+  <div class="brand">Witself <span>/ agent console</span></div>
   <div class="topbar-right">
     <span class="live"><span id="live-dot" class="dot"></span><span id="live-label">connecting</span></span>
     <span id="version" class="version"></span>
@@ -27,6 +21,14 @@
 </header>
 <div class="frame">
   <nav class="rail">
+    <div class="identity">
+      <button id="avatar-trigger" class="avatar-box" type="button" aria-label="Enlarge current agent portrait" aria-haspopup="dialog" aria-controls="avatar-dialog"><img id="avatar" src="/api/avatar.svg" alt="agent avatar"></button>
+      <div class="identity-text">
+        <div id="agent-name" class="agent-name">&hellip;</div>
+        <div class="agent-meta"><span id="realm-name"></span><span class="sep">&middot;</span><span id="agent-id" class="mono"></span></div>
+      </div>
+    </div>
+    <div class="rail-links">
     <a href="#/overview" data-nav="overview">overview</a>
     <a href="#/transcripts" data-nav="transcripts">transcripts</a>
     <a href="#/facts" data-nav="facts">facts</a>
@@ -34,6 +36,7 @@
     <a href="#/conversations" data-nav="conversations">conversations</a>
     <a href="#/email" data-nav="email">email</a>
     <a href="#/secrets" data-nav="secrets">secrets</a>
+    </div>
   </nav>
   <main class="main">
     <div id="breadcrumb" class="breadcrumb"></div>
@@ -48,6 +51,10 @@
   <span id="status-addr" class="mono"></span>
   <a class="legal-link" href="https://self.witwave.ai/legal" target="_blank" rel="noopener">legal</a>
 </footer>
+<dialog id="avatar-dialog" class="avatar-dialog" aria-label="Current agent portrait">
+  <img src="/api/avatar.svg" alt="Current agent portrait enlarged">
+  <button id="avatar-close" class="avatar-close" type="button" autofocus>Close portrait</button>
+</dialog>
 <script src="/static/app.js"></script>
 </body>
 </html>
