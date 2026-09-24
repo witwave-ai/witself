@@ -333,9 +333,12 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   font-size: 0.75rem;
   color: var(--fg-dim);
 }
-.kv { display: grid; grid-template-columns: minmax(0, 30%) minmax(0, 1fr); gap: 0.2rem 1rem; font-size: 0.85rem; }
-.kv dt { color: var(--fg-dim); }
-.kv dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+/* Agent and Account details share a bounded label gutter. */
+.kv, .account-kv { display: grid; grid-template-columns: minmax(7rem, 12rem) minmax(0, 1fr); align-items: start; gap: .35rem .8rem; }
+.kv dt, .account-kv dt { min-width: 0; color: var(--fg-dim); overflow-wrap: anywhere; }
+.kv dd, .account-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv { font-size: 0.85rem; }
+.kv dd { font-family: var(--font-mono); }
 
 /* Read-only agent email */
 .email-address { color: var(--accent-2); overflow-wrap: anywhere; }
@@ -537,15 +540,15 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
 .account-sections { display: flex; flex-wrap: wrap; gap: 0 .8rem; margin: .35rem 0; }
 .account-sections a { padding: .4rem .15rem; min-height: 44px; }
 .account-sections a[aria-current="page"] { color: var(--fg); border-bottom: 2px solid var(--accent); }
-.account-kv { display: grid; grid-template-columns: minmax(7rem, 12rem) minmax(0, 1fr); gap: .35rem .8rem; margin: .7rem 0; }
-.account-kv dt { color: var(--fg-dim); }
-.account-kv dd { margin: 0; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.account-kv { margin: .7rem 0; }
+.account-kv dd { white-space: pre-wrap; }
 .account-item { border-top: 1px solid var(--border); padding: .6rem 0; }
+.account-card h2 { font-size: 1.05rem; color: var(--fg); margin: 0 0 .5rem; }
 .account-card h3 { font-size: .9rem; font-weight: 600; margin: .4rem 0; }
 .account-thread { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 480px) {
-  .account-kv { grid-template-columns: minmax(0, 1fr); gap: .15rem; }
-  .account-kv dd { margin-bottom: .5rem; }
+  .kv, .account-kv { grid-template-columns: minmax(0, 1fr); gap: .15rem; }
+  .kv dd, .account-kv dd { margin-bottom: .5rem; }
 }
 
 @media (max-width: 700px) {
