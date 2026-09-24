@@ -90,7 +90,7 @@ func (m *Model) compactNav() string {
 
 func (m *Model) accountNav() string {
 	width := max(1, m.account.vp.Width)
-	lines, line := []string{}, "[ / ]"
+	lines, line := []string{}, ""
 	for _, key := range m.account.context.sections {
 		label := accountLabels[key]
 		style := m.style(m.colors().dim)
@@ -99,7 +99,9 @@ func (m *Model) accountNav() string {
 			style = m.style(m.colors().accent).Bold(true)
 		}
 		item := style.Render(label)
-		if ansi.StringWidth(line)+2+ansi.StringWidth(item) > width {
+		if line == "" {
+			line = item
+		} else if ansi.StringWidth(line)+2+ansi.StringWidth(item) > width {
 			lines = append(lines, line)
 			line = item
 		} else {
@@ -117,26 +119,32 @@ func (m *Model) accountAgentName() string {
 // If a value needs abbreviation, its full form is also rendered in scroll.
 func (m *Model) accountContextStrip(d *detailWriter) bool {
 	clipped := false
-	for _, row := range []struct{ label, value string }{
-		{"Read-only account scope · Account", m.account.context.account},
-		{"Manager · " + m.account.context.role, m.account.context.operator},
-		{"Selected agent", m.accountAgentName()},
+	compact := func(value string) string {
+		text := single(value)
+		clipped = clipped || text != value
+		return text
+	}
+	account := compact(m.account.context.account)
+	manager := compact(m.account.context.operator)
+	role := compact(m.account.context.role)
+	agent := compact(m.accountAgentName())
+	for _, row := range []struct{ label, value, suffix string }{
+		{"Account", account, " · Read-only"},
+		{"Manager", manager + " · " + role + " · Agent " + agent, ""},
 	} {
-		value := single(row.value)
-		room := d.width - ansi.StringWidth(row.label) - 2
-		if room < 8 {
-			d.dim(row.label)
-			room = d.width
-			if ansi.StringWidth(value) > room || value != row.value {
-				clipped = true
-			}
-			d.line(d.m.style(d.m.colors().fg).Render(ansi.Truncate(value, max(1, room), "…")))
+		label := row.label + "  "
+		room := d.width - ansi.StringWidth(label+row.suffix)
+		// Reserve Read-only on the account row at ordinary terminal widths.
+		// Any clipped or normalized component is repeated losslessly in scroll.
+		if room < 1 {
+			clipped = true
+			d.lines = append(d.lines, m.style(m.colors().dim).Render(ansi.Truncate(label+row.value+row.suffix, max(1, d.width), "…")))
 			continue
 		}
-		if ansi.StringWidth(value) > room || value != row.value {
-			clipped = true
-		}
-		d.line(d.m.style(d.m.colors().dim).Render(row.label+"  ") + d.m.style(d.m.colors().fg).Render(ansi.Truncate(value, room, "…")))
+		clipped = clipped || ansi.StringWidth(row.value) > room
+		d.lines = append(d.lines, m.style(m.colors().dim).Render(label)+
+			m.style(m.colors().fg).Render(ansi.Truncate(row.value, room, "…"))+
+			m.style(m.colors().dim).Render(row.suffix))
 	}
 	return clipped
 }

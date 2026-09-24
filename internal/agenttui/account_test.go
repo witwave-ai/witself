@@ -156,7 +156,7 @@ func TestAccountNavigationAndRestrictedRole(t *testing.T) {
 					t.Fatalf("%s: %s", section, m.account.status)
 				}
 				content := ansi.Strip(m.account.vp.View())
-				if !strings.Contains(content, "Read-only account scope") || !strings.Contains(content, "Manager") || !strings.Contains(content, "Selected agent") {
+				if !strings.Contains(content, "Account  acct_studio_demo · Read-only") || !strings.Contains(content, "Manager  op_manager_demo") || !strings.Contains(content, m.account.context.role+" · Agent "+m.accountAgentName()) {
 					t.Fatalf("scope missing: %s", content)
 				}
 			}
@@ -518,7 +518,7 @@ func TestAccountLayoutsAndSyntheticSnapshots(t *testing.T) {
 							t.Fatalf("width %d", ansi.StringWidth(line))
 						}
 					}
-					for _, want := range []string{accountLabels[section], "Read-only account scope", "Manager", "Selected agent", "1–7", "q quit"} {
+					for _, want := range []string{accountLabels[section], "Account  acct_studio_demo · Read-only", "Manager  op_manager_demo", m.account.context.role + " · Agent " + m.accountAgentName(), "1–7", "q quit"} {
 						if !strings.Contains(plain, want) {
 							t.Fatalf("%s missing %q\n%s", section, want, plain)
 						}
