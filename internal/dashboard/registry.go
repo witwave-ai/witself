@@ -30,24 +30,27 @@ var agentIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 // RegistryEntry is the discovery record one serving dashboard writes to
 // ~/.witself/dashboards/<agentID>.json so local tooling can find it.
-// AccessURL carries the tokened open URL so tooling that did not start the
-// serve can still open it; the 0600 file's same-user exposure is identical
-// to the agent token file, which already grants the underlying reads (ADR
-// 0004).
+// AccessURL is private in-process session custody. On disk, manager opening
+// credentials use manager_access_url and access_url is empty, so legacy readers
+// cannot print or reuse manager access. The 0600 registry is not an authority
+// boundary against the same OS user. Public status/stop output must redact
+// manager-bound access URLs; reuse requires authenticated live proof.
 type RegistryEntry struct {
-	SchemaVersion string    `json:"schema_version"`
-	AgentID       string    `json:"agent_id"`
-	AgentName     string    `json:"agent_name"`
-	Account       string    `json:"account"`
-	AccountID     string    `json:"account_id,omitempty"`
-	RealmID       string    `json:"realm_id,omitempty"`
-	Endpoint      string    `json:"endpoint,omitempty"`
-	Realm         string    `json:"realm"`
-	Port          int       `json:"port"`
-	PID           int       `json:"pid"`
-	URL           string    `json:"url"`
-	AccessURL     string    `json:"access_url"`
-	StartedAt     time.Time `json:"started_at"`
+	Manager        *ViewerBinding `json:"manager,omitempty"`
+	ViewerContract string         `json:"viewer_contract,omitempty"`
+	SchemaVersion  string         `json:"schema_version"`
+	AgentID        string         `json:"agent_id"`
+	AgentName      string         `json:"agent_name"`
+	Account        string         `json:"account"`
+	AccountID      string         `json:"account_id,omitempty"`
+	RealmID        string         `json:"realm_id,omitempty"`
+	Endpoint       string         `json:"endpoint,omitempty"`
+	Realm          string         `json:"realm"`
+	Port           int            `json:"port"`
+	PID            int            `json:"pid"`
+	URL            string         `json:"url"`
+	AccessURL      string         `json:"access_url"`
+	StartedAt      time.Time      `json:"started_at"`
 }
 
 // DefaultPort maps an agent id onto a stable port in [50000, 59999]: the
@@ -88,7 +91,7 @@ func WriteRegistryEntry(entry RegistryEntry) error {
 	if err != nil {
 		return err
 	}
-	return writeJSONAtomic(path, entry)
+	return writeJSONAtomic(path, privateRegistryRecord(entry))
 }
 
 // ClaimRegistryEntry atomically claims the agent's registry slot for a
@@ -117,7 +120,7 @@ func ClaimRegistryEntry(entry RegistryEntry) (RegistryEntry, bool, error) {
 		// A corrupt file is stale, never live — the same verdict as
 		// LiveRegistryEntry — and so is an entry recording our own port.
 		var existing RegistryEntry
-		if json.Unmarshal(raw, &existing) == nil && existing.Port != entry.Port && EntryLive(existing) {
+		if decodeRegistryRecord(raw, &existing) == nil && existing.Port != entry.Port && EntryLive(existing) {
 			return existing, false, nil
 		}
 	}
@@ -157,7 +160,7 @@ func ReadRegistryEntry(agentID string) (RegistryEntry, error) {
 		return RegistryEntry{}, err
 	}
 	var entry RegistryEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
+	if err := decodeRegistryRecord(raw, &entry); err != nil {
 		return RegistryEntry{}, fmt.Errorf("dashboard: decode %s: %w", path, err)
 	}
 	return entry, nil
@@ -213,7 +216,7 @@ func LiveRegistryEntry(agentID string) (RegistryEntry, bool, error) {
 		return RegistryEntry{}, false, err
 	}
 	var entry RegistryEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
+	if err := decodeRegistryRecord(raw, &entry); err != nil {
 		// A corrupt registry file is stale, not live; the next serve
 		// overwrites it.
 		return RegistryEntry{}, false, nil
@@ -288,7 +291,7 @@ func ListRegistryEntries() ([]RegistryEntry, error) {
 			continue
 		}
 		var entry RegistryEntry
-		if err := json.Unmarshal(raw, &entry); err != nil {
+		if err := decodeRegistryRecord(raw, &entry); err != nil {
 			continue
 		}
 		entries = append(entries, entry)

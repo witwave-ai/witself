@@ -545,20 +545,35 @@ existing agent-driven CLI and MCP workflows, and the Console reflects the
 resulting state through observational or passive reads. Its only write is the
 narrowly scoped theme
 preference described in [ADR 0004](docs/decisions/0004-local-agent-dashboard.md).
-The Overview also shows the bounded enforced plan, closed agent-domain feature
-booleans, and retention days from the token account's cell-applied snapshot;
-it performs no billing/control-plane read and exposes no subscription,
-payment, provider, pending-change, admin, or cross-agent usage detail.
+The agent Overview also shows the bounded enforced plan, closed agent-domain
+feature booleans, and retention days from the token account's cell-applied
+snapshot; that projection performs no billing/control-plane read and exposes
+no subscription, payment, provider, pending-change, admin, or cross-agent usage
+detail.
 
-The listener binds `127.0.0.1` only and requires the per-process tokened URL
-printed at startup; `status` and `stop` manage running Consoles from the same
-local registry. See the [Agent Console presentation
-matrix](docs/agent-console.md) and [ADR
+Both interfaces also show a separate **Account** area when the original current
+CLI operator is verified as a manager of the selected agent's canonical
+account. The agent gains no permissions. Without that manager, Account
+navigation and options are absent; explicit `--endpoint` or `--token-file`
+connections remain agent-only. Account has six read subsections: Overview,
+Clients on this device, Plan & limits, Billing, Support, and Access; Plan & limits
+and Billing appear only for permitted manager roles. Press `8` in the TUI or
+use the browser's bottom Account entry. Clients are local recorded installs,
+checked only by **Check this device**, with no provider execution or online
+health claim. Account adds no payment, support, or other domain write controls.
+
+The listener binds `127.0.0.1` only. `status` and `stop` manage registered
+Consoles locally and hide manager-session opening URLs. Use `dashboard open`
+with the same account, realm, and agent selectors to verify and open an existing
+session. For manual browser opening, add `--print-url`; its output is private
+and grants access to that local session. Do not paste it into logs or reports.
+See the [Agent Console presentation matrix](docs/agent-console.md) and [ADR
 0004](docs/decisions/0004-local-agent-dashboard.md).
 
 ```sh
 witself dashboard serve --agent scout --open
 witself dashboard status
+witself dashboard open --agent scout
 witself dashboard stop --agent scout
 ```
 

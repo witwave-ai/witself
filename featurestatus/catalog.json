@@ -485,7 +485,7 @@
       "id": "agent-dashboard",
       "name": "Local Agent Console",
       "area": "Operator experience",
-      "summary": "The loopback-only per-agent Agent Console is `witself dashboard`, with passive or observational projections for identity, cell-applied plan entitlements, transcripts, memories, facts, messaging, received/sent email metadata, email capacity, secrets metadata, and local preferences.",
+      "summary": "The local Agent Console keeps seven agent sections and adds a conditional, read-only Account area in browser and TUI for the verified current same-account manager: profile, this-device clients, role-filtered plan/billing, support, and access. Agent authority is unchanged.",
       "implementation": "implemented",
       "managed_rollout": "not_applicable",
       "evidence_release": "v0.0.275",
@@ -500,29 +500,35 @@
       "gates": {
         "behavior": {
           "state": "pass",
-          "summary": "Serve, status, stop, live updates, preferences, capability degradation, and all seven advertised panels are implemented, including the live cell-applied entitlement card and independent read-only Received and Sent email projections.",
+          "summary": "Seven agent sections remain intact. The Account extension uses a separate current same-account manager, six role-filtered read subsections, explicit local client checks, and selected support text.",
           "evidence": [
             "README.md",
             "cmd/witself/dashboard_test.go",
+            "internal/agenttui/account_test.go",
+            "internal/dashboard/account_test.go",
+            "internal/dashboard/account_ui_test.go",
             "internal/dashboard/dashboard_test.go"
           ]
         },
         "entitlement_policy": {
           "state": "pass",
-          "summary": "The Console uses exactly one agent token and projects a closed value-free entitlement schema only from that token account's cell-applied snapshot; it performs no catalog, control-plane, billing, provider, account-selector, privileged cross-agent, admin, or domain-mutation operation.",
+          "summary": "Agent panels use the agent token and cell-applied entitlement snapshot. Account reads independently recheck the original current CLI manager for the same account; explicit endpoint/token-file stays agent-only. No agent grant, fleet/admin privilege, or domain mutation is added.",
           "evidence": [
             "cmd/witself-server/plan_entitlements_test.go",
             "docs/agent-console.md",
             "docs/decisions/0004-local-agent-dashboard.md",
+            "internal/dashboard/account_test.go",
             "internal/dashboard/dashboard_test.go",
             "internal/server/self_test.go"
           ]
         },
         "bounds_abuse": {
           "state": "pass",
-          "summary": "Loopback binding, host checks, process-local credentials, method/body caps, CSP, bounded pages, sanitized SVG, a double allow-listed entitlement projection, and strict email projections that remove ids, bodies, provider payloads, billing fields, and action targets constrain the browser boundary.",
+          "summary": "Loopback/auth guards and allowlisted projections remain. Account adds bounded reads, fixed resource errors, ephemeral selected support text, exact money/unknown states, and explicit metadata-only local checks. Manager bearers and routine manager-session URLs remain private.",
           "evidence": [
             "docs/decisions/0004-local-agent-dashboard.md",
+            "internal/clientinventory/inventory_test.go",
+            "internal/dashboard/account_test.go",
             "internal/dashboard/dashboard_test.go",
             "internal/server/self_test.go"
           ]
@@ -551,10 +557,11 @@
         },
         "docs_support": {
           "state": "pass",
-          "summary": "The command, presentation matrix, cell-applied entitlement schema and compatibility states, domain-ownership boundary, local lifecycle, received/sent email projections, and distinction from the fleet-admin TUI and any future hosted console are documented.",
+          "summary": "Browser and TUI guides cover conditional Account access, role-filtered reads, explicit local check limits, support transport/display caps, current-manager session matching, private manual opening, and the unchanged agent/domain boundary.",
           "evidence": [
             "README.md",
             "docs/agent-console.md",
+            "docs/agent-tui.md",
             "docs/cli-command-surface.md",
             "docs/decisions/0004-local-agent-dashboard.md"
           ]

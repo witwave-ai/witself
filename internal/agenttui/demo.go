@@ -12,8 +12,9 @@ import (
 // demoSource is deliberately closed: all content is authored below, with no
 // client, endpoint, environment, filesystem, or credential lookup.
 type demoSource struct {
-	mu    sync.Mutex
-	theme string
+	mu             sync.Mutex
+	theme          string
+	accountChecked bool
 }
 
 // NewDemoSource returns a deterministic, entirely in-memory synthetic workspace.
@@ -116,6 +117,8 @@ func (d *demoSource) Read(ctx context.Context, r dashboard.ReadRequest) (json.Ra
 		return nil, err
 	}
 	switch r.Resource {
+	case dashboard.ResourceAccountContext, dashboard.ResourceAccountOverview, dashboard.ResourceAccountClients, dashboard.ResourceAccountClientsScan, dashboard.ResourceAccountPlan, dashboard.ResourceAccountBilling, dashboard.ResourceAccountSupport, dashboard.ResourceAccountSupportTicket, dashboard.ResourceAccountAccess:
+		return d.accountRead(r)
 	case dashboard.ResourceSummary:
 		return encode(object{"summary": demoSummary()})
 	case dashboard.ResourceSelf:

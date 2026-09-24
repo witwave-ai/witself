@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -11,7 +10,7 @@ import (
 // SameRegistryInstance compares the complete private discovery fence. PID
 // alone is insufficient when a process or port is reused.
 func SameRegistryInstance(a, b RegistryEntry) bool {
-	return a.SchemaVersion == b.SchemaVersion && a.AgentID == b.AgentID &&
+	return sameRegistryManager(a.Manager, b.Manager) && a.ViewerContract == b.ViewerContract && a.SchemaVersion == b.SchemaVersion && a.AgentID == b.AgentID &&
 		a.PID == b.PID && a.Port == b.Port && a.StartedAt.Equal(b.StartedAt) &&
 		a.URL == b.URL && a.AccessURL == b.AccessURL && a.AccountID == b.AccountID &&
 		a.RealmID == b.RealmID && a.Endpoint == b.Endpoint && a.Account == b.Account &&
@@ -46,7 +45,7 @@ func ReadRegistryInstance(agentID string) (RegistryEntry, error) {
 		return RegistryEntry{}, errors.New("dashboard registry record is unreadable")
 	}
 	var entry RegistryEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
+	if err := decodeRegistryRecord(raw, &entry); err != nil {
 		return RegistryEntry{}, err
 	}
 	if entry.SchemaVersion != RegistrySchemaVersion || entry.AgentID != agentID {
@@ -118,4 +117,20 @@ func ClaimManagedRegistryEntry(ctx context.Context, entry RegistryEntry) (bool, 
 func RegistryPIDRunning(pid int) bool {
 	running, known := pidRunning(pid)
 	return known && running
+}
+
+func sameRegistryManager(a, b *ViewerBinding) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// PublicRegistryEntry removes opening authority from manager session output,
+// including stale sessions. Never mutate the private on-disk fence.
+func PublicRegistryEntry(entry RegistryEntry) RegistryEntry {
+	if entry.Manager != nil {
+		entry.AccessURL = ""
+	}
+	return entry
 }

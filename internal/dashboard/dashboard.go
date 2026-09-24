@@ -152,6 +152,10 @@ var maxSSEConnections = 8
 
 // Config carries everything Register needs to proxy one agent's read surface.
 type Config struct {
+	// AccountManager is an optional separately verified operator for this agent account.
+	AccountManager *AccountManager `json:"-"`
+	// AccountClientsScan is private local wiring; nil truthfully means not_checked.
+	AccountClientsScan AccountClientsScan `json:"-"`
 	// Endpoint and BearerToken reach the agent's cell exactly like the CLI.
 	Endpoint    string
 	BearerToken string
@@ -189,6 +193,14 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	sem := make(chan struct{}, maxSSEConnections)
 	factReads := &factReadCapability{}
 	secrets := &secretsCapability{}
+	accounts := newAccountCollector(cfg)
+	mux.Handle("GET /api/console/viewer", secure(cfg, session, viewerContextHandler(cfg, accounts)))
+	for resource, path := range accountPaths {
+		if resource == ResourceAccountSupportTicket {
+			path += "{id}"
+		}
+		mux.Handle("GET "+path, secure(cfg, session, accountHandler(accounts, resource)))
+	}
 	mux.Handle("GET /{$}", secure(cfg, session, http.HandlerFunc(indexHandler)))
 	mux.Handle("GET /static/", secure(cfg, session, http.FileServerFS(staticFS)))
 	mux.Handle("GET /api/self", secure(cfg, session, selfHandler(cfg)))
@@ -288,8 +300,12 @@ func secure(cfg Config, session string, next http.Handler) http.Handler {
 		}
 		cookie, err := r.Cookie(cookieName)
 		if err != nil || !tokenMatches(cookie.Value, session) {
+			hint := "open the ?token= URL printed at startup"
+			if cfg.AccountManager != nil {
+				hint = "run witself dashboard open with the same account, realm, and agent selectors; add --print-url to deliberately reveal the opening URL"
+			}
 			writeJSONError(w, http.StatusUnauthorized,
-				"missing or invalid access token (open the ?token= URL printed at startup)")
+				"missing or invalid access token ("+hint+")")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(activity.WithObservation(r.Context())))

@@ -22,11 +22,29 @@ import (
 
 const consoleBootstrapLimit = 64 * 1024
 
+// Explicit pipe-only DTO: AccountManager intentionally omits its bearer from JSON.
+type tuiConsoleManagerBootstrap struct {
+	Endpoint string                           `json:"endpoint"`
+	Bearer   string                           `json:"bearer"`
+	Binding  dashboard.AccountManagerIdentity `json:"binding"`
+}
+
+func (tuiConsoleManagerBootstrap) String() string   { return "private manager bootstrap" }
+func (tuiConsoleManagerBootstrap) GoString() string { return "private manager bootstrap" }
+func consoleManagerBootstrap(m *dashboard.AccountManager) *tuiConsoleManagerBootstrap {
+	if m == nil {
+		return nil
+	}
+	return &tuiConsoleManagerBootstrap{Endpoint: m.Endpoint, Bearer: m.BearerToken, Binding: m.Identity}
+}
+
 type tuiConsoleBootstrap struct {
-	AccessToken string              `json:"access_token"`
-	Connection  agentConnection     `json:"connection"`
-	Identity    client.SelfIdentity `json:"identity"`
-	Poll        time.Duration       `json:"poll"`
+	Manager      *tuiConsoleManagerBootstrap `json:"manager,omitempty"`
+	ScannerRoots accountConsoleRoots         `json:"scanner_roots"`
+	AccessToken  string                      `json:"access_token"`
+	Connection   agentConnection             `json:"connection"`
+	Identity     client.SelfIdentity         `json:"identity"`
+	Poll         time.Duration               `json:"poll"`
 }
 
 func (c *tuiConsole) spawn(ctx context.Context) (*tuiConsoleProcess, <-chan bool, error) {
@@ -34,7 +52,7 @@ func (c *tuiConsole) spawn(ctx context.Context) (*tuiConsoleProcess, <-chan bool
 	if err != nil {
 		return nil, nil, errConsoleStart
 	}
-	raw, err := json.Marshal(tuiConsoleBootstrap{Connection: c.conn, Identity: c.identity, Poll: c.poll, AccessToken: accessToken})
+	raw, err := json.Marshal(tuiConsoleBootstrap{Connection: c.conn, Identity: c.identity, Poll: c.poll, AccessToken: accessToken, Manager: consoleManagerBootstrap(c.manager), ScannerRoots: c.roots})
 	if err != nil || len(raw)+1 > consoleBootstrapLimit {
 		return nil, nil, errConsoleStart
 	}
@@ -144,6 +162,10 @@ func runTUIConsoleChild(input io.Reader, output io.Writer) int {
 	bootstrap.Connection.Endpoint = endpoint
 	startup, finish := context.WithTimeout(ctx, 8*time.Second)
 	err = verifyConsoleChildIdentity(startup, bootstrap)
+	var manager *dashboard.AccountManager
+	if err == nil {
+		manager, err = verifyConsoleChildManager(startup, bootstrap)
+	}
 	finish()
 	if err != nil || ctx.Err() != nil {
 		return 1
@@ -157,7 +179,7 @@ func runTUIConsoleChild(input io.Reader, output io.Writer) int {
 	if err != nil {
 		return 1
 	}
-	cfg := dashboard.Config{Endpoint: endpoint, BearerToken: bootstrap.Connection.Token, AccessToken: token, Identity: bootstrap.Identity, Version: version.Version, PollInterval: bootstrap.Poll}
+	cfg := dashboard.Config{AccountManager: manager, AccountClientsScan: newAccountConsoleScanner(ctx, bootstrap.ScannerRoots, manager), Endpoint: endpoint, BearerToken: bootstrap.Connection.Token, AccessToken: token, Identity: bootstrap.Identity, Version: version.Version, PollInterval: bootstrap.Poll}
 	entry := dashboard.RegistryEntry{AgentID: bootstrap.Identity.AgentID, AgentName: bootstrap.Identity.AgentName, Account: bootstrap.Connection.AccountName, Realm: bootstrap.Identity.RealmName}
 	return serveDashboardLifecycle(ctx, listener, cfg, entry, false, io.Discard, func() error { _, err := io.WriteString(output, "ready\n"); return err })
 }
@@ -189,4 +211,25 @@ func verifyConsoleChildIdentity(ctx context.Context, bootstrap tuiConsoleBootstr
 		return errConsoleStart
 	}
 	return nil
+}
+
+// No ambient selectors or credential lookup are allowed in the child. A claimed
+// manager must authenticate the original bound operator; refusal is fatal.
+func verifyConsoleChildManager(ctx context.Context, b tuiConsoleBootstrap) (*dashboard.AccountManager, error) {
+	if b.Manager == nil {
+		return nil, nil
+	}
+	m := b.Manager
+	a, e1 := client.AccountConsoleOrigin(b.Connection.Endpoint)
+	endpoint, e2 := client.AccountConsoleOrigin(m.Endpoint)
+	if e1 != nil || e2 != nil || a != endpoint || !b.ScannerRoots.valid() ||
+		m.Binding.AccountID != b.Identity.AccountID || m.Bearer == "" || m.Bearer == b.Connection.Token ||
+		!client.AccountConsoleRole(m.Binding.Role) || m.Binding.OperatorID == "" {
+		return nil, errConsoleStart
+	}
+	manager := &dashboard.AccountManager{Endpoint: endpoint, BearerToken: m.Bearer, Identity: m.Binding}
+	if _, err := client.RevalidateAccountConsoleManager(ctx, *manager); err != nil {
+		return nil, errConsoleStart
+	}
+	return manager, nil
 }

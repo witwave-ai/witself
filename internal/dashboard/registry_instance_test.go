@@ -16,6 +16,10 @@ func registryInstanceFixture() RegistryEntry {
 
 func TestReleaseRegistryInstanceExactFence(t *testing.T) {
 	cases := map[string]func(*RegistryEntry){
+		"manager": func(e *RegistryEntry) {
+			e.Manager = &ViewerBinding{AccountID: "acc_synthetic", OperatorID: "op_new", Role: "account_owner"}
+		},
+		"viewer contract":        func(e *RegistryEntry) { e.ViewerContract = ViewerSchema },
 		"pid":                    func(e *RegistryEntry) { e.PID++ },
 		"port same pid":          func(e *RegistryEntry) { e.Port++ },
 		"started same pid":       func(e *RegistryEntry) { e.StartedAt = e.StartedAt.Add(time.Nanosecond) },
@@ -212,5 +216,42 @@ func TestClaimManagedRegistryEntryRefusesUnverifiedRecords(t *testing.T) {
 	raw, err := os.ReadFile(path)
 	if err != nil || string(raw) != "{corrupt" {
 		t.Fatal("managed claim changed corrupt record")
+	}
+}
+
+func TestRegistryManagerReplacementFence(t *testing.T) {
+	for _, field := range []string{"presence", "account", "operator", "role", "contract"} {
+		t.Run(field, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", t.TempDir())
+			original := registryInstanceFixture()
+			original.Manager = &ViewerBinding{AccountID: original.AccountID, OperatorID: "op_original", Role: "account_owner"}
+			original.ViewerContract = ViewerSchema
+			successor := original
+			binding := *original.Manager
+			successor.Manager = &binding
+			switch field {
+			case "presence":
+				successor.Manager = nil
+			case "account":
+				binding.AccountID = "acc_other"
+			case "operator":
+				binding.OperatorID = "op_other"
+			case "role":
+				binding.Role = "account_operator"
+			case "contract":
+				successor.ViewerContract = "different"
+			}
+			if WriteRegistryEntry(successor) != nil {
+				t.Fatal("write successor")
+			}
+			called := false
+			matched, err := WithRegistryInstance(context.Background(), original, func() error { called = true; return nil })
+			if err != nil || matched || called {
+				t.Fatal("changed manager fence authorized action")
+			}
+			if removed, err := ReleaseRegistryInstance(context.Background(), original); err != nil || removed {
+				t.Fatal("changed manager fence deleted")
+			}
+		})
 	}
 }

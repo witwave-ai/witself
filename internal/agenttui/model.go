@@ -78,6 +78,7 @@ type Model struct {
 	private                       privateState
 	privateBusy                   bool
 	console                       consoleModel
+	account                       accountModel
 	states                        [7]panelState
 	self                          object
 	selfStatus                    string
@@ -126,6 +127,7 @@ func New(ctx context.Context, src Source, o Options) *Model {
 		theme = "auto"
 	}
 	m := &Model{ctx: ctx, cancel: cancel, source: src, opts: o, width: 80, height: 24, theme: theme, self: object{}, blocked: map[dashboard.Resource]string{}, expanded: map[int]bool{}, vp: viewport.New(40, 15), selfStatus: "loading"}
+	m.account.vp = viewport.New(76, 15)
 	m.summaryRow = 1 // Start on the first category with a defined activity metric.
 	if ValidTheme(o.Theme) {
 		m.themeRevision = 1
@@ -150,6 +152,11 @@ func (m *Model) closeLocked() {
 		return
 	}
 	m.cancel()
+	m.clearAccountData()
+	m.account.authorityGeneration++
+	if m.account.authorityCancel != nil {
+		m.account.authorityCancel()
+	}
 	m.console.generation++
 	if m.console.cancel != nil {
 		m.console.cancel()
@@ -200,7 +207,7 @@ func (m *Model) Init() tea.Cmd {
 		o, _ := decode(dashboard.ResourcePreferences, raw)
 		return prefsMsg{revision: rev, theme: str(obj(o["prefs"]), "theme")}
 	}
-	return tea.Batch(m.tick(), m.refresh(), prefs, m.consoleTick(), m.consoleRun(consoleCheck))
+	return tea.Batch(m.tick(), m.refresh(), prefs, m.consoleTick(), m.consoleRun(consoleCheck), m.accountTick(), m.accountAuthority())
 }
 
 type tickMsg struct{}
@@ -952,6 +959,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
+	case accountTickMsg:
+		authority := m.accountAuthority()
+		var read tea.Cmd
+		m.account.ticket.Lock()
+		selected := m.account.ticket.id != ""
+		m.account.ticket.Unlock()
+		if !m.paused && !selected && m.account.status != "response_too_large" {
+			read = m.accountRead(false)
+		}
+		return m, tea.Batch(m.accountTick(), authority, read)
+	case accountContextMsg:
+		return m, m.accountContextResult(msg)
+	case accountDataMsg:
+		return m, m.accountDataResult(msg)
+	case accountTicketMsg:
+		m.account.ticket.Lock()
+		valid := msg.generation == m.account.ticket.generation
+		m.account.ticket.Unlock()
+		if valid {
+			if msg.forbidden {
+				m.dropAccount()
+			} else {
+				m.renderAccount()
+			}
+		}
+		return m, nil
 	case consoleTickMsg:
 		return m, tea.Batch(m.consoleTick(), m.consoleRun(consoleCheck))
 	case consoleMsg:
@@ -1089,6 +1122,12 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 		return nil
+	}
+	if m.account.mode {
+		return m.accountKey(k)
+	}
+	if k == "8" {
+		return m.openAccount()
 	}
 	if m.panel == 0 {
 		if handled, cmd := m.summaryKey(k); handled {

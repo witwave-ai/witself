@@ -579,6 +579,14 @@
       hash = hash.slice(0, q);
     }
     var parts = hash.replace(/^#\//, "").split("/").filter(Boolean);
+    if (parts[0] === "account") {
+      // Preserve the ticket segment, rejecting query strings, extra segments and
+      // encoded separators. Account routes never carry payloads or credentials.
+      var ticket = null;
+      try { ticket = parts[2] ? decodeURIComponent(parts[2]) : null; } catch (_) { return { section: "account", invalid: true }; }
+      return { section: "account", subsection: parts[1] || "overview", ticket: ticket,
+        invalid: q >= 0 || parts.length > 3 || (ticket !== null && (parts[1] !== "support" || !accountID(ticket))) };
+    }
     return { section: parts[0] || "overview", id: parts[1] || null, query: query };
   }
 
@@ -600,17 +608,21 @@
   var factViewGeneration = 0;
   var memoryViewGeneration = 0;
   var transcriptViewGeneration = 0;
+  var secretViewGeneration = 0;
 
   function route() {
+    cancelAccountView();
     stopSummary();
     overviewViewGeneration++;
     factViewGeneration++;
     memoryViewGeneration++;
     transcriptViewGeneration++;
+    secretViewGeneration++;
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
     var current = parseHash();
     setNav(current.section);
+    if (current.section === "account") { return viewAccount(current); }
     if (current.section === "transcripts" && current.id) { return viewTranscript(current.id, current.query); }
     if (current.section === "transcripts") { return viewTranscripts(); }
     if (current.section === "facts" && current.id) { return viewFact(current.id); }
@@ -646,6 +658,407 @@
       toastTimer = null;
       node.classList.remove("show");
     }, 3500);
+  }
+
+  // --- Account: separate authority and short-lived selected reads --------
+  var ACCOUNT_SCHEMA = "witself.console.account.v1";
+  var accountSections = ["overview", "clients", "plan", "billing", "support", "access"];
+  var accountLabels = ["Overview", "Clients on this device", "Plan & limits", "Billing", "Support", "Access"];
+  // Only this allowlisted identity survives between views. Section payloads,
+  // especially ticket bodies, are never cached, filtered, logged or persisted.
+  var accountContext = null;
+  var accountContextKnown = false;
+  var accountContextSequence = 0;
+  var accountContextController = null;
+  var accountTimer = null;
+  var accountStarted = false;
+  var accountGeneration = 0;
+  var accountViewController = null;
+  var accountViewActive = false;
+  var accountBusy = false;
+
+  function accountID(value) {
+    return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+      value !== "." && value !== ".." && !/[\s/\\%?#:\x00-\x1f\x7f]/.test(value);
+  }
+  function verifiedAccountContext(data) {
+    if (!data || data.schema_version !== ACCOUNT_SCHEMA || data.available !== true ||
+        !accountID(data.account_id) || !accountID(data.operator_id) ||
+        ["account_owner", "account_admin", "account_billing", "account_operator"].indexOf(data.role) < 0 ||
+        !Array.isArray(data.sections) || !data.sections.length) { return null; }
+    var previous = -1;
+    for (var i = 0; i < data.sections.length; i++) {
+      var index = accountSections.indexOf(data.sections[i]);
+      if (index <= previous || (data.role === "account_operator" && (index === 2 || index === 3))) { return null; }
+      previous = index;
+    }
+    return { account_id: data.account_id, operator_id: data.operator_id, role: data.role, sections: data.sections.slice() };
+  }
+  function cancelAccountView() {
+    accountGeneration++;
+    if (accountViewController) { accountViewController.abort(); }
+    accountViewController = null;
+    accountBusy = false;
+    // Clear the actual nodes before dropping the view owner. No retained HTML
+    // or private thread object exists to restore them on a later visit.
+    if (accountViewActive) { $("view").textContent = ""; $("breadcrumb").textContent = ""; }
+    accountViewActive = false;
+  }
+  function accountNavigation() {
+    var node = $("account-nav");
+    if (!node) { return; }
+    if (!accountContext) { node.textContent = ""; }
+    else if (!node.querySelector("a")) { node.innerHTML = '<div class="account-rail"><a href="#/account" data-nav="account">Account</a></div>'; }
+    setNav(parseHash().section);
+  }
+  function accountFallback() {
+    cancelAccountView();
+    window.location.hash = "#/overview";
+    setNav("overview");
+    breadcrumb([{ label: "overview" }]);
+    // The ordinary hashchange handler mounts the agent Overview.
+  }
+  function accountRead(path, controller) {
+    var timeout;
+    var deadline = new Promise(function (_, reject) {
+      timeout = setTimeout(function () { controller.abort(); reject({ code: "unavailable" }); }, 10000);
+    });
+    var response = fetch(path, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
+      .then(function (resp) {
+        if (resp.status === 401 || resp.status === 403) { throw { code: "forbidden" }; }
+        return resp.json().then(function (data) {
+          if (!resp.ok) { throw { code: data && data.error === "response_too_large" ? "response_too_large" :
+            (resp.status === 401 || resp.status === 403 ? "forbidden" : "unavailable") }; }
+          if (!data || data.schema_version !== ACCOUNT_SCHEMA) { throw { code: "unavailable" }; }
+          return data;
+        });
+      });
+    return Promise.race([response, deadline]).finally(function () { clearTimeout(timeout); });
+  }
+  function dropAccountTicket() {
+    var current = parseHash();
+    if (current.section === "account" && current.ticket) {
+      // Replace rather than push: returning to this visit must not reopen a body.
+      window.history.replaceState(null, "", "#/account/support");
+      current.ticket = null;
+    }
+    return current;
+  }
+  function checkAccountContext() {
+    if (document.hidden) { return Promise.resolve(); }
+    clearTimeout(accountTimer);
+    var sequence = ++accountContextSequence;
+    if (accountContextController) { accountContextController.abort(); }
+    var controller = accountContextController = new AbortController();
+    function accept(next) {
+      if (sequence !== accountContextSequence || document.hidden) { return; }
+      var changed = JSON.stringify(accountContext) !== JSON.stringify(next);
+      var first = !accountContextKnown;
+      if (changed || !next) {
+        if (accountContextKnown) { dropAccountTicket(); }
+        cancelAccountView();
+      }
+      accountContext = next;
+      accountContextKnown = true;
+      accountNavigation();
+      if (parseHash().section === "account") {
+        if (!next) { accountFallback(); }
+        else if (changed || first) { route(); }
+      }
+    }
+    return accountRead("/api/account/context", controller).then(function (data) {
+      accept(verifiedAccountContext(data));
+    }).catch(function () { accept(null); }).finally(function () {
+      if (sequence !== accountContextSequence) { return; }
+      accountContextController = null;
+      if (accountStarted && !document.hidden) { accountTimer = setTimeout(checkAccountContext, 5000); }
+    });
+  }
+  function stopAccount() {
+    dropAccountTicket();
+    accountStarted = false;
+    clearTimeout(accountTimer);
+    accountContextSequence++;
+    if (accountContextController) { accountContextController.abort(); }
+    accountContextController = null;
+    cancelAccountView();
+    accountContext = null;
+    accountContextKnown = false;
+    accountNavigation();
+  }
+  function accountVisibilityChanged() {
+    if (document.hidden) {
+      var started = accountStarted;
+      stopAccount();
+      accountStarted = started;
+    } else if (accountStarted) { checkAccountContext(); }
+  }
+  function startAccount() {
+    if (accountStarted) { return; }
+    // Without cancellation and bounded deadlines this surface cannot safely
+    // maintain authority. Older embedded clients retain their agent views.
+    if (typeof AbortController !== "function" || typeof setTimeout !== "function" || typeof clearTimeout !== "function") {
+      accountContextKnown = true;
+      return;
+    }
+    accountStarted = true;
+    document.addEventListener("visibilitychange", accountVisibilityChanged);
+    window.addEventListener("pagehide", function () {
+      var started = accountStarted;
+      stopAccount();
+      accountStarted = started;
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted && accountStarted) { checkAccountContext(); }
+    });
+    checkAccountContext();
+  }
+  function accountText(value) {
+    if (typeof value === "boolean") { return value ? "Yes" : "No"; }
+    if (typeof value === "number") { return Number.isSafeInteger(value) ? String(value) : "Unknown"; }
+    return typeof value === "string" && value !== "" ? value : "Unknown";
+  }
+  function accountRow(label, value) { return "<dt>" + esc(label) + "</dt><dd>" + esc(accountText(value)) + "</dd>"; }
+  function accountRows(data, fields) {
+    return '<dl class="account-kv">' + fields.map(function (field) { return accountRow(field[1], data && data[field[0]]); }).join("") + "</dl>";
+  }
+  function accountCard(title, body) { return '<section class="panel account-card"><h2>' + esc(title) + "</h2>" + body + "</section>"; }
+  function accountNotice(text) { return '<p class="dim">' + esc(text) + "</p>"; }
+  function accountTruncated(data) { return data && data.truncated === true ? accountNotice("Partial display: this source was truncated by the console read limit.") : ""; }
+  function accountPending(data) {
+    return data ? accountRows(data, [["kind", "Change"], ["plan", "Pending plan"], ["plan_name", "Pending plan name"],
+      ["requested", "Requested"], ["effective", "Effective"], ["expires", "Expires"]]) : accountNotice("No pending change reported.");
+  }
+  function accountMoneyText(data) {
+    var currency = data && typeof data.currency === "string" && data.currency ? data.currency : "Unknown currency";
+    var cents = data && data.amount_cents;
+    if (!Number.isSafeInteger(cents)) { return "Unknown amount · " + currency; }
+    // Arithmetic in integer space avoids rounding even at MAX_SAFE_INTEGER.
+    var exact = BigInt(cents), magnitude = exact < 0n ? -exact : exact;
+    return currency + " " + (exact < 0n ? "-" : "") + String(magnitude / 100n) + "." +
+      String(magnitude % 100n).padStart(2, "0") + " (" + String(exact) + " cents)";
+  }
+  function accountRetention(data, key) {
+    if (!data || !Object.prototype.hasOwnProperty.call(data, key)) { return "Unknown"; }
+    if (data[key] === null) { return "Indefinite"; }
+    return Number.isSafeInteger(data[key]) && data[key] > 0 ? data[key] + " days" : "Unknown";
+  }
+  function accountPlanHTML(data) {
+    var html = accountCard("Current plan", accountRows(data, [["plan", "Current plan"], ["plan_name", "Current plan name"],
+      ["billing_plan", "Billing plan"], ["billing_plan_name", "Billing plan name"], ["applied", "Applied plan"],
+      ["apply_pending", "Application pending"], ["apply_blocked", "Application blocked"], ["past_due_since", "Past due since"]]));
+    html += accountCard("Pending change", accountPending(data.pending));
+    // The core projection supplies the closed, full unit maps for each valid
+    // source. Never duplicate its catalog or infer a value from malformed data.
+    function limitMap(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : null; }
+    function numericKeys(source) { return Object.keys(source || {}).filter(function (key) {
+      return Number.isSafeInteger(source[key]) && source[key] >= 0;
+    }); }
+    var limits = limitMap(data.limits), defaults = limitMap(data.limit_defaults);
+    var units = limitMap(data.limits_units), defaultUnits = limitMap(data.limit_defaults_units);
+    var keys = Array.from(new Set(Object.keys(units || {}).concat(Object.keys(defaultUnits || {}),
+      numericKeys(limits), numericKeys(defaults)))).sort();
+    html += accountCard("Limits", keys.map(function (key) {
+      function limit(source, units) {
+        if (!source) { return "Unknown"; }
+        if (!Object.prototype.hasOwnProperty.call(source, key)) { return "No plan cap"; }
+        return Number.isSafeInteger(source[key]) && source[key] >= 0 ? source[key] + " " + accountText(units && units[key]) : "Unknown";
+      }
+      return '<div class="account-item"><h3>' + esc(key.replace(/_/g, " ")) + '</h3><dl class="account-kv">' +
+        accountRow("Effective limit", limit(limits, data.limits_units)) + accountRow("Plan default", limit(defaults, data.limit_defaults_units)) + "</dl></div>";
+    }).join("") || accountNotice("Limits unknown."));
+    var features = Array.isArray(data.features) ? data.features : null;
+    var featureDefaults = Array.isArray(data.feature_defaults) ? data.feature_defaults : null;
+    html += accountCard("Features", accountRows({ effective: features ? features.join(", ") || "None" : null,
+      defaults: featureDefaults ? featureDefaults.join(", ") || "None" : null }, [["effective", "Effective features"], ["defaults", "Plan defaults"]]) +
+      ["messaging", "email_receive", "email_send"].map(function (key) {
+        return '<div class="account-item"><h3>' + esc(key.replace(/_/g, " ")) + "</h3>" + accountRows(data[key],
+          [["enabled", "Enabled"], ["default_enabled", "Plan default"], ["overridden", "Override applied"]]) + "</div>";
+      }).join(""));
+    html += accountCard("Retention", ["message_retention", "email_retention", "transcript_retention"].map(function (key) {
+      return '<div class="account-item"><h3>' + esc(key.replace(/_/g, " ")) + '</h3><dl class="account-kv">' +
+        accountRow("Effective retention", accountRetention(data[key], "effective_days")) +
+        accountRow("Plan default", accountRetention(data[key], "default_days")) + accountRow("Override applied", data[key] && data[key].overridden) + "</dl></div>";
+    }).join(""));
+    return html + accountTruncated(data);
+  }
+  function accountBillingHTML(data) {
+    return ["summary", "invoices", "payments"].map(function (key) {
+      var source = data[key], title = { summary: "Billing summary", invoices: "Invoices", payments: "Payments" }[key];
+      if (!source || source.available !== true) {
+        return accountCard(title, accountNotice(source && source.error === "response_too_large" ?
+          "This source exceeds the console read limit." : "Source unavailable. This is not an empty history."));
+      }
+      var html;
+      if (key === "summary") {
+        html = accountRows(source, [["billing_available", "Billing available"], ["configured", "Configured"],
+          ["subscription_status", "Subscription status"], ["billing_plan", "Billing plan"], ["billing_plan_name", "Billing plan name"],
+          ["effective_plan", "Effective plan"], ["effective_plan_name", "Effective plan name"], ["applied_plan", "Applied plan"],
+          ["entitled_at", "Entitled at"], ["past_due_since", "Past due since"]]) +
+          '<dl class="account-kv">' + accountRow("Payment method", source.payment_method && source.payment_method.label) +
+          accountRow("Next charge", accountMoneyText(source.next_charge)) + accountRow("Charge date", source.next_charge && source.next_charge.date) + "</dl>" +
+          "<h3>Pending change</h3>" + accountPending(source.pending);
+      } else {
+        html = !Array.isArray(source.entries) ? accountNotice("History unknown.") : source.entries.length ? source.entries.map(function (row) {
+          return '<div class="account-item">' + accountRows(row, key === "invoices" ?
+            [["number", "Invoice"], ["date", "Date"], ["status", "Status"]] : [["date", "Date"], ["method", "Method"], ["status", "Status"]]) +
+            '<dl class="account-kv">' + accountRow("Amount", accountMoneyText(row)) + "</dl></div>";
+        }).join("") : accountNotice("No " + key + " returned.");
+      }
+      return accountCard(title, html + accountTruncated(source));
+    }).join("");
+  }
+  function accountClientsHTML(data) {
+    var report = data.report;
+    var html = accountNotice("Recorded clients for this account on this device. Check configuration without launching a client.") +
+      accountNotice("Recorded versions and check times do not indicate activity. Connection testing is not run.") +
+      '<button id="account-scan" type="button">Check this device</button>';
+    if (!report || data.status === "not_checked") { return accountCard("Clients on this device", html + accountNotice("Not checked. Use Check this device to inspect local metadata.")); }
+    html += accountRows(report, [["checked_at", "Local checked time"], ["scan_status", "Check status"]]);
+    if (report.scan_status === "partial" || report.scan_status === "unavailable") { html += accountNotice("Local metadata is incomplete or unavailable; this is not a complete inventory."); }
+    html += !Array.isArray(report.entries) ? accountNotice("Client metadata unknown.") : report.entries.length ? report.entries.map(function (row) {
+      return '<div class="account-item"><h3>' + esc(accountText(row.runtime)) + "</h3>" + accountRows(row,
+        [["recorded_version", "Recorded installation version"], ["executable_status", "Recorded executable"], ["configuration_status", "Configuration status"],
+          ["installed_at", "Recorded installation time"]]) + '<dl class="account-kv">' +
+        accountRow("Configuration scope", row.configuration_scope === "mcp_registration" ? "Recorded MCP registration only" : "None") +
+        accountRow("Effective verification", "Not run") + "</dl></div>";
+    }).join("") : accountNotice("No matching recorded clients returned for this account on this device.");
+    return accountCard("Clients on this device", html + accountTruncated(report));
+  }
+  var accountTicketFields = [["id", "Ticket"], ["subject", "Subject"], ["category", "Category"], ["state", "State"],
+    ["priority", "Priority"], ["opened_at", "Opened"], ["first_response_at", "First response"], ["resolved_at", "Resolved"],
+    ["closed_at", "Closed"], ["last_activity_at", "Last activity"]];
+  function accountSupportHTML(data, ticket) {
+    if (ticket) {
+      if (!data.ticket || data.ticket.id !== ticket) { return accountNotice("Selected thread unavailable."); }
+      return accountCard("Selected support ticket", '<a href="#/account/support">Back to ticket metadata</a>' + accountRows(data.ticket, accountTicketFields)) +
+        accountCard("Thread", accountNotice("Selected read only. Thread text is cleared when you leave, refresh or hide this page.") +
+          (!Array.isArray(data.messages) ? accountNotice("Thread unknown.") : data.messages.length ? data.messages.map(function (message) {
+            return '<article class="account-item">' + accountRows(message, [["author_kind", "Author"], ["posted_at", "Posted"]]) +
+              '<p class="account-thread">' + esc(accountText(message.body)) + "</p></article>";
+          }).join("") : accountNotice("No messages returned.")) + accountTruncated(data));
+    }
+    return accountCard("Support", accountNotice("Ticket metadata only. Select a ticket to read its bounded thread.") +
+      (!Array.isArray(data.tickets) ? accountNotice("Ticket metadata unknown.") : data.tickets.length ? data.tickets.map(function (row) {
+        return '<div class="account-item">' + (accountID(row.id) ? '<a href="#/account/support/' + esc(encodeURIComponent(row.id)) + '">Read ticket</a>' : "") +
+          accountRows(row, accountTicketFields) + "</div>";
+      }).join("") : accountNotice("No support tickets returned.")) + accountTruncated(data));
+  }
+  function accountSectionHTML(data, current) {
+    if (current.subsection === "plan") { return accountPlanHTML(data); }
+    if (current.subsection === "billing") { return accountBillingHTML(data); }
+    if (current.subsection === "clients") { return accountClientsHTML(data); }
+    if (current.subsection === "support") { return accountSupportHTML(data, current.ticket); }
+    if (current.subsection === "access") {
+      return accountCard("Access", accountRows(data, [["account_id", "Account scope"], ["operator_id", "Current CLI manager"], ["role", "Manager role (raw)"]]) +
+        accountNotice("Available read sections: " + data.sections.map(function (key) { return accountLabels[accountSections.indexOf(key)]; }).join(", ")) +
+        accountNotice("These reads use the verified CLI manager for this account. They do not grant the selected agent account permissions."));
+    }
+    return accountCard("Account profile", accountRows(data.account, [["id", "Account ID"], ["display_name", "Display name"], ["status", "Status"],
+      ["email", "Contact email"], ["created_at", "Created"]]) + accountTruncated(data));
+  }
+  function accountShell(current) {
+    breadcrumb([{ label: "Account", href: "#/account" }, { label: accountLabels[accountSections.indexOf(current.subsection)] }]);
+    var role = { account_owner: "Owner", account_admin: "Administrator", account_billing: "Billing", account_operator: "Operator" }[accountContext.role];
+    $("view").innerHTML = '<div class="account-area"><section class="panel account-header">' +
+      '<div class="account-heading"><h1>Account</h1><span class="badge">Read-only</span></div>' +
+      '<div class="account-scope">Account ID: <span class="mono">' + esc(accountContext.account_id) +
+      '</span> · Manager role: ' + esc(role) + '</div><nav class="account-sections" aria-label="Account sections">' +
+      accountContext.sections.map(function (key) { return '<a href="#/account/' + key + '"' +
+        (key === current.subsection ? ' aria-current="page"' : "") + '>' + accountLabels[accountSections.indexOf(key)] + "</a>"; }).join("") +
+      '</nav><button id="account-refresh" type="button">Refresh selected section</button></section>' +
+      '<div id="account-content" role="status" aria-live="polite">Loading…</div></div>';
+    $("account-refresh").addEventListener("click", function () {
+      if (!accountBusy) { loadAccountSection(dropAccountTicket(), false); }
+    });
+  }
+  function viewAccount(current) {
+    accountViewActive = true;
+    // Stop section-specific agent subscriptions while retaining header updates.
+    openEvents(null);
+    if (document.hidden) { return; }
+    if (!accountContext) {
+      if (accountContextKnown) { accountFallback(); }
+      else { $("view").textContent = "Verifying account access…"; $("breadcrumb").textContent = ""; }
+      return;
+    }
+    if (current.invalid || accountContext.sections.indexOf(current.subsection) < 0) { accountFallback(); return; }
+    accountShell(current);
+    return loadAccountSection(current, false);
+  }
+  function loadAccountSection(current, scan) {
+    if (accountBusy || !accountContext || document.hidden || accountContext.sections.indexOf(current.subsection) < 0) { return Promise.resolve(); }
+    var generation = accountGeneration;
+    var accessSequence = null;
+    if (current.subsection === "access") {
+      accessSequence = ++accountContextSequence;
+      clearTimeout(accountTimer);
+      if (accountContextController) { accountContextController.abort(); }
+      accountContextController = null;
+    }
+    var actionID = scan ? "account-scan" : "account-refresh";
+    var action = $(actionID), restoreFocus = document.activeElement === action;
+    function focusMoved(event) { if (event.target !== action) { restoreFocus = false; } }
+    document.addEventListener("focusin", focusMoved);
+    var controller = accountViewController = new AbortController();
+    accountBusy = true;
+    $("account-refresh").disabled = true;
+    var button = $("account-scan");
+    if (button) { button.disabled = true; }
+    // Explicit refresh/scan immediately removes all previously displayed data.
+    $("account-content").textContent = scan ? "Checking this device…" : "Loading…";
+    var path = "/api/account/" + current.subsection + (scan ? "/scan" : current.ticket ? "/" + encodeURIComponent(current.ticket) : "");
+    function live() { return generation === accountGeneration && accountViewActive && !document.hidden && !controller.signal.aborted; }
+    return accountRead(path, controller).then(function (data) {
+      if (!live()) { return; }
+      if (accessSequence !== null) {
+        if (accessSequence !== accountContextSequence) { throw { code: "superseded" }; }
+        var next = verifiedAccountContext(data);
+        if (!next) { throw { code: "forbidden" }; }
+        var changed = JSON.stringify(accountContext) !== JSON.stringify(next);
+        accountContext = next;
+        accountContextKnown = true;
+        accountNavigation();
+        if (next.sections.indexOf(current.subsection) < 0) { accountFallback(); return; }
+        if (changed) { accountShell(current); $("account-refresh").disabled = true; }
+      }
+      if (data.available !== true) { throw { code: "unavailable" }; }
+      $("account-content").innerHTML = accountSectionHTML(data, current);
+      var scanButton = $("account-scan");
+      if (scanButton) { scanButton.addEventListener("click", function () { loadAccountSection(current, true); }); }
+    }).catch(function (error) {
+      // A timeout aborts this controller too; generation is the authority fence.
+      if (generation !== accountGeneration || !accountViewActive || document.hidden) { return; }
+      if (accessSequence !== null && accessSequence !== accountContextSequence) { error = { code: "superseded" }; }
+      if ((error && error.code === "forbidden") || (accessSequence !== null && accessSequence === accountContextSequence)) {
+        cancelAccountView(); accountContext = null; accountContextKnown = true; accountNavigation(); accountFallback();
+        checkAccountContext();
+        return;
+      }
+      $("account-content").textContent = error && error.code === "response_too_large" ?
+        (current.ticket ? "This thread exceeds the console read limit (4 MiB). Inspect it deliberately with the existing support CLI." : "This source exceeds the console read limit.") :
+        "This section is unavailable. No successful empty result was returned.";
+      if (scan) {
+        var content = $("account-content");
+        content.innerHTML = accountNotice(content.textContent) + '<button id="account-scan" type="button">Check this device</button>';
+        $("account-scan").addEventListener("click", function () { loadAccountSection(current, true); });
+      }
+    }).finally(function () {
+      document.removeEventListener("focusin", focusMoved);
+      if (accessSequence !== null && accessSequence === accountContextSequence && accountStarted && !document.hidden) {
+        accountTimer = setTimeout(checkAccountContext, 5000);
+      }
+      if (generation !== accountGeneration) { return; }
+      accountBusy = false;
+      accountViewController = null;
+      var refresh = $("account-refresh");
+      if (refresh) { refresh.disabled = false; }
+      var target = $(actionID);
+      if (restoreFocus && accountViewActive && !document.hidden && target &&
+          (document.activeElement === action || document.activeElement === document.body)) {
+        target.focus({ preventScroll: true });
+      }
+    });
   }
 
   // --- views ------------------------------------------------------------
@@ -1501,11 +1914,13 @@
   }
 
   function viewSecrets() {
+    var generation = secretViewGeneration;
     breadcrumb([{ label: "secrets" }]);
     openEvents(null, 0, false, false, false, true);
     fetchJSON("/api/secrets?limit=100").then(function (body) {
+      if (generation !== secretViewGeneration) { return; }
       renderSecretsList(body.secrets || []);
-    }).catch(secretsError);
+    }).catch(function (err) { if (generation === secretViewGeneration) { secretsError(err); } });
   }
 
   function secretFieldRow(field) {
@@ -1515,9 +1930,11 @@
   }
 
   function viewSecret(id) {
+    var generation = secretViewGeneration;
     breadcrumb([{ label: "secrets", href: "#/secrets" }, { label: id }]);
     openEvents(null);
     fetchJSON("/api/secrets/" + encodeURIComponent(id)).then(function (body) {
+      if (generation !== secretViewGeneration) { return; }
       var secret = body.secret || {};
       var vaultKey = body.vault_key || {};
       var fields = (secret.fields || []).map(secretFieldRow).join("");
@@ -1537,7 +1954,7 @@
         "</dl></div>" +
         '<div class="panel"><h2>Fields</h2><div class="list">' +
         (fields || '<div class="empty">no fields</div>') + "</div></div>";
-    }).catch(secretsError);
+    }).catch(function (err) { if (generation === secretViewGeneration) { secretsError(err); } });
   }
 
   // --- read-only agent email ------------------------------------------
@@ -2342,6 +2759,7 @@
   // Browsers do not define module, so the production boot path is unchanged.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      account: { check: checkAccountContext, visibility: accountVisibilityChanged, start: startAccount, stop: stopAccount, money: accountMoneyText },
       normalizeSummary: normalizeSummary,
       summaryState: summaryState,
       refreshSummary: refreshSummary,
@@ -2385,5 +2803,6 @@
   $("view").addEventListener("click", onMessageBodyClick);
   document.addEventListener("visibilitychange", summaryVisibilityChanged);
   window.addEventListener("hashchange", route);
+  startAccount();
   route();
 })();

@@ -4281,6 +4281,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
 	cliout.Line(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
 	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
+	cliout.Line(w, "  witself dashboard open [--print-url]  Verify and open a running console, or deliberately print its private opening URL")
 	cliout.Line(w, "  witself tui [--agent NAME] [--demo]  Open the native agent terminal workspace")
 	cliout.Line(w, "  witself help                 Show this help")
 	cliout.Line(w)

@@ -3,6 +3,7 @@ package agenttui
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -47,7 +48,7 @@ func (m *Model) layout() (rail, inventory, detail, height int) {
 		rail = 18
 	}
 	remaining := m.width - rail
-	if m.panel == 0 && m.summaryView != 3 {
+	if m.account.mode || (m.panel == 0 && m.summaryView != 3) {
 		return rail, 0, remaining, height
 	}
 	if remaining < 60 {
@@ -61,6 +62,9 @@ func (m *Model) resize() {
 	_, _, dw, h := m.layout()
 	m.vp.Width = max(1, dw-4)
 	m.vp.Height = max(1, h-2)
+	m.account.vp.Width = max(1, dw-4)
+	nav := ansi.Wrap(m.accountNav(), m.account.vp.Width, "")
+	m.account.vp.Height = max(1, h-3-strings.Count(nav, "\n")-1)
 }
 func (m *Model) box(content string, w, h int, active bool) string {
 	if w <= 0 {
@@ -156,7 +160,7 @@ func (m *Model) view() string {
 		nav := []string{}
 		for i, l := range labels {
 			s := fmt.Sprintf("%d %s", i+1, l)
-			if i == m.panel {
+			if i == m.panel && !m.account.mode {
 				s = m.style(c.accent).Bold(true).Render(s)
 			} else {
 				s = m.style(c.dim).Render(s)
@@ -164,10 +168,22 @@ func (m *Model) view() string {
 			nav = append(nav, s)
 		}
 		compact := " " + strings.Join(nav, "  ")
+		if m.account.context.available() {
+			compact += "  | 8 Account"
+		}
 		if ansi.StringWidth(compact) > m.width {
 			active := fmt.Sprintf(" %d / 7  %s    1–7 switch", m.panel+1, panelNames[m.panel])
+			if m.account.mode {
+				active = " Account · 1–7 agent panels"
+			}
+			if m.account.context.available() {
+				active += " | 8 Account"
+			}
 			if ansi.StringWidth(active) > m.width {
 				active = fmt.Sprintf("%d %s · 1–7", m.panel+1, panelNames[m.panel])
+				if m.account.context.available() {
+					active += " | 8 Account"
+				}
 			}
 			header += "\n" + fit(active, m.width)
 		} else {
@@ -177,6 +193,12 @@ func (m *Model) view() string {
 	var body string
 	if m.overlay != "" {
 		body = m.box(m.overlayView(m.width-4, h-2), m.width, h, true)
+	} else if m.account.mode {
+		nav := ansi.Wrap(m.accountNav(), max(1, dw-4), "")
+		body = m.box(m.style(c.accent).Render(nav)+"\n\n"+m.account.vp.View(), dw, h, true)
+		if rw > 0 {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
+		}
 	} else {
 		inventory := ""
 		if iw > 0 {
@@ -198,6 +220,13 @@ func (m *Model) view() string {
 			note = "Enter open · a ASCII · " + note
 		}
 	}
+	if m.account.mode && m.overlay == "" {
+		focus := "Scroll"
+		if m.account.focus == 0 && m.accountSection() == "support" {
+			focus = "Ticket selection"
+		}
+		note = focus + " · Tab focus · r refresh · p pause display · ? help"
+	}
 	if m.filterEditing {
 		note = "Type to filter · Enter keep · Esc cancel · Ctrl+U clear"
 	}
@@ -218,12 +247,18 @@ func (m *Model) railView(w, h int) string {
 	lines := []string{"", m.style(c.dim).Render(" WORKSPACE"), ""}
 	for i, n := range panelNames {
 		s := fmt.Sprintf(" %d  %s", i+1, n)
-		if i == m.panel {
+		if i == m.panel && !m.account.mode {
 			s = lipgloss.NewStyle().Foreground(lipgloss.Color(c.accent)).Background(lipgloss.Color(c.panel)).Bold(true).Render(fit(s, w-1))
 		} else {
 			s = m.style(c.dim).Render(s)
 		}
 		lines = append(lines, s, "")
+	}
+	if m.account.context.available() {
+		for len(lines) < h-6 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, m.style(c.dim).Render(" ─ Account scope"), m.style(c.accent).Bold(m.account.mode).Render(" 8  Account"))
 	}
 	for len(lines) < h-3 {
 		lines = append(lines, "")
@@ -333,6 +368,15 @@ func (m *Model) footer() string {
 	if m.overlay != "" {
 		return " ↑↓/PgUp/PgDn scroll  Esc close  Ctrl+C quit"
 	}
+	if m.account.mode {
+		if m.accountSection() == "clients" {
+			return "[ ] section · x Check this device · 1–7 agent · t theme · q quit"
+		}
+		if m.accountSection() == "support" {
+			return "[ ] section · Enter thread · Esc clear · 1–7 agent · t theme · q quit"
+		}
+		return "[ ] section · ↑↓/PgUp/PgDn scroll · 1–7 agent · t theme · q quit"
+	}
 	if m.filterEditing {
 		return " / filtering  Enter keep  Esc cancel  Ctrl+C quit"
 	}
@@ -414,7 +458,21 @@ func (m *Model) overlayView(w, h int) string {
 		return crop(strings.Join(ls, "\n"), w, h)
 	}
 	help := []string{
-		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Summary", "o / l / e        Overview / Timeline / Recent updates", "d                Workspace details and salient memories", "a                Toggle plain ASCII graph characters", "Tab              Switch category selection and scrolling", "Enter            Open the selected category", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "All reads use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
+		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Summary", "o / l / e        Overview / Timeline / Recent updates", "d                Workspace details and salient memories", "a                Toggle plain ASCII graph characters", "Tab              Switch category selection and scrolling", "Enter            Open the selected category", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "The seven agent panels use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
+	}
+	if m.account.context.available() {
+		accountHelp := []string{"Account · read-only manager scope", "8                Open Account; 1–7 return to agent panels", "[ / ] or ← / →   Switch permitted subsections", "↑↓ / PgUp/PgDn   Scroll details", "r                Refresh cached section", "p                Pause display; authority checks continue", "t / b / w        Theme / browser / web console controls", "Account uses the current verified manager, distinct from the agent.", ""}
+		if slices.Contains(m.account.context.sections, "support") {
+			accountHelp = append(accountHelp, "Tab              Ticket selection / detail scrolling", "Enter            Deliberately open selected support thread", "Esc              Clear selected thread and rendered text", "Refresh or leaving also clears the selected thread.")
+		}
+		if slices.Contains(m.account.context.sections, "clients") {
+			accountHelp = append(accountHelp, "x                Check this device (Clients only; explicit scan)")
+		}
+		if m.account.mode {
+			help = append(accountHelp, help...)
+		} else {
+			help = append(help, accountHelp...)
+		}
 	}
 	lines := []string{}
 	for _, l := range help {
@@ -480,6 +538,10 @@ func (m *Model) revealAction() {
 	}
 }
 func (m *Model) renderDetail(follow bool) {
+	if m.account.mode {
+		m.renderAccount()
+		return
+	}
 	old := m.vp.YOffset
 	m.actionOffsets = nil
 	d := &detailWriter{m: m, width: m.vp.Width}
