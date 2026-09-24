@@ -81,11 +81,7 @@ func (m *Model) renderAccount() {
 	d := &detailWriter{m: m, width: a.vp.Width}
 	selectedOffset := -1
 	section := m.accountSection()
-	d.heading(accountLabels[section])
-	d.dim("Read-only account scope")
-	d.kv("Account", a.context.account)
-	d.kv("Manager", a.context.operator+" · "+a.context.role)
-	d.kv("Selected agent", first(str(obj(m.self["identity"]), "agent_name"), m.opts.Agent, "Agent"))
+	contextClipped := m.accountContextStrip(d)
 	if a.status != "ready" {
 		d.body(accountErrorText(a.status, false))
 	} else {
@@ -94,8 +90,7 @@ func (m *Model) renderAccount() {
 		case "overview":
 			accountFields(d, obj(o["account"]), "display_name:Display name", "status:Status", "email:Contact email", "created_at:Created")
 		case "clients":
-			d.dim("x Check this device · explicit local metadata scan")
-			d.dim("Static configuration only; no online or remote installation status.")
+			d.dim("Local metadata only · no online or remote installation status.")
 			if str(o, "status") == "not_checked" {
 				d.kv("This device", "Not checked")
 				d.kv("Checked at", "Not checked")
@@ -204,13 +199,20 @@ func (m *Model) renderAccount() {
 					d.body(accountErrorText(status, true))
 				} else {
 					ticket := obj(data["ticket"])
-					accountFields(d, ticket, "subject:Subject", "state:State", "category:Category", "priority:Priority")
 					for _, message := range list(data, "messages") {
 						d.heading(accountValue(message, "author_kind") + " · " + accountValue(message, "posted_at"))
 						d.body(str(message, "body"))
 					}
 					if len(list(data, "messages")) == 0 {
 						d.body("No messages reported.")
+					}
+					d.heading("Ticket details")
+					accountFields(d, ticket, "subject:Subject", "state:State", "category:Category", "priority:Priority")
+					// Retain list metadata below the deliberately loaded body.
+					for _, row := range list(o, "tickets") {
+						if str(row, "id") == id {
+							accountFields(d, row, "opened_at:Opened", "last_activity_at:Last activity", "first_response_at:First response", "resolved_at:Resolved", "closed_at:Closed")
+						}
 					}
 					accountTruncation(d, data)
 				}
@@ -224,7 +226,10 @@ func (m *Model) renderAccount() {
 					prefix := "  "
 					if i == a.selected {
 						prefix = "› "
-						selectedOffset = len(d.lines) + 1
+						selectedOffset = len(d.lines)
+						if m.height > 24 && len(d.lines) > 0 {
+							selectedOffset++
+						}
 					}
 					d.heading(prefix + accountValue(row, "subject"))
 					d.kv("Ticket", accountValue(row, "id"))
@@ -244,21 +249,17 @@ func (m *Model) renderAccount() {
 		}
 		accountTruncation(d, o)
 	}
+	if contextClipped {
+		d.heading("Full account context · read-only")
+		d.kv("Account", a.context.account)
+		d.kv("Manager", a.context.operator)
+		d.kv("Role", a.context.role)
+		d.kv("Selected agent", m.accountAgentName())
+	}
 	old := a.vp.YOffset
 	a.vp.SetContent(strings.Join(d.lines, "\n"))
 	a.vp.SetYOffset(old)
 	if a.focus == 0 && selectedOffset >= 0 && (selectedOffset < old || selectedOffset >= old+a.vp.Height) {
 		a.vp.SetYOffset(selectedOffset)
 	}
-}
-func (m *Model) accountNav() string {
-	parts := []string{}
-	for _, key := range m.account.context.sections {
-		label := accountLabels[key]
-		if key == m.accountSection() {
-			label = "› " + label
-		}
-		parts = append(parts, label)
-	}
-	return "[ / ]  " + strings.Join(parts, " · ")
 }

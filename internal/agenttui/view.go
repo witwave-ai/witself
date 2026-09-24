@@ -63,24 +63,25 @@ func (m *Model) resize() {
 	m.vp.Width = max(1, dw-4)
 	m.vp.Height = max(1, h-2)
 	m.account.vp.Width = max(1, dw-4)
-	nav := ansi.Wrap(m.accountNav(), m.account.vp.Width, "")
-	m.account.vp.Height = max(1, h-3-strings.Count(nav, "\n")-1)
+	nav := m.accountNav()
+	m.account.vp.Height = max(1, h-3-strings.Count(nav, "\n"))
 }
 func (m *Model) box(content string, w, h int, active bool) string {
 	if w <= 0 {
 		return ""
 	}
 	c := m.colors()
-	border := c.border
+	border := lipgloss.RoundedBorder()
 	if active {
-		border = c.cyan
+		// Shape carries focus even with ANSI colors disabled.
+		border.TopLeft, border.TopRight = "┏", "┓"
 	}
 	if w < 4 || h < 3 {
 		return crop(content, w, h)
 	}
 	// Lipgloss Width includes horizontal padding, but excludes borders.
 	// Reserve two cells for borders and two more for the inner padding.
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(border)).Padding(0, 1).Width(w - 2).Height(h - 2).Background(lipgloss.Color(c.bg)).Render(crop(content, w-4, h-2))
+	return lipgloss.NewStyle().Border(border).BorderForeground(lipgloss.Color(c.border)).Padding(0, 1).Width(w - 2).Height(h - 2).Background(lipgloss.Color(c.bg)).Render(crop(content, w-4, h-2))
 }
 func crop(s string, w, h int) string {
 	if w <= 0 || h <= 0 {
@@ -156,46 +157,14 @@ func (m *Model) view() string {
 	header += "\n" + fit(identity, m.width)
 	rw, iw, dw, h := m.layout()
 	if rw == 0 {
-		labels := []string{"Overview", "Transcr.", "Facts", "Memories", "Convs.", "Email", "Secrets"}
-		nav := []string{}
-		for i, l := range labels {
-			s := fmt.Sprintf("%d %s", i+1, l)
-			if i == m.panel && !m.account.mode {
-				s = m.style(c.accent).Bold(true).Render(s)
-			} else {
-				s = m.style(c.dim).Render(s)
-			}
-			nav = append(nav, s)
-		}
-		compact := " " + strings.Join(nav, "  ")
-		if m.account.context.available() {
-			compact += "  | 8 Account"
-		}
-		if ansi.StringWidth(compact) > m.width {
-			active := fmt.Sprintf(" %d / 7  %s    1–7 switch", m.panel+1, panelNames[m.panel])
-			if m.account.mode {
-				active = " Account · 1–7 agent panels"
-			}
-			if m.account.context.available() {
-				active += " | 8 Account"
-			}
-			if ansi.StringWidth(active) > m.width {
-				active = fmt.Sprintf("%d %s · 1–7", m.panel+1, panelNames[m.panel])
-				if m.account.context.available() {
-					active += " | 8 Account"
-				}
-			}
-			header += "\n" + fit(active, m.width)
-		} else {
-			header += "\n" + fit(compact, m.width)
-		}
+		header += "\n" + fit(m.compactNav(), m.width)
 	}
 	var body string
 	if m.overlay != "" {
 		body = m.box(m.overlayView(m.width-4, h-2), m.width, h, true)
 	} else if m.account.mode {
-		nav := ansi.Wrap(m.accountNav(), max(1, dw-4), "")
-		body = m.box(m.style(c.accent).Render(nav)+"\n\n"+m.account.vp.View(), dw, h, true)
+		nav := m.accountNav()
+		body = m.box(nav+"\n"+m.account.vp.View(), dw, h, true)
 		if rw > 0 {
 			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
 		}
@@ -221,11 +190,11 @@ func (m *Model) view() string {
 		}
 	}
 	if m.account.mode && m.overlay == "" {
-		focus := "Scroll"
-		if m.account.focus == 0 && m.accountSection() == "support" {
-			focus = "Ticket selection"
-		}
+		focus := m.accountFocusHint()
 		note = focus + " · Tab focus · r refresh · p pause display · ? help"
+		if ansi.StringWidth(note) > m.width {
+			note = focus + " · Tab · r refresh · p pause display · ?"
+		}
 	}
 	if m.filterEditing {
 		note = "Type to filter · Enter keep · Esc cancel · Ctrl+U clear"
@@ -248,6 +217,7 @@ func (m *Model) railView(w, h int) string {
 	for i, n := range panelNames {
 		s := fmt.Sprintf(" %d  %s", i+1, n)
 		if i == m.panel && !m.account.mode {
+			s = "›" + strings.TrimPrefix(s, " ")
 			s = lipgloss.NewStyle().Foreground(lipgloss.Color(c.accent)).Background(lipgloss.Color(c.panel)).Bold(true).Render(fit(s, w-1))
 		} else {
 			s = m.style(c.dim).Render(s)
@@ -258,7 +228,11 @@ func (m *Model) railView(w, h int) string {
 		for len(lines) < h-6 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, m.style(c.dim).Render(" ─ Account scope"), m.style(c.accent).Bold(m.account.mode).Render(" 8  Account"))
+		label := " 8  Account"
+		if m.account.mode {
+			label = "›8  Account"
+		}
+		lines = append(lines, m.style(c.dim).Render(" ─ Account scope"), m.style(c.accent).Bold(m.account.mode).Render(label))
 	}
 	for len(lines) < h-3 {
 		lines = append(lines, "")
@@ -493,18 +467,6 @@ func (d *detailWriter) line(s string) {
 }
 func (d *detailWriter) body(s string) { d.line(clean(s)) }
 func (d *detailWriter) dim(s string)  { d.line(d.m.style(d.m.colors().dim).Render(clean(s))) }
-func (d *detailWriter) heading(s string) {
-	if len(d.lines) > 0 {
-		d.line("")
-	}
-	d.line(d.m.style(d.m.colors().cyan).Bold(true).Render(single(s)))
-}
-func (d *detailWriter) kv(label, value string) {
-	if value == "" {
-		value = "not reported"
-	}
-	d.line(d.m.style(d.m.colors().dim).Render(label+"  ") + clean(value))
-}
 func (d *detailWriter) fields(o object, fields string) {
 	for _, k := range strings.Fields(fields) {
 		if v, ok := o[k]; ok && v != nil {
