@@ -523,3 +523,32 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
 .summary-details { padding: .25rem .4rem .6rem; border-bottom: 1px solid var(--border); color: var(--summary-muted); font-size: .75rem; }
 .summary-details > summary { cursor: pointer; padding: .4rem 0; min-height: 32px; }
 .summary-details .summary-breakdown { margin: .4rem 0; color: var(--fg); font-variant-numeric: tabular-nums; }
+
+/* Account is a second principal, below the seven unchanged agent links. */
+#account-nav { margin-top: auto; flex: none; }
+.account-header { padding: .75rem 1rem; }
+.account-heading { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.account-heading h1 { font-size: 1.1rem; margin: 0; }
+.account-scope { margin-top: .35rem; color: var(--fg-dim); }
+.account-rail { display: flex; flex-direction: column; border-top: 1px solid var(--border); margin-top: .8rem; padding-top: .6rem; }
+.account-area { min-width: 0; overflow-wrap: anywhere; }
+.account-area button { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: .45rem .65rem; min-height: 44px; cursor: pointer; max-width: 100%; white-space: normal; }
+.account-area button:disabled { opacity: .65; cursor: wait; }
+.account-sections { display: flex; flex-wrap: wrap; gap: 0 .8rem; margin: .35rem 0; }
+.account-sections a { padding: .4rem .15rem; min-height: 44px; }
+.account-sections a[aria-current="page"] { color: var(--fg); border-bottom: 2px solid var(--accent); }
+.account-kv { display: grid; grid-template-columns: minmax(7rem, 12rem) minmax(0, 1fr); gap: .35rem .8rem; margin: .7rem 0; }
+.account-kv dt { color: var(--fg-dim); }
+.account-kv dd { margin: 0; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.account-item { border-top: 1px solid var(--border); padding: .6rem 0; }
+.account-card h3 { font-size: .9rem; font-weight: 600; margin: .4rem 0; }
+.account-thread { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .account-kv { grid-template-columns: minmax(0, 1fr); gap: .15rem; }
+  .account-kv dd { margin-bottom: .5rem; }
+}
+
+@media (max-width: 700px) {
+  #account-nav { margin-top: 0; }
+  .account-rail { margin-top: .35rem; padding-top: .35rem; }
+}
