@@ -82,7 +82,11 @@ devices can retain copies.
 
 Press `b` to open the selected agent's web console in your default browser.
 The workspace starts a local console when needed and reuses an existing one
-only after verifying its canonical account, realm, and agent identity.
+only after verifying its canonical account, realm, and agent identity, plus the
+same manager binding and current manager authorization when Account is enabled.
+Agent-only sessions cannot reuse manager-enabled sessions; one manager cannot
+reuse another's. A revoked manager session cannot become agent-only for reuse.
+Legacy consoles qualify only as agent-only.
 Press `w` for its status and controls:
 
 | Key | Action |
@@ -101,14 +105,85 @@ Unverifiable registry records are left untouched and shown as an identity
 conflict. Demo mode never starts a server or opens a browser.
 
 The managed console runs in a separate child process, so stopping it does not
-quit the TUI. Its connection credentials pass through a private pipe. Access
-URLs never appear in the TUI, its status messages, or ordinary errors. Browser
+quit the TUI. Its explicit connection credentials pass through a bounded private
+stdin pipe; the child reauthenticates both contexts without loading ambient
+manager credentials. Access URLs never appear in the TUI, its status messages,
+or ordinary errors. Browser
 opening uses the operating system's native opener on macOS, Linux, and Windows;
 it occurs on the computer running the TUI.
 
+For an already running session, `witself dashboard open --agent NAME` performs
+independent current-agent/current-manager verification and an exact live-session
+check before opening it. Use the same account and realm selectors. If manual
+browser opening is needed, add `--print-url`. Its output is a **private local
+session capability**, including Account access when enabled; do not copy it into
+logs or reports. Routine status, stop results, and banners hide manager URLs.
+See [local opening and reuse](agent-console.md#opening-and-reusing-a-local-console).
+
+## Account navigation
+
+A separate **8 Account** entry appears only when the original current CLI
+operator is verified for the selected agent's canonical account. The seven
+agent sections retain keys `1`–`7` and their existing agent authority. Account
+uses the current manager's authority and grants the agent no new permissions.
+Without a verified manager there is no Account entry or Account help/options,
+including at compact terminal sizes. Explicit `--endpoint` or `--token-file`
+connections remain agent-only.
+
+The Account header identifies the account, current manager/role, selected agent,
+and read-only scope. Its subsections are **Overview**, **Clients on this device**,
+**Plan & limits**, **Billing**, **Support**, and **Access**, in that order.
+Plan & limits and Billing appear only for `account_owner`, `account_admin`, or
+`account_billing`; `account_operator` sees the other four. Access describes the
+manager's permitted reads, not the agent's privileges.
+
+| Key | Action in Account |
+| --- | --- |
+| `8` | Open Account when authorized |
+| `1`–`7` | Return to the corresponding agent section |
+| `[` / `]` or left / right | Move between permitted Account subsections |
+| Tab / Shift+Tab | Switch between selection and scrolling |
+| Up / down or `k` / `j` | Select a support ticket in selection mode, otherwise scroll |
+| Enter | Deliberately open the selected support thread |
+| Esc | Clear the selected thread and return to selection |
+| `x` | Check this device, only in Clients on this device |
+| `r` | Refresh the section and authority; Clients reads the cached report |
+| `p` | Pause/resume display refresh; independent authority checks continue |
+| `b` / `w` / `t` | Keep browser opening, web-console controls, and theme selection |
+
+Current authorization is checked independently of slow section reads and paused
+display refresh. An authority error or revocation clears Account data and removes
+navigation; changed identity, role, or permitted sections clears old projections.
+Late results cannot restore them. Account has no clipboard, support mutation,
+payment, or other domain mutation controls. The existing theme exception remains
+agent-scoped.
+
+Clients scans run only on explicit `x` (**Check this device**). The report covers
+recorded installs for this account on this device, distinguishing recorded
+version, executable presence, static MCP registration, effective verification
+**Not run**, and check time. It never runs providers, reads credentials, or
+performs network checks. All eight runtime record types are inventoried; only
+the four supported default-root MCP registrations are checked. Custom provider
+roots and unsupported platforms/topologies remain unsupported or unavailable,
+not healthy. This is not fleet inventory or online status.
+
+Support bodies are separate ephemeral selected reads. Esc, refresh, leaving or
+hiding the view (including help/theme/web controls), selection changes, or
+context changes clear them; reopening requires fresh selection. There is no
+background body refresh. Whole-thread responses over 4 MiB produce the fixed
+`response_too_large` resource error without removing Account authority. Use
+`witself account support show --account NAME --ticket TKT_ID` deliberately to
+inspect such a thread. Admitted responses show only the newest 100 messages,
+with 16 KiB body caps and truncation markers; no console pagination is offered.
+
+For the shared plan/retention interpretation, exact cents and unknown-versus-zero
+billing behavior, partial billing errors, and detailed local check limits, see
+[Account in the console guide](agent-console.md#account-current-manager-selected-agent).
+Hosted administration and fleet/admin privileges remain outside this workspace.
+
 ## Observation and deliberate access
 
-Passive panels share the existing Agent Console handler projections, invoked
+Passive agent panels share the existing Agent Console handler projections, invoked
 in process. Ordinary terminal browsing does not start a local HTTP listener,
 create a browser session token, or register a console. Those are created only
 when you explicitly start or open the web console. Broad fact reads retain the observational
@@ -143,4 +218,6 @@ navigation, private-access lifetimes, observational reads, and terminal text
 safety without using a real account. Such checks are not evidence of a live
 vault enrollment or production cell acceptance. The browser's existing
 [presentation and privacy contract](agent-console.md) still applies to its own
-surface; the new secret-field reveal is confined to the terminal workspace.
+surface; secret-field reveal is confined to the terminal workspace. Account
+checks use synthetic identities and local fixtures; they do not establish live
+customer-account acceptance.

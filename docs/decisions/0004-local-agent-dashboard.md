@@ -1,8 +1,8 @@
 # ADR 0004: Local Read-Only Agent Dashboard Served By The CLI
 
 Status: accepted and implemented (2026-07-20). The command and its current
-panels are generally shipped; cross-platform release acceptance remains a
-tracked operational gate in the canonical [Feature Status](../feature-status.md)
+seven agent panels are generally shipped; cross-platform release acceptance
+remains a tracked operational gate in the canonical [Feature Status](../feature-status.md)
 scorecard.
 
 The product-facing name is **local Agent Console**; the command remains
@@ -23,10 +23,10 @@ query at a time.
 
 [post-v0-roadmap.md](../post-v0-roadmap.md) defers a "Web Dashboard" and
 [requirements.md](../requirements.md) requires that managed-service
-administration never need one. Both constraints are about the operator/admin
-web surface for account, billing, and fleet workflows. Neither rules out a
-strictly local, strictly read-only convenience view, but the roadmap binds any
-dashboard to one rule: it must reuse the same public API, authorization,
+administration never need one. Both constraints are about hosted administration
+for account, billing, and fleet workflows. Neither rules out a strictly local,
+strictly read-only convenience view, but the roadmap binds any dashboard to one
+rule: it must reuse the same public API, authorization,
 audit, and redaction rules as the CLI rather than adding a privileged
 web-only path.
 
@@ -36,12 +36,14 @@ local processes are foreground commands the operator starts and stops.
 ## Decision
 
 Ship `witself dashboard serve`: a foreground CLI command that serves a local,
-read-only, live-updating HTTP dashboard for exactly one agent.
+read-only, live-updating HTTP dashboard for exactly one agent, with a conditional
+same-account manager read area as described below.
 
 ### Same API, same authz, same redaction
 
-The dashboard process is a thin proxy over the existing `/v1` read API using
-the agent's own token via the standard connection resolution
+For its seven agent sections, the dashboard process is a thin proxy over the
+existing `/v1` read API using the agent's own token via the standard connection
+resolution
 (`-account`/`-realm`/`-agent`/`-endpoint`/`-token-file`, defaulting like every
 other agent command). No widened reads: transcripts and
 self digests use `observational=true` reads, messages use the passive
@@ -64,7 +66,7 @@ projections. Received uses exactly `GET /v1/email/address`, `GET
 /v1/email:status`, and `GET /v1/email`; Sent uses only the bounded owner outbox
 `GET /v1/email/sent`. The dashboard never calls `:listen`, inbound `:read`,
 `:ack`, or processing actions, outbound `:send` or reply, a sent-message detail
-route, an operator-control route, or a provider-event route. The proxy rebuilds
+route, an email operator-control route, or a provider-event route. The proxy rebuilds
 every response through narrow allow lists rather than trusting the current wire
 shape.
 
@@ -155,15 +157,74 @@ is still validated against the embedded theme list in the browser before it
 can become a stylesheet URL, so a tampered row can only ever select an
 embedded pack.
 
+### Account extension: two independently verified contexts
+
+The local browser and native TUI retain the seven agent sections and add a
+visually separate, conditional Account area. The agent token stays confined to
+the existing agent routes. Account uses a separate credential for the **original current CLI
+operator**, verified against the fixed trusted endpoint and the selected
+agent's canonical account. It does not confer manager permissions on the agent.
+No verified manager means no Account navigation or options. Explicit
+`--endpoint` or `--token-file` connections are agent-only.
+
+Eligibility starts from the original managed account selection, before any
+secret-vault fallback. The CLI compares nonsecret account metadata to the
+verified agent account, resolves the trusted directory endpoint freshly, and
+compares fixed origins before loading only that account's operator credential.
+Strict live operator identity and current capabilities must match; an unknown
+schema, principal kind, ID, account, or role fails closed. There is no fallback
+to an ambient/default owner. Absence of Account capability is normal and leaves
+the agent sections usable.
+
+Account offers Overview, Clients on this device, Plan & limits, Billing,
+Support, and Access. The first two plus Support and Access permit recognized
+active account operators; Plan & limits and Billing require `account_owner`,
+`account_admin`, or `account_billing`. `account_operator` receives no plan or
+billing links. Every read checks current backend authorization. Context errors,
+revocation, or mismatch clear Account contents and navigation; context/role
+changes discard prior projections and in-flight results. TUI authority checks
+continue independently of slow reads and paused display refresh.
+
+Both interfaces use the closed `witself.console.account.v1` projection through
+fixed local GET resources (or their in-process Reader equivalents):
+`/api/account/context`, `/overview`, `/clients`, `/clients/scan`, `/plan`,
+`/billing`, `/support`, `/support/{id}`, and `/access`, with every abbreviated
+path under `/api/account`. No arbitrary upstream URL, method, query, or
+credential forwarding is added. The explicit Clients scan rejects HEAD without
+scanning; polling only reads cached metadata. That local check neither executes
+providers nor accesses their credentials or network services. It considers all
+eight recorded runtime installs for this account, with default-root static MCP
+registration checks for four supported runtimes and effective verification
+always not run; unsupported roots/topologies/platforms are not reported healthy.
+
+Upstream responses are bounded before decoding: 2 MiB normally, 4 MiB for the
+existing whole-thread support endpoint, with no redirects and a 10-second
+caller deadline. An oversized source returns only `response_too_large` (local
+502/Reader code) without revoking Account authority. Admitted support threads
+retain the newest 100 messages and at most 16 KiB per body, with truncation
+marked. There is no invented pagination or automatic CLI fallback; deliberate
+inspection uses `witself account support show --account NAME --ticket TKT_ID`.
+Selected text stays separate from passive data, clears on refresh/hiding/context
+change, and requires fresh selection. Billing sources retain independent
+failure states and exact cents/currency; unknown amounts never become zero.
+The [Account guide](../agent-console.md#account-current-manager-selected-agent)
+defines plan cap/retention interpretation and the complete presentation limits.
+
+Account adds no domain write, support reply, billing action, token inventory,
+or fleet/admin privilege. Hosted administration remains deferred. The existing
+agent-scoped theme preference is still the only write exception.
+
 ### Local-only by construction
 
 The listener binds `127.0.0.1` only, validates the `Host` header, and
-requires a per-process random URL token delivered once at startup. Opening
-the `?token=` URL exchanges it for an `HttpOnly` `SameSite=Strict` session
+requires a per-process random URL token. Agent-only startup may print its
+opening URL; manager-session banners suppress it and direct the operator to
+verified `dashboard open` (or deliberate `--print-url` for manual opening).
+Opening the `?token=` URL exchanges it for an `HttpOnly` `SameSite=Strict` session
 cookie holding a distinct per-process random value — never the URL token
 itself. Browsers do not isolate cookies by port (RFC 6265), so any cookie set
 for `127.0.0.1` rides along on requests to every other loopback listener the
-operator visits; the exchange keeps the printed credential out of that
+operator visits; the exchange keeps the opening credential out of that
 channel, a leaked session value dies with the process, and the cookie name is
 scoped by listener port so concurrently served agents neither clobber nor
 accept each other's sessions. Because that port-blindness also makes every
@@ -198,9 +259,11 @@ and hand every MCP-connected runtime spawn authority it does not need.
 "Show me the dashboard" from an AI runtime is agent-driven CLI use instead:
 the agent checks `witself dashboard status -json` (registry read plus PID
 liveness), starts `witself dashboard serve` itself as a runtime-managed
-background task when none is live, and opens the tokened URL in its
-integrated browser. The process then belongs to the runtime's task manager
-and ends with the session rather than becoming an orphan daemon.
+background task when none is live, and uses `witself dashboard open` with the
+same account, realm, and agent selectors. For an integrated or manual browser,
+`--print-url` deliberately reveals the verified opening URL; that output is
+private and must not enter shared logs or reports. The process then belongs to
+the runtime's task manager and ends with the session rather than becoming an orphan daemon.
 `witself dashboard stop` completes that runtime-managed lifecycle: it is the
 same purely local registry read, and it delivers SIGINT only after the
 marker-header liveness probe confirms a live dashboard and the entry's own
@@ -210,17 +273,41 @@ recorded port after a crash — while only the owner answers the `?token=`
 exchange with a redirect) — never to a bare recorded PID, which may have
 been reused by an unrelated process — then waits briefly for the serve to
 shut down and release its registry entry. So that
-tooling which did not start the serve can still open it, the 0600 registry
-entry records the tokened URL; the same-user exposure is identical to the
-agent token file, which already grants the underlying reads. A read-only
+tooling which did not start the serve can still request verified opening, the
+0600 registry retains the local capability. For manager sessions, durable legacy
+`access_url` is empty and only private `manager_access_url` contains it; old
+readers cannot expose it. Routine status and stop text/JSON and startup banners
+suppress manager opening URLs. This registry is private local-session custody,
+not a privilege boundary against the same OS user. A read-only
 MCP `dashboard.status` discovery tool remains an option for shell-less
 runtimes later; nothing ever grants MCP spawn authority.
 
+`dashboard open` independently resolves the current agent and manager, verifies
+the authenticated live session, and fences the exact registry instance before
+opening or printing its URL. TUI reuse/open additionally manages startup and
+ownership. Discovery compares both principals, including canonical agent
+account/realm/ID, immutable manager account/operator/role binding, and current
+manager availability through `witself.console.viewer.v1`. Registry claims alone
+cannot authorize reuse. Agent-only cannot reuse manager-enabled; one manager
+cannot reuse another. An unavailable/revoked manager-bound session retains its
+original binding, and legacy route absence is compatible only with agent-only.
+Mismatching running sessions are left intact with a conflict response; cleanup
+removes only the exact owned instance. Stop manager-enabled sessions before
+downgrading: older CLIs cannot prove ownership and intentionally leave them
+running. Use the launching/newer CLI, foreground Ctrl-C, or the owning TUI.
+
+The TUI's managed web child receives explicit credentials and context through
+bounded private stdin, independently reauthenticates both principals, and never
+loads ambient manager credentials. Manager bearers stay out of argv, environment,
+browser state, registry, errors, and reports. See the
+[terminal lifecycle guide](../agent-tui.md#web-console-one-key-away).
+
 ### Explicitly not the deferred web dashboard
 
-The operator/admin web dashboard remains deferred per the roadmap. A future
-operator surface follows the control-plane fan-out topology; it will not
-scrape local per-agent dashboards. The local registry only powers same-machine
+Hosted operator/admin web administration remains deferred per the roadmap.
+The local Account read area does not add administration or fleet authority.
+A future hosted operator surface follows the control-plane fan-out topology;
+it will not scrape local per-agent dashboards. The local registry only powers same-machine
 discovery.
 
 ## Consequences
@@ -254,9 +341,15 @@ discovery.
   racing past the liveness check still resolve to exactly one registered
   survivor; shutdown only removes the registry entry it still owns, so a
   losing serve cannot delete the survivor's discovery record.
-- The dashboard inherits CLI trust: anyone with the agent token file could
-  already read this data via the CLI; the URL token only guards the local
-  HTTP surface against other local users and DNS-rebinding browsers.
+- Agent panels inherit the selected agent token's CLI trust. Account reads
+  require independently verified current manager authority. A manager-enabled
+  session URL therefore carries local access beyond agent-token reads and must
+  be kept private; possession of an agent token alone cannot authorize opening
+  or reusing that session. The URL token guards the local HTTP surface against
+  other local users and DNS-rebinding browsers.
+- Historical seven-panel release acceptance does not validate the Account
+  extension. Account requires separate synthetic authorization and presentation
+  checks; those results do not establish live customer-account acceptance.
 
 ## Alternatives Considered
 
