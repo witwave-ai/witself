@@ -30,11 +30,16 @@ const dashboardStatusUsage = "usage: witself dashboard status [--agent NAME] [--
 
 const dashboardStopUsage = "usage: witself dashboard stop [--agent NAME] [--account NAME] [--realm NAME] [--json]"
 
+const dashboardOpenUsage = "usage: witself dashboard open [--account NAME] [--realm NAME] [--agent NAME] [--endpoint URL --token-file FILE] [--print-url]"
+
+const dashboardOpenHint = "run witself dashboard open with the same account, realm, and agent selectors; add --print-url to deliberately reveal the opening URL for a manual browser"
+
 func dashboardCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, dashboardServeUsage)
 		fmt.Fprintln(os.Stderr, dashboardStatusUsage)
 		fmt.Fprintln(os.Stderr, dashboardStopUsage)
+		fmt.Fprintln(os.Stderr, dashboardOpenUsage)
 		return 2
 	}
 	switch args[0] {
@@ -46,6 +51,8 @@ func dashboardCmd(args []string) int {
 		return dashboardStatus(args[1:])
 	case "stop":
 		return dashboardStop(args[1:])
+	case "open":
+		return dashboardOpen(context.Background(), args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself dashboard: unknown subcommand %q\n", args[0])
 		return 2
@@ -72,7 +79,7 @@ func dashboardStatus(args []string) int {
 
 	entries, err := dashboard.ListRegistryEntries()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	type dashboardStatusEntry struct {
@@ -90,7 +97,7 @@ func dashboardStatus(args []string) int {
 		if *realm != "" && entry.Realm != *realm {
 			continue
 		}
-		statuses = append(statuses, dashboardStatusEntry{RegistryEntry: entry, Live: dashboard.EntryLive(entry)})
+		statuses = append(statuses, dashboardStatusEntry{RegistryEntry: dashboard.PublicRegistryEntry(entry), Live: dashboard.EntryLive(entry)})
 	}
 	if *jsonOut {
 		return printJSON(map[string]any{"dashboards": statuses})
@@ -153,7 +160,7 @@ func dashboardStop(args []string) int {
 
 	entries, err := dashboard.ListRegistryEntries()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	type dashboardStopEntry struct {
@@ -173,7 +180,7 @@ func dashboardStop(args []string) int {
 		if *realm != "" && entry.Realm != *realm {
 			continue
 		}
-		result := dashboardStopEntry{RegistryEntry: entry}
+		result := dashboardStopEntry{RegistryEntry: dashboard.PublicRegistryEntry(entry)}
 		if dashboard.EntryLive(entry) && dashboard.EntryOwned(entry) {
 			result.Live = true
 			if err := stopDashboardEntry(entry); err != nil {
@@ -210,7 +217,7 @@ func dashboardStop(args []string) int {
 // the slot is genuinely free for the next serve.
 func stopDashboardEntry(entry dashboard.RegistryEntry) error {
 	if err := signalDashboard(entry); err != nil {
-		return fmt.Errorf("signal dashboard pid %d: %w", entry.PID, err)
+		return errors.New("dashboard process could not be signaled")
 	}
 	deadline := time.Now().Add(dashboardStopWait)
 	for {
@@ -253,42 +260,44 @@ func dashboardServe(ctx context.Context, args []string) int {
 		return 2
 	}
 
-	conn, err := connectAgent(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
+	conn, err := accountConsoleConnect(ctx, *account, *realm, *agent, *endpoint, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	self, err := client.GetSelf(ctx, conn.Endpoint, conn.Token, client.SelfOptions{})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	if err := verifySelfCardConnection(conn, self.Identity); err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 
-	if entry, live, err := dashboard.LiveRegistryEntry(self.Identity.AgentID); err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+	if _, live, err := dashboard.LiveRegistryEntry(self.Identity.AgentID); err != nil {
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	} else if live {
-		fmt.Fprintf(os.Stderr, "witself: a dashboard for agent %q is already serving on %s (pid %d); stop it first\n",
-			entry.AgentName, entry.URL, entry.PID)
+		fmt.Fprintln(os.Stderr, "witself: a dashboard already occupies this agent session; stop it explicitly before restarting")
 		return 1
 	}
 
 	accessToken, err := newDashboardAccessToken()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	listener, err := listenDashboard(*port, dashboard.DefaultPort(self.Identity.AgentID))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintln(os.Stderr, "witself: local dashboard operation could not complete")
 		return 1
 	}
 
+	manager := resolveAccountConsoleManager(ctx, conn, self.Identity, accountConsoleExplicit(fs), accountConsoleLocate)
+	roots := accountConsoleLocalRoots()
 	cfg := dashboard.Config{
+		AccountManager: manager, AccountClientsScan: newAccountConsoleScanner(ctx, roots, manager),
 		Endpoint:     conn.Endpoint,
 		BearerToken:  conn.Token,
 		AccessToken:  accessToken,
@@ -347,13 +356,19 @@ func serveDashboardLifecycle(ctx context.Context, listener net.Listener, cfg das
 	entry.URL = fmt.Sprintf("http://127.0.0.1:%d/", port)
 	entry.AccessURL = fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, cfg.AccessToken)
 	entry.StartedAt = time.Now().UTC()
+	entry.ViewerContract = dashboard.ViewerSchema
+	entry.Manager = nil
+	if cfg.AccountManager != nil {
+		p := cfg.AccountManager.Identity
+		entry.Manager = &dashboard.ViewerBinding{AccountID: p.AccountID, OperatorID: p.OperatorID, Role: p.Role}
+	}
 
 	// Windows has no Process.Signal(SIGINT). Register its private shutdown
 	// event before publishing the registry entry; Unix retains signal shutdown.
 	ctx, releaseStop, err := registerDashboardStop(ctx, entry)
 	if err != nil {
 		_ = listener.Close()
-		_, _ = fmt.Fprintf(output, "witself: register dashboard shutdown: %v\n", err)
+		_, _ = fmt.Fprintln(output, "witself: dashboard shutdown registration failed")
 		return 1
 	}
 	defer releaseStop()
@@ -361,7 +376,7 @@ func serveDashboardLifecycle(ctx context.Context, listener net.Listener, cfg das
 	mux := http.NewServeMux()
 	if err := dashboard.Register(mux, cfg); err != nil {
 		_ = listener.Close()
-		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
+		_, _ = fmt.Fprintln(output, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	srv := &http.Server{
@@ -391,29 +406,27 @@ func serveDashboardLifecycle(ctx context.Context, listener net.Listener, cfg das
 	// liveness probe of the winner must see the marker header. Two serves
 	// racing past the pre-bind check therefore resolve to exactly one
 	// registered survivor; the loser backs off without deleting its entry.
-	var survivor dashboard.RegistryEntry
 	var claimed bool
 	if ready != nil {
 		claimed, err = dashboard.ClaimManagedRegistryEntry(ctx, entry)
 	} else {
-		survivor, claimed, err = dashboard.ClaimRegistryEntry(entry)
+		_, claimed, err = dashboard.ClaimRegistryEntry(entry)
 	}
 	if err != nil {
 		backOff()
-		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
+		_, _ = fmt.Fprintln(output, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	if !claimed {
 		backOff()
-		_, _ = fmt.Fprintf(output, "witself: a dashboard for agent %q is already serving on %s (pid %d); stop it first\n",
-			survivor.AgentName, survivor.URL, survivor.PID)
+		_, _ = fmt.Fprintln(output, "witself: a dashboard already occupies this agent session; stop it explicitly before restarting")
 		return 1
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if _, err := dashboard.ReleaseRegistryInstance(releaseCtx, entry); err != nil {
-			_, _ = fmt.Fprintf(output, "witself: warning: remove dashboard registry entry: %v\n", err)
+			_, _ = fmt.Fprintln(output, "witself: dashboard registry cleanup could not complete")
 		}
 	}()
 	if ready != nil {
@@ -422,27 +435,40 @@ func serveDashboardLifecycle(ctx context.Context, listener net.Listener, cfg das
 			return 1
 		}
 	}
-	_, _ = fmt.Fprintf(output, "witself dashboard: serving agent %s on %s\n",
-		entry.AgentName, entry.AccessURL)
+	bannerURL := entry.AccessURL
+	if entry.Manager != nil {
+		bannerURL = entry.URL
+	}
+	_, _ = fmt.Fprintf(output, "witself dashboard: serving agent %s on %s\n", entry.AgentName, bannerURL)
+	if entry.Manager != nil && ready == nil {
+		_, _ = fmt.Fprintln(output, "witself dashboard:", dashboardOpenHint)
+	}
 	if openBrowser && ready == nil {
-		// Fire-and-forget: a launch failure only warns — the banner URL still
-		// works — and nothing waits on the browser process.
+		if cfg.AccountManager != nil {
+			if _, err := client.RevalidateAccountConsoleManager(ctx, *cfg.AccountManager); err != nil {
+				_, _ = fmt.Fprintln(output, "witself: account console authority could not be verified; browser was not opened")
+				backOff()
+				return 1
+			}
+		}
+		// This process may open its own freshly verified context.
 		if err := launchBrowser(entry.AccessURL); err != nil {
-			_, _ = fmt.Fprintf(output, "witself dashboard: warning: open browser: %v\n", err)
+			_, _ = fmt.Fprintln(output, "witself dashboard: browser could not open")
+			_, _ = fmt.Fprintln(output, "witself dashboard:", dashboardOpenHint)
 		}
 	}
 
 	select {
 	case <-ctx.Done():
-	case err := <-errc:
-		_, _ = fmt.Fprintf(output, "witself: %v\n", err)
+	case <-errc:
+		_, _ = fmt.Fprintln(output, "witself: local dashboard operation could not complete")
 		return 1
 	}
 	defer func() { _ = srv.Close() }()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
-		_, _ = fmt.Fprintf(output, "witself dashboard: shut down with connections still open: %v\n", err)
+		_, _ = fmt.Fprintln(output, "witself dashboard: shut down with connections still open")
 		return 0
 	}
 	_, _ = fmt.Fprintln(output, "witself dashboard: shut down cleanly")

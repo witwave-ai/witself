@@ -194,6 +194,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	factReads := &factReadCapability{}
 	secrets := &secretsCapability{}
 	accounts := newAccountCollector(cfg)
+	mux.Handle("GET /api/console/viewer", secure(cfg, session, viewerContextHandler(cfg, accounts)))
 	for resource, path := range accountPaths {
 		if resource == ResourceAccountSupportTicket {
 			path += "{id}"
@@ -299,8 +300,12 @@ func secure(cfg Config, session string, next http.Handler) http.Handler {
 		}
 		cookie, err := r.Cookie(cookieName)
 		if err != nil || !tokenMatches(cookie.Value, session) {
+			hint := "open the ?token= URL printed at startup"
+			if cfg.AccountManager != nil {
+				hint = "run witself dashboard open with the same account, realm, and agent selectors; add --print-url to deliberately reveal the opening URL"
+			}
 			writeJSONError(w, http.StatusUnauthorized,
-				"missing or invalid access token (open the ?token= URL printed at startup)")
+				"missing or invalid access token ("+hint+")")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(activity.WithObservation(r.Context())))

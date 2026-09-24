@@ -25,7 +25,7 @@ const tuiConsoleBrowserArgument = "_managed-tui-console-open"
 
 var (
 	errConsoleUnavailable = errors.New("web console is unavailable")
-	errConsoleConflict    = errors.New("web console identity could not be verified")
+	errConsoleConflict    = errors.New("web console context conflicts or cannot be verified; stop it explicitly before restarting")
 	errConsoleStart       = errors.New("web console could not start")
 	errConsoleStop        = errors.New("web console could not stop")
 	errConsoleOpen        = errors.New("web console browser could not open")
@@ -36,6 +36,8 @@ var (
 // gate serializes actions, but cancellation and Close do not wait to cancel an
 // in-flight startup. The retained child lifetime derives only from the parent.
 type tuiConsole struct {
+	manager  *dashboard.AccountManager
+	roots    accountConsoleRoots
 	parent   context.Context
 	cancel   context.CancelFunc
 	gate     chan struct{}
@@ -61,10 +63,15 @@ type tuiConsoleProcess struct {
 
 var _ agenttui.ConsoleController = (*tuiConsole)(nil)
 
-func newTUIConsole(ctx context.Context, conn agentConnection, identity client.SelfIdentity, poll time.Duration) *tuiConsole {
+func newTUIConsole(ctx context.Context, conn agentConnection, identity client.SelfIdentity, poll time.Duration, account accountConsoleOptions) *tuiConsole {
 	parent, cancel := context.WithCancel(ctx)
 	c := &tuiConsole{parent: parent, cancel: cancel, gate: make(chan struct{}, 1), conn: conn, identity: identity, poll: poll,
 		opener: openTUIConsoleBrowser, signal: signalDashboardProcess}
+	c.roots = account.Roots
+	if account.Manager != nil {
+		m := *account.Manager
+		c.manager = &m
+	}
 	c.command = func() (*exec.Cmd, error) {
 		executable, err := os.Executable()
 		if err != nil {
@@ -295,7 +302,7 @@ func (c *tuiConsole) captureChildEntry(child *tuiConsoleProcess) {
 	// The retained handle plus the parent's unique private bootstrap token bind
 	// the record to this child even if publication raced cancellation.
 	entry, err := dashboard.ReadRegistryInstance(c.identity.AgentID)
-	if err == nil && c.validEntry(entry) && entry.PID == child.cmd.Process.Pid &&
+	if err == nil && c.validEntry(entry) && consoleRegistryManagerMatches(entry, c.manager) && entry.PID == child.cmd.Process.Pid &&
 		entry.AccountID == c.identity.AccountID && entry.RealmID == c.identity.RealmID &&
 		strings.HasSuffix(entry.AccessURL, "?token="+child.accessToken) {
 		child.entry = entry

@@ -39,7 +39,7 @@ func TestAgentTUIDemoDoesNotResolveConnection(t *testing.T) {
 	t.Setenv("WITSELF_AGENT", "missing-agent")
 	t.Setenv("WITSELF_REALM", "missing-realm")
 	called := false
-	createTUIConsole = func(context.Context, agentConnection, client.SelfIdentity, time.Duration) agenttui.ConsoleController {
+	createTUIConsole = func(context.Context, agentConnection, client.SelfIdentity, time.Duration, accountConsoleOptions) agenttui.ConsoleController {
 		t.Fatal("demo initialized a console controller")
 		return nil
 	}
@@ -111,8 +111,11 @@ func TestAgentTUIAuthenticatesIdentityAndUsesObservationalReader(t *testing.T) {
 			called := false
 			console := &testTUIConsoleCleanup{}
 			created := 0
-			createTUIConsole = func(ctx context.Context, conn agentConnection, id client.SelfIdentity, poll time.Duration) agenttui.ConsoleController {
+			createTUIConsole = func(ctx context.Context, conn agentConnection, id client.SelfIdentity, poll time.Duration, account accountConsoleOptions) agenttui.ConsoleController {
 				created++
+				if account.Manager != nil {
+					t.Fatal("explicit connection acquired ambient manager")
+				}
 				if ctx.Err() != nil || conn.Endpoint != cell.URL || id != identity || poll != 2*time.Second {
 					t.Fatal("console lost the verified connection")
 				}

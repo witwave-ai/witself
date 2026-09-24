@@ -94,7 +94,7 @@ func consoleTestBackend(t *testing.T, handler http.HandlerFunc) agentConnection 
 
 func consoleTestController(ctx context.Context, t *testing.T, conn agentConnection) *tuiConsole {
 	t.Helper()
-	c := newTUIConsole(ctx, conn, consoleTestIdentity(), time.Second)
+	c := newTUIConsole(ctx, conn, consoleTestIdentity(), time.Second, accountConsoleOptions{})
 	c.command = consoleTestCommand("console-test-child")
 	c.opener = func(context.Context, string) error { t.Error("unexpected browser launch"); return nil }
 	t.Cleanup(func() {
@@ -532,8 +532,8 @@ func TestTUIConsoleStopReportsSuccessor(t *testing.T) {
 
 func TestTUIConsolePrivateBootstrapAndReadiness(t *testing.T) {
 	consoleTestHome(t)
-	conn := consoleTestBackend(t, nil)
-	bootstrap := tuiConsoleBootstrap{Connection: conn, Identity: consoleTestIdentity(), Poll: time.Second, AccessToken: strings.Repeat("ab", 16)}
+	conn, manager, _ := accountTestBackend(t)
+	bootstrap := tuiConsoleBootstrap{Manager: consoleManagerBootstrap(manager), ScannerRoots: accountConsoleLocalRoots(), Connection: conn, Identity: consoleTestIdentity(), Poll: time.Second, AccessToken: strings.Repeat("ab", 16)}
 	raw, _ := json.Marshal(bootstrap)
 	command, err := consoleTestCommand("console-test-child")()
 	if err != nil {
@@ -555,7 +555,7 @@ func TestTUIConsolePrivateBootstrapAndReadiness(t *testing.T) {
 	// This subprocess is the test executable. Coverage instrumentation needs a
 	// private output directory to avoid its own warning on otherwise quiet stderr.
 	command.Env = append(command.Env, "GOCOVERDIR="+t.TempDir())
-	if strings.Contains(strings.Join(command.Args, " ")+strings.Join(command.Env, " "), conn.Token) {
+	if strings.Contains(strings.Join(command.Args, " ")+strings.Join(command.Env, " "), conn.Token) || strings.Contains(strings.Join(command.Args, " ")+strings.Join(command.Env, " "), accountFakeBearer) {
 		t.Fatal("credential outside bootstrap")
 	}
 	if err := command.Start(); err != nil {

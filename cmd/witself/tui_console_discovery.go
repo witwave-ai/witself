@@ -73,7 +73,7 @@ func (c *tuiConsole) validEntry(entry dashboard.RegistryEntry) bool {
 
 func (c *tuiConsole) discover(ctx context.Context) (agenttui.ConsoleStatus, dashboard.RegistryEntry, error) {
 	empty := dashboard.RegistryEntry{}
-	if !consoleIdentityMatches(c.identity, c.identity) || c.conn.Token == "" || (c.conn.AccountID != "" && c.conn.AccountID != c.identity.AccountID) {
+	if !accountConsoleManagerMatches(c.conn, c.identity, c.manager) || !consoleIdentityMatches(c.identity, c.identity) || c.conn.Token == "" || (c.conn.AccountID != "" && c.conn.AccountID != c.identity.AccountID) {
 		return consoleUnavailable(), empty, errConsoleUnavailable
 	}
 	if _, err := normalizeConsoleEndpoint(c.conn.Endpoint); err != nil {
@@ -90,7 +90,7 @@ func (c *tuiConsole) discover(ctx context.Context) (agenttui.ConsoleStatus, dash
 	if err != nil || !c.validEntry(entry) || !dashboard.RegistryPIDRunning(entry.PID) {
 		return conflict, empty, errConsoleConflict
 	}
-	if !verifyConsoleEntry(ctx, entry, c.identity) {
+	if !verifyConsoleEntry(ctx, entry, c.identity, c.manager) {
 		if ctx.Err() != nil {
 			return consoleUnavailable(), empty, errConsoleCanceled
 		}
@@ -103,7 +103,7 @@ func (c *tuiConsole) discover(ctx context.Context) (agenttui.ConsoleStatus, dash
 	return agenttui.ConsoleStatus{State: agenttui.ConsoleRunning, Owned: c.owns(entry), Port: entry.Port}, entry, nil
 }
 
-func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expected client.SelfIdentity) bool {
+func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expected client.SelfIdentity, manager *dashboard.AccountManager) bool {
 	probe, closeProbe := consoleHTTPClient()
 	defer closeProbe()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, entry.AccessURL, nil)
@@ -136,7 +136,55 @@ func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expe
 		return false
 	}
 	identity, err := decodeConsoleIdentity(response.Body)
-	return err == nil && consoleIdentityMatches(expected, identity)
+	if err != nil || !consoleIdentityMatches(expected, identity) {
+		return false
+	}
+	// Registry metadata can refuse reuse, but cannot authorize it or hide the
+	// immutable live session binding. Even available:false retains that binding.
+	request, err = http.NewRequestWithContext(ctx, http.MethodGet, entry.URL+"api/console/viewer", nil)
+	if err != nil {
+		return false
+	}
+	request.AddCookie(cookies[0])
+	viewerResponse, err := probe.Do(request)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = viewerResponse.Body.Close() }()
+	if viewerResponse.Header.Get(dashboard.MarkerHeader) != dashboard.RegistrySchemaVersion {
+		return false
+	}
+	if viewerResponse.StatusCode == http.StatusNotFound {
+		return manager == nil && entry.Manager == nil && entry.ViewerContract == ""
+	}
+	if viewerResponse.StatusCode != http.StatusOK {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(viewerResponse.Body, 4097))
+	if err != nil || len(raw) > 4096 {
+		return false
+	}
+	var viewer dashboard.ViewerContext
+	if json.Unmarshal(raw, &viewer) != nil || viewer.SchemaVersion != dashboard.ViewerSchema ||
+		viewer.AccountID != expected.AccountID || viewer.RealmID != expected.RealmID || viewer.AgentID != expected.AgentID {
+		return false
+	}
+	if entry.ViewerContract != "" && entry.ViewerContract != dashboard.ViewerSchema {
+		return false
+	}
+	if manager == nil {
+		return viewer.Manager == nil && entry.Manager == nil && !viewer.Available
+	}
+	if viewer.Manager == nil || !viewer.Available {
+		return false
+	}
+	binding := dashboard.ViewerBinding{AccountID: manager.Identity.AccountID, OperatorID: manager.Identity.OperatorID, Role: manager.Identity.Role}
+	if *viewer.Manager != binding || (entry.Manager != nil && *entry.Manager != binding) {
+		return false
+	}
+	// Verify the caller's private authority separately from the serving session.
+	_, err = client.RevalidateAccountConsoleManager(ctx, *manager)
+	return err == nil
 }
 
 func decodeConsoleIdentity(reader io.Reader) (client.SelfIdentity, error) {
