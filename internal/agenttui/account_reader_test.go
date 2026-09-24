@@ -81,7 +81,7 @@ func TestAccountActualReaderEnvelopes(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	fixtureURL = server.URL
-	reader, err := dashboard.NewReader(dashboard.Config{Endpoint: fixtureURL, BearerToken: "synthetic-agent", Identity: client.SelfIdentity{AccountID: "acct_studio_demo", AgentID: "agent_atlas_demo"}, AccountManager: &dashboard.AccountManager{Endpoint: fixtureURL, BearerToken: "synthetic-manager", Identity: dashboard.AccountManagerIdentity{AccountID: "acct_studio_demo", OperatorID: "op_manager_demo", Role: "account_owner"}}, AccountClientsScan: func(ctx context.Context, id string) (dashboard.AccountClientsReport, error) {
+	reader, err := dashboard.NewReader(dashboard.Config{Endpoint: fixtureURL, BearerToken: "synthetic-agent", Identity: client.SelfIdentity{AccountID: "acct_studio_demo", AgentID: "agent_atlas_demo"}, AccountManager: &dashboard.AccountManager{Endpoint: fixtureURL, BearerToken: "synthetic-manager", Identity: dashboard.AccountManagerIdentity{AccountID: "acct_studio_demo", OperatorID: "op_manager_demo", Role: "account_owner"}}, AccountClientsScan: func(_ context.Context, id string) (dashboard.AccountClientsReport, error) {
 		scans.Add(1)
 		if id != "acct_studio_demo" {
 			t.Error("wrong scan account")

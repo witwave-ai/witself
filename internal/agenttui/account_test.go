@@ -218,12 +218,13 @@ func TestAccountSupportPrivateLifecycle(t *testing.T) {
 				m.Update(accountContextMsg{generation: m.account.authorityGeneration})
 			case "identity", "role", "sections":
 				c := m.account.context
-				if action == "identity" {
+				switch action {
+				case "identity":
 					c.operator = "op_changed"
-				} else if action == "role" {
+				case "role":
 					c.role = "account_operator"
 					c.sections = []string{"overview", "clients", "support", "access"}
-				} else {
+				default:
 					c.sections = []string{"overview", "access"}
 				}
 				_, cmd := m.Update(accountContextMsg{generation: m.account.authorityGeneration, context: c})
@@ -336,12 +337,13 @@ func TestAccountDelayedThreadCannotRestoreAfterSelectionOrClose(t *testing.T) {
 			done := make(chan tea.Msg, 1)
 			go func() { done <- cmd() }()
 			<-started
-			if action == "close" {
+			switch action {
+			case "close":
 				m.Close()
-			} else if action == "selection" {
+			case "selection":
 				accountPress(t, m, "tab")
 				accountPress(t, m, "j")
-			} else {
+			default:
 				accountPress(t, m, action)
 			}
 			close(release)
@@ -567,7 +569,7 @@ func TestAccountCloseCancelsAuthorityAndSection(t *testing.T) {
 	f := newFake()
 	var calls atomic.Int32
 	started := make(chan struct{}, 2)
-	f.read = func(ctx context.Context, r dashboard.ReadRequest) (json.RawMessage, error) {
+	f.read = func(ctx context.Context, _ dashboard.ReadRequest) (json.RawMessage, error) {
 		calls.Add(1)
 		started <- struct{}{}
 		<-ctx.Done()

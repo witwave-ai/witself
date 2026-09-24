@@ -2,6 +2,7 @@ package agenttui
 
 import (
 	"encoding/json"
+
 	"github.com/witwave-ai/witself/internal/dashboard"
 )
 

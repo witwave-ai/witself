@@ -73,7 +73,7 @@ func TestAccountConsoleAllScannerConstructors(t *testing.T) {
 				}
 				accountConsoleLocate = func(context.Context, string, string) (string, string, error) { return "", conn.Endpoint, nil }
 				var scans atomic.Int32
-				accountConsoleScan = func(ctx context.Context, o clientinventory.Options) (clientinventory.Report, error) {
+				accountConsoleScan = func(_ context.Context, o clientinventory.Options) (clientinventory.Report, error) {
 					scans.Add(1)
 					if o.Home != roots.Home || o.WitselfHome != roots.WitselfHome || o.DSHHome != roots.DSHHome || o.AccountID != conn.AccountID {
 						t.Error("constructor lost private scanner roots")

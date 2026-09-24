@@ -13,10 +13,13 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// SchemaVersion identifies the metadata-only client inventory report contract.
 const SchemaVersion = "witself.console.clients.v1"
 
+// Runtime identifies a supported local client runtime.
 type Runtime string
 
+// Supported runtime identifiers.
 const (
 	RuntimeCodex       Runtime = "codex"
 	RuntimeClaudeCode  Runtime = "claude-code"
@@ -30,16 +33,20 @@ const (
 
 var runtimes = [...]Runtime{RuntimeCodex, RuntimeClaudeCode, RuntimeGrokBuild, RuntimeCursor, RuntimeOpenClaw, RuntimeAntigravity, RuntimeCopilot, RuntimeDSH}
 
+// ExecutableStatus describes the recorded executable file check.
 type ExecutableStatus string
 
+// Executable file check outcomes.
 const (
 	ExecutablePresent   ExecutableStatus = "present"
 	ExecutableMissing   ExecutableStatus = "missing"
 	ExecutableUnchecked ExecutableStatus = "unchecked"
 )
 
+// ConfigurationStatus describes the bounded local configuration check.
 type ConfigurationStatus string
 
+// Local configuration check outcomes.
 const (
 	ConfigurationMatch       ConfigurationStatus = "match"
 	ConfigurationIncomplete  ConfigurationStatus = "incomplete"
@@ -48,20 +55,25 @@ const (
 	ConfigurationUnsupported ConfigurationStatus = "unsupported"
 )
 
+// EffectiveVerification describes whether runtime behavior was verified.
 type EffectiveVerification string
 
+// EffectiveNotRun indicates that no runtime verification was performed.
 const EffectiveNotRun EffectiveVerification = "not_run"
 
 // ConfigurationScope makes the deliberately narrow meaning of match explicit.
 type ConfigurationScope string
 
+// Configuration check scopes.
 const (
 	ScopeNone            ConfigurationScope = "none"
 	ScopeMCPRegistration ConfigurationScope = "mcp_registration"
 )
 
+// ScanStatus describes whether the local inventory scan completed.
 type ScanStatus string
 
+// Local inventory scan outcomes.
 const (
 	ScanComplete    ScanStatus = "complete"
 	ScanPartial     ScanStatus = "partial"
@@ -72,6 +84,7 @@ const (
 // Home must be absolute; empty WitselfHome/DSHHome mean Home/.witself and Home/.dsh.
 type Options struct{ Home, WitselfHome, DSHHome, AccountID string }
 
+// Report contains metadata-only inventory for the requested canonical account.
 type Report struct {
 	SchemaVersion string     `json:"schema_version"`
 	DeviceLabel   string     `json:"device_label"`
@@ -80,6 +93,7 @@ type Report struct {
 	ScanStatus    ScanStatus `json:"scan_status"`
 }
 
+// Entry contains the bounded metadata and check results for one runtime.
 type Entry struct {
 	Runtime               Runtime               `json:"runtime"`
 	RecordedVersion       string                `json:"recorded_version"`
@@ -91,8 +105,11 @@ type Entry struct {
 }
 
 var (
-	ErrAccountRequired     = errors.New("clientinventory: canonical account ID required")
-	ErrInvalidOptions      = errors.New("clientinventory: invalid roots")
+	// ErrAccountRequired indicates a missing or invalid canonical account ID.
+	ErrAccountRequired = errors.New("clientinventory: canonical account ID required")
+	// ErrInvalidOptions indicates invalid caller-owned roots.
+	ErrInvalidOptions = errors.New("clientinventory: invalid roots")
+	// ErrUnsupportedPlatform indicates that safe local scanning is unsupported.
 	ErrUnsupportedPlatform = errors.New("clientinventory: platform unsupported")
 	versionPattern         = regexp.MustCompile(`^v?(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-(alpha|beta|rc)(\.(0|[1-9][0-9]{0,8}))?)?$`)
 	cursorVersionPattern   = regexp.MustCompile(`^[1-9][0-9]{3}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,16}$`)
@@ -241,7 +258,7 @@ func validID(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
 			return false
 		}
 	}

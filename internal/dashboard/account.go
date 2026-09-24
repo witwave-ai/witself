@@ -10,12 +10,17 @@ import (
 	"github.com/witwave-ai/witself/internal/client"
 )
 
+// AccountSchema identifies the read-only account projection contract.
 const AccountSchema = "witself.console.account.v1"
+
+// AccountClientsSchema identifies the local client inventory report contract.
 const AccountClientsSchema = "witself.console.clients.v1"
 
 // AccountManager and AccountManagerIdentity are private process configuration
 // and its verified public principal. No credential is serialized.
 type AccountManager = client.AccountConsoleManager
+
+// AccountManagerIdentity is the verified public account operator binding.
 type AccountManagerIdentity = client.AccountConsoleIdentity
 
 // AccountClientsScan is an explicit local metadata scan. It must honor ctx,
@@ -25,6 +30,8 @@ type AccountManagerIdentity = client.AccountConsoleIdentity
 // Constructors and ordinary Clients reads never invoke it. The core copies and
 // bounds the returned DTO before caching; the callback must not mutate it later.
 type AccountClientsScan func(ctx context.Context, accountID string) (AccountClientsReport, error)
+
+// AccountClientsReport contains metadata from an explicit local inventory scan.
 type AccountClientsReport struct {
 	SchemaVersion string               `json:"schema_version"`
 	DeviceLabel   string               `json:"device_label"`
@@ -33,6 +40,8 @@ type AccountClientsReport struct {
 	Entries       []AccountClientEntry `json:"entries"`
 	Truncated     bool                 `json:"truncated"`
 }
+
+// AccountClientEntry contains bounded metadata and check results for one runtime.
 type AccountClientEntry struct {
 	Runtime               string `json:"runtime"`
 	RecordedVersion       string `json:"recorded_version"`

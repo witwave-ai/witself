@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestDashboardManagerManualOpeningRecovery(t *testing.T) {
 }
 
 func TestDashboardOpenVerifiesBeforeReveal(t *testing.T) {
-	for _, mode := range []string{"reveal", "browser", "launcher-failure", "agent-only-caller", "revoked", "different-operator", "replaced", "missing"} {
+	for _, mode := range []string{"reveal", "output-failure", "browser", "launcher-failure", "agent-only-caller", "revoked", "different-operator", "replaced", "missing"} {
 		t.Run(mode, func(t *testing.T) {
 			consoleTestHome(t)
 			conn, manager, revoked := accountTestBackend(t)
@@ -159,7 +160,14 @@ func TestDashboardOpenVerifiesBeforeReveal(t *testing.T) {
 			if mode == "agent-only-caller" {
 				args = append(args, "--endpoint", conn.Endpoint)
 			}
-			out, errout, code := captureFactDeleteCLI(t, func() int { return dashboardCmd(args) })
+			out, errout, code := captureFactDeleteCLI(t, func() int {
+				if mode == "output-failure" {
+					if err := os.Stdout.Close(); err != nil {
+						t.Fatal("close synthetic stdout pipe")
+					}
+				}
+				return dashboardCmd(args)
+			})
 			if mode == "reveal" {
 				if code != 0 || out != entry.AccessURL+"\n" || errout != "" || opened != 0 {
 					t.Fatal("verified deliberate reveal failed")
@@ -175,6 +183,9 @@ func TestDashboardOpenVerifiesBeforeReveal(t *testing.T) {
 				}
 			} else if code != 1 {
 				t.Fatal("unverified or failed opening succeeded")
+			}
+			if mode == "output-failure" && errout != "witself: dashboard opening URL could not be written\n" {
+				t.Fatal("output failure omitted fixed value-free diagnostic")
 			}
 			if mode == "launcher-failure" {
 				if opened != 1 || !strings.Contains(errout, "--print-url") {

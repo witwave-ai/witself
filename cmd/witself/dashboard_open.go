@@ -53,7 +53,10 @@ func dashboardOpen(ctx context.Context, args []string) int {
 		return fail()
 	}
 	if *printURL {
-		fmt.Fprintln(os.Stdout, entry.AccessURL)
+		if _, err := fmt.Fprintln(os.Stdout, entry.AccessURL); err != nil {
+			fmt.Fprintln(os.Stderr, "witself: dashboard opening URL could not be written")
+			return 1
+		}
 		return 0
 	}
 	if err := launchBrowser(entry.AccessURL); err != nil {

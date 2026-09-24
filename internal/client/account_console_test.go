@@ -54,7 +54,7 @@ func TestAccountConsoleStrictVerifier(t *testing.T) {
 	}
 	for _, role := range []string{"account_owner", "account_admin", "account_billing", "account_operator"} {
 		t.Run(role, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(consoleWhoami(role)) }))
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(consoleWhoami(role)) }))
 			defer srv.Close()
 			p, err := RevalidateAccountConsoleManager(t.Context(), consoleManager(srv.URL))
 			if err != nil || p.Role != role {
@@ -65,14 +65,14 @@ func TestAccountConsoleStrictVerifier(t *testing.T) {
 }
 func TestAccountConsoleTransportBoundsRedirectAndErrors(t *testing.T) {
 	var redirected atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1) }))
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { redirected.Add(1) }))
 	defer target.Close()
 	for _, tc := range []string{"redirect", "status", "bytes", "chunked", "malformed", "cancel"} {
 		t.Run(tc, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch tc {
 				case "redirect":
-					http.Redirect(w, r, target.URL, 302)
+					http.Redirect(w, r, target.URL, http.StatusFound)
 				case "status":
 					http.Error(w, "sensitive provider error fake-manager", 500)
 				case "bytes", "chunked":
@@ -117,7 +117,7 @@ func TestAccountConsoleClosedReads(t *testing.T) {
 			t.Error("wrong CP request")
 		}
 		if mode.Load() == "redirect" {
-			http.Redirect(w, r, "/unexpected", 302)
+			http.Redirect(w, r, "/unexpected", http.StatusFound)
 			return
 		}
 		if mode.Load() == "bytes" {
@@ -242,7 +242,7 @@ func TestAccountConsoleExactResponseCap(t *testing.T) {
 				t.Run(fmt.Sprintf("limit=%d/chunked=%t/extra=%d", limit, chunked, extra), func(t *testing.T) {
 					// A valid JSON response at each boundary, not an oversized diagnostic.
 					payload := `{"schema_version":"witself.v0","padding":"` + strings.Repeat("x", limit+extra-len(`{"schema_version":"witself.v0","padding":""}`)) + `"}`
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 						if chunked {
 							w.(http.Flusher).Flush()
 						} else {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 )
 
+// ViewerSchema identifies the console session identity contract.
 const ViewerSchema = "witself.console.viewer.v1"
 
 // ViewerBinding describes the immutable original session, not current authority.
@@ -14,6 +15,8 @@ type ViewerBinding struct {
 	OperatorID string `json:"operator_id"`
 	Role       string `json:"role"`
 }
+
+// ViewerContext reports the original session binding and current manager availability.
 type ViewerContext struct {
 	SchemaVersion string         `json:"schema_version"`
 	AccountID     string         `json:"account_id"`

@@ -79,7 +79,7 @@ func newAccountFixture(t *testing.T) (*accountFixture, Config) {
 		}
 		if path == "/v1/whoami" {
 			if f.revoked {
-				http.Error(w, "PRIVATE_REVOKED", 401)
+				http.Error(w, "PRIVATE_REVOKED", http.StatusUnauthorized)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": f.schema, "principal": f.principal})
@@ -171,7 +171,7 @@ func newAccountHarness(t *testing.T, mode string, cfg Config) accountHarness {
 			}
 			return 0, nil
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		raw, _ := io.ReadAll(resp.Body)
 		if resp.Header.Get("Cache-Control") != "private, no-store" || resp.Header.Get("Content-Security-Policy") == "" {
 			t.Error("missing secure wrapper")
@@ -752,7 +752,7 @@ func TestAccountLoopbackGuardsAndNoMutation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != tc.status {
 			t.Fatalf("guard %s %s: %d", tc.method, tc.path, resp.StatusCode)
 		}
@@ -768,7 +768,7 @@ func TestAccountLoopbackGuardsAndNoMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode < 400 {
 				t.Fatal("mutation accepted")
 			}

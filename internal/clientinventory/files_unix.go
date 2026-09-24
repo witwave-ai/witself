@@ -77,7 +77,7 @@ func (d *directory) regular(ctx context.Context, rel string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (d *directory) read(ctx context.Context, rel string, limit int64) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (d *directory) read(ctx context.Context, rel string, limit int64) ([]byte, 
 		return nil, closedFileError(err)
 	}
 	f := os.NewFile(uintptr(opened), "inventory")
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var current unix.Stat_t
 	if unix.Fstat(opened, &current) != nil || !sameFile(before, current) {
 		return nil, errUnsafe

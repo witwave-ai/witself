@@ -77,7 +77,7 @@ func TestAccountConsoleResolutionOrdering(t *testing.T) {
 		}
 		return local.Resolve(name)
 	}
-	locate := func(ctx context.Context, directory, id string) (string, string, error) {
+	locate := func(_ context.Context, directory, id string) (string, string, error) {
 		located++
 		if directory != defaultControlPlane || id != conn.AccountID || reads != 0 {
 			t.Fatal("directory did not precede bearer read")
@@ -155,7 +155,7 @@ func TestAccountConsoleStrictIdentity(t *testing.T) {
 		`{"schema_version":"witself.v0","principal":{"kind":"operator","account_id":"acc_synthetic","operator_id":"","account_role":"account_owner"}}`,
 		`{"schema_version":"witself.v0","principal":{"kind":"operator","account_id":"acc_synthetic","operator_id":"op_synthetic","account_role":"account_member"}}`,
 	} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
 		conn := agentConnection{Endpoint: server.URL, Token: consoleFakeToken, AccountName: "selected", AccountID: id.AccountID}
 		got := resolveAccountConsoleManager(context.Background(), conn, id, false, func(context.Context, string, string) (string, string, error) { return "", server.URL, nil })
 		server.Close()
@@ -172,7 +172,7 @@ func TestAccountConsoleScannerExplicitAndCancellation(t *testing.T) {
 	previous := accountConsoleScan
 	defer func() { accountConsoleScan = previous }()
 	calls := 0
-	accountConsoleScan = func(ctx context.Context, options clientinventory.Options) (clientinventory.Report, error) {
+	accountConsoleScan = func(_ context.Context, options clientinventory.Options) (clientinventory.Report, error) {
 		calls++
 		if options != (clientinventory.Options{Home: roots.Home, WitselfHome: roots.WitselfHome, DSHHome: roots.DSHHome, AccountID: conn.AccountID}) {
 			t.Error("scanner roots or account changed")

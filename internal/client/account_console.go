@@ -30,11 +30,18 @@ type AccountConsoleManager struct {
 }
 
 // String and GoString prevent accidental credential-bearing diagnostic output.
-func (AccountConsoleManager) String() string   { return "account console manager (private)" }
+func (AccountConsoleManager) String() string { return "account console manager (private)" }
+
+// GoString prevents accidental credential-bearing Go-syntax diagnostic output.
 func (AccountConsoleManager) GoString() string { return "account console manager (private)" }
 
+// ErrAccountConsoleUnavailable indicates that an account console read could not complete.
 var ErrAccountConsoleUnavailable = errors.New("account console unavailable")
+
+// ErrAccountConsoleResponseTooLarge indicates that a response exceeded its byte cap.
 var ErrAccountConsoleResponseTooLarge = errors.New("account console response too large")
+
+// ErrAccountConsoleForbidden indicates that account console authorization failed.
 var ErrAccountConsoleForbidden = errors.New("account console forbidden")
 
 // AccountConsoleRole recognizes only roles supported by today's cell/CP source.
@@ -46,6 +53,7 @@ func AccountConsoleRole(role string) bool {
 	return false
 }
 
+// AccountConsoleBillingRole reports whether a recognized role permits billing reads.
 func AccountConsoleBillingRole(role string) bool {
 	return role == "account_owner" || role == "account_admin" || role == "account_billing"
 }
@@ -124,6 +132,7 @@ func RevalidateAccountConsoleManager(ctx context.Context, m AccountConsoleManage
 // query or credential can be supplied through a console read request.
 type AccountConsoleResource uint8
 
+// Account console resources identify the supported upstream reads.
 const (
 	AccountConsoleOverview AccountConsoleResource = iota + 1
 	AccountConsolePlan
@@ -260,7 +269,7 @@ func accountConsoleJSON(ctx context.Context, target, bearer string, maxBytes int
 	if err != nil {
 		return ErrAccountConsoleUnavailable
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		return ErrAccountConsoleForbidden
 	}

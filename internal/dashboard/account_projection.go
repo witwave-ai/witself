@@ -35,7 +35,7 @@ var accountMoneyFields = accountFields{"amount_cents": "n", "currency": "s", "da
 var accountInvoiceFields = accountFields{"number": "s", "date": "s", "amount_cents": "n", "currency": "s", "status": "s"}
 var accountPaymentFields = accountFields{"date": "s", "amount_cents": "n", "currency": "s", "method": "s", "status": "s"}
 
-func accountText(s string, max int) (string, bool) {
+func accountText(s string, maxBytes int) (string, bool) {
 	clean := strings.Map(func(r rune) rune {
 		if (unicode.IsControl(r) && r != '\n' && r != '\t') || r == 0x2028 || r == 0x2029 || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
 			return -1
@@ -43,8 +43,8 @@ func accountText(s string, max int) (string, bool) {
 		return r
 	}, s)
 	changed := clean != s
-	if len(clean) > max {
-		clean = clean[:max]
+	if len(clean) > maxBytes {
+		clean = clean[:maxBytes]
 		for !utf8.ValidString(clean) {
 			clean = clean[:len(clean)-1]
 		}
@@ -85,11 +85,11 @@ func accountPick(src map[string]any, fields accountFields, truncated *bool) (map
 			if !ok {
 				return nil, client.ErrAccountConsoleUnavailable
 			}
-			max := accountTextBytes
+			maxBytes := accountTextBytes
 			if kind == "body" {
-				max = accountBodyBytes
+				maxBytes = accountBodyBytes
 			}
-			clean, changed := accountText(s, max)
+			clean, changed := accountText(s, maxBytes)
 			dst[key] = clean
 			*truncated = *truncated || changed
 		case "b":

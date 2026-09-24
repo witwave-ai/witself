@@ -694,10 +694,11 @@ func TestTokenFileExclusionsOnlyFromEligibleRecords(t *testing.T) {
 			r := scan(t, f)
 			wantConfiguration, wantExecutable := ConfigurationMatch, ExecutablePresent
 			wantRows, wantScan := 1, ScanComplete
-			if eligibility == "eligible" {
+			switch eligibility {
+			case "eligible":
 				wantConfiguration, wantExecutable = ConfigurationUnsupported, ExecutableUnchecked
 				wantRows = 3
-			} else if eligibility == "wrong_schema" || eligibility == "wrong_runtime" {
+			case "wrong_schema", "wrong_runtime":
 				wantScan = ScanPartial
 			}
 			if len(r.Entries) != wantRows || r.ScanStatus != wantScan {
