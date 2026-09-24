@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 type accountFixture struct {
@@ -262,6 +264,170 @@ func TestAccountReaderAndLoopbackProjections(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountPlanLimitPresence(t *testing.T) {
+	for _, mode := range []string{"reader", "web"} {
+		for _, tc := range []struct {
+			name    string
+			present bool
+			value   any
+			want    map[string]any
+		}{
+			{name: "absent"},
+			{name: "null", present: true},
+			{name: "empty", present: true, value: map[string]any{}, want: map[string]any{}},
+			{name: "zero", present: true, value: map[string]any{"agents": 0}, want: map[string]any{"agents": float64(0)}},
+			{name: "unsupported", present: true, value: map[string]any{"PRIVATE_UNKNOWN": "PRIVATE_VALUE"}, want: map[string]any{}},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				f, cfg := newAccountFixture(t)
+				h := newAccountHarness(t, mode, cfg)
+				f.change(func() {
+					p := f.payloads["/v1/accounts/acct_test/plan"].(map[string]any)
+					for _, key := range []string{"limits", "limit_defaults"} {
+						delete(p, key)
+						if tc.present {
+							p[key] = tc.value
+						}
+					}
+				})
+				out := readAccountOK(t, h, ResourceAccountPlan, "")
+				for _, key := range []string{"limits", "limit_defaults"} {
+					if tc.want == nil {
+						if _, exists := out[key]; exists {
+							t.Fatalf("unknown %s became present", key)
+						}
+						if _, exists := out[key+"_units"]; exists {
+							t.Fatalf("unknown %s gained units", key)
+						}
+						continue
+					}
+					if !reflect.DeepEqual(out[key], tc.want) {
+						t.Fatalf("%s = %v, want %v", key, out[key], tc.want)
+					}
+					assertAccountLimitUnits(t, out, key)
+				}
+			})
+		}
+	}
+}
+
+func assertAccountLimitUnits(t *testing.T, out map[string]any, key string) {
+	t.Helper()
+	units, ok := out[key+"_units"].(map[string]any)
+	if !ok || len(units) != len(plans.SupportedLimitKeys()) {
+		t.Fatalf("%s units do not contain the closed full vocabulary: %v", key, units)
+	}
+	for _, dimension := range plans.SupportedLimitKeys() {
+		if units[dimension] != accountLimitUnit(dimension) {
+			t.Errorf("%s unit for %s = %v", key, dimension, units[dimension])
+		}
+	}
+	for dimension, want := range map[string]string{
+		"agents": "count", "agent_email_max_raw_bytes": "bytes",
+		"message_sent_per_agent_minute":               "operations/minute",
+		"agent_email_received_bytes_per_realm_minute": "bytes/minute",
+	} {
+		if units[dimension] != want {
+			t.Errorf("%s unit for %s = %v, want %s", key, dimension, units[dimension], want)
+		}
+	}
+}
+
+func TestAccountPlanCatalogDefaultsAndUnlimitedOverride(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"reader", "web"} {
+		for _, plan := range catalog.Plans {
+			t.Run(mode+"/"+plan.ID, func(t *testing.T) {
+				f, cfg := newAccountFixture(t)
+				h := newAccountHarness(t, mode, cfg)
+				defaults, limits := map[string]any{}, map[string]any{}
+				wantDefaults, wantLimits := map[string]any{}, map[string]any{}
+				for dimension, cap := range plan.Limits {
+					defaults[dimension], limits[dimension] = cap, cap
+					wantDefaults[dimension], wantLimits[dimension] = float64(cap), float64(cap)
+				}
+				// Match lifecycle resolution: an explicit unlimited override removes
+				// the effective key, while the default cap remains present.
+				delete(limits, plans.AgentPerRealmLimit)
+				delete(wantLimits, plans.AgentPerRealmLimit)
+				f.change(func() {
+					p := f.payloads["/v1/accounts/acct_test/plan"].(map[string]any)
+					p["plan"], p["limits"], p["limit_defaults"] = plan.ID, limits, defaults
+				})
+				out := readAccountOK(t, h, ResourceAccountPlan, "")
+				if !reflect.DeepEqual(out["limits"], wantLimits) || !reflect.DeepEqual(out["limit_defaults"], wantDefaults) {
+					t.Fatalf("catalog caps or unlimited override changed: %v", out)
+				}
+				assertAccountLimitUnits(t, out, "limits")
+				assertAccountLimitUnits(t, out, "limit_defaults")
+				// A zero override must remain an actual cap on the same dimension.
+				f.change(func() { limits[plans.AgentPerRealmLimit] = 0 })
+				wantLimits[plans.AgentPerRealmLimit] = float64(0)
+				out = readAccountOK(t, h, ResourceAccountPlan, "")
+				if !reflect.DeepEqual(out["limits"], wantLimits) || !reflect.DeepEqual(out["limit_defaults"], wantDefaults) {
+					t.Fatal("zero override became unlimited or changed plan defaults")
+				}
+			})
+		}
+	}
+}
+
+func TestAccountPlanInvalidLimitsUnavailable(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+	}{
+		{"null_entry", map[string]any{"agents": nil}},
+		{"negative", map[string]any{"agents": -1}},
+		{"unsafe_integer", map[string]any{"agents": json.Number("9007199254740992")}},
+		{"out_of_int64", map[string]any{"agents": json.Number("9223372036854775808")}},
+		{"fraction", map[string]any{"agents": 0.5}},
+		{"wrong_scalar_type", map[string]any{"agents": "PRIVATE_INVALID"}},
+		{"wrong_map_type", "PRIVATE_INVALID"},
+	}
+	for dimension, maximum := range plans.WorkerValidationContract().LimitMaximums {
+		if maximum < plans.MaxPlanLimit {
+			cases = append(cases, struct {
+				name  string
+				value any
+			}{"platform/" + dimension, map[string]any{dimension: maximum + 1}})
+		}
+	}
+	for _, mode := range []string{"reader", "web"} {
+		for _, key := range []string{"limits", "limit_defaults"} {
+			for _, tc := range cases {
+				t.Run(mode+"/"+key+"/"+tc.name, func(t *testing.T) {
+					f, cfg := newAccountFixture(t)
+					h := newAccountHarness(t, mode, cfg)
+					f.change(func() { f.payloads["/v1/accounts/acct_test/plan"].(map[string]any)[key] = tc.value })
+					in := ReadRequest{Resource: ResourceAccountPlan}
+					if mode == "reader" {
+						raw, err := h.reader.Read(t.Context(), in)
+						var re *ReaderError
+						if !errors.As(err, &re) || re.Status != 502 || re.Code != "unavailable" || len(raw) != 0 || err.Error() != "dashboard reader request failed" {
+							t.Fatalf("invalid limit did not fail with fixed unavailable: %q %v", raw, err)
+						}
+					} else {
+						status, raw := h.read(t.Context(), in)
+						var out map[string]any
+						if err := json.Unmarshal(raw, &out); err != nil {
+							t.Fatal(err)
+						}
+						want := map[string]any{"schema_version": AccountSchema, "available": false, "error": "unavailable"}
+						if status != 502 || !reflect.DeepEqual(out, want) {
+							t.Fatalf("invalid limit did not fail with fixed unavailable: %d %s", status, raw)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestAccountMissingOrMismatchedConfigNoRequests(t *testing.T) {
 	for _, mode := range []string{"reader", "web"} {
 		for _, kind := range []string{"absent", "account", "endpoint", "same_bearer", "agent_missing", "role"} {

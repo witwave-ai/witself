@@ -217,9 +217,25 @@ func projectAccount(resource Resource, raw json.RawMessage, accountID, id string
 			if err != nil {
 				return nil, err
 			}
+			limits := make(map[string]int64, len(safe))
+			for dimension, value := range safe {
+				n, ok := value.(json.Number)
+				if !ok { // Explicit null is invalid; only an omitted key has no plan cap.
+					return nil, client.ErrAccountConsoleUnavailable
+				}
+				limits[dimension], err = n.Int64()
+				if err != nil {
+					return nil, client.ErrAccountConsoleUnavailable
+				}
+			}
+			if plans.ValidateLimits(limits) != nil {
+				return nil, client.ErrAccountConsoleUnavailable
+			}
 			out[key] = safe
+			// A present valid map supplies the full dimension vocabulary, even
+			// when every dimension has no plan cap. Do not invent numeric caps.
 			units := map[string]string{}
-			for key := range safe {
+			for _, key := range plans.SupportedLimitKeys() {
 				units[key] = accountLimitUnit(key)
 			}
 			out[key+"_units"] = units
