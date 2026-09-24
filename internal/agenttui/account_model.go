@@ -424,6 +424,7 @@ func (m *Model) accountKey(k string) tea.Cmd {
 			m.clearAccountData()
 			a.section = next
 			a.focus = 0
+			m.resize() // Whole subsection items can wrap differently after selection.
 			return m.accountRead(false)
 		}
 	case "tab", "shift+tab":
