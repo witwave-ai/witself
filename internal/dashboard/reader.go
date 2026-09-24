@@ -17,7 +17,8 @@ import (
 	"github.com/witwave-ai/witself/internal/activity"
 )
 
-// Resource is the closed set of passive console projections. Sensitive fact
+// Resource is the closed set of console projections. ClientsScan requires an
+// explicit user action; all other resources are passive reads. Sensitive fact
 // reveals and message body previews require their separate, explicit methods.
 type Resource uint8
 
@@ -41,6 +42,16 @@ const (
 	ResourceSecrets
 	ResourceSecret
 	ResourceSummary
+	ResourceAccountContext
+	ResourceAccountOverview
+	ResourceAccountPlan
+	ResourceAccountBilling
+	ResourceAccountSupport
+	ResourceAccountSupportTicket
+	ResourceAccountAccess
+	ResourceAccountClients
+	// ResourceAccountClientsScan is an explicit local check, never a polling resource.
+	ResourceAccountClientsScan
 )
 
 // ReadRequest addresses a console resource, never an HTTP method or URL.
@@ -53,7 +64,7 @@ type ReadRequest struct {
 }
 
 // ReaderError contains only a status and an optional, allow-listed Code:
-// feature_not_enabled, unavailable, or unenrolled. Error never includes cell
+// feature_not_enabled, unavailable, unenrolled, or forbidden. Error never includes cell
 // response text, request values, endpoint details, or credentials. Status is
 // the console handler's status (or a local validation/collection failure).
 type ReaderError struct {
@@ -80,6 +91,7 @@ type Reader struct {
 	factReads factReadCapability
 	secrets   secretsCapability
 	summary   *summaryCollector
+	accounts  *accountCollector
 }
 
 // NewReader validates the fixed cell endpoint without contacting it. Endpoint
@@ -105,7 +117,7 @@ func NewReader(cfg Config) (*Reader, error) {
 		cfg.PollInterval = defaultPollInterval
 	}
 	cfg.AccessToken = ""
-	return &Reader{cfg: cfg, summary: newSummaryCollector(cfg)}, nil
+	return &Reader{cfg: cfg, summary: newSummaryCollector(cfg), accounts: newAccountCollector(cfg)}, nil
 }
 
 // Read returns the existing handler's JSON projection. Every call has a
@@ -123,6 +135,9 @@ func (r *Reader) Read(ctx context.Context, in ReadRequest) (json.RawMessage, err
 	var needsID bool
 	limit := 100
 	switch in.Resource {
+	case ResourceAccountContext, ResourceAccountOverview, ResourceAccountPlan, ResourceAccountBilling, ResourceAccountSupport, ResourceAccountSupportTicket, ResourceAccountAccess, ResourceAccountClients, ResourceAccountClientsScan:
+		handler, path = accountHandler(r.accounts, in.Resource), accountPaths[in.Resource]
+		needsID = in.Resource == ResourceAccountSupportTicket
 	case ResourceSummary:
 		handler, path = summaryHandler(r.summary), "/api/summary"
 	case ResourceSelf:
@@ -311,10 +326,14 @@ func (r *Reader) invoke(ctx context.Context, handler http.Handler, method, path,
 // upstream prose or expose that prose to recover the missing classification.
 func readerErrorCode(body []byte) string {
 	var envelope struct {
-		Error string `json:"error"`
+		Error  string `json:"error"`
+		Schema string `json:"schema_version"`
 	}
 	if json.Unmarshal(body, &envelope) != nil {
 		return ""
+	}
+	if envelope.Schema == AccountSchema && (envelope.Error == "forbidden" || envelope.Error == "unavailable" || envelope.Error == "response_too_large") {
+		return envelope.Error
 	}
 	switch envelope.Error {
 	case "inbound email is not enabled on this account", "outbound email is not enabled on this account", "feature not enabled":
