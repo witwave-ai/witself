@@ -34,7 +34,8 @@ VERSION=1.2.3
 OLD_DIGEST="sha256:$(printf 'a%.0s' {1..64})"
 BACKUP_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
 SERVING_DIGEST="sha256:$(printf 'c%.0s' {1..64})"
-export OLD_DIGEST BACKUP_DIGEST SERVING_DIGEST
+CONFIG_DIGEST="sha256:$(printf 'd%.0s' {1..64})"
+export OLD_DIGEST BACKUP_DIGEST SERVING_DIGEST CONFIG_DIGEST
 ORIGINAL_PATH=$PATH
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/.git" "$STUB_BIN" "$STATE_DIR"
 mkdir -p "$FIXTURE_ROOT/.gitops/charts/apps"
@@ -256,6 +257,7 @@ case "$*" in
   *'get application'*|*'get applications'*|*'get app '*)
     if [ "$SCENARIO" = slow_argo ] && [ -f "$STATE_DIR/merged" ]; then /bin/sleep 3; fi
     revision=$version
+    if [[ "$SCENARIO" = digest_bare_* ]] && [ ! -f "$STATE_DIR/merged-$cell" ]; then revision=1.2.2; fi
     [ "$SCENARIO" != argo_timeout ] || revision=1.2.2
     # Label the Application with the cell named by the kube context, as the live
     # platform chart does; the train binds every live read to that label.
@@ -287,7 +289,12 @@ case "$*" in
         esac
       fi
     fi
-    jq -n --arg spec_image "$spec_image" --arg running_image "$running_image" --arg image_id "$image_id" '{items: [
+    if [[ "$SCENARIO" = digest_bare_* ]]; then
+      running_image=$CONFIG_DIGEST
+      image_id=$image
+    fi
+    jq -n --arg spec_image "$spec_image" --arg running_image "$running_image" --arg image_id "$image_id" \
+      --arg scenario "$SCENARIO" --arg unknown_digest "$CONFIG_DIGEST" '{items: [
       ("witself-server", "witself-worker") as $name | {
         metadata: {name: ($name + "-pod"), labels: {
           "app.kubernetes.io/name": $name, "app.kubernetes.io/instance": "witself-server",
@@ -299,7 +306,15 @@ case "$*" in
             imageID: (if $image_id != "" and $name == "witself-worker" then "docker-pullable://" + $image_id else $image_id end),
             ready: true, state: {running: {}}}]}
       }
-    ]}'
+    ]} |
+      # Keep the server valid so it cannot hide a bad worker status.
+      if $scenario == "digest_bare_unknown" then
+        .items[1].status.containerStatuses[0].imageID = ("ghcr.io/witwave-ai/witself-server@" + $unknown_digest)
+      elif $scenario == "digest_bare_missing" then
+        del(.items[1].status.containerStatuses[0].imageID)
+      elif $scenario == "digest_bare_malformed" then
+        .items[1].status.containerStatuses[0].imageID = ("bad reference@" + $unknown_digest)
+      else . end'
     ;;
   *'get deployments -l app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server'*)
     [ "$SCENARIO" != newer_deployment ] || image="ghcr.io/witwave-ai/witself-server:1.2.4"
@@ -658,6 +673,29 @@ if printf '%s\n' "$pods_good" | jq --arg image_id "$BACKUP_DIGEST" '
 fi
 printf 'roll train test: runtime imageID certifies pinned status while spec, worker digest, and tag-mode guards remain enforced\n'
 
+pods_bare=$(printf '%s\n' "$pods_digest" | jq --arg config "$CONFIG_DIGEST" '
+  .items[].status.containerStatuses[0] |= (.imageID = .image | .image = $config)
+')
+printf '%s\n' "$pods_bare" | run_predicate pods_converged "$BACKUP_DIGEST" || fail 'bare config status with matching manifest imageID refused'
+for bad_id in null false 42 '""' '"sha256:short"' \
+  "\"$BACKUP_DIGEST\"" "\"bad reference@$BACKUP_DIGEST\"" \
+  "\"repo@@$BACKUP_DIGEST\"" "\"repo@$OLD_DIGEST\""; do
+  if printf '%s\n' "$pods_bare" | jq --argjson bad "$bad_id" \
+    '.items[1].status.containerStatuses[0].imageID = $bad' | run_predicate pods_converged "$BACKUP_DIGEST"; then
+    fail 'bare worker status accepted missing, malformed, or stale manifest imageID'
+  fi
+done
+if printf '%s\n' "$pods_bare" | jq 'del(.items[1].status.containerStatuses)' | run_predicate pods_converged "$BACKUP_DIGEST"; then
+  fail 'bare status fixture converged with missing worker statuses'
+fi
+if printf '%s\n' "$pods_bare" | jq '.items[1].status.containerStatuses = []' | run_predicate pods_converged "$BACKUP_DIGEST"; then
+  fail 'bare status fixture converged vacuously with empty worker statuses'
+fi
+if printf '%s\n' "$pods_bare" | run_predicate pods_converged; then
+  fail 'bare status imageID bypassed tag-only convergence'
+fi
+printf 'roll train test: bare config status requires a matching manifest imageID and complete worker statuses\n'
+
 cp "$FIXTURE_ROOT/.gitops/cells/$BACKUP/values.yaml" "$TEST_ROOT/inconsistent-pin.yaml"
 "$ROLL_TRAIN_REAL_YQ" -i '
   .apps.witselfServer.imageDigest = strenv(BACKUP_DIGEST) |
@@ -695,10 +733,10 @@ grep -Fq 'witself-infra <health> <--json>' "$TEST_LOG" || fail 'available infra 
 if grep -Eq '<(--force|--force-with-lease|-f)>' "$TEST_LOG"; then fail 'train used force'; fi
 printf 'roll train test: offline two-wave success, merge fences, CI, order, cleanup, and health passed\n'
 
-for scenario in digest_success digest_from_tag; do
+for scenario in digest_success digest_from_tag digest_bare_success; do
   reset_case
   SCENARIO=$scenario
-  if [ "$scenario" = digest_success ]; then pin_fixture_cells; fi
+  if [ "$scenario" != digest_from_tag ]; then pin_fixture_cells; fi
   bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 \
     >"$TEST_ROOT/output" 2>&1 || fail "$scenario two-wave train failed"
   [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail "$scenario did not merge both waves"
@@ -708,6 +746,24 @@ for scenario in digest_success digest_from_tag; do
   while IFS= read -r path; do [ ! -d "$path" ] || fail "$scenario retained its worktree"; done <"$STATE_DIR/worktrees"
 done
 printf 'roll train test: pinned and first-pin waves preserve live version evidence and converge on each written cell pin\n'
+
+for scenario in digest_bare_unknown digest_bare_missing digest_bare_malformed; do
+  reset_case
+  SCENARIO=$scenario
+  pin_fixture_cells
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work"
+  if [ "$scenario" = digest_bare_unknown ]; then
+    grep -Fq "$BACKUP live image digest has no matching release pin in the cell values" "$TEST_ROOT/output" \
+      || fail 'bare status with unknown manifest missed the existing pin refusal'
+  else
+    grep -Fq 'pod witself-worker-pod container witself-worker: bare status image requires a valid repository@sha256 imageID' "$TEST_ROOT/output" \
+      || fail "$scenario did not identify the pod and container"
+  fi
+  if grep -Eq '^(roll-cell|git <(add|commit|push)>|gh <pr> <(create|merge)>)' "$TEST_LOG"; then
+    fail "$scenario edited pins or published a wave"
+  fi
+done
+printf 'roll train test: bare status with unknown, missing, or malformed imageID stops before pin edits\n'
 
 for scenario in digest_pod_spec_mismatch digest_pod_status_mismatch digest_deployment_mismatch digest_tag_mismatch; do
   reset_case
