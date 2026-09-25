@@ -41,7 +41,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
         '/api/prefs': { preferences: { prefs: { theme: 'console' } } },
         '/api/facts': { facts }, '/api/facts/fact_plain/history': { assertions: [] }, '/api/facts/fact_locked/history': { assertions: [] },
         '/api/fact': { fact: { value } },
-        '/api/transcripts': { transcripts: [{ id: long, title: long, updated_at: '2026-09-23T12:00:00Z' }] },
+        '/api/transcripts': { transcripts: [{ id: long, title: long, updated_at: '2026-09-23T12:00:00Z', metadata: { agent_name: long, runtime: long, location: { name: long }, initial_cwd: '/synthetic-parent/' + long + '/' } }] },
         ['/api/transcripts/' + long]: { transcript: { title: 'Synthetic transcript' }, entries: [{ sequence: 1, role: 'assistant', body: value }] },
         '/api/memories': { items: [{ id: long, content: long, kind: long, state: 'active', salience: 0.9 }] },
         '/api/secrets': { secrets: [{ id: long, name: long, field_count: 3, sensitive_field_count: 2, lifecycle: long }] },
@@ -61,7 +61,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
       await page.waitForFunction((section) => !!document.getElementById('filter-' + section), section);
     };
     const noOverflow = async () => {
-      const bad = await page.evaluate(() => [...document.querySelectorAll('.row, .panel, .entry, .fact-value, .summary-row, .agent-summary')]
+      const bad = await page.evaluate(() => [...document.querySelectorAll('.row, .panel, .entry, .fact-value, .summary-row, .agent-summary, .transcript-table, .transcript-row, .transcript-selection, .transcript-metadata dd')]
         .filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.className));
       assert.deepEqual(bad, [], 'content boxes must not overflow');
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'document fits viewport');
@@ -74,8 +74,20 @@ test('readability: responsive lists, details, filters, transport, and summary re
       for (const section of ['facts', 'transcripts', 'memories', 'secrets', 'conversations']) {
         await navigate(section);
         await noOverflow();
-        const title = page.locator('.row .grow a').first();
+        const title = page.locator(section === 'transcripts' ? '.transcript-open' : '.row .grow a').first();
         assert.ok((await title.boundingBox()).width > 80, `${section} title visible at ${width}`);
+        if (section === 'transcripts') {
+          assert.deepEqual(await page.locator('.transcript-table th').allTextContents(), ['Agent', 'AI client', 'Location', 'Workspace', 'Updated']);
+          assert.equal(await page.locator('.transcript-row td').count(), 5);
+          assert.equal(await page.locator('.transcript-row').first().evaluate((el) => getComputedStyle(el).display), width <= 700 ? 'grid' : 'table-row');
+          assert.equal(await page.locator('.transcript-mobile-label').first().isVisible(), width <= 700);
+          assert.ok(!(await page.locator('#view').textContent()).includes('synthetic-parent'), 'workspace retains only basename');
+          const beforeSelect = requests.length;
+          await page.locator('.transcript-select').first().focus();
+          await page.keyboard.press('Space');
+          assert.equal(await page.locator('.transcript-select').first().getAttribute('aria-pressed'), 'true');
+          assert.equal(requests.length, beforeSelect, 'keyboard selection never fetches a body');
+        }
         const count = requests.length;
         await page.locator('#filter-' + section).fill('impossible-no-match');
         assert.equal(await page.locator('#filter-empty-' + section).isVisible(), true);
@@ -96,7 +108,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
       assert.equal(await page.locator('.fact-detail-value .value').evaluate((el) => getComputedStyle(el).whiteSpace), 'pre-wrap');
       await noOverflow();
       await navigate('transcripts');
-      await page.locator('.row a').first().click();
+      await page.locator('.transcript-open').click();
       await page.waitForSelector('.entry .body');
       await noOverflow();
       if (width <= 700) {

@@ -313,13 +313,9 @@ func decode(r dashboard.Resource, raw json.RawMessage) (object, error) {
 	case dashboard.ResourceThemes:
 		out = pick(o, "themes")
 	case dashboard.ResourceTranscripts:
-		out["transcripts"] = projectRows(o, "transcripts", func(t object) object {
-			p := pick(t, "title external_id updated_at created_at")
-			p["id"] = identity(t, "id")["id"]
-			return p
-		})
+		out["transcripts"] = projectRows(o, "transcripts", projectTranscript)
 	case dashboard.ResourceTranscript:
-		out["transcript"] = pick(obj(o["transcript"]), "id title external_id updated_at")
+		out["transcript"] = projectTranscript(obj(o["transcript"]))
 		out["entries"] = projectRows(o, "entries", func(t object) object { return pick(t, "role sequence body created_at") })
 	case dashboard.ResourceFacts:
 		out["facts"] = projectRows(o, "facts", fact)
@@ -394,7 +390,7 @@ func makeRows(panel int, data map[dashboard.Resource]object, self object, sent b
 	case 1:
 		for _, t := range list(data[dashboard.ResourceTranscripts], "transcripts") {
 			rows = append(rows, makeItem(str(t, "id"), first(str(t, "title"), str(t, "external_id"), str(t, "id")), str(t, "updated_at"), t))
-			rows[len(rows)-1].search += " " + strings.ToLower(single(str(t, "id")+" "+str(t, "external_id")))
+			rows[len(rows)-1].search += " " + strings.ToLower(single(str(t, "id")+" "+str(t, "external_id")+" "+strings.Join(transcriptColumns(t), " ")))
 		}
 	case 2:
 		for _, f := range list(data[dashboard.ResourceFacts], "facts") {

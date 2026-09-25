@@ -39,8 +39,8 @@ func demoSelf() object {
 }
 func demoTranscripts() []any {
 	return []any{
-		object{"id": "tr_wayfinding", "title": "Designing a calmer workspace", "external_id": "studio/design/042", "updated_at": demoTime},
-		object{"id": "tr_fieldguide", "title": "Field guide · reader walkthrough", "external_id": "studio/review/018", "updated_at": "2026-09-20T16:20:00Z"},
+		object{"id": "tr_wayfinding", "title": "Designing a calmer workspace / custom notes", "metadata": object{"agent_name": "Atlas", "runtime": "codex", "location": object{"id": "loc_studio", "name": "Studio Mac"}, "initial_cwd": "/Users/demo/projects/witself/"}, "external_id": "studio/design/042", "updated_at": demoTime},
+		object{"id": "tr_fieldguide", "title": "Field guide · reader walkthrough", "metadata": object{"agent_name": "Atlas", "runtime": "claude-code", "location": object{"id": "loc_windows"}, "initial_cwd": `C:\Projects\field-guide\`}, "external_id": "studio/review/018", "updated_at": "2026-09-20T16:20:00Z"},
 		object{"id": "tr_keyboard", "title": "Keyboard navigation audit", "external_id": "studio/quality/009", "updated_at": "2026-09-19T11:15:00Z"},
 	}
 }

@@ -21,12 +21,20 @@ func Avatar() any {
 
 // Transcripts returns the shared cell response used by proxy and acceptance tests.
 func Transcripts() any {
-	return map[string]any{"transcripts": []client.Transcript{{ID: "tr_1"}}}
+	return map[string]any{"transcripts": []client.Transcript{transcriptFixture()}}
 }
 
 // TranscriptDetail returns the shared cell response used by proxy and acceptance tests.
 func TranscriptDetail() any {
-	return client.TranscriptDetail{Transcript: client.Transcript{ID: "tr_1"}}
+	return client.TranscriptDetail{Transcript: transcriptFixture()}
+}
+
+// Preserve the shared fixture's identity/count while exercising capture fields.
+func transcriptFixture() client.Transcript {
+	stamp := time.Date(2026, time.September, 24, 12, 34, 56, 0, time.UTC)
+	return client.Transcript{ID: "tr_1", Title: "Acceptance / custom session title", ExternalID: "acceptance/session/1",
+		Metadata:  json.RawMessage(`{"agent_name":"Atlas","runtime":"codex","location":{"id":"loc_studio","name":"Studio Mac"},"initial_cwd":"/synthetic/projects/witself/"}`),
+		CreatedAt: stamp, UpdatedAt: stamp}
 }
 
 // Memories returns the shared cell response used by proxy and acceptance tests.

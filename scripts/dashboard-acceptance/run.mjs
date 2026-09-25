@@ -488,6 +488,10 @@ export async function run(args) {
             await expect(page.locator('#workspace-content .row').first()).toBeVisible();
             await page.locator('#workspace-details > summary').click();
             await expect(page.locator('#workspace-content')).toBeEmpty();
+          } else if (panel.name === 'transcripts') {
+            await expect(page.locator('#view .transcript-row').first()).toBeVisible();
+            await expect(page.locator('.transcript-table th')).toHaveText(['Agent', 'AI client', 'Location', 'Workspace', 'Updated']);
+            await expect(page.locator('.transcript-selection')).toContainText('Acceptance / custom session title');
           } else { await expect(page.locator('#view .row').first()).toBeVisible(); }
           if (panel.name === 'email') {
             await expect(page.locator('.email-row:not(.email-sent-row)').first()).toContainText('safe subject');

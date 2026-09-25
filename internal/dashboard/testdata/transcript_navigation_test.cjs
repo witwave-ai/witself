@@ -54,8 +54,12 @@ function dom(check) {
       if (!this.listeners.has(name)) this.listeners.set(name, []);
       this.listeners.get(name).push(listener);
     }
-    dispatch(name) {
-      for (const listener of this.listeners.get(name) || []) listener.call(this, { target: this });
+    dispatch(name, properties = {}) {
+      const event = { target: this, preventDefault() { this.defaultPrevented = true; }, ...properties };
+      for (let node = this; node; node = name === "click" ? node.parentNode : null) {
+        for (const listener of node.listeners.get(name) || []) listener.call(node, event);
+      }
+      return event;
     }
     focus() { activeElement = this; }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -423,10 +427,10 @@ test("transcript navigation renders and filters current inventory", options, asy
   assert.ok(input, "real renderer created the transcript filter");
   input.value = "SECOND";
   input.dispatch("input");
-  assert.deepEqual(h.nodes.view.querySelectorAll(".row").map((row) => row.style.display), ["none", ""], "inventory filtering is case insensitive");
+  assert.deepEqual(h.nodes.view.querySelectorAll(".transcript-row").map((row) => row.style.display), ["none", ""], "inventory filtering is case insensitive");
   input.value = "";
   input.dispatch("input");
-  assert.deepEqual(h.nodes.view.querySelectorAll(".row").map((row) => row.style.display), ["", ""], "clearing the filter restores both rows");
+  assert.deepEqual(h.nodes.view.querySelectorAll(".transcript-row").map((row) => row.style.display), ["", ""], "clearing the filter restores both rows");
   assert.equal(h.requests.length, 3, "filtering makes no additional request");
   baseline(t);
 });
@@ -557,3 +561,139 @@ for (const scenario of staleCases) {
     }
   });
 }
+
+
+test("structured columns select metadata only, filter every field, and clear stale details", options, async (t) => {
+  const h = fixture(t);
+  const request = beginList(h);
+  assert.match(h.nodes.view.textContent, /Loading transcripts/);
+  await h.finish(request, { transcripts: [
+    { id: "tx_alpha", external_id: "external/a", title: "Custom / unrelated / title", updated_at: "2026-09-24T12:34:56Z", created_at: "2026-09-20T01:02:03Z",
+      metadata: { agent_name: "Atlas", runtime: "claude-code", location: { name: "Studio Mac", id: "loc_hidden", host: "HOST_MUST_NOT_RENDER" }, initial_cwd: "/private/parent/project-a/", model: "MODEL_MUST_NOT_RENDER", arbitrary: "PRIVATE_VALUE" } },
+    { id: "tx_beta", title: "Legacy / fake-client / fake-location" },
+  ] });
+  assert.deepEqual(h.nodes.view.querySelectorAll("th").map((th) => [th.textContent, th.getAttribute("scope")]),
+    ["Agent", "AI client", "Location", "Workspace", "Updated"].map((label) => [label, "col"]));
+  const rows = h.nodes.view.querySelectorAll(".transcript-row");
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].querySelectorAll("td").length, 5);
+  assert.equal(rows[0].querySelectorAll(".transcript-mobile-label").length, 5);
+  const buttons = h.nodes.view.querySelectorAll(".transcript-select");
+  assert.ok(buttons.every((button) => button.tagName === "button" && button.getAttribute("type") === "button"));
+  assert.ok(buttons[0].getAttribute("aria-label").includes("Atlas"), "accessible name includes visible agent");
+  assert.ok(buttons[1].getAttribute("aria-label").includes("Not recorded"), "legacy accessible name includes visible missing value");
+  const detail = h.document.getElementById("transcript-selection");
+  assert.match(detail.textContent, /Custom \/ unrelated \/ title/);
+  assert.match(detail.textContent, /external\/a/);
+  assert.match(detail.textContent, /2026-09-20T01:02:03Z/);
+  for (const forbidden of ["/private/parent", "HOST_MUST_NOT_RENDER", "MODEL_MUST_NOT_RENDER", "PRIVATE_VALUE", "loc_hidden"]) {
+    assert.ok(!h.writes.join("").includes(forbidden));
+    assert.ok(!h.nodes.view.textContent.includes(forbidden));
+  }
+  assert.equal(detail.querySelector("a").getAttribute("href"), "#/transcripts/tx_alpha");
+  buttons[1].focus(); buttons[1].dispatch("click");
+  assert.equal(h.document.activeElement, buttons[1], "selection preserves keyboard focus");
+  assert.equal(buttons[1].getAttribute("aria-pressed"), "true");
+  assert.equal(buttons[0].getAttribute("aria-pressed"), "false");
+  assert.match(detail.textContent, /Legacy \/ fake-client \/ fake-location/);
+  assert.equal(rows[1].querySelectorAll("td").filter((cell) => cell.textContent.includes("Not recorded")).length, 5);
+  const input = h.document.getElementById("filter-transcripts");
+  for (const query of ["ATLAS", "Claude Code", "studio mac", "project-a", "2026-09-24", "Custom / unrelated", "external/a", "tx_alpha"]) {
+    input.value = query; input.dispatch("input");
+    assert.deepEqual(rows.map((row) => row.style.display), ["", "none"], query);
+    assert.equal(detail.querySelector("a").getAttribute("href"), "#/transcripts/tx_alpha");
+  }
+  input.value = "no such session"; input.dispatch("input");
+  assert.equal(detail.hidden, true);
+  assert.equal(detail.textContent, "", "hidden selection does not retain misleading metadata");
+  assert.equal(h.document.getElementById("filter-empty-transcripts").hidden, false);
+  h.document.getElementById("clear-filter-transcripts").dispatch("click");
+  assert.equal(detail.hidden, false);
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual(h.requests.map((r) => r.url), ["/api/transcripts"], "select/filter/clear never request bodies");
+  buttons[1].dispatch("click");
+  const refreshed = beginList(h);
+  await h.finish(refreshed, { transcripts: [{ id: "tx_beta", title: "Reordered selected" }, { id: "tx_alpha", title: "Reordered other" }] });
+  assert.equal(h.document.getElementById("transcript-selection").querySelector("a").getAttribute("href"), "#/transcripts/tx_beta");
+});
+
+test("transcript metadata rejects types and escapes literal text in inventory and reader", options, async (t) => {
+  const h = fixture(t);
+  const hostile = '<img src=x onerror="alert(1)">';
+  const metadata = { agent_name: hostile, runtime: "custom/runtime", location: { name: ["invalid"], id: "fallback-location", os: hostile },
+    initial_cwd: "C:\\private\\projects\\work-folder\\", arbitrary: "UNLISTED_VALUE" };
+  await h.finish(beginList(h), { transcripts: [{ id: "tx_alpha", title: hostile, metadata },
+    { id: "tx_beta", metadata: { agent_name: 12, runtime: {}, location: { name: 2, id: [] }, initial_cwd: {} } }] });
+  const detail = h.document.getElementById("transcript-selection");
+  for (const text of [hostile, "custom/runtime", "fallback-location", "work-folder"]) assert.ok(detail.textContent.includes(text));
+  assert.equal(h.nodes.view.querySelector("img"), null);
+  assert.ok(!h.nodes.view.textContent.includes("private"));
+  h.nodes.view.querySelectorAll(".transcript-select")[1].dispatch("click");
+  assert.equal(detail.querySelectorAll("dd").slice(0, 5).every((dd) => dd.textContent === "Not recorded"), true);
+  await h.finish(beginDetail(h), { transcript: { id: "tx_alpha", title: "Reader / custom title", external_id: "original-external", metadata }, entries: [entry(1)] });
+  assert.equal(h.nodes.view.querySelectorAll(".transcript-reader-metadata").length, 1, "reader has one coherent metadata disclosure");
+  const reader = h.nodes.view.querySelector(".transcript-reader-metadata");
+  assert.ok(reader && reader.tagName === "details", "metadata uses a compact native disclosure");
+  for (const text of [hostile, "custom/runtime", "work-folder", "Reader / custom title", "original-external", "tx_alpha"]) assert.ok(reader.textContent.includes(text));
+  assert.equal(h.nodes.view.querySelector("img"), null);
+  assert.ok(!reader.textContent.includes("UNLISTED_VALUE"));
+  assert.ok(!reader.textContent.includes("private"));
+});
+
+test("workspace roots, control strings and missing metadata never become guessed columns", options, async (t) => {
+  const h = fixture(t);
+  for (const [cwd, expected] of [["/", "Not recorded"], ["C:\\", "Not recorded"], ["\\\\server\\share\\", "Not recorded"],
+    [".", "Not recorded"], ["..", "Not recorded"], ["/a/project\x1b]52;c;/PRIVATE\x07", "project"],
+    ["", "Not recorded"], ["/a/b///", "b"], ["C:\\a\\b\\", "b"], ["/a/\x1b[31mred\x1b[0m", "red"]]) {
+    await h.finish(beginList(h), { transcripts: [{ id: "tx_alpha", title: "Misleading / runtime / cwd", metadata: {
+      agent_name: "A\x1b]52;c;SECRET\x07tlas\u202e", runtime: "\x1b[31mcodex\x1b[0m", location: { name: "\u009dSECRET\u009cStudio" }, initial_cwd: cwd
+    } }] });
+    const values = h.document.getElementById("transcript-selection").querySelectorAll("dd").map((dd) => dd.textContent);
+    assert.deepEqual(values.slice(0, 4), ["Atlas", "Codex", "Studio", expected]);
+    assert.ok(!h.nodes.view.textContent.includes("SECRET"));
+  }
+  await h.finish(beginList(h), { transcripts: [] });
+  assert.equal(h.document.getElementById("transcript-selection").hidden, true);
+  assert.match(h.nodes.view.textContent, /no transcripts/);
+  assert.equal(h.document.getElementById("filter-empty-transcripts").hidden, true);
+});
+
+test("keyboard selection and detached inventory handlers stay within the active visit", options, async (t) => {
+  const h = fixture(t);
+  await h.finish(beginList(h), { transcripts: [{ id: "tx_alpha", title: "First" }, { id: "tx_beta", title: "Second" }] });
+  const buttons = h.nodes.view.querySelectorAll(".transcript-select");
+  buttons[0].focus();
+  const down = buttons[0].dispatch("keydown", { key: "ArrowDown" });
+  assert.equal(down.defaultPrevented, true);
+  assert.equal(h.document.activeElement, buttons[1]);
+  assert.equal(buttons[1].getAttribute("aria-pressed"), "true");
+  buttons[1].dispatch("keydown", { key: "ArrowUp" });
+  assert.equal(h.document.activeElement, buttons[0]);
+  const input = h.document.getElementById("filter-transcripts");
+  input.value = "Second"; input.dispatch("input");
+  buttons[1].dispatch("keydown", { key: "ArrowUp" });
+  assert.equal(h.document.activeElement, buttons[1], "arrow navigation skips filtered rows");
+  const clear = h.document.getElementById("clear-filter-transcripts");
+  await currentDetail(h, "tx_beta");
+  const before = currentDestination(t, h);
+  input.value = "First"; input.dispatch("input");
+  clear.dispatch("click"); buttons[0].dispatch("click"); buttons[0].dispatch("keydown", { key: "ArrowDown" });
+  unchangedAfter(h, before, "detached controls cannot repaint or change streams");
+  assert.equal(h.app.state.filters.transcripts, "Second", "detached filter cannot change state");
+  assert.equal(h.requests.length, 2, "only inventory and explicit reader route fetched");
+});
+
+test("malformed metadata containers and identities never coerce or expand requests", options, async (t) => {
+  const h = fixture(t);
+  for (const invalid of [null, 42, true, ["invented"], "invented"]) {
+    await h.finish(beginList(h), { transcripts: [{ id: "tx_alpha", title: "Original / unparsed", metadata: invalid }] });
+    const values = h.document.getElementById("transcript-selection").querySelectorAll("dd").slice(0, 5).map((node) => node.textContent);
+    assert.deepEqual(values, Array(5).fill("Not recorded"));
+  }
+  await h.finish(beginList(h), { transcripts: [{ id: "tx_alpha\x1b[0m", title: {}, external_id: [], updated_at: 42,
+    metadata: { agent_name: {}, runtime: [], location: { name: true, id: 42 }, initial_cwd: 42 } }] });
+  const selected = h.document.getElementById("transcript-selection");
+  assert.equal(selected.querySelector("a"), null, "corrupted action ID is not normalized into a valid route");
+  assert.ok(selected.querySelectorAll("dd").every((node) => node.textContent === "Not recorded"));
+  assert.ok(h.requests.every((request) => request.url === "/api/transcripts"));
+});

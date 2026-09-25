@@ -36,7 +36,8 @@ for (const section of ['transcripts', 'facts', 'memories', 'secrets', 'conversat
     await nextTurn();
     const input = d.document.getElementById('filter-' + section);
     assert.ok(input, d.nodes.view.textContent);
-    const rows = d.nodes.view.querySelectorAll('.row');
+    const rowSelector = section === 'transcripts' ? '.transcript-row' : '.row';
+    const rows = d.nodes.view.querySelectorAll(rowSelector);
     assert.equal(rows.length, 1);
     const count = requests.length;
     input.value = 'no-such-record';
@@ -49,7 +50,7 @@ for (const section of ['transcripts', 'facts', 'memories', 'secrets', 'conversat
     assert.equal(empty.hidden, true);
     assert.equal(d.document.activeElement, input);
     assert.equal(rows[0].style.display, '');
-    assert.equal(d.nodes.view.querySelectorAll('.row')[0], rows[0], 'same private subtree retained');
+    assert.equal(d.nodes.view.querySelectorAll(rowSelector)[0], rows[0], 'same private subtree retained');
     assert.equal(requests.length, count, 'no detail/reveal request');
     assert.equal(d.nodes.view.querySelector('.error'), null);
     // A successful empty response is not a filtered-out nonempty inventory.
@@ -58,7 +59,7 @@ for (const section of ['transcripts', 'facts', 'memories', 'secrets', 'conversat
       sandbox.module.exports.state.filters[section] = 'saved filter';
       sandbox.module.exports.route();
       await nextTurn();
-      assert.equal(d.nodes.view.querySelectorAll('.row').length, 0);
+      assert.equal(d.nodes.view.querySelectorAll(rowSelector).length, 0);
       assert.ok(d.nodes.view.querySelector('.empty'));
       assert.equal(d.document.getElementById('filter-empty-' + section).hidden, true);
     }
