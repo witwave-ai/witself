@@ -42,7 +42,7 @@ func accountRetentionValue(o object, key string) string {
 	}
 	return fmt.Sprintf("%d days", days)
 }
-func accountFields(d *detailWriter, o object, fields ...string) {
+func accountFields(d *accountWriter, o object, fields ...string) {
 	for _, field := range fields {
 		key, label, _ := strings.Cut(field, ":")
 		if label == "" {
@@ -55,7 +55,7 @@ func accountAmount(o object) string {
 	// Exact decimal integer cents; never float conversion or cross-currency totals.
 	return accountValue(o, "amount_cents") + " cents · " + accountValue(o, "currency")
 }
-func accountTruncation(d *detailWriter, o object) {
+func accountTruncation(d *accountWriter, o object) {
 	if flag(o, "truncated") {
 		d.dim("Truncated · only bounded records/text are shown.")
 	}
@@ -78,10 +78,13 @@ func (m *Model) renderAccount() {
 		a.vp.SetContent("")
 		return
 	}
-	d := &detailWriter{m: m, width: a.vp.Width}
+	d := &accountWriter{detailWriter: detailWriter{m: m, width: a.vp.Width}}
 	selectedOffset := -1
 	section := m.accountSection()
-	contextClipped := m.accountContextStrip(d)
+	contextClipped := m.accountContextStrip(&d.detailWriter)
+	if heading := map[string]string{"overview": "Profile", "clients": "Local check", "plan": "Plan state", "access": "Permissions"}[section]; heading != "" {
+		d.heading(heading)
+	}
 	if a.status != "ready" {
 		d.body(accountErrorText(a.status, false))
 	} else {
@@ -103,26 +106,35 @@ func (m *Model) renderAccount() {
 			if len(rows) == 0 {
 				d.body("No matching client records reported.")
 			}
-			for _, row := range rows {
-				d.heading(accountValue(row, "runtime"))
+			for i, row := range rows {
+				if i > 0 {
+					d.line("")
+				}
+				d.title(accountValue(row, "runtime"))
 				accountFields(d, row, "recorded_version:Recorded version", "executable_status:Executable", "configuration_status:Static configuration", "configuration_scope:Configuration scope", "installed_at:Recorded installation")
 				d.kv("Effective verification", map[bool]string{true: "Not run", false: "Unknown"}[str(row, "effective_verification") == "not_run"])
 			}
 			accountTruncation(d, report)
 		case "plan":
-			accountFields(d, o, "plan_name:Current plan name", "plan:Current plan", "applied:Applied plan", "billing_plan_name:Billing plan name", "billing_plan:Billing plan", "billing_available:Billing available", "apply_pending:Application pending", "apply_blocked:Application blocked", "past_due_since:Past due since")
+			d.plan("Current plan", o, "plan_name", "plan")
+			d.kv("Applied plan", "code "+accountValue(o, "applied"))
+			d.plan("Billing plan", o, "billing_plan_name", "billing_plan")
+			accountFields(d, o, "billing_available:Billing available", "apply_pending:Application pending", "apply_blocked:Application blocked", "past_due_since:Past due since")
 			d.heading("Pending change")
 			pending := obj(o["pending"])
 			if len(pending) == 0 {
 				d.body("No pending change reported.")
 			} else {
-				accountFields(d, pending, "kind:Kind", "plan:Plan", "plan_name:Plan name", "requested:Requested", "effective:Effective", "expires:Expires")
+				accountFields(d, pending, "kind:Kind")
+				d.plan("Plan", pending, "plan_name", "plan")
+				accountFields(d, pending, "requested:Requested", "effective:Effective", "expires:Expires")
 			}
 			d.heading("Limits · effective / default")
 			d.dim("No plan cap still permits platform ceilings.")
 			for _, key := range plans.SupportedLimitKeys() {
 				d.kv(strings.ReplaceAll(key, "_", " "), accountLimitValue(o, "limits", key)+" / "+accountLimitValue(o, "limit_defaults", key))
 			}
+			d.heading("Features / retention")
 			for _, key := range []string{"features", "feature_defaults"} {
 				label := map[string]string{"features": "Effective features", "feature_defaults": "Default features"}[key]
 				value := "Unknown"
@@ -135,11 +147,13 @@ func (m *Model) renderAccount() {
 				d.kv(label, value)
 			}
 			for _, key := range []string{"messaging", "email_receive", "email_send"} {
-				d.heading(strings.ReplaceAll(key, "_", " "))
+				d.line("")
+				d.title(strings.ReplaceAll(key, "_", " "))
 				accountFields(d, obj(o[key]), "enabled:Enabled", "default_enabled:Default enabled", "overridden:Overridden")
 			}
 			for _, key := range []string{"message_retention", "email_retention", "transcript_retention"} {
-				d.heading(strings.ReplaceAll(key, "_", " "))
+				d.line("")
+				d.title(strings.ReplaceAll(key, "_", " "))
 				retention := obj(o[key])
 				d.kv("Effective", accountRetentionValue(retention, "effective_days"))
 				d.kv("Default", accountRetentionValue(retention, "default_days"))
@@ -151,14 +165,20 @@ func (m *Model) renderAccount() {
 			if !flag(summary, "available") {
 				d.body(accountErrorText(str(summary, "error"), false))
 			} else {
-				accountFields(d, summary, "subscription_status:Subscription", "configured:Configured", "billing_available:Billing available", "billing_plan_name:Billing plan name", "billing_plan:Billing plan", "effective_plan_name:Effective plan name", "effective_plan:Effective plan", "applied_plan:Applied plan", "entitled_at:Entitled at", "past_due_since:Past due since")
+				accountFields(d, summary, "subscription_status:Subscription", "configured:Configured", "billing_available:Billing available")
+				d.plan("Billing plan", summary, "billing_plan_name", "billing_plan")
+				d.plan("Effective plan", summary, "effective_plan_name", "effective_plan")
+				d.kv("Applied plan", "code "+accountValue(summary, "applied_plan"))
+				accountFields(d, summary, "entitled_at:Entitled at", "past_due_since:Past due since")
 				d.kv("Payment method", accountValue(obj(summary["payment_method"]), "label"))
 				charge := obj(summary["next_charge"])
 				d.kv("Next charge", accountAmount(charge))
 				accountFields(d, charge, "date:Charge date")
 				if pending := obj(summary["pending"]); len(pending) > 0 {
 					d.heading("Pending billing change")
-					accountFields(d, pending, "kind:Kind", "plan:Plan", "plan_name:Plan name", "requested:Requested", "effective:Effective", "expires:Expires")
+					accountFields(d, pending, "kind:Kind")
+					d.plan("Plan", pending, "plan_name", "plan")
+					accountFields(d, pending, "requested:Requested", "effective:Effective", "expires:Expires")
 				}
 				accountTruncation(d, summary)
 			}
@@ -178,7 +198,10 @@ func (m *Model) renderAccount() {
 					if key == "invoices" {
 						label = "Invoice " + first(str(row, "number"), fmt.Sprint(i+1))
 					}
-					d.heading(label)
+					if i > 0 {
+						d.line("")
+					}
+					d.title(label)
 					d.kv("Amount", accountAmount(row))
 					accountFields(d, row, "date:Date", "status:Status")
 					if key == "payments" {
@@ -199,8 +222,11 @@ func (m *Model) renderAccount() {
 					d.body(accountErrorText(status, true))
 				} else {
 					ticket := obj(data["ticket"])
-					for _, message := range list(data, "messages") {
-						d.heading(accountValue(message, "author_kind") + " · " + accountValue(message, "posted_at"))
+					for i, message := range list(data, "messages") {
+						if i > 0 {
+							d.line("")
+						}
+						d.title(accountValue(message, "author_kind") + " · " + accountValue(message, "posted_at"))
 						d.body(str(message, "body"))
 					}
 					if len(list(data, "messages")) == 0 {
@@ -217,21 +243,24 @@ func (m *Model) renderAccount() {
 					accountTruncation(d, data)
 				}
 			} else {
+				d.heading("Tickets")
 				d.dim("↑↓ select ticket · Enter deliberately opens text")
 				rows := list(o, "tickets")
 				if len(rows) == 0 {
 					d.body("No tickets reported.")
 				}
 				for i, row := range rows {
+					if i > 0 {
+						d.line("")
+					}
 					prefix := "  "
 					if i == a.selected {
 						prefix = "› "
-						selectedOffset = len(d.lines)
-						if m.height > 24 && len(d.lines) > 0 {
-							selectedOffset++
-						}
 					}
-					d.heading(prefix + accountValue(row, "subject"))
+					offset := d.title(prefix + accountValue(row, "subject"))
+					if i == a.selected {
+						selectedOffset = offset
+					}
 					d.kv("Ticket", accountValue(row, "id"))
 					d.kv("State", accountValue(row, "state")+" · "+accountValue(row, "priority"))
 					accountFields(d, row, "category:Category", "opened_at:Opened", "last_activity_at:Last activity", "first_response_at:First response", "resolved_at:Resolved", "closed_at:Closed")
@@ -259,7 +288,10 @@ func (m *Model) renderAccount() {
 	old := a.vp.YOffset
 	a.vp.SetContent(strings.Join(d.lines, "\n"))
 	a.vp.SetYOffset(old)
-	if a.focus == 0 && selectedOffset >= 0 && (selectedOffset < old || selectedOffset >= old+a.vp.Height) {
+	// Keep a selected ticket's title, ID and state together when scrolling it
+	// into view, instead of leaving only the title at the bottom edge.
+	selectionRows := min(3, a.vp.Height)
+	if a.focus == 0 && selectedOffset >= 0 && (selectedOffset < old || selectedOffset+selectionRows > old+a.vp.Height) {
 		a.vp.SetYOffset(selectedOffset)
 	}
 }

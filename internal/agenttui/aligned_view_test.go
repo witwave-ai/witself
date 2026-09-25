@@ -259,7 +259,7 @@ func TestAlignedAccountDimensionsAndFullContext(t *testing.T) {
 	m.opts.Agent = "agent_" + strings.Repeat("selected_", 30)
 	m.renderAccount()
 	d := &detailWriter{m: m, width: m.account.vp.Width}
-	if !m.accountContextStrip(d) || len(d.lines) != 3 {
+	if !m.accountContextStrip(d) || len(d.lines) != 2 {
 		t.Fatal("long context did not stay compact")
 	}
 	all := strings.Join(strings.Fields(accountScrolledText(m)), "")
