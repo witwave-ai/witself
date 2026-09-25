@@ -124,10 +124,10 @@ func runtimeLabel(s string) string {
 }
 func transcriptColumns(t object) []string {
 	md := obj(t["metadata"])
-	return []string{first(str(md, "agent_name"), notRecorded), runtimeLabel(str(md, "runtime")), first(str(md, "location"), notRecorded), first(str(md, "workspace"), notRecorded), first(str(t, "updated_at"), notRecorded)}
+	return []string{first(str(md, "agent_name"), notRecorded), first(str(md, "location"), notRecorded), runtimeLabel(str(md, "runtime")), first(str(md, "workspace"), notRecorded), first(str(t, "updated_at"), notRecorded)}
 }
 
-var transcriptLabels = []string{"Agent", "AI client", "Location", "Workspace", "Updated"}
+var transcriptLabels = []string{"Agent", "Location", "AI client", "Workspace", "Updated"}
 
 // This split is also used by resize, so viewport/action offsets always refer
 // to the actual reader height, never to the inventory above it.
@@ -176,7 +176,7 @@ func (m *Model) transcriptInventory(w, h int) string {
 			lines[0] = fit("Transcripts · "+stateLabel(status)+" · "+filter, w)
 		}
 	}
-	widths := []int{max(5, w*14/100), max(9, w*18/100), max(8, w*18/100), 0, max(10, w*21/100)}
+	widths := []int{max(5, w*14/100), max(8, w*18/100), max(9, w*18/100), 0, max(10, w*21/100)}
 	widths[3] = max(1, w-10-widths[0]-widths[1]-widths[2]-widths[4])
 	cells := func(values []string) string {
 		out := make([]string, len(values))

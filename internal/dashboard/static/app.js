@@ -1544,8 +1544,8 @@
       agent: transcriptText(md.agent_name), client: transcriptRuntime(transcriptText(md.runtime)),
       location: transcriptText(location.name) || transcriptText(location.id), workspace: transcriptWorkspace(md.initial_cwd) };
   }
-  var transcriptColumnKeys = ["agent", "client", "location", "workspace", "updated"];
-  var transcriptColumnLabels = ["Agent", "AI client", "Location", "Workspace", "Updated"];
+  var transcriptColumnKeys = ["agent", "location", "client", "workspace", "updated"];
+  var transcriptColumnLabels = ["Agent", "Location", "AI client", "Workspace", "Updated"];
   var selectedTranscriptID = ""; // Identity only; metadata lives in this visit's DOM handlers.
   function transcriptValue(value) { return value || "Not recorded"; }
   function transcriptMetadataHTML(t) {

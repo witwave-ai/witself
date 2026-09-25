@@ -29,7 +29,7 @@ func TestTranscriptProjectionBothResources(t *testing.T) {
 		if r == dashboard.ResourceTranscripts {
 			data = list(out, "transcripts")[0]
 		}
-		want := []string{"Atlas", "Claude Code", "loc_fallback", "project", "updated"}
+		want := []string{"Atlas", "loc_fallback", "Claude Code", "project", "updated"}
 		if got := transcriptColumns(data); !reflect.DeepEqual(got, want) {
 			t.Fatalf("columns: %v", got)
 		}
@@ -247,7 +247,7 @@ func TestTranscriptSelectedDetailUsesMatchingProjectedMetadata(t *testing.T) {
 	inventory := projectTranscript(object{"id": "tr_a", "title": "Custom / title", "external_id": "original", "updated_at": "before", "metadata": object{"agent_name": "Atlas", "initial_cwd": "/private/project"}})
 	detail := projectTranscript(object{"id": "tr_a", "updated_at": "after", "created_at": "created", "metadata": object{"runtime": "codex", "location": object{"id": "recorded-location"}}})
 	merged := transcriptDetails(inventory, detail)
-	if want := []string{"Atlas", "Codex", "recorded-location", "project", "after"}; !reflect.DeepEqual(transcriptColumns(merged), want) {
+	if want := []string{"Atlas", "recorded-location", "Codex", "project", "after"}; !reflect.DeepEqual(transcriptColumns(merged), want) {
 		t.Fatalf("selected metadata: %v", transcriptColumns(merged))
 	}
 	if str(merged, "title") != "Custom / title" || str(merged, "external_id") != "original" || str(merged, "created_at") != "created" {
