@@ -89,9 +89,16 @@ pods_converged() {
       all(.status.containerStatuses[];
         .ready == true and (.state.running | type == "object") and
         .state.waiting == null and .state.terminated == null and
-        # Runtime status.image may retain a tag after a digest-only pull.
-        ((.image | image_matches) or
-          ($digest != "" and (.imageID | type == "string" and endswith($digest))))))
+        # Bare status.image is a config digest; imageID identifies the manifest.
+        (if (.image | type == "string" and test("^sha256:[0-9a-f]{64}$")) then
+          $digest != "" and
+          (.imageID | type == "string" and
+            test("^[^@[:space:]]+@sha256:[0-9a-f]{64}$") and image_matches)
+        else
+          # Runtime status.image may retain a tag after a digest-only pull.
+          (.image | image_matches) or
+            ($digest != "" and (.imageID | type == "string" and endswith($digest)))
+        end)))
   ' >/dev/null
 }
 
@@ -432,7 +439,14 @@ require_live_not_newer() {
           all(.[]; .image | type == "string")))) and
       (.[1].items | type == "array" and length > 0 and all(.[];
         .spec.template.spec.containers | containers))
-    then .[0].items[] | (.spec.containers[], .status.containerStatuses[]?) | .image
+    then .[0].items[] | . as $pod |
+      (.spec.containers[].image,
+       (.status.containerStatuses[]? |
+        if (.image | test("^sha256:[0-9a-f]{64}$")) then
+          if (.imageID | type == "string" and test("^[^@[:space:]]+@sha256:[0-9a-f]{64}$")) then
+            .imageID
+          else error("pod \($pod.metadata.name) container \(.name): bare status image requires a valid repository@sha256 imageID") end
+        else .image end))
     else error("invalid live workload image inventory") end,
     (.[1].items[].spec.template.spec.containers[].image)
   ') || die "invalid live workload images for $cell"

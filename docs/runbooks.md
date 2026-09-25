@@ -969,6 +969,7 @@ no newer than the target. Already or partly pinned cells require manual
 inspection; the train does not resume them automatically.
 Verification covers the server deployment and, when enabled, the worker
 deployment, and the version guard refuses a downgrade of either.
+Digest-pinned cells can report bare config digests in container status; the train uses the validated `imageID` manifest reference to check the recorded release pin and convergence.
 It then runs `roll-cell.sh`,
 commits and pushes a branch, and creates a PR recording the wave and schema
 attestation or evidence gate. It waits for all required PR checks to pass,
