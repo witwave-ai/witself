@@ -573,16 +573,22 @@ test("structured columns select metadata only, filter every field, and clear sta
     { id: "tx_beta", title: "Legacy / fake-client / fake-location" },
   ] });
   assert.deepEqual(h.nodes.view.querySelectorAll("th").map((th) => [th.textContent, th.getAttribute("scope")]),
-    ["Agent", "AI client", "Location", "Workspace", "Updated"].map((label) => [label, "col"]));
+    ["Agent", "Location", "AI client", "Workspace", "Updated"].map((label) => [label, "col"]));
   const rows = h.nodes.view.querySelectorAll(".transcript-row");
   assert.equal(rows.length, 2);
-  assert.equal(rows[0].querySelectorAll("td").length, 5);
-  assert.equal(rows[0].querySelectorAll(".transcript-mobile-label").length, 5);
+  assert.deepEqual(rows[0].querySelectorAll("td").map((cell) => cell.textContent),
+    ["AgentAtlas", "LocationStudio Mac", "AI clientClaude Code", "Workspaceproject-a", "Updated2026-09-24T12:34:56Z"]);
+  assert.deepEqual(rows[0].querySelectorAll(".transcript-mobile-label").map((label) => label.textContent),
+    ["Agent", "Location", "AI client", "Workspace", "Updated"]);
   const buttons = h.nodes.view.querySelectorAll(".transcript-select");
   assert.ok(buttons.every((button) => button.tagName === "button" && button.getAttribute("type") === "button"));
   assert.ok(buttons[0].getAttribute("aria-label").includes("Atlas"), "accessible name includes visible agent");
   assert.ok(buttons[1].getAttribute("aria-label").includes("Not recorded"), "legacy accessible name includes visible missing value");
   const detail = h.document.getElementById("transcript-selection");
+  assert.deepEqual(detail.querySelectorAll("dt").slice(0, 5).map((dt) => dt.textContent),
+    ["Agent", "Location", "AI client", "Workspace", "Updated"]);
+  assert.deepEqual(detail.querySelectorAll("dd").slice(0, 5).map((dd) => dd.textContent),
+    ["Atlas", "Studio Mac", "Claude Code", "project-a", "2026-09-24T12:34:56Z"]);
   assert.match(detail.textContent, /Custom \/ unrelated \/ title/);
   assert.match(detail.textContent, /external\/a/);
   assert.match(detail.textContent, /2026-09-20T01:02:03Z/);
@@ -633,6 +639,10 @@ test("transcript metadata rejects types and escapes literal text in inventory an
   await h.finish(beginDetail(h), { transcript: { id: "tx_alpha", title: "Reader / custom title", external_id: "original-external", metadata }, entries: [entry(1)] });
   assert.equal(h.nodes.view.querySelectorAll(".transcript-reader-metadata").length, 1, "reader has one coherent metadata disclosure");
   const reader = h.nodes.view.querySelector(".transcript-reader-metadata");
+  assert.deepEqual(reader.querySelectorAll("dt").slice(0, 5).map((dt) => dt.textContent),
+    ["Agent", "Location", "AI client", "Workspace", "Updated"]);
+  assert.deepEqual(reader.querySelectorAll("dd").slice(0, 5).map((dd) => dd.textContent),
+    [hostile, "fallback-location", "custom/runtime", "work-folder", "Not recorded"]);
   assert.ok(reader && reader.tagName === "details", "metadata uses a compact native disclosure");
   for (const text of [hostile, "custom/runtime", "work-folder", "Reader / custom title", "original-external", "tx_alpha"]) assert.ok(reader.textContent.includes(text));
   assert.equal(h.nodes.view.querySelector("img"), null);
@@ -649,7 +659,7 @@ test("workspace roots, control strings and missing metadata never become guessed
       agent_name: "A\x1b]52;c;SECRET\x07tlas\u202e", runtime: "\x1b[31mcodex\x1b[0m", location: { name: "\u009dSECRET\u009cStudio" }, initial_cwd: cwd
     } }] });
     const values = h.document.getElementById("transcript-selection").querySelectorAll("dd").map((dd) => dd.textContent);
-    assert.deepEqual(values.slice(0, 4), ["Atlas", "Codex", "Studio", expected]);
+    assert.deepEqual(values.slice(0, 4), ["Atlas", "Studio", "Codex", expected]);
     assert.ok(!h.nodes.view.textContent.includes("SECRET"));
   }
   await h.finish(beginList(h), { transcripts: [] });

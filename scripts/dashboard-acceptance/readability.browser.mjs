@@ -77,7 +77,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
         const title = page.locator(section === 'transcripts' ? '.transcript-open' : '.row .grow a').first();
         assert.ok((await title.boundingBox()).width > 80, `${section} title visible at ${width}`);
         if (section === 'transcripts') {
-          assert.deepEqual(await page.locator('.transcript-table th').allTextContents(), ['Agent', 'AI client', 'Location', 'Workspace', 'Updated']);
+          assert.deepEqual(await page.locator('.transcript-table th').allTextContents(), ['Agent', 'Location', 'AI client', 'Workspace', 'Updated']);
           assert.equal(await page.locator('.transcript-row td').count(), 5);
           assert.equal(await page.locator('.transcript-row').first().evaluate((el) => getComputedStyle(el).display), width <= 700 ? 'grid' : 'table-row');
           assert.equal(await page.locator('.transcript-mobile-label').first().isVisible(), width <= 700);
