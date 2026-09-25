@@ -37,10 +37,11 @@ const (
 // Detail is deliberately omitted: the contract stays value-free and stable for
 // cron/monitoring consumers while the interactive dashboard carries diagnostics.
 type automationHealthResult struct {
-	Name      string                `json:"name"`
-	State     automationHealthState `json:"state"`
-	LatencyMS int64                 `json:"latency_ms"`
-	CheckedAt time.Time             `json:"checked_at"`
+	Name         string                `json:"name"`
+	RegistryName string                `json:"registry_name,omitempty"`
+	State        automationHealthState `json:"state"`
+	LatencyMS    int64                 `json:"latency_ms"`
+	CheckedAt    time.Time             `json:"checked_at"`
 }
 
 var errHealthNotOK = errors.New("one or more health targets are not ok")
@@ -55,8 +56,9 @@ type fleetHealthClient interface {
 type fleetHealthClientFactory func(controlPlane, tokenFile string) (fleetHealthClient, error)
 
 type automationHealthTarget struct {
-	name  string
-	probe func(context.Context) automationHealthState
+	name         string
+	registryName string
+	probe        func(context.Context) automationHealthState
 }
 
 func newFleetHealthClient(controlPlane, tokenFile string) (fleetHealthClient, error) {
@@ -181,9 +183,14 @@ func configuredHealthTargets(configPath, selectedCell string, factory fleetHealt
 			}
 		}
 
-		cellName, controlPlane, tokenPath := name, cp, tokenFile
+		cellName, controlPlane, tokenPath := entry.registryName(name), cp, tokenFile
+		registryName := ""
+		if entry.RegistryName != nil {
+			registryName = cellName
+		}
 		targets = append(targets, automationHealthTarget{
-			name: cellName,
+			name:         name,
+			registryName: registryName,
 			probe: func(ctx context.Context) automationHealthState {
 				if controlPlane == "" {
 					return automationHealthDown
@@ -245,9 +252,10 @@ func probeAutomationHealth(ctx context.Context, targets []automationHealthTarget
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
 				results[i] = automationHealthResult{
-					Name:      target.name,
-					State:     classifyHealthError(ctx.Err()),
-					CheckedAt: now().UTC(),
+					Name:         target.name,
+					RegistryName: target.registryName,
+					State:        classifyHealthError(ctx.Err()),
+					CheckedAt:    now().UTC(),
 				}
 				return
 			}
@@ -262,10 +270,11 @@ func probeAutomationHealth(ctx context.Context, targets []automationHealthTarget
 				latency = 0
 			}
 			results[i] = automationHealthResult{
-				Name:      target.name,
-				State:     state,
-				LatencyMS: latency,
-				CheckedAt: checkedAt.UTC(),
+				Name:         target.name,
+				RegistryName: target.registryName,
+				State:        state,
+				LatencyMS:    latency,
+				CheckedAt:    checkedAt.UTC(),
 			}
 		}()
 	}
@@ -284,8 +293,12 @@ func emitAutomationHealth(results []automationHealthResult, jsonOutput bool, out
 		return nil
 	}
 	for _, result := range results {
+		name := result.Name
+		if result.RegistryName != "" {
+			name += " (registry " + result.RegistryName + ")"
+		}
 		if _, err := fmt.Fprintf(out, "%-44s %-10s %dms %s\n",
-			result.Name, result.State, result.LatencyMS, result.CheckedAt.Format(time.RFC3339)); err != nil {
+			name, result.State, result.LatencyMS, result.CheckedAt.Format(time.RFC3339)); err != nil {
 			return fmt.Errorf("write health output: %w", err)
 		}
 	}

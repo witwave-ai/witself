@@ -855,6 +855,15 @@ dispatch key. Operators must therefore read `civo-sandbox-usw2-dev` in
 `witself-admin cells` output as the live serving cell, and
 `civo-sandbox-use1-serving` in GitOps, kubectl contexts and Pulumi state.
 
+Set the optional per-cell `registry_name: civo-sandbox-usw2-dev` on the
+`civo-sandbox-use1-serving` entry in `~/.witself/infra.yaml`. This maps health
+probes and existing fleet lookups/teardown to the retained registry identity;
+health output keeps the inventory name and includes `registry_name` in JSON or
+`(registry civo-sandbox-usw2-dev)` in text. The field must be a valid fleet cell
+name and cannot collide with another inventory key or cell's `registry_name`;
+it cannot be set in `defaults`. It does not rename the Pulumi stack or change
+new-cell registration and its post-registration readiness/restore steps.
+
 ### Restore transport: `kubectl exec -i` can hang after `pg_restore` exits
 
 During the 2026-09-19 restore, `kubectl exec -i` into the PostgreSQL pod with

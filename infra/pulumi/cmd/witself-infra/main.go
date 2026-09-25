@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -972,7 +973,7 @@ func run(args []string) error {
 				// Fleet removal is a pre-step: drain first (placement stops), then
 				// remove — refusing while accounts live on the cell unless the
 				// operator explicitly acknowledges their destruction.
-				if err := removeCell(ctx, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts); err != nil {
+				if err := removeConfiguredCell(ctx, *configPath, *controlPlane, *fleetTokenFile, cellName, *destroyAccounts, os.Stderr); err != nil {
 					sink.errPhase(cellName, "fleet.remove", err)
 					return err
 				}
@@ -1260,6 +1261,20 @@ func waitForCellHealthy(ctx context.Context, cl cellProber, cellName string, max
 		case <-time.After(pollEvery):
 		}
 	}
+}
+
+// removeConfiguredCell keeps stack selection and confirmation on the inventory
+// key while every fleet teardown operation uses the existing registry identity.
+func removeConfiguredCell(ctx context.Context, configPath, controlPlane, fleetTokenFile, cellName string, destroyAccounts bool, out io.Writer) error {
+	cfg, _, err := loadInfraConfig(configPath)
+	if err != nil {
+		return err
+	}
+	registryName := cfg.Cells[cellName].registryName(cellName)
+	if registryName != cellName {
+		_, _ = fmt.Fprintf(out, "Destroy target %s.\n", destroyCellIdentity(cellName, registryName))
+	}
+	return removeCell(ctx, controlPlane, fleetTokenFile, registryName, destroyAccounts)
 }
 
 // removeCell drains the cell and removes it from the fleet ahead of teardown.

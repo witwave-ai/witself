@@ -509,3 +509,65 @@ func TestWhoamiRejectsAWSAccountMismatch(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestConfigRegistryNameValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, want, wantErr string
+	}{
+		{name: "absent", body: "cells:\n  cell-a: {}\n", want: "cell-a"},
+		{name: "valid", body: "cells:\n  cell-a: {registry_name: civo-sandbox-usw2-dev}\n", want: "civo-sandbox-usw2-dev"},
+		{name: "own key", body: "cells:\n  cell-a: {registry_name: cell-a}\n", want: "cell-a"},
+		{name: "duplicate registry", body: "cells:\n  cell-a: {registry_name: old-cell}\n  cell-b: {registry_name: old-cell}\n", wantErr: "duplicates"},
+		{name: "inventory collision", body: "cells:\n  cell-a: {registry_name: cell-b}\n  cell-b: {}\n", wantErr: "another inventory key"},
+		{name: "remapped inventory collision", body: "cells:\n  cell-a: {registry_name: cell-b}\n  cell-b: {registry_name: old-cell}\n", wantErr: "another inventory key"},
+		{name: "defaults", body: "defaults: {registry_name: old-cell}\n", wantErr: "per-cell only"},
+		{name: "empty", body: "cells:\n  cell-a: {registry_name: ''}\n", wantErr: "valid cell name"},
+		{name: "uppercase", body: "cells:\n  cell-a: {registry_name: Cell-a}\n", wantErr: "valid cell name"},
+		{name: "path", body: "cells:\n  cell-a: {registry_name: '../cell'}\n", wantErr: "valid cell name"},
+		{name: "whitespace", body: "cells:\n  cell-a: {registry_name: ' old-cell '}\n", wantErr: "valid cell name"},
+		{name: "too long", body: "cells:\n  cell-a: {registry_name: '" + strings.Repeat("z", 65) + "'}\n", wantErr: "valid cell name"},
+		{name: "length limit", body: "cells:\n  cell-a: {registry_name: '" + strings.Repeat("z", 64) + "'}\n", want: strings.Repeat("z", 64)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, _, err := loadInfraConfig(writeConfig(t, "version: 1\n"+tt.body))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Cells["cell-a"].registryName("cell-a"); got != tt.want {
+				t.Fatalf("registry name = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRegistryNamePreservesStackIdentity(t *testing.T) {
+	path := writeConfig(t, strings.Replace(sampleConfig, "    cloud: aws", "    registry_name: retained-cell\n    cloud: aws", 1))
+	fs := newTestFlagSet()
+	if err := applyCellConfig(fs, destroyTestCell, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := fs.Lookup("role").Value.String(); got != "dev" {
+		t.Fatalf("stack role changed: %s", got)
+	}
+	// Saving another inventory entry must preserve the YAML-only mapping.
+	add := newTestFlagSet()
+	if err := add.Parse([]string{"-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := configAddCell(add, path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := loadInfraConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cells[destroyTestCell].registryName(destroyTestCell) != "retained-cell" {
+		t.Fatal("config save lost registry mapping")
+	}
+}

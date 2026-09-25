@@ -668,7 +668,7 @@ func (s liveDataSource) load(ctx context.Context, configPath string) (loadResult
 		if entry.ControlPlane != nil {
 			cp = *entry.ControlPlane
 		}
-		st := cellState{name: n, entry: entry, fleet: byName[n], controlPlane: cp}
+		st := cellState{name: n, entry: entry, fleet: byName[entry.registryName(n)], controlPlane: cp}
 		st.settings = effectiveSettings(entry, cfg.Defaults)
 		// Silent path: the dashboard iterates every cell every 60s and
 		// on every g/opDone; the interactive `aws sso login` fallback
@@ -682,7 +682,7 @@ func (s liveDataSource) load(ctx context.Context, configPath string) (loadResult
 		} else {
 			st.identity = id
 		}
-		delete(byName, n)
+		delete(byName, entry.registryName(n))
 		states = append(states, st)
 	}
 	// Sort by group so cells with the same control plane are
@@ -751,7 +751,7 @@ func (liveDataSource) probe(ctx context.Context, configPath, cell string) (reach
 	if err != nil {
 		return reachResult{}, err
 	}
-	pr, err := fc.Probe(ctx, cell)
+	pr, err := fc.Probe(ctx, cfg.Cells[cell].registryName(cell))
 	if err != nil {
 		return reachResult{}, err
 	}
@@ -1175,6 +1175,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = startConfirm(opDestroy, msg.cell, false)
+		if st := m.selectedState(); st != nil {
+			m.pending.registryName = st.entry.registryName(msg.cell)
+		}
 		m.status = "destroy safety checks passed for " + msg.cell + " — exact-name confirmation required"
 		return m, nil
 	case bgProbeTickMsg:

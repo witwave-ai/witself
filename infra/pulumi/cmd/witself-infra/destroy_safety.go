@@ -47,9 +47,13 @@ func runDestroySafety(ctx context.Context, cellName string, opts destroySafetyOp
 	if err := checkDestroyDeletionProtection(cellName, opts.ConfigPath); err != nil {
 		return err
 	}
+	cfg, _, err := loadInfraConfig(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
 	if err := checkDestroyAccounts(
 		ctx,
-		cellName,
+		cellName, cfg.Cells[cellName].registryName(cellName),
 		opts.ControlPlane,
 		opts.FleetTokenFile,
 		opts.ForceWithAccounts,
@@ -59,7 +63,7 @@ func runDestroySafety(ctx context.Context, cellName string, opts destroySafetyOp
 	); err != nil {
 		return err
 	}
-	return confirmDestroy(cellName, opts.YesCell, opts.Interactive, opts.Input, out)
+	return confirmDestroy(cellName, cfg.Cells[cellName].registryName(cellName), opts.YesCell, opts.Interactive, opts.Input, out)
 }
 
 // destroyPreflight gives the dashboard the same read-only guards before it
@@ -93,7 +97,7 @@ func (liveDataSource) destroyPreflight(ctx context.Context, configPath, cellName
 		fleetTokenFile = *entry.FleetTokenFile
 	}
 	return checkDestroyAccounts(
-		ctx, cellName, controlPlane, fleetTokenFile,
+		ctx, cellName, entry.registryName(cellName), controlPlane, fleetTokenFile,
 		false, false, nil, io.Discard,
 	)
 }
@@ -139,48 +143,49 @@ func checkDestroyInventory(cellName, configPath string, allowUnknown bool, out i
 
 func checkDestroyAccounts(
 	ctx context.Context,
-	cellName, controlPlane, fleetTokenFile string,
+	cellName, registryName, controlPlane, fleetTokenFile string,
 	forceWithAccounts, skipAccountCheck bool,
 	reader placementStatusReader,
 	out io.Writer,
 ) error {
+	identity := destroyCellIdentity(cellName, registryName)
 	if skipAccountCheck {
-		_, _ = fmt.Fprintf(out, "warning: --skip-account-check bypassed live/archived account placement verification for cell %q\n", cellName)
+		_, _ = fmt.Fprintf(out, "warning: --skip-account-check bypassed live/archived account placement verification for cell %s\n", identity)
 		return nil
 	}
 	if controlPlane == "" {
-		return destroyAccountCheckUnavailable(cellName, "no control plane is configured")
+		return destroyAccountCheckUnavailable(identity, "no control plane is configured")
 	}
 	if reader == nil {
 		client, err := fleet.NewClient(controlPlane, fleetTokenFile)
 		if err != nil {
-			return destroyAccountCheckUnavailable(cellName, "fleet credentials are unavailable")
+			return destroyAccountCheckUnavailable(identity, "fleet credentials are unavailable")
 		}
 		reader = client
 	}
 	status, err := reader.GetPlacementStatus(ctx, 1)
 	if err != nil {
-		return destroyAccountCheckUnavailable(cellName, "the control-plane placement-status read failed")
+		return destroyAccountCheckUnavailable(identity, "the control-plane placement-status read failed")
 	}
 
 	var target *fleet.PlacementStatusCell
 	for i := range status.Cells {
-		if status.Cells[i].Name != cellName {
+		if status.Cells[i].Name != registryName {
 			continue
 		}
 		if target != nil {
-			return destroyAccountCheckUnavailable(cellName, "placement status contains duplicate target-cell rows")
+			return destroyAccountCheckUnavailable(identity, "placement status contains duplicate target-cell rows")
 		}
 		target = &status.Cells[i]
 	}
 	if target == nil {
-		return destroyAccountCheckUnavailable(cellName, "placement status has no target-cell row")
+		return destroyAccountCheckUnavailable(identity, "placement status has no target-cell row")
 	}
 	if !target.ReportsAccountCounts() {
-		return destroyAccountCheckUnavailable(cellName, "placement status does not explicitly report both account counts")
+		return destroyAccountCheckUnavailable(identity, "placement status does not explicitly report both account counts")
 	}
 	if target.AccountCount < 0 || target.ArchivedCount < 0 {
-		return destroyAccountCheckUnavailable(cellName, "placement status contains invalid account counts")
+		return destroyAccountCheckUnavailable(identity, "placement status contains invalid account counts")
 	}
 
 	live, archived := target.AccountCount, target.ArchivedCount
@@ -189,26 +194,36 @@ func checkDestroyAccounts(
 	}
 	if !forceWithAccounts {
 		return fmt.Errorf(
-			"live-accounts protection: cell %q has %d live account(s) and %d archived account(s) still placed there; refusing destroy (pass --force-with-accounts to proceed)",
-			cellName, live, archived,
+			"live-accounts protection: cell %s has %d live account(s) and %d archived account(s) still placed there; refusing destroy (pass --force-with-accounts to proceed)",
+			identity, live, archived,
 		)
 	}
 	_, _ = fmt.Fprintf(
 		out,
-		"warning: --force-with-accounts permits destroy of cell %q with %d live account(s) and %d archived account(s) still placed there\n",
-		cellName, live, archived,
+		"warning: --force-with-accounts permits destroy of cell %s with %d live account(s) and %d archived account(s) still placed there\n",
+		identity, live, archived,
 	)
 	return nil
 }
 
-func destroyAccountCheckUnavailable(cellName, reason string) error {
+func destroyAccountCheckUnavailable(identity, reason string) error {
 	return fmt.Errorf(
-		"live-accounts protection: account placement status is unavailable for cell %q (%s); refusing destroy (pass --skip-account-check to bypass)",
-		cellName, reason,
+		"live-accounts protection: account placement status is unavailable for cell %s (%s); refusing destroy (pass --skip-account-check to bypass)",
+		identity, reason,
 	)
 }
 
-func confirmDestroy(cellName, yesCell string, interactive bool, in io.Reader, out io.Writer) error {
+// destroyCellIdentity keeps unmapped diagnostics byte-compatible while making
+// the inventory-to-fleet mapping explicit wherever destruction is described.
+func destroyCellIdentity(cellName, registryName string) string {
+	identity := fmt.Sprintf("%q", cellName)
+	if registryName != "" && registryName != cellName {
+		identity += fmt.Sprintf(" (fleet registry entry %q)", registryName)
+	}
+	return identity
+}
+
+func confirmDestroy(cellName, registryName, yesCell string, interactive bool, in io.Reader, out io.Writer) error {
 	if !interactive {
 		if yesCell == "" {
 			return fmt.Errorf("non-interactive destroy requires --yes-cell=%s", cellName)
@@ -216,10 +231,13 @@ func confirmDestroy(cellName, yesCell string, interactive bool, in io.Reader, ou
 		if yesCell != cellName {
 			return fmt.Errorf("--yes-cell must exactly match target cell %q", cellName)
 		}
+		if registryName != cellName {
+			_, _ = fmt.Fprintf(out, "Destroy target %s.\n", destroyCellIdentity(cellName, registryName))
+		}
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(out, "Destroy target %q. Type the exact cell name to confirm: ", cellName)
+	_, _ = fmt.Fprintf(out, "Destroy target %s. Type the exact cell name to confirm: ", destroyCellIdentity(cellName, registryName))
 	if in == nil {
 		return fmt.Errorf("destroy confirmation failed: no interactive input is available")
 	}

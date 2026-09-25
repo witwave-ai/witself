@@ -116,6 +116,7 @@ type securityContext struct {
 // cellEntry is one cell's configuration — pointer fields so "absent"
 // and "zero value" stay distinguishable in the merge.
 type cellEntry struct {
+	RegistryName *string `yaml:"registry_name,omitempty"`
 	Cloud        *string `yaml:"cloud,omitempty"`
 	AccountAlias *string `yaml:"account_alias,omitempty"`
 	Region       *string `yaml:"region,omitempty"`
@@ -140,6 +141,18 @@ type cellEntry struct {
 	BackupValidationTarget *bool            `yaml:"backup_validation_target,omitempty"`
 	SecurityContext        *securityContext `yaml:"security_context,omitempty"`
 }
+
+// registryName resolves an existing fleet identity without changing the inventory
+// key, Pulumi stack identity, or registration of newly provisioned cells.
+func (e cellEntry) registryName(inventoryName string) string {
+	if e.RegistryName != nil {
+		return *e.RegistryName
+	}
+	return inventoryName
+}
+
+// Match the control plane's CELL_NAME validation for fleet registrations.
+var registryCellName = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
 // infraConfig is the whole file.
 type infraConfig struct {
@@ -289,6 +302,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		return nil, path, fmt.Errorf("%s: unsupported version %d (want 1)", path, cfg.Version)
 	}
 	if d := cfg.Defaults; d != nil {
+		if d.RegistryName != nil {
+			return nil, path, fmt.Errorf("%s: defaults must not set registry_name — fleet identity is per-cell only", path)
+		}
 		if d.Cloud != nil || d.AccountAlias != nil || d.Region != nil || d.Role != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set cell identity (cloud/account_alias/region/role)", path)
 		}
@@ -311,6 +327,30 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 			return nil, path, fmt.Errorf("%s: defaults must not set backup_validation_target — restore-test isolation is per-cell only", path)
 		}
 	}
+	// Sort for deterministic collision diagnostics, independent of map iteration.
+	names := make([]string, 0, len(cfg.Cells))
+	for name := range cfg.Cells {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	registryOwners := make(map[string]string)
+	for _, name := range names {
+		entry := cfg.Cells[name]
+		if entry.RegistryName == nil {
+			continue
+		}
+		registryName := *entry.RegistryName
+		if !registryCellName.MatchString(registryName) {
+			return nil, path, fmt.Errorf("%s: cell %q registry_name must be a valid cell name (1-64 lowercase letters, digits, or hyphens)", path, name)
+		}
+		if _, exists := cfg.Cells[registryName]; exists && registryName != name {
+			return nil, path, fmt.Errorf("%s: cell %q registry_name %q conflicts with another inventory key", path, name, registryName)
+		}
+		if owner, exists := registryOwners[registryName]; exists {
+			return nil, path, fmt.Errorf("%s: cell %q registry_name %q duplicates cell %q registry_name", path, name, registryName, owner)
+		}
+		registryOwners[registryName] = name
+	}
 	return &cfg, path, nil
 }
 
@@ -318,8 +358,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 // identity conflicts, and fills every flag the operator did NOT set
 // explicitly from the cell entry (falling back to defaults). It then
 // re-composes the cell name from the merged identity and requires it
-// to match the entry key — the key IS the Pulumi stack name and fleet
-// registry key, so drift here would silently target the wrong stack.
+// to match the entry key — the key IS the Pulumi stack name, so drift here
+// would silently target the wrong stack. registry_name only addresses an
+// existing fleet entry.
 func applyCellConfig(fs *flag.FlagSet, cellName, configPath string) error {
 	cfg, path, err := loadInfraConfig(configPath)
 	if err != nil {
@@ -368,7 +409,7 @@ func applyCellConfig(fs *flag.FlagSet, cellName, configPath string) error {
 	}
 	composed := strings.Join([]string{get("cloud"), get("account-alias"), regionCode, get("role")}, "-")
 	if composed != cellName {
-		return fmt.Errorf("cell key %q does not match its identity (cloud/account_alias/region/role compose to %q) — the key is the stack + fleet name and must stay canonical", cellName, composed)
+		return fmt.Errorf("cell key %q does not match its identity (cloud/account_alias/region/role compose to %q) — the key is the stack name and must stay canonical", cellName, composed)
 	}
 	return nil
 }
