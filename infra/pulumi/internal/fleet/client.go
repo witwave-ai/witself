@@ -176,10 +176,14 @@ func (c *Client) Register(ctx context.Context, cell Cell) error {
 			return err
 		}
 	}
+	// Keep out a nil interface when no acknowledgement is required. Passing
+	// a typed-nil *registrationAck makes do try to unmarshal into a nil pointer.
+	var out any
 	if cell.BackupToken != "" || cell.BackupValidationTarget {
 		ack = &registrationAck{}
+		out = ack
 	}
-	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", cell, ack)
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", cell, out)
 	if err != nil {
 		return err
 	}
@@ -281,6 +285,8 @@ func (c *Client) lookup(ctx context.Context, name string) (*Cell, error) {
 }
 
 // Drain re-registers the cell with accepting=false so placement stops.
+// Registry reads redact credentials; their omitempty fields preserve the
+// control plane's stored tokens when this registration omits them.
 func (c *Client) Drain(ctx context.Context, name string) error {
 	cell, err := c.lookup(ctx, name)
 	if err != nil {

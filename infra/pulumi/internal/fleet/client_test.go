@@ -5,9 +5,99 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// Ordinary registration used to pass a typed-nil *registrationAck to do,
+// causing json: Unmarshal(nil *fleet.registrationAck) after a successful write.
+func TestRegisterWithoutBackupToken(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/cells" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":true,"backup_validation_target":false}}`))
+			}))
+			defer server.Close()
+			client := &Client{base: server.URL, token: "fleet-test-token", hc: server.Client()}
+			if err := client.Register(context.Background(), Cell{Name: "cell-a", Endpoint: "https://cell.example.com"}); err != nil {
+				t.Fatalf("successful registration: %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("registrations = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestDrainRedactedCredentials(t *testing.T) {
+	for _, backupTarget := range []bool{false, true} {
+		name := "ordinary"
+		if backupTarget {
+			name = "backup validation target"
+		}
+		t.Run(name, func(t *testing.T) {
+			var requests []string
+			drains := 0
+			cell := map[string]any{
+				"name": "cell-a", "endpoint": "https://cell.example.com",
+				"accepting": !backupTarget, "backup_validation_target": backupTarget,
+				"has_provision_token": true, "has_backup_token": true,
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				request := r.Method + " " + r.URL.Path
+				requests = append(requests, request)
+				switch request {
+				case "GET /v1/cells":
+					_ = json.NewEncoder(w).Encode(map[string]any{"cells": []any{cell}})
+				case "POST /v1/cells":
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode drain: %v", err)
+						http.Error(w, "bad request", http.StatusBadRequest)
+						return
+					}
+					for _, key := range []string{"provision_token", "backup_token"} {
+						if _, present := body[key]; present {
+							t.Errorf("drain must omit %s", key)
+						}
+					}
+					want := map[string]any{
+						"name": "cell-a", "endpoint": "https://cell.example.com",
+						"accepting": false, "backup_validation_target": backupTarget,
+						"has_provision_token": true, "has_backup_token": true,
+					}
+					if !reflect.DeepEqual(body, want) {
+						t.Errorf("registration = %v, want %v", body, want)
+					}
+					cell["accepting"] = false
+					drains++
+					_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": cell})
+				default:
+					t.Errorf("unexpected request: %s", request)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			client := &Client{base: server.URL, token: "fleet-test-token", hc: server.Client()}
+			if err := client.Drain(context.Background(), "cell-a"); err != nil {
+				t.Fatalf("drain redacted cell: %v", err)
+			}
+			if want := []string{"GET /v1/cells", "POST /v1/cells"}; !reflect.DeepEqual(requests, want) {
+				t.Errorf("requests = %v, want %v", requests, want)
+			}
+			if drains != 1 || cell["accepting"] != false {
+				t.Errorf("drains = %d, accepting = %v", drains, cell["accepting"])
+			}
+		})
+	}
+}
 
 func TestRegisterSendsDistinctCredentialShape(t *testing.T) {
 	var body map[string]any
