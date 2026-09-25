@@ -51,7 +51,7 @@ func (m *Model) layout() (rail, inventory, detail, height int) {
 	if m.account.mode || (m.panel == 0 && m.summaryView != 3) {
 		return rail, 0, remaining, height
 	}
-	if remaining < 60 {
+	if m.panel == 1 || remaining < 60 {
 		return rail, 0, remaining, height
 	}
 	inventory = min(32, max(24, remaining/3))
@@ -62,6 +62,10 @@ func (m *Model) resize() {
 	_, _, dw, h := m.layout()
 	m.vp.Width = max(1, dw-4)
 	m.vp.Height = max(1, h-2)
+	if m.panel == 1 && !m.account.mode {
+		_, dh := m.transcriptHeights(h)
+		m.vp.Height = max(1, dh-2)
+	}
 	m.account.vp.Width = max(1, dw-4)
 	nav := m.accountNav()
 	m.account.vp.Height = max(1, h-3-strings.Count(nav, "\n"))
@@ -165,6 +169,11 @@ func (m *Model) view() string {
 	} else if m.account.mode {
 		nav := m.accountNav()
 		body = m.box(nav+"\n"+m.account.vp.View(), dw, h, true)
+		if rw > 0 {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
+		}
+	} else if m.panel == 1 {
+		body = m.transcriptView(dw, h)
 		if rw > 0 {
 			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
 		}
@@ -373,6 +382,9 @@ func (m *Model) footer() string {
 		}
 		return short + "  ? help  q quit"
 	}
+	if m.panel == 1 {
+		return m.transcriptFooter()
+	}
 	actions := "Enter detail"
 	switch m.panel {
 	case 1:
@@ -504,6 +516,9 @@ func (m *Model) renderDetail(follow bool) {
 		m.renderAccount()
 		return
 	}
+	if m.panel == 1 {
+		m.resize()
+	}
 	old := m.vp.YOffset
 	m.actionOffsets = nil
 	d := &detailWriter{m: m, width: m.vp.Width}
@@ -519,6 +534,9 @@ func (m *Model) renderDetail(follow bool) {
 				title = first(strings.Split(str(row.data, "content"), "\n")[0], title)
 			}
 			title = ansi.Truncate(title, max(20, m.vp.Width*2-2), "…")
+		}
+		if m.panel == 1 {
+			title = "Selected session"
 		}
 		d.heading(title)
 		state := s.status[primary(m.panel, m.sent)]
@@ -691,15 +709,16 @@ func (m *Model) detailState(d *detailWriter, r dashboard.Resource) bool {
 	return true
 }
 func (m *Model) transcriptDetail(d *detailWriter) {
-	d.dim("Live tail · [ ] select entry · x expand/collapse JSON")
 	if m.evidenceFrom > 0 {
 		d.body(fmt.Sprintf("Evidence #%d–%d · Esc returns to memory", m.evidenceFrom, m.evidenceUntil))
 	}
+	page := m.states[1].data[dashboard.ResourceTranscript]
+	t := transcriptDetails(m.current().data, obj(page["transcript"]))
+	m.transcriptMetadata(d, t)
 	if !m.detailState(d, dashboard.ResourceTranscript) {
 		return
 	}
-	page := m.states[1].data[dashboard.ResourceTranscript]
-	d.fields(obj(page["transcript"]), "id external_id updated_at")
+	d.dim("Live tail · [ ] select entry · x expand/collapse JSON")
 	entries := list(page, "entries")
 	if len(entries) == 0 {
 		d.body("No transcript entries yet.")

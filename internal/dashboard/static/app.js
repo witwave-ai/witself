@@ -1489,21 +1489,134 @@
     });
   }
 
+  // Only capture's documented string fields become inventory state. Paths are
+  // reduced before retention; titles are opaque text, never a metadata source.
+  function transcriptText(value) {
+    if (typeof value !== "string") { return ""; }
+    var out = "", mode = 0;
+    for (var ch of value) {
+      var code = ch.codePointAt(0);
+      if (mode === 1) {
+        if (ch === "[") { mode = 2; }
+        else if ("]PX^_".indexOf(ch) >= 0) { mode = 3; }
+        else if (code >= 0x30 && code <= 0x7e) { mode = 0; }
+        continue;
+      }
+      if (mode === 2) { if (code >= 0x40 && code <= 0x7e) { mode = 0; } continue; }
+      if (mode === 3) {
+        if (code === 7 || code === 0x9c) { mode = 0; }
+        else if (code === 27) { mode = 4; }
+        continue;
+      }
+      if (mode === 4) {
+        if (ch === "\\" || code === 7 || code === 0x9c) { mode = 0; }
+        else if (code !== 27) { mode = 3; }
+        continue;
+      }
+      if (code === 27) { mode = 1; continue; }
+      if (code === 0x9b) { mode = 2; continue; }
+      if ([0x90, 0x98, 0x9d, 0x9e, 0x9f].indexOf(code) >= 0) { mode = 3; continue; }
+      if (ch === "\n" || ch === "\t" || ch === "\r") { out += " "; continue; }
+      if (code < 32 || code >= 0x7f && code <= 0x9f || code === 0x061c ||
+          code === 0x200e || code === 0x200f || code >= 0x202a && code <= 0x202e ||
+          code >= 0x2066 && code <= 0x206f) { continue; }
+      out += ch;
+    }
+    return out.trim();
+  }
+  function transcriptObject(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
+  function transcriptWorkspace(value) {
+    var path = transcriptText(value).replace(/\\/g, "/").replace(/\/+$/, "");
+    if (path.indexOf("//") === 0 && path.slice(2).split("/").filter(Boolean).length <= 2) { return ""; }
+    var base = path.slice(path.lastIndexOf("/") + 1);
+    return /^[a-z]:$/i.test(base) || base === "." || base === ".." ? "" : base;
+  }
+  function transcriptRuntime(value) {
+    var names = { codex: "Codex", claude: "Claude Code", "claude-code": "Claude Code", claude_code: "Claude Code",
+      gemini: "Gemini CLI", "gemini-cli": "Gemini CLI", dsh: "DSH", cursor: "Cursor", copilot: "Copilot", grok: "Grok", "grok-build": "Grok Build", openclaw: "OpenClaw", antigravity: "Antigravity" };
+    return Object.prototype.hasOwnProperty.call(names, value.toLowerCase()) ? names[value.toLowerCase()] : value;
+  }
+  function transcriptProjection(value) {
+    var t = transcriptObject(value), md = transcriptObject(t.metadata), location = transcriptObject(md.location);
+    var id = transcriptText(t.id);
+    return { id: id === t.id ? id : "", title: transcriptText(t.title), externalID: transcriptText(t.external_id),
+      created: transcriptText(t.created_at), updated: transcriptText(t.updated_at),
+      agent: transcriptText(md.agent_name), client: transcriptRuntime(transcriptText(md.runtime)),
+      location: transcriptText(location.name) || transcriptText(location.id), workspace: transcriptWorkspace(md.initial_cwd) };
+  }
+  var transcriptColumnKeys = ["agent", "client", "location", "workspace", "updated"];
+  var transcriptColumnLabels = ["Agent", "AI client", "Location", "Workspace", "Updated"];
+  var selectedTranscriptID = ""; // Identity only; metadata lives in this visit's DOM handlers.
+  function transcriptValue(value) { return value || "Not recorded"; }
+  function transcriptMetadataHTML(t) {
+    var keys = transcriptColumnKeys.concat(["created", "title", "externalID", "id"]);
+    var labels = transcriptColumnLabels.concat(["Created", "Original title", "External ID", "Transcript ID"]);
+    return '<dl class="transcript-metadata">' + keys.map(function (key, index) {
+      return '<dt>' + labels[index] + '</dt><dd>' + esc(transcriptValue(t[key])) + '</dd>';
+    }).join("") + '</dl>';
+  }
   function viewTranscripts() {
     var generation = transcriptViewGeneration;
     breadcrumb([{ label: "transcripts" }]);
     openEvents(null);
+    $("view").innerHTML = '<div class="panel"><h2>Transcripts</h2><div role="status">Loading transcripts…</div></div>';
     fetchJSON("/api/transcripts").then(function (body) {
       if (generation !== transcriptViewGeneration) { return; }
-      var rows = (body.transcripts || []).map(function (transcript) {
-        return '<div class="row"><span class="grow"><a href="#/transcripts/' + esc(transcript.id) + '">' +
-          esc(transcript.title || transcript.external_id || transcript.id) + "</a></span>" +
-          '<span class="dim mono">' + esc(transcript.id) + '</span>' +
-          '<span class="dim">' + esc((transcript.updated_at || "").slice(0, 19)) + "</span></div>";
+      var transcripts = (Array.isArray(body.transcripts) ? body.transcripts : []).map(transcriptProjection);
+      var rows = transcripts.map(function (t, index) {
+        return '<tr class="transcript-row" role="row" id="transcript-row-' + index + '">' + transcriptColumnKeys.map(function (key, col) {
+          var value = esc(transcriptValue(t[key]));
+          if (col === 0) { value = '<button type="button" class="transcript-select" id="transcript-select-' + index + '" aria-pressed="false" aria-label="Select session ' + esc(transcriptValue(t.agent) + ': ' + (t.title || t.id || String(index + 1))) + '">' + value + '</button>'; }
+          return '<td role="cell"><span class="transcript-mobile-label" aria-hidden="true">' + transcriptColumnLabels[col] + '</span>' + value + '</td>';
+        }).join("") + '</tr>';
       }).join("");
-      $("view").innerHTML = '<div class="panel"><h2>Transcripts</h2>' + filterInputHTML("transcripts") +
-        '<div class="list">' + (rows || '<div class="empty">no transcripts</div>') + "</div></div>";
-      bindFilter("transcripts");
+      $("view").innerHTML = '<div class="panel transcript-inventory"><h2>Transcripts</h2>' + filterInputHTML("transcripts") +
+        (rows ? '<table class="transcript-table" role="table"><caption>Recorded sessions · select a row for details</caption><thead role="rowgroup"><tr role="row">' +
+          transcriptColumnLabels.map(function (label) { return '<th scope="col" role="columnheader">' + label + '</th>'; }).join("") +
+          '</tr></thead><tbody role="rowgroup">' + rows + '</tbody></table>' : '<div class="empty">no transcripts</div>') +
+        '<section id="transcript-selection" class="transcript-selection" aria-label="Selected session" hidden></section></div>';
+      var visible = [];
+      function select(index) {
+        if (generation !== transcriptViewGeneration) { return; }
+        selectedTranscriptID = index >= 0 ? transcripts[index].id : "";
+        transcripts.forEach(function (_, i) {
+          $("transcript-row-" + i).classList.toggle("selected", i === index);
+          $("transcript-select-" + i).setAttribute("aria-pressed", String(i === index));
+        });
+        var details = $("transcript-selection");
+        details.hidden = index < 0;
+        details.innerHTML = index < 0 ? "" : '<div class="transcript-selection-head"><h3>Selected session</h3>' +
+          (transcripts[index].id ? '<a class="transcript-open" href="#/transcripts/' + esc(encodeURIComponent(transcripts[index].id)) + '">Open transcript →</a>' : '') +
+          '</div>' + transcriptMetadataHTML(transcripts[index]);
+      }
+      var input = $("filter-transcripts");
+      function filter() {
+        if (generation !== transcriptViewGeneration) { return; }
+        state.filters.transcripts = input.value;
+        var query = input.value.toLowerCase();
+        visible = [];
+        transcripts.forEach(function (t, i) {
+          var corpus = transcriptColumnKeys.map(function (key) { return transcriptValue(t[key]); }).concat([t.title, t.id, t.externalID]).join(" ").toLowerCase();
+          var match = !query || corpus.indexOf(query) >= 0;
+          $("transcript-row-" + i).style.display = match ? "" : "none";
+          if (match) { visible.push(i); }
+        });
+        $("filter-empty-transcripts").hidden = !query || !transcripts.length || visible.length > 0;
+        var selected = visible.find(function (i) { return transcripts[i].id === selectedTranscriptID; });
+        select(selected === undefined ? (visible.length ? visible[0] : -1) : selected);
+      }
+      transcripts.forEach(function (_, i) {
+        $("transcript-row-" + i).addEventListener("click", function () { select(i); });
+        $("transcript-select-" + i).addEventListener("keydown", function (event) {
+          if (generation !== transcriptViewGeneration || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) { return; }
+          event.preventDefault();
+          var next = visible[Math.max(0, Math.min(visible.length - 1, visible.indexOf(i) + (event.key === "ArrowDown" ? 1 : -1)))];
+          if (next !== undefined) { select(next); $("transcript-select-" + next).focus(); }
+        });
+      });
+      input.addEventListener("input", filter);
+      $("clear-filter-transcripts").addEventListener("click", function () { if (generation !== transcriptViewGeneration) { return; } input.value = ""; filter(); input.focus(); });
+      filter();
     }).catch(function (err) {
       if (generation === transcriptViewGeneration) { showError(err); }
     });
@@ -1582,8 +1695,11 @@
         return entryHTML(entry, from > 0 && entry.sequence >= from && entry.sequence <= until);
       }).join("");
       state.seenSequences[id] = highest;
-      var title = (page.transcript && (page.transcript.title || page.transcript.id)) || id;
+      var metadata = transcriptProjection(page.transcript);
+      var title = metadata.title || metadata.id || id;
+      metadata.id = metadata.id || id;
       $("view").innerHTML = '<div class="panel"><h2>' + esc(title) + ' <span class="badge">live tail</span></h2>' +
+        '<details class="transcript-reader-metadata"><summary>Session details</summary>' + transcriptMetadataHTML(metadata) + '</details>' +
         '<div id="entries" class="entries" data-transcript="' + esc(id) + '">' +
         (rows || '<div class="empty">no entries yet</div>') + "</div></div>";
       var anchor = document.querySelector(".entry.anchored");

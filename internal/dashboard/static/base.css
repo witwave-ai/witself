@@ -555,3 +555,42 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
   #account-nav { margin-top: 0; }
   .account-rail { margin-top: .35rem; padding-top: .35rem; }
 }
+
+/* Transcript inventory: native table semantics, independent of other lists. */
+.transcript-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.transcript-table caption { text-align: left; color: var(--fg-dim); padding-bottom: .75rem; }
+.transcript-table th, .transcript-table td { text-align: left; vertical-align: top; padding: .75rem .6rem; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.transcript-table th { color: var(--fg-dim); font-weight: 500; }
+.transcript-row { cursor: pointer; }
+.transcript-row:hover { background: var(--bg); }
+.transcript-row.selected { background: var(--bg-panel); box-shadow: inset 3px 0 var(--accent); }
+.transcript-row.selected .transcript-select { color: var(--accent); font-weight: 600; }
+.transcript-select { font: inherit; color: inherit; border: 1px solid transparent; border-radius: 3px; background: transparent; padding: .15rem .25rem; text-align: left; cursor: pointer; overflow-wrap: anywhere; max-width: 100%; }
+.transcript-select:focus-visible, .transcript-open:focus-visible, .transcript-reader-metadata summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.transcript-selection { margin-top: 1rem; padding: 1rem; border: 1px solid var(--border); background: var(--bg-panel); }
+.transcript-selection-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.transcript-selection-head h3 { margin: 0; }
+.transcript-open { padding: .4rem .6rem; border: 1px solid var(--border); border-radius: 4px; }
+.transcript-metadata { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: .4rem 1rem; }
+.transcript-metadata dt { color: var(--fg-dim); }
+.transcript-metadata dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.transcript-reader-metadata { margin-bottom: 1rem; }
+.transcript-mobile-label { display: none; }
+@media (max-width: 700px) {
+  .transcript-table, .transcript-table tbody { display: block; }
+  .transcript-table caption { display: block; }
+  /* Keep column headers available to assistive technology. */
+  .transcript-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .transcript-table .transcript-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: .6rem; border-bottom: 1px solid var(--border); }
+  .transcript-table td { display: block; border: 0; padding: .4rem; }
+  .transcript-table td:last-child { grid-column: 1 / -1; }
+  .transcript-mobile-label { display: block; color: var(--fg-dim); font-size: .85em; margin-bottom: .2rem; }
+  .transcript-metadata { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+  .transcript-metadata dd { margin-bottom: .5rem; }
+}
+
+.transcript-select[aria-pressed="true"] { border-color: var(--accent); }
+.transcript-reader-metadata summary { cursor: pointer; overflow-wrap: anywhere; color: var(--fg-dim); }
+@media (pointer: coarse) {
+  .transcript-select, .transcript-open { min-height: 44px; }
+}

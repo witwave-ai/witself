@@ -106,6 +106,7 @@ type Model struct {
 	evidenceFrom, evidenceUntil   int
 	returnMemory                  string
 	actionOffsets                 []int
+	transcriptReader              transcriptReaderPosition
 }
 
 var _ tea.Model = (*Model)(nil)
@@ -549,6 +550,9 @@ func (m *Model) movePanel(panel int) bool {
 	if panel < 0 || panel >= 7 || panel == m.panel {
 		return false
 	}
+	if m.panel == 1 && m.focus != 0 {
+		m.setDetailFocus(0)
+	}
 	m.states[m.panel].scroll = m.vp.YOffset
 	m.invalidate()
 	m.panel = panel
@@ -581,6 +585,9 @@ func (m *Model) choose(delta int) tea.Cmd {
 	return m.refresh()
 }
 func (m *Model) resetDetail() {
+	if m.panel == 1 {
+		m.transcriptReader = transcriptReaderPosition{}
+	}
 	s := &m.states[m.panel]
 	for _, r := range []dashboard.Resource{dashboard.ResourceTranscript, dashboard.ResourceFactHistory, dashboard.ResourceMemory, dashboard.ResourceMemoryHistory, dashboard.ResourceSecret} {
 		delete(s.data, r)
@@ -719,7 +726,24 @@ func (m *Model) applyFetch(msg fetchedMsg) tea.Cmd {
 	if oldSub != "" && oldSub != m.subKey {
 		m.clearPrivate()
 	}
-	m.renderDetail(m.panel == 1 && hadEntries && atBottom && m.evidenceFrom == 0)
+	m.renderDetail(m.panel == 1 && m.focus != 0 && hadEntries && atBottom && m.evidenceFrom == 0)
+	if m.panel == 1 && m.focus != 0 && !hadEntries {
+		if m.evidenceFrom > 0 {
+			for i, entry := range m.actionObjects() {
+				seq := num(entry, "sequence")
+				if seq >= m.evidenceFrom && seq <= m.evidenceUntil {
+					m.sub, m.subKey = i, actionKey(entry)
+					break
+				}
+			}
+			m.renderDetail(false)
+		}
+		m.revealAction()
+		if m.actionCount() > 0 {
+			m.transcriptReader.opened = true
+			m.transcriptReader.key = s.key
+		}
+	}
 	if m.wanted {
 		return m.refresh()
 	}
@@ -1174,22 +1198,26 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "/":
 		m.filterEditing = true
 		m.filterBefore = m.states[m.panel].filter
-		m.focus = 0
-	case "tab":
-		m.focus = (m.focus + 1) % 3
-		if m.actionCount() == 0 && m.focus == 2 {
+		if m.panel == 1 {
+			m.setDetailFocus(0)
+		} else {
 			m.focus = 0
 		}
-		m.renderDetail(false)
+	case "tab":
+		focus := (m.focus + 1) % 3
+		if m.actionCount() == 0 && focus == 2 {
+			focus = 0
+		}
+		m.setDetailFocus(focus)
 		if m.focus == 2 {
 			m.revealAction()
 		}
 	case "shift+tab":
-		m.focus = (m.focus + 2) % 3
-		if m.actionCount() == 0 && m.focus == 2 {
-			m.focus = 1
+		focus := (m.focus + 2) % 3
+		if m.actionCount() == 0 && focus == 2 {
+			focus = 1
 		}
-		m.renderDetail(false)
+		m.setDetailFocus(focus)
 		if m.focus == 2 {
 			m.revealAction()
 		}
@@ -1202,7 +1230,8 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 			return m.refresh()
 		}
 		if m.focus != 0 {
-			m.focus = 0
+			m.setDetailFocus(0)
+			return nil
 		} else if m.states[m.panel].filter != "" {
 			m.states[m.panel].filter = ""
 			m.reconcileRows()
@@ -1217,8 +1246,12 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 		if m.focus == 2 {
 			return m.activateAction()
 		}
-		m.focus = 1
-		m.renderDetail(false)
+		firstRead := m.panel == 1 && m.focus == 0 &&
+			(!m.transcriptReader.opened || m.transcriptReader.key != m.states[1].key)
+		m.setDetailFocus(1)
+		if firstRead {
+			m.revealAction()
+		}
 	case "v":
 		return m.privateRead(false)
 	case "c":
@@ -1234,6 +1267,9 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "x":
 		if m.panel == 1 {
 			m.focus = 2
+			if m.actionCount() == 0 {
+				m.renderDetail(false)
+			}
 			return m.activateAction()
 		}
 	case "[":
@@ -1426,6 +1462,7 @@ func (m *Model) activateAction() tea.Cmd {
 		m.evidenceUntil = until
 		m.returnMemory = memoryID
 		m.focus = 1
+		m.renderDetail(false)
 		return m.refresh()
 	case 4, 6:
 		return m.privateRead(false)

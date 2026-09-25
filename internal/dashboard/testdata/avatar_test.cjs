@@ -36,6 +36,21 @@ async function fixture(t, { missing, unsupported } = {}) {
     set innerHTML(value) {
       assert.ok(!identityIDs.includes(this.attrs.id), "identity must never enter an HTML sink");
       this.html = value;
+      // The boot route now binds its rendered filter and selected-session
+      // nodes. Materialize actual IDs from that markup, as for the shell.
+      if (this.attrs.id === "view") {
+        for (const id of this.renderedIDs || []) nodes.delete(id);
+        this.renderedIDs = [];
+        for (const match of value.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
+          const attrs = Object.fromEntries([...match[2].matchAll(/([\w-]+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+          if (!attrs.id) continue;
+          assert.ok(!nodes.has(attrs.id), "unique rendered ID: " + attrs.id);
+          const node = new Element(match[1], attrs);
+          node.value = attrs.value || "";
+          nodes.set(attrs.id, node);
+          this.renderedIDs.push(attrs.id);
+        }
+      }
     }
     addEventListener(type, listener) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);

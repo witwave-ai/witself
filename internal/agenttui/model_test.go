@@ -414,7 +414,11 @@ func TestAvailabilityAndRetryGate(t *testing.T) {
 }
 func TestEvidenceJumpAndSalientOutsideInventory(t *testing.T) {
 	f := newFake()
+	transcriptOutage := false
 	f.read = func(ctx context.Context, r dashboard.ReadRequest) (json.RawMessage, error) {
+		if transcriptOutage && (r.Resource == dashboard.ResourceTranscripts || r.Resource == dashboard.ResourceTranscript) {
+			return nil, errors.New("synthetic outage")
+		}
 		if r.Resource == dashboard.ResourceMemories {
 			return encode(object{"items": []any{demoMemories()[1]}})
 		}
@@ -427,13 +431,27 @@ func TestEvidenceJumpAndSalientOutsideInventory(t *testing.T) {
 		t.Fatal("salient link opened wrong memory")
 	}
 	m.key(key("e"))
-	settle(t, m, m.key(key("enter")))
+	cmd := m.key(key("enter"))
+	_, _, _, h := m.layout()
+	_, dh := m.transcriptHeights(h)
+	if m.vp.Height != dh-2 {
+		t.Fatal("pending evidence reader has stale geometry")
+	}
+	settle(t, m, cmd)
 	req := f.last(dashboard.ResourceTranscript)
 	if req.ID != "tr_wayfinding" || req.Query.Get("after_sequence") != "3" || req.Query.Get("limit") != "500" {
 		t.Fatalf("wrong evidence window: %+v", req)
 	}
-	if m.evidenceFrom != 4 || m.evidenceUntil != 6 || !strings.Contains(ansi.Strip(m.vp.View()), "Evidence #4–6") {
+	if m.evidenceFrom != 4 || m.evidenceUntil != 6 || !strings.Contains(ansi.Strip(m.View()), "Evidence #4–6") {
 		t.Fatal("evidence range not shown")
+	}
+	if !strings.Contains(ansi.Strip(m.vp.View()), "▌ #4") {
+		t.Fatal("evidence jump did not expose the highlighted entry")
+	}
+	transcriptOutage = true
+	settle(t, m, m.refresh())
+	if !strings.Contains(ansi.Strip(m.View()), "Evidence #4–6") || !strings.Contains(ansi.Strip(m.vp.View()), "▌ #4") {
+		t.Fatal("stale reader lost the evidence range or highlighted entry")
 	}
 	settle(t, m, m.key(key("esc")))
 	if m.panel != 3 || m.current().key != "mem_wayfinding" {
