@@ -28,7 +28,8 @@ type IdentityCapacityMetrics struct {
 // ReadIdentityCapacityMetrics measures active, non-purged accounts, matching
 // identity-create eligibility. Each account contributes once per dimension;
 // agents_per_realm uses its busiest live realm. Missing limits are unlimited.
-// Zero is a finite cap with no headroom and is both near and at its limit.
+// Only elective capacity (a finite cap above the bootstrap structural minimum)
+// contributes to saturation and minimum headroom. All finite caps remain measured.
 func (s *Store) ReadIdentityCapacityMetrics(ctx context.Context) (IdentityCapacityMetrics, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -42,6 +43,7 @@ func (s *Store) ReadIdentityCapacityMetrics(ctx context.Context) (IdentityCapaci
 	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return IdentityCapacityMetrics{}, fmt.Errorf("bound identity capacity metrics: %w", err)
 	}
+	realmsMinimum, agentsMinimum, operatorsMinimum := identityCapacityStructuralMinimums()
 	rows, err := tx.Query(ctx, `
 		WITH live_accounts AS (
 		  SELECT id, plan_limits FROM accounts
@@ -62,25 +64,24 @@ func (s *Store) ReadIdentityCapacityMetrics(ctx context.Context) (IdentityCapaci
 		    JOIN live_accounts account_record ON account_record.id = o.account_id
 		   WHERE o.deleted_at IS NULL GROUP BY o.account_id
 		), capacities AS (
-		  SELECT dimension, used, (account_record.plan_limits->>dimension)::bigint AS cap
+		  SELECT dimension, used, structural_minimum, (account_record.plan_limits->>dimension)::bigint AS cap
 		    FROM live_accounts account_record
 		    LEFT JOIN realm_counts r ON r.account_id = account_record.id
 		    LEFT JOIN operator_counts o ON o.account_id = account_record.id
 		    CROSS JOIN LATERAL (VALUES
-		      ('realms', COALESCE(r.realms, 0)),
-		      ('agents_per_realm', COALESCE(r.agents_per_realm, 0)),
-		      ('operator_seats', COALESCE(o.operator_seats, 0))
-		    ) dimensions(dimension, used)
+		      ('realms', COALESCE(r.realms, 0), $1::bigint),
+		      ('agents_per_realm', COALESCE(r.agents_per_realm, 0), $2::bigint),
+		      ('operator_seats', COALESCE(o.operator_seats, 0), $3::bigint)
+		    ) dimensions(dimension, used, structural_minimum)
 		)
 		SELECT dimension,
 		       count(*) FILTER (WHERE cap IS NOT NULL),
-		       count(*) FILTER (WHERE cap IS NOT NULL AND used::numeric >= cap::numeric * 0.8),
-		       count(*) FILTER (WHERE cap IS NOT NULL AND used >= cap),
+		       count(*) FILTER (WHERE cap > structural_minimum AND used::numeric >= cap::numeric * 0.8),
+		       count(*) FILTER (WHERE cap > structural_minimum AND used >= cap),
 		       count(*) FILTER (WHERE cap IS NULL),
-		       COALESCE(min(CASE WHEN cap = 0 THEN 0::double precision
-		         ELSE greatest(0, least(1, (cap - used)::double precision / cap))
-		         END) FILTER (WHERE cap IS NOT NULL), 1::double precision)
-		  FROM capacities GROUP BY dimension`)
+		       COALESCE(min(greatest(0, least(1, (cap - used)::double precision / NULLIF(cap, 0))))
+		         FILTER (WHERE cap > structural_minimum), 1::double precision)
+		  FROM capacities GROUP BY dimension`, realmsMinimum, agentsMinimum, operatorsMinimum)
 	if err != nil {
 		return IdentityCapacityMetrics{}, fmt.Errorf("query identity capacity metrics: %w", err)
 	}

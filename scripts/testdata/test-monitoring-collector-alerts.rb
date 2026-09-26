@@ -36,8 +36,8 @@ end
 # The PagerDuty fixture omits both opt-ins so a chart-only rollout cannot page
 # on collector or sealed-posture absence. The serving cell opts in only the
 # sealed-plane group through its catalog switch; the collector group stays off
-# until WitselfIdentityCapacityAtLimit stops treating a Personal account's
-# single root operator seat as a capacity breach.
+# until its separate config-only rollout (WitselfIdentityCapacityAtLimit now
+# counts only elective capacity, never a Personal account's structural caps).
 pagerduty = File.join(chart, 'ci/monitoring-pagerduty-values.yaml')
 serving = File.join(root, '.gitops/cells/civo-sandbox-use1-serving/values.yaml')
 disabled = render.call(pagerduty)
