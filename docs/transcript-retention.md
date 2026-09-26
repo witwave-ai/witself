@@ -298,6 +298,11 @@ A policy-window change resets that account's cycle, while every candidate is
 still rechecked against the current live cutoff before deletion. Appending and
 enforcement lock the same conversation row.
 
+As of 2026-09-26, the checked-in configuration enables transcript and message retention in value-free `preview` mode on both
+`civo-sandbox-use1-backup` and `civo-sandbox-use1-serving`; live operation
+requires owner verification after Argo sync, and enforcement is a separate
+reviewed config-only change.
+
 Retention is disabled by default and uses an explicit three-stage rollout:
 
 1. leave the worker disabled while schema and code converge;
