@@ -3,16 +3,16 @@
 Status: draft. Decision: the v0 product docs are ready to freeze for initial
 repo scaffolding.
 
-Narrative-memory amendment (accepted 2026-07-14): there is no server-side
-embedding-provider scaffold. The memory slice starts with PostgreSQL
+Narrative-memory amendment (accepted 2026-07-14): there is no backend
+model-provider scaffold. The memory slice starts with PostgreSQL
 versions/evidence and lexical recall, then may accept optional client-supplied
 vectors under
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVK custody for agent secrets. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -31,12 +31,12 @@ product: the **open plane** (memories + facts) and the **sealed plane** (secrets
 realm/agent/memory/fact/policy/group/message domain joined by the
 secret/TOTP/grant domain, PostgreSQL lexical recall plus an optional
 client-vector index boundary, a dedicated policy-engine package added for
-cross-agent identity access, and the crypto + KMS-provider packages re-added for the
-sealed-plane envelope (CMK → per-realm KEK → per-secret/field DEK; see
+cross-agent identity access, and client crypto packages for the sealed-plane
+envelope (per-agent AVK → field-generation DEK; see
 [key-hierarchy.md](key-hierarchy.md) and [encryption-model.md](encryption-model.md)).
 The sealed plane is reveal-gated and is never embedded, never recalled, never in
-the self-digest, and never plaintext-exported; KMS is a required dependency only
-when the sealed plane is enabled.
+the self-digest, and never plaintext-exported. The active client holds the AVK;
+the backend stores ciphertext and redacted inventory without a vault key provider.
 
 The initial scaffold should create:
 
@@ -45,7 +45,7 @@ The initial scaffold should create:
 - `cmd/witself-server`.
 - Internal package layout for shared core, CLI adapter, MCP adapter, API
   adapter, storage adapters, lexical recall/optional client vectors, policy
-  engine, sealed-plane envelope crypto, KMS provider abstraction, audit,
+  engine, client-side sealed-plane envelope crypto, audit,
   observability, and JSON
   contracts.
 - `.gitignore`.
@@ -90,8 +90,8 @@ internal/policy/              # Policy engine: default-deny evaluation, verbs, p
 internal/recall/              # Open plane: PostgreSQL lexical ranking; optional client-vector math
 internal/audit/               # Audit event generation and sinks
 internal/observability/       # Metrics, logs, request IDs, and health probes
-internal/crypto/              # Sealed plane: envelope (CMK->per-realm KEK->DEK), AEAD, reveal; plus token hashing/transport
-internal/kms/                 # Sealed plane: KMS-provider abstraction (aws-kms/gcp-kms/azure-key-vault/local-dev)
+internal/sealed/        # Client-side AVK->field-DEK envelope and authenticated scope
+internal/secretclient/        # Local AVK custody, reveal, TOTP calculation, and password generation
 internal/store/               # Storage interfaces
 internal/store/local/         # Local development adapter (file-backed, lexical recall)
 internal/store/postgres/      # Production relational adapter; FTS + JSONB vectors
@@ -153,22 +153,16 @@ Notes on the domain-specific packages:
   projection may accelerate candidate generation;
   migrations run through `witself-server migrate` (Goose, advisory lock).
   Tracked in [storage.md](storage.md).
-- `internal/crypto/` owns the sealed-plane envelope: the CMK → per-realm KEK →
-  per-secret/field DEK hierarchy, AEAD seal/open (`XCHACHA20_POLY1305`,
-  `AES_256_GCM`), AAD binding, DEK wrap/unwrap, and the reveal machinery for
-  `secret reveal` / `totp code`, alongside its existing token hashing and
-  transport concerns. The envelope is the sealed plane's confidentiality
-  boundary; the open plane (memories/facts) uses ordinary data-at-rest, not this
-  package. Tracked in [encryption-model.md](encryption-model.md) and
+- `internal/sealed/` defines the portable sealed-plane envelope and
+  authenticated scope: client-held AVK → field-generation DEK, field seal/open,
+  and DEK wrap/unwrap. It supplies cryptographic primitives, not backend key
+  custody. See [encryption-model.md](encryption-model.md) and
   [key-hierarchy.md](key-hierarchy.md).
-- `internal/kms/` is the KMS-provider abstraction that roots the envelope: the
-  `aws-kms`, `gcp-kms`, `azure-key-vault`, and `local-dev` providers behind a
-  capability boundary, supporting client-side and server-side decrypt. It is
-  required only when the sealed plane is enabled (an open-plane-only deployment
-  runs without KMS). Unlike optional vector profiles, KMS is a real backend
-  provider boundary because it protects sealed data. KMS loss crypto-shreds
-  secret values without affecting the open plane. Tracked in
-  [key-hierarchy.md](key-hierarchy.md) and [storage.md](storage.md).
+- `internal/secretclient/` owns local key custody and encrypted material
+  access. The active CLI/MCP client uses `internal/sealed/` to encrypt and
+  decrypt, generate passwords, and calculate TOTP codes. The backend validates and stores ciphertext, wrapped
+  DEKs, public key identity, and redacted inventory; it has no AVK or agent-vault
+  KMS provider. Missing or mismatched local keys fail closed.
 
 ## CI And Release Workflows
 
@@ -230,13 +224,13 @@ Frozen enough for scaffolding:
   (secret/TOTP/grant). Ownership is unified — `owner_kind ∈ {agent, group}`
   across memories, facts, and secrets.
 - The two-plane Postgres data model is frozen for the first Goose migration,
-  including the sealed-plane `secrets`, `secret_fields`, `secret_grants`,
-  `totp_enrollments`, `realm_keys`, and `secret_deks` tables and their envelope
-  columns (CMK → per-realm KEK → per-secret/field DEK). See
+  including sealed-plane `secrets`, `secret_fields`, public `agent_vault_keys`,
+  wrapped `secret_deks`, and enrollment/rotation lifecycle tables. Grants,
+  group ownership, and standalone TOTP enrollment remain deferred. See
   [data-model.md](data-model.md).
 - Sealed-plane invariants: secret values and TOTP seeds are reveal-gated and are
   never embedded, never recalled, never in the self-digest, and never
-  plaintext-exported. KMS is required only when the sealed plane is enabled.
+  plaintext-exported. AVKs stay client-side with no backend vault key provider.
 - PostgreSQL lexical recall as the always-available baseline, with no backend
   inference and implemented optional client-supplied vector profiles/JSONB rows.
 - Cross-agent access via an evaluable default-deny policy engine.
@@ -250,8 +244,9 @@ Frozen enough for scaffolding:
 - Backend API and route style (`/v1`, plural resources, colon actions).
 - Prometheus metrics, Kubernetes health probes, and structured server logs.
 - PostgreSQL as the first production storage path; AWS first. A future ANN
-  projection is optional and never a gate for the open plane; AWS KMS is the first production
-  key path for the sealed plane (see [storage.md](storage.md)).
+  projection is optional and never a gate for the open plane; agent-vault
+  ciphertext uses the same client-custody contract across clouds (see
+  [storage.md](storage.md)).
 - Helm under `charts/*`.
 - Terraform under `infra/terraform`.
 - Strong CI and release action from the beginning.
@@ -270,7 +265,8 @@ Still expected to evolve during implementation:
 - Exact Go package names.
 - Exact policy-evaluation and recall-ranking structs.
 - Exact optional client-vector profile, validation, and dimensionality handling.
-- Exact cryptographic envelope structs and KMS-provider interface.
+- Client crypto and ciphertext transport structs, subject to the accepted
+  portable AVK envelope contract.
 - Exact OpenAPI generation approach.
 - Exact Helm values schema.
 - Exact Terraform variables and outputs.

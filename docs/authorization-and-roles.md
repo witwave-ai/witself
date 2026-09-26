@@ -14,8 +14,8 @@ fine-grained scope editing, and SCIM are deferred to v1.
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVK custody for agent secrets. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -384,13 +384,13 @@ differs only at Step 5 (Policy for open, grant for sealed).
     cross-agent curate/forget/delete.
 - **Step 6 — Preconditions (alongside, not inside, the allow decision).** A required
   audit `--reason` (operator/admin reveal/destructive/copy-with-sensitive/cross-agent/
-  curate/forget/server-side-decrypt), confirmation/`--yes`, and advertised backend
-  capability (e.g. `server_side_decrypt` for sealed reveal). A missing reason or unmet
+  curate/forget), confirmation/`--yes`, and advertised backend
+  capability (e.g. encrypted material access for client-local reveal). A missing reason or unmet
   confirmation fails as a deterministic **VALIDATION** error, distinct from a scope
   **DENY**; either outcome is audited.
 - **Step 7 — Audit.** Emit the `audit_events` row (dotted `action` namespace,
   `actor_kind`, target, owner context, deciding Policy id for open-plane cross-agent,
-  reason, `server_side_decrypt` flag for sealed reveal, result
+  reason, value-free encrypted material-access attribution for sealed reveal, result
   `success|denied|error`). Audit rows never store memory content, fact values, secret
   values, TOTP seeds/codes, message bodies, embedding vectors, raw tokens, passphrases,
   or private keys.
@@ -420,7 +420,7 @@ Required scope is necessary but not sufficient — Step 5/6 gates still apply.
 | `secret create` / `POST /v1/secrets` / `witself.secret.create` | `secret:create` | Agent: self-owned only. |
 | `secret show` / `GET /v1/secrets/...` / `witself.secret.show` | `secret:show` | Self-owned or grant; operator cross-agent needs `--owner-agent`/`--owner-group`. Redacted; never plaintext. |
 | `secret scan --all-agents` (realm-wide inventory) | `secret:show` + `realm:admin` | Operator/admin only; agents denied. |
-| `secret reveal` / reveal route / `witself.secret.reveal` | `secret:reveal` | Grant `--reveal` or realm role; `--reason`; reveal ceremony; capability-gated decrypt path. Never embedded/recalled/in-digest/exported. |
+| `secret reveal` / reveal route / `witself.secret.reveal` | `secret:reveal` | Grant `--reveal` or realm role; `--reason`; local reveal ceremony; encrypted material access plus client-held AVK. Never embedded/recalled/in-digest/exported. |
 | `secret update` / `witself.secret.update` | `secret:update` | Self-owned or `--write` grant; operator needs `--owner-agent`/`--owner-group` + `--reason`. |
 | `secret delete [--permanent]` | `secret:delete` | Operator-gated; explicit target; `--reason` + `--yes`. |
 | `secret grant` / `secret revoke` / `:grant` / `:revoke` | `secret:grant` | Operator/admin for cross-agent/group-owned; `--reason`; audited. Sealed-plane only — no Policy. |
@@ -463,9 +463,9 @@ paths, same resulting role:
    files.
 3. **Local dev.** `witself realm init` creates the local realm and the first
    local operator/admin context (`account_owner`-equivalent) when the realm is empty,
-   able to create agents and write token files. When the sealed plane is enabled, local
-   dev uses the `local-dev` KMS provider for envelope keys (see
-   [key-hierarchy.md](key-hierarchy.md)); an open-plane-only deployment needs no KMS.
+   able to create agents and write token files. Sealed values use the same
+   client-held AVK and encrypted material contract as remote deployments (see
+   [key-hierarchy.md](key-hierarchy.md)); the backend has no vault key.
 
 After the first operator exists, ordinary account/realm/agent/token management flows
 through the public `witself` CLI under normal authz.
@@ -480,7 +480,7 @@ exist; the last one cannot be removed or demoted.
 
 - **Audit reason.** Operator/admin secret reveal, cross-agent open-plane curate/forget,
   destructive (delete/archive/permanent), copy-with-sensitive, cross-agent, grant/revoke,
-  TOTP-generate, billing-mutation, and cross-agent server-side-decrypt ops MUST carry
+  TOTP-generate and billing-mutation ops MUST carry
   `--reason`; read-only billing/show/list MUST NOT require one. A missing required
   `--reason` is a deterministic VALIDATION failure (the op is refused alongside the authz
   decision), NOT a silent allow and NOT a scope DENY.
@@ -492,17 +492,16 @@ exist; the last one cannot be removed or demoted.
   `secret delete --permanent`, grant/revoke, TOTP delete, cross-agent hard delete, token
   revoke, billing mutations, import `--replace`) MUST require confirmation unless `--yes`
   by an authorized caller; `--dry-run` is supported for preview.
-- **Server-side decrypt (sealed plane, distinguishing).** There is NO dedicated scope —
-  it rides on `secret:reveal` / `totp:code`. It is gated additionally by the
-  backend/realm advertising the `server_side_decrypt` capability (remote managed
-  token-only pods; capability discovery is authoritative, else `unsupported_operation`),
-  is the default for remote backends in v0 (client-side decrypt is post-v0), and is
-  recorded by setting `audit_events.server_side_decrypt=true` — which is exactly what
-  distinguishes it in the audit trail from a client-side reveal. Cross-agent server-side
-  decrypt additionally requires an audit reason. This applies only to the sealed plane;
-  the open plane has no decrypt path (see [encryption-model.md](encryption-model.md),
-  [key-hierarchy.md](key-hierarchy.md)). Audit rows NEVER store secret values, TOTP
-  seeds/codes, memory content, fact values, raw tokens, passphrases, or private keys.
+- **Client-custodied reveal (sealed plane).** Authorization grants access to an
+  encrypted field package, never backend plaintext. The active client must
+  possess the matching AVK to decrypt the field or calculate a TOTP code.
+  A bearer token, realm role, or future grant cannot substitute for that key.
+  Cross-agent/group secret access remains deferred until cryptographic
+  possession matches authorization. The backend records value-free material
+  access; it cannot attest to a local reveal or calculation. See
+  [encryption-model.md](encryption-model.md) and [key-hierarchy.md](key-hierarchy.md).
+  Audit rows NEVER store secret values, TOTP seeds/codes, memory content, fact
+  values, raw tokens, passphrases, or private keys.
 
 ## V0 Subset
 
@@ -525,8 +524,8 @@ exist; the last one cannot be removed or demoted.
   as the CLI role-management surface (pick a role, get its bundle; no per-member scope
   flags).
 - Bootstrap operator = `account_owner` across managed/self-hosted/local.
-- Guarded-op rules: audit reason, explicit targeting, confirmation, server-side-decrypt
-  capability gating + audit flag (sealed plane).
+- Guarded-op rules: audit reason, explicit targeting, confirmation, encrypted
+  material-access authorization, and client-held AVK custody (sealed plane).
 - Sealed-plane invariants: secrets/TOTP seeds are never embedded, recalled, in the
   self-digest, or plaintext-exported, regardless of role/scope/grant.
 - `realm_members.scopes[]` present in schema but frozen-empty (runtime guard treats
@@ -537,10 +536,10 @@ additive, no migration); `denied_scopes[]` / subtractive composition (no schema 
 rejected for audit simplicity); fine-grained scope editing and arbitrary custom roles; a
 scope-constraint mini-language (v0 uses structural grants + targeting + Policy); SCIM /
 external-IdP role provisioning; per-field DEK-backed reveal grants as crypto (v0 keeps
-per-field grants as authorization checks); client-side/BYOK decrypt over the wire;
+cross-agent/group access deferred pending cryptographic possession);
 Policy `deny` effects; private internal Witself staff admin CLI roles + step-up
-approval; per-realm cryptographic isolation against the deployment role (v0 isolation is
-authorization + `realm_id` query scoping + per-realm KEK for the sealed plane).
+approval. The implemented sealed plane already uses a separate client-held AVK
+per agent, with authenticated account/realm/owner binding; backend roles hold no AVK.
 
 ## Revises / Reconciliation
 

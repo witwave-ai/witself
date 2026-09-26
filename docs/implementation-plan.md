@@ -16,16 +16,13 @@ this draft's server-embedding milestone and autonomous
 `memory.consolidate(scope, dry_run)` work. Facts and non-memory platform
 milestones remain applicable.
 
-Every server embedding-provider, embed-on-write, local embedder, pgvector
-prerequisite, or provider-health fallback below is preserved only as rejected
-historical context. It is not a current requirement. Migration `0032` instead
-implements optional client-authored profiles/JSONB rows and bounded hybrid
-recall on ordinary PostgreSQL; pgvector/ANN can only be a future accelerator.
+Migration `0032` implements optional client-authored profiles/JSONB rows and
+bounded hybrid recall on ordinary PostgreSQL. Clients supply memory and query
+vectors; the backend never computes embeddings. A future pgvector/ANN projection
+can only accelerate this contract and is not a prerequisite.
 
-Sealed-plan amendment (accepted 2026-07-18): milestone M6 and every KMS,
-realm-KEK, server-decrypt, token-only reveal, group-owned first-slice, or
-plaintext-capable operator item below is historical. Implement the sealed plane
-in the slices defined by
+Sealed-plan amendment (accepted 2026-07-18): use the client-custodied
+secrets slices defined by
 [client-custodied-agent-vault.md](client-custodied-agent-vault.md), beginning at
 migration `0055`. ADR 0003 makes the active client the only decrypt owner and
 keeps the backend ciphertext-only across AWS, Google Cloud, and Azure.
@@ -34,11 +31,11 @@ Witself reuses the Witpass platform spine and folds the former Witpass secret
 payload back in as one of two planes of agent durable state. Witself runs an
 **open plane** (memories + facts: plaintext at rest, indexed, recallable,
 in the self-digest, plaintext-exportable) and a **sealed plane** (secrets +
-TOTP: KMS-backed envelope encryption, reveal-gated, never embedded, never
+TOTP: client-side envelope encryption, reveal-gated, never embedded, never
 recalled, never in the self-digest, never plaintext-exported). The build
 sequences the open-plane domains first (memory, fact, policy, security-group,
 and messaging, plus lexical and optional client-vector recall) and then lands
-the sealed credential plane (secret model, envelope/KMS, key hierarchy, reveal,
+the sealed credential plane (secret model, client envelopes, key hierarchy, reveal,
 TOTP, grants/roles) as a defined v0 slice on top of the same spine. The platform
 milestones (core-behind-adapters, API skeleton, storage boundary, images, Helm,
 Terraform, managed slice, hardening) are otherwise the same shape.
@@ -53,9 +50,8 @@ the real product boundaries:
 - CLI and MCP adapters over that core.
 - A separate `witself-server` API process over that core.
 - A local development adapter using the same model-free retrieval contract.
-- A production storage boundary ready for ordinary PostgreSQL, KMS (required
-  only when the sealed plane is enabled), and
-  object/blob storage.
+- A production storage boundary ready for ordinary PostgreSQL, client-created
+  encrypted field packages, and object/blob storage.
 - Public release, image, Helm, and Terraform scaffolding from the beginning.
 
 The local adapter is useful scaffolding. It should not become a separate product
@@ -73,15 +69,15 @@ target includes:
 - Memory, fact, recall, policy, security-group, messaging, reference,
   export/import, and audit flows.
 - Sealed-plane secret, password, TOTP, reveal, grant, and runtime-injection
-  flows, with envelope encryption (CMK → per-realm KEK → per-secret/field DEK)
-  behind the KMS-backed capability switch.
+  flows, with client-side envelope encryption (per-agent AVK → field-generation
+  DEK). Grants and runtime injection retain their separate deferred gates.
 - Deterministic lexical recall with optional migration-0032 client-vector hybrid
   ranking.
 - Prometheus metrics, structured logs, and Kubernetes health probes.
 - MCP stdio tools.
 - PostgreSQL storage adapter with full text and JSONB support.
-- KMS path (AWS-first) for the sealed plane: `realm_keys` and `secret_deks`
-  envelope storage, required only when the sealed plane is enabled.
+- Provider-neutral client-custodied AVK path: public `agent_vault_keys`
+  identities, ciphertext, and wrapped `secret_deks` in PostgreSQL.
 - Public CLI/MCP and backend images.
 - `charts/witself-server` Helm skeleton.
 - AWS Terraform skeleton.
@@ -252,53 +248,37 @@ Exit criteria:
 - Unsupported service-admin commands return deterministic
   `unsupported_operation`.
 
-## Rejected Historical Milestone 3: Server Embeddings And Semantic Recall
+## Milestone 3: Client Vectors And Semantic Recall
 
-Do not implement any deliverable in this archived milestone. Use Phases 1, 2,
-and 5 of
-[narrative-memory-and-curation.md](narrative-memory-and-curation.md): lexical
-recall first, then optional client-supplied vectors.
+The accepted scope follows Phases 1, 2, and 5 of
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md): PostgreSQL
+lexical recall first, then optional client-supplied vectors. The direct and
+migration-0032 hybrid paths are implemented; production performance gates
+remain tracked by the feature scorecard.
 
-Goal: make semantic recall real — the core Witself differentiator — behind a
-provider abstraction and stored in pgvector.
-
-This milestone is the analogue of the Witpass KMS milestone: a capability-gated
-provider boundary with a `local-dev` implementation, but for embeddings rather
-than envelope encryption. There is no KMS pillar.
+Goal: relevance-ranked recall with no backend model inference.
 
 Deliverables:
 
-- Embedding-provider abstraction with `voyage` (default), `openai`, and
-  `local-dev` implementations, selectable via `WITSELF_EMBEDDINGS_PROVIDER` and
-  `WITSELF_EMBEDDINGS_MODEL`.
-- Embed-on-write: every `memory add`/`adjust` computes and persists an embedding
-  vector from content (and optionally tags/kind).
-- pgvector-backed vector column and similarity index (introduced with the
-  storage adapter; see [storage.md](storage.md)).
-- `witself memory recall <query>` and `/v1/memories:recall`
-  (or `/v1/memories/{memory_id}:recall`).
-- Hybrid ranking blending vector similarity, lexical/keyword match, tag/kind
-  match, recency, and `salience`, with documented default weights.
-- Deterministic degradation to keyword/tag/kind/time ranking when the embedding
-  provider is unavailable or disabled, surfaced through the capabilities
-  contract (recall never silently returns unranked/empty results).
-- Capability reporting of active provider, model, and vector dimensionality.
-- `local-dev` deterministic/low-cost embedder for tests, demos, and
-  `witself-server serve --dev`.
-- Metrics for recall and embedding operations and vector storage size.
-- `MCP` `witself.memory.recall`.
-- Explicit, audited re-embedding maintenance path (not an automatic side
-  effect) reserved for provider/model change.
+- Clients supply immutable vector profiles and exact-version memory vectors;
+  semantic queries include a compatible profile and client-created query vector.
+- Portable JSONB vector storage and bounded deterministic hybrid ranking over
+  ordinary PostgreSQL. No pgvector extension is required.
+- CLI, API, and MCP recall report coverage and degraded reasons explicitly;
+  ordinary recall without a vector profile uses the full lexical contract.
+- Model/profile changes require client-authored replacement vectors. The backend
+  validates and stores them; it never re-embeds content or calls a model provider.
+- Value-free recall/vector-write usage and vector storage accounting.
 
 Exit criteria:
 
-- `witself memory recall` returns relevance-ranked results from the caller's
-  accessible memories against a real provider and against `local-dev`.
-- With the provider disabled, recall degrades deterministically and the
-  capabilities contract reports degraded semantic recall.
+- Lexical recall remains available without vectors or model credentials.
+- Compatible client vectors enable bounded hybrid scoring with explicit
+  coverage and truncation metadata.
 - Embedding vectors never appear in logs, metrics labels, audit records, or
   errors.
-- The recall and embedding model matches [memory-model.md](memory-model.md).
+- The recall model matches [memory-model.md](memory-model.md) and
+  [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Milestone 3.5: Agent Self-Management And Hydration
 
@@ -662,7 +642,7 @@ Exit criteria:
 
 Goal: land the sealed plane's data model and non-cryptographic lifecycle on top
 of the open-plane core, so that secrets behave like a first-class agent-state
-type while the envelope/KMS layer (M6.2) is still local-dev.
+type while the client-custodied envelope layer (M6.2) is integrated.
 
 This is the analogue of the open-plane memory/fact core (M1), but for the sealed
 plane. Secrets and TOTP seeds are a *carve-out* from the open plane: they are
@@ -738,62 +718,49 @@ Exit criteria:
 
 ## Milestone 6.2: Envelope Encryption, Key Hierarchy, And Reveal
 
-Goal: make the sealed plane actually sealed — envelope encryption behind a
-capability-gated KMS boundary, the key hierarchy, and the explicit reveal
-ceremony — so no secret value is ever stored as an ordinary database value.
+Goal: make the sealed plane actually sealed with client-side envelope
+encryption, independent AVK custody, and deliberate local reveal. The backend
+stores ciphertext and redacted inventory and holds no decrypt key.
 
-Unlike the open plane, which needs only ordinary PostgreSQL for lexical and
-optional client-vector recall, the sealed plane has a capability-gated provider
-boundary with a `local-dev` implementation. KMS is **required only when the
-sealed plane is enabled**; an open-plane-only deployment does not need it.
+The accepted implementation sequence and current lifecycle evidence are in
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md) and
+[sealed-plane-acceptance.md](sealed-plane-acceptance.md). The broader live
+certification and deferred operations remain separate release gates.
 
 Deliverables:
 
-- Provider-shaped KMS abstraction with `aws-kms` (first target), `gcp-kms`,
-  `azure-key-vault`, and `local-dev` implementations, selectable via
-  `WITSELF_KMS_PROVIDER` and `WITSELF_KMS_KEY_ID` (with `WITSELF_PASSPHRASE_FILE`
-  for the local-dev path), per [key-hierarchy.md](key-hierarchy.md).
-- The key hierarchy: customer master key (CMK) in KMS → per-realm KEK
-  (`kek_…`) → per-secret/field DEK (`dek_…`), with AEAD payloads
-  (`XCHACHA20_POLY1305` default, `AES_256_GCM`) per
-  [encryption-model.md](encryption-model.md).
-- Envelope encryption wired into every secret/field/TOTP-seed write so values
-  are stored only as ciphertext + wrapped DEK; the `realm_keys` and
-  `secret_deks` storage shapes per [storage.md](storage.md) (introduced ahead of
-  the production storage boundary in M7).
-- Hybrid decrypt behind one capability switch: `client_side_decrypt` (default
-  where the client holds key material) and `server_side_decrypt` (for
-  token-only pods), reported through the capabilities contract.
-- The reveal ceremony: `witself secret reveal` and `witself totp code` as the
-  explicit, audited, value-returning operations; reference resolution and
-  `witself run` are reveal-class reads subject to the same authorization and
-  audit.
-- Capability reporting of the active KMS provider, key identity, and
-  `client_side_decrypt`/`server_side_decrypt` support.
-- KEK rotation path (`key.rotated`) as an explicit, audited maintenance
-  operation (not an automatic side effect).
+- A client-held per-agent AVK wraps a fresh DEK for each sensitive field
+  generation. Clients seal/open fields and wrap/unwrap DEKs using the portable
+  algorithm and authenticated scope in [key-hierarchy.md](key-hierarchy.md).
+- Client encryption before every sensitive write; PostgreSQL holds only public
+  AVK identity, ciphertext, and wrapped DEKs. Neither managed nor local servers
+  acquire an AVK or a vault KMS provider.
+- Explicit encrypted material delivery through the HTTP `:access` route; local
+  CLI/MCP code performs reveal and TOTP calculation with the matching AVK.
+  Password generation is client-local as well. Runtime injection and grants
+  remain deferred until their own acceptance gates are met.
+- Client-driven AVK enrollment, recovery, and rotation with value-free backend
+  lifecycle state and client-created transfer/staging ciphertext.
+- Value-free material-delivery and vault-lifecycle audit records. Backend events
+  never attest to successful local decryption or code calculation.
 - Current ADR 0003 metrics: `witself_secret_material_deliveries_total`,
   `witself_vault_lifecycle_operations_total`, secret-limit rejections, and
   cell-wide posture gauges. These observe encrypted material delivery and
   vault lifecycle calls; they cannot observe client decrypt/TOTP success and
   include no agent-secret KMS operations or secret material in labels. See
   [Sealed-plane SLOs](observability-and-operations.md#sealed-plane-slos).
-- Audit events: `secret.reveal`, `totp.code`, `key.rotated`, each carrying the
-  `server_side_decrypt` flag when the value crossed the server boundary.
 
 Exit criteria:
 
-- A secret created in M6.1 is stored only as ciphertext + wrapped DEK; no
-  plaintext secret value, TOTP seed, or generated password is stored as an
-  ordinary database value.
-- `witself secret reveal` and `witself totp code` return values only through the
-  audited reveal ceremony, against both a real KMS provider and `local-dev`.
-- With the sealed plane disabled, KMS is not required and the capabilities
-  contract reports the sealed plane as off; the open plane is unaffected.
-- Loss of the KMS key renders secret values unrecoverable (crypto-shred) without
-  affecting the open plane.
-- Ciphertext, wrapped DEKs, and key material never appear in logs, metrics
-  labels, audit records, or errors.
+- Sensitive values, TOTP seeds, AVKs, and plaintext DEKs never become backend
+  request fields, database values, logs, audit payloads, or error text.
+- Local reveal and TOTP calculation fail closed without the matching AVK;
+  possession of the bearer token alone cannot reveal a field.
+- Agent-vault custody requires no backend KMS readiness gate.
+- An account archive carries ciphertext, wrapped DEKs, and public key bindings;
+  the AVK is transferred or recovered separately by the client.
+- Loss of all AVK copies and recovery paths makes encrypted fields unrecoverable
+  without affecting open-plane backup recovery.
 - The model matches [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md), and [storage.md](storage.md).
 
@@ -854,13 +821,13 @@ Deliverables:
 - MCP `--no-value-tools` mode (sealed plane only) that disables
   `secret.reveal`/`totp.code`/value-returning `reference.resolve`; `--read-only`
   still disables all mutations across both planes.
-- API routes: `/v1/secrets` (+ `:reveal`/`:rotate`/`:archive`/`:restore`/
-  `:grant`/`:revoke`), `/v1/totp` (+ `:code`), and `/v1/password:generate`,
-  using `POST` for actions, with `client_side_decrypt`/`server_side_decrypt`
-  capability flags surfaced in responses.
-- Export carve-out: `witself export` excludes the sealed plane from the plaintext
-  identity bundle; secret backup is encrypted-only (envelope + KMS key identity,
-  never plaintext) behind an explicit, audited, separate flag, per
+- API routes return redacted inventory and one encrypted field package through
+  `POST /v1/secrets/{secret_id}/fields/{field_id}:access`; the active client
+  performs reveal, TOTP calculation, and password generation. Deferred update,
+  grants, and runtime injection remain separately gated.
+- Export carve-out: plaintext identity export excludes secret values. Account
+  archives carry ciphertext, wrapped field DEKs, and public AVK bindings, never
+  the AVK or a recovery artifact; clients transfer the AVK separately, per
   [backup-and-recovery.md](backup-and-recovery.md).
 - Self-digest carve-out enforced at the adapter boundary: `self show`,
   `digest emit`, and `ingest` never include secrets or TOTP seeds.
@@ -893,8 +860,9 @@ Deliverables:
   the production system of record for realm, account, operator, agent, token,
   memory, fact, client-vector profile/row, policy, group, message, audit, usage
   counter, and idempotency records
-  (open plane), plus the sealed-plane tables: secrets, secret fields, secret
-  grants, TOTP enrollments, `realm_keys`, `secret_deks`, and attachments.
+  (open plane), plus sealed-plane secrets, secret fields, public
+  `agent_vault_keys`, wrapped `secret_deks`, and enrollment/rotation lifecycle
+  tables. Grants, standalone TOTP enrollments, and attachments remain deferred.
 - Goose migration framework.
 - `witself-server migrate status`.
 - `witself-server migrate up`.
@@ -907,9 +875,9 @@ Deliverables:
 - Two-tier encryption posture: the open plane uses ordinary data-at-rest
   encryption (RDS/disk), with optional field-level encryption for `sensitive`
   facts as a capability (not the default); the sealed plane uses the
-  CMK → per-realm KEK → per-secret/field DEK envelope from M6.2, with `realm_keys`
-  and `secret_deks` persisted here. KMS is a required dependency only when the
-  sealed plane is enabled.
+  client AVK → field-generation DEK envelope from M6.2, with public
+  `agent_vault_keys` and wrapped `secret_deks` persisted here. AVKs remain
+  client-held and add no backend key-provider dependency.
 - Integration tests for the production adapter where infrastructure is
   available.
 
@@ -963,12 +931,12 @@ Deliverables:
 - ServiceAccount.
 - Service.
 - ConfigMap.
-- Secret references by existing Secret names (token, database, KMS
+- Secret references by existing Secret names (token and database
   credentials), never raw secrets in `values.yaml`.
 - External PostgreSQL configuration as a first-class value; no model-provider
   or vector-extension setting is required.
-- KMS provider configuration (`kms.*` values) as first-class values for the
-  sealed plane, required only when the sealed plane is enabled.
+- Agent-vault custody stays in the active client; the chart does not provision
+  a vault KMS provider or receive AVK material.
 - Optional Ingress.
 - Optional NetworkPolicy.
 - Liveness, readiness, and startup probes.
@@ -1023,7 +991,8 @@ Deliverables:
 - Outputs consumed by the Helm chart:
   - Kubernetes context or cluster identity.
   - PostgreSQL endpoint and secret references.
-  - KMS key references for the sealed plane (when enabled).
+  - Public agent-vault identity and encrypted storage configuration, with AVKs
+    remaining outside backend infrastructure.
   - Object/blob storage references.
   - Workload identity references.
   - Networking and ingress references.
@@ -1082,15 +1051,15 @@ Deliverables:
 - Dual-posture threat-model review: integrity and authenticity of identity data
   (open plane: memory-poisoning, unauthorized curation/forgetting, cross-agent
   write abuse, sender spoofing) and confidentiality of secrets (sealed plane:
-  leakage, KMS/role compromise, reveal abuse, server-side-decrypt TCB expansion,
-  tenant blast radius).
+  leakage, client/AVK compromise, reveal abuse, and authenticated scope
+  violations).
 - Backup and restore docs covering both planes: plaintext identity
   export/import and restoring semantic recall from backed-up vectors without
-  re-embedding (open plane); encrypted-only secret backup with KMS key identity,
-  rotation metadata, and KMS-loss/crypto-shred implications (sealed plane), with
+  client re-embedding (open plane); encrypted-only secret backup with public AVK
+  identity, rotation metadata, and client-key recovery requirements (sealed plane), with
   secrets excluded from the plaintext export.
-- Key-rotation and reveal-ceremony tests for the sealed plane (KEK rotation,
-  `client_side_decrypt`/`server_side_decrypt`, audited reveal/code/grant paths).
+- Key-rotation and reveal-ceremony tests for the sealed plane (client-driven AVK
+  rotation, encrypted material delivery, and local reveal/code calculation).
 - Token rotation and revocation tests.
 - Migration rollback and forward-upgrade tests.
 - Client-vector profile replacement, coverage, and archive-round-trip tests;
@@ -1150,9 +1119,8 @@ Exit criteria:
   authorization layer, but it is a confidentiality plane with its own
   carve-outs. Secrets and TOTP seeds are never embedded, recalled, in the
   self-digest, or plaintext-exported, and value reads go through an explicit
-  audited reveal — distinct from the plainly readable open plane. KMS becomes a
-  required dependency only once the sealed plane is enabled; an open-plane-only
-  deployment ships without it.
+  audited material delivery and local reveal. The active client holds the AVK;
+  neither plane adds a backend vault KMS dependency.
 - Helm and Terraform can start as scaffolding, but their CI checks should exist
   early so deployment artifacts do not drift.
 - Managed billing, payments, crypto payment rails, and support can be capability

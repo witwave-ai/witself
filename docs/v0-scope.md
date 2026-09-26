@@ -42,9 +42,9 @@ match authorization.
 
 Decision: v0 ships in two sequenced slices on one platform. The **open-plane core
 (memory/fact/identity) ships first**; the **sealed credential plane
-(secrets/TOTP/encryption/KMS/reveal) is a defined v0 slice that may be staged
+(secrets/TOTP/client-encryption/reveal) is a defined v0 slice that may be staged
 after the core**. Both are in v0 scope; the sequencing exists so the identity
-store can prove itself without blocking on KMS. This mirrors
+store can prove itself while client-custodied secret workflows are staged. This mirrors
 [requirements.md](requirements.md#v0-scope).
 
 - **Open-plane core (ships first).** The CLI, MCP stdio, the backend API
@@ -257,11 +257,11 @@ Core backend capabilities:
   the `/v1/message-requests/{request_id}` actions `:offer`, `:decline`, `:select`,
   `:cancel`, `:claim`, `:renew`, `:release`, and `:complete`,
   and `/v1/tokens/{token_id}:rotate`.
-- Sealed credential-plane route groups for the sealed-plane slice:
-  `/v1/secrets` (with `:reveal`, `:rotate`, `:archive`, `:restore`, `:grant`,
-  `:revoke`), `/v1/totp` (with `:code`), and `/v1/password:generate`, all behind
-  the capability flags `client_side_decrypt` / `server_side_decrypt` and the KMS
-  readiness gate that applies only when the sealed plane is enabled.
+- Sealed credential-plane routes for redacted inventory and explicit
+  `POST /v1/secrets/{secret_id}/fields/{field_id}:access` encrypted material
+  delivery, plus AVK enrollment/rotation. Active clients perform reveal, TOTP
+  calculation, and password generation. Deferred update, grants, and runtime
+  injection retain separate gates; see [api-routes.md](api-routes.md).
 - Prometheus metrics for HTTP traffic, auth, token operations, memory
   operations, recall and optional vector-index operations, fact operations, policy
   decisions, cross-agent accesses, group operations, messaging, audit events,
@@ -278,10 +278,9 @@ Core backend capabilities:
   lanes, cursors, requests, runs, inputs, actions, and mutation receipts;
   migration `0032` adds portable JSONB vector profiles/rows. A future optional
   pgvector/ANN projection is rebuildable and never required for baseline or
-  JSONB hybrid recall. When the sealed
-  plane is enabled, the schema gains `realm_keys` and `secret_deks` and a KMS
-  provider binding (`aws-kms`, `gcp-kms`, `azure-key-vault`, `local-dev`) becomes
-  a readiness gate for that slice only.
+  JSONB hybrid recall. The sealed plane adds public `agent_vault_keys`,
+  ciphertext, wrapped `secret_deks`, and enrollment/rotation lifecycle tables.
+  AVKs stay client-side; no backend key provider becomes a readiness gate.
 - Deterministic lexical/structured recall with no backend model dependency;
   capabilities independently report optional client-vector support/coverage.
 - Object/blob storage interface for exports and large artifacts, even if v0
@@ -296,10 +295,11 @@ Core backend capabilities:
   plus the system event `message.request.expired`; cancellation is agent-driven
   for an explicit coordinator action or system-driven when coordinator deletion
   closes open work. When the
-  sealed plane is enabled, secret create/update/rename/copy/archive/restore/
-  delete, `secret.reveal`, secret grant/revoke, `totp.enrolled`/`totp.code`/
-  seed-revealed/deleted, and `key.rotated` (KEK) events are emitted, with a
-  `server_side_decrypt` flag recorded on reveal and code.
+  sealed plane is enabled, implemented secret create/archive/restore/delete,
+  encrypted material-delivery, and AVK lifecycle operations emit value-free
+  events. Deferred update, grants, and standalone TOTP lifecycle retain their
+  separate target status; backend events cannot attest to local reveal or code
+  calculation.
 - Deterministic resource/receipt mutation results, exact idempotent retries,
   complete immutable memory versions, evidence, and token-derived provenance.
   The backend never invents semantic duplicate/merge decisions.
@@ -437,18 +437,19 @@ V0 is credible when:
 
 When the sealed credential-plane slice ships, it is additionally credible when:
 
-- An open-plane-only deployment passes readiness with **no KMS** configured;
-  enabling the sealed plane makes KMS a readiness gate while PostgreSQL remains
-  the open-plane gate.
-- `secret reveal` and `totp code` are the only value-returning sealed-plane ops,
-  each emits an audited event with the `server_side_decrypt` flag, and
-  `--no-value-tools` disables them in MCP while `--read-only` disables mutations.
+- PostgreSQL is the backend storage gate for both planes. Sealed operations
+  require the matching client-held AVK for local use, with no vault KMS
+  readiness dependency on the backend.
+- `secret reveal` and `totp code` return values only in the active client after
+  authorized encrypted material delivery. `--no-value-tools` disables them in
+  MCP while `--read-only` disables mutations. Backend audit records remain
+  value-free and cannot attest to local calculation or reveal.
 - Secrets and TOTP seeds never appear in embeddings, `memory recall`, `self show`,
   `digest emit`, `ingest`, or `witself export`; `witself export` excludes the
-  sealed plane and secret backup is encrypted-only (envelope plus KMS key
-  identity, never plaintext).
-- Loss of KMS access renders sealed secret values unrecoverable (crypto-shred)
-  without affecting the open plane.
+  sealed plane and secret backup carries ciphertext, wrapped DEKs, and public
+  AVK identity, never sensitive plaintext or AVK material.
+- Loss of every AVK copy and recovery path makes sealed fields unrecoverable
+  without affecting open-plane backup recovery.
 
 ## Related Docs
 

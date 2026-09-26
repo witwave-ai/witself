@@ -7,13 +7,12 @@ Inference-boundary amendment (accepted 2026-07-14): under
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md), the
 backend stores and deterministically searches/applies client-authored memory
 data and optional client-supplied vectors. It never calls an LLM or embedding
-model. Later server-provider language is superseded; PostgreSQL and the public
-backend boundary remain accepted.
+model. PostgreSQL and the public backend boundary remain accepted.
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-held AVK custody for agent secrets. The
 backend holds no AVK key material, calls no KMS for agent secrets, and exposes
 no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
@@ -208,12 +207,12 @@ The two storage planes keep distinct, explicit postures:
 - Open-plane memories and facts use ordinary PostgreSQL columns under managed
   disk/database encryption. Their `sensitive` flag controls disclosure and
   redaction; it is not an encrypted-blob or reveal boundary.
-- When the sealed secret/TOTP plane is enabled, KMS-backed envelope encryption,
-  key rotation, reveal gates, and audit are required. KMS availability gates
-  sealed value operations but never open-plane memory capture or recall.
-- Model inference and sealed-plane cryptography are unrelated boundaries. The
-  server may legitimately hold KMS authority for sealed values while holding no
-  LLM or embedding-model credentials.
+- Secret/TOTP values use client-side envelope encryption under the agent vault
+  key, with reveal gates and audit for encrypted-field delivery. The backend
+  stores ciphertext and redacted inventory; it has no agent-vault key material.
+- Model inference and sealed-plane cryptography both remain in the active
+  client. The backend has neither agent-vault decryption authority nor LLM or
+  embedding-model credentials.
 
 Storage and key-custody details live in [storage.md](storage.md),
 [encryption-model.md](encryption-model.md), and
@@ -469,7 +468,7 @@ a cell runs the same `witself-server` and the same core service described above.
 The full model is tracked in [deployment-cells.md](deployment-cells.md).
 
 A cell is one complete, independent Witself stack — `witself-server` plus its
-PostgreSQL, optional sealed-plane KMS, and blob storage —
+PostgreSQL and blob storage —
 running in a single cloud
 account/region (an AWS account, a second AWS account, a GCP project, an Azure
 subscription). Cells are isolated and each cell is authoritative for its own
@@ -497,9 +496,10 @@ harder, deferred problem).
 Tenant migration moves a realm/account between cells by exporting from cell A,
 importing into cell B, repointing the control-plane mapping, and cutting over.
 The open plane (memories/facts) moves through the existing first-class
-export/import path (see [Core Boundary](#core-boundary)); the sealed plane, where
-an operator has enabled per-cell KMS-rooted field encryption, re-wraps keys under
-the destination KMS as an audited decrypt-at-source / re-encrypt-at-dest step.
+export/import path (see [Core Boundary](#core-boundary)); the sealed plane moves
+as ciphertext and public vault-key bindings. The client retains its AVK
+separately and decrypts locally after the move; neither cell decrypts or
+re-wraps agent-secret values.
 Migration is bounded but not free; details and the cutover trade-off live in
 [deployment-cells.md](deployment-cells.md).
 
@@ -626,7 +626,7 @@ full sequence is tracked in [implementation-plan.md](implementation-plan.md).
 - Do not let local development define a second storage or inference path.
 - Do not add backend model inference, embedding-provider credentials, or model
   egress. Client inference is the only semantic-authoring boundary.
-- Do not make sealed-plane KMS or reveal availability a dependency of the
+- Do not make sealed-plane reveal availability a dependency of the
   open-plane memory path.
 - Do not require a web dashboard for ordinary account, realm, billing, support,
   or agent administration.

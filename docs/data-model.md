@@ -3,9 +3,9 @@
 > **Sealed-plane schema amendment (accepted 2026-07-19):** migrations `0055`
 > and `0056`, together with
 > [the client-custodied vault plan](client-custodied-agent-vault.md), are the
-> authoritative implemented secrets schema. Earlier `realm_keys`, KMS-rooted
-> DEKs, group-owned v0 secrets, and server-decrypt columns below are historical
-> target design and are superseded for the implemented slice.
+> authoritative implemented secrets schema. Agent vault keys stay in the
+> active client; PostgreSQL stores public key identities and ciphertext.
+> Group-owned secrets and grants remain deferred target design.
 
 Status: draft with implementation-backed amendments. Last reviewed 2026-08-16.
 Decision: Witself uses a single
@@ -282,7 +282,7 @@ generate stable local ids.
 | `dek_` | per-secret/per-field data-encryption key | sealed | `secret_deks` |
 | `grt_` | target-only secret grant | sealed | future `secret_grants` |
 | `totp_` | target-only standalone TOTP enrollment | sealed | future `totp_enrollments` |
-| `kek_` | superseded KMS-rooted key identity | sealed | historical `realm_keys` target |
+| `avk_` | public agent vault key identity | sealed | `agent_vault_keys`; key bytes stay client-side |
 | `att_` | target-only attachment metadata | sealed | future `attachments` |
 | `aud_` | audit event | spine | `audit_events` |
 | `usg_` | immutable usage event | spine | `usage_events` |
@@ -310,8 +310,8 @@ expand/contract migrations cheap) using the exact contract vocabularies:
 | `message_recipient_kind` | `agent`, `group` |
 | `delivery_state` | `pending`, `delivered` |
 | `read_state` | `unread`, `read`, `acked` |
-| `kms_provider` (sealed) | `aws-kms`, `gcp-kms`, `azure-key-vault`, `local-dev` |
-| `aead_algorithm` (sealed) | `XCHACHA20_POLY1305`, `AES_256_GCM` |
+| `algorithm` (agent vault) | `AES_256_GCM_RANDOM_NONCE_V1` |
+| `algorithm` (sealed field and DEK wrapper) | `AES_256_GCM_RANDOM_NONCE_V1` |
 | `totp_hash_algorithm` (sealed) | `SHA1`, `SHA256`, `SHA512` |
 | `template` (sealed) | `login`, `api-key`, `ssh-key`, `certificate`, `env`, `generic` |
 | `usage_dimension` | extensible metered dimension name (see [`usage_events`](#usage_events)) |
@@ -419,7 +419,7 @@ account is the billing target; usage rolls up by realm (see
 | `name` | `text NOT NULL` | display name |
 | `backend_kind` | `text NOT NULL` | `managed` \| `self-hosted` \| `local` |
 | `plan_id` | `text NULL` | plan reference (`plan_` prefix; account-level plan) |
-| `sealed_plane_enabled` | `boolean NOT NULL DEFAULT false` | whether the sealed (secret/TOTP) plane is provisioned; gates the KMS dependency |
+| `sealed_plane_enabled` | `boolean NOT NULL DEFAULT false` | target sealed-plane provisioning flag; agent-vault custody adds no backend key dependency |
 | `row_version` | `bigint NOT NULL DEFAULT 1` | optimistic lock |
 | `created_at` / `updated_at` | `timestamptz NOT NULL` | |
 | `deleted_at` | `timestamptz NULL` | tombstone |
@@ -459,8 +459,8 @@ CREATE UNIQUE INDEX ux_operators_account_email
 
 Purpose: the rename of the Witpass vault — the operator-owned container and the
 billing / isolation / key-separation scope. Plans, usage limits, agent caps, and
-rate limits attach to the account and roll up by realm; the per-realm KEK
-(sealed plane) is keyed here. See [storage.md](storage.md).
+rate limits attach to the account and roll up by realm; sealed-plane public AVK
+identities are scoped by account, realm, and owning agent. See [storage.md](storage.md).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -469,7 +469,7 @@ rate limits attach to the account and roll up by realm; the per-realm KEK
 | `name` | `text NOT NULL` | |
 | `description` | `text NULL` | |
 | `realm_handle` | `text NULL` | the realm's **federation identity** (the unit of trust; published in the realm card); globally unique when set. NULL for a realm not yet federated. Maps to the card `realm_handle` (see [agent-collaboration.md](agent-collaboration.md)) |
-| `signing_public_key` | `text NULL` | the realm signing **public key** / JWKS (or a JWKS ref) published in the realm card and used by peers to verify cross-realm envelopes. Public material only — the **private signing key is sealed-plane / KMS-custodied and is NEVER a column here** |
+| `signing_public_key` | `text NULL` | the realm signing **public key** / JWKS (or a JWKS ref) published in the realm card and used by peers to verify cross-realm envelopes. Public material only — the **private signing key is NEVER a column here; its custody requires a separate federation design** |
 | `signing_key_version` | `bigint NULL` | monotonic signing-key generation, bumped on rotation; lets peers select the verifying key during a rotation overlap |
 | `card_expires_at` | `timestamptz NULL` | TTL of the currently published realm card (`ttl` / `expires_at`); cards are re-fetched on expiry |
 | `email_route_state` | `text NOT NULL` | `live`, `closing`, or `retired` |
@@ -478,8 +478,9 @@ rate limits attach to the account and roll up by realm; the per-realm KEK
 | `row_version` | `bigint NOT NULL DEFAULT 1` | |
 | `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
 
-The signing **private** key lives where realm key material lives (KMS-custodied
-sealed plane; see [key-hierarchy.md](key-hierarchy.md)), never in `realms`. The
+The target federation signing **private** key must remain outside `realms`.
+Its custody and rotation require a separate federation design; the agent AVK
+hierarchy does not define a server-held realm signing key. The
 `realm_handle` + `signing_public_key` here are the **per-cell copy** of the realm
 card's identity; the authoritative *routing* directory (handle -> home cell +
 endpoint + key) is the separate global control plane, not this table (see the
@@ -1428,108 +1429,37 @@ is a latency accelerator only.
 
 ## Sealed-Plane Tables
 
-> **Historical target section:** the KMS-rooted, group/grant, standalone TOTP,
-> and attachment model below predates ADR 0003. It is retained only as future
-> product-shape context. The implemented column contract is
-> [Authoritative Sealed Schema Through `0056`](#authoritative-sealed-schema-through-0056);
-> where the two differ, the schema-55/56 migrations and that section win.
-
-Sealed-plane sensitive values and TOTP seeds live **only** in envelope columns
-(CMK → per-realm KEK → per-secret/field DEK; see [key-hierarchy.md](key-hierarchy.md)).
-This plane is reveal-gated and is **never embedded, never recalled, never in the
-self-digest, never plaintext-exported, and never ingested**. These tables exist
-only when the sealed plane is enabled (`accounts.sealed_plane_enabled`); enabling
-the plane makes KMS a required dependency.
+The implemented agent-owned tables use client-custodied AVKs and field DEKs;
+see [Authoritative Sealed Schema Through `0056`](#authoritative-sealed-schema-through-0056)
+for exact columns, constraints, and lifecycle tables. The backend stores public
+key identity, ciphertext, and client-created wrapped DEKs, never vault keys or
+sensitive plaintext. Secrets and TOTP seeds are never embedded, recalled,
+included in the self-digest, plaintext-exported, or ingested. Deferred group,
+grant, and attachment shapes below must preserve this client-custody boundary.
 
 ### `secrets`
 
-Purpose: secret metadata and ownership. Secrets are flat sets of named fields;
-only `name` and `description` are required. Maps to the secret summary/detail
-JSON shape. Owner is an agent or a group (a former vault-shared secret is now
-group-owned).
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `text` PK | `sec_` prefix (maps to `{secret_id}`) |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | |
-| `owner_kind` | `text NOT NULL` | `agent` \| `group` discriminator |
-| `owner_agent_id` | `text NULL` FK -> `agents(id)` | set iff `owner_kind = 'agent'` |
-| `owner_group_id` | `text NULL` FK -> `security_groups(id)` | set iff `owner_kind = 'group'` (was vault-shared) |
-| `name` | `text NOT NULL` | <= 255 chars; uniqueness per ownership scope |
-| `description` | `text NULL` | <= 4 KiB |
-| `template` | `text NOT NULL DEFAULT 'generic'` | `login`/`api-key`/`ssh-key`/`certificate`/`env`/`generic`; convention only |
-| `tags` | `text[] NOT NULL DEFAULT '{}'` | non-sensitive |
-| `archived_at` | `timestamptz NULL` | soft-archive state (archive/restore) |
-| `row_version` | `bigint NOT NULL DEFAULT 1` | optimistic lock; surfaced for `If-Match`/`conflict` |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
-
-Constraints: `ux_secrets_agent_name`, `ux_secrets_group_name`, and the
-`owner_kind` `CHECK` (above). FKs `account_id`, `realm_id`, `owner_agent_id`,
-`owner_group_id`. Index `(realm_id, owner_agent_id)` and `(realm_id,
-owner_group_id)`. `field_count` and `sensitive_field_count` in the JSON shape are
-derived from `secret_fields`.
+Purpose: redacted inventory and public metadata for an agent-owned bundle of
+named fields. The implemented table is scoped by account, realm, and owner
+agent; its exact schema is defined [above](#authoritative-sealed-schema-through-0056).
+Group-owned secrets remain deferred.
 
 ### `secret_fields`
 
-Purpose: one row per named field. Non-sensitive fields are ordinary queryable
-columns; sensitive field values live ONLY in the envelope columns. Plaintext is
-never an ordinary column. Maps to the secret field object (`name`, `sensitive`,
-and `value`/`value_encoding` in the client-facing reveal path only).
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `text` PK | `fld_` prefix |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | scoping + AAD binding |
-| `secret_id` | `text NOT NULL` FK -> `secrets(id)` ON DELETE CASCADE | parent secret |
-| `name` | `text NOT NULL` | field name |
-| `sensitive` | `boolean NOT NULL` | per-field sensitivity marker |
-| `plain_value` | `text NULL` | non-sensitive queryable value (usernames, URLs, issuers, labels) ONLY; <= 16 KiB; NULL when `sensitive` |
-| envelope columns | see [Sensitive-Field Envelope Storage](#sensitive-field-envelope-storage) | **nullable** here; populated ONLY when `sensitive`: `ciphertext`, `nonce`, `aead_algorithm`, `dek_id`, `dek_version`, `kms_provider`, `aad_context` |
-| `row_version` | `bigint NOT NULL DEFAULT 1` | |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
-
-Because `secret_fields` is a mixed table (sensitive and non-sensitive rows in one
-table), the envelope columns are declared **NULLABLE** at the column level; the
-"present" requirement is enforced only by the sensitive/non-sensitive `CHECK`,
-not by per-column `NOT NULL` (a `NOT NULL` envelope column would reject every
-non-sensitive insert). `NOT NULL` envelope columns appear only on
-always-encrypted rows (`totp_enrollments` seed, `attachments`), not here.
-
-```sql
--- one envelope, fully present, when sensitive; no envelope when not
-ALTER TABLE secret_fields ADD CONSTRAINT ck_secret_fields_envelope CHECK (
-  (sensitive
-     AND ciphertext IS NOT NULL AND nonce IS NOT NULL AND aead_algorithm IS NOT NULL
-     AND dek_id IS NOT NULL AND dek_version IS NOT NULL AND kms_provider IS NOT NULL
-     AND aad_context IS NOT NULL AND plain_value IS NULL)
-  OR
-  (NOT sensitive
-     AND ciphertext IS NULL AND nonce IS NULL AND aead_algorithm IS NULL
-     AND dek_id IS NULL AND dek_version IS NULL AND kms_provider IS NULL
-     AND aad_context IS NULL)
-);
-
-CREATE UNIQUE INDEX ux_secret_fields_secret_name
-  ON secret_fields (secret_id, name)
-  WHERE deleted_at IS NULL;
-```
-
-Constraints: the envelope `CHECK` and unique index above. FKs `account_id`,
-`realm_id`, `secret_id`, and `dek_id` (the `dek_id` FK is on a nullable column,
-so it constrains only sensitive rows). Sensitive-field `ciphertext` stays inline
-within the 64 KiB sensitive / 256 KiB total inline limits; oversized blobs move
-to [`attachments`](#attachments-deferred-but-stubbed) / object storage (see
-[secret-size-and-attachments.md](secret-size-and-attachments.md)).
+Purpose: one named field per row. Non-sensitive fields may hold `public_value`;
+sensitive fields hold only client-created ciphertext and authenticated DEK
+coordinates. A database check enforces exactly one branch. The exact columns
+and schema constraints are defined [above](#authoritative-sealed-schema-through-0056).
+Ordinary inventory is redacted; one-field material access delivers an encrypted
+package that the active client decrypts using its AVK.
 
 ### `secret_grants`
 
-Purpose: cross-agent and group-owned **secret** access grants (explicit,
-auditable, never the default). A grant authorizes the authorization layer to
-return encrypted material to a grantee; per-field reveal grants remain
-authorization checks (not separate crypto boundaries) unless an operator opts a
-field into its own DEK. This is the sealed-plane analogue of open-plane
+Purpose: deferred cross-agent and group-owned **secret** access grants
+(explicit, auditable, never the default). The target below describes
+authorization metadata only. Grant implementation must also arrange client-side
+cryptographic possession; authorization alone cannot reveal a field encrypted
+under another agent's AVK. This is the sealed-plane analogue of open-plane
 [`policies`](#policies); secrets are NOT subject to the open cross-agent
 read/curate/forget verbs.
 
@@ -1566,161 +1496,43 @@ Grant changes MUST emit `secret.grant` / `secret.revoke` audit events.
 
 ### `totp_enrollments`
 
-Purpose: TOTP enrollment. The encrypted **seed** is high-value sealed material
-and stored only as an envelope; the normal agent surface returns generated codes,
-never the seed. Non-sensitive TOTP metadata (issuer, account label, algorithm,
-digits, period) are ordinary queryable columns. Keyed by `secret_id` so
-`POST /v1/totp/{secret_id}:code` resolves directly. Semantics in
-[totp-2fa.md](totp-2fa.md).
-
-The whole row is always an envelope, so the seed envelope columns are `NOT NULL`
-here (unlike the mixed `secret_fields` table). The TOTP hash algorithm and the
-AEAD algorithm are two distinct columns: `algorithm` is the non-sensitive TOTP
-hash (`SHA1`/`SHA256`/`SHA512`, matching the `totp.show` JSON field), and
-`aead_algorithm` is the envelope's AEAD primitive.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `text` PK | `totp_` prefix |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | |
-| `secret_id` | `text NOT NULL` FK -> `secrets(id)` ON DELETE CASCADE | one enrollment per secret |
-| `issuer` | `text NULL` | non-sensitive |
-| `account_label` | `text NULL` | non-sensitive |
-| `algorithm` | `text NOT NULL DEFAULT 'SHA1'` | TOTP hash: `SHA1` \| `SHA256` \| `SHA512` |
-| `digits` | `smallint NOT NULL DEFAULT 6` | |
-| `period_seconds` | `smallint NOT NULL DEFAULT 30` | |
-| `ciphertext` | `bytea NOT NULL` | the encrypted seed (never plaintext, never recalled/exported) |
-| `nonce` | `bytea NOT NULL` | per-encryption nonce |
-| `aead_algorithm` | `text NOT NULL` | AEAD id: `XCHACHA20_POLY1305` \| `AES_256_GCM` |
-| `dek_id` | `text NOT NULL` FK -> `secret_deks(id)` | wrapping DEK row |
-| `dek_version` | `bigint NOT NULL` | frozen DEK generation (see envelope notes) |
-| `kms_provider` | `text NOT NULL` | root unwrap provider |
-| `aad_context` | `jsonb NOT NULL` | domain tag `"totp-seed"` |
-| `row_version` | `bigint NOT NULL DEFAULT 1` | |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
-
-Constraints: FKs `account_id`, `realm_id`, `secret_id`, `dek_id`. One live
-enrollment per secret via a partial index:
-
-```sql
-CREATE UNIQUE INDEX ux_totp_enrollments_secret
-  ON totp_enrollments (secret_id)
-  WHERE deleted_at IS NULL;
-```
-
-Seed import/setup/export requires a more privileged path than ordinary code
-generation; `totp:enroll` vs `totp:code` scopes gate them. The seed is sealed
-material: never embedded, recalled, in the digest, or plaintext-exported.
+A standalone enrollment table remains deferred. The implemented model stores
+sensitive TOTP payloads as ordinary encrypted secret fields; the active client
+obtains the authorized package, decrypts with its AVK, and calculates the code.
+No backend code-generation route or plaintext seed column exists. See
+[totp-2fa.md](totp-2fa.md) and the
+[implemented schema](#authoritative-sealed-schema-through-0056).
 
 ### Sensitive-Field Envelope Storage
 
-Sealed-plane sensitive field values and TOTP seeds are stored as the
-per-ciphertext envelope from [key-hierarchy.md](key-hierarchy.md) — multiple
-at-rest columns alongside `ciphertext`, field-per-row (one envelope per
-`secret_fields` / `totp_enrollments` row). These are at-rest columns, NOT public
-response fields; the public contract redacts by default and a value is returned
-only through the audited reveal ceremony (`witself secret reveal` / `witself totp
-code`; see [encryption-model.md](encryption-model.md)).
+Each sensitive field generation has a fresh DEK. The active client seals the
+field and wraps that DEK with its AVK using `AES_256_GCM_RANDOM_NONCE_V1`.
+The backend persists the ciphertext, wrapped DEK, public AVK coordinates, and
+versioned authenticated scope. It has no key capable of opening either layer.
+The [implemented schema](#authoritative-sealed-schema-through-0056) and
+[key-hierarchy.md](key-hierarchy.md) define the exact envelope and AAD contract.
 
-The **wrapped DEK lives only in [`secret_deks`](#secret_deks)** and is referenced
-from each envelope by `dek_id`; the envelope does **not** carry an inline
-`wrapped_dek` copy. KEK re-wrap on rotation updates exactly one `secret_deks`
-row. The wrapping KEK is resolved through `secret_deks.kek_id` (the post-rotation
-pointer), never by joining a frozen `(realm_id, key_version)` to `realm_keys`.
-
-| Column | Type | Description |
-| --- | --- | --- |
-| `ciphertext` | `bytea` | AEAD ciphertext of the field value or TOTP seed. Inline within size limits; never a plaintext column. `NOT NULL` only on always-encrypted tables (`totp_enrollments`, `attachments`); nullable on the mixed `secret_fields` table (gated by its `CHECK`). |
-| `nonce` | `bytea` | Per-encryption random nonce (24 B XChaCha20-Poly1305 / 12 B AES-GCM); never reused per DEK. Nullability follows `ciphertext`. |
-| `aead_algorithm` | `text` | AEAD id: `XCHACHA20_POLY1305` \| `AES_256_GCM`. (Distinct from the TOTP hash `algorithm` column.) |
-| `dek_id` | `text` FK -> `secret_deks(id)` | The `dek_` row holding the canonical `wrapped_dek`. Fields sharing a per-secret DEK reference one row. The wrapping KEK is resolved via `secret_deks.kek_id`, updated in place on KEK re-wrap. |
-| `dek_version` | `bigint` | The **frozen** DEK generation in force when this blob was written. Recorded for AAD reconstruction and `--version` historical reads; it does NOT identify the current wrapping KEK (that is `secret_deks.kek_id`). **Distinct** from `row_version` and from `realm_keys.key_version`. |
-| `kms_provider` | `text` | `aws-kms` \| `gcp-kms` \| `azure-key-vault` \| `local-dev`; surfaces as the `kms_provider` metric label. |
-| `aad_context` | `jsonb` | Authenticated associated data (integrity-bound, not encrypted). Bound at encryption from **stable identifiers only**: `realm_id`, `secret_id`, field name, `owner.kind`, `dek_id`, and a domain tag (`"secret-field"` \| `"totp-seed"` \| `"attachment"`). It deliberately excludes any rotating counter (no KEK/realm `key_version`), so KEK rotation provably cannot affect AAD. At decrypt, AAD is reconstructed **strictly from these stored envelope columns**, never from current/live realm key state. |
-
-`value_encoding` (`"plain"` \| `"base64"` \| `null`) is a **client-facing**
-reveal/show field only — the decrypted value's encoding on a reveal, or `null`
-with `redacted: true` and a `value_ref` on ordinary show. It is NOT an at-rest
-column and base64 there is serialization, not a security boundary.
+Inventory returns redacted field metadata. Explicit material access returns
+one encrypted field package; local reveal and TOTP calculation take place only
+in the active client. Plaintext values and AVKs never enter server responses.
 
 ### `realm_keys`
 
-Purpose: per-realm KEK material — the tenant-isolation and rotation unit (the
-re-skin of Witpass `vault_keys`; the per-vault KEK becomes a **per-realm** KEK).
-The KEK is stored only KMS-wrapped; KMS wraps the KEK (not per-field). Joins
-envelopes (via `secret_deks.kek_id`) to their unwrap/rotation root. See
-[key-hierarchy.md](key-hierarchy.md).
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `text` PK | `kek_` prefix |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | one current KEK per realm, prior versions retained |
-| `wrapped_kek` | `bytea NOT NULL` | KEK wrapped by the root CMK |
-| `key_version` | `bigint NOT NULL` | monotonic KEK version (per-realm; separate from envelope `dek_version`) |
-| `is_current` | `boolean NOT NULL DEFAULT true` | exactly one current live row per realm |
-| `kms_provider` | `text NOT NULL` | root unwrap provider |
-| `kms_key_ref` | `text NOT NULL` | CMK reference (AWS KMS ARN / GCP / Azure id); never key material |
-| `rotation_state` | `text NULL` | re-wrap/backfill bookkeeping |
-| `row_version` | `bigint NOT NULL DEFAULT 1` | |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
-
-Constraints: FKs `account_id`, `realm_id`.
-
-```sql
-CREATE UNIQUE INDEX ux_realm_keys_realm_version
-  ON realm_keys (realm_id, key_version);
-
--- exactly one current live KEK row per realm
-CREATE UNIQUE INDEX ux_realm_keys_current
-  ON realm_keys (realm_id)
-  WHERE is_current AND deleted_at IS NULL;
-```
-
-KEK rotation creates a new version, re-wraps existing DEKs key-on-key (ciphertext
-untouched), repoints each affected `secret_deks.kek_id` at the new KEK row, and
-bumps `is_current`. Envelopes are NOT touched by KEK rotation. KMS-loss of a
-realm's KEK/CMK material renders its secret values unrecoverable (crypto-shred);
-it does **not** affect the open plane (see
-[backup-and-recovery.md](backup-and-recovery.md)).
+There is no agent-vault `realm_keys` table. Public AVK identities live in
+`agent_vault_keys`; AVK bytes remain with the active client. See the
+[implemented schema](#authoritative-sealed-schema-through-0056).
 
 ### `secret_deks`
 
-Purpose: per-secret (default) or per-field (opt-in) DEK rows. DEKs are stored
-only KEK-wrapped. This table is the **single source of truth** for `wrapped_dek`;
-envelopes reference it by `dek_id` and never store a second copy.
+Purpose: one client-created wrapped DEK per sensitive field generation, fully
+scoped to the owning account, realm, agent, secret, and field. The row stores
+wrapper bytes and algorithm/AAD/revision metadata plus the public wrapping AVK
+id and version. Exact columns are defined
+[above](#authoritative-sealed-schema-through-0056).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `text` PK | `dek_` prefix |
-| `account_id` | `text NOT NULL` FK -> `accounts(id)` | |
-| `realm_id` | `text NOT NULL` FK -> `realms(id)` | |
-| `secret_id` | `text NULL` FK -> `secrets(id)` ON DELETE CASCADE | owning secret (per-secret DEK) |
-| `field_name` | `text NULL` | set for opt-in per-field DEKs (e.g. TOTP seeds) |
-| `kek_id` | `text NOT NULL` FK -> `realm_keys(id)` | wrapping KEK; **updated in place on KEK re-wrap** so it always points at the KEK that currently wraps this DEK |
-| `wrapped_dek` | `bytea NOT NULL` | canonical wrapped DEK (KEK-wrapped); the only stored copy |
-| `key_version` | `bigint NOT NULL` | DEK generation; old versions retained for `--version` reads |
-| `is_current` | `boolean NOT NULL DEFAULT true` | current DEK per `(secret, field_name)` |
-| `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
-
-Constraints: FKs `account_id`, `realm_id`, `secret_id`, `kek_id`.
-
-```sql
--- exactly one current live DEK per (secret, field-or-secret-wide)
-CREATE UNIQUE INDEX ux_secret_deks_current
-  ON secret_deks (secret_id, coalesce(field_name, '*'))
-  WHERE is_current AND deleted_at IS NULL;
-
--- rotation/backfill targeting by secret
-CREATE INDEX ix_secret_deks_secret ON secret_deks (secret_id);
-```
-
-Prior DEK generations are retained as separate rows (`is_current = false`) so the
-`(secret, field)` partial unique index pins exactly one live current DEK while
-historical `--version` reads still resolve their generation. KEK rotation
-re-wraps `wrapped_dek` and repoints `kek_id` **on this row only** (one write per
-DEK); no envelope row is touched.
+AVK rotation is client-driven: the client rewraps each field DEK without
+changing field ciphertext; the backend stages the wrappers and commits the
+accepted rotation atomically. No AVK or plaintext DEK enters PostgreSQL.
 
 ### `attachments` (deferred-but-stubbed)
 
@@ -1746,7 +1558,7 @@ here).
 | `aead_algorithm` | `text NOT NULL` | AEAD id |
 | `dek_id` | `text NOT NULL` FK -> `secret_deks(id)` | wrapping DEK row (canonical `wrapped_dek`) |
 | `dek_version` | `bigint NOT NULL` | frozen DEK generation |
-| `kms_provider` | `text NOT NULL` | root unwrap provider |
+| wrapping key identity | deferred | public client-held AVK coordinates; no backend key material |
 | `aad_context` | `jsonb NOT NULL` | domain tag `"attachment"` |
 | `row_version` | `bigint NOT NULL DEFAULT 1` | |
 | `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
@@ -1806,7 +1618,7 @@ core service or the audit layer immediately below it, never by transport
 adapters. Required for **open-plane** cross-agent read/contribute/curate/forget,
 policy/group/message events, and destructive identity changes, and for
 **sealed-plane** reveal, TOTP code generation, grant changes, key rotation, and
-server-side decrypt — plus token lifecycle, billing mutations, and
+encrypted field-material delivery — plus token lifecycle, billing mutations, and
 support-sensitive ops. Default retention 365 days (managed and self-hosted Helm;
 operator-configurable; minimum 90d). Audit is itself a metered dimension
 (`audit_event`). See [audit-retention.md](audit-retention.md).
@@ -1833,10 +1645,10 @@ MUST NOT be conflated. Stable actions span both planes:
   `message.request.expired`. The `fact set` /
   `remember` upsert emits `fact.created` for a new fact or `fact.updated` for an
   existing one.
-- Sealed plane: `secret.created`, `secret.updated`, `secret.renamed`,
-  `secret.copied`, `secret.archived`, `secret.restored`, `secret.deleted`,
-  `secret.reveal`, `secret.grant`, `secret.revoke`, `totp.enrolled`, `totp.code`,
-  `totp.seed_revealed`, `totp.deleted`, `key.rotated` (KEK).
+- Sealed plane: `secret.created`, `secret.archived`, `secret.restored`,
+  `secret.deleted`, `secret.material.delivered`, and value-free AVK lifecycle
+  events. Update, grants, and standalone TOTP lifecycle remain target work; the
+  backend cannot attest to client-local reveal or code calculation.
 - Cross-realm collaboration (post-v0; emitted only when federation is enabled,
   see [agent-collaboration.md](agent-collaboration.md)): the conversation/task
   lifecycle `conversation.started`, `conversation.state_changed`,
@@ -1858,10 +1670,9 @@ MUST NOT be conflated. Stable actions span both planes:
 | `policy_id` | `text NULL` FK -> `policies(id)` | deciding policy id for open-plane cross-agent actions |
 | `grant_id` | `text NULL` FK -> `secret_grants(id)` | deciding grant id for sealed-plane cross-agent access |
 | `result` | `text NULL` | success / error / denied / rate_limited / unsupported |
-| `reason` | `text NULL` | required audit reason for operator/admin + cross-agent action + server-side decrypt |
+| `reason` | `text NULL` | required audit reason for operator/admin and cross-agent target actions |
 | `request_id` | `text NULL` | redacted client context |
 | `provider_event_id` | `text NULL` | provider event id for billing/payment/crypto reconciliation |
-| `server_side_decrypt` | `boolean NOT NULL DEFAULT false` | distinguishes the sealed-plane server-side decrypt exception |
 | `metadata` | `jsonb NOT NULL DEFAULT '{}'` | non-sensitive context only |
 | `timestamp` | `timestamptz NOT NULL` | event time |
 
@@ -1956,7 +1767,7 @@ Every mutable resource EXCEPT `agent_tokens` carries a `row_version bigint NOT
 NULL DEFAULT 1` column (`accounts`, `operators`, `realms`, `realm_members`,
 `agents`, `memories`, `facts`, `policies`, `security_groups`, `group_members`,
 `message_deliveries`, `conversations`, `federation_peers`, `secrets`,
-`secret_fields`, `secret_grants`, `totp_enrollments`, `realm_keys`,
+`secret_fields`, `secret_grants`, `totp_enrollments`, `agent_vault_keys`,
 `attachments`, `usage_counters`).
 `agent_tokens` is excluded because token mutations use create/rotate/revoke
 semantics (`revoked_at`), not `If-Match`/`row_version`. `memory_versions` /
@@ -1968,7 +1779,7 @@ semantics (`revoked_at`), not `If-Match`/`row_version`. `memory_versions` /
   write -> `conflict` (exit 6, HTTP 409).
 - `row_version` is kept strictly **distinct** from memory `version` (content
   generation), envelope `dek_version` (frozen DEK generation), and
-  `realm_keys.key_version` (per-realm KEK generation) — one guards lost updates,
+  `agent_vault_keys.key_version` (agent vault epoch) — one guards lost updates,
   the others govern content history and rotation/decryptability.
 - **History in v0.** The open plane keeps full versioned edit history
   (`memory_versions` / `fact_versions`) plus `row_version`, `created_at` /
@@ -2002,8 +1813,9 @@ the audit trail is append-only PII-bearing (`actor_name`, `target_name`,
 `owner_name`, `request_id`) on top of `operators.email`. v0 posture:
 
 - **v0 default: deferred right-to-erasure with a stated retention exception.** On
-  account closure, sealed-plane secret material can be crypto-shredded by
-  destroying the realm KEK/CMK material (rendering ciphertext unrecoverable; see
+  account closure, the backend cannot destroy a client-held AVK. Irreversible
+  secret crypto-shred remains deferred; backend ciphertext deletion does not
+  erase client keys, recovery artifacts, or pre-existing copies (see
   [key-hierarchy.md](key-hierarchy.md)). Open-plane identity content is ordinary
   data and is removed by deleting/purging its rows. **Crypto-shredding does NOT
   cover metadata/PII**: operator email and the `*_name` columns in
@@ -2033,18 +1845,12 @@ Realm is the single isolation/billing/key-separation scope. The rule:
   operator/admin cross-realm administration gated by `realm:admin` /
   `account:manage`.
 - **Open vs sealed isolation.** Open-plane content is isolated by query scoping
-  and [policy](access-policy.md) evaluation (default-deny). Sealed-plane content
-  adds cryptographic binding: the per-realm KEK + KMS encryption-context binds
-  each wrapped KEK to its own realm, so a wrapped blob from one realm cannot be
-  *confused* for another's. Under the v0 single-CMK + single deployment-IAM
-  model, that context does NOT scope the deployment role's *authority*: a holder
-  of the one role can unwrap any realm's KEK by supplying that realm's (non-secret)
-  `realm_id` context. Cross-realm isolation against a compromised server/role is
-  therefore **authorization/operational, not cryptographic**, with a realm-wide
-  blast radius (see [key-hierarchy.md](key-hierarchy.md) and
-  [threat-model.md](threat-model.md)). Query scoping is the enforced isolation
-  layer in v0; per-realm cryptographic isolation against the role is deferred
-  pending per-realm KMS grants.
+  and [policy](access-policy.md) evaluation (default-deny). Sealed fields add
+  authenticated account/realm/owner/field binding and per-agent AVK custody.
+  Backend deployment credentials cannot open an agent's field: the active
+  client holds the AVK and verifies the package before local decryption. Query
+  scoping still governs access to ciphertext and metadata. See
+  [key-hierarchy.md](key-hierarchy.md) and [threat-model.md](threat-model.md).
 - Managed (multi-tenant `realm_id`-scoped shared tables) and self-hosted
   (typically single-tenant) share the identical model; `realm_id` MUST NOT appear
   in high-cardinality metric labels. The `owner_kind` Prometheus label values are
@@ -2078,9 +1884,10 @@ public repo. See [storage.md](storage.md) and
   only after all running instances no longer depend on the old shape. Migration
   `0032` is the additive vector-table phase. Any future optional pgvector/ANN
   projection is a separate expand phase and must not gate lexical or JSONB
-  hybrid recall. The sealed-plane envelope columns, `realm_keys`,
-  and `secret_deks` are introduced as expand-phase additive migrations; KEK
-  rotation backfills are metadata-only re-wrap jobs, not schema migrations.
+  hybrid recall. Migration `0055` introduces client-created field envelopes,
+  public `agent_vault_keys`, and wrapped `secret_deks`; migration `0056` adds
+  enrollment and client-driven AVK rotation. Client DEK rewraps are lifecycle
+  operations, not schema migrations.
 - **Destructive-down classification.** Each migration is classified `reversible`,
   `lossy`, or `destructive`. `lossy`/`destructive` downs are guarded, require
   explicit confirmation, and SHOULD be avoided in managed production in favor of a

@@ -2,8 +2,8 @@
 
 Status: accepted (2026-06-26). Supersedes the standalone Witpass product.
 
-Sealed-custody amendment (2026-07-18): ADR 0003 supersedes the KMS-rooted key
-hierarchy and server-mediated decrypt portions of this decision. Consolidation
+Sealed-custody amendment (2026-07-18): ADR 0003 establishes client-held agent
+vault keys and client encryption/decryption for the sealed plane. Consolidation
 into Witself, the two-plane model, structured secrets, and shared identity
 remain accepted.
 
@@ -31,9 +31,9 @@ left untouched; content was read-only and re-skinned into `witself`.)
 - **Open plane** (memories, facts): plaintext at rest, semantically indexed (embeddings),
   recallable, cross-agent readable/curatable under the declarative policy engine, in the
   self-digest, plaintext-exportable, ingestible from CLAUDE.md/AGENTS.md.
-- **Sealed plane** (secrets, TOTP): `CMK → per-realm KEK → per-secret/field DEK` envelope
-  encryption, reveal-gated, hybrid `client_side_decrypt` / `server_side_decrypt` behind one
-  capability switch.
+- **Sealed plane** (secrets, TOTP): `client-held AVK → per-sensitive-field DEK`
+  envelope encryption and client-side reveal. The backend stores ciphertext and
+  redacted inventory; a bearer token alone cannot reveal sensitive values.
 - **Shared spine**: account/realm/agent model, token=identity, CLI/MCP/`witself-server` API
   adapters, one authorization layer (roles/scopes spanning both planes + the cross-agent
   identity policy engine for the open plane), audit, observability, billing, release.
@@ -49,8 +49,9 @@ left untouched; content was read-only and re-skinned into `witself`.)
 
 ### The five reconciliations (opposite postures made to coexist)
 
-1. **Two-tier encryption** — open plane = ordinary data-at-rest (no KMS); sealed plane = KMS
-   envelope. KMS is a conditional dependency, required only when the sealed plane is enabled.
+1. **Two-tier encryption** — open plane = ordinary data-at-rest; sealed plane =
+   client-authored envelopes under an agent vault key. Neither plane requires
+   cloud KMS for per-record plaintext handling.
 2. **Export carve-out** — identity (memory + fact) is first-class plaintext export/import;
    secrets are **never** in the plaintext export (encrypted-only backup, never key material).
 3. **Reveal + MCP `--no-value-tools`** return for the sealed plane only; the open plane has no
@@ -63,7 +64,7 @@ left untouched; content was read-only and re-skinned into `witself`.)
 ## Consequences
 
 - One product to adopt, bill, and operate; the secrets capability can be staged after the
-  open-plane core (it carries the envelope/KMS dependency).
+  open-plane core (it requires client-held keys and encrypted envelopes).
 - The merge also filled genuine gaps in Witself: `data-model.md` (full Postgres schema, both
   planes) and `authorization-and-roles.md` (role/scope model) had no Witself equivalent.
 - New docs: `data-model.md`, `encryption-model.md`, `key-hierarchy.md`,

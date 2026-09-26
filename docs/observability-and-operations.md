@@ -73,10 +73,10 @@ probes. See
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-side custody for agent secrets. The backend holds no AVK key material,
+calls no KMS for agent secrets, and never decrypts secret values.
+Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
 
 ## Decision
@@ -105,8 +105,10 @@ is instrumented for memory operations, deterministic recall, optional vector
 validation/search, curation state, fact operations, policy decisions,
 cross-agent access, groups, and inter-agent
 messaging; its threat focus is the **integrity and authenticity** of identity
-data. The **sealed plane** (secrets and TOTP) is instrumented for secret
-operations, reveals, TOTP codes, and KMS calls; its threat focus is the
+data. The **sealed plane** (secrets and TOTP) is instrumented for encrypted material
+delivery, vault lifecycle calls, secret-limit refusals, and cell-wide posture;
+these server observations cannot attest to client reveal or TOTP success. Its
+threat focus is the
 **confidentiality** of credential material. The privacy rules tighten across
 both: metrics and logs must never carry memory content, fact values, message
 bodies, or embedding vectors, and must never carry secret values, TOTP seeds,
@@ -158,13 +160,15 @@ Probe semantics:
 | Endpoint | Purpose | Dependency checks |
 |---|---|---|
 | `/livez` | Process is alive and should not be restarted. | Minimal process-local checks only. |
-| `/readyz` | Server can safely receive traffic. | Storage, migrations, KMS reachability when the sealed plane is enabled, and read-only maintenance state. |
+| `/readyz` | Server can safely receive traffic. | Storage, migrations, and read-only maintenance state; agent-secret custody adds no KMS dependency. |
 | `/startupz` | Server completed boot and initial dependency validation. | Startup config, migrations state, and required dependency availability. |
 | `/healthz` | Alias for the liveness probe. | Minimal process-local checks only. |
 
 Liveness should be conservative. A transient database, object-store, or KMS
 failure should normally make readiness fail, not
-force Kubernetes to restart a healthy process.
+force Kubernetes to restart a healthy process. This applies to required
+infrastructure dependencies; agent-secret encryption and reveal add no backend
+KMS dependency.
 
 Readiness should fail when:
 
@@ -173,10 +177,6 @@ Readiness should fail when:
 - PostgreSQL full-text facilities required for universal recall are unavailable.
 - Migration-0032 vector tables are missing or invalid. This gates vector
   operations, not lexical memory traffic; no extension is required.
-- Required KMS operations cannot complete when the sealed plane is enabled.
-  KMS is a hard readiness gate only for sealed-plane deployments; an
-  open-plane-only deployment does not depend on KMS (see
-  [storage.md](storage.md) and [key-hierarchy.md](key-hierarchy.md)).
 - The server is intentionally in a mode that should not accept ordinary
   traffic.
 - The server is draining or shutting down.
@@ -188,8 +188,8 @@ support disabled remains ready for all universal memory operations.
 
 Startup should cover slow boot paths such as config validation, first database
 connection, migration status checks, full-text index availability,
-migration-0032 vector-table validation, and KMS provider client initialization when the
-sealed plane is enabled.
+and migration-0032 vector-table validation. Agent vault keys stay with clients;
+startup does not initialize an agent-secret KMS provider.
 
 ## Prometheus Metrics
 
@@ -1095,11 +1095,10 @@ Initial alert candidates:
 - Curation request backlog, lease expiry, fencing conflict, or failed plan
   application above a baseline.
 - Storage operation failures.
-- KMS operation failures (sealed plane).
-- Secret reveal spikes (possible credential-exfiltration signal).
-- TOTP code generation spikes.
-- Server-side-decrypt reveal rate above a baseline (token-only pods serving
-  values; expands the decrypt trust boundary).
+- Sealed-plane ciphertext-storage or vault-lifecycle call failures.
+- Encrypted material-delivery spikes (possible credential-exfiltration signal).
+- Future value-free client TOTP reports, if separately specified; the server
+  cannot observe local code generation.
 - Cross-agent access denials above a baseline (possible policy or abuse signal).
 - Cross-agent curate/forget spikes (possible memory-poisoning or write abuse).
 - Sustained active-memory capacity refusals by bounded operation (capacity or
@@ -1418,8 +1417,8 @@ Required checks once the server and chart exist:
 - Tests proving secret values, secret/field names, TOTP seeds, generated TOTP
   codes, KMS key material, data keys, and private keys never appear in metrics,
   logs, or health responses.
-- Tests proving the `kms_provider` label carries only the provider family and
-  never a key id, ARN, endpoint, or key material.
+- Tests proving sealed-plane telemetry does not register agent-secret KMS
+  operation metrics or provider labels; all value cryptography remains client-side.
 - Tests proving no backend model-provider label/config/health path is
   registered, and vector metrics never carry a profile id, model name,
   dimensions, query text, endpoint, credential, or vector value.
