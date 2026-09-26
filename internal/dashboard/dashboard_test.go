@@ -2647,7 +2647,7 @@ func TestFactHistoryProxyLocksValuesUnlessProvenNonSensitive(t *testing.T) {
 		return func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/v1/facts/fact_1/history":
-				writeTestJSON(t, w, map[string]any{"assertions": []client.FactAssertion{
+				writeTestJSON(t, w, map[string]any{"truncated": true, "assertions": []client.FactAssertion{
 					{ID: "fas_1", FactID: "fact_1", Value: json.RawMessage(`"history-value"`), SourceRef: "history-ref"},
 				}})
 			case "/v1/facts":
@@ -2688,6 +2688,9 @@ func TestFactHistoryProxyLocksValuesUnlessProvenNonSensitive(t *testing.T) {
 			raw, err := io.ReadAll(resp.Body)
 			if err != nil {
 				t.Fatalf("read body: %v", err)
+			}
+			if !strings.Contains(string(raw), `"truncated":true`) {
+				t.Fatal("proxy lost history truncation")
 			}
 			if !strings.Contains(string(raw), "fas_1") {
 				t.Fatalf("assertion metadata missing: %s", raw)

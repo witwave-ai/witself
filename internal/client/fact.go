@@ -341,13 +341,24 @@ func ProbeObservationalFactReads(ctx context.Context, endpoint, token string) (b
 
 // GetFactHistory retrieves immutable assertions newest first.
 func GetFactHistory(ctx context.Context, endpoint, token, factID string) ([]FactAssertion, error) {
-	var out struct {
-		Assertions []FactAssertion `json:"assertions"`
-	}
-	if err := doJSON(ctx, http.MethodGet, factsURL(endpoint)+"/"+url.PathEscape(factID)+"/history", token, nil, &out); err != nil {
+	page, err := GetFactHistoryPage(ctx, endpoint, token, factID)
+	if err != nil {
 		return nil, err
 	}
-	return out.Assertions, nil
+	return page.Assertions, nil
+}
+
+// FactHistoryPage contains the bounded history and an explicit truncation signal.
+type FactHistoryPage struct {
+	Assertions []FactAssertion `json:"assertions"`
+	Truncated  bool            `json:"truncated"`
+}
+
+// GetFactHistoryPage retrieves the newest assertions, including truncation state.
+func GetFactHistoryPage(ctx context.Context, endpoint, token, factID string) (FactHistoryPage, error) {
+	var out FactHistoryPage
+	err := doJSON(ctx, http.MethodGet, factsURL(endpoint)+"/"+url.PathEscape(factID)+"/history", token, nil, &out)
+	return out, err
 }
 
 // ProposeFact submits an uncertain fact for review.

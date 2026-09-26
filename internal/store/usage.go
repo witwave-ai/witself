@@ -90,6 +90,7 @@ type UsageQuery struct {
 	Bucket          string
 	Dimensions      []string
 	AllowTruncation bool
+	activityOnly    bool // private: only GetActivity can opt into activity dimensions
 }
 
 // UsagePoint is one dimension total in an hourly or daily UTC bucket.
@@ -244,7 +245,7 @@ func normalizeUsageQuery(query UsageQuery) (UsageQuery, error) {
 	seen := map[string]bool{}
 	dimensions := make([]string, 0, min(len(query.Dimensions), len(usageDimensions)))
 	for _, dimension := range query.Dimensions {
-		if !validUsageDimension(dimension) {
+		if !validUsageDimension(dimension) || activity.Unit(dimension) != "" && !query.activityOnly {
 			return UsageQuery{}, fmt.Errorf("%w: unknown dimension", ErrUsageInputInvalid)
 		}
 		if !seen[dimension] {

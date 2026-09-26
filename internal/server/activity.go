@@ -41,9 +41,15 @@ func activityContextMux(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := activity.WithOperation(r.Context(), requestActivityOperation(r))
 		ids, observations := r.Header.Values(activity.RequestIDHeader), r.Header.Values(activity.ObservationHeader)
-		if len(ids) > 1 || len(observations) > 1 || len(ids) == 1 && !activity.ValidRequestID(ids[0]) || len(observations) == 1 && observations[0] != "1" {
-			writeJSONError(w, http.StatusBadRequest, "invalid activity intent")
-			return
+		// Intent is cooperative telemetry, never a prerequisite for authentication
+		// or domain writes (which validate their own Idempotency-Key).
+		if len(ids) != 1 || !activity.ValidRequestID(ids[0]) {
+			r.Header.Del(activity.RequestIDHeader)
+			ids = nil
+		}
+		if len(observations) != 1 || observations[0] != "1" {
+			r.Header.Del(activity.ObservationHeader)
+			observations = nil
 		}
 		if len(ids) == 1 {
 			ctx = activity.WithRequestID(ctx, ids[0])

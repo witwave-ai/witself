@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -616,5 +618,57 @@ func mapLookup(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
+	}
+}
+
+type cleanupMetricsRecorder struct {
+	failures []string
+	results  []worker.RetentionResult
+	deleted  []int64
+}
+
+func (m *cleanupMetricsRecorder) RecordJobFailure(job string) { m.failures = append(m.failures, job) }
+func (m *cleanupMetricsRecorder) ObserveMessageRateBucketCleanupBatch(result worker.RetentionResult, deleted int64) {
+	m.results = append(m.results, result)
+	m.deleted = append(m.deleted, deleted)
+}
+
+func TestMessageRateBucketCleanupRetentionFailureAttribution(t *testing.T) {
+	cause := errors.New("synthetic query failure")
+	for _, tc := range []struct {
+		name     string
+		batch    store.MessageRateBucketCleanupBatchResult
+		result   worker.RetentionResult
+		deleted  int64
+		failures int
+		wantLog  string
+	}{
+		{"success", store.MessageRateBucketCleanupBatchResult{Deleted: 7}, worker.RetentionResultSuccess, 7, 0, "deleted=7"},
+		{"retention_only", store.MessageRateBucketCleanupBatchResult{Deleted: 7, ActivityRetentionError: cause}, worker.RetentionResultSuccess, 7, 1, "activity_retention=synthetic query failure"},
+		{"rate_bucket_only", store.MessageRateBucketCleanupBatchResult{RateBucketError: cause}, worker.RetentionResultError, 0, 1, "rate_bucket=synthetic query failure"},
+		{"both", store.MessageRateBucketCleanupBatchResult{RateBucketError: cause, ActivityRetentionError: cause}, worker.RetentionResultError, 0, 1, "activity_retention=synthetic query failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			var metrics cleanupMetricsRecorder
+			reportMessageRateBucketCleanupBatch(&metrics, &output, tc.batch)
+			if len(metrics.failures) != tc.failures || len(metrics.results) != 1 || metrics.results[0] != tc.result || metrics.deleted[0] != tc.deleted {
+				t.Fatalf("incorrect attribution: %+v", metrics)
+			}
+			for _, job := range metrics.failures {
+				if job != messageRateBucketCleanupJob {
+					t.Fatalf("unexpected job %q", job)
+				}
+			}
+			if !strings.Contains(output.String(), tc.wantLog) {
+				t.Fatalf("missing %q in %q", tc.wantLog, output.String())
+			}
+			if tc.batch.RateBucketError == nil && strings.Contains(output.String(), "rate_bucket=") {
+				t.Fatalf("retention failure mislabeled: %q", output.String())
+			}
+			if tc.batch.ActivityRetentionError == nil && strings.Contains(output.String(), "activity_retention=") {
+				t.Fatalf("rate failure mislabeled: %q", output.String())
+			}
+		})
 	}
 }

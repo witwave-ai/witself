@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/memorycurator"
@@ -3207,6 +3208,9 @@ func TestAutomaticHydrationHookCurrentRuntimeConformance(t *testing.T) {
 					}
 					_ = json.NewEncoder(w).Encode(digest)
 				case "/v1/memories:recall":
+					if r.Header.Get(activity.ObservationHeader) != "1" || r.Header.Get(activity.RequestIDHeader) != "" {
+						t.Error("hydration recall was not observational")
+					}
 					var input client.MemoryRecallInput
 					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 						t.Errorf("decode recall: %v", err)

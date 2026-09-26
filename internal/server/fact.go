@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/store"
 )
 
 // ErrFactLimitReached identifies a non-retryable refusal of a net-positive
@@ -378,7 +380,7 @@ func factHistoryHandler(auth PrincipalAuthFunc, history func(context.Context, Do
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "private, no-store")
-		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "assertions": assertions})
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "assertions": assertions, "truncated": len(assertions) == store.MaxFactHistoryAssertions && assertions[len(assertions)-1].SupersedesID != ""})
 	})
 }
 

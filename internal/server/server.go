@@ -53,8 +53,9 @@ type Config struct {
 	ReadMemoryCurationQueueMetrics func(context.Context) (MemoryCurationQueueMetrics, error)
 	// These readers expose value-free cell aggregates through independent 2 s
 	// sequential reads on /metrics. Nil readers omit their metric families.
-	ReadIdentityCapacityMetrics func(context.Context) (IdentityCapacityMetrics, error)
-	ReadAuditAppendMetrics      func(context.Context) (AuditAppendMetrics, error)
+	ReadIdentityCapacityMetrics  func(context.Context) (IdentityCapacityMetrics, error)
+	ReadAuditAppendMetrics       func(context.Context) (AuditAppendMetrics, error)
+	ReadActivityMeteringFailures func() uint64
 
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
@@ -2275,7 +2276,7 @@ func Run(ctx context.Context, cfg Config) error {
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
 		{"metrics", cfg.MetricsAddr, metricsMuxFor(
 			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics,
-			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics, cfg.ReadMemoryCurationCounters, cfg.ReadMemoryCurationQueueMetrics)},
+			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics, cfg.ReadMemoryCurationCounters, cfg.ReadMemoryCurationQueueMetrics, cfg.ReadActivityMeteringFailures)},
 	}
 
 	type running struct {
@@ -7024,7 +7025,7 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil)
+	return metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func metricsMuxFor(
@@ -7036,6 +7037,7 @@ func metricsMuxFor(
 	readSealedPlanePosture func(context.Context) (SealedPlanePostureMetrics, error),
 	readMemoryCurationCounters func() MemoryCurationCounters,
 	readMemoryCurationQueue func(context.Context) (MemoryCurationQueueMetrics, error),
+	readActivityMeteringFailures func() uint64,
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -7053,6 +7055,9 @@ func metricsMuxFor(
 			}()
 		}
 		metrics.writePrometheus(w)
+		if readActivityMeteringFailures != nil {
+			_, _ = fmt.Fprintf(w, "# HELP witself_activity_metering_failures_total Failed nonbilling activity read metering transactions.\n# TYPE witself_activity_metering_failures_total counter\nwitself_activity_metering_failures_total %d\n", readActivityMeteringFailures())
+		}
 		writeAgentEmailCellStoragePrometheus(
 			r.Context(), w, readAgentEmailCellStorage,
 		)

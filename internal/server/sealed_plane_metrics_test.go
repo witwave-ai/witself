@@ -30,7 +30,7 @@ func zeroVaultLifecycleSamples() map[string]string {
 
 func TestSealedPlaneCountersPresentBeforeFirstObservation(t *testing.T) {
 	response := httptest.NewRecorder()
-	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("metrics status=%d", response.Code)
 	}
@@ -68,7 +68,7 @@ func TestVaultRotationFirstConflictBurstAlerts(t *testing.T) {
 	scrape := func() string {
 		t.Helper()
 		response := httptest.NewRecorder()
-		metricsMuxFor(metrics, nil, nil, nil, nil, nil, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		metricsMuxFor(metrics, nil, nil, nil, nil, nil, nil, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 		if response.Code != http.StatusOK {
 			t.Fatalf("metrics status=%d", response.Code)
 		}

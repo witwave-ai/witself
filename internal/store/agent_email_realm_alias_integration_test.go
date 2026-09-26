@@ -358,6 +358,12 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	// back to 0087. Schema 0087 can safely discard its sole original-domain
 	// route, and schema 0086 can step back to 0085. The following 0085 -> 0084
 	// downgrade must still refuse to discard realm-alias delivery provenance.
+	// Schema 0096 only adds the activity-retention index. Dropping that index
+	// must preserve the alias delivery provenance tested by this downgrade chain.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0096 to 0095: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 95)
 	// Schema 0095 only adds the support-ticket admission index, so it can
 	// safely step back without changing any account data.
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {

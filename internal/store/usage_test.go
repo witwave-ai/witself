@@ -186,3 +186,14 @@ func TestImportedUsagePreservesHistoricalDimensionSyntax(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageRejectsActivityDimensions(t *testing.T) {
+	for _, dim := range []string{"operation_read", "operation_read_record", "memory_created", "activity_tracking_started"} {
+		if _, err := normalizeUsageQuery(UsageQuery{Dimensions: []string{dim}}); !errors.Is(err, ErrUsageInputInvalid) {
+			t.Fatal("legacy usage accepted activity", dim, err)
+		}
+	}
+	if _, err := normalizeUsageQuery(UsageQuery{Dimensions: []string{"operation_read"}, activityOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+}

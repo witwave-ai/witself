@@ -40,8 +40,8 @@ folded exactly once after the `v0.0.251` redirect-handling fix, producing one
 provider receipt and one canonical `email_sent` usage observation. That
 observation is operational and non-billable: no invoice, overage, or
 payment-provider conversion is enabled. The original DLQ copy remains retained
-as incident evidence. As of 2026-09-02, the serving and rollback-validation
-Civo cells both run application `0.0.272` at schema 94. The email edge enabled
+as incident evidence. The serving and rollback-validation
+Civo cells use the application-managed database migrations. The email edge enabled
 DMARC rejection and relay v2 from the clean `v0.0.262` release on 2026-08-29,
 after a live-header and end-to-end production proof. Releases `v0.0.250`
 and `v0.0.251` were edge-only event-consumer releases; `v0.0.252` added the
@@ -193,7 +193,7 @@ The Founder account has explicit indefinite agent-email retention, so its mail
 is not eligible for age deletion. Its attachment-storage allowance is also
 commercially unlimited, but the live schema-91 platform ledger still refuses
 new roots at 3 GiB/25,000 roots and all positive counted-row writes at
-4 GiB/100,000 rows. The production deployment (now v0.0.272/schema 94) runs
+4 GiB/100,000 rows. The production deployment runs
 the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
 run. Activation followed verification of both required pre-migration backups.

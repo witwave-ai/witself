@@ -328,3 +328,19 @@ func TestCopyUnavailableAndPassiveOnlySource(t *testing.T) {
 		t.Fatal("secret actions must never be present")
 	}
 }
+
+func TestFactHistoryTruncationSurvivesProjectionAndRendering(t *testing.T) {
+	raw := []byte(`{"truncated":true,"assertions":[]}`)
+	projected, err := decode(dashboard.ResourceFactHistory, raw)
+	if err != nil || !flag(projected, "truncated") {
+		t.Fatal("history truncation lost", err)
+	}
+	m := testModel(t, NewDemoSource())
+	m.panel = 2
+	m.states[2].data[dashboard.ResourceFactHistory] = projected
+	d := &detailWriter{m: m, width: 100}
+	m.factDetail(d, item{key: "fact_test", data: object{"id": "fact_test", "value": "public"}})
+	if !strings.Contains(ansi.Strip(strings.Join(d.lines, "\n")), "History truncated") {
+		t.Fatal("missing visible history truncation")
+	}
+}

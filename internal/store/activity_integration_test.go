@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/testenv"
 )
@@ -125,17 +127,20 @@ func TestActivityPostgresReadScopeAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireActivity(t, st, peer, "operation_read", 0)
-	// A metering failure must replace the otherwise successful store read.
+	// A failed meter must leave the successful domain read available.
 	if _, err := st.pool.Exec(ctx, `CREATE FUNCTION fail_activity_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.dimension='operation_read' THEN RAISE EXCEPTION 'synthetic meter failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_activity_test BEFORE INSERT ON usage_events FOR EACH ROW EXECUTE FUNCTION fail_activity_test()`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err == nil {
-		t.Fatal("meter failure returned success")
+	if _, err := st.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err != nil {
+		t.Fatal("meter failure replaced success")
 	}
 	if _, err := st.pool.Exec(ctx, `DROP TRIGGER fail_activity_test ON usage_events; DROP FUNCTION fail_activity_test()`); err != nil {
 		t.Fatal(err)
 	}
 	requireActivity(t, st, p, "operation_read", 4)
+	if st.ActivityMeteringFailures() != 1 {
+		t.Fatal("missing failure metric")
+	}
 }
 func TestActivityPostgresWritesBatchReplayAndPortability(t *testing.T) {
 	st, p := activityTestStore(t)
@@ -180,6 +185,14 @@ func TestActivityPostgresWritesBatchReplayAndPortability(t *testing.T) {
 	before, err := st.GetActivity(ctx, p, ActivityQuery{})
 	if err != nil || before.TrackingSince == nil {
 		t.Fatal(err)
+	}
+	// Advance the maintenance clock to prove archives preserve authoritative
+	// rollups even after every activity event has retired.
+	if deleted, err := st.RetireActivityEvents(ctx, time.Now().Add(36*24*time.Hour), 1000); err != nil || deleted != 6 {
+		t.Fatal("retire before export", deleted, err)
+	}
+	if deleted, err := st.RetireActivityEvents(ctx, time.Now().Add(36*24*time.Hour), 1000); err != nil || deleted != 0 {
+		t.Fatal("retention not idempotent", deleted, err)
 	}
 	if err := st.SuspendAccountSystem(ctx, p.AccountID, "evacuation", "synthetic activity archive"); err != nil {
 		t.Fatal(err)
@@ -418,6 +431,9 @@ func TestActivityPostgresMemoryCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.RecallMemories(read(), p, MemoryRecallOptions{Kind: "decision"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecallMemories(activity.WithObservation(read()), p, MemoryRecallOptions{Kind: "decision"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, op := range []string{"memories.get", "memories.list", "memories.history", "memories.recall"} {
@@ -802,20 +818,185 @@ func TestActivityPostgresFactHistoryBound(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE facts SET resolved_assertion_id='fas_history_1001' WHERE id=$1`, fact.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.FactHistory(activity.WithRequestID(ctx, activity.NewRequestID()), p, fact.ID); !errors.Is(err, ErrFactInputInvalid) {
-		t.Fatal("oversized history did not fail closed", err)
-	}
-	r, err := st.GetActivity(ctx, p, ActivityQuery{})
-	if err != nil || r.TrackingSince != nil {
-		t.Fatal("failed history began tracking", err)
+	history, err := st.FactHistory(activity.WithRequestID(ctx, activity.NewRequestID()), p, fact.ID)
+	if err != nil || len(history) != 1000 || history[0].ID != "fas_history_1001" || history[999].SupersedesID != "fas_history_1" {
+		t.Fatal("oversized history did not return the newest bounded assertions", err)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE facts SET resolved_assertion_id='fas_history_1000' WHERE id=$1`, fact.ID); err != nil {
 		t.Fatal(err)
 	}
-	history, err := st.FactHistory(activity.WithRequestID(ctx, activity.NewRequestID()), p, fact.ID)
-	if err != nil || len(history) != 1000 {
+	history, err = st.FactHistory(activity.WithRequestID(ctx, activity.NewRequestID()), p, fact.ID)
+	if err != nil || len(history) != 1000 || history[999].SupersedesID != "" {
 		t.Fatal("bounded history rejected", len(history), err)
 	}
+	requireActivity(t, st, p, "operation_read", 2)
+	requireActivity(t, st, p, "operation_read_record", 2000)
+}
+
+func TestActivityRetentionBoundsAndMarker(t *testing.T) {
+	st, p := activityTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, event := range []struct {
+		key, dim, unit string
+		at             time.Time
+	}{
+		{"old-marker", "activity_tracking_started", "activation", now.Add(-40 * 24 * time.Hour)},
+		{"old-read", "operation_read", "operation", now.Add(-40 * 24 * time.Hour)},
+		{"old-memory", "memory_created", "change", now.Add(-36 * 24 * time.Hour)},
+		{"boundary", "operation_write", "operation", now.Add(-35 * 24 * time.Hour)},
+		{"recent", "memory_deleted", "change", now},
+		{"billing", "message_sent", "message", now.Add(-40 * 24 * time.Hour)},
+	} {
+		_, err := recordUsageEventTx(ctx, tx, usageEventInput{AccountID: p.AccountID, RealmID: p.RealmID, AgentID: p.ID,
+			Dimension: event.dim, Unit: event.unit, Quantity: 1, SubjectType: "activity", SubjectID: "synthetic", IdempotencyKey: event.key, OccurredAt: event.at})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{0, -1, 1001} {
+		if _, err := st.RetireActivityEvents(ctx, now, limit); !errors.Is(err, ErrUsageInputInvalid) {
+			t.Fatal("invalid bound", err)
+		}
+	}
+	for _, want := range []int64{1, 1, 0} {
+		if n, err := st.RetireActivityEvents(ctx, now, 1); err != nil || n != want {
+			t.Fatal("bounded retention", n, err)
+		}
+	}
+	var events, rollups int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE account_id=$1`, p.AccountID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM usage_rollups WHERE account_id=$1`, p.AccountID).Scan(&rollups); err != nil {
+		t.Fatal(err)
+	}
+	if events != 4 || rollups != 12 {
+		t.Fatal("marker, boundary, billing or rollups changed", events, rollups)
+	}
+}
+
+func TestActivityReadMarkerCacheCommitAndRestart(t *testing.T) {
+	st, p := activityTestStore(t)
+	ctx := t.Context()
+	read := func() {
+		t.Helper()
+		if _, err := st.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// First failed activation must not poison the cache.
+	if _, err := st.pool.Exec(ctx, `CREATE FUNCTION reject_meter() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.dimension='operation_read' THEN RAISE EXCEPTION 'synthetic'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_meter BEFORE INSERT ON usage_events FOR EACH ROW EXECUTE FUNCTION reject_meter()`); err != nil {
+		t.Fatal(err)
+	}
+	read()
+	if _, err := st.pool.Exec(ctx, `DROP TRIGGER reject_meter ON usage_events; DROP FUNCTION reject_meter()`); err != nil {
+		t.Fatal(err)
+	}
+	read()
 	requireActivity(t, st, p, "operation_read", 1)
-	requireActivity(t, st, p, "operation_read_record", 1000)
+	before, err := st.GetActivity(ctx, p, ActivityQuery{})
+	if err != nil || before.TrackingSince == nil {
+		t.Fatal("activation missing", err)
+	}
+	// A marker-insert trigger proves cached reads don't even attempt the insert.
+	if _, err := st.pool.Exec(ctx, `CREATE FUNCTION reject_marker() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.dimension='activity_tracking_started' THEN RAISE EXCEPTION 'synthetic'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_marker BEFORE INSERT ON usage_events FOR EACH ROW EXECUTE FUNCTION reject_marker()`); err != nil {
+		t.Fatal(err)
+	}
+	read()
+	requireActivity(t, st, p, "operation_read", 2)
+	if st.ActivityMeteringFailures() != 1 {
+		t.Fatal("cached read attempted marker write")
+	}
+	if _, err := st.pool.Exec(ctx, `DROP TRIGGER reject_marker ON usage_events; DROP FUNCTION reject_marker()`); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Store{pool: st.pool}
+	if _, err := restarted.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.GetActivity(ctx, p, ActivityQuery{})
+	if err != nil || !before.TrackingSince.Equal(*after.TrackingSince) {
+		t.Fatal("restart changed marker", err)
+	}
+	requireActivity(t, st, p, "operation_read", 3)
+}
+
+func TestActivityRetentionRunsInMaintenanceLoop(t *testing.T) {
+	st, p := activityTestStore(t)
+	ctx := t.Context()
+	if _, err := st.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE usage_events SET occurred_at=clock_timestamp()-interval '36 days' WHERE account_id=$1 AND dimension='operation_read'`, p.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if err := st.RunMessageRateBucketCleanupWorker(workerCtx, DefaultMessageRateBucketCleanupWorkerConfig(), func(result MessageRateBucketCleanupBatchResult) {
+		if result.RateBucketError != nil || result.ActivityRetentionError != nil {
+			t.Errorf("maintenance errors: rate_bucket=%v activity_retention=%v", result.RateBucketError, result.ActivityRetentionError)
+		}
+		cancel()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE account_id=$1 AND dimension='operation_read'`, p.AccountID).Scan(&count); err != nil || count != 0 {
+		t.Fatal("maintenance did not retire activity", count, err)
+	}
+	requireActivity(t, st, p, "operation_read", 1)
+}
+
+func TestActivityImportedRollupsCannotUndercountRetainedEvents(t *testing.T) {
+	st, p := activityTestStore(t)
+	ctx := t.Context()
+	if _, err := st.ListFactsObservational(activity.WithRequestID(ctx, activity.NewRequestID()), p, FactListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM usage_rollups WHERE account_id=$1 AND dimension='operation_read'`, p.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateImportedUsageRollups(ctx, tx, p.AccountID); !errors.Is(err, ErrArchiveContent) {
+		t.Fatal("retention exemption accepted missing rollups", err)
+	}
+}
+
+func TestActivityRetentionWorkerQueryFailure(t *testing.T) {
+	st, _ := activityTestStore(t)
+	ctx := t.Context()
+	// A statement trigger fails the real retention DELETE even with no old rows.
+	if _, err := st.pool.Exec(ctx, `CREATE FUNCTION fail_activity_retention_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic retention query failure'; END $$; CREATE TRIGGER fail_activity_retention_test BEFORE DELETE ON usage_events FOR EACH STATEMENT EXECUTE FUNCTION fail_activity_retention_test()`); err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var results []MessageRateBucketCleanupBatchResult
+	if err := st.RunMessageRateBucketCleanupWorker(workerCtx, DefaultMessageRateBucketCleanupWorkerConfig(), func(result MessageRateBucketCleanupBatchResult) {
+		results = append(results, result)
+		cancel()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].RateBucketError != nil {
+		t.Fatalf("rate-bucket success missing: %+v", results)
+	}
+	var cause *pgconn.PgError
+	err := results[0].ActivityRetentionError
+	if !errors.As(err, &cause) || cause.Code != "P0001" || !strings.Contains(err.Error(), "activity event retention: ERROR: synthetic retention query failure") {
+		t.Fatalf("retention query cause missing: %v", err)
+	}
 }

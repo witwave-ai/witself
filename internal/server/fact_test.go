@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/store"
 )
 
 const testFactCandidateRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -920,4 +922,27 @@ func factRequestWithIdempotency(t *testing.T, base, method, path, body, key stri
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func TestFactHistoryTruncationWire(t *testing.T) {
+	for _, truncated := range []bool{false, true} {
+		assertions := make([]FactAssertion, store.MaxFactHistoryAssertions)
+		if truncated {
+			assertions[len(assertions)-1].SupersedesID = "fas_older"
+		}
+		srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, true, nil
+		}, GetFactHistory: func(context.Context, DomainPrincipal, string) ([]FactAssertion, error) { return assertions, nil }}))
+		resp := factRequest(t, srv.URL, http.MethodGet, "/v1/facts/fact_1/history", "")
+		var got struct {
+			Assertions []FactAssertion
+			Truncated  bool
+		}
+		err := json.NewDecoder(resp.Body).Decode(&got)
+		_ = resp.Body.Close()
+		srv.Close()
+		if err != nil || resp.StatusCode != 200 || len(got.Assertions) != store.MaxFactHistoryAssertions || got.Truncated != truncated {
+			t.Fatal("history wire mismatch", err)
+		}
+	}
 }

@@ -14,7 +14,7 @@ import (
 )
 
 func curationMetricsHandler(m *runtimeMetrics, counters func() MemoryCurationCounters, queue func(context.Context) (MemoryCurationQueueMetrics, error)) http.Handler {
-	return metricsMuxFor(m, nil, nil, nil, nil, nil, counters, queue)
+	return metricsMuxFor(m, nil, nil, nil, nil, nil, counters, queue, nil)
 }
 
 func scrapeCurationMetrics(t *testing.T, h http.Handler) string {
@@ -260,7 +260,7 @@ func TestMemoryCurationQueueReadOverlapsExistingCollectors(t *testing.T) {
 			t.Error("existing collectors waited for the curation deadline")
 			return MemoryCurationQueueMetrics{}, ctx.Err()
 		}
-	})
+	}, nil)
 	output := scrapeCurationMetrics(t, h)
 	for _, sample := range []string{"witself_support_slo_metrics_up 1", "witself_memory_curation_queue_metrics_up 1"} {
 		if !strings.Contains(output, sample+"\n") {

@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,8 @@ type Store struct {
 	supportTicketRateLimit         SupportTicketRateLimitConfig
 	auditAppendFailures            atomic.Uint64
 	memoryCurationMetrics          memoryCurationMetrics
+	activityMarkers                sync.Map // committed read markers, scoped to this database pool
+	activityMeteringFailures       atomic.Uint64
 }
 
 // AuditAppendFailures returns failed account_events INSERT attempts made by

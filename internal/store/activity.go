@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -66,7 +69,7 @@ func (s *Store) GetActivity(ctx context.Context, p Principal, q ActivityQuery) (
 	if q.Until.Sub(q.Since.UTC().Truncate(time.Hour)) > 31*24*time.Hour {
 		return ActivityReport{}, ErrUsageInputInvalid
 	}
-	u, err := s.GetAgentUsage(ctx, p, UsageQuery{Since: q.Since, Until: q.Until, Bucket: UsageBucketHour, Dimensions: activity.Dimensions()})
+	u, err := s.GetAgentUsage(ctx, p, UsageQuery{Since: q.Since, Until: q.Until, Bucket: UsageBucketHour, Dimensions: activity.Dimensions(), activityOnly: true})
 	if err != nil {
 		return ActivityReport{}, err
 	}
@@ -87,28 +90,88 @@ func (s *Store) GetActivity(ctx context.Context, p Principal, q ActivityQuery) (
 	return out, nil
 }
 
-// beginActivityRead excludes nested helpers and preserves the original scope
-// for completion. Completion failures replace success before the API responds.
+// A marker is cached only after commit, never after an attempted or rolled-back
+// insertion. Store-local scope keeps separate databases and test schemas apart.
+type activityReadMarker struct {
+	initializing chan struct{}
+	known        atomic.Bool
+	since        time.Time
+}
+type activityReadMarkerKey struct{}
+
+// ActivityMeteringFailures is a process-local, value-free count of failed read
+// metering transactions. Domain writes still meter atomically or fail.
+func (s *Store) ActivityMeteringFailures() uint64 { return s.activityMeteringFailures.Load() }
+
+// One limiter across all Stores prevents a database outage from logging per read.
+var activityReadWarnings activityReadWarningLimiter
+
+type activityReadWarningLimiter struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (l *activityReadWarningLimiter) allow(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.last.IsZero() && now.Sub(l.last) < time.Minute {
+		return false
+	}
+	l.last = now
+	return true
+}
+
+func (l *activityReadWarningLimiter) warn(now time.Time, operation string, err error) {
+	if l.allow(now) {
+		fmt.Fprintf(os.Stderr, "witself: activity read metering failed: operation=%s: %v\n", operation, err)
+	}
+}
+
+// beginActivityRead excludes nested helpers. Metering failure never replaces a
+// successful domain read. Warnings include the cause and are process-rate-limited.
 func (s *Store) beginActivityRead(ctx context.Context, p Principal, operation string) (context.Context, func(int64, *error)) {
 	meterCtx := activity.DefaultOperation(ctx, operation)
 	return activity.WithOperation(meterCtx, ""), func(records int64, resultErr *error) {
 		if *resultErr != nil || !activityEligible(meterCtx, p, operation, false) {
 			return
 		}
-		tx, err := s.pool.Begin(meterCtx)
-		if err != nil {
-			*resultErr = err
-			return
+		if err := s.recordActivityRead(meterCtx, p, operation, records); err != nil {
+			s.activityMeteringFailures.Add(1)
+			activityReadWarnings.warn(time.Now(), operation, err)
 		}
-		defer func() { _ = tx.Rollback(meterCtx) }()
-		if err = verifyLiveAgentScope(meterCtx, tx, p.AccountID, p.RealmID, p.ID); err == nil {
-			err = recordActivityOperationTx(meterCtx, tx, p, operation, activity.RequestID(meterCtx), records)
-		}
-		if err == nil {
-			err = tx.Commit(meterCtx)
-		}
-		*resultErr = err
 	}
+}
+func (s *Store) recordActivityRead(ctx context.Context, p Principal, operation string, records int64) error {
+	key := [3]string{p.AccountID, p.RealmID, p.ID}
+	v, ok := s.activityMarkers.Load(key)
+	if !ok {
+		v, _ = s.activityMarkers.LoadOrStore(key, &activityReadMarker{initializing: make(chan struct{}, 1)})
+	}
+	marker := v.(*activityReadMarker)
+	// Serialize only first activation, not steady-state per-agent reads.
+	if !marker.known.Load() {
+		select {
+		case marker.initializing <- struct{}{}:
+			defer func() { <-marker.initializing }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The domain read already checked access. No redundant scope query here.
+	ctx = context.WithValue(ctx, activityReadMarkerKey{}, marker)
+	if err := recordActivityOperationTx(ctx, tx, p, operation, activity.RequestID(ctx), records); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	marker.known.Store(true)
+	return nil
 }
 func activityEligible(ctx context.Context, p Principal, operation string, write bool) bool {
 	if p.Kind != PrincipalAgent || activity.IsObservation(ctx) {
@@ -144,7 +207,7 @@ func recordActivityOperationTx(ctx context.Context, tx pgx.Tx, p Principal, oper
 	if err != nil {
 		return err
 	}
-	now, err := ensureActivityMarkerTx(ctx, tx, p)
+	now, err := activityEventTimeTx(ctx, tx, p)
 	if err != nil {
 		return err
 	}
@@ -153,12 +216,31 @@ func recordActivityOperationTx(ctx context.Context, tx pgx.Tx, p Principal, oper
 	if err != nil || !inserted || records == 0 {
 		return err
 	}
+	// Separate operation/record quantities and event counts are part of the
+	// summary contract. One event has one dimension/unit; folding these rows
+	// requires a schema and archive contract change, not just a write shortcut.
 	in.Dimension += "_record"
 	in.Unit = "record"
 	in.Quantity = records
 	in.IdempotencyKey += ":records"
 	_, err = recordUsageEventTx(ctx, tx, in)
 	return err
+}
+
+// activityEventTimeTx avoids even calling marker initialization on cached
+// reads. Writes keep initialization inside their domain transaction.
+func activityEventTimeTx(ctx context.Context, tx pgx.Tx, p Principal) (time.Time, error) {
+	marker, _ := ctx.Value(activityReadMarkerKey{}).(*activityReadMarker)
+	if marker != nil && marker.known.Load() {
+		var now time.Time
+		err := tx.QueryRow(ctx, `SELECT GREATEST(clock_timestamp(), $1::timestamptz)`, marker.since).Scan(&now)
+		return now, err
+	}
+	now, err := ensureActivityMarkerTx(ctx, tx, p)
+	if err == nil && marker != nil {
+		marker.since = now
+	}
+	return now, err
 }
 func ensureActivityMarkerTx(ctx context.Context, tx pgx.Tx, p Principal) (time.Time, error) {
 	var now time.Time
@@ -182,7 +264,7 @@ func recordMemoryActivityTx(ctx context.Context, tx pgx.Tx, p Principal, dimensi
 	if activity.Unit(dimension) != "change" {
 		return ErrUsageInputInvalid
 	}
-	now, err := ensureActivityMarkerTx(ctx, tx, p)
+	now, err := activityEventTimeTx(ctx, tx, p)
 	if err != nil {
 		return err
 	}
@@ -200,4 +282,21 @@ func recordMemoryVersionActivityTx(ctx context.Context, tx pgx.Tx, m Memory) err
 		dimension = "memory_created"
 	}
 	return recordMemoryActivityTx(ctx, tx, Principal{Kind: PrincipalAgent, AccountID: m.AccountID, RealmID: m.RealmID, ID: m.OwnerID}, dimension, fmt.Sprintf("%s:%d", m.ID, m.Version))
+}
+
+// RetireActivityEvents deletes at most limit old nonbilling activity events.
+// The caller is the existing rate-bucket maintenance loop; concurrent replicas
+// divide work via SKIP LOCKED. Rollups and tracking markers remain authoritative.
+func (s *Store) RetireActivityEvents(ctx context.Context, now time.Time, limit int) (int64, error) {
+	if limit < 1 || limit > 1000 || now.IsZero() {
+		return 0, ErrUsageInputInvalid
+	}
+	tag, err := s.pool.Exec(ctx, `WITH retired AS (
+ SELECT id FROM usage_events
+ WHERE dimension IN ('operation_read','operation_read_record','operation_write','operation_write_record',
+ 'memory_created','memory_revised','memory_archived','memory_restored','memory_deleted')
+ AND occurred_at < $1
+ ORDER BY occurred_at, id LIMIT $2 FOR UPDATE SKIP LOCKED
+ ) DELETE FROM usage_events u USING retired r WHERE u.id=r.id`, now.UTC().Add(-35*24*time.Hour), limit)
+	return tag.RowsAffected(), err
 }

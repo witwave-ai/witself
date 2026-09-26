@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
@@ -334,7 +335,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 	if err := validateBinding(binding); err != nil {
 		return Result{Attempted: true, Delivery: feature.Delivery, Query: query, Outcome: OutcomeBindingMismatch}, err
 	}
-	hydrationCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	hydrationCtx, cancel := context.WithTimeout(activity.WithObservation(ctx), cfg.Timeout)
 	defer cancel()
 
 	selfOptions := client.SelfOptions{

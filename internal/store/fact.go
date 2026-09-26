@@ -411,12 +411,13 @@ func (s *Store) listFacts(ctx context.Context, p Principal, opts FactListOptions
 	return s.listFactsWithUsage(ctx, p, opts, recordUsage)
 }
 
-// maxFactHistoryAssertions bounds both recursive traversal and returned records.
-// Oversized histories fail closed because this endpoint has no paging contract.
-const maxFactHistoryAssertions = 1000
+// MaxFactHistoryAssertions bounds both recursive traversal and returned records.
+// The final returned supersedes_id indicates whether older assertions remain.
+const MaxFactHistoryAssertions = 1000
 
 // FactHistory returns bounded source assertions newest first without changing
-// legacy retrieval usage. It never silently returns a partial assertion chain.
+// legacy retrieval usage. Transports expose truncation when the final returned
+// assertion still has a predecessor. There is no paging contract.
 func (s *Store) FactHistory(ctx context.Context, p Principal, factID string) (activityResult []FactAssertion, activityErr error) {
 	ctx, finishActivity := s.beginActivityRead(ctx, p, "facts.history")
 	defer func() { finishActivity(int64(len(activityResult)), &activityErr) }()
@@ -440,15 +441,15 @@ func (s *Store) FactHistory(ctx context.Context, p Principal, factID string) (ac
 		SELECT id, fact_id, value_type, value, recurrence, source_kind, source_ref, confidence,
 		       observed_at, confirmed_at, valid_from, valid_until,
 		       COALESCE(supersedes_id, ''), created_at
-		FROM history ORDER BY chain_depth`, factID, p.AccountID, maxFactHistoryAssertions)
+		FROM history ORDER BY chain_depth`, factID, p.AccountID, MaxFactHistoryAssertions)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []FactAssertion{}
 	for rows.Next() {
-		if len(out) == maxFactHistoryAssertions {
-			return nil, fmt.Errorf("%w: fact history exceeds %d assertions", ErrFactInputInvalid, maxFactHistoryAssertions)
+		if len(out) == MaxFactHistoryAssertions {
+			break
 		}
 		var a FactAssertion
 		if err := rows.Scan(&a.ID, &a.FactID, &a.ValueType, &a.Value, &a.Recurrence,
