@@ -96,6 +96,9 @@ deployment cells under a thin global control plane.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
   capture, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.
+- [transcript-release-design.md](transcript-release-design.md): parked
+  operator-release reference, safety findings, recovery state machine, and
+  re-implementation plan.
 - [agent-collaboration.md](agent-collaboration.md): the cross-realm /
   cross-account agent collaboration substrate — realm-authority addressing,
   signed realm/agent discovery, the blind cloud relay, cross-realm conversations,
