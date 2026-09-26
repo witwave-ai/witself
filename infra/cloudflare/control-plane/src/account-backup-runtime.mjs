@@ -585,7 +585,7 @@ export class DurableAccountBackup {
         return errorResponse(boundedReason(error), 400);
       }
     }
-    if (request.method !== "POST" || url.pathname !== "/run") {
+    if (request.method !== "POST" || !["/run", "/start"].includes(url.pathname)) {
       return errorResponse("account backup endpoint not found", 404);
     }
 
@@ -597,6 +597,31 @@ export class DurableAccountBackup {
     }
     if (!this.validInput(input)) {
       return errorResponse("invalid account backup request", 400);
+    }
+
+    if (url.pathname === "/start") {
+      try {
+        let result;
+        try {
+          result = await this.fence.run(() => this.start(input));
+        } catch (error) {
+          if (!(error instanceof AccountLifecycleBusyError)) throw error;
+          // The active export owns all mutations, including its recovery alarm.
+          // A persisted acknowledgement does not need to acquire that fence.
+          result = await this.start(input, true);
+        }
+        if (!result) {
+          return errorResponse("account backup acknowledgement is not yet available", 503);
+        }
+        return json({
+          schema_version: "witself.v0",
+          account_id: this.accountId,
+          backup_id: input.backup_id,
+          ...result,
+        }, result.status === "accepted" ? 202 : 200);
+      } catch (error) {
+        return errorResponse(boundedReason(error), 500);
+      }
     }
 
     try {
@@ -706,6 +731,58 @@ export class DurableAccountBackup {
     }
 
     return this.execute(input.catalog_limit);
+  }
+
+  async start(input, readOnly = false) {
+    const state = await this.loadState();
+    const committed = state.catalog.find(
+      (record) => record.backup_id === input.backup_id,
+    );
+    if (committed) return { status: "committed", backup: committed };
+
+    const current = state.current_job;
+    if (current?.backup_id === input.backup_id && current.status === "failed") {
+      return { status: "failed", attempts: current.attempts };
+    }
+    if (current && ["pending", "running", "retrying"].includes(current.status)) {
+      if (current.backup_id !== input.backup_id) {
+        if (!readOnly) await this.scheduleRetry(current);
+        return { status: "busy", current_backup_id: current.backup_id };
+      }
+      if (!readOnly && (
+        typeof this.storage.getAlarm !== "function" ||
+        await this.storage.getAlarm() === null
+      )) {
+        await this.storage.setAlarm(this.now().getTime());
+      }
+      return { status: "accepted", scheduled_at: current.scheduled_at };
+    }
+    // Another fenced operation may still be preparing its first durable job.
+    // Never claim acceptance or invent a running id without persisted evidence.
+    if (readOnly) return null;
+
+    const source = await this.sourceCellSnapshot();
+    await this.saveState({
+      ...state,
+      revision: state.revision + 1,
+      current_job: {
+        account_id: this.accountId,
+        backup_id: input.backup_id,
+        object: input.object,
+        scheduled_at: input.scheduled_at,
+        status: "pending",
+        attempts: 0,
+        max_attempts: input.max_attempts,
+        created_at: this.now().toISOString(),
+        source_cell: source.name,
+        source_endpoint: source.endpoint,
+        source_registration_id: source.registration_id,
+        source_registered_at: source.registered_at,
+        source_route: source.route,
+      },
+    });
+    await this.storage.setAlarm(this.now().getTime());
+    return { status: "accepted", scheduled_at: input.scheduled_at };
   }
 
   async execute(catalogLimit) {
@@ -1423,11 +1500,26 @@ export async function runManualAccountBackup(
   }
   const config = accountBackupConfig(env);
   const job = backupJobIdentity(accountID, scheduledTime, 1);
-  const result = await dispatchBackup(env, job, config);
-  if (!result.acknowledged) {
+  const response = await (await backupStub(env, accountID)).fetch(
+    new Request("http://account-backup.internal/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...job,
+        max_attempts: config.max_attempts,
+        catalog_limit: config.catalog_limit,
+      }),
+    }),
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok ||
+      body?.schema_version !== "witself.v0" ||
+      body?.account_id !== job.account_id ||
+      body?.backup_id !== job.backup_id ||
+      !["accepted", "committed", "busy", "failed"].includes(body?.status)) {
     throw new Error("manual account backup was not acknowledged");
   }
-  return result.body;
+  return body;
 }
 
 async function targetHasLiveProjection(env, targetCell) {

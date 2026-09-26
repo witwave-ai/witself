@@ -4605,11 +4605,12 @@ async function handleAccountBackups(request, env, url) {
       if (!Number.isFinite(scheduledTime)) {
         return err("scheduled_at must be an RFC3339 timestamp", 400);
       }
-      return json(await runManualAccountBackup(
+      const result = await runManualAccountBackup(
         env,
         body.account_id,
         scheduledTime,
-      ));
+      );
+      return json(result, result.status === "accepted" ? 202 : 200);
     }
 
     if (
