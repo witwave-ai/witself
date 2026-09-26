@@ -78,13 +78,14 @@ Workspace details open explicitly beneath the summary.
 
 ### Browse, open, and back
 
-Memories and Conversations share a focus view. Browse the filtered list, use
-Up/Down (or Home/End) to select a visible row, and press Enter or Space to open
+Facts, Memories, Conversations, and Account → Support share a focus view.
+Browse the filtered list, use Up/Down (or Home/End) to select a visible row, and press Enter or Space to open
 it. The list collapses to an identity header with a visible Back control, and
 the detail uses the available content width. Back or Escape restores the filter,
 selected row, keyboard focus, and list scroll position within this page.
 
-Open details keep their `#/memories/:id` and `#/conversations/:key` URLs;
+Open details keep their `#/facts/:id`, `#/memories/:id`,
+`#/conversations/:key`, and `#/account/support/:id` URLs;
 list URLs represent browse mode. Deep links and browser Back/Forward work too.
 A deep link's Back loads the inventory if this page has not browsed it yet.
 Filter and scroll state stay in the page, not in the URL or persistent storage.
@@ -93,6 +94,19 @@ conversation open/back reuses already loaded metadata. Private content never
 auto-reveals: memories the server redacts stay redacted, an exact memory
 read shows what it always showed, and received message bodies still require
 Show body. Leaving a conversation clears any revealed body.
+
+Facts put the current value first, followed by source, confidence, and assertion
+history. Sensitive current values still require explicit reveal; assertion
+history is fetched only on open and sensitive history stays locked. Back
+refreshes the redacted inventory and restores its filter and position.
+
+Support uses compact ticket metadata rows and the same focus controls inside
+the Account shell. Opening a ticket uses the existing bounded, text-only thread
+read; Back reloads ticket metadata and restores selection and position. Support
+navigation state is separate from other Account sections. Manager checks and
+polling continue unchanged: a context change, refresh, or page hide drops the
+selected ticket route and clears its body. Returning never restores a cached
+thread; reading it again requires deliberate selection.
 
 Conversations fetches a received message's body only when Show body is selected,
 using the existing recipient-only observational peek API. The local proxy

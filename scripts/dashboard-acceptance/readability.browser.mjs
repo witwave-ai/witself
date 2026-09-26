@@ -9,6 +9,8 @@ const { summaryData } = require('../../internal/dashboard/testdata/overview_harn
 const staticRoot = new URL('../../internal/dashboard/static/', import.meta.url);
 const long = 'Synthetic_long_identifier_'.repeat(12);
 const value = 'A complete synthetic value <literal> with many words. '.repeat(30);
+const accountPayload = (data) => ({ schema_version: 'witself.console.account.v1', available: true, ...data });
+const tickets = Array.from({ length: 30 }, (_, i) => ({ id: 'ticket_' + i, subject: 'Synthetic question ' + i, state: 'open', last_activity_at: '2026-09-26' }));
 const facts = [
   { id: 'fact_plain', subject: long, predicate: 'example/value', value, source_kind: long, updated_at: '2026-09-23T12:00:00Z' },
   { id: 'fact_locked', subject: 'Synthetic private fact', predicate: 'example/private', sensitive: true },
@@ -42,9 +44,11 @@ test('readability: responsive lists, details, filters, transport, and summary re
       if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: await readFile(new URL('index.html', staticRoot), 'utf8') });
       if (url.pathname.startsWith('/static/')) return route.fulfill({ contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', body: await readFile(new URL(url.pathname.slice(8), staticRoot), 'utf8') });
       if (url.pathname === '/api/avatar.svg') return route.fulfill({ contentType: 'image/svg+xml', headers: { 'Cache-Control': 'private, no-store' }, body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"/>' });
-      // The console polls account context at boot; this fixture has no manager credential.
-      if (url.pathname === '/api/account/context') return route.fulfill({ status: 403, json: { error: 'forbidden' } });
+      // Synthetic manager context is served only by this intercepted transport.
+      if (url.pathname === '/api/account/context') return route.fulfill({ json: accountPayload({ account_id: 'acct_fixture', operator_id: 'op_fixture', role: 'account_owner', sections: ['overview', 'support'] }) });
       const responses = {
+        '/api/account/support': accountPayload({ tickets }),
+        '/api/account/support/ticket_29': accountPayload({ ticket: tickets[29], messages: [{ author_kind: 'operator', posted_at: '2026-09-26', body: value }] }),
         '/api/themes': { themes: ['console', 'paper', 'amber', 'high-contrast', 'midnight'] },
         '/api/prefs': { preferences: { prefs: { theme: 'console' } } },
         '/api/facts': { facts }, '/api/facts/fact_plain/history': { assertions: [] }, '/api/facts/fact_locked/history': { assertions: [] },
@@ -118,7 +122,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
         assert.equal(await page.locator('#filter-empty-' + section).isVisible(), false);
         assert.equal(await page.locator('#filter-' + section).evaluate((el) => el === document.activeElement), true);
         assert.equal(foregroundRequests(), count, 'filter/clear never fetch');
-        if ([390, 1280].includes(width) && ['memories', 'conversations'].includes(section)) {
+        if ([390, 1280].includes(width) && ['facts', 'memories', 'conversations'].includes(section)) {
           const filterText = 'Synthetic_long';
           await page.locator('#filter-' + section).fill(filterText);
           const control = page.locator('.focus-open').first();
@@ -141,6 +145,11 @@ test('readability: responsive lists, details, filters, transport, and summary re
           if (section === 'conversations') {
             assert.equal(await page.locator('.message-body-content').isVisible(), false);
             assert.equal(foregroundRequests(), beforeOpen, 'conversation Open never fetches');
+          } else if (section === 'facts') {
+            assert.deepEqual(requests.slice(beforeRoutes).filter((url) => !backgroundPolls.has(url.split('?')[0])), [
+              '/api/facts/fact_plain/history?subject=' + encodeURIComponent(long) + '&predicate=example%2Fvalue',
+            ]);
+            assert.equal(await page.locator('.fact-detail-value .value').textContent(), value);
           } else {
             // Memory history/detail are not in the browse projection. Keep the
             // two existing metadata reads explicit; never prefetch or reveal.
@@ -159,7 +168,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
           assert.equal(await control.getAttribute('aria-current'), 'true');
           assert.equal(await control.evaluate((el) => el === document.activeElement), true);
           assert.equal(await page.locator('#focus-detail').isVisible(), false);
-          assert.equal(foregroundRequests(), beforeBack, 'Back never refetches existing inventory');
+          assert.equal(foregroundRequests(), beforeBack + (section === 'facts' ? 1 : 0), 'Facts retains its existing fresh inventory read on Back; other lists reuse metadata');
           // History must drive the same component state as its visible controls.
           await page.goBack();
           await page.waitForSelector('#focus-detail .panel h2');
@@ -170,6 +179,40 @@ test('readability: responsive lists, details, filters, transport, and summary re
           assert.equal(await control.evaluate((el) => el === document.activeElement), true);
           assert.equal(await page.locator('#filter-' + section).inputValue(), filterText);
         }
+      }
+      if ([390, 1280].includes(width)) {
+        await page.evaluate(() => { location.hash = '#/account/support'; });
+        await page.waitForSelector('#filter-account-support');
+        await page.locator('#filter-account-support').fill('Synthetic question');
+        const control = page.locator('.focus-open').last();
+        await control.focus();
+        await control.scrollIntoViewIfNeeded();
+        const scroll = await page.evaluate(() => ({ view: document.getElementById('view').scrollTop, document: document.scrollingElement.scrollTop }));
+        assert.ok(scroll.view > 0 || scroll.document > 0, 'ticket list actually scrolls');
+        assert.equal(await control.getAttribute('aria-expanded'), 'false');
+        const beforeOpen = requests.length;
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('.account-thread');
+        assert.equal(await page.evaluate(() => location.hash), '#/account/support/ticket_29');
+        assert.equal(await page.locator('.account-header').count(), 1);
+        assert.equal(await page.locator('#focus-detail').evaluate(el => el === document.activeElement), true);
+        assert.equal(await page.locator('.focus-back').getAttribute('aria-expanded'), 'true');
+        assert.equal(await page.locator('#focus-inventory').isVisible(), false);
+        assert.equal(await page.locator('.account-thread').textContent(), value);
+        assert.equal(await page.locator('.account-thread literal').count(), 0);
+        assert.deepEqual(requests.slice(beforeOpen).filter(url => !backgroundPolls.has(url.split('?')[0])), ['/api/account/support/ticket_29']);
+        await noOverflow();
+        if (width === 390) await page.keyboard.press('Escape');
+        else await page.locator('.focus-back').click();
+        await page.waitForSelector('#filter-account-support');
+        assert.equal(await page.evaluate(() => location.hash), '#/account/support');
+        assert.equal(await page.locator('.account-thread').count(), 0);
+        assert.equal(await page.locator('#filter-account-support').inputValue(), 'Synthetic question');
+        assert.equal(await control.getAttribute('aria-current'), 'true');
+        assert.equal(await control.evaluate(el => el === document.activeElement), true);
+        assert.deepEqual(await page.evaluate(() => ({ view: document.getElementById('view').scrollTop, document: document.scrollingElement.scrollTop })), scroll);
+        assert.match(await page.locator('#focus-status').textContent(), /list expanded/);
+        await noOverflow();
       }
       await page.evaluate(() => { location.hash = '#/email'; });
       await page.waitForSelector('.email-sent-row');
@@ -213,10 +256,14 @@ test('readability: responsive lists, details, filters, transport, and summary re
       'Focus returns to input when incoming records hide Clear filter');
     assert.equal(foregroundRequests(), beforeLiveFilter, 'Live focus restoration never fetches');
     await filter.fill('');
+    const exactReads = () => requests.filter(url => url.startsWith('/api/fact?')).length;
+    const beforeLockedOpen = exactReads();
     await page.locator('a[href="#/facts/fact_locked"]').click();
     await page.locator('.fact-detail-value').waitFor();
     const reveal = page.getByRole('button', { name: 'reveal sensitive value', exact: true });
     await reveal.waitFor();
+    assert.equal(exactReads(), beforeLockedOpen, 'opening a sensitive fact never reveals');
+    assert.equal(await page.locator('.fact-detail-value .value').count(), 0);
     assert.ok((await reveal.boundingBox()).height >= 44);
     await page.getByRole('button', { name: 'copy value without revealing', exact: true }).click();
     await page.waitForFunction(() => window.testCopies.length === 1);

@@ -457,3 +457,74 @@ test("both-empty valid limit maps use all dimensions from the shared unit maps; 
   await h.section("plan", { limits: { malformed_only: null }, limit_defaults: {} });
   assert.doesNotMatch(h.text(), /malformed only|No plan cap/);
 });
+
+for (const cold of [false, true]) {
+  test(`support focus ${cold ? "deep link" : "browse"} preserves shell, exact thread scope, and Back position`, async t => {
+    const h = fixture(t, cold ? "#/account/support/ticket_one" : "#/overview");
+    h.document.scrollingElement = { scrollTop: 0 };
+    const status = new h.nodes.view.constructor();
+    h.nodes["focus-status"] = status;
+    const tickets = { tickets: [{ id: "ticket_other", subject: "Other" }, support.ticket] };
+    await h.boot();
+    if (!cold) {
+      await h.section("support", tickets);
+      const input = h.document.getElementById("filter-account-support");
+      input.value = "Question"; input.dispatch("input");
+      const control = h.nodes.view.querySelectorAll(".focus-open")[1];
+      assert.equal(control.getAttribute("aria-expanded"), "false");
+      assert.equal(control.getAttribute("href"), "#/account/support/ticket_one");
+      let prevented = false;
+      for (const listener of control.listeners.get("keydown")) {
+        listener({ key: "Enter", preventDefault() { prevented = true; } });
+      }
+      assert.equal(prevented, true);
+      assert.equal(h.window.location.hash, control.getAttribute("href"));
+      h.nodes.view.scrollTop = 147; h.document.scrollingElement.scrollTop = 258;
+      await h.navigate(h.window.location.hash);
+    }
+    await h.pending("/api/account/support/ticket_one").finish(payload(support));
+    assert.ok(h.nodes.view.querySelector(".account-header"), "authority shell remains mounted");
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    assert.equal(h.nodes.view.querySelector(".focus-back").getAttribute("aria-expanded"), "true");
+    assert.equal(h.document.getElementById("focus-inventory").getAttribute("hidden"), "");
+    assert.match(status.textContent, /list collapsed/);
+    assert.equal(h.nodes.view.querySelector(".account-thread").textContent, support.messages[0].body);
+    assert.equal(h.nodes.view.querySelector("img"), null);
+    const reads = accountRequests(h).length;
+    await h.check();
+    assert.equal(accountRequests(h).length, reads, "unchanged context never reloads a body");
+    h.nodes.view.scrollTop = 0; h.document.scrollingElement.scrollTop = 0;
+    h.nodes.view.querySelector(".focus-back").dispatch("click");
+    assert.equal(h.window.location.hash, "#/account/support");
+    await h.navigate(h.window.location.hash);
+    assert.doesNotMatch(h.text(), /PRIVATE_THREAD_CANARY/, "Back clears body before metadata responds");
+    await h.pending("/api/account/support").finish(payload(tickets));
+    const selected = h.nodes.view.querySelectorAll(".focus-open")[1];
+    assert.equal(h.document.activeElement, selected);
+    assert.equal(selected.getAttribute("aria-current"), "true");
+    assert.equal(h.nodes.view.scrollTop, cold ? 0 : 147);
+    assert.equal(h.document.scrollingElement.scrollTop, cold ? 0 : 258);
+    assert.equal(h.document.getElementById("filter-account-support").value, cold ? "" : "Question");
+    assert.match(status.textContent, /list expanded/);
+    await h.section("overview", { account: {} });
+    assert.equal(h.nodes.view.querySelector(".focus-open"), null);
+    await h.section("support", tickets);
+    assert.notEqual(h.document.activeElement, h.nodes.view.querySelectorAll(".focus-open")[1], "other account subsections are not Support Back");
+  });
+}
+
+test("support context change while focused drops body and restores only metadata selection", async t => {
+  const h = fixture(t); await h.boot();
+  const tickets = { tickets: [support.ticket] };
+  await h.section("support", tickets);
+  h.nodes.view.scrollTop = 99;
+  await h.section("support", support, "ticket_one");
+  await h.check(context("account_operator"));
+  assert.equal(h.window.location.hash, "#/account/support");
+  assert.doesNotMatch(h.text(), /PRIVATE_THREAD_CANARY/);
+  await h.pending("/api/account/support").finish(payload(tickets));
+  assert.equal(h.nodes.view.querySelector(".account-thread"), null);
+  assert.equal(h.document.activeElement, h.nodes.view.querySelector(".focus-open"));
+  assert.equal(h.nodes.view.scrollTop, 99);
+  assert.equal(h.requests.filter(r => r.url === "/api/account/support/ticket_one").length, 1);
+});

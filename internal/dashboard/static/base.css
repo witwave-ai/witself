@@ -595,7 +595,7 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
   .transcript-select, .transcript-open { min-height: 44px; }
 }
 
-/* Shared Memories / Conversations focus navigation. */
+/* Shared Facts / Memories / Conversations / Account Support focus navigation. */
 .focus-layout, .focus-inventory, .focus-detail { min-width: 0; width: 100%; }
 .focus-inventory > .panel:first-child h2, .focus-detail > .panel:first-child h2 { font-size: 1.1rem; color: var(--fg); }
 .focus-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--border); background: var(--bg-panel); }

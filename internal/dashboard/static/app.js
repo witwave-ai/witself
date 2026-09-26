@@ -234,6 +234,11 @@
     return focusLists[section] || (focusLists[section] = { selected: "", viewTop: 0, documentTop: 0 });
   }
   function focusRouteChanged(current) {
+    // Account routes carry a ticket rather than an id; isolate Support from
+    // the other account sections without changing their authority-owned routes.
+    if (current.section === "account" && current.subsection === "support") {
+      current = { section: "account-support", id: current.ticket };
+    }
     var previous = focusRoute;
     if (previous.section && !previous.id && $("focus-inventory")) {
       var saved = focusState(previous.section);
@@ -248,8 +253,9 @@
     focusRoute = { section: current.section, id: current.id || "" };
     focusState(current.section).returning = previous.section === current.section && !!previous.id && !current.id;
   }
+  function focusPath(section) { return section === "account-support" ? "account/support" : section; }
   function focusControl(section, id, label) {
-    return '<a class="focus-open" href="#/' + esc(section) + '/' + esc(encodeURIComponent(id)) +
+    return '<a class="focus-open" href="#/' + esc(focusPath(section)) + '/' + esc(encodeURIComponent(id)) +
       '" data-focus-id="' + esc(id) + '" aria-expanded="false" aria-controls="focus-detail">' + esc(label) + '</a>';
   }
   function announceFocus(text) {
@@ -259,14 +265,14 @@
   function focusElement(node) {
     if (node && typeof node.focus === "function") { node.focus({ preventScroll: true }); }
   }
-  function renderFocusList(section, html) {
+  function renderFocusList(section, html, target) {
     var saved = focusState(section), view = $("view");
     var caret = captureFilterFocus(section);
     var active = document.activeElement;
     var hadRowFocus = active && active.classList && active.classList.contains("focus-open");
     var viewTop = view.scrollTop;
     var documentTop = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
-    view.innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory">' + html +
+    (target || view).innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory">' + html +
       '</div><section id="focus-detail" hidden></section></div>';
     bindFilter(section);
     var controls = Array.prototype.slice.call(view.querySelectorAll(".focus-open"));
@@ -314,14 +320,14 @@
       if (document.scrollingElement) { document.scrollingElement.scrollTop = documentTop; }
     }
   }
-  function renderFocusDetail(section, id, label, html, moveFocus) {
+  function renderFocusDetail(section, id, label, html, moveFocus, target) {
     focusState(section).selected = id;
-    $("view").innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory" hidden></div>' +
+    (target || $("view")).innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory" hidden></div>' +
       '<div class="focus-header"><span class="focus-identity">' + esc(label) + '</span>' +
       '<button type="button" class="focus-back" aria-expanded="true" aria-controls="focus-detail">Back</button></div>' +
       '<section id="focus-detail" class="focus-detail" tabindex="-1" aria-label="' + esc(label) + '">' + html + '</section></div>';
     var back = $("view").querySelector(".focus-back");
-    function close() { window.location.hash = "#/" + section; }
+    function close() { window.location.hash = "#/" + focusPath(section); }
     back.addEventListener("click", close);
     $("view").querySelector(".focus-layout").addEventListener("keydown", function (event) {
       if (event.key === "Escape") { event.preventDefault(); close(); }
@@ -718,6 +724,8 @@
   var secretViewGeneration = 0;
 
   function route() {
+    var current = parseHash();
+    focusRouteChanged(current);
     cancelAccountView();
     stopSummary();
     overviewViewGeneration++;
@@ -727,8 +735,6 @@
     secretViewGeneration++;
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
-    var current = parseHash();
-    focusRouteChanged(current);
     setNav(current.section);
     if (current.section === "account") { return viewAccount(current); }
     if (current.section === "transcripts" && current.id) { return viewTranscript(current.id, current.query); }
@@ -1039,17 +1045,19 @@
   function accountSupportHTML(data, ticket) {
     if (ticket) {
       if (!data.ticket || data.ticket.id !== ticket) { return accountNotice("Selected thread unavailable."); }
-      return accountCard("Selected support ticket", '<a href="#/account/support">Back to ticket metadata</a>' + accountRows(data.ticket, accountTicketFields)) +
+      return accountCard("Selected support ticket", accountRows(data.ticket, accountTicketFields)) +
         accountCard("Thread", accountNotice("Selected read only. Thread text is cleared when you leave, refresh or hide this page.") +
           (!Array.isArray(data.messages) ? accountNotice("Thread unknown.") : data.messages.length ? data.messages.map(function (message) {
             return '<article class="account-item">' + accountRows(message, [["author_kind", "Author"], ["posted_at", "Posted"]]) +
               '<p class="account-thread">' + esc(accountText(message.body)) + "</p></article>";
           }).join("") : accountNotice("No messages returned.")) + accountTruncated(data));
     }
-    return accountCard("Support", accountNotice("Ticket metadata only. Select a ticket to read its bounded thread.") +
+    return accountCard("Support", accountNotice("Ticket metadata only. Select a ticket to read its bounded thread.") + filterInputHTML("account-support") +
       (!Array.isArray(data.tickets) ? accountNotice("Ticket metadata unknown.") : data.tickets.length ? data.tickets.map(function (row) {
-        return '<div class="account-item">' + (accountID(row.id) ? '<a href="#/account/support/' + esc(encodeURIComponent(row.id)) + '">Read ticket</a>' : "") +
-          accountRows(row, accountTicketFields) + "</div>";
+        return '<div class="row"><span class="grow">' + (accountID(row.id) ?
+          focusControl("account-support", row.id, accountText(row.subject) || row.id) : esc(accountText(row.subject))) +
+          '</span><span class="mono">' + esc(accountText(row.id)) + '</span><span class="dim">' +
+          esc(accountText(row.state)) + '</span><span class="dim">' + esc(accountText(row.last_activity_at)) + '</span></div>';
       }).join("") : accountNotice("No support tickets returned.")) + accountTruncated(data));
   }
   function accountSectionHTML(data, current) {
@@ -1077,7 +1085,11 @@
       '</nav><button id="account-refresh" type="button">Refresh selected section</button></section>' +
       '<div id="account-content" role="status" aria-live="polite">Loading…</div></div>';
     $("account-refresh").addEventListener("click", function () {
-      if (!accountBusy) { loadAccountSection(dropAccountTicket(), false); }
+      if (!accountBusy) {
+        var next = dropAccountTicket();
+        focusRouteChanged(next);
+        loadAccountSection(next, false);
+      }
     });
   }
   function viewAccount(current) {
@@ -1131,7 +1143,14 @@
         if (changed) { accountShell(current); $("account-refresh").disabled = true; }
       }
       if (data.available !== true) { throw { code: "unavailable" }; }
-      $("account-content").innerHTML = accountSectionHTML(data, current);
+      var html = accountSectionHTML(data, current);
+      if (current.subsection === "support") {
+        if (current.ticket) {
+          renderFocusDetail("account-support", current.ticket, accountText(data.ticket && data.ticket.subject) || current.ticket, html, true, $("account-content"));
+        } else {
+          renderFocusList("account-support", html, $("account-content"));
+        }
+      } else { $("account-content").innerHTML = html; }
       var scanButton = $("account-scan");
       if (scanButton) { scanButton.addEventListener("click", function () { loadAccountSection(current, true); }); }
     }).catch(function (error) {
@@ -1876,17 +1895,13 @@
 
   function renderFactsList(facts) {
     var rows = (facts || []).map(function (fact) {
-      return '<div class="row"><span class="grow"><a href="#/facts/' + esc(fact.id) + '">' +
-        esc(fact.subject) + " \u00b7 " + esc(fact.predicate) + "</a></span>" +
+      return '<div class="row"><span class="grow">' + focusControl("facts", fact.id, fact.subject + " \u00b7 " + fact.predicate) + "</span>" +
         '<span class="fact-value mono">' + factValueHTML(fact) + "</span>" +
         '<span class="dim">' + esc(fact.source_kind || "") + "</span>" +
         '<span class="dim">' + esc((fact.updated_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
-    var caret = captureFilterFocus("facts");
-    $("view").innerHTML = '<div class="panel"><h2>Facts</h2>' + filterInputHTML("facts") +
-      '<div class="list">' + (rows || '<div class="empty">no facts</div>') + "</div></div>";
-    bindFilter("facts");
-    restoreFilterFocus("facts", caret);
+    renderFocusList("facts", '<div class="panel"><h2>Facts</h2>' + filterInputHTML("facts") +
+      '<div class="list">' + (rows || '<div class="empty">no facts</div>') + "</div></div>");
   }
 
   function viewFacts() {
@@ -1937,15 +1952,15 @@
         '<span class="dim mono">' + esc(assertion.confidence != null ? assertion.confidence.toFixed(2) : "") + "</span>" +
         '<span class="dim">' + esc((assertion.observed_at || "").slice(0, 19)) + "</span></div>";
     }).join("");
-    $("view").innerHTML =
+    renderFocusDetail("facts", fact.id, fact.subject + " \u00b7 " + fact.predicate,
       '<div class="panel"><h2>' + esc(fact.subject) + " \u00b7 " + esc(fact.predicate) + "</h2>" +
       '<div class="fact-value fact-detail-value mono">' + factValueHTML(fact) + "</div></div>" +
       '<div class="panel"><h2>Details</h2><dl class="kv">' +
+      "<dt>source</dt><dd>" + esc(fact.source_kind || "") + (fact.source_ref ? " (" + esc(fact.source_ref) + ")" : "") + "</dd>" +
+      "<dt>confidence</dt><dd>" + esc(fact.confidence != null ? fact.confidence.toFixed(2) : "") + "</dd>" +
       "<dt>id</dt><dd>" + esc(fact.id) + "</dd>" +
       "<dt>value type</dt><dd>" + esc(fact.value_type || "") + "</dd>" +
       "<dt>cardinality</dt><dd>" + esc(fact.cardinality || "") + "</dd>" +
-      "<dt>source</dt><dd>" + esc(fact.source_kind || "") + (fact.source_ref ? " (" + esc(fact.source_ref) + ")" : "") + "</dd>" +
-      "<dt>confidence</dt><dd>" + esc(fact.confidence != null ? fact.confidence.toFixed(2) : "") + "</dd>" +
       "<dt>sensitive</dt><dd>" + esc(fact.sensitive ? "yes" : "no") + "</dd>" +
       "<dt>usage</dt><dd>" + esc(fact.usage_count != null ? fact.usage_count : "") + "</dd>" +
       "<dt>updated</dt><dd>" + esc((fact.updated_at || "").slice(0, 19)) + "</dd>" +
@@ -1953,7 +1968,7 @@
       '<div class="panel"><h2>Assertion history</h2>' +
       (truncated ? '<div class="fact-note">History truncated: showing the newest 1,000 assertions.</div>' : '') +
       (fact.sensitive ? '<div class="fact-note">sensitive history values stay locked in v1 &mdash; no per-assertion reveal.</div>' : "") +
-      '<div class="list">' + (history || '<div class="empty">no assertions</div>') + "</div></div>";
+      '<div class="list">' + (history || '<div class="empty">no assertions</div>') + "</div></div>");
   }
 
   // Copy-without-reveal: the value goes fetch response -> clipboard and is
