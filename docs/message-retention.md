@@ -174,6 +174,11 @@ thread, message, or content value is a metric label.
 
 ## Rollout
 
+As of 2026-09-26, the checked-in configuration enables transcript and message retention in value-free `preview` mode on both
+`civo-sandbox-use1-backup` and `civo-sandbox-use1-serving`; live operation
+requires owner verification after Argo sync, and enforcement is a separate
+reviewed config-only change.
+
 1. Deploy the cell image and migration with message retention disabled.
 2. Legacy applied snapshots without `messaging_entitlement_version` continue to
    allow messaging; this prevents a cell-first rollout from disabling existing

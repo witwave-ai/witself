@@ -2122,6 +2122,16 @@ down migration deliberately refuses before removing its triggers. Gate receive
 and send off, drain or evacuate the account data under the normal migration
 contract, and roll forward; never disable triggers to force a rollback.
 
+As of 2026-09-26, the checked-in overlays for `civo-sandbox-use1-backup` and
+`civo-sandbox-use1-serving` enable transcript and message retention in
+value-free `preview` mode (batch sizes 100/25, interval `5m`, timeout `2m`).
+Agent-email retention is unchanged: the serving cell keeps its existing
+`enforce` posture described above, and the backup cell (which receives no
+mail) runs it in `preview`. The owner must verify preview batches and
+eligible/deferred counts on each cell after Argo sync before any transcript
+or message enforcement decision, which is a separate reviewed config-only
+change.
+
 For a new cell, first run this exact shape in preview and review only value-free
 counts, then explicitly promote it to enforcement before admitting a finite
 cohort. Once production enforcement is active, Professional mail automatically

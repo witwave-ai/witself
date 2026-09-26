@@ -61,6 +61,30 @@ apps:
     topologySpreadConstraints: []
     worker:
       enabled: true
+      # Preview reports value-free counts only.
+      # The flip to enforce is a separate reviewed config-only change.
+      transcriptRetention:
+        enabled: true
+        mode: preview
+        batchSize: 100
+        interval: 5m
+        batchTimeout: 2m
+      # Preview reports value-free counts only.
+      # The flip to enforce is a separate reviewed config-only change.
+      messageRetention:
+        enabled: true
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
+      # Preview reports value-free counts only.
+      # The flip to enforce is a separate reviewed config-only change.
+      agentEmailRetention:
+        enabled: true
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
       # Preview-first per the chart's own rollout contract: value-free
       # counts only until a config-only flip to enforce. grace stays the
       # chart default 720h - the privacy policy's 30 days.
