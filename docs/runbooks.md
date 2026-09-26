@@ -467,6 +467,10 @@ the cell (stops placement), evacuates every account into a per-account archive
 in Cloudflare R2, then removes the cell from the fleet and tears down the AWS
 resources. The accounts wait in R2 as `archived — awaiting placement` until
 they are restored onto another cell.
+Drain uses an accepting-only `PATCH /v1/cells/:name` with `accepting=false` and
+requires control plane **v0.0.274 or newer** (the #378 release).
+An unregistered cell skips fleet removal and proceeds to infrastructure destroy,
+subject to the existing destroy safety guards.
 
 Before using this procedure, complete the separate unprotect update in
 [Deletion protection and break-glass](#deletion-protection-and-break-glass).
