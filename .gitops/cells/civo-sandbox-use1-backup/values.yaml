@@ -24,9 +24,11 @@ apps:
     # Cells have drifted to different latest digests. Preserve this cell's
     # running image content; cross-cell alignment is a separate reviewed change.
     # A tag-to-digest reference change can still roll the StatefulSet pod.
+    allowInsecureImages: true
     image:
-      registry: registry-1.docker.io
-      repository: bitnami/postgresql
+      registry: "ghcr.io"
+      repository: "witwave-ai/images/postgresql"
+      tag: "0.0.307-civo-sandbox-use1-backup"
       digest: sha256:a727ea9d5ceb64beb404afeb62a4b757fe3c33c2a09af86dc391a3a0dfed6049
     networkPolicy:
       enabled: true
