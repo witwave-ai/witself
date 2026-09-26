@@ -456,7 +456,14 @@ for (const status of ["pending", "running", "retrying"]) {
       schema_version: "witself.v0", account_id: ACCOUNT,
       backup_id: other.backup_id, status: "busy", current_backup_id: h.job.backup_id,
     });
-    assert.equal(h.storage.alarm, NOW.getTime() + (status === "retrying" ? 180_000 : 60_000));
+    assert.equal(h.storage.alarm, NOW.getTime() + (status === "retrying" ? 180_000 : status === "running" ? 60_000 : 0));
+    // An already-armed executor alarm is never pushed later by a busy answer.
+    h.storage.alarm = NOW.getTime() + 5_000;
+    const again = await h.instance.fetch(h.request("/start", other));
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).status, "busy");
+    assert.equal(h.storage.alarm, NOW.getTime() + 5_000);
+    assert.deepEqual(h.storage.values.get("account-backups"), before);
     assert.deepEqual(h.storage.values.get("account-backups"), before);
     const repeated = await h.instance.fetch(h.request("/start"));
     assert.equal(repeated.status, 202);

@@ -3348,8 +3348,12 @@ the committed catalog. Inspect `current_job.status` for progress or failure
 and `last_committed_at` for the latest committed timestamp; the timestamp
 alone does not prove the selected generation committed. A repeat for an
 already committed id returns HTTP 200 `committed`; a terminally failed id
-returns HTTP 200 `failed`. Then run the isolated rollback-only restore drill
-only after the selected id is committed:
+returns HTTP 200 `failed`. A 502 is still possible in the sub-second window
+while another operation is preparing its first durable job; repeating the
+same call (same `scheduled_at`, or none within the same minute) is safe and
+idempotent, so retry it instead of probing with new generations. Then run
+the isolated rollback-only restore drill only after the selected id is
+committed:
 
 ```sh
 BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"

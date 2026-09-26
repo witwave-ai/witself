@@ -746,15 +746,10 @@ export class DurableAccountBackup {
     }
     if (current && ["pending", "running", "retrying"].includes(current.status)) {
       if (current.backup_id !== input.backup_id) {
-        if (!readOnly) await this.scheduleRetry(current);
+        if (!readOnly) await this.ensureAlarm(current);
         return { status: "busy", current_backup_id: current.backup_id };
       }
-      if (!readOnly && (
-        typeof this.storage.getAlarm !== "function" ||
-        await this.storage.getAlarm() === null
-      )) {
-        await this.storage.setAlarm(this.now().getTime());
-      }
+      if (!readOnly) await this.ensureAlarm(current);
       return { status: "accepted", scheduled_at: current.scheduled_at };
     }
     // Another fenced operation may still be preparing its first durable job.
@@ -781,8 +776,30 @@ export class DurableAccountBackup {
         source_route: source.route,
       },
     });
+    // If the isolate dies between the state write above and this alarm, the
+    // job sits pending with no alarm until the next /start (any generation)
+    // or /run re-arms it through ensureAlarm; a same-slot retry is idempotent.
     await this.storage.setAlarm(this.now().getTime());
     return { status: "accepted", scheduled_at: input.scheduled_at };
+  }
+
+  // ensureAlarm arms the executor alarm for an open job only when none is
+  // set. The alarm is the executor for a /start-created job, so an
+  // acknowledgement must never push an already-armed alarm later: a pending
+  // job without an alarm fires now, anything else follows the retry policy.
+  async ensureAlarm(job) {
+    if (typeof this.storage.setAlarm !== "function") return;
+    if (
+      typeof this.storage.getAlarm === "function" &&
+      await this.storage.getAlarm() !== null
+    ) {
+      return;
+    }
+    if (job.status === "pending" && !validDate(job.retry_at)) {
+      await this.storage.setAlarm(this.now().getTime());
+      return;
+    }
+    await this.scheduleRetry(job);
   }
 
   async execute(catalogLimit) {
