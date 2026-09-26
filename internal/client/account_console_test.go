@@ -87,7 +87,13 @@ func TestAccountConsoleTransportBoundsRedirectAndErrors(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			// Only the cancel case relies on the deadline; the bounded-body cases must
+			// hit the byte limit before any timer fires, even on a loaded runner.
+			timeout := 10 * time.Second
+			if tc == "cancel" {
+				timeout = 100 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
 			defer cancel()
 			_, err := VerifyAccountConsoleManager(ctx, srv.URL, "fake-manager", "acct_test")
 			want := ErrAccountConsoleUnavailable
