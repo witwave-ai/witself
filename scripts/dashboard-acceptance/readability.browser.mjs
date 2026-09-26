@@ -22,6 +22,11 @@ test('readability: responsive lists, details, filters, transport, and summary re
   try {
     const page = await browser.newPage();
     const errors = [], requests = [];
+    // The console polls account context every 5 s and refreshes the summary on
+    // its own timer; under the installed clock those still fire in real time.
+    // "Never fetch" assertions count only requests a user action could cause.
+    const backgroundPolls = new Set(['/api/account/context', '/api/summary']);
+    const foregroundRequests = () => requests.filter((url) => !backgroundPolls.has(url.split('?')[0])).length;
     page.on('pageerror', (error) => errors.push(error.message));
     await page.addInitScript(() => {
       window.EventSource = class extends EventTarget {
@@ -98,19 +103,19 @@ test('readability: responsive lists, details, filters, transport, and summary re
           assert.equal(await page.locator('.transcript-row').first().evaluate((el) => getComputedStyle(el).display), width <= 700 ? 'grid' : 'table-row');
           assert.equal(await page.locator('.transcript-mobile-label').first().isVisible(), width <= 700);
           assert.ok(!(await page.locator('#view').textContent()).includes('synthetic-parent'), 'workspace retains only basename');
-          const beforeSelect = requests.length;
+          const beforeSelect = foregroundRequests();
           await page.locator('.transcript-select').first().focus();
           await page.keyboard.press('Space');
           assert.equal(await page.locator('.transcript-select').first().getAttribute('aria-pressed'), 'true');
-          assert.equal(requests.length, beforeSelect, 'keyboard selection never fetches a body');
+          assert.equal(foregroundRequests(), beforeSelect, 'keyboard selection never fetches a body');
         }
-        const count = requests.length;
+        const count = foregroundRequests();
         await page.locator('#filter-' + section).fill('impossible-no-match');
         assert.equal(await page.locator('#filter-empty-' + section).isVisible(), true);
         await page.getByRole('button', { name: 'Clear filter', exact: true }).click();
         assert.equal(await page.locator('#filter-empty-' + section).isVisible(), false);
         assert.equal(await page.locator('#filter-' + section).evaluate((el) => el === document.activeElement), true);
-        assert.equal(requests.length, count, 'filter/clear never fetch');
+        assert.equal(foregroundRequests(), count, 'filter/clear never fetch');
       }
       await page.evaluate(() => { location.hash = '#/email'; });
       await page.waitForSelector('.email-sent-row');
@@ -140,7 +145,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
     const filter = page.locator('#filter-facts');
     await filter.fill('newly-matching-record');
     await page.locator('#clear-filter-facts').focus();
-    const beforeLiveFilter = requests.length;
+    const beforeLiveFilter = foregroundRequests();
     await page.evaluate((facts) => window.testStream.dispatchEvent(new MessageEvent('facts', {
       data: JSON.stringify({ facts }),
     })), facts);
@@ -152,7 +157,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
     assert.equal(await page.locator('#filter-empty-facts').isVisible(), false);
     assert.equal(await filter.evaluate((el) => el === document.activeElement), true,
       'Focus returns to input when incoming records hide Clear filter');
-    assert.equal(requests.length, beforeLiveFilter, 'Live focus restoration never fetches');
+    assert.equal(foregroundRequests(), beforeLiveFilter, 'Live focus restoration never fetches');
     await filter.fill('');
     await page.locator('a[href="#/facts/fact_locked"]').click();
     await page.locator('.fact-detail-value').waitFor();
