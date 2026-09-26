@@ -367,6 +367,9 @@ plus the skipped markers, because a hook-spawned detached flush prints nothing.
   implements the companion-emitted fence option; the operator-purge and
   liveness options remain undecided. The delegation orchestrator must wire
   this call into job completion.
+- [Transcript release design](transcript-release-design.md): parked
+  operator-release reference, unresolved safety findings, and proposed
+  re-implementation slices for unfenced residue.
 - [Issue #336](https://github.com/witwave-ai/witself/issues/336): the Codex
   persistence-boundary exclusion shipped in `v0.0.273` via
   [PR #341](https://github.com/witwave-ai/witself/pull/341). With that release
