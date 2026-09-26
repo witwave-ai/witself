@@ -44,7 +44,7 @@ func TestWriteFlushesReadableChunksBeforeSourceExhaustion(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		tr := tar.NewReader(gz)
 		// Every flushed entry must already be fully readable without the gzip footer.
 		for i := 0; i < flushes; i++ {

@@ -78,7 +78,7 @@ func TestMigration97And98ExportIndexesPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off`); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestExportTranscriptFirstChunkPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	source.tx = tx
 	src := &countedExportSource{querySource: source}
 	var archive bytes.Buffer
@@ -210,7 +210,7 @@ func TestExportTranscriptFirstChunkPostgres(t *testing.T) {
 		t.Fatalf("flushes=%d, want manifest and multiple chunks", flushes)
 	}
 	restored := 0
-	_, err = archiveexport.Read(ctx, bytes.NewReader(archive.Bytes()), archiveexport.ImportOptions{CurrentSchema: SchemaVersion(), Row: func(table string, row []byte) error {
+	_, err = archiveexport.Read(ctx, bytes.NewReader(archive.Bytes()), archiveexport.ImportOptions{CurrentSchema: SchemaVersion(), Row: func(_ string, row []byte) error {
 		var entry struct {
 			Sequence int `json:"sequence"`
 		}
@@ -245,7 +245,7 @@ func TestExportKeysetBatchesKeepSnapshotAndOrderingPostgres(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer tx.Rollback(ctx)
+			defer func() { _ = tx.Rollback(ctx) }()
 			q := `SELECT jsonb_build_object('id',id) FROM export_rows WHERE account_id=$1 ORDER BY group_id, created_at, id`
 			if recursive {
 				q = `WITH RECURSIVE source AS (SELECT * FROM export_rows WHERE account_id=$1) SELECT jsonb_build_object('id',id) FROM source ORDER BY group_id, created_at, id`
@@ -287,7 +287,7 @@ func TestExportKeysetBatchesKeepSnapshotAndOrderingPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	src := &querySource{tx: tx, table: "fixture", q: `SELECT jsonb_build_object('id',id) FROM export_rows WHERE account_id=$1 ORDER BY id`, arg: "account", keyset: []string{"id"}}
