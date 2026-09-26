@@ -8,49 +8,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Only identity and viewport bookkeeping survive inventory focus. Metadata
-// remains in the existing allow-listed projection, not in another cache.
-type transcriptReaderPosition struct {
-	key          string
-	offset       int
-	tail, opened bool
-}
-
-// Transcript inventory and reader share content but have different heights.
-// Save the reader before changing geometry; inventory can show its summary
-// without replacing the reader's offset or intent to follow the live tail.
-func (m *Model) setDetailFocus(focus int) {
-	if m.panel != 1 || m.account.mode {
-		m.focus = focus
-		m.renderDetail(false)
-		return
-	}
-	p := &m.transcriptReader
-	if p.key != m.states[1].key {
-		*p = transcriptReaderPosition{key: m.states[1].key}
-	}
-	restore := m.focus == 0 && focus != 0 && p.opened
-	if m.focus != 0 && focus == 0 {
-		p.offset, p.tail = m.vp.YOffset, m.actionCount() > 0 && m.evidenceFrom == 0 && m.vp.AtBottom()
-		p.opened = p.opened || m.actionCount() > 0
-	}
-	m.focus = focus
-	if focus == 0 {
-		m.vp.GotoTop()
-	}
-	m.renderDetail(false)
-	if restore {
-		if p.tail {
-			m.vp.GotoBottom()
-		} else {
-			m.vp.SetYOffset(p.offset)
-		}
-	}
-	if focus != 0 && m.actionCount() > 0 {
-		p.opened = true
-	}
-}
-
 const notRecorded = "Not recorded"
 
 // Capture metadata is not a free-form display surface. Only strings in these
@@ -129,29 +86,11 @@ func transcriptColumns(t object) []string {
 
 var transcriptLabels = []string{"Agent", "Location", "AI client", "Workspace", "Updated"}
 
-// This split is also used by resize, so viewport/action offsets always refer
-// to the actual reader height, never to the inventory above it.
+// Kept as a thin wrapper for the existing transcript geometry contract tests.
+func (m *Model) transcriptView(w, h int) string { return m.panelView(w, h) }
+
 func (m *Model) transcriptHeights(h int) (inventory, detail int) {
-	if h < 7 {
-		return 0, h
-	}
-	inventory = min(12, max(8, h/3))
-	if m.focus != 0 {
-		inventory = 5
-	}
-	if m.width < 70 && m.focus == 0 {
-		inventory = min(10, h-3)
-	}
-	inventory = min(inventory, h-3)
-	return inventory, h - inventory
-}
-func (m *Model) transcriptView(w, h int) string {
-	ih, dh := m.transcriptHeights(h)
-	inv := ""
-	if ih > 0 {
-		inv = m.box(m.transcriptInventory(w-4, ih-2), w, ih, m.focus == 0) + "\n"
-	}
-	return inv + m.box(m.vp.View(), w, dh, m.focus != 0)
+	return m.panelHeights(1, h)
 }
 func (m *Model) transcriptInventory(w, h int) string {
 	s := &m.states[1]
