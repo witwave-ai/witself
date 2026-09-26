@@ -302,6 +302,35 @@ export function trackMessageDetailRequests(page) {
   return requests;
 }
 
+async function exerciseFocusNavigation(page, expect, section, pending) {
+  const control = page.locator('.focus-open').first();
+  const id = await control.getAttribute('data-focus-id');
+  const label = await control.textContent();
+  const href = await control.getAttribute('href');
+  await page.locator('#filter-' + section).fill(label);
+  await expect(control).toHaveAttribute('aria-expanded', 'false');
+  await control.press('Enter');
+  // The detail heading is always rendered with text; a fixture memory may have
+  // empty content, and an empty div is not "visible" to Playwright.
+  await expect(page.locator('#focus-detail .panel h2').first()).toBeVisible();
+  await expect(page.locator('#focus-detail .panel h2').first()).toContainText(section === 'memories' ? 'Memory ' + id : label);
+  await expect(page.locator('#focus-inventory')).toBeHidden();
+  await expect(page.locator('.focus-identity')).toHaveText(section === 'memories' ? id : label);
+  await expect(page.locator('#focus-detail')).toBeFocused();
+  await expect(page.locator('.focus-back')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#focus-status')).toContainText('list collapsed');
+  assert.equal(await page.evaluate(() => location.hash), href);
+  if (section === 'conversations') await expect(page.locator('.message-body-content').first()).toBeHidden();
+  await expect.poll(() => pending.size).toBe(0);
+  await page.locator('.focus-back').click();
+  await expect(page.locator('#filter-' + section)).toHaveValue(label);
+  await expect(control).toHaveAttribute('aria-current', 'true');
+  await expect(control).toBeFocused();
+  await expect(page.locator('#focus-detail')).toBeHidden();
+  await expect(page.locator('#focus-status')).toContainText('list expanded');
+  await page.locator('#filter-' + section).fill('');
+}
+
 async function exerciseConversationBodyPreview(page, expect, requests, pending) {
   const fixture = 'Received body preview.\nLiteral text: <em>not markup</em>';
   const expectedRequest = { method: 'GET', path: '/api/messages/msg_1/body' };
@@ -498,6 +527,9 @@ export async function run(args) {
             await expect(page.locator('.email-sent-row').first()).toContainText('safe sent subject');
             await expect(page.getByRole('heading', { name: 'Email storage', exact: true })).toBeVisible();
             await expect(page.getByRole('progressbar', { name: 'account-wide attachment capacity' })).toBeVisible();
+          }
+          if (['memories', 'conversations'].includes(panel.name)) {
+            await exerciseFocusNavigation(page, expect, panel.name, pending);
           }
           if (panel.name === 'conversations') {
             await exerciseConversationBodyPreview(page, expect, messageDetailRequests, pending);

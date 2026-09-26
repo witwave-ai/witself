@@ -12,6 +12,7 @@ const vm = require("node:vm");
 // and execution semantics; these tests control delayed completion ordering.
 function dom() {
   const htmlWrites = [];
+  let activeElement = null;
   const decode = (value) => value.replace(/&(?:amp|lt|gt|quot|#39);/g, (part) => ({
     "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'",
   }[part]));
@@ -24,9 +25,18 @@ function dom() {
       this.parentNode = null;
       this.ownText = "";
       this.style = {};
+      this.listeners = new Map();
+      this.scrollTop = 0;
+      this.value = "";
       this.classList = {
         contains: (name) => (this.attrs.class || "").split(/\s+/).includes(name),
-        toggle() {},
+        toggle: (name, force) => {
+          const classes = new Set((this.attrs.class || "").split(/\s+/).filter(Boolean));
+          const add = force === undefined ? !classes.has(name) : Boolean(force);
+          if (add) classes.add(name); else classes.delete(name);
+          this.attrs.class = [...classes].join(" ");
+          return add;
+        },
       };
     }
     get id() { return this.attrs.id; }
@@ -35,9 +45,19 @@ function dom() {
     get disabled() { return Object.hasOwn(this.attrs, "disabled"); }
     set disabled(value) { if (value) this.attrs.disabled = ""; else delete this.attrs.disabled; }
     getAttribute(name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; }
-    setAttribute(name, value) { this.attrs[name] = String(value); }
+    setAttribute(name, value) { this.attrs[name] = String(value); if (name === "value") this.value = String(value); }
     removeAttribute(name) { delete this.attrs[name]; }
-    addEventListener() {}
+    addEventListener(name, listener) {
+      if (!this.listeners.has(name)) this.listeners.set(name, []);
+      this.listeners.get(name).push(listener);
+    }
+    dispatch(name, extra = {}) {
+      const event = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
+      for (const listener of this.listeners.get(name) || []) listener.call(this, event);
+      return event;
+    }
+    focus() { activeElement = this; this.dispatch("focus"); }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
     get textContent() { return this.ownText + this.children.map((child) => child.textContent).join(""); }
     set textContent(value) {
       this.children.forEach((child) => { child.parentNode = null; });
@@ -103,10 +123,11 @@ function dom() {
       this.parentNode = null;
     }
   }
-  const nodes = Object.fromEntries(["view", "breadcrumb", "status-upstream", "status-sse", "live-dot", "live-label"].map((id) => [id, new Element()]));
+  const nodes = Object.fromEntries(["view", "focus-status", "breadcrumb", "status-upstream", "status-sse", "live-dot", "live-label"].map((id) => [id, new Element()]));
   return {
     nodes, htmlWrites,
     document: {
+      get activeElement() { return activeElement; },
       getElementById(id) { return nodes[id] || nodes.view.querySelector("#" + id); },
       querySelectorAll() { return []; },
     },
@@ -352,17 +373,21 @@ test("hide cancels pending work and late completion cannot replace a newer revea
 
 test("navigation clears immediately and leaving then returning rejects old body and metadata responses", async () => {
   const h = harness();
-  await openThread(h);
+  h.holdLists(true);
+  const oldListView = h.navigate("#/conversations");
+  const oldListReads = h.requests.slice(-2);
+  assert.equal(oldListReads.length, 2);
+  h.holdLists(false);
+  await h.navigate("#/conversations/peer");
   const shown = h.click();
   h.bodyRequests()[0].resolve(response({ body: "visible before navigation" }));
   await shown;
   const oldContent = h.preview().querySelector(".message-body-content");
-  h.holdLists(true);
-  const oldListView = h.navigate("#/conversations");
-  assert.equal(oldContent.textContent, "", "navigation clears before destination reads finish");
+  const requestCount = h.requests.length;
+  await h.navigate("#/conversations");
+  assert.equal(oldContent.textContent, "", "Back clears revealed text immediately");
   assert.equal(oldContent.hidden, true);
-  const oldListReads = h.requests.slice(-2);
-  h.holdLists(false);
+  assert.equal(h.requests.length, requestCount, "Back uses existing metadata");
   await h.navigate("#/conversations/peer");
   assert.equal(h.preview().querySelector(".message-body-content").hidden, true);
   const oldReveal = h.click();
@@ -455,4 +480,73 @@ test("removed preview nodes are cleared and cannot receive delayed body text", a
   await pending;
   assert.equal(node.querySelector(".message-body-content").textContent, "");
   assert.equal(h.nodes.view.textContent.includes("removed message"), false);
+});
+
+for (const back of ["button", "Escape", "history"]) {
+  test(`conversation focus navigation via ${back} restores browse state without requests`, async () => {
+    const h = harness();
+    h.outbox.forEach((message) => { message.to.agent_name = "Synthetic peer"; });
+    h.inbox.push(metadata("another", { from: { agent_id: "other", agent_name: "Synthetic other" } }));
+    h.inbox.push(metadata("filtered", { from: { agent_id: "hidden", agent_name: "Filtered away" } }));
+    h.document.scrollingElement = { scrollTop: 0 };
+    await h.navigate("#/conversations");
+    const input = h.document.getElementById("filter-conversations");
+    input.value = "Synthetic";
+    input.dispatch("input");
+    const controls = h.nodes.view.querySelectorAll(".focus-open");
+    controls[0].focus();
+    for (const [key, index] of [["ArrowDown", 1], ["End", 1], ["ArrowUp", 0], ["Home", 0]]) {
+      assert.equal(h.document.activeElement.dispatch("keydown", { key }).defaultPrevented, true);
+      assert.equal(h.document.activeElement, controls[index]);
+    }
+    h.nodes.view.scrollTop = 220;
+    h.document.scrollingElement.scrollTop = 340;
+    const count = h.requests.length;
+    controls[0].dispatch("keydown", { key: back === "button" ? " " : "Enter" });
+    assert.equal(h.window.location.hash, "#/conversations/peer");
+    await h.navigate(h.window.location.hash);
+    assert.equal(h.document.getElementById("focus-inventory").hidden, true);
+    assert.equal(h.nodes.view.querySelector(".focus-identity").textContent, "Synthetic peer");
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    assert.match(h.nodes["focus-status"].textContent, /list collapsed/);
+    assert.equal(h.requests.length, count, "Open never refetches metadata or a body");
+    assert.equal(h.preview().querySelector(".message-body-content").hidden, true);
+    if (back === "button") h.nodes.view.querySelector(".focus-back").dispatch("click");
+    else if (back === "Escape") h.nodes.view.querySelector(".focus-layout").dispatch("keydown", { key: "Escape" });
+    else h.window.location.hash = "#/conversations";
+    assert.equal(h.window.location.hash, "#/conversations");
+    await h.navigate(h.window.location.hash);
+    assert.equal(h.document.getElementById("focus-inventory").hidden, false);
+    assert.equal(h.document.getElementById("focus-detail").hidden, true);
+    assert.equal(h.document.getElementById("filter-conversations").value, "Synthetic");
+    assert.equal(h.document.activeElement.getAttribute("data-focus-id"), "peer");
+    assert.equal(h.document.activeElement.getAttribute("aria-current"), "true");
+    assert.equal(h.document.activeElement.closest(".row").classList.contains("selected"), true);
+    assert.equal(h.document.activeElement.getAttribute("aria-expanded"), "false");
+    assert.equal(h.nodes.view.scrollTop, 220);
+    assert.equal(h.document.scrollingElement.scrollTop, 340);
+    assert.equal(h.requests.length, count);
+    await h.navigate("#/conversations/peer"); // browser Forward
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    assert.equal(h.bodyRequests().length, 0);
+  });
+}
+
+test("conversation deep link expands with Back and keeps reveal explicit on reopening", async () => {
+  const h = harness();
+  await h.navigate("#/conversations/peer");
+  assert.equal(h.document.getElementById("focus-inventory").hidden, true);
+  assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+  assert.equal(h.bodyRequests().length, 0);
+  const pending = h.click();
+  h.bodyRequests()[0].resolve(response({ body: "explicit private preview" }));
+  await pending;
+  const content = h.preview().querySelector(".message-body-content");
+  h.nodes.view.querySelector(".focus-back").dispatch("click");
+  await h.navigate(h.window.location.hash);
+  assert.equal(content.textContent, "");
+  assert.equal(h.document.activeElement.getAttribute("data-focus-id"), "peer");
+  await h.navigate("#/conversations/peer");
+  assert.equal(h.preview().querySelector(".message-body-content").hidden, true);
+  assert.equal(h.requests.length, 3, "only initial inbox/outbox and explicitly requested body");
 });

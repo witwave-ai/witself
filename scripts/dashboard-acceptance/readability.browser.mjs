@@ -52,6 +52,8 @@ test('readability: responsive lists, details, filters, transport, and summary re
         '/api/transcripts': { transcripts: [{ id: long, title: long, updated_at: '2026-09-23T12:00:00Z', metadata: { agent_name: long, runtime: long, location: { name: long }, initial_cwd: '/synthetic-parent/' + long + '/' } }] },
         ['/api/transcripts/' + long]: { transcript: { title: 'Synthetic transcript' }, entries: [{ sequence: 1, role: 'assistant', body: value }] },
         '/api/memories': { items: [{ id: long, content: long, kind: long, state: 'active', salience: 0.9 }] },
+        ['/api/memories/' + long]: { memory: { id: long, sensitive: true, redacted: true, content: 'PRIVATE_MEMORY_MUST_STAY_HIDDEN' } },
+        ['/api/memories/' + long + '/history']: { versions: [] },
         '/api/secrets': { secrets: [{ id: long, name: long, field_count: 3, sensitive_field_count: 2, lifecycle: long }] },
         '/api/messages': { messages: url.searchParams.get('direction') === 'inbox' ? [{ id: long, from: { agent_id: long, agent_name: long }, subject: long, created_at: '2026-09-23T12:00:00Z' }] : [] },
         '/api/email/address': { available: true, address: { address: 'synthetic@example.test', receive_state: 'enabled' } },
@@ -69,7 +71,7 @@ test('readability: responsive lists, details, filters, transport, and summary re
       await page.waitForFunction((section) => !!document.getElementById('filter-' + section), section);
     };
     const noOverflow = async () => {
-      const bad = await page.evaluate(() => [...document.querySelectorAll('.row, .panel, .entry, .fact-value, .summary-row, .agent-summary, .transcript-table, .transcript-row, .transcript-selection, .transcript-metadata dd')]
+      const bad = await page.evaluate(() => [...document.querySelectorAll('.row, .panel, .entry, .fact-value, .summary-row, .agent-summary, .transcript-table, .transcript-row, .transcript-selection, .transcript-metadata dd, .focus-header, .focus-detail')]
         .filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.className));
       assert.deepEqual(bad, [], 'content boxes must not overflow');
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'document fits viewport');
@@ -116,6 +118,58 @@ test('readability: responsive lists, details, filters, transport, and summary re
         assert.equal(await page.locator('#filter-empty-' + section).isVisible(), false);
         assert.equal(await page.locator('#filter-' + section).evaluate((el) => el === document.activeElement), true);
         assert.equal(foregroundRequests(), count, 'filter/clear never fetch');
+        if ([390, 1280].includes(width) && ['memories', 'conversations'].includes(section)) {
+          const filterText = 'Synthetic_long';
+          await page.locator('#filter-' + section).fill(filterText);
+          const control = page.locator('.focus-open').first();
+          const identity = section === 'memories' ? await control.getAttribute('data-focus-id') : (await control.textContent()).trim();
+          const href = await control.getAttribute('href');
+          await control.focus();
+          assert.equal(await control.getAttribute('aria-expanded'), 'false');
+          const beforeOpen = foregroundRequests();
+          const beforeRoutes = requests.length;
+          await page.keyboard.press('Space');
+          await page.waitForSelector('#focus-detail .panel h2');
+          assert.equal(await page.evaluate(() => location.hash), href);
+          assert.equal(await page.locator('#focus-inventory').isVisible(), false);
+          assert.equal(await page.locator('.focus-identity').textContent(), identity);
+          assert.equal(await page.locator('.focus-back').getAttribute('aria-expanded'), 'true');
+          assert.equal(await page.locator('#focus-detail').evaluate((el) => el === document.activeElement), true);
+          assert.match(await page.locator('#focus-status').textContent(), /list collapsed/);
+          assert.equal(await page.locator('.focus-header').evaluate((el) => getComputedStyle(el).display), width <= 700 ? 'grid' : 'flex');
+          assert.equal(await page.locator('#view').textContent().then((text) => text.includes('PRIVATE_MEMORY_MUST_STAY_HIDDEN')), false);
+          if (section === 'conversations') {
+            assert.equal(await page.locator('.message-body-content').isVisible(), false);
+            assert.equal(foregroundRequests(), beforeOpen, 'conversation Open never fetches');
+          } else {
+            // Memory history/detail are not in the browse projection. Keep the
+            // two existing metadata reads explicit; never prefetch or reveal.
+            assert.deepEqual(requests.slice(beforeRoutes).filter((url) => !backgroundPolls.has(url.split('?')[0])), [
+              '/api/memories/' + long, '/api/memories/' + long + '/history?limit=50',
+            ]);
+            assert.equal(foregroundRequests(), beforeOpen + 2);
+          }
+          await noOverflow();
+          const beforeBack = foregroundRequests();
+          if (width === 390) await page.keyboard.press('Escape');
+          else await page.locator('.focus-back').click();
+          await page.waitForSelector('#filter-' + section);
+          assert.equal(await page.evaluate(() => location.hash), '#/' + section);
+          assert.equal(await page.locator('#filter-' + section).inputValue(), filterText);
+          assert.equal(await control.getAttribute('aria-current'), 'true');
+          assert.equal(await control.evaluate((el) => el === document.activeElement), true);
+          assert.equal(await page.locator('#focus-detail').isVisible(), false);
+          assert.equal(foregroundRequests(), beforeBack, 'Back never refetches existing inventory');
+          // History must drive the same component state as its visible controls.
+          await page.goBack();
+          await page.waitForSelector('#focus-detail .panel h2');
+          assert.equal(await page.evaluate(() => location.hash), href);
+          assert.equal(await page.locator('#focus-inventory').isVisible(), false);
+          await page.goForward();
+          await page.waitForSelector('#filter-' + section);
+          assert.equal(await control.evaluate((el) => el === document.activeElement), true);
+          assert.equal(await page.locator('#filter-' + section).inputValue(), filterText);
+        }
       }
       await page.evaluate(() => { location.hash = '#/email'; });
       await page.waitForSelector('.email-sent-row');
