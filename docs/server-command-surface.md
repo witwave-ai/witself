@@ -5,8 +5,8 @@ managed and self-hosted backend API deployments.
 
 > **Current implementation boundary (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-> [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> KMS-rooted and server-decrypt target below. Agent secrets use a
+> [client-custodied vault plan](client-custodied-agent-vault.md) define the
+> current sealed-plane boundary. Agent secrets use a
 > client-custodied AVK; the backend stores ciphertext and public key metadata
 > and cannot decrypt. `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`,
 > and `WITSELF_KMS_KEY_ID` are not implemented or required. The current binary
@@ -14,8 +14,8 @@ managed and self-hosted backend API deployments.
 > backfill`, `agent-email canary-manifest`, and `agent-email
 > provider-event-canary` actions; `serve` and the mutable
 > backfill apply embedded forward Goose migrations before continuing. Later
-> sections describing KMS configuration, sealed-plane readiness, or separate
-> `migrate`, `config`, `bootstrap`, or `healthcheck` commands are superseded
+> sections describing separate `migrate`, `config`, `bootstrap`, or
+> `healthcheck` commands are superseded
 > target history, not current
 > operational instructions.
 
@@ -45,8 +45,8 @@ replicas. See [cell-worker.md](cell-worker.md).
 The platform spine is shared; this one process serves both planes — the OPEN
 plane (memories, facts, policy, groups, messaging) and the SEALED plane (secrets,
 TOTP). There is no separate secrets process or sidecar; the sealed plane is a
-domain module behind the same API listener, gated by the sealed-plane capability
-switch. See [secret-model.md](secret-model.md), [encryption-model.md](encryption-model.md),
+domain module behind the same API listener, with capabilities describing its
+ciphertext-only backend contract. See [secret-model.md](secret-model.md), [encryption-model.md](encryption-model.md),
 and [key-hierarchy.md](key-hierarchy.md).
 
 ## Design Goals
@@ -54,8 +54,8 @@ and [key-hierarchy.md](key-hierarchy.md).
 - Run the backend API server for managed Witself Cloud and self-hosted
   deployments.
 - Keep server operation separate from agent/operator identity workflows.
-- Validate configuration before booting, including PostgreSQL for the open
-  plane and KMS when the sealed plane is enabled.
+- Validate configuration before booting, including PostgreSQL for both planes.
+  Agent-secret cryptography remains in the active client.
 - Apply embedded forward migrations safely at startup.
 - Provide liveness, readiness, and startup checks for containers and service
   managers.
@@ -63,7 +63,7 @@ and [key-hierarchy.md](key-hierarchy.md).
 - Never print memory content, fact values, message bodies or payloads,
   client-supplied vectors, raw tokens, database passwords, provider credentials,
   raw payment details, or raw wallet credentials. Never print sealed-plane
-  material: secret values, TOTP seeds, plaintext private keys, per-realm KEKs,
+  material: secret values, TOTP seeds, plaintext private keys, client-held AVKs,
   per-secret/field DEKs, or KMS credentials. There is no secret-reveal or TOTP-code
   surface on `witself-server`; reveal is reserved for the audited `witself`
   value ceremony (see [secret-model.md](secret-model.md) and [totp-2fa.md](totp-2fa.md)).
@@ -165,9 +165,6 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded agent-email retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
-| `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |
-| `WITSELF_KMS_PROVIDER` | KMS provider for sealed-plane envelope encryption: `aws-kms` (default), `gcp-kms`, `azure-key-vault`, or `local-dev`. Required when the sealed plane is enabled; ignored otherwise. |
-| `WITSELF_KMS_KEY_ID` | KMS customer master key (CMK) identifier that roots the per-realm KEK / per-secret-and-field DEK hierarchy. Required when the sealed plane is enabled. |
 | `WITSELF_AUDIT_RETENTION` | Audit retention duration. Default should be `8760h` (365 days). |
 | `WITSELF_METRICS_ENABLED` | Enable Prometheus-compatible metrics. Default should be true for server deployments and false only when explicitly disabled. |
 | `WITSELF_METRICS_LISTEN` | Dedicated metrics listen address. Default should be `:9090`. |
@@ -197,21 +194,19 @@ reuses the production immutable-dispatch serializer, and signs for the distinct
 provider-call start and a settled provider route succeeds. See
 [cell-worker.md](cell-worker.md#operator-only-accepted-receipt-proof).
 
-Witself serves two planes with two distinct production dependency sets. The OPEN
+Witself serves two planes with distinct custody boundaries. The OPEN
 plane (memories, facts) is backed by PostgreSQL. Its required recall path is
 deterministic lexical/tag/kind/time ranking over canonical PostgreSQL rows; no
 backend inference or vector service gates availability. The optional vector
 path accepts vectors authored by an authenticated client under an immutable
 profile and performs bounded deterministic hybrid ranking over portable JSONB
-rows. Missing vectors preserve the lexical baseline. The SEALED
-plane (secrets, TOTP) is backed by KMS
-envelope encryption: a CMK roots a per-realm KEK, which wraps per-secret and
-per-field DEKs (XChaCha20-Poly1305 / AES-256-GCM). KMS is therefore a required
-dependency when, and only when, the sealed plane is enabled — it is not required
-for an open-plane-only deployment. KMS loss makes secret values unrecoverable
-(crypto-shred) but does not affect the open plane. Sealed-plane material is never
-embedded, recalled, placed in the self-digest, or included in plaintext export.
-See [storage.md](storage.md), [encryption-model.md](encryption-model.md),
+rows. Missing vectors preserve the lexical baseline. The SEALED plane (secrets,
+TOTP) stores sensitive-field ciphertext, AVK-wrapped per-field DEKs, and public
+vault metadata in PostgreSQL. The active client holds the AVK and performs
+encryption, decryption, password generation, and TOTP calculation. There is no
+agent-secret KMS configuration or backend decrypt key. Sealed-plane material
+is never embedded, recalled, placed in the self-digest, or included in plaintext
+export. See [storage.md](storage.md), [encryption-model.md](encryption-model.md),
 [key-hierarchy.md](key-hierarchy.md), and [memory-model.md](memory-model.md).
 
 ## `witself-server version`
@@ -391,14 +386,13 @@ installing pgvector. It does not invoke a model, generate vectors, or perform a
 backend re-embedding side effect. See
 [storage.md](storage.md) and [backup-and-recovery.md](backup-and-recovery.md).
 
-Migrations must also cover the sealed-plane tables when the sealed plane is in
-scope: `secrets`, `secret_fields`, `secret_grants`, `totp_enrollments`,
-`realm_keys` (the per-realm KEK records, wrapped under the CMK), `secret_deks`
-(the per-secret/field wrapped DEKs), and `attachments`. Migrations only ever store
-wrapped key material and ciphertext; no plaintext secret value, TOTP seed, KEK,
-or DEK is written to the schema. Changing the KMS provider or rotating the CMK is
-a separate, audited key-rotation operation, not an automatic migration side
-effect; see [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md), and
+Migrations also cover the sealed-plane ciphertext and public metadata tables:
+`secrets`, `secret_fields`, `agent_vault_keys`, `secret_deks`, and vault lifecycle
+and receipt rows. Migrations store wrapped key material and ciphertext; no
+plaintext secret value, TOTP seed, AVK, or unwrapped DEK is written to the schema.
+AVK rotation is a separate client lifecycle operation, not an automatic
+migration side effect. See [storage.md](storage.md),
+[key-hierarchy.md](key-hierarchy.md), and
 [backup-and-recovery.md](backup-and-recovery.md).
 
 ## `witself-server config` (target; not implemented)
@@ -418,16 +412,13 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--check-connections` | Check PostgreSQL, object storage when configured, and KMS connectivity when the sealed plane is enabled. |
+| `--check-connections` | Check PostgreSQL and object storage when configured. Agent secrets require no backend KMS connectivity. |
 | `--strict` | Treat warnings as errors. |
 
 `--check-connections` should confirm that PostgreSQL is reachable and that the
 required relational and lexical-memory schema is present. It must not contact a
-model or embedding provider. When the sealed plane is enabled, `--check-connections`
-must also confirm that the configured KMS provider and CMK are reachable and
-usable for wrap/unwrap; an unreachable KMS is a hard failure for the sealed plane
-because secrets cannot be sealed or revealed without it. When the sealed plane is
-disabled, KMS connectivity is not checked.
+model or embedding provider. Agent-secret encryption and decryption happen in
+the active client, so there is no backend key-provider connection to validate.
 
 ### `witself-server config print`
 
@@ -447,9 +438,8 @@ Flags:
 provider secrets, secret values, TOTP seeds, KEKs, DEKs, or any memory content or
 fact values. There is no backend model or embedding-provider setting to print.
 The retrieval mode and whether the client-vector capability is supported
-are capabilities, not credentials. The KMS provider name, configured CMK key
-identifier, and whether the sealed plane is enabled are safe to print and should
-be shown when configured.
+are capabilities, not credentials. The server has no agent-vault KMS provider
+or decrypt-key setting to print.
 
 ## `witself-server bootstrap` (target; not implemented)
 
@@ -522,9 +512,8 @@ Flags:
 Readiness should depend on Postgres connectivity (the system of record for
 memories, facts, policies, groups, messages, secrets, TOTP, and audit).
 The deterministic lexical recall path has no model/provider health dependency.
-When the sealed plane is enabled, readiness should also gate on KMS
-reachability, because the sealed plane cannot seal or reveal secrets without it;
-when the sealed plane is disabled, KMS is not part of the readiness gate.
+Agent secrets add no KMS readiness dependency. The backend stores encrypted
+material; only the active client can decrypt it with the matching AVK.
 
 Healthcheck output must not include memory content, fact values, message bodies,
 client-supplied vectors, raw tokens, secret values, TOTP seeds, key material, or
@@ -541,9 +530,9 @@ full sensitive config.
   credential injection as server admin commands; those are agent/operator surfaces
   on `witself`.
 - Do not turn `witself-server` into a sealed-plane value surface. The server
-  process wraps and unwraps key material via KMS to operate the sealed plane, but
+  process stores ciphertext and redacted inventory. Encryption, decryption,
   the audited secret-reveal ceremony, TOTP code generation, and `witself run`
-  runtime injection live exclusively on `witself`; sealed-plane values are never
+  runtime injection live exclusively in the active client; sealed-plane values are never
   emitted by any `witself-server` command. See [secret-model.md](secret-model.md)
   and [totp-2fa.md](totp-2fa.md).
 

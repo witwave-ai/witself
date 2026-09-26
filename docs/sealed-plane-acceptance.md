@@ -11,9 +11,9 @@ acceptance contract.
 
 This is the release gate for the client-custodied agent vault defined by
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. Where an
-older sealed-plane document still describes a cloud-KMS vault root or
-server-side decryption, ADR 0003 and this gate take precedence.
+[Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. ADR 0003
+and this gate define the custody boundary: the client holds the agent vault
+key and decrypts locally; the backend stores ciphertext and redacted inventory.
 
 ## Implemented schema-56 lifecycle gate
 
@@ -736,3 +736,26 @@ acceptance suites.
 Cloud KMS may protect database volumes, backups, deployment credentials, and
 infrastructure state. The gate forbids only using cloud KMS as the agent-vault
 decrypt root or as a requirement for moving encrypted agent vault state.
+
+## Documentation consistency (2026-09-26)
+
+The `sealed-doc-consistency` cleanup uses ADR 0003 throughout the sealed-plane
+custody, schema, API, deployment, migration, rotation, and recovery documents.
+The active client holds the AVK and performs encryption, decryption, password
+generation, and TOTP calculation. The backend returns authorized ciphertext
+and records material delivery; it cannot attest to local plaintext use.
+Account archives preserve encrypted vault state and public bindings, while the
+matching AVK and client recovery material travel separately.
+
+Remaining KMS references describe rejected historical designs, compatibility
+anchors, explicit absence of an agent-vault dependency, or separate
+infrastructure encryption and credential handling. They do not supply a vault
+decrypt root or a token-only fallback. Federation signing custody remains a
+separate target design. Implemented delivery/lifecycle metrics, posture gauges,
+SLOs, and alerts retain their current evidence in
+[observability-and-operations.md](observability-and-operations.md) and
+[runbooks.md](runbooks.md).
+
+This closes only documentation consistency. It does not close the live
+runtime/cloud certification, recovery drills, advanced-operation gates, or
+production self-host support commitments in [Feature Status](feature-status.md).

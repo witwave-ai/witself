@@ -1387,9 +1387,9 @@ Notes on a few dimensions:
   secret material (see [storage.md](storage.md)).
 - `encrypted_storage_byte` is the sealed-plane companion to `storage_byte`. It
   measures the envelope-encrypted secret bytes (ciphertext, wrapped DEKs, and
-  attachments) governed by the CMK→per-realm KEK→per-secret/field DEK hierarchy.
-  It is metered separately because the sealed plane is a distinct storage and
-  KMS cost driver (see [encryption-model.md](encryption-model.md),
+  future attachments) created by active clients under the AVK→field-DEK hierarchy.
+  It is metered separately because the sealed plane has distinct ciphertext
+  storage and backup costs (see [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md), and
   [secret-size-and-attachments.md](secret-size-and-attachments.md)).
 - `secret_read` increments on the reveal-gated value-returning paths only —
@@ -1594,9 +1594,10 @@ shape can exist before the backend supports live billing or crypto settlement.
 The live catalog sets the Personal, Professional, and Team plan names, monthly
 prices ($0, $30, and $250), included quantities, and feature entitlements.
 Overage policy, usage conversion, future catalog changes, and Enterprise terms
-remain business follow-up. The embedding-operation and vector-storage
-dimensions in particular carry real provider cost and should be observed before
-fixed overage pricing is set. On the sealed plane, `secret_read`, `totp_code`,
+remain business follow-up. Client-vector writes and vector storage create
+validation, search, storage, and backup load that should be observed before
+fixed overage pricing is set. Model inference costs remain with the client;
+the backend never computes embeddings. On the sealed plane, `secret_read`, `totp_code`,
 and `encrypted_storage_byte` carry real envelope-storage cost and should be
 observed on the same basis (see [key-hierarchy.md](key-hierarchy.md)).
 

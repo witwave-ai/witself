@@ -42,7 +42,7 @@ spans both planes under a single realm/agent/token model: an agent-native
 cross-agent **policy** engine with default deny, **security groups** as policy
 subjects/targets, durable **inter-agent messaging** with token-derived senders,
 first-class plaintext **export/import**) joined to an agent-native *credential*
-store (per-realm sealed secrets and TOTP under KMS-backed envelope encryption,
+store (agent-owned sealed secrets and TOTP encrypted by the client under its AVK,
 explicit audited reveal, runtime injection, and stable `witself://` references).
 Both planes share one inspectable public backend that runs as managed Witself
 Cloud or self-hosted, and one CLI-native administration surface where operators
@@ -394,8 +394,9 @@ Witself takeaway:
   a recommendation: the sealed plane is **never embedded, recalled, in the
   self-digest, ingested, or plaintext-exported**, and values are returned only
   through an explicit, audited, reveal-gated ceremony (`witself secret reveal`,
-  `witself totp code`) under KMS-backed envelope encryption (CMK → per-realm KEK
-  → per-secret/field DEK). See [encryption-model.md](encryption-model.md),
+  `witself totp code`) in the active client under its agent vault key; the
+  backend stores ciphertext and redacted inventory. See
+  [encryption-model.md](encryption-model.md),
   [key-hierarchy.md](key-hierarchy.md), and
   [authorization-and-roles.md](authorization-and-roles.md).
 - Dynamic/short-lived leases (Vault, Akeyless, Infisical) are a credible
@@ -469,7 +470,7 @@ identity anchors — plus operator-level realm context. It directly answers the
 "vendor lock-in / opaque memory" weakness of native memory features. The carve-
 out is deliberate and load-bearing: the plaintext export covers the **open
 plane only**. The sealed plane is **never in the plaintext export** — secret
-backup is encrypted-only (envelope blobs plus KMS key identity, never
+backup is encrypted-only (envelope blobs plus public vault-key bindings, never
 plaintext), behind a separate, explicit, audited flag. The two-tier export is
 itself a differentiator: portability for identity, confidentiality for
 credentials, in one product. See
@@ -479,30 +480,30 @@ credentials, in one product. See
 
 No memory product holds credentials; no secrets manager holds durable agent
 identity. Witself ships both as one platform. Secrets and TOTP live in a
-**sealed plane** under KMS-backed envelope encryption (CMK → per-realm KEK →
-per-secret/field DEK, XChaCha20-Poly1305 / AES-256-GCM), owned by the same
-**agent** or **group** principals as memories and facts, governed by grants and
-realm roles, and returned only through an explicit, audited reveal ceremony
-(`witself secret reveal`, `witself totp code`) — with hybrid client-side or
-server-side decrypt behind a capability switch. The carve-out is the product
+**sealed plane** encrypted by the active client under its agent vault key,
+with agent-owned ciphertext and redacted inventory stored by the backend.
+Values are available only through an explicit reveal ceremony in that client
+(`witself secret reveal`, `witself totp code`), with backend audit of encrypted
+field delivery. The carve-out is the product
 guarantee: sealed material is **never embedded, recalled, in the self-digest,
 ingested from CLAUDE.md/AGENTS.md, or plaintext-exported**. A secrets manager
 would have to grow an agent-memory model with cross-agent governance to match
-this; a memory layer would have to grow KMS-backed encryption and a reveal
+this; a memory layer would have to grow client-custodied encryption and a reveal
 discipline. See [secret-model.md](secret-model.md),
 [encryption-model.md](encryption-model.md),
 [key-hierarchy.md](key-hierarchy.md), and [totp-2fa.md](totp-2fa.md).
 
 ### Inspectable public backend and self-hosting
 
-The CLI, MCP adapter, `witself-server` API, storage and embedding adapters,
-crypto and KMS provider adapters, authorization and policy logic, and audit
-model live in one public repository. Operators choose managed Witself Cloud or
+The CLI, MCP adapter, `witself-server` API, storage and client-vector validation,
+client cryptography, infrastructure configuration, authorization and policy
+logic, and audit model live in one public repository. Operators choose managed Witself Cloud or
 self-hosted control without changing the agent-facing CLI, MCP tools,
 `witself://` references, or JSON contracts. Security reviewers can read the code
-that stores, authorizes, audits, embeds, recalls, and serves identity material
-on the open plane, and the code that envelope-encrypts, key-manages, reveals,
-and audits credential material on the sealed plane. See
+that stores, authorizes, audits, ranks client-supplied vectors, recalls, and
+serves identity material on the open plane. They can also inspect the client
+code that encrypts and decrypts sealed values and the backend code that stores
+ciphertext, gates encrypted-field delivery, and audits access. See
 [self-hosting.md](self-hosting.md) and
 [backend-architecture.md](backend-architecture.md).
 
@@ -518,7 +519,7 @@ same agent principal owns memories, facts, and secrets under one realm, one
 token, one audit trail, and one CLI — the open plane optimized for *integrity
 and authenticity* (default-deny cross-agent policy, attributed
 curation/forgetting, security groups, authentic messaging) and the sealed plane
-optimized for *confidentiality* (KMS-backed envelope encryption, reveal-gated
+optimized for *confidentiality* (client-side AVK encryption, reveal-gated
 access, never embedded/recalled/in-digest/plaintext-exported). The wedge is the
 seam no competitor crosses, not parity on either side.
 

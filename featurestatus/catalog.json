@@ -2275,10 +2275,12 @@
           ]
         },
         "docs_support": {
-          "state": "conditional",
-          "summary": "The authoritative AVK design is documented, while older KMS/server-decryption language remains in historical documents and needs consistency cleanup.",
+          "state": "pass",
+          "summary": "Sealed-plane docs use client-held AVKs, ciphertext-only backend access, client rotation/recovery, and unchanged encrypted archives. Historical and infrastructure KMS references are explicitly separate; live certification and advanced operations remain gated.",
           "evidence": [
             "docs/client-custodied-agent-vault.md",
+            "docs/encryption-model.md",
+            "docs/key-hierarchy.md",
             "docs/sealed-plane-acceptance.md"
           ]
         }
@@ -2289,12 +2291,6 @@
           "gate_ids": ["behavior"],
           "summary": "Implement secret update, local runtime injection, grants/group ownership, and irreversible tombstone purge with matching policy and tests.",
           "ref": "docs/secret-model.md"
-        },
-        {
-          "id": "sealed-doc-consistency",
-          "gate_ids": ["docs_support"],
-          "summary": "Remove or clearly label stale KMS and server-decryption claims that conflict with the client-custodied AVK architecture.",
-          "ref": "docs/sealed-plane-acceptance.md"
         },
         {
           "id": "sealed-live-certification",

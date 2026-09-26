@@ -5,7 +5,7 @@ envelope-encrypted in Postgres) and defers large attachments to an encrypted
 object/blob path. Attachments are stubbed but not built in the first v0 slice.
 
 Scope: this doc covers the SEALED PLANE only (secrets and their fields). Sealed
-material is envelope-encrypted (CMK -> per-realm KEK -> per-secret/field DEK) and
+material is client-envelope-encrypted (AVK -> per-sensitive-field DEK) and
 is NEVER embedded, NEVER returned by semantic recall, NEVER in the self-digest,
 NEVER ingested from CLAUDE.md/AGENTS.md, and NEVER in the plaintext export. The
 size limits and attachment rules below inherit those carve-outs. Open-plane data
@@ -29,8 +29,7 @@ These limits should be enforced with deterministic `limit_exceeded` or
 practical.
 
 Sizes are measured on the cleartext value before encryption and encoding; the
-envelope overhead (per-field DEK, nonce, AEAD tag for `XCHACHA20_POLY1305` /
-`AES_256_GCM`) is storage overhead and is not counted against the inline budget.
+envelope overhead (per-field DEK, nonce, AEAD tag for AES-256-GCM) is storage overhead and is not counted against the inline budget.
 
 ## Attachments
 
@@ -50,11 +49,12 @@ than large ordinary database columns. Good candidates include:
 Attachment rules:
 
 - Attachments are sealed-plane material: they are encrypted under the same
-  envelope hierarchy as secret fields (per-realm KEK -> per-attachment DEK) and
+  client-held hierarchy as secret fields (AVK -> per-attachment DEK) and
   carry the same carve-outs (never embedded, recalled, in the self-digest, or in
   the plaintext export).
-- Attachment metadata (`att_` id, owner, content type, size, checksum, KEK/DEK
+- Attachment metadata (`att_` id, owner, content type, size, checksum, public AVK/DEK
   key identity) can live in Postgres; the ciphertext lives in object/blob storage.
+  Encryption and decryption remain in the active client.
 - Object/blob storage should not become a default dependency for small secrets;
   it is enabled only when the attachment path is in use.
 - Attachment ownership follows the secret: `owner_kind` is `agent` or `group`

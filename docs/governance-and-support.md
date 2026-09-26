@@ -8,16 +8,15 @@ gates instead of treating this design history as delivery evidence.
 
 Narrative-memory amendment (accepted 2026-07-14): the public backend includes
 client-vector validation/search and curation-plan application, not an embedding
-provider or its credentials. Conflicting support language below is superseded
-by [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
+provider or its credentials. The contract is in
+[narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-earlier server-KMS design. The backend stores ciphertext and public metadata;
-the authorized client holds the agent vault key and performs decryption. KMS,
-realm KEK, server-decrypt, and cross-cloud re-wrap language is historical, not
-an implemented server contract. Operators still own ordinary infrastructure
+[client-custodied vault plan](client-custodied-agent-vault.md) define client-held
+agent-vault custody. The backend stores ciphertext and public metadata;
+the authorized client holds the agent vault key and performs decryption.
+Operators still own ordinary infrastructure
 encryption, backups, and separate recovery custody for client vault keys.
 
 ## Public Code Stance

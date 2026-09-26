@@ -41,7 +41,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Realm email aliases](#realm-email-aliases) | Email | `implemented` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Realm-local messaging](#realm-messaging) | Communication | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Agent runtime integrations](#runtime-integrations) | Integration | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
-| [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 3/7 pass | 3 |
+| [Secrets, vault, passwords, and TOTP](#secrets-vault) | Security | `implemented` | `limited` | **conditional** | 4/7 pass | 2 |
 | [Self-hosted Witself](#self-hosting) | Deployment | `implemented` | `not applicable` | **conditional** | 0/7 pass | 5 |
 | [Transcripts and retention](#transcripts) | Core data | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Usage metering and customer reporting](#usage-metering) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -687,12 +687,11 @@ The client-custodied agent vault, ciphertext-only backend, secret lifecycle, gua
 | Observability | **PASS** | Value-free delivery/lifecycle metrics, cell posture gauges, sealed-plane SLOs, and five tested alerts are implemented; the alert gate is on for the serving cell via the sealed_plane_alerts catalog switch after v0.0.286 series verification. [founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [founder-open-plane.rules.test.yaml](../.gitops/charts/platform/testdata/founder-open-plane.rules.test.yaml), [observability-and-operations.md](../docs/observability-and-operations.md), [runbooks.md](../docs/runbooks.md), [metrics.go](../internal/server/metrics.go), [metrics_test.go](../internal/server/metrics_test.go), [sealed_plane_posture.go](../internal/store/sealed_plane_posture.go), [sealed_plane_posture_integration_test.go](../internal/store/sealed_plane_posture_integration_test.go) |
 | Recovery | **CONDITIONAL** | Client recovery, rotation, encrypted archive/import, and fail-closed vault binding exist; cross-cloud movement and loss/recovery drills remain incomplete. [backup-and-recovery.md](../docs/backup-and-recovery.md), [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md) |
 | Rollout / canaries | **CONDITIONAL** | The implemented slice is released, but four-runtime and multi-cloud acceptance evidence is incomplete and advanced operations remain unavailable. [provider-integration-certification.md](../docs/provider-integration-certification.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
-| Docs / support | **CONDITIONAL** | The authoritative AVK design is documented, while older KMS/server-decryption language remains in historical documents and needs consistency cleanup. [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
+| Docs / support | **PASS** | Sealed-plane docs use client-held AVKs, ciphertext-only backend access, client rotation/recovery, and unchanged encrypted archives. Historical and infrastructure KMS references are explicitly separate; live certification and advanced operations remain gated. [client-custodied-agent-vault.md](../docs/client-custodied-agent-vault.md), [encryption-model.md](../docs/encryption-model.md), [key-hierarchy.md](../docs/key-hierarchy.md), [sealed-plane-acceptance.md](../docs/sealed-plane-acceptance.md) |
 
 Open gates:
 
 - `advanced-secret-operations` (behavior): Implement secret update, local runtime injection, grants/group ownership, and irreversible tombstone purge with matching policy and tests. ([tracking/evidence](../docs/secret-model.md))
-- `sealed-doc-consistency` (docs / support): Remove or clearly label stale KMS and server-decryption claims that conflict with the client-custodied AVK architecture. ([tracking/evidence](../docs/sealed-plane-acceptance.md))
 - `sealed-live-certification` (recovery, rollout / canaries): Complete four-runtime reveal/TOTP recovery and multi-cloud archive/movement drills with sanitized evidence. ([tracking/evidence](../docs/sealed-plane-acceptance.md))
 
 <a id="self-hosting"></a>

@@ -1398,7 +1398,7 @@ The portable minimum is:
 - checksummed account archives compatible across cell providers.
 
 This runs without architectural changes on AWS, Azure, and Google Cloud. Cloud
-KMS and object-store adapters used elsewhere in Witself do not participate in
+Infrastructure KMS and object-store integrations do not participate in
 narrative inference.
 
 A file-backed adapter may remain for unit tests or disposable fixtures, but it

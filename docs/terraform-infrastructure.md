@@ -11,10 +11,10 @@ PostgreSQL-backed target is specified by
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-side custody for agent secrets. The backend holds no AVK key material,
+calls no KMS for agent secrets, and never decrypts secret values.
+Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
 
 ## Decision
@@ -25,22 +25,19 @@ and Azure infrastructure.
 Terraform owns cloud substrate. Helm owns application deployment.
 
 Terraform should provision Kubernetes, ordinary PostgreSQL, object/blob
-storage, workload identity, networking, KMS for the sealed plane, and the
+storage, workload identity, networking, and the
 Kubernetes integration points that the Helm chart
 needs. The Helm chart should deploy `witself-server` onto that substrate and wire
 probes, metrics, and optional Prometheus Operator resources.
 
 Witself has two planes. The open plane (memories and facts) is ordinary
-data-at-rest in Postgres and needs no KMS. The sealed plane (secrets and TOTP)
-is envelope-encrypted with a customer managed key (CMK) at its root, so KMS is a
-required dependency whenever the sealed plane is enabled. Terraform provisions
-the CMK and the IAM that lets the `witself-server` deployment identity call KMS;
-the application uses that key to wrap per-realm KEKs, which in turn wrap
-per-secret/field DEKs. See [encryption-model.md](encryption-model.md) and
-[key-hierarchy.md](key-hierarchy.md). The KMS material protects only sealed-plane
-confidentiality: secret values are never embedded, recalled, placed in the
-self-digest, or plaintext-exported, and KMS loss crypto-shreds secrets without
-touching the open plane.
+data-at-rest in Postgres. In the sealed plane (secrets and TOTP), the active
+client encrypts and decrypts sensitive values with per-field DEKs wrapped by
+its agent vault key (AVK). Terraform provisions no agent-vault key or server
+permission to unwrap those keys. The backend stores ciphertext, wrapped DEKs,
+and public vault metadata. Secret values are never embedded, recalled, placed
+in the self-digest, or plaintext-exported. See
+[encryption-model.md](encryption-model.md) and [key-hierarchy.md](key-hierarchy.md).
 
 AWS is the first implementation target. GCP and Azure remain planned provider
 targets and should keep visible module/stack placeholders, but AWS should get
@@ -91,20 +88,16 @@ The AWS module is the first implementation target. It should support:
 - S3 bucket for object/blob storage when needed (large exports, diagnostic
   bundles, support attachments, backup artifacts).
 - IAM roles for service accounts (IRSA) for `witself-server` workload identity.
-- An AWS KMS customer managed key (CMK) for the sealed plane when secrets and
-  TOTP are enabled, plus the IAM policy that grants the `witself-server`
-  deployment identity the `kms:Encrypt`, `kms:Decrypt`,
-  `kms:GenerateDataKey`/`kms:GenerateDataKeyWithoutPlaintext`, and
-  `kms:DescribeKey` actions on that key so the server can wrap and unwrap
-  per-realm KEKs (see [KMS Module](#kms-module-sealed-plane)).
+- Agent secrets use client-held AVKs; no application KMS key or unwrap IAM
+  grant is required.
+
 - Security groups and network policy prerequisites.
 - Optional Route 53 and ACM integration.
 - Networking inputs sized for inter-agent messaging if a future transport needs
   cross-pod or cross-AZ delivery paths (see [Messaging
   Networking](#messaging-networking)).
 - Outputs for the Helm chart, such as service account annotations, database
-  secret reference, bucket name, public URL, and the KMS provider and key ID
-  for the sealed plane.
+  secret reference, bucket name, and public URL.
 
 ### Optional ANN projection
 
@@ -115,40 +108,17 @@ as an explicit optional accelerator. If added, Terraform may provision extension
 support and report its state, but the chart, readiness, capabilities, archive,
 and correctness tests must continue to work without it.
 
-### KMS module (sealed plane)
+### Sealed-plane custody
 
-The AWS module includes a KMS submodule that provisions the sealed plane's root
-of trust. It should:
+The sealed plane requires no Terraform key-management module. Authorized
+clients hold the AVK and wrap per-field DEKs locally; the server stores only
+the resulting encrypted material and public metadata. The server has no
+sealed-plane KMS provider setting or KMS readiness dependency.
 
-- Provision an AWS KMS customer managed key (CMK) for the sealed plane, with key
-  rotation enabled, when `sealed_plane_enabled` is true. The CMK is the root of
-  the envelope hierarchy: CMK wraps per-realm KEKs, which wrap per-secret/field
-  DEKs. Terraform never sees a KEK or DEK; those are managed by the application.
-- Allow operators to bring an existing CMK (BYOK by ARN) instead of provisioning
-  a new one, so production environments can keep the key lifecycle outside the
-  public stack.
-- Attach an IAM policy to the `witself-server` IRSA role granting only the
-  actions the server needs against the CMK: `kms:Encrypt`, `kms:Decrypt`,
-  `kms:GenerateDataKey`, `kms:GenerateDataKeyWithoutPlaintext`, and
-  `kms:DescribeKey`. The deployment identity must not hold `kms:ScheduleKeyDeletion`
-  or key-policy administration; key administration stays with operators.
-- Use a key policy and grants scoped to the deployment identity, not the account
-  root, so the blast radius of a compromised pod is limited to envelope
-  operations on the one key.
-- Surface the KMS provider (`aws-kms`) and key ID/ARN as outputs for Helm, which
-  maps them to `WITSELF_KMS_PROVIDER` and `WITSELF_KMS_KEY_ID` on
-  `witself-server` (see [helm-chart.md](helm-chart.md)).
-
-The KMS module is required only when the sealed plane is enabled. An
-open-plane-only deployment (memories and facts) can omit it; ordinary PostgreSQL
-is the open-plane gate. When the sealed plane is on, readiness
-gates on KMS reachability so a misconfigured key fails the deployment rather than
-silently disabling reveal. Losing the CMK crypto-shreds all secret values it
-roots and is unrecoverable; it does not affect open-plane data. KMS material
-protects sealed-plane confidentiality only — secrets and TOTP seeds are never
-embedded, recalled, written to the self-digest, or plaintext-exported. See
-[key-hierarchy.md](key-hierarchy.md), [encryption-model.md](encryption-model.md),
-and [storage.md](storage.md).
+AVK enrollment, recovery, and rotation are client operations. Infrastructure
+provisioning does not recover a lost AVK or grant access to sensitive values.
+See [key-hierarchy.md](key-hierarchy.md),
+[encryption-model.md](encryption-model.md), and [storage.md](storage.md).
 
 ## GCP Target
 
@@ -159,15 +129,12 @@ The GCP module is a planned follow-up target. It should eventually support:
   is required.
 - Cloud Storage bucket for object/blob storage when needed.
 - Workload Identity for `witself-server`.
-- A Cloud KMS key (CMK) for the sealed plane when secrets and TOTP are enabled,
-  plus the IAM binding granting the `witself-server` workload identity
-  `cloudkms.cryptoKeyVersions.useToEncrypt`/`useToDecrypt` (the
-  `roles/cloudkms.cryptoKeyEncrypterDecrypter` role) on that key.
+- Agent secrets retain the same client-held AVK custody as every other cloud.
+
 - Network and firewall prerequisites.
 - Optional Cloud DNS and certificate integration.
 - Outputs for the Helm chart, such as service account annotations, database
-  secret reference, bucket name, public URL, and the KMS provider (`gcp-kms`)
-  and key resource name for the sealed plane.
+  secret reference, bucket name, and public URL.
 
 ## Azure Target
 
@@ -178,15 +145,12 @@ The Azure module is a planned follow-up target. It should eventually support:
   extension is required.
 - Azure Blob Storage for object/blob storage when needed.
 - Azure Workload Identity for `witself-server`.
-- An Azure Key Vault key (CMK) for the sealed plane when secrets and TOTP are
-  enabled, plus the access policy or RBAC role assignment granting the
-  `witself-server` workload identity wrap/unwrap (and encrypt/decrypt) key
-  permissions on that key.
+- Agent secrets retain the same client-held AVK custody as every other cloud.
+
 - Network security groups and private networking prerequisites.
 - Optional Azure DNS and certificate integration.
 - Outputs for the Helm chart, such as service account annotations, database
-  secret reference, storage account/container name, public URL, and the KMS
-  provider (`azure-key-vault`) and Key Vault key reference for the sealed plane.
+  secret reference, storage account/container name, and public URL.
 
 ## Messaging Networking
 
@@ -231,16 +195,16 @@ Witself's go-forward topology is a fleet of independent cells under a thin globa
 control plane (see [deployment-cells.md](deployment-cells.md)). Terraform is how a
 cell is built. A **cell** is one complete, isolated Witself stack in a single cloud
 account/region: one instantiation of a `stacks/` composition over the existing
-per-provider `modules/` — `witself-server`, ordinary PostgreSQL, the sealed-plane
-KMS rooted in that cell's cloud, and object/blob storage. The repository layout above
+per-provider `modules/` — `witself-server`, ordinary PostgreSQL, and object/blob
+storage. The repository layout above
 does not change for cells; a cell is one stack instance, and the fleet is many such
 instances stood up across multiple accounts and regions.
 
 Multi-account is the normal case, not a special one. An independent second AWS
 account in the same region is simply another cell — another instantiation of the AWS
 stack against that account's provider configuration. The same holds for additional
-GCP projects and Azure subscriptions. Each cell keeps its own state, credentials, and
-sealed-plane CMK; cells share nothing at the data layer (see [State And Secret
+GCP projects and Azure subscriptions. Each cell keeps its own state and credentials;
+cells share nothing at the data layer (see [State And Secret
 Policy](#state-and-secret-policy) — per-cell state and credential isolation is a hard
 requirement, never a shared backend across cells).
 
@@ -253,15 +217,12 @@ metadata-only keeps its blast radius tiny. New cells register with the control p
 clients resolve their home cell through it and then talk directly to that cell (see
 [deployment-cells.md](deployment-cells.md)).
 
-Tenant migration between cells re-keys the sealed plane. Because each cell's sealed
-plane is KMS-rooted in its own cloud, moving a tenant from cell A to cell B is an
-audited decrypt-at-source / re-encrypt-at-dest pass that **re-wraps** the tenant's
-keys under the destination cell's CMK; Terraform's job is only to ensure both cells'
-KMS modules and deployment-identity grants exist so the application can run that
-re-wrap (see [key-hierarchy.md](key-hierarchy.md) and [storage.md](storage.md)). The
-open plane moves via the existing first-class export/import. Terraform never sees a
-KEK or DEK on either side; it provisions the roots and the IAM, and the application
-performs the re-wrap.
+Tenant migration between cells copies sealed ciphertext, wrapped DEKs, and
+public vault metadata unchanged. The matching AVK remains with the authorized
+client; neither cell unwraps keys or receives plaintext. Terraform provisions
+the destination storage and identity, without an agent-vault KMS dependency.
+The open plane moves via the existing first-class export/import. See
+[key-hierarchy.md](key-hierarchy.md) and [storage.md](storage.md).
 
 Open decisions (tracked in [deployment-cells.md](deployment-cells.md), not resolved
 here): whether the placement/migration unit is the account or the realm, and whether a
@@ -281,8 +242,6 @@ Example output categories:
 - Object/blob storage bucket/container.
 - Public URL or ingress host.
 - Required cloud identity metadata.
-- KMS provider and key ID for the sealed plane when secrets and TOTP are
-  enabled, mapped by Helm to `WITSELF_KMS_PROVIDER` and `WITSELF_KMS_KEY_ID`.
 - Optional Prometheus, ServiceMonitor, PodMonitor, or managed monitoring
   integration references when the platform provides them.
 
@@ -315,7 +274,7 @@ Terraform state can contain sensitive values. The public repo must not include:
 - Embedding-provider API keys.
 - Payment provider credentials.
 - Wallet credentials.
-- KMS credentials and key material for the sealed plane.
+- Agent vault keys and unwrapped sealed-plane data keys.
 
 The repo should include `.gitignore` rules, examples, and validation checks that
 make accidental state or secret commits difficult.
@@ -356,12 +315,11 @@ surface becomes stable enough to deserve independent versioning.
   clusters and managed services should be able to use only the Helm chart.
 - Do not hide managed Witself Cloud production secrets or state in the public
   repo.
-- Do not require KMS for an open-plane-only deployment. KMS is required only for
-  the sealed plane (secrets and TOTP); memories and facts are ordinary
-  data-at-rest and never need it.
+- Do not require application KMS configuration for either plane. Agent-secret
+  encryption and decryption belong to the active client.
 - Do not grant the `witself-server` deployment identity KMS administration
-  (key deletion, key-policy edits). Terraform scopes it to envelope operations
-  only; key administration stays with operators.
+  (key deletion, key-policy edits). Key administration stays with operators;
+  agent-secret data keys are wrapped and unwrapped only by the active client.
 
 ## Related Docs
 

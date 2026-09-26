@@ -10,8 +10,8 @@ implemented vault behavior is still waiting on operations, recovery
 certification, runtime acceptance, and documentation consistency.
 
 This document turns Witself's agent-secrets product into buildable slices. It is
-the authoritative custody and delivery contract wherever an older sealed-plane
-draft still describes KMS-rooted keys or server-side decryption.
+the authoritative custody and delivery contract for client-held agent vault
+keys, client encryption/decryption, and backend ciphertext storage.
 
 ## Outcome
 
@@ -651,7 +651,7 @@ with a follow-on release target.
 ### 0. Contract and collision control — implemented
 
 - Land ADR 0003 and this plan.
-- Add supersession notices to conflicting KMS/server-decrypt drafts.
+- Align sealed-plane documents with client-held AVKs and backend ciphertext storage.
 - Begin migrations at `0055` after the completed avatar series.
 
 Exit: one authoritative decrypt owner and no migration collision.

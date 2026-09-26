@@ -21,8 +21,9 @@ local Agent Vault Key path is accessed, the client authenticates the token and
 requires the returned account id to match that binding. Older integrations that
 lack `account_id` fail closed for agent-secret tools and must be refreshed with
 `witself install <runtime>`. The current custody and tool boundary is
-authoritative in [the implementation plan](client-custodied-agent-vault.md);
-older KMS and server-decrypt target text below is superseded.
+defined in [the implementation plan](client-custodied-agent-vault.md): the
+active client encrypts and decrypts under its AVK, while the backend stores
+ciphertext and redacted inventory.
 The implemented agent-owned tools are `witself.password.generate`,
 `witself.secret.search`, `witself.secret.status`, `witself.secret.show`,
 `witself.secret.create`, `witself.secret.delete`, `witself.secret.reveal`, and
@@ -2607,8 +2608,9 @@ Input:
 
 Output data returns secret detail with sensitive fields redacted (it never echoes
 the stored value). `template` is one of `login|api-key|ssh-key|certificate|env|
-generic`. Field values are sealed at rest under the per-realm KEK / per-field DEK
-envelope (see [key-hierarchy.md](key-hierarchy.md)).
+generic`. The active client encrypts sensitive field values with per-field DEKs
+wrapped by its AVK (see [key-hierarchy.md](key-hierarchy.md)); the backend stores
+ciphertext and redacted inventory.
 
 ### `witself.secret.status`
 
@@ -2740,10 +2742,10 @@ Input:
 ```
 
 Output data uses the secret reveal result from
-[json-contracts.md](json-contracts.md), in either the client-held or
-server-mediated shape per the hybrid decrypt model (see
-[key-hierarchy.md](key-hierarchy.md)). Audited as `secret.reveal`, with the
-`server_side_decrypt` flag recorded when the server performed the decrypt.
+[json-contracts.md](json-contracts.md). The active MCP client decrypts the
+encrypted field package under its AVK (see [key-hierarchy.md](key-hierarchy.md)).
+The backend audits encrypted-field delivery; it neither
+receives the plaintext nor attests that local decryption succeeded.
 
 ### `witself.secret.update`
 
@@ -2828,8 +2830,9 @@ Input:
 ```
 
 Output data uses the TOTP code result from
-[json-contracts.md](json-contracts.md). Audited as `totp.code`, with the
-`server_side_decrypt` flag recorded when the seed was decrypted server-side.
+[json-contracts.md](json-contracts.md). The active MCP client decrypts the
+seed under its AVK and calculates the code locally. The backend audits
+encrypted-field delivery without receiving the seed or code.
 
 ### `witself.totp.show`
 

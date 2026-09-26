@@ -9,8 +9,8 @@
 > receives an AVK, pairing secret, enrollment private key, recovery artifact or
 > passphrase, plaintext secret value, TOTP seed/code, or AI/model inference.
 > Secret update, irreversible purge, grants, group ownership, runtime
-> injection, and server-side reveal/TOTP routes described in target sections
-> below remain unregistered and are superseded wherever they conflict with
+> injection, and other deferred operations remain unregistered. Reveal and
+> TOTP calculation are active-client operations under
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
 
 Status: draft. Decision: Witself uses resource-oriented `/v1` routes with
@@ -1249,8 +1249,8 @@ audit events; read-only recall does neither:
 - `POST /v1/secrets/{secret_id}/fields/{field_id}:access` is the implemented
   explicit material-delivery route. It returns exactly one client-decryptable
   ciphertext and wrapped-DEK package with `Cache-Control: no-store`; local CLI
-  or MCP code performs the reveal. There is no server-side decrypt or plaintext
-  response shape.
+  or MCP code performs the reveal. The backend never decrypts the package or returns sensitive
+  plaintext.
 - `GET /v1/secrets:status` returns the authenticated owner agent's value-free
   retained capacity: `used`, nullable `max`, nullable `remaining`, `unlimited`,
   and `over_limit`. Active and archived bundles count; tombstones do not.
@@ -1271,8 +1271,8 @@ audit events; read-only recall does neither:
   metadata and deletes all field and wrapped-DEK rows. Ordinary get/list/access
   routes exclude the remaining minimal value-free tombstone. Permanent
   `DELETE` purge of that tombstone, `PATCH` update, copy, grants/group
-  ownership, and server-side TOTP routes are target-only and are not registered
-  in schema 67.
+  ownership are target-only and are not registered in schema 67. TOTP
+  calculation takes place in the active client, with no backend code route.
 - `/v1/vault/enrollments` implements the five-state, short-lived transfer
   lifecycle. `:receive` is an opaque target read; `:consume` proves durable
   local receipt before terminal capsule purge. Collection/exact lifecycle reads

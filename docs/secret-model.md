@@ -3,14 +3,15 @@
 > **Custody amendment (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
 > [client-custodied vault plan](client-custodied-agent-vault.md) supersede this
-> document wherever it specifies KMS-rooted encryption, backend decryption,
-> token-only reveal, group ownership, or plaintext-capable operator access.
+> document for client encryption/decryption, the agent-owned implementation,
+> and the requirement for a matching local AVK before sensitive use.
 > The structured secret, per-field sensitivity, redaction, and lifecycle ideas
 > remain applicable unless the new plan narrows them for v1.
 
 Status: draft. Decision: a secret is a first-class, agent- or group-owned
 **sealed-plane** payload — a named bundle of typed, per-field-sensitivity values,
-stored only as KMS-backed envelopes (never plaintext columns), revealed one
+with sensitive values stored only as client-authored envelopes (never plaintext
+columns), revealed one
 field at a time through an explicit, audited reveal ceremony, and used by
 reference without ever printing plaintext. Last reviewed 2026-06-26.
 
@@ -35,7 +36,7 @@ spine, one authorization layer, and one audit trail:
   recallable, plainly readable, in the self-digest, plaintext-exportable,
   ingestible from `CLAUDE.md`/`AGENTS.md`.
 - **Sealed plane** — secrets and TOTP enrollments. Envelope-encrypted at rest
-  (CMK → per-realm KEK → per-secret/field DEK), reveal-gated, and subject to the
+  (client-held AVK → per-sensitive-field DEK), reveal-gated, and subject to the
   carve-outs below.
 
 A credential belongs in the sealed plane, as a secret — **not** as a sensitive
@@ -57,7 +58,7 @@ These hold for every secret and every TOTP seed, with no per-deployment toggle:
 - **Never ingested.** Secrets are not created by `CLAUDE.md`/`AGENTS.md` ingest.
   Importing identity context can never produce a secret.
 - **Never plaintext-exported.** `witself export` excludes the sealed plane.
-  Secret backup is encrypted-only (envelope + KMS key identity, never plaintext);
+  Secret backup is encrypted-only (envelope + public AVK metadata, never the AVK);
   see [backup-and-recovery.md](backup-and-recovery.md).
 - **No plaintext at rest.** Sensitive values live only in envelope columns. Base64
   is serialization, never a security boundary. See
@@ -77,7 +78,7 @@ truth.
 - `id`: stable identifier with the `sec_` prefix. Server-assigned. Immutable.
   Callers must not parse id internals.
 - `realm`: the enclosing realm id (`realm_…`). Immutable. The realm is the
-  isolation, billing, and key-separation scope (one per-realm KEK per realm).
+  isolation and billing scope; each agent has a separate client-held AVK.
 - `owner`: the owning principal. An agent (`agent_…`) by default, or a security
   group (`grp_…`) for group-owned secrets. There is **no separate "shared"
   scope**: a credential meant for a team is owned by a group. Ownership is set at
@@ -280,16 +281,16 @@ sensitive secret values cross into plaintext only here.
 Reveal rules:
 
 - Reveal returns exactly **one** named sensitive field, not a whole secret.
-- Reveal requires `secret:reveal` (own secrets) or a matching grant / realm role
-  (others). Operator and cross-agent reveals also require an audit `reason`.
-- Reveal is always audited (`secret.reveal`), recording actor, target secret,
-  target field, owner context, result, and — for the server-mediated path — the
-  `server_side_decrypt` flag. The plaintext value is never written to the audit
-  row, logs, metrics, or errors.
-- Decryption follows the hybrid model in [key-hierarchy.md](key-hierarchy.md):
-  clients that can hold key material decrypt client-side by default
-  (`client_side_decrypt`); managed token-only pods that hold only a bearer token
-  use the capability-gated, narrowly audited `server_side_decrypt` path.
+- Reveal requires authorized access as the owning agent and the matching AVK
+  in the active client. Grants and group ownership remain follow-on targets;
+  an operator token alone cannot reveal sealed values.
+- Backend audit records authorized encrypted material access, including actor,
+  target secret, target field, owner context, and result. It cannot attest to
+  successful local decryption. Plaintext never enters audit, logs, metrics, or
+  errors.
+- Decryption follows [key-hierarchy.md](key-hierarchy.md): the active client
+  unwraps the field DEK with the matching AVK and decrypts locally. Token-only
+  clients cannot reveal; the backend has no plaintext fallback.
 - Each reveal (and each reference resolution) is metered as `secret_read`.
 
 The MCP surface gates reveal explicitly. `--no-value-tools` disables
@@ -414,8 +415,8 @@ Sealed-plane operations meter these dimensions (see
 `totp_code`, `runtime_injection`. Audit events:
 `secret.created`/`updated`/`renamed`/`copied`/`archived`/`restored`/`deleted`,
 `secret.reveal`, `secret.grant`/`revoke`, and the TOTP events in
-[totp-2fa.md](totp-2fa.md), with `server_side_decrypt` flagged on the
-server-mediated reveal/code path.
+[totp-2fa.md](totp-2fa.md). The implemented backend audits encrypted material
+access; client-side reveal and code generation never send plaintext to audit.
 
 ## Related Docs
 

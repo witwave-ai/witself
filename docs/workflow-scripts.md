@@ -18,7 +18,7 @@ vectors are client-supplied, and the backend performs no model inference. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 Sealed-value operations require the agent's client-held vault key as well as its token.
-The backend holds no AVK key material and offers no server-side decrypt path.
+The backend holds no AVK key material and never decrypts sealed values.
 Ordinary secret inventory is redacted; explicit secret reveal and TOTP commands
 return values through the active client. Archives contain encrypted sealed
 values, never AVKs or plaintext secret/TOTP values. See

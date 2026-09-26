@@ -19,10 +19,10 @@ zero coverage falls back to lexical recall and requires no pgvector extension.
 
 Sealed-plane custody amendment (accepted 2026-07-18):
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
-[client-custodied vault contract](client-custodied-agent-vault.md) supersede
-KMS-rooted agent-secret, realm-KEK, and server-side-decrypt language below. The
-backend holds no AVK key material, calls no KMS for agent secrets, and exposes
-no decrypt or `server_side_decrypt` path. Ordinary infrastructure KMS and
+[client-custodied vault contract](client-custodied-agent-vault.md) define
+client-side custody for agent secrets. The backend holds no AVK key material,
+calls no KMS for agent secrets, and never decrypts secret values.
+Ordinary infrastructure KMS and
 storage-encryption references are unaffected.
 
 ## Decision
@@ -33,7 +33,7 @@ archive format AWS-specific.
 AWS is first for:
 
 - The first managed-PostgreSQL narrative-memory conformance deployment.
-- The first production KMS integration for the sealed plane.
+- The first managed-cloud verification of client-custodied sealed state.
 - The first production-shaped Helm values example.
 - The first CI or smoke environment that exercises cloud-shaped infrastructure.
 
@@ -53,8 +53,7 @@ suite or an actual cross-provider archive move on all three targets.
 - It gives one concrete cloud to harden before multiplying provider behavior.
 - It lines up with the first production storage path: managed PostgreSQL as the
   canonical memory store with deterministic lexical recall.
-- It lines up with the AWS KMS decision for the sealed plane: AWS KMS is the
-  first key-management provider, with `gcp-kms` and `azure-key-vault` planned
+- It exercises the same client-custodied vault contract used on every cloud
   (see [storage.md](storage.md), [key-hierarchy.md](key-hierarchy.md)).
 - It leaves the already implemented GCP and Azure substrates available for the
   same conformance suite without changing the memory architecture.
@@ -96,28 +95,23 @@ does not require pgvector or any other model-specific extension. A later ANN
 projection may be provider-specific optimization only; it may not weaken the
 portable JSONB contract or lexical baseline. See [storage.md](storage.md).
 
-## KMS Requirement for the Sealed Plane
+## Sealed-Plane Custody Across Cloud Targets
 
-The sealed plane (secrets and TOTP) is protected by KMS-backed envelope
-encryption: a customer master key (CMK) wraps a per-realm KEK, which wraps a
-per-secret/field DEK (see [key-hierarchy.md](key-hierarchy.md)). The AWS target
-provisions AWS KMS as the first key-management provider; `gcp-kms` and
-`azure-key-vault` are planned and follow AWS.
+The sealed plane (secrets and TOTP) uses client-side envelope encryption:
+the agent vault key wraps per-field DEKs, and only the active client encrypts
+or decrypts sensitive values. The backend stores ciphertext and redacted
+inventory without agent-vault key material. See
+[key-hierarchy.md](key-hierarchy.md).
 
-- KMS is a hard dependency only when the sealed plane is enabled. An
-  open-plane-only deployment (memories and facts) requires PostgreSQL but not
-  KMS. Readiness gates on KMS only when the sealed plane is enabled; PostgreSQL
-  stays the hard gate for the open plane.
-- The AWS module surfaces the KMS provider, key id, and IAM grants as explicit
-  prerequisites (`witself-server` reads `WITSELF_KMS_PROVIDER` and
-  `WITSELF_KMS_KEY_ID`; see [storage.md](storage.md)).
-- KMS-loss is unrecoverable for sealed values by design (crypto-shred): without
-  the CMK, secret and TOTP values cannot be decrypted. This does not affect the
-  open plane, whose data is plaintext at rest in Postgres.
+- Agent secrets require no server KMS provider, key identifier, or unwrap IAM
+  grant. PostgreSQL remains the storage dependency; there is no agent-secret
+  KMS readiness gate.
+- Recovery of sealed values requires the matching client AVK or an authorized
+  client recovery path. A database restore alone does not recover that key.
 - Sealed-plane carve-outs hold regardless of cloud target: secret and TOTP
   values are never vectorized, never returned by memory recall, never in the
-  self-digest, and never written to plaintext export. Only the explicit,
-  reveal-gated, audited operations return sealed values.
+  self-digest, and never written to plaintext export. Explicit reveal and TOTP
+  operations return values only after local client decryption or calculation.
 
 ## Client Inference Is Not Cloud Substrate
 
@@ -127,7 +121,7 @@ embedding service, provider egress, or provider credential for
 `witself-server`.
 
 - Cloud targets provision compute, PostgreSQL, object/blob storage, identity,
-  networking, and optional sealed-plane KMS.
+  and networking.
 - Client model credentials stay with the client and never enter server, Helm, or
   infrastructure configuration.
 - Every cell serves deterministic lexical/tag/kind/time recall from PostgreSQL
@@ -161,10 +155,10 @@ The fleet spans AWS, GCP, Azure, and Civo, across multiple accounts per cloud.
   lands on is a placement outcome, not a global setting.
 - **A fleet of independent cells, not a shared substrate.** There is no shared data
   store spanning cells and no shared-data multi-master across clouds. Each cell
-  holds the full data and key material for its own tenants; a cell outage affects
+  holds the data and encrypted vault material for its own tenants; a cell outage affects
   only the tenants homed on that cell. Moving a tenant between clouds or accounts is
-  a deliberate, bounded migration (with a sealed-plane KMS re-wrap under the
-  destination cell), not continuous cross-cloud replication — see
+  a deliberate, bounded migration that preserves sealed ciphertext and requires
+  the same client-held AVK, not continuous cross-cloud replication — see
   [deployment-cells.md](deployment-cells.md).
 
 This is why the provider-neutral contracts below matter: they let any cloud target
@@ -182,13 +176,14 @@ Shared contracts should stay provider-neutral:
 - Memory, fact, policy, group, and message model.
 - Secret, TOTP, grant, and capability model (sealed plane).
 - Client-authored inference boundary and vector-profile portability contract.
-- KMS provider interface.
+- Infrastructure key-management boundary, separate from client-held AVKs.
+  It does not provide agent-secret unwrap authority.
 - Object/blob storage interface.
 - Helm chart values shape.
 - Observability and health probe semantics.
 - Infrastructure stack conventions.
 
-Provider-specific behavior should live behind storage, KMS, object/blob,
+Provider-specific behavior should live behind storage, infrastructure KMS, object/blob,
 identity, and infrastructure-as-code boundaries.
 
 ## Related Docs
