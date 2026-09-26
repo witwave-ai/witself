@@ -584,6 +584,10 @@ jobs:
         working-directory: scripts/dashboard-acceptance
         run: npx playwright install chromium
 
+      - name: Test dashboard browser regressions
+        working-directory: scripts/dashboard-acceptance
+        run: npm run test:browser
+
       - name: Run dashboard acceptance (Unix)
         if: runner.os != 'Windows'
         shell: bash

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { chromium } from '@playwright/test';
+import { launchChromium } from './browser.mjs';
 
 // Real app, shell, stylesheet, and browser layout; only transport is synthetic.
 // Run npm run test:browser after installing Playwright Chromium.
@@ -18,8 +18,9 @@ for (const { viewport, tallFooter } of [
   { viewport: { width: 1280, height: 900 } },
   { viewport: { width: 390, height: 844 }, tallFooter: true },
 ]) {
-  test(`conversation preserves reading position at ${viewport.width}x${viewport.height}${tallFooter ? ' with a tall footer' : ''}`, async () => {
-    const browser = await chromium.launch({ headless: true });
+  test(`conversation preserves reading position at ${viewport.width}x${viewport.height}${tallFooter ? ' with a tall footer' : ''}`, { timeout: 120000 }, async (t) => {
+    const browser = await launchChromium(t);
+    if (!browser) return;
     try {
       const page = await browser.newPage({ viewport });
       const errors = [];
@@ -42,6 +43,8 @@ for (const { viewport, tallFooter } of [
         if (url.pathname === '/api/avatar.svg') {
           return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"/>' });
         }
+        // The console polls account context at boot; this fixture has no manager credential.
+        if (url.pathname === '/api/account/context') { return route.fulfill({ status: 403, json: { error: 'forbidden' } }); }
         const responses = {
           '/api/themes': { themes: ['console'] },
           '/api/prefs': { preferences: { prefs: { theme: 'console' } } },

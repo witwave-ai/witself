@@ -145,15 +145,16 @@
 
   // --- portrait ---------------------------------------------------------
   function initAvatarDialog() {
-    var trigger = $("avatar-trigger"), dialog = $("avatar-dialog"), close = $("avatar-close");
+    var trigger = $("avatar-trigger"), dialog = $("avatar-dialog"), close = $("avatar-close"), image = $("avatar-enlarged");
     // Older embedded browsers and lightweight DOM consumers may omit dialogs.
-    if (!trigger || !dialog || !close) { return; }
+    if (!trigger || !dialog || !close || !image) { return; }
     if (typeof dialog.showModal !== "function" || typeof dialog.close !== "function") {
       trigger.disabled = true;
       return;
     }
     trigger.addEventListener("click", function () {
       if (dialog.open) { return; }
+      if (!image.getAttribute("src")) { image.setAttribute("src", "/api/avatar.svg"); }
       dialog.showModal();
       close.focus();
     });

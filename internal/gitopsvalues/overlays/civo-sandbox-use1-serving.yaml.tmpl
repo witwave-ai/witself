@@ -35,7 +35,7 @@ apps:
     chartVersion: {{.ChartVersion}}
     imageTag: {{.ImageTag}}
     backendKind: managed
-    # Schema-28's compatibility hold expired long ago (cells run schema 94);
+    # Schema-28's compatibility hold expired long ago;
     # in-product permanent fact deletion backs the published privacy policy.
     factDeletionEnabled: true
     # All writers on 0.0.273: config-only rollout; ConfigMap checksum restarts
