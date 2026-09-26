@@ -5,8 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/witwave-ai/witself/internal/agenttui"
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/sealed"
+	"github.com/witwave-ai/witself/internal/secretclient"
 )
 
 type fakeTUISecretReader struct {
@@ -94,6 +96,29 @@ func TestTUISecretRefusesWrongSecretOrField(t *testing.T) {
 		if value != nil || err == nil || service.accessed {
 			clear(value)
 			t.Fatal("nonmatching or inactive field reached access")
+		}
+	}
+}
+
+func TestTUISecretTypedReasons(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want agenttui.SecretRevealReason
+	}{
+		{secretclient.ErrKeyUnavailable, agenttui.SecretUnenrolled},
+		{secretclient.ErrKeyMismatch, agenttui.SecretMismatch},
+		{context.Canceled, agenttui.SecretCanceled},
+		{errors.New("PRIVATE_VALUE /private/path"), agenttui.SecretUnavailable},
+	} {
+		service := &fakeTUISecretReader{secret: &client.Secret{ID: "sec_selected", Lifecycle: "active", Fields: []client.SecretField{{ID: "fld_selected", Kind: "password", Sensitive: true, Encoding: sealed.ValueEncodingUTF8}}}, value: []byte("discard"), err: tc.err}
+		value, err := revealTUISecret(context.Background(), service, "sec_selected", "fld_selected")
+		if value != nil || !errors.Is(err, tc.want) {
+			t.Fatal("incorrect typed reveal reason")
+		}
+		for _, b := range service.value {
+			if b != 0 {
+				t.Fatal("failed reveal retained bytes")
+			}
 		}
 	}
 }

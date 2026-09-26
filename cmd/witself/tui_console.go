@@ -36,20 +36,21 @@ var (
 // gate serializes actions, but cancellation and Close do not wait to cancel an
 // in-flight startup. The retained child lifetime derives only from the parent.
 type tuiConsole struct {
-	manager  *dashboard.AccountManager
-	roots    accountConsoleRoots
-	parent   context.Context
-	cancel   context.CancelFunc
-	gate     chan struct{}
-	conn     agentConnection
-	identity client.SelfIdentity
-	poll     time.Duration
-	closed   bool
-	closeErr error
-	child    *tuiConsoleProcess
-	command  func() (*exec.Cmd, error)
-	opener   func(context.Context, string) error
-	signal   func(dashboard.RegistryEntry) error
+	authority func(context.Context, dashboard.AccountManagerIdentity) error
+	manager   *dashboard.AccountManager
+	roots     accountConsoleRoots
+	parent    context.Context
+	cancel    context.CancelFunc
+	gate      chan struct{}
+	conn      agentConnection
+	identity  client.SelfIdentity
+	poll      time.Duration
+	closed    bool
+	closeErr  error
+	child     *tuiConsoleProcess
+	command   func() (*exec.Cmd, error)
+	opener    func(context.Context, string) error
+	signal    func(dashboard.RegistryEntry) error
 }
 
 type tuiConsoleProcess struct {
@@ -81,6 +82,12 @@ func newTUIConsole(ctx context.Context, conn agentConnection, identity client.Se
 	}
 	go func() { <-parent.Done(); _ = c.Close() }()
 	return c
+}
+
+// BindAccountAuthority connects discovery to the same private Reader used by the TUI.
+// Called once during model construction, before any console actions.
+func (c *tuiConsole) BindAccountAuthority(check func(context.Context, dashboard.AccountManagerIdentity) error) {
+	c.authority = check
 }
 
 func (c *tuiConsole) action(ctx context.Context, timeout time.Duration) (context.Context, func(), error) {
@@ -218,7 +225,12 @@ func (c *tuiConsole) Open(ctx context.Context) (agenttui.ConsoleStatus, error) {
 	// hold its discovery lock while waiting on an OS association handler:
 	// independent shutdown must still be able to release its registry record.
 	// The access token is scoped to that instance; a replacement cannot adopt it.
-	if launchCtx.Err() != nil || c.opener(launchCtx, entry.AccessURL) != nil {
+	if launchCtx.Err() != nil {
+		return status, errConsoleOpen
+	}
+	if err := c.opener(launchCtx, entry.AccessURL); errors.Is(err, agenttui.ErrBrowserOutcomeUnknown) {
+		return status, agenttui.ErrBrowserOutcomeUnknown
+	} else if err != nil {
 		return status, errConsoleOpen
 	}
 	return status, nil

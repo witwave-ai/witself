@@ -104,9 +104,9 @@ func (c *tuiConsole) spawn(ctx context.Context) (*tuiConsoleProcess, <-chan bool
 }
 
 func consoleChildEnvironment() []string {
-	// Runtime/path/home values only. The resolved account and bearer never use
+	// Runtime/path/home and networking configuration only. The resolved account and bearer never use
 	// env/argv/files. Windows needs SystemRoot for ordinary native networking.
-	keys := []string{"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "WITSELF_HOME", "DSH_HOME", "TMPDIR", "TMP", "TEMP", "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR"}
+	keys := []string{"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "WITSELF_HOME", "DSH_HOME", "TMPDIR", "TMP", "TEMP", "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 	env := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok {
@@ -160,7 +160,7 @@ func runTUIConsoleChild(input io.Reader, output io.Writer) int {
 		return 1
 	}
 	bootstrap.Connection.Endpoint = endpoint
-	startup, finish := context.WithTimeout(ctx, 8*time.Second)
+	startup, finish := context.WithTimeout(ctx, consoleStartupTimeout)
 	err = verifyConsoleChildIdentity(startup, bootstrap)
 	var manager *dashboard.AccountManager
 	if err == nil {
@@ -196,7 +196,11 @@ func verifyConsoleChildIdentity(ctx context.Context, bootstrap tuiConsoleBootstr
 		return errConsoleStart
 	}
 	request.Header.Set("Authorization", "Bearer "+bootstrap.Connection.Token)
-	probe, closeProbe := consoleHTTPClient()
+	// The cell may require a proxy or custom CA. Keep redirects disabled so the
+	// agent bearer cannot move to another origin.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	probe := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	closeProbe := transport.CloseIdleConnections
 	defer closeProbe()
 	response, err := probe.Do(request)
 	if err != nil {

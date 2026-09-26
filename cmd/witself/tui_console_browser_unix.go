@@ -7,6 +7,10 @@ import (
 	"io"
 	"os/exec"
 	"runtime"
+	"syscall"
+	"time"
+
+	"github.com/witwave-ai/witself/internal/agenttui"
 )
 
 func openTUIConsoleBrowser(ctx context.Context, accessURL string) error {
@@ -22,12 +26,34 @@ func openTUIConsoleBrowser(ctx context.Context, accessURL string) error {
 	default:
 		return errConsoleOpen
 	}
-	// Native argv delivery only; never a shell. CommandContext bounds the
-	// launcher and reaps it; failures retain the running console for retry.
-	if err := exec.CommandContext(ctx, opener, accessURL).Run(); err != nil {
+	return launchTUIConsoleBrowser(ctx, exec.Command(opener, accessURL), time.Second)
+}
+
+// Native argv only, with a separate process group and an unconditional reaper.
+// Cancellation bounds observation, never the lifetime of an already launched browser.
+func launchTUIConsoleBrowser(ctx context.Context, command *exec.Cmd, wait time.Duration) error {
+	if ctx.Err() != nil {
+		return errConsoleCanceled
+	}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
 		return errConsoleOpen
 	}
-	return nil
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return errConsoleOpen
+		}
+		return nil
+	case <-timer.C:
+		return agenttui.ErrBrowserOutcomeUnknown
+	case <-ctx.Done():
+		return agenttui.ErrBrowserOutcomeUnknown
+	}
 }
 
 // The native browser helper is only used on Windows.

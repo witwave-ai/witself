@@ -221,3 +221,9 @@ vault enrollment or production cell acceptance. The browser's existing
 surface; secret-field reveal is confined to the terminal workspace. Account
 checks use synthetic identities and local fixtures; they do not establish live
 customer-account acceptance.
+
+The TUI removes an exact, valid console registry record only when its process is known dead, allowing `b` or `w` to start a replacement; live or unverifiable records remain untouched.
+Account authority is checked on each Account tick, every 30 seconds elsewhere, and with exponential retry backoff capped at 60 seconds after failure; a failed check immediately removes Account access, and console discovery reuses the reader's verified principal for at most 30 seconds.
+Secret reveal failures show only fixed reasons for an unenrolled key, a key mismatch, unavailable access, or cancellation, without displaying error text or paths.
+On Unix, browser launch observes early failure for up to one second, then reports an unknown opening outcome without killing a launched browser.
+Managed console children inherit HTTP/HTTPS proxy, proxy exclusion, and custom CA settings; local discovery probes bypass proxies, while cell identity verification uses the standard transport with a ten-second budget.

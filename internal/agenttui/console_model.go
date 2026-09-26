@@ -2,12 +2,17 @@ package agenttui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
+
+// ErrBrowserOutcomeUnknown means launch succeeded but its early-exit window elapsed.
+// It is informational and contains no URL or launcher error text.
+var ErrBrowserOutcomeUnknown = errors.New("browser launched; outcome unknown")
 
 type consoleAction uint8
 
@@ -38,6 +43,7 @@ type consoleMsg struct {
 	generation uint64
 	action     consoleAction
 	status     ConsoleStatus
+	unknown    bool
 	failed     bool
 }
 type consoleTickMsg struct{}
@@ -112,7 +118,7 @@ func (m *Model) consoleRun(action consoleAction) tea.Cmd {
 		case consoleStop:
 			valid = valid && status.State == ConsoleStopped
 		}
-		return consoleMsg{generation: generation, action: action, status: status, failed: err != nil || !valid}
+		return consoleMsg{generation: generation, action: action, status: status, unknown: errors.Is(err, ErrBrowserOutcomeUnknown), failed: (err != nil && !errors.Is(err, ErrBrowserOutcomeUnknown)) || !valid}
 	}
 }
 
@@ -183,6 +189,9 @@ func consoleOutcome(msg consoleMsg) string {
 	}
 	switch msg.action {
 	case consoleOpen:
+		if msg.unknown {
+			return "Browser launched; opening outcome is unknown."
+		}
 		return "Web console opened in your browser."
 	case consoleStart:
 		return "Web console is running. Use Web console: b open."

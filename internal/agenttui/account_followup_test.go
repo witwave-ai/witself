@@ -434,8 +434,12 @@ func TestAccountSupportRequiresFreshEnterAfterClear(t *testing.T) {
 			}
 			ticketEmpty(t, m)
 			m.overlay = ""
+			// Advance the idle authority interval so every iteration has finite work.
+			now := time.Now()
+			m.account.now = func() time.Time { return now }
 			// Use actual independent tick work, omitting only the next timer.
 			for i := 0; i < 2; i++ {
+				now = now.Add(30 * time.Second)
 				_, cmd := m.Update(accountTickMsg{})
 				batch := cmd().(tea.BatchMsg)
 				for _, child := range batch[1:] {

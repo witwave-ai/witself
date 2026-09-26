@@ -35,7 +35,7 @@ func consoleIdentityMatches(a, b client.SelfIdentity) bool {
 	return a.AccountID != "" && a.RealmID != "" && a.AgentID != "" && a.AccountID == b.AccountID && a.RealmID == b.RealmID && a.AgentID == b.AgentID
 }
 
-// All discovery traffic uses constructed loopback URLs, never redirects or
+// Local discovery traffic uses constructed loopback URLs, never redirects or
 // proxy environment settings. Each client has a private, promptly closed pool.
 func consoleHTTPClient() (*http.Client, func()) {
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: time.Second}).DialContext, ResponseHeaderTimeout: 2 * time.Second}
@@ -87,10 +87,23 @@ func (c *tuiConsole) discover(ctx context.Context) (agenttui.ConsoleStatus, dash
 		return agenttui.ConsoleStatus{State: agenttui.ConsoleStopped}, empty, nil
 	}
 	conflict := agenttui.ConsoleStatus{State: agenttui.ConsoleConflict}
-	if err != nil || !c.validEntry(entry) || !dashboard.RegistryPIDRunning(entry.PID) {
+	if err != nil || !c.validEntry(entry) {
 		return conflict, empty, errConsoleConflict
 	}
-	if !verifyConsoleEntry(ctx, entry, c.identity, c.manager) {
+	if consolePIDDead(entry.PID) {
+		removed, err := dashboard.WithRegistryInstance(ctx, entry, func() error {
+			// Recheck after waiting for the claim lock: a reused PID is not dead.
+			if !consolePIDDead(entry.PID) {
+				return errConsoleConflict
+			}
+			return dashboard.RemoveRegistryEntry(entry.AgentID)
+		})
+		if err == nil && removed {
+			return agenttui.ConsoleStatus{State: agenttui.ConsoleStopped}, empty, nil
+		}
+		return conflict, empty, errConsoleConflict
+	}
+	if !dashboard.RegistryPIDRunning(entry.PID) || !verifyConsoleEntry(ctx, entry, c.identity, c.manager, c.authority) {
 		if ctx.Err() != nil {
 			return consoleUnavailable(), empty, errConsoleCanceled
 		}
@@ -103,7 +116,7 @@ func (c *tuiConsole) discover(ctx context.Context) (agenttui.ConsoleStatus, dash
 	return agenttui.ConsoleStatus{State: agenttui.ConsoleRunning, Owned: c.owns(entry), Port: entry.Port}, entry, nil
 }
 
-func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expected client.SelfIdentity, manager *dashboard.AccountManager) bool {
+func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expected client.SelfIdentity, manager *dashboard.AccountManager, authority func(context.Context, dashboard.AccountManagerIdentity) error) bool {
 	probe, closeProbe := consoleHTTPClient()
 	defer closeProbe()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, entry.AccessURL, nil)
@@ -183,6 +196,9 @@ func verifyConsoleEntry(ctx context.Context, entry dashboard.RegistryEntry, expe
 		return false
 	}
 	// Verify the caller's private authority separately from the serving session.
+	if authority != nil {
+		return authority(ctx, manager.Identity) == nil
+	}
 	_, err = client.RevalidateAccountConsoleManager(ctx, *manager)
 	return err == nil
 }

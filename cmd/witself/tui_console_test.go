@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -671,10 +672,24 @@ func TestTUIConsoleIgnoresProxyAndPrivateEnvironment(t *testing.T) {
 	var proxyRequests atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { proxyRequests.Add(1); w.WriteHeader(500) }))
 	defer proxy.Close()
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy"} {
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"} {
 		t.Setenv(key, proxy.URL)
 	}
 	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "loopback.invalid")
+	t.Setenv("SSL_CERT_FILE", filepath.Join(t.TempDir(), "synthetic-ca"))
+	t.Setenv("SSL_CERT_DIR", t.TempDir())
+	allowed := []string{"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "WITSELF_HOME", "DSH_HOME", "TMPDIR", "TMP", "TEMP", "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+	want := []string{}
+	for _, key := range allowed {
+		if value, ok := os.LookupEnv(key); ok {
+			want = append(want, key+"="+value)
+		}
+	}
+	if !reflect.DeepEqual(consoleChildEnvironment(), want) {
+		t.Fatal("child environment differs from exact allowlist")
+	}
+
 	t.Setenv("WITSELF_TOKEN", consoleFakeToken)
 	t.Setenv("UNRELATED_SECRET", consoleFakeToken)
 	for _, value := range consoleChildEnvironment() {

@@ -128,6 +128,15 @@ func New(ctx context.Context, src Source, o Options) *Model {
 		theme = "auto"
 	}
 	m := &Model{ctx: ctx, cancel: cancel, source: src, opts: o, width: 80, height: 24, theme: theme, self: object{}, blocked: map[dashboard.Resource]string{}, expanded: map[int]bool{}, vp: viewport.New(40, 15), selfStatus: "loading"}
+	if source, ok := src.(interface {
+		VerifyAccountConsoleAuthority(context.Context, dashboard.AccountManagerIdentity) error
+	}); ok {
+		if console, ok := o.Console.(interface {
+			BindAccountAuthority(func(context.Context, dashboard.AccountManagerIdentity) error)
+		}); ok {
+			console.BindAccountAuthority(source.VerifyAccountConsoleAuthority)
+		}
+	}
 	m.account.vp = viewport.New(76, 15)
 	m.summaryRow = 1 // Start on the first category with a defined activity metric.
 	if ValidTheme(o.Theme) {
@@ -896,7 +905,11 @@ func (m *Model) privateRead(copyOnly bool) tea.Cmd {
 			raw, err := src.(SecretSource).RevealSecret(ctx, secretID, fieldID)
 			defer clear(raw)
 			if err != nil || ctx.Err() != nil || len(raw) > 64<<10 {
-				return finish("", "unavailable")
+				reason := secretRevealReason(err)
+				if ctx.Err() != nil {
+					reason = SecretCanceled
+				}
+				return finish("", reason.Error())
 			}
 			exact = string(raw)
 		} else {
@@ -984,7 +997,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := msg.(type) {
 	case accountTickMsg:
-		authority := m.accountAuthority()
+		authority := m.accountPollAuthority()
 		var read tea.Cmd
 		m.account.ticket.Lock()
 		selected := m.account.ticket.id != ""

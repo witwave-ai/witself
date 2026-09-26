@@ -11,6 +11,7 @@ import (
 	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agenttui"
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/dashboard"
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/sealed"
 	"github.com/witwave-ai/witself/internal/secretclient"
@@ -29,7 +30,7 @@ func (s *tuiSecretSource) RevealSecret(ctx context.Context, secretID, fieldID st
 	defer cancel()
 	accountName, account, err := local.ResolveAccount(s.connection.AccountName)
 	if err != nil || account.ID != s.identity.AccountID {
-		return nil, errors.New("secret access needs the matching local account and enrolled vault key")
+		return nil, agenttui.SecretUnavailable
 	}
 	service, err := secretclient.New(secretclient.Config{
 		Endpoint: s.connection.Endpoint, Token: s.connection.Token,
@@ -37,7 +38,7 @@ func (s *tuiSecretSource) RevealSecret(ctx context.Context, secretID, fieldID st
 		RealmName: s.identity.RealmName, AgentName: s.identity.AgentName,
 	})
 	if err != nil {
-		return nil, errors.New("local secret custody is unavailable")
+		return nil, agenttui.SecretUnavailable
 	}
 	return revealTUISecret(ctx, service, secretID, fieldID)
 }
@@ -49,8 +50,11 @@ type tuiSecretReader interface {
 
 func revealTUISecret(ctx context.Context, service tuiSecretReader, secretID, fieldID string) ([]byte, error) {
 	secret, err := service.Get(ctx, secretID)
+	if ctx.Err() != nil {
+		return nil, agenttui.SecretCanceled
+	}
 	if err != nil || secret == nil || secret.ID != secretID || secret.Lifecycle != "active" {
-		return nil, errors.New("selected secret is unavailable")
+		return nil, agenttui.SecretUnavailable
 	}
 	var field *client.SecretField
 	for i := range secret.Fields {
@@ -60,47 +64,49 @@ func revealTUISecret(ctx context.Context, service tuiSecretReader, secretID, fie
 		}
 	}
 	if field == nil {
-		return nil, errors.New("selected field is unavailable")
+		return nil, agenttui.SecretUnavailable
 	}
 	if field.Kind == "totp" {
-		return nil, errors.New("TOTP seed cannot be revealed; use witself totp code for a current code")
+		return nil, agenttui.SecretUnavailable
 	}
 	var value []byte
 	if field.Sensitive {
 		key, keyErr := secretIdempotencyKey("")
 		if keyErr != nil {
-			return nil, errors.New("could not start field access")
+			return nil, agenttui.SecretUnavailable
 		}
 		value, err = service.RevealExistingField(ctx, secret.ID, field.ID, key)
 		if err != nil {
 			clear(value)
 			switch {
+			case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+				return nil, agenttui.SecretCanceled
 			case errors.Is(err, secretclient.ErrKeyUnavailable):
-				return nil, errors.New("vault key unavailable here; enroll this installation before revealing")
+				return nil, agenttui.SecretUnenrolled
 			case errors.Is(err, secretclient.ErrKeyMismatch):
-				return nil, errors.New("local vault key does not match; reveal refused")
+				return nil, agenttui.SecretMismatch
 			default:
-				return nil, errors.New("field access failed; no value was displayed")
+				return nil, agenttui.SecretUnavailable
 			}
 		}
 	} else if field.PublicValue != nil {
 		value = []byte(*field.PublicValue)
 	} else {
-		return nil, errors.New("selected field value is unavailable")
+		return nil, agenttui.SecretUnavailable
 	}
 	if ctx.Err() != nil {
 		clear(value)
-		return nil, errors.New("field access canceled")
+		return nil, agenttui.SecretCanceled
 	}
 	if len(value) > 64<<10 {
 		clear(value)
-		return nil, errors.New("field is too large for terminal reveal")
+		return nil, agenttui.SecretUnavailable
 	}
 	switch field.Encoding {
 	case sealed.ValueEncodingUTF8, sealed.ValueEncodingJSON:
 		if !utf8.Valid(value) || (field.Encoding == sealed.ValueEncodingJSON && !json.Valid(value)) {
 			clear(value)
-			return nil, errors.New("field encoding is invalid")
+			return nil, agenttui.SecretUnavailable
 		}
 	case sealed.ValueEncodingBinary:
 		encoded := make([]byte, base64.StdEncoding.EncodedLen(len(value)))
@@ -109,7 +115,17 @@ func revealTUISecret(ctx context.Context, service tuiSecretReader, secretID, fie
 		value = encoded
 	default:
 		clear(value)
-		return nil, errors.New("field encoding is unsupported")
+		return nil, agenttui.SecretUnavailable
 	}
 	return value, nil
+}
+
+// Forward only the private principal check, never manager credentials.
+func (s *tuiSecretSource) VerifyAccountConsoleAuthority(ctx context.Context, expected dashboard.AccountManagerIdentity) error {
+	if source, ok := s.Source.(interface {
+		VerifyAccountConsoleAuthority(context.Context, dashboard.AccountManagerIdentity) error
+	}); ok {
+		return source.VerifyAccountConsoleAuthority(ctx, expected)
+	}
+	return client.ErrAccountConsoleUnavailable
 }
