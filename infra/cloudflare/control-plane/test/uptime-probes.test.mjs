@@ -167,7 +167,7 @@ test("the template cron triggers keep probe and maintenance work exclusive", asy
   }
 });
 
-test("scheduled probes run concurrently, time out at 10s, and persist only value-free results", async (t) => {
+test("scheduled probes run concurrently, time out at 10s, and persist only value-free results", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const directory = new DirectoryKV(Object.fromEntries(
     ["ok", "fail", "timeout", "reject"].map((name) => [`cell:${name}`, {
@@ -300,7 +300,7 @@ test("a scheduler that never ran exposes zero-valued scheduler gauges", async ()
   assert.equal(directory.writes.length, 0);
 });
 
-test("an empty directory persists scheduler health and exposes it without target samples", async (t) => {
+test("an empty directory persists scheduler health and exposes it without target samples", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const directory = new DirectoryKV();
   await runScheduledUptimeProbes({ DIRECTORY: directory }, () => assert.fail("unexpected probe"));
@@ -317,7 +317,7 @@ test("an empty directory persists scheduler health and exposes it without target
   assert.equal(body.includes("{target="), false);
 });
 
-test("directory failure without previous targets still persists and exposes scheduler health", async (t) => {
+test("directory failure without previous targets still persists and exposes scheduler health", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const directory = new DirectoryKV();
   directory.list = async () => { throw new Error(PRIVATE_MARKER); };
@@ -334,7 +334,7 @@ test("directory failure without previous targets still persists and exposes sche
   assert.equal(body.includes(PRIVATE_MARKER), false);
 });
 
-test("six unreachable targets cannot falsely fail a healthy seventh behind a connection queue", async (t) => {
+test("six unreachable targets cannot falsely fail a healthy seventh behind a connection queue", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const names = ["a", "b", "c", "d", "e", "f", "healthy"];
   const directory = new DirectoryKV(Object.fromEntries(names.map((name) =>
@@ -382,7 +382,7 @@ test("six unreachable targets cannot falsely fail a healthy seventh behind a con
   assert.equal(active, 0);
 });
 
-test("the probe pool keeps at most four fetches in flight and gives queued probes a fresh timeout", async (t) => {
+test("the probe pool keeps at most four fetches in flight and gives queued probes a fresh timeout", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const directory = new DirectoryKV(Object.fromEntries(
     Array.from({ length: 8 }, (_, i) => [`cell:c${i}`, { endpoint: `https://c${i}.test.invalid` }]),
@@ -418,7 +418,7 @@ test("the probe pool keeps at most four fetches in flight and gives queued probe
 
 test("the four-probe pool is isolated from three slow maintenance connections", async (t) => {
   for (const separateInvocations of [false, true]) {
-    await t.test(separateInvocations ? "separate cron invocations" : "former shared invocation reproduces a false outage", async (subtest) => {
+    await t.test(separateInvocations ? "separate cron invocations" : "former shared invocation reproduces a false outage", { timeout: 10_000 }, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
       subtest.mock.method(console, "log", () => {});
       const invocations = new AsyncLocalStorage();
@@ -540,7 +540,7 @@ test("the four-probe pool is isolated from three slow maintenance connections", 
   }
 });
 
-test("the shared budget records unstarted targets as skipped and omits their up sample", async (t) => {
+test("the shared budget records unstarted targets as skipped and omits their up sample", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const directory = new DirectoryKV(Object.fromEntries(
     Array.from({ length: 9 }, (_, i) => [`cell:c${i}`, { endpoint: `https://c${i}.test.invalid` }]),
@@ -583,7 +583,7 @@ test("malformed and absent run documents persist skipped targets on the first ti
     "absent": null,
   };
   for (const [name, raw] of Object.entries(cases)) {
-    await t.test(name, async (subtest) => {
+    await t.test(name, { timeout: 10_000 }, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
       const names = ["a", "b", "c", "d", "z"];
       const directory = new DirectoryKV(Object.fromEntries(names.map((name) => [
@@ -649,7 +649,7 @@ test("malformed and absent run documents persist skipped targets on the first ti
   }
 });
 
-test("recovered targets get dispatched across cron ticks while earlier cells keep timing out", async (t) => {
+test("recovered targets get dispatched across cron ticks while earlier cells keep timing out", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const names = ["a", "b", "c", "d", "z"];
   const observation = { state: "down", http_status_class: 5, latency_ms: 1250,
@@ -701,7 +701,7 @@ test("recovered targets get dispatched across cron ticks while earlier cells kee
   assert.deepEqual(upByRun, [false, true, true, true], "recovery must replace the stale outage metric");
 });
 
-test("repeated skipped runs preserve a prior outage and its last completed observation through discovery failure", async (t) => {
+test("repeated skipped runs preserve a prior outage and its last completed observation through discovery failure", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const names = ["a", "b", "c", "d", "e", "f", "g", "h", "z"];
   const observation = { state: "down", http_status_class: 5, latency_ms: 1250,
@@ -762,7 +762,7 @@ test("repeated skipped runs preserve a prior outage and its last completed obser
   assert.equal(body.includes('witself_probe_skipped{target="z"}'), false);
 });
 
-test("a healthy fifth target is skipped when slow discovery leaves less than its full timeout", async (t) => {
+test("a healthy fifth target is skipped when slow discovery leaves less than its full timeout", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const directory = new DirectoryKV(Object.fromEntries(
     ["a", "b", "c", "d", "healthy"].map((name) => [`cell:${name}`, { endpoint: `https://${name}.test.invalid` }]),
@@ -805,7 +805,7 @@ test("a healthy fifth target is skipped when slow discovery leaves less than its
   assert.equal(body.includes('witself_probe_up{target="healthy"}'), false);
 });
 
-test("an unreadable prior snapshot preserves existing outage evidence when discovered targets are skipped", async (t) => {
+test("an unreadable prior snapshot preserves existing outage evidence when discovered targets are skipped", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const names = ["a", "b", "c", "d", "e", "f", "g", "h", "z"];
   const checkedAt = new Date(NOW - 3_600_000).toISOString();
@@ -886,7 +886,7 @@ test("a skipped target retains its prior healthy metric and probe priority", asy
   assert.equal(Object.hasOwn(completed, "last_observation"), false);
 });
 
-test("skipping projects legacy observations without carrying private metadata", async (t) => {
+test("skipping projects legacy observations without carrying private metadata", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const names = ["a", "b", "c", "d", "e", "f", "g", "h", "z"];
   const observation = { state: "down", http_status_class: 5, latency_ms: 1250,
@@ -924,7 +924,7 @@ test("skipping projects legacy observations without carrying private metadata", 
   assert.equal(body.includes(PRIVATE_MARKER), false);
 });
 
-test("alternating discovery failures preserve a continuous cell outage and its timestamps", async (t) => {
+test("alternating discovery failures preserve a continuous cell outage and its timestamps", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const directory = new DirectoryKV({
     "cell:broken": { endpoint: "https://broken.test.invalid" },
@@ -974,7 +974,7 @@ test("alternating discovery failures preserve a continuous cell outage and its t
 
 test("failed discovery never overwrites an unreadable previous snapshot", async (t) => {
   for (const failure of ["throw", "timeout"]) {
-    await t.test(failure, async (subtest) => {
+    await t.test(failure, { timeout: 10_000 }, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
       const previous = snapshot();
       const directory = new DirectoryKV({ [UPTIME_PROBES_KEY]: previous });
@@ -1037,7 +1037,7 @@ test("discovery failure preserves a directory-named cell's check time without du
   }
 });
 
-test("scheduled CP probes reach the container only behind the exact opt-in gate", async (t) => {
+test("scheduled CP probes reach the container only behind the exact opt-in gate", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   let env;
   let cellFetches;
@@ -1139,7 +1139,7 @@ test("unsafe endpoints fail their cell without forwarding URL secrets or followi
 
 test("stalled KV reads and noncooperative fetches cannot exceed the scheduled budget", async (t) => {
   for (const phase of ["list", "get"]) {
-    await t.test(phase, async (timeoutTest) => {
+    await t.test(phase, { timeout: 10_000 }, async (timeoutTest) => {
       timeoutTest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
       const directory = new DirectoryKV({ "cell:a": { endpoint: "https://a.test.invalid" } });
       directory[phase] = async (key) => [UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY].includes(key)
@@ -1157,7 +1157,7 @@ test("stalled KV reads and noncooperative fetches cannot exceed the scheduled bu
       assert.equal(directory.scheduler().directory_ok, false);
     });
   }
-  await t.test("directory, fetch and write share the 25s budget", async (timeoutTest) => {
+  await t.test("directory, fetch and write share the 25s budget", { timeout: 10_000 }, async (timeoutTest) => {
     timeoutTest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
     const directory = new DirectoryKV({ "cell:a": { endpoint: "https://a.test.invalid" } });
     directory.list = async () => {
@@ -1200,7 +1200,7 @@ test("public metrics bypass account/auth paths, preserve stale timestamps and ke
   const directory = new DirectoryKV({ [UPTIME_PROBES_KEY]: document });
   const env = new Proxy({ DIRECTORY: directory }, {
     get(target, key) {
-      assert.ok(["DIRECTORY", "CP_PLAN_LIFECYCLE_ENABLED"].includes(key), "metrics may read only snapshots and lifecycle enablement, not auth, account, limiter or container bindings");
+      assert.ok(["DIRECTORY", "CP_PLAN_LIFECYCLE_ENABLED", "CP_ACCOUNT_BACKUPS_ENABLED"].includes(key), "disabled metrics may read only snapshots and feature enablement, not auth, account, limiter or container bindings");
       return target[key];
     },
   });
@@ -1220,6 +1220,8 @@ test("public metrics bypass account/auth paths, preserve stale timestamps and ke
   assert.equal(body.includes(PRIVATE_MARKER), false);
   assert.ok(body.endsWith("\n"));
   assert.deepEqual(body.trim().split("\n").filter((line) => !line.startsWith("#")).sort(), [
+    "witself_control_plane_account_backup_enabled 0",
+    "witself_control_plane_account_backup_health_available 0",
     "witself_entitlement_delivery_enabled 0",
     "witself_entitlement_delivery_metrics_up 0",
     'witself_entitlement_delivery_snapshot_state{state="disabled"} 1',
@@ -1352,7 +1354,7 @@ test("non-GET metrics requests are rejected before reading KV", async () => {
 
 test("thirteen rejected run-document writes cannot refresh the heartbeat without outage results", async (t) => {
   for (const layout of ["empty run document", "empty legacy pair", "never written"]) {
-    await t.test(layout, async (subtest) => {
+    await t.test(layout, { timeout: 10_000 }, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["Date"], now: NOW });
       const previousScheduler = { ...scheduler(layout === "empty legacy pair" ? 1 : 0),
         last_run_at: new Date(NOW - 300_000).toISOString() };
@@ -1419,7 +1421,7 @@ test("thirteen rejected run-document writes cannot refresh the heartbeat without
   }
 });
 
-test("the complete legacy pair remains readable and migrates with one new-key write", async (t) => {
+test("the complete legacy pair remains readable and migrates with one new-key write", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const previous = snapshot();
   const priorScheduler = { ...scheduler(), last_run_at: previous.targets[0].checked_at };
@@ -1540,7 +1542,7 @@ test("invalid or unparseable run documents expose stale zero gauges and never fa
 test("transport errors and timeouts fail the scrape for each persisted run key", async (t) => {
   for (const key of [UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY]) {
     for (const failure of ["throw", "timeout"]) {
-      await t.test(`${key}: ${failure}`, async (subtest) => {
+      await t.test(`${key}: ${failure}`, { timeout: 10_000 }, async (subtest) => {
         subtest.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
         const directory = new DirectoryKV({
           [UPTIME_PROBES_KEY]: snapshot(), [UPTIME_PROBE_SCHEDULER_KEY]: scheduler(),

@@ -1481,3 +1481,133 @@ tests:
       - eval_time: 60m
         alertname: WitselfIdentityCapacityAtLimit
         exp_alerts: []
+
+  - name: account backups alert after grace and resolve without account labels
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 1+0x15
+      - series: witself_control_plane_account_backup_health_available
+        values: 1+0x15
+      - series: witself_control_plane_account_backup_stale_accounts
+        values: 0 1+0x7 0+0x6
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfAccountBackupStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfAccountBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: A live account has exceeded twice the backup interval since its newest commit or earliest known job.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 10m
+        alertname: WitselfAccountBackupStale
+        exp_alerts: []
+  - name: disabled backups do not page
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 0+0x10
+      - series: witself_control_plane_account_backup_stale_accounts
+        values: 2+0x10
+      - series: witself_control_plane_account_backup_health_available
+        values: 0+0x10
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WitselfAccountBackupStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+  - name: unreadable backup catalogs page instead of looking healthy
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 1+0x10
+      - series: witself_control_plane_account_backup_health_available
+        values: 0+0x6 1+0x3
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Periodic account backup health is unavailable or its snapshot is older than three intervals.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 8m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+
+  - name: backup snapshot age uses three configured intervals and resolves on refresh
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 1+0x15
+      - series: witself_control_plane_account_backup_health_available
+        values: 1+0x15
+      - series: witself_control_plane_account_backup_interval_seconds
+        values: 300+0x15
+      - series: witself_control_plane_account_backup_health_age_seconds
+        values: 900+0x5 901+0x5 0+0x3
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: Periodic account backup health is unavailable or its snapshot is older than three intervals.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 12m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+  - name: new accounts without overdue jobs do not page
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 1+0x10
+      - series: witself_control_plane_account_backup_health_available
+        values: 1+0x10
+      - series: witself_control_plane_account_backup_stale_accounts
+        values: 0+0x10
+      - series: witself_control_plane_account_backup_never_committed_accounts
+        values: 12+0x10
+      - series: witself_control_plane_account_backup_interval_seconds
+        values: 86400+0x10
+      - series: witself_control_plane_account_backup_health_age_seconds
+        values: 60+60x10
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfAccountBackupStale
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []
+  - name: missing scrape series are not a computed health failure
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: 1+0x10
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfAccountBackupHealthUnavailable
+        exp_alerts: []

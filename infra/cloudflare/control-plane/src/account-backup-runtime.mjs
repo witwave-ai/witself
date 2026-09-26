@@ -26,7 +26,9 @@ const DEFAULT_PAGE_SIZE = 4;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_CATALOG_LIMIT = 64;
-const EXPORT_TIMEOUT_MS = 5 * 60 * 1000;
+export const IDLE_TIMEOUT_MS = 120_000;
+export const OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
+const VALIDATION_TIMEOUT_MS = 5 * 60 * 1000;
 const BASE_RETRY_MS = 60_000;
 const MAX_RETRY_MS = 30 * 60_000;
 const SCAN_FAILURE_SAMPLE_LIMIT = 16;
@@ -290,6 +292,7 @@ function validCatalogRecord(record, accountID) {
     validDate(record.scheduled_at) &&
     validDate(record.exported_at) &&
     validDate(record.verified_at) &&
+    (record.committed_at === undefined || validDate(record.committed_at)) &&
     Number.isSafeInteger(record.size) &&
     record.size > 0 &&
     Number.isSafeInteger(record.archive_schema_version) &&
@@ -421,6 +424,95 @@ function boundedReason(error) {
   return (message || "backup failed").slice(0, 300);
 }
 
+// Only body bytes constitute progress. Keep at most the stream's normal
+// backpressure buffer; never tee or accumulate the archive in this watchdog.
+class ExportWatchdog {
+  constructor() {
+    this.controller = new AbortController();
+    this.signal = this.controller.signal;
+    this.overall = setTimeout(() => this.abort("export_overall_timeout"), OVERALL_TIMEOUT_MS);
+    this.progress();
+  }
+
+  progress() {
+    if (this.closed) return;
+    clearTimeout(this.idle);
+    this.idle = setTimeout(() => this.abort("export_idle_timeout"), IDLE_TIMEOUT_MS);
+  }
+
+  abort(code) {
+    if (this.signal.aborted) return;
+    const error = new Error(code);
+    this.controller.abort(error);
+  }
+
+  async wait(operation) {
+    // Remove each listener after its operation: racing every chunk against
+    // one long-lived promise would retain handlers for the entire archive.
+    const signal = this.signal;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      Promise.resolve(operation).then(resolve, reject).finally(() => {
+        signal.removeEventListener("abort", abort);
+      });
+      if (signal.aborted) abort();
+    });
+  }
+
+  body(body) {
+    const reader = body.getReader();
+    this.reader = reader;
+    return new ReadableStream({
+      pull: async (controller) => {
+        try {
+          const { done, value } = await this.wait(reader.read());
+          this.signal.throwIfAborted();
+          if (value?.byteLength > 0) this.progress();
+          if (done) {
+            clearTimeout(this.idle);
+            controller.close();
+            reader.releaseLock();
+            this.reader = null;
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    });
+  }
+
+  close() {
+    this.closed = true;
+    clearTimeout(this.idle);
+    clearTimeout(this.overall);
+    // Also cancel on bad headers or an R2 error; cancellation must not hold
+    // the durable retry state hostage to a broken upstream implementation.
+    this.reader?.cancel().catch(() => {});
+  }
+}
+
+function exportFailure(error) {
+  const message = String(error?.message ?? "");
+  if (/network connection lost|connection (?:lost|reset|closed)|socket|fetch failed|terminated/i.test(message) ||
+      ["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(error?.cause?.code ?? error?.code)) {
+    return new Error("connection_lost");
+  }
+  return error;
+}
+
+function lastCommittedAt(state) {
+  return state.catalog.reduce((latest, record) => {
+    // Legacy catalogs predate committed_at; verified_at was written just
+    // before the durable catalog commit and is the best retained evidence.
+    const at = record.committed_at ?? record.verified_at;
+    return !latest || Date.parse(at) > Date.parse(latest) ? at : latest;
+  }, null);
+}
+
 function retryDelay(attempts) {
   return Math.min(
     BASE_RETRY_MS * (2 ** Math.max(0, attempts - 1)),
@@ -457,10 +549,12 @@ export class DurableAccountBackup {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/status") {
       try {
+        const backups = await this.loadState();
         return json({
           schema_version: "witself.v0",
           account_id: this.accountId,
-          backups: await this.loadState(),
+          last_committed_at: lastCommittedAt(backups),
+          backups,
         });
       } catch (error) {
         return errorResponse(boundedReason(error), 500);
@@ -671,56 +765,63 @@ export class DurableAccountBackup {
       }
 
       const source = await this.sourceCell(job);
-      const response = await this.fetchImpl(
-        `${source.endpoint}/v1/accounts/${this.accountId}:export-backup`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${source.backup_token}`,
-            "X-Witself-Backup-ID": job.backup_id,
+      const watchdog = new ExportWatchdog();
+      let size;
+      try {
+        const response = await watchdog.wait(this.fetchImpl(
+          `${source.endpoint}/v1/accounts/${this.accountId}:export-backup`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${source.backup_token}`,
+              "X-Witself-Backup-ID": job.backup_id,
+            },
+            signal: watchdog.signal,
           },
-          signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS),
-        },
-      );
-      if (!response.ok || !response.body) {
-        const detail = (await response.text().catch(() => "")).slice(0, 200);
-        throw new Error(
-          `backup export ${response.status}: ${detail}`,
-        );
-      }
-      if (
-        response.headers.get("X-Witself-Backup-ID") !== job.backup_id
-      ) {
-        throw new Error(
-          "backup export did not acknowledge the exact backup id",
-        );
-      }
+        ));
+        if (!response.ok || !response.body) {
+          response.body?.cancel().catch(() => {});
+          throw new Error(`backup export ${response.status}`);
+        }
+        if (
+          response.headers.get("X-Witself-Backup-ID") !== job.backup_id
+        ) {
+          response.body.cancel().catch(() => {});
+          throw new Error(
+            "backup export did not acknowledge the exact backup id",
+          );
+        }
 
-      const streamedAt = this.now().toISOString();
-      const size = await this.streamArchive(
-        this.env.BACKUPS,
-        job.object,
-        response.body,
-        {
-          httpMetadata: {
-            contentType: "application/gzip",
-            contentDisposition:
-              `attachment; filename="${this.accountId}-${job.backup_id}.tar.gz"`,
+        const streamedAt = this.now().toISOString();
+        size = await watchdog.wait(this.streamArchive(
+          this.env.BACKUPS,
+          job.object,
+          watchdog.body(response.body),
+          {
+            httpMetadata: {
+              contentType: "application/gzip",
+              contentDisposition:
+                `attachment; filename="${this.accountId}-${job.backup_id}.tar.gz"`,
+            },
+            customMetadata: {
+              account_id: this.accountId,
+              backup_id: job.backup_id,
+              cell: source.name,
+              cell_registered_at: source.registered_at,
+              cell_registration_id: source.registration_id,
+              scheduled_at: job.scheduled_at,
+              streamed_at: streamedAt,
+              ...(job.source_route.epoch === null
+                ? {}
+                : { route_epoch: String(job.source_route.epoch) }),
+            },
           },
-          customMetadata: {
-            account_id: this.accountId,
-            backup_id: job.backup_id,
-            cell: source.name,
-            cell_registered_at: source.registered_at,
-            cell_registration_id: source.registration_id,
-            scheduled_at: job.scheduled_at,
-            streamed_at: streamedAt,
-            ...(job.source_route.epoch === null
-              ? {}
-              : { route_epoch: String(job.source_route.epoch) }),
-          },
-        },
-      );
+        ));
+      } catch (error) {
+        throw watchdog.signal.aborted ? watchdog.signal.reason : exportFailure(error);
+      } finally {
+        watchdog.close();
+      }
       const verification = await this.verifyObject(job, source.name, size);
       state = await this.commitJob(
         state,
@@ -908,7 +1009,7 @@ export class DurableAccountBackup {
       throw new Error("backup job lost durable ownership before commit");
     }
     const catalog = [
-      record,
+      { ...record, committed_at: this.now().toISOString() },
       ...persisted.catalog.filter(
         (entry) => entry.backup_id !== job.backup_id,
       ),
@@ -1114,6 +1215,8 @@ function validScanState(state, slot) {
     Number.isSafeInteger(state.failed) &&
     state.failed >= 0 &&
     state.scanned === state.accepted + state.failed &&
+    [state.previous_slot_terminal_failures, state.previous_slot_status_unavailable]
+      .every((value) => value === undefined || (Number.isSafeInteger(value) && value >= 0 && value <= state.scanned)) &&
     state.failed_retry === SCAN_FAILED_RETRY_POLICY &&
     Array.isArray(state.failure_sample) &&
     state.failure_sample.length <= SCAN_FAILURE_SAMPLE_LIMIT &&
@@ -1168,38 +1271,134 @@ async function backupStub(env, accountID) {
   return env.ACCOUNT_BACKUP.get(id);
 }
 
+async function readBackupStatus(env, accountID) {
+  const response = await (await backupStub(env, accountID)).fetch(
+    new Request("http://account-backup.internal/status"),
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.schema_version !== "witself.v0" ||
+      body?.account_id !== accountID) {
+    throw new Error("account backup status is unavailable");
+  }
+  validateAccountBackupState(body.backups, accountID);
+  return { ...body, last_committed_at: lastCommittedAt(body.backups) };
+}
+
+function unavailableHealth() {
+  return {
+    stale_accounts: null,
+    oldest_committed_age_seconds: null,
+    never_committed_accounts: null,
+    health_available: false,
+  };
+}
+
+function emptyHealth() {
+  return {
+    stale_accounts: 0,
+    oldest_committed_age_seconds: null,
+    never_committed_accounts: 0,
+    health_available: true,
+  };
+}
+
+function addAccountHealth(health, status, now, intervalMinutes) {
+  const threshold = 2 * intervalMinutes * 60_000;
+  if (status.last_committed_at === null) {
+    health.never_committed_accounts++;
+    const dates = [status.backups.current_job, ...status.backups.failures]
+      .map((job) => job?.scheduled_at).filter(validDate).map(Date.parse);
+    if (dates.length && now - Math.min(...dates) > threshold) {
+      health.stale_accounts++;
+    }
+  } else {
+    if (!validDate(status.last_committed_at)) throw new Error("invalid backup commit time");
+    const age = Math.max(0, now - Date.parse(status.last_committed_at));
+    if (age > threshold) health.stale_accounts++;
+    health.oldest_committed_age_seconds = Math.max(
+      health.oldest_committed_age_seconds ?? 0, Math.floor(age / 1000),
+    );
+  }
+}
+
+// Only these aggregate fields may cross the public scrape boundary. Legacy or
+// malformed snapshots are unavailable, never a partial healthy fleet.
+export function accountBackupHealthSnapshot(scan) {
+  const health = scan?.health;
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  if (scan?.schema_version !== ACCOUNT_BACKUP_SCAN_SCHEMA ||
+      !isObject(health) || !validDate(health.computed_at) ||
+      typeof health.health_available !== "boolean" ||
+      (health.health_available &&
+        (!count(health.stale_accounts) || !count(health.never_committed_accounts) ||
+         !(health.oldest_committed_age_seconds === null || count(health.oldest_committed_age_seconds))))) {
+    return { ...unavailableHealth(), computed_at: null };
+  }
+  return {
+    ...(health.health_available ? {
+      stale_accounts: health.stale_accounts,
+      oldest_committed_age_seconds: health.oldest_committed_age_seconds,
+      never_committed_accounts: health.never_committed_accounts,
+      health_available: true,
+    } : unavailableHealth()),
+    computed_at: health.computed_at,
+  };
+}
+
+// Authenticated live inspection only. The public scrape reads scan.health.
+export async function accountBackupHealth(env, dependencies = {}) {
+  const config = accountBackupConfig(env);
+  const pageLoader = dependencies.activeAccountPage ?? activeAccountPage;
+  const statusLoader = dependencies.status ?? readBackupStatus;
+  const now = (dependencies.now ?? Date.now)();
+  const signal = dependencies.signal;
+  let cursor;
+  const health = emptyHealth();
+  const seen = new Set();
+  const cursors = new Set();
+  for (let pages = 0; pages < 100; pages++) {
+    signal?.throwIfAborted();
+    const page = await pageLoader(env, config.page_size, cursor);
+    signal?.throwIfAborted();
+    await mapBounded(page.account_ids, config.concurrency, async (accountID) => {
+      signal?.throwIfAborted();
+      if (seen.has(accountID)) return;
+      seen.add(accountID);
+      const status = await statusLoader(env, accountID);
+      signal?.throwIfAborted();
+      addAccountHealth(health, status, now, config.interval_minutes);
+    });
+    if (page.next_cursor === null) {
+      return health;
+    }
+    if (!page.next_cursor || cursors.has(page.next_cursor)) break;
+    cursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+  throw new Error("account backup health scan incomplete");
+}
+
 export async function accountBackupStatus(env, accountID = undefined) {
   const config = accountBackupConfig(env);
   const scan = env.DIRECTORY
     ? await env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" })
     : null;
+  const base = {
+    schema_version: "witself.v0",
+    schedule: config,
+    scan: isObject(scan) ? scan : null,
+  };
   if (accountID === undefined || accountID === null || accountID === "") {
-    return {
-      schema_version: "witself.v0",
-      schedule: config,
-      scan: isObject(scan) ? scan : null,
-    };
+    try {
+      return { ...base, ...await accountBackupHealth(env) };
+    } catch {
+      return { ...base, ...unavailableHealth() };
+    }
   }
   if (!ACCOUNT_ID.test(accountID)) {
     throw new Error("invalid backup status account id");
   }
-  const response = await (await backupStub(env, accountID)).fetch(
-    new Request("http://account-backup.internal/status"),
-  );
-  const body = await response.json().catch(() => null);
-  if (
-    !response.ok ||
-    body?.schema_version !== "witself.v0" ||
-    body?.account_id !== accountID
-  ) {
-    throw new Error("account backup status is unavailable");
-  }
-  return {
-    schema_version: "witself.v0",
-    schedule: config,
-    scan: isObject(scan) ? scan : null,
-    account: body,
-  };
+  return { ...base, account: await readBackupStatus(env, accountID) };
 }
 
 export async function runManualAccountBackup(
@@ -1502,7 +1701,7 @@ export async function runAccountBackupValidation(
         "X-Witself-Backup-Validation": "true",
       },
       body: object.body,
-      signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
     },
   );
   const text = await response.text().catch(() => "");
@@ -1588,6 +1787,8 @@ export async function runScheduledAccountBackups(
   const slot = identity.scheduled_at;
   const pageLoader = dependencies.activeAccountPage ?? activeAccountPage;
   const dispatcher = dependencies.dispatch ?? dispatchBackup;
+  const statusLoader = dependencies.status ?? readBackupStatus;
+  const previousSlot = new Date(Date.parse(slot) - config.interval_minutes * 60_000).toISOString();
 
   try {
     const stored = await env.DIRECTORY.get(
@@ -1606,6 +1807,7 @@ export async function runScheduledAccountBackups(
           failed: 0,
           failed_retry: SCAN_FAILED_RETRY_POLICY,
           failure_sample: [],
+          health: accountBackupHealthSnapshot(stored),
         };
     if (scan.complete) {
       return {
@@ -1618,6 +1820,9 @@ export async function runScheduledAccountBackups(
         failed: scan.failed,
         failed_retry: scan.failed_retry,
         failure_sample: scan.failure_sample,
+        previous_slot: previousSlot,
+        previous_slot_terminal_failures: scan.previous_slot_terminal_failures ?? 0,
+        previous_slot_status_unavailable: scan.previous_slot_status_unavailable ?? 0,
       };
     }
 
@@ -1631,6 +1836,32 @@ export async function runScheduledAccountBackups(
           config.interval_minutes,
         ),
     );
+    // Read before dispatch: a new generation may replace current_job. Count
+    // each account once, even if the terminal job also appears in failures.
+    const healthProgress = scan.health_progress ?? {
+      ...emptyHealth(),
+      // The first page's observation time is conservative for snapshot age.
+      computed_at: new Date(Number(scheduledTime)).toISOString(),
+    };
+    // An in-flight legacy scan has no health evidence for its earlier pages.
+    if (!scan.health_progress && scan.scanned > 0) healthProgress.health_available = false;
+    const healthTime = Date.parse(healthProgress.computed_at);
+    const previous = await mapBounded(jobs, config.concurrency, async (job) => {
+      try {
+        const status = await statusLoader(env, job.account_id);
+        addAccountHealth(healthProgress, status, healthTime, config.interval_minutes);
+        const records = [status.backups.current_job, ...status.backups.failures];
+        return records.some((record) => record?.status === "failed" &&
+          record.scheduled_at === previousSlot) ? "failed" : "ok";
+      } catch {
+        healthProgress.health_available = false;
+        return "unavailable";
+      }
+    });
+    const previousFailures = (scan.previous_slot_terminal_failures ?? 0) +
+      previous.filter((result) => result === "failed").length;
+    const previousUnavailable = (scan.previous_slot_status_unavailable ?? 0) +
+      previous.filter((result) => result === "unavailable").length;
     const results = await mapBounded(
       jobs,
       config.concurrency,
@@ -1670,6 +1901,14 @@ export async function runScheduledAccountBackups(
       failed,
       failed_retry: SCAN_FAILED_RETRY_POLICY,
       failure_sample: failureSample,
+      previous_slot: previousSlot,
+      previous_slot_terminal_failures: previousFailures,
+      previous_slot_status_unavailable: previousUnavailable,
+      health_progress: healthProgress,
+      health: complete ? {
+        ...(healthProgress.health_available ? healthProgress : unavailableHealth()),
+        computed_at: healthProgress.computed_at,
+      } : accountBackupHealthSnapshot(scan),
     };
     await env.DIRECTORY.put(
       ACCOUNT_BACKUP_SCAN_KEY,
@@ -1680,6 +1919,8 @@ export async function runScheduledAccountBackups(
       `slot=${slot} page_scanned=${jobs.length} ` +
       `page_accepted=${pageAccepted} page_failed=${pageFailed} ` +
       `scanned=${scanned} accepted=${accepted} failed=${failed} ` +
+      `previous_slot_terminal_failures=${previousFailures} ` +
+      `previous_slot_status_unavailable=${previousUnavailable} ` +
       `complete=${complete}`,
     );
     return {
@@ -1692,6 +1933,9 @@ export async function runScheduledAccountBackups(
       failed,
       failed_retry: SCAN_FAILED_RETRY_POLICY,
       failure_sample: failureSample,
+      previous_slot: previousSlot,
+      previous_slot_terminal_failures: previousFailures,
+      previous_slot_status_unavailable: previousUnavailable,
     };
   } catch (error) {
     console.log(

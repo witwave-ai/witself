@@ -2,6 +2,26 @@ groups:
   - name: witself-founder-open-plane
     interval: 30s
     rules:
+      - alert: WitselfAccountBackupStale
+        expr: max(witself_control_plane_account_backup_stale_accounts) > 0 and max(witself_control_plane_account_backup_enabled) == 1
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane
+          witself_alert: "true"
+        annotations:
+          summary: A live account has exceeded twice the backup interval since its newest commit or earliest known job.
+          runbook: docs/runbooks.md#operate-periodic-account-backups
+      - alert: WitselfAccountBackupHealthUnavailable
+        expr: (max(witself_control_plane_account_backup_health_available) == 0 or max(witself_control_plane_account_backup_health_age_seconds) > 3 * max(witself_control_plane_account_backup_interval_seconds)) and max(witself_control_plane_account_backup_enabled) == 1
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane
+          witself_alert: "true"
+        annotations:
+          summary: Periodic account backup health is unavailable or its snapshot is older than three intervals.
+          runbook: docs/runbooks.md#operate-periodic-account-backups
       - alert: WitselfServerMetricsUnavailable
         expr: absent(witself_up) or max(witself_up) < 1
         for: 3m
