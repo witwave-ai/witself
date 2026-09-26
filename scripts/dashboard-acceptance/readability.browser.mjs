@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { chromium } from '@playwright/test';
+import { launchChromium } from './browser.mjs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -16,8 +16,9 @@ const facts = [
 
 // Fresh context, intercepted transport only. No actual agent, account, server,
 // credential, or OS clipboard. The browser executes the shipped app unchanged.
-test('readability: responsive lists, details, filters, transport, and summary refresh', { timeout: 120000 }, async () => {
-  const browser = await chromium.launch({ headless: true });
+test('readability: responsive lists, details, filters, transport, and summary refresh', { timeout: 120000 }, async (t) => {
+  const browser = await launchChromium(t);
+  if (!browser) return;
   try {
     const page = await browser.newPage();
     const errors = [], requests = [];
@@ -35,7 +36,9 @@ test('readability: responsive lists, details, filters, transport, and summary re
       requests.push(url.pathname + url.search);
       if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: await readFile(new URL('index.html', staticRoot), 'utf8') });
       if (url.pathname.startsWith('/static/')) return route.fulfill({ contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', body: await readFile(new URL(url.pathname.slice(8), staticRoot), 'utf8') });
-      if (url.pathname === '/api/avatar.svg') return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"/>' });
+      if (url.pathname === '/api/avatar.svg') return route.fulfill({ contentType: 'image/svg+xml', headers: { 'Cache-Control': 'private, no-store' }, body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"/>' });
+      // The console polls account context at boot; this fixture has no manager credential.
+      if (url.pathname === '/api/account/context') return route.fulfill({ status: 403, json: { error: 'forbidden' } });
       const responses = {
         '/api/themes': { themes: ['console', 'paper', 'amber', 'high-contrast', 'midnight'] },
         '/api/prefs': { preferences: { prefs: { theme: 'console' } } },
@@ -68,6 +71,19 @@ test('readability: responsive lists, details, filters, transport, and summary re
     };
     await page.clock.install();
     await page.goto('http://dashboard.test/#/facts');
+    assert.equal(requests.filter((url) => url === '/api/avatar.svg').length, 1, 'one avatar request on page load');
+    assert.equal(await page.locator('#avatar-enlarged').getAttribute('src'), null);
+    await page.locator('#avatar-trigger').click();
+    await page.waitForFunction(() => {
+      const image = document.getElementById('avatar-enlarged');
+      return image.complete && image.naturalWidth > 0;
+    });
+    // Chromium shares one in-document image resource per URL even under no-store,
+    // so opening the portrait adds no request there (measured: 1 at load, 1 after);
+    // an engine that refetches may add exactly one more, never a per-open stream.
+    const avatarRequests = requests.filter((url) => url === '/api/avatar.svg').length;
+    assert.ok(avatarRequests >= 1 && avatarRequests <= 2, 'opening the portrait costs at most one avatar request, saw ' + avatarRequests);
+    await page.locator('#avatar-close').click();
     // 640 CSS px also represents the reflow width of a 1280px window at 200% zoom.
     for (const width of [320, 390, 700, 640, 1024, 1280]) {
       await page.setViewportSize({ width, height: 900 });

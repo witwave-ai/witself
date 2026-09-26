@@ -163,7 +163,7 @@ dashboard-acceptance: ## Run the release's headless Agent Console acceptance on 
 				npx playwright install --with-deps chromium; \
 			else \
 				npx playwright install chromium; \
-			fi); \
+			fi && npm run test:browser); \
 		rm -rf evidence/dashboard-acceptance; \
 		node scripts/dashboard-acceptance/run.mjs \
 			--witself "$$dashboard_acceptance_tmp/witself$$dashboard_acceptance_exe" \

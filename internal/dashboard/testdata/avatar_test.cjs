@@ -14,12 +14,13 @@ const identityIDs = ["agent-name", "realm-name", "agent-id"];
 // models DOM events and focus, not browser layout, tab trapping, or native
 // keyboard defaults. Escape's native dialog cancel event is dispatched below.
 async function fixture(t, { missing, unsupported } = {}) {
-  const nodes = new Map(), elements = [], requests = [], streams = [];
+  const nodes = new Map(), elements = [], requests = [], imageRequests = [], streams = [];
   let activeElement = null;
   class Element {
     constructor(tag, attrs = {}) {
       this.tag = tag;
       this.attrs = attrs;
+      if (tag === "img" && attrs.src) imageRequests.push(attrs.src);
       this.listeners = new Map();
       this.textContent = "";
       this.disabled = false;
@@ -27,7 +28,10 @@ async function fixture(t, { missing, unsupported } = {}) {
       this.classList = { toggle() {}, add() {}, remove() {} };
     }
     getAttribute(name) { return this.attrs[name] ?? null; }
-    setAttribute(name, value) { this.attrs[name] = String(value); }
+    setAttribute(name, value) {
+      this.attrs[name] = String(value);
+      if (this.tag === "img" && name === "src") imageRequests.push(String(value));
+    }
     removeAttribute(name) { delete this.attrs[name]; }
     querySelectorAll(selector) {
       assert.equal(selector, ".message-preview");
@@ -121,11 +125,13 @@ async function fixture(t, { missing, unsupported } = {}) {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(nodes.get("status-addr").textContent, "localhost", "boot continued");
   assert.match(nodes.get("view").html, /no transcripts/, "existing panel still renders");
-  return { nodes, elements, window, document, requests, streams };
+  return { nodes, elements, window, document, requests, imageRequests, streams };
 }
 
-test("portrait opens once, explicitly closes, and restores trigger focus", async (t) => {
+test("portrait loads once at boot, loads enlargement on demand, and restores trigger focus", async (t) => {
   const h = await fixture(t);
+  assert.deepEqual(h.imageRequests, ["/api/avatar.svg"], "only the header image loads at boot");
+  assert.equal(h.nodes.get("avatar-enlarged").getAttribute("src"), null);
   const trigger = h.nodes.get("avatar-trigger"), dialog = h.nodes.get("avatar-dialog"), close = h.nodes.get("avatar-close");
   assert.equal(trigger.tag, "button");
   assert.equal(trigger.attrs.type, "button");
@@ -138,6 +144,7 @@ test("portrait opens once, explicitly closes, and restores trigger focus", async
   trigger.focus();
   trigger.click();
   assert.equal(dialog.open, true);
+  assert.deepEqual(h.imageRequests, ["/api/avatar.svg", "/api/avatar.svg"], "enlargement loads only on opening");
   assert.equal(h.document.activeElement, close);
   trigger.click(); // An already open dialog must not throw or reopen.
   close.click();
@@ -149,26 +156,30 @@ test("portrait opens once, explicitly closes, and restores trigger focus", async
   assert.equal(dialog.open, false);
   assert.equal(h.document.activeElement, trigger);
   assert.equal(h.window.location.hash, "#/transcripts");
-  assert.deepEqual(h.requests, requests, "portrait interaction issues no fetches");
+  assert.deepEqual(h.imageRequests, ["/api/avatar.svg", "/api/avatar.svg"], "reopening does not reassign the source");
+  assert.deepEqual(h.requests, requests, "portrait interaction issues no JSON fetches");
 });
 
 test("live malicious and long identity stays literal without changing image sources", async (t) => {
   const h = await fixture(t);
   const images = h.elements.filter((element) => element.tag === "img");
-  assert.deepEqual(images.map((element) => element.attrs.src), ["/api/avatar.svg", "/api/avatar.svg"]);
+  assert.deepEqual(images.map((element) => element.attrs.src), ["/api/avatar.svg", undefined]);
   const values = ["<img src=x onerror=alert(1)>" + "long-name".repeat(200), "</span><script>alert(1)</script>", 'id-" onmouseover="alert(1)'];
   h.streams[0].dispatch("self", { data: JSON.stringify({ identity: {
     agent_name: values[0], realm_name: values[1], agent_id: values[2],
   }, dashboard_version: "test", poll_interval_ms: 2000 }) });
   assert.deepEqual(identityIDs.map((id) => h.nodes.get(id).textContent), values);
-  assert.deepEqual(images.map((element) => element.attrs.src), ["/api/avatar.svg", "/api/avatar.svg"]);
+  assert.deepEqual(images.map((element) => element.attrs.src), ["/api/avatar.svg", undefined]);
+  assert.deepEqual(h.imageRequests, ["/api/avatar.svg"], "identity updates never load the hidden portrait");
+  h.nodes.get("avatar-trigger").click();
+  assert.equal(h.nodes.get("avatar-enlarged").getAttribute("src"), "/api/avatar.svg", "source remains fixed after identity updates");
   assert.equal(h.nodes.get("version").textContent, "vtest");
   assert.equal(h.nodes.get("status-poll").textContent, "poll 2s");
   h.streams[0].dispatch("self", { data: JSON.stringify({ identity: {} }) });
   assert.deepEqual(identityIDs.map((id) => h.nodes.get(id).textContent), ["(unnamed agent)", "", ""]);
 });
 
-for (const missing of ["avatar-trigger", "avatar-dialog", "avatar-close"]) {
+for (const missing of ["avatar-trigger", "avatar-dialog", "avatar-close", "avatar-enlarged"]) {
   test("boot tolerates missing optional " + missing, async (t) => { await fixture(t, { missing }); });
 }
 for (const unsupported of ["showModal", "close"]) {
@@ -177,5 +188,6 @@ for (const unsupported of ["showModal", "close"]) {
     assert.equal(h.nodes.get("avatar-trigger").disabled, true);
     h.nodes.get("avatar-trigger").click();
     assert.equal(h.nodes.get("avatar-dialog").open, false);
+    assert.deepEqual(h.imageRequests, ["/api/avatar.svg"]);
   });
 }
