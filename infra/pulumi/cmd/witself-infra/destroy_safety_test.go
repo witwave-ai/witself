@@ -60,7 +60,7 @@ func TestDestroyAccountGuardLiveAndArchivedWithForce(t *testing.T) {
 
 	var out strings.Builder
 	err := checkDestroyAccounts(
-		context.Background(), destroyTestCell, "https://control.invalid", "unused",
+		context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 		false, false, reader, &out,
 	)
 	if err == nil {
@@ -74,7 +74,7 @@ func TestDestroyAccountGuardLiveAndArchivedWithForce(t *testing.T) {
 
 	out.Reset()
 	if err := checkDestroyAccounts(
-		context.Background(), destroyTestCell, "https://control.invalid", "unused",
+		context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 		true, false, reader, &out,
 	); err != nil {
 		t.Fatalf("explicit account override: %v", err)
@@ -91,7 +91,7 @@ func TestDestroyAccountGuardUnreachableAndSkip(t *testing.T) {
 	unreachable := &fakePlacementStatusReader{err: errors.New("control plane unavailable")}
 	var out strings.Builder
 	err := checkDestroyAccounts(
-		context.Background(), destroyTestCell, "https://control.invalid", "unused",
+		context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 		true, false, unreachable, &out,
 	)
 	if err == nil {
@@ -106,7 +106,7 @@ func TestDestroyAccountGuardUnreachableAndSkip(t *testing.T) {
 
 	out.Reset()
 	if err := checkDestroyAccounts(
-		context.Background(), destroyTestCell, "https://control.invalid", "unused",
+		context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 		false, true, unreachable, &out,
 	); err != nil {
 		t.Fatalf("explicit account-check skip: %v", err)
@@ -135,7 +135,7 @@ func TestDestroyAccountGuardRejectsAmbiguousStatus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			reader := &fakePlacementStatusReader{status: status}
 			err := checkDestroyAccounts(
-				context.Background(), destroyTestCell, "https://control.invalid", "unused",
+				context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 				true, false, reader, &strings.Builder{},
 			)
 			if err == nil || !strings.Contains(err.Error(), "placement status is unavailable") {
@@ -158,7 +158,7 @@ func TestDestroyAccountGuardRejectsOmittedCounts(t *testing.T) {
 			}
 			reader := &fakePlacementStatusReader{status: status}
 			err := checkDestroyAccounts(
-				context.Background(), destroyTestCell, "https://control.invalid", "unused",
+				context.Background(), destroyTestCell, destroyTestCell, "https://control.invalid", "unused",
 				false, false, reader, &strings.Builder{},
 			)
 			if err == nil || !strings.Contains(err.Error(), "placement status is unavailable") {
@@ -182,7 +182,7 @@ func TestDestroyInteractiveConfirmationRequiresExactCellName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out strings.Builder
-			err := confirmDestroy(destroyTestCell, "", true, strings.NewReader(tt.input), &out)
+			err := confirmDestroy(destroyTestCell, destroyTestCell, "", true, strings.NewReader(tt.input), &out)
 			if tt.ok && err != nil {
 				t.Fatalf("exact confirmation: %v", err)
 			}
@@ -197,7 +197,7 @@ func TestDestroyInteractiveConfirmationRequiresExactCellName(t *testing.T) {
 }
 
 func TestDestroyNonInteractiveYesCellMustMatchExactly(t *testing.T) {
-	if err := confirmDestroy(destroyTestCell, destroyTestCell, false, nil, &strings.Builder{}); err != nil {
+	if err := confirmDestroy(destroyTestCell, destroyTestCell, destroyTestCell, false, nil, &strings.Builder{}); err != nil {
 		t.Fatalf("exact --yes-cell: %v", err)
 	}
 	for name, yesCell := range map[string]string{
@@ -206,7 +206,7 @@ func TestDestroyNonInteractiveYesCellMustMatchExactly(t *testing.T) {
 		"space":    destroyTestCell + " ",
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := confirmDestroy(destroyTestCell, yesCell, false, nil, &strings.Builder{})
+			err := confirmDestroy(destroyTestCell, destroyTestCell, yesCell, false, nil, &strings.Builder{})
 			if err == nil || !strings.Contains(err.Error(), "--yes-cell") {
 				t.Fatalf("non-interactive confirmation result = %v", err)
 			}

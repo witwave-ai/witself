@@ -362,11 +362,12 @@ type opDoneMsg struct {
 
 // confirmDialog names what the operator is being asked to confirm.
 type confirmDialog struct {
-	kind        opKind
-	cell        string
-	previewSeen bool   // for up: a successful preview must precede
-	typed       string // for destroy: the operator must type cell exactly
-	err         string // shown on a typed mismatch
+	kind         opKind
+	cell         string
+	registryName string
+	previewSeen  bool   // for up: a successful preview must precede
+	typed        string // for destroy: the operator must type cell exactly
+	err          string // shown on a typed mismatch
 }
 
 // startConfirm decides what confirmation an op needs.
@@ -406,6 +407,9 @@ func (c *confirmDialog) render() string {
 			b.WriteString("preview passed. press y to apply, esc to cancel.\n")
 		}
 	case opDestroy:
+		if c.registryName != "" && c.registryName != c.cell {
+			fmt.Fprintf(&b, "Destroy target %s.\n\n", destroyCellIdentity(c.cell, c.registryName))
+		}
 		b.WriteString("destroy will DRAIN the cell, EVACUATE every account to R2, then DELETE the fleet entry and tear down every cloud resource.\n\n")
 		b.WriteString("type `" + c.cell + "` then enter to confirm:\n")
 		b.WriteString("  " + c.typed + "▏\n")
