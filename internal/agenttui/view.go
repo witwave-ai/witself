@@ -943,7 +943,7 @@ func (m *Model) secretDetail(d *detailWriter) {
 				d.body(text)
 				d.dim("  v hide · automatically hidden after 30 seconds")
 			} else {
-				d.dim("  " + status + " · v hide; v again retries")
+				d.dim("  " + secretStatusText(status) + " · v hide; v again retries")
 			}
 		} else {
 			d.dim("  [value hidden] · v reveal · c copy")

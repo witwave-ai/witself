@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/client"
 )
@@ -65,6 +66,7 @@ type accountCollector struct {
 	scan          AccountClientsScan
 	scanGate      chan struct{}
 	mu            sync.Mutex
+	validatedAt   time.Time
 	principal     AccountManagerIdentity
 	epoch         uint64
 	next, applied uint64
@@ -104,6 +106,7 @@ func (c *accountCollector) authority(ctx context.Context) (AccountManagerIdentit
 		c.next++
 		seq := c.next
 		c.mu.Unlock()
+		started := time.Now()
 		p, err := client.RevalidateAccountConsoleManager(ctx, *c.manager)
 		c.mu.Lock()
 		// Transport cancellation belongs to this caller, not shared authority.
@@ -134,6 +137,10 @@ func (c *accountCollector) authority(ctx context.Context) (AccountManagerIdentit
 			return AccountManagerIdentity{}, epoch, client.ErrAccountConsoleForbidden
 		}
 		c.applied = seq
+		c.validatedAt = time.Time{}
+		if err == nil {
+			c.validatedAt = started
+		}
 		if err != nil {
 			p = AccountManagerIdentity{}
 		}
@@ -147,6 +154,32 @@ func (c *accountCollector) authority(ctx context.Context) (AccountManagerIdentit
 		return p, epoch, err
 	}
 }
+
+// VerifyAccountConsoleAuthority reuses only a recent principal from this Reader.
+// Account resource reads still call authority unconditionally, including their
+// post-read fence. Observed authority denial clears the principal immediately.
+func (r *Reader) VerifyAccountConsoleAuthority(ctx context.Context, expected AccountManagerIdentity) error {
+	c := r.accounts
+	if ctx.Err() != nil || c.manager == nil || c.manager.Identity != expected {
+		return client.ErrAccountConsoleForbidden
+	}
+	c.mu.Lock()
+	fresh := c.principal.AccountID == expected.AccountID && c.principal.OperatorID == expected.OperatorID &&
+		client.AccountConsoleRole(c.principal.Role) && !c.validatedAt.IsZero() && time.Since(c.validatedAt) <= 30*time.Second
+	c.mu.Unlock()
+	if fresh {
+		return nil
+	}
+	p, _, err := c.authority(ctx)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != expected.AccountID || p.OperatorID != expected.OperatorID || !client.AccountConsoleRole(p.Role) {
+		return client.ErrAccountConsoleForbidden
+	}
+	return nil
+}
+
 func (c *accountCollector) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

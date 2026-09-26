@@ -15,6 +15,10 @@ import (
 // Account has no panel index. Authority, section reads and selected private
 // text have independent cancellation/generation fences from the seven panels.
 type accountModel struct {
+	now                             func() time.Time
+	lastAuthority                   time.Time
+	retryAuthority                  time.Time
+	authorityBackoff                time.Duration
 	context                         accountContext
 	mode                            bool
 	section, selected, focus        int
@@ -60,6 +64,25 @@ func (m *Model) accountTick() tea.Cmd {
 	return tea.Tick(m.opts.PollInterval, func(time.Time) tea.Msg { return accountTickMsg{} })
 }
 
+func (m *Model) accountNow() time.Time {
+	if m.account.now != nil {
+		return m.account.now()
+	}
+	return time.Now()
+}
+
+func (m *Model) accountPollAuthority() tea.Cmd {
+	a := &m.account
+	now := m.accountNow()
+	if now.Before(a.retryAuthority) {
+		return nil
+	}
+	if a.authorityBackoff == 0 && !a.mode && !a.lastAuthority.IsZero() && now.Sub(a.lastAuthority) < 30*time.Second {
+		return nil
+	}
+	return m.accountAuthority()
+}
+
 // Context and Access are both fresh authority reads. Order their requests with
 // one fence; a later context check remains independent of a slow Access read.
 func (m *Model) accountAuthorityFence() uint64 {
@@ -79,6 +102,7 @@ func (m *Model) accountAuthority() tea.Cmd {
 	}
 	gen := m.accountAuthorityFence()
 	a.authorityBusy = true
+	a.lastAuthority = m.accountNow()
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 	a.authorityCancel = cancel
 	src := m.source
@@ -142,9 +166,18 @@ func (m *Model) accountContextResult(msg accountContextMsg) tea.Cmd {
 	a.authorityBusy = false
 	a.authorityCancel = nil
 	if !msg.context.available() || (a.context.available() && a.context.account != msg.context.account) {
+		if a.authorityBackoff == 0 {
+			a.authorityBackoff = m.opts.PollInterval
+		} else {
+			a.authorityBackoff *= 2
+		}
+		a.authorityBackoff = min(a.authorityBackoff, 60*time.Second)
+		a.retryAuthority = m.accountNow().Add(a.authorityBackoff)
 		m.dropAccount()
 		return nil
 	}
+	a.authorityBackoff = 0
+	a.retryAuthority = time.Time{}
 	a.verifiedContextGeneration = msg.generation
 	if !a.context.same(msg.context) {
 		section := m.accountSection()
