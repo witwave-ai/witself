@@ -642,3 +642,54 @@ test("fact detail uses full wrapping value while inventory remains a bounded pre
   assert.equal(detail.querySelector("literal"), null);
 
 });
+
+for (const cold of [false, true]) {
+  test(`fact focus ${cold ? "deep link" : "browse"} locks private values and restores row on Back`, options, async t => {
+    const h = fixture(t);
+    const status = new h.nodes.view.constructor();
+    h.nodes["focus-status"] = status;
+    h.document.scrollingElement = { scrollTop: 0 };
+    const rows = [fact("fact_alpha", "plain"), fact("fact_locked", null, true)];
+    let request;
+    if (cold) {
+      const inventoryRequest = beginCold(h, "fact_locked");
+      request = await launchColdHistory(h, inventoryRequest, "fact_locked", rows);
+    } else {
+      await inventory(h, rows);
+      const filter = h.document.getElementById("filter-facts");
+      filter.value = "locked"; filter.dispatch("input");
+      const control = h.nodes.view.querySelectorAll(".focus-open")[1];
+      assert.equal(control.getAttribute("aria-expanded"), "false");
+      control.dispatch("click");
+      h.nodes.view.scrollTop = 123; h.document.scrollingElement.scrollTop = 456;
+      request = await beginWarm(h, "fact_locked");
+    }
+    await h.finish(request, history("PRIVATE_ASSERTION_MUST_STAY_LOCKED"));
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    assert.equal(h.document.getElementById("focus-inventory").getAttribute("hidden"), "");
+    assert.equal(h.nodes.view.querySelector(".focus-back").getAttribute("aria-expanded"), "true");
+    assert.match(status.textContent, /list collapsed/);
+    assert.deepEqual(h.nodes.view.querySelectorAll("dt").slice(0, 2).map(node => node.textContent), ["source", "confidence"]);
+    assert.equal(h.nodes.view.querySelector(".fact-detail-value").querySelector(".value"), null);
+    assert.doesNotMatch(h.nodes.view.textContent, /PRIVATE_ASSERTION_MUST_STAY_LOCKED/);
+    assert.ok(h.requests.every(r => !r.url.startsWith("/api/fact?")), "open never requests an exact value");
+    h.nodes.view.scrollTop = 0; h.document.scrollingElement.scrollTop = 0;
+    if (cold) h.nodes.view.querySelector(".focus-back").dispatch("click");
+    else {
+      let prevented = false;
+      for (const listener of h.nodes.view.querySelector(".focus-layout").listeners.get("keydown")) {
+        listener({ key: "Escape", preventDefault() { prevented = true; } });
+      }
+      assert.equal(prevented, true);
+    }
+    assert.equal(h.window.location.hash, "#/facts");
+    await inventory(h, rows);
+    const selected = h.nodes.view.querySelectorAll(".focus-open")[1];
+    assert.equal(selected.getAttribute("aria-current"), "true");
+    assert.equal(h.document.activeElement, selected);
+    assert.equal(h.document.getElementById("filter-facts").value, cold ? "" : "locked");
+    assert.equal(h.nodes.view.scrollTop, cold ? 0 : 123);
+    assert.equal(h.document.scrollingElement.scrollTop, cold ? 0 : 456);
+    assert.match(status.textContent, /list expanded/);
+  });
+}
