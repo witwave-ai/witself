@@ -32,9 +32,11 @@ apps:
     # The tag-to-digest change plus exporter activation causes ONE PostgreSQL
     # restart. Both server replicas are expected to crash-loop for ~1 minute
     # while PostgreSQL returns; two replicas/PDBs do not mask this DB outage.
+    allowInsecureImages: true
     image:
-      registry: registry-1.docker.io
-      repository: bitnami/postgresql
+      registry: "ghcr.io"
+      repository: "witwave-ai/images/postgresql"
+      tag: "0.0.307-civo-sandbox-use1-serving"
       digest: sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f
     networkPolicy:
       enabled: true
