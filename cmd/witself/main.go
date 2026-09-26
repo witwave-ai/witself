@@ -3489,16 +3489,19 @@ func factHistory(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	assertions, err := client.GetFactHistory(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
+	history, err := client.GetFactHistoryPage(ctx, conn.Endpoint, conn.Token, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 	if *jsonOut {
-		return printJSON(map[string]any{"assertions": assertions})
+		return printJSON(history)
+	}
+	if history.Truncated {
+		fmt.Fprintln(os.Stderr, "History truncated: showing the newest 1,000 assertions.")
 	}
 	w, flush := tableWriter("created\tvalue\ttype\trecurrence\tsource\tsupersedes")
-	for _, assertion := range assertions {
+	for _, assertion := range history.Assertions {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", assertion.CreatedAt.UTC().Format(time.RFC3339),
 			tabSafe(string(assertion.Value)), assertion.ValueType, assertion.Recurrence, assertion.SourceKind, assertion.SupersedesID)
 	}

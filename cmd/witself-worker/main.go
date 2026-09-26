@@ -198,30 +198,8 @@ func serve() int {
 				return st.RunMessageRateBucketCleanupWorker(
 					jobCtx,
 					cfg,
-					func(deleted int64) {
-						metrics.ObserveMessageRateBucketCleanupBatch(
-							messageRateBucketCleanupMetricResult(deleted),
-							deleted,
-						)
-						if deleted > 0 {
-							fmt.Fprintf(
-								os.Stderr,
-								"witself-worker: message rate bucket cleanup: deleted=%d\n",
-								deleted,
-							)
-						}
-					},
-					func(err error) {
-						metrics.RecordJobFailure(messageRateBucketCleanupJob)
-						metrics.ObserveMessageRateBucketCleanupBatch(
-							worker.RetentionResultError,
-							0,
-						)
-						fmt.Fprintf(
-							os.Stderr,
-							"witself-worker: message rate bucket cleanup: %v\n",
-							err,
-						)
+					func(result store.MessageRateBucketCleanupBatchResult) {
+						reportMessageRateBucketCleanupBatch(metrics, os.Stderr, result)
 					},
 				)
 			},
@@ -1260,4 +1238,30 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Listeners:")
 	_, _ = fmt.Fprintln(w, "  WITSELF_HEALTH_ADDR   default :8081  (/livez /readyz /startupz)")
 	_, _ = fmt.Fprintln(w, "  WITSELF_METRICS_ADDR  default :9090  (/metrics)")
+}
+
+type messageRateBucketCleanupMetrics interface {
+	RecordJobFailure(string)
+	ObserveMessageRateBucketCleanupBatch(worker.RetentionResult, int64)
+}
+
+// The registered maintenance job owns both sweeps, so its job-failure counter
+// includes activity retention. Rate-bucket batch metrics describe only the
+// rate-bucket query; the distinct activity_retention log field preserves attribution.
+func reportMessageRateBucketCleanupBatch(metrics messageRateBucketCleanupMetrics, output io.Writer, result store.MessageRateBucketCleanupBatchResult) {
+	if result.RateBucketError != nil || result.ActivityRetentionError != nil {
+		metrics.RecordJobFailure(messageRateBucketCleanupJob)
+	}
+	if result.RateBucketError != nil {
+		metrics.ObserveMessageRateBucketCleanupBatch(worker.RetentionResultError, 0)
+		fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: rate_bucket=%v\n", result.RateBucketError)
+	} else {
+		metrics.ObserveMessageRateBucketCleanupBatch(messageRateBucketCleanupMetricResult(result.Deleted), result.Deleted)
+		if result.Deleted > 0 {
+			fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: deleted=%d\n", result.Deleted)
+		}
+	}
+	if result.ActivityRetentionError != nil {
+		fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: activity_retention=%v\n", result.ActivityRetentionError)
+	}
 }

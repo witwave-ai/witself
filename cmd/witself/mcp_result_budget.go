@@ -82,6 +82,9 @@ func isElidableMCPJSONArray(raw json.RawMessage) bool {
 func mcpResultSizeGuard() mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				ctx = client.WithActivityRetryScope(ctx)
+			}
 			res, err := next(ctx, method, req)
 			if err != nil || method != "tools/call" {
 				return res, err

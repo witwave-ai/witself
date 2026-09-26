@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/placement"
@@ -8620,7 +8621,9 @@ func validateImportedFactDecisionAssertions(ctx context.Context, q factQuerier, 
 }
 
 // validateImportedUsageRollups prevents a stale or edited projection from
-// landing beside an otherwise valid event ledger. date_bin uses a fixed UTC
+// landing beside an otherwise valid event ledger. Activity rollups are
+// authoritative after event retention, but cannot undercount retained events.
+// Marker and billing projections must still match exactly. date_bin uses a fixed UTC
 // epoch, matching usageBucketStart without depending on the DB session zone.
 func validateImportedUsageRollups(ctx context.Context, tx pgx.Tx, accountID string) error {
 	var mismatch bool
@@ -8648,9 +8651,12 @@ func validateImportedUsageRollups(ctx context.Context, tx pgx.Tx, accountID stri
 		  SELECT 1 FROM expected e
 		  FULL OUTER JOIN actual a
 		    USING (account_id, realm_id, agent_id, dimension, unit, bucket, bucket_start)
-		  WHERE e.account_id IS NULL OR a.account_id IS NULL
-		     OR e.quantity <> a.quantity OR e.event_count <> a.event_count
-		)`, accountID).Scan(&mismatch)
+		  WHERE CASE WHEN COALESCE(a.dimension, e.dimension) = ANY($2::text[])
+           THEN a.account_id IS NULL OR COALESCE(e.quantity, 0) > a.quantity
+                OR COALESCE(e.event_count, 0) > a.event_count
+           ELSE e.account_id IS NULL OR a.account_id IS NULL
+                OR e.quantity <> a.quantity OR e.event_count <> a.event_count END
+		)`, accountID, activity.Dimensions()).Scan(&mismatch)
 	if err != nil {
 		return fmt.Errorf("validate imported usage rollups: %w", err)
 	}

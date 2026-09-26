@@ -320,6 +320,7 @@ func decode(r dashboard.Resource, raw json.RawMessage) (object, error) {
 	case dashboard.ResourceFacts:
 		out["facts"] = projectRows(o, "facts", fact)
 	case dashboard.ResourceFactHistory:
+		out["truncated"] = flag(o, "truncated")
 		out["assertions"] = projectRows(o, "assertions", func(t object) object {
 			p := pick(t, "source_kind confidence observed_at created_at sensitive redacted")
 			if !flag(t, "sensitive") && !flag(t, "redacted") {

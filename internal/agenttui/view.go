@@ -775,6 +775,9 @@ func (m *Model) factDetail(d *detailWriter, row item) {
 	if !m.detailState(d, dashboard.ResourceFactHistory) {
 		return
 	}
+	if flag(m.states[2].data[dashboard.ResourceFactHistory], "truncated") {
+		d.dim("History truncated: showing the newest 1,000 assertions.")
+	}
 	assertions := list(m.states[2].data[dashboard.ResourceFactHistory], "assertions")
 	if len(assertions) == 0 {
 		d.dim("No assertions reported.")

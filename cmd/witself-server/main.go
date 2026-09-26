@@ -195,6 +195,7 @@ func serve() int {
 				OperatorSeats:  server.IdentityCapacityDimensionMetrics(m.OperatorSeats),
 			}, nil
 		}
+		cfg.ReadActivityMeteringFailures = st.ActivityMeteringFailures
 		cfg.ReadAuditAppendMetrics = func(ctx context.Context) (server.AuditAppendMetrics, error) {
 			if err := ctx.Err(); err != nil {
 				return server.AuditAppendMetrics{}, err

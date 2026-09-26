@@ -94,3 +94,57 @@ func TestUsageActivityRejectsUnsupportedFiltersBeforeConnecting(t *testing.T) {
 		}
 	}
 }
+
+func TestDeliberateRecallAndHistoryTruncationCLI(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	recalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			_ = json.NewEncoder(w).Encode(client.SelfDigest{Identity: client.SelfIdentity{AccountID: "acc_test", RealmID: "rlm_test", AgentID: "agt_test", RealmName: "default", AgentName: "test"}})
+		case "/v1/memories:recall":
+			recalls++
+			if r.Header.Get(activity.ObservationHeader) != "" || !activity.ValidRequestID(r.Header.Get(activity.RequestIDHeader)) {
+				t.Error("deliberate recall lacked activity intent")
+			}
+			_, _ = w.Write([]byte(`{"hits":[],"retrieval_mode":"lexical"}`))
+		case "/v1/facts/fact_test/history":
+			_, _ = w.Write([]byte(`{"assertions":[],"truncated":true}`))
+		default:
+			t.Error("unexpected route")
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	credential := filepath.Join(t.TempDir(), "synthetic-credential")
+	if err := os.WriteFile(credential, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	flags := []string{"--endpoint", srv.URL, "--token-file", credential}
+	_, stderr, code := captureFactDeleteCLI(t, func() int {
+		return run(append([]string{"memory", "recall", "--query", "decision", "--json"}, flags...))
+	})
+	if code != 0 || recalls != 1 {
+		t.Fatal("deliberate recall failed", code, stderr)
+	}
+	for _, jsonOut := range []bool{false, true} {
+		args := append([]string{"fact", "history"}, flags...)
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		args = append(args, "fact_test")
+		stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+		if code != 0 {
+			t.Fatal("history failed", code, stderr)
+		}
+		if jsonOut {
+			var history client.FactHistoryPage
+			if json.Unmarshal([]byte(stdout), &history) != nil || !history.Truncated {
+				t.Fatal("JSON lost truncation")
+			}
+		} else if !strings.Contains(stderr, "History truncated") {
+			t.Fatal("text lost truncation")
+		}
+	}
+}

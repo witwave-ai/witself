@@ -195,9 +195,9 @@ func TestMigration95SupportTicketAdmissionIndexPostgres(t *testing.T) {
 		FROM generate_series(1,20020) n`, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	// This test owns the 0094 -> 0095 index transition and its down migration,
+	// independently of later migrations compiled into the current binary.
+	migrationTestUpTo(t, dsn, 95)
 	assertMigrationTestVersion(t, dsn, 95)
 	if _, err := st.pool.Exec(ctx, `ANALYZE support_tickets`); err != nil {
 		t.Fatal(err)

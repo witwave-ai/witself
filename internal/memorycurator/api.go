@@ -6,6 +6,7 @@ package memorycurator
 import (
 	"context"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 )
 
@@ -34,7 +35,7 @@ type HTTPAPI struct {
 
 // ListRequests returns curation requests matching the supplied filters.
 func (a HTTPAPI) ListRequests(ctx context.Context, opts client.MemoryCurationRequestListOptions) (*client.MemoryCurationRequestPage, error) {
-	return client.ListMemoryCurationRequests(ctx, a.Endpoint, a.Token, opts)
+	return client.ListMemoryCurationRequests(activity.WithObservation(ctx), a.Endpoint, a.Token, opts)
 }
 
 // Start begins a curation run through the configured HTTP client.
@@ -44,12 +45,12 @@ func (a HTTPAPI) Start(ctx context.Context, in client.StartMemoryCurationInput) 
 
 // GetInputs returns one page of frozen inputs for a fenced curation run.
 func (a HTTPAPI) GetInputs(ctx context.Context, runID string, fence int64, cursor string, limit int) (*client.MemoryCurationRunInputPage, error) {
-	return client.GetMemoryCurationRunInputs(ctx, a.Endpoint, a.Token, runID, fence, cursor, limit)
+	return client.GetMemoryCurationRunInputs(activity.WithObservation(ctx), a.Endpoint, a.Token, runID, fence, cursor, limit)
 }
 
 // GetPlan returns the exact accepted plan for review before apply.
 func (a HTTPAPI) GetPlan(ctx context.Context, runID string, fence int64) (*client.GetMemoryCurationPlanResult, error) {
-	return client.GetMemoryCurationPlan(ctx, a.Endpoint, a.Token, runID, fence)
+	return client.GetMemoryCurationPlan(activity.WithObservation(ctx), a.Endpoint, a.Token, runID, fence)
 }
 
 // Renew extends the lease for a fenced curation run.
@@ -74,10 +75,10 @@ func (a HTTPAPI) Abandon(ctx context.Context, in client.FinishMemoryCurationInpu
 
 // GetRun returns a curation run by ID.
 func (a HTTPAPI) GetRun(ctx context.Context, runID string) (*client.MemoryCurationRun, error) {
-	return client.GetMemoryCurationRun(ctx, a.Endpoint, a.Token, runID)
+	return client.GetMemoryCurationRun(activity.WithObservation(ctx), a.Endpoint, a.Token, runID)
 }
 
 // Status returns the current status projection for a curation run.
 func (a HTTPAPI) Status(ctx context.Context, runID string) (*client.MemoryCurationStatus, error) {
-	return client.GetMemoryCurationStatus(ctx, a.Endpoint, a.Token, runID)
+	return client.GetMemoryCurationStatus(activity.WithObservation(ctx), a.Endpoint, a.Token, runID)
 }

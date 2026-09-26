@@ -64,12 +64,17 @@ func (c MessageRateBucketCleanupWorkerConfig) Validate() error {
 	return nil
 }
 
-type messageRateBucketCleanupDeleteFunc func(
-	context.Context,
-	time.Time,
-	int,
-) (int64, error)
+// MessageRateBucketCleanupBatchResult separates the two maintenance outcomes.
+// Activity retention shares the registered rate-bucket job's failure metric;
+// ActivityRetentionError identifies that attribution without hiding rate-bucket success.
+type MessageRateBucketCleanupBatchResult struct {
+	Deleted                int64
+	RateBucketError        error
+	ActivityRetentionError error
+}
 
+type messageRateBucketCleanupDeleteFunc func(context.Context, time.Time, int) (int64, error)
+type messageRateBucketCleanupBatchFunc func(context.Context, time.Time, int) MessageRateBucketCleanupBatchResult
 type messageRateBucketCleanupWaitFunc func(context.Context, time.Duration) bool
 
 // RunMessageRateBucketCleanupWorker runs one bounded batch immediately and
@@ -79,28 +84,35 @@ type messageRateBucketCleanupWaitFunc func(context.Context, time.Duration) bool
 func (s *Store) RunMessageRateBucketCleanupWorker(
 	ctx context.Context,
 	cfg MessageRateBucketCleanupWorkerConfig,
-	onResult func(deleted int64),
-	onError func(error),
+	onResult func(MessageRateBucketCleanupBatchResult),
 ) error {
-	return runMessageRateBucketCleanupWorker(
-		ctx,
-		cfg,
-		time.Now,
-		s.DeleteStaleMessageRateBuckets,
-		waitForMessageRateBucketCleanupInterval,
-		onResult,
-		onError,
-	)
+	return runMessageRateBucketCleanupWorker(ctx, cfg, time.Now,
+		func(batchCtx context.Context, now time.Time, limit int) MessageRateBucketCleanupBatchResult {
+			return messageRateBucketCleanupBatch(batchCtx, now, limit, s.DeleteStaleMessageRateBuckets, s.RetireActivityEvents)
+		}, waitForMessageRateBucketCleanupInterval, onResult)
+}
+
+func messageRateBucketCleanupBatch(
+	ctx context.Context, now time.Time, limit int,
+	deleteBuckets, retireActivity messageRateBucketCleanupDeleteFunc,
+) MessageRateBucketCleanupBatchResult {
+	// Activity cleanup shares this maintenance cadence and deadline. Run
+	// rate-bucket cleanup first so activity retention cannot starve it.
+	deleted, err := deleteBuckets(ctx, now, limit)
+	result := MessageRateBucketCleanupBatchResult{Deleted: deleted, RateBucketError: err}
+	if _, err := retireActivity(ctx, now, min(limit, 1000)); err != nil && ctx.Err() == nil {
+		result.ActivityRetentionError = fmt.Errorf("activity event retention: %w", err)
+	}
+	return result
 }
 
 func runMessageRateBucketCleanupWorker(
 	ctx context.Context,
 	cfg MessageRateBucketCleanupWorkerConfig,
 	now func() time.Time,
-	deleteBatch messageRateBucketCleanupDeleteFunc,
+	deleteBatch messageRateBucketCleanupBatchFunc,
 	wait messageRateBucketCleanupWaitFunc,
-	onResult func(deleted int64),
-	onError func(error),
+	onResult func(MessageRateBucketCleanupBatchResult),
 ) error {
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -114,19 +126,14 @@ func runMessageRateBucketCleanupWorker(
 			return nil
 		}
 		attemptCtx, cancelAttempt := context.WithTimeout(ctx, cfg.BatchTimeout)
-		deleted, err := deleteBatch(attemptCtx, now().UTC(), cfg.BatchSize)
+		result := deleteBatch(attemptCtx, now().UTC(), cfg.BatchSize)
 		cancelAttempt()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if !errors.Is(err, context.Canceled) && onError != nil {
-				onError(err)
-			}
-		} else if onResult != nil {
-			onResult(deleted)
+		if ctx.Err() != nil {
+			return nil
 		}
-
+		if !errors.Is(result.RateBucketError, context.Canceled) && onResult != nil {
+			onResult(result)
+		}
 		if !wait(ctx, cfg.Interval) {
 			return nil
 		}

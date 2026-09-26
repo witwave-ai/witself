@@ -387,7 +387,7 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	} else {
 		key := activity.RequestID(ctx)
 		if key == "" {
-			key = activity.NewRequestID()
+			key = activityRetryID(ctx, method, url, body)
 		}
 		if !activity.ValidRequestID(key) {
 			return errors.New("invalid activity request ID")

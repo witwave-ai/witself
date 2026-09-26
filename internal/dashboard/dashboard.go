@@ -1360,11 +1360,12 @@ func factRevealHandler(cfg Config) http.Handler {
 func factHistoryHandler(cfg Config, factReads *factReadCapability) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		factID := r.PathValue("id")
-		assertions, err := client.GetFactHistory(r.Context(), cfg.Endpoint, cfg.BearerToken, factID)
+		history, err := client.GetFactHistoryPage(r.Context(), cfg.Endpoint, cfg.BearerToken, factID)
 		if err != nil {
 			writeUpstreamError(w, err)
 			return
 		}
+		assertions := history.Assertions
 		if assertions == nil {
 			assertions = []client.FactAssertion{}
 		}
@@ -1375,7 +1376,7 @@ func factHistoryHandler(cfg Config, factReads *factReadCapability) http.Handler 
 				assertions[i].SourceRef = ""
 			}
 		}
-		writeJSON(w, map[string]any{"assertions": assertions})
+		writeJSON(w, map[string]any{"assertions": assertions, "truncated": history.Truncated})
 	})
 }
 

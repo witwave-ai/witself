@@ -1813,14 +1813,14 @@
         encodeURIComponent(fact.subject) + "&predicate=" + encodeURIComponent(fact.predicate))
         .then(function (body) {
           if (generation !== factViewGeneration) { return; }
-          renderFact(fact, body.assertions || []);
+          renderFact(fact, body.assertions || [], body.truncated === true);
         });
     }).catch(function (err) {
       if (generation === factViewGeneration) { showError(err); }
     });
   }
 
-  function renderFact(fact, assertions) {
+  function renderFact(fact, assertions, truncated) {
     var history = assertions.map(function (assertion) {
       var value = fact.sensitive ? '<span class="lock-chip">locked</span>' :
         '<span class="mono">' + esc(factValueText(assertion.value)) + "</span>";
@@ -1843,6 +1843,7 @@
       "<dt>updated</dt><dd>" + esc((fact.updated_at || "").slice(0, 19)) + "</dd>" +
       "</dl></div>" +
       '<div class="panel"><h2>Assertion history</h2>' +
+      (truncated ? '<div class="fact-note">History truncated: showing the newest 1,000 assertions.</div>' : '') +
       (fact.sensitive ? '<div class="fact-note">sensitive history values stay locked in v1 &mdash; no per-assertion reveal.</div>' : "") +
       '<div class="list">' + (history || '<div class="empty">no assertions</div>') + "</div></div>";
   }

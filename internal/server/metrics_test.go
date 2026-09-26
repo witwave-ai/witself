@@ -212,7 +212,7 @@ func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil, nil, nil, nil).ServeHTTP(
+			metricsMuxFor(newRuntimeMetrics(), test.read, nil, nil, nil, nil, nil, nil, nil).ServeHTTP(
 				response,
 				httptest.NewRequest(http.MethodGet, "/metrics", nil),
 			)
@@ -782,7 +782,7 @@ func metricsMuxForCellStorageTest(
 	metrics *runtimeMetrics,
 	read func(context.Context) (AgentEmailCellStorageMetrics, error),
 ) http.Handler {
-	return metricsMuxFor(metrics, read, nil, nil, nil, nil, nil, nil)
+	return metricsMuxFor(metrics, read, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // The SLO gauges must separate "nothing waiting" from "read failed": a broken
@@ -791,7 +791,7 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	ok := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 90061}, nil
-	}, nil, nil, nil, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil, nil, nil, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := ok.Body.String()
 	for _, want := range []string{
 		"witself_support_slo_metrics_up 1",
@@ -805,7 +805,7 @@ func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	broken := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
 		return SupportSLOMetrics{}, errors.New("db down with tenant detail")
-	}, nil, nil, nil, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	}, nil, nil, nil, nil, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	b := broken.Body.String()
 	if !strings.Contains(b, "witself_support_slo_metrics_up 0") ||
 		strings.Contains(b, "witself_support_unanswered_tickets") ||
@@ -851,7 +851,7 @@ func TestIdentityCapacityMetricsAreValueFreeAndBounded(t *testing.T) {
 			AgentsPerRealm: IdentityCapacityDimensionMetrics{AccountsMeasured: 5, AccountsNearLimit: 1, AccountsAtLimit: 0, AccountsUnlimited: 2, MinHeadroomRatio: 0.1},
 			OperatorSeats:  IdentityCapacityDimensionMetrics{AccountsMeasured: 0, AccountsUnlimited: 7, MinHeadroomRatio: 1},
 		}, nil
-	}, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
+	}, nil, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 	if response.Code != http.StatusOK || reads != 1 {
 		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
 	}
@@ -892,7 +892,7 @@ func TestIdentityCapacityMetricsFailClosedWithoutErrorText(t *testing.T) {
 			metricsMuxFor(newRuntimeMetrics(), nil, nil, func(ctx context.Context) (IdentityCapacityMetrics, error) {
 				assertCapacityMetricsDeadline(ctx, t)
 				return IdentityCapacityMetrics{Realms: valid, AgentsPerRealm: valid, OperatorSeats: test.status}, test.err
-			}, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
+			}, nil, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 			assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_identity_capacity_")
 		})
 	}
@@ -905,7 +905,7 @@ func TestAuditAppendMetricsAreValueFreeAndBounded(t *testing.T) {
 		reads++
 		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, nil
-	}, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
+	}, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 	if response.Code != http.StatusOK || reads != 1 {
 		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
 	}
@@ -929,7 +929,7 @@ func TestAuditAppendMetricsFailClosedWithoutErrorText(t *testing.T) {
 	metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, func(ctx context.Context) (AuditAppendMetrics, error) {
 		assertCapacityMetricsDeadline(ctx, t)
 		return AuditAppendMetrics{TxFailures: 7}, errors.New("database_capacity_error_canary account_capacity_private")
-	}, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
+	}, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
 	assertCapacityMetricsFailClosed(t, response.Body.String(), "witself_audit_append_")
 }
 
@@ -1252,7 +1252,7 @@ func TestSealedPlanePostureMetricsRenderAndFailValueFree(t *testing.T) {
 				read = nil
 			}
 			response := httptest.NewRecorder()
-			metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, read, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics?agent=agent_sealed_private", nil))
+			metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, read, nil, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics?agent=agent_sealed_private", nil))
 			if response.Code != http.StatusOK || (!test.disabled && reads != 1) || (test.disabled && reads != 0) {
 				t.Fatalf("response=%d reads=%d", response.Code, reads)
 			}

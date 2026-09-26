@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
@@ -180,5 +183,30 @@ func TestWitselfMCPTranscriptGetStaysTransportSized(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), "witself:elided") {
 		t.Fatal("bounded page carries no elision note")
+	}
+}
+
+func TestMCPReadInvocationScopesExactRetries(t *testing.T) {
+	var ids []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ids = append(ids, r.Header.Get(activity.RequestIDHeader))
+		_, _ = w.Write([]byte(`{"hits":[]}`))
+	}))
+	defer srv.Close()
+	handler := mcpResultSizeGuard()(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		for range 2 {
+			if _, err := client.RecallMemories(ctx, srv.URL, "synthetic", client.MemoryRecallInput{Query: "decision"}); err != nil {
+				return nil, err
+			}
+		}
+		return &mcp.CallToolResult{}, nil
+	})
+	for range 2 {
+		if _, err := handler(t.Context(), "tools/call", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(ids) != 4 || !activity.ValidRequestID(ids[0]) || ids[0] != ids[1] || ids[2] != ids[3] || ids[0] == ids[2] {
+		t.Fatal("MCP retry scope is not per invocation")
 	}
 }

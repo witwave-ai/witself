@@ -701,6 +701,7 @@ expand it into another agent's view. `since` and `until` are RFC3339, repeated
 `dimension` parameters filter dimensions, and `group_by` is `hour` or `day`
 (default `day`). The default window is 30 days. Hourly windows are capped at 90
 days and daily windows at 1,830 days (five 366-day years). Unknown dimensions
+and activity dimensions (`operation_*`, `memory_*`, and the activation marker)
 are rejected with HTTP 400; the closed vocabulary is listed in
 [Usage Report](json-contracts.md#usage-report).
 Results contain at most 10,000 time-bucket `points`, ordered by bucket start,
@@ -723,6 +724,14 @@ Unknown or duplicate parameters are rejected. The response wraps
 points, totals, a nullable persistent `tracking_since`, and `truncated: false`.
 See [Agent Activity Report](json-contracts.md#agent-activity-report) and the
 [activity guide](agent-activity.md) for units, coverage, and retry semantics.
+Read-meter failures do not fail the domain response and increment
+`witself_activity_metering_failures_total`; write metering stays transactional.
+Malformed/duplicated activity-intent headers are ignored, including on self and
+auth routes. This does not relax domain `Idempotency-Key` validation.
+Automatic hydration recall and curator bookkeeping reads carry observation
+intent and no activity ID; explicit memory recall remains deliberate.
+Activity events retire after 35 days in bounded maintenance batches; markers
+and rollups survive and archives preserve their authoritative activity totals.
 
 `POST /v1/support/tickets` admits at most 10 new tickets per account in a
 rolling 60-second window by default, shared across the account's operators and
@@ -888,6 +897,10 @@ audit events; read-only recall does neither:
   memory. `reason_code` is server-owned (`direct_user_request`) and a supplied
   query value is rejected. Apply conflicts on stale guards or live incoming
   dependencies and returns an exact replay for the same apply key and guards.
+- `GET /v1/facts/{fact_id}/history` returns HTTP 200 with `assertions` (newest
+  first, at most 1,000) and `truncated`. A true flag means older assertions remain.
+  There is no cursor; traversal remains capped. This successful bounded response
+  replaces the former client error for histories beyond 1,000 assertions.
 - `POST /v1/facts/{fact_id}:primary` is the atomic primary promotion. It demotes
   any prior primary of the same logical kind for the same owner.
 - `DELETE /v1/facts?dry_run=true&subject={subject}&predicate={predicate}`

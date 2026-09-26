@@ -57,7 +57,12 @@ func TestActivityHeaderAndObservationIndependence(t *testing.T) {
 			mux := activityContextMux(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
 				op, _ := activity.Operation(r.Context())
-				if op != "facts.exact" || activity.IsObservation(r.Context()) != tc.passive || activity.RequestID(r.Context()) != tc.id {
+				if op != "facts.exact" || activity.IsObservation(r.Context()) != tc.passive || activity.RequestID(r.Context()) != func() string {
+					if activity.ValidRequestID(tc.id) {
+						return tc.id
+					}
+					return ""
+				}() {
 					t.Fatal("bad context")
 				}
 				w.WriteHeader(204)
@@ -71,11 +76,7 @@ func TestActivityHeaderAndObservationIndependence(t *testing.T) {
 			}
 			res := httptest.NewRecorder()
 			mux.ServeHTTP(res, req)
-			if tc.bad {
-				if res.Code != 400 || called || strings.Contains(res.Body.String(), tc.id) && tc.id != "" {
-					t.Fatal("invalid intent leaked or reached handler")
-				}
-			} else if res.Code != 204 || !called {
+			if res.Code != 204 || !called {
 				t.Fatal("valid intent rejected")
 			}
 		})
@@ -168,5 +169,34 @@ func TestActivityNormalizedActionRoutes(t *testing.T) {
 				t.Fatalf("descriptor=%q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInvalidActivityHeadersDoNotBlockExcludedRoutes(t *testing.T) {
+	for _, path := range []string{"/v1/self", "/v1/auth", "/v1/facts"} {
+		mux := activityContextMux(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(activity.RequestIDHeader) != "" || r.Header.Get(activity.ObservationHeader) != "" || activity.RequestID(r.Context()) != "" {
+				t.Error("invalid headers survived")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Add(activity.RequestIDHeader, "0123456789abcdef")
+		req.Header.Add(activity.RequestIDHeader, "fedcba9876543210")
+		req.Header.Add(activity.ObservationHeader, "1")
+		req.Header.Add(activity.ObservationHeader, "1")
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		if res.Code != 204 {
+			t.Fatal("telemetry blocked route", res.Code)
+		}
+	}
+}
+func TestActivityMeteringFailureCounter(t *testing.T) {
+	mux := metricsMuxFor(newRuntimeMetrics(), nil, nil, nil, nil, nil, nil, nil, func() uint64 { return 7 })
+	out := httptest.NewRecorder()
+	mux.ServeHTTP(out, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(out.Body.String(), "# TYPE witself_activity_metering_failures_total counter\nwitself_activity_metering_failures_total 7\n") {
+		t.Fatal("counter missing")
 	}
 }
