@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -129,18 +130,24 @@ func (s *Store) ExportAccountEvacuation(
 //
 // A backup refuses to overlap an evacuation or non-portable vault lifecycle.
 // Those are retryable scheduling conditions; the backup path never suspends,
-// resumes, aborts, or otherwise resolves them.
+// resumes, aborts, or otherwise resolves them. The optional flush hook runs
+// after compressed manifest/chunk bytes have been written to w.
 func (s *Store) ExportAccountBackup(
 	ctx context.Context,
 	accountID, backupID, cellName, serverVersion string,
 	w io.Writer,
+	flush ...func() error,
 ) error {
 	if err := validateBackupID(backupID); err != nil {
 		return err
 	}
+	var flushHook func() error
+	if len(flush) > 0 {
+		flushHook = flush[0]
+	}
 	return s.exportAccount(
 		ctx, accountID, cellName, serverVersion, w,
-		accountExportOptions{backup: true, backupID: backupID},
+		accountExportOptions{backup: true, backupID: backupID, flush: flushHook},
 	)
 }
 
@@ -165,6 +172,7 @@ func (s *Store) ExportAccountSelf(
 }
 
 type accountExportOptions struct {
+	flush        func() error
 	evacuationID string
 	backupID     string
 	backup       bool
@@ -387,7 +395,7 @@ func (s *Store) exportAccount(
 			  'id', id, 'account_id', account_id, 'role', role, 'is_root', is_root,
 			  'display_name', display_name, 'created_at', created_at,
 			  'updated_at', updated_at, 'deleted_at', deleted_at)
-			FROM operators WHERE account_id = $1 ORDER BY id`, arg: accountID},
+			FROM operators WHERE account_id = $1 ORDER BY id`, arg: accountID, keyset: []string{"id"}},
 		&querySource{tx: tx, table: "realms", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'name', name,
@@ -396,7 +404,7 @@ func (s *Store) exportAccount(
 			  'email_route_state', email_route_state,
 			  'email_route_generation', email_route_generation,
 			  'email_route_operation_id', email_route_operation_id)
-			FROM realms WHERE account_id = $1 ORDER BY id`, arg: accountID},
+			FROM realms WHERE account_id = $1 ORDER BY id`, arg: accountID, keyset: []string{"id"}},
 		&querySource{tx: tx, table: "agent_email_realm_receive_controls", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -404,7 +412,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'disabled_at', disabled_at)
 			FROM agent_email_realm_receive_controls
-			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID},
+			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID, keyset: []string{"realm_id"}},
 		&querySource{tx: tx, table: "agent_email_realm_send_controls", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -412,7 +420,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'disabled_at', disabled_at)
 			FROM agent_email_realm_send_controls
-			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID},
+			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID, keyset: []string{"realm_id"}},
 		// Realm avatar style heads and immutable versions precede agents so
 		// profiles can reference the selected style as soon as they stream.
 		// The current-version head foreign key is deferred because the head and
@@ -423,7 +431,7 @@ func (s *Store) exportAccount(
 			  'current_version', current_version, 'revision', revision,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM avatar_style_packs WHERE account_id = $1
-			ORDER BY realm_id, id`, arg: accountID},
+			ORDER BY realm_id, id`, arg: accountID, keyset: []string{"realm_id", "id"}},
 		&querySource{tx: tx, table: "avatar_style_pack_versions", q: `
 			WITH RECURSIVE style_order AS (
 			  SELECT v.*, 0 AS chain_depth
@@ -448,7 +456,7 @@ func (s *Store) exportAccount(
 			  'provenance', provenance, 'created_by_kind', created_by_kind,
 			  'created_by_id', created_by_id, 'created_at', created_at)
 			FROM style_order
-			ORDER BY realm_id, style_pack_id, chain_depth, version`, arg: accountID},
+			ORDER BY realm_id, style_pack_id, chain_depth, version`, arg: accountID, keyset: []string{"realm_id", "style_pack_id", "chain_depth", "version"}},
 		&querySource{tx: tx, table: "realm_avatar_styles", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -457,7 +465,7 @@ func (s *Store) exportAccount(
 			  'revision', revision, 'created_at', created_at,
 			  'updated_at', updated_at)
 			FROM realm_avatar_styles WHERE account_id = $1
-			ORDER BY realm_id`, arg: accountID},
+			ORDER BY realm_id`, arg: accountID, keyset: []string{"realm_id"}},
 		&querySource{tx: tx, table: "avatar_style_rollout_jobs", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -473,14 +481,14 @@ func (s *Store) exportAccount(
 			  'updated_at', updated_at, 'completed_at', completed_at,
 			  'superseded_at', superseded_at)
 			FROM avatar_style_rollout_jobs WHERE account_id = $1
-			ORDER BY realm_id, style_revision`, arg: accountID},
+			ORDER BY realm_id, style_revision`, arg: accountID, keyset: []string{"realm_id", "style_revision"}},
 		&querySource{tx: tx, table: "agents", q: `
 			SELECT jsonb_build_object(
 			  'id', a.id, 'realm_id', a.realm_id, 'name', a.name,
 			  'created_at', a.created_at, 'updated_at', a.updated_at,
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
-			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID, keyset: []string{"a.id"}},
 		&querySource{tx: tx, table: "agent_email_send_controls", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -490,7 +498,7 @@ func (s *Store) exportAccount(
 			  'disabled_at', disabled_at)
 			FROM agent_email_send_controls
 			WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id"}},
 		// Agent-email address reservations intentionally retain retired rows. The
 		// remaining streams follow their foreign-key dependency order, and raw
 		// MIME uses the archive's canonical lowercase bytea hex representation.
@@ -504,7 +512,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'retired_at', retired_at,
 			  'retirement_reason_code', retirement_reason_code)
 			FROM agent_email_addresses WHERE account_id = $1
-			ORDER BY realm_id, created_at, id`, arg: accountID},
+			ORDER BY realm_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "agent_email_address_domains", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -512,7 +520,7 @@ func (s *Store) exportAccount(
 			  'address_id', address_id, 'domain', domain,
 			  'local_part', local_part, 'created_at', created_at)
 			FROM agent_email_address_domains WHERE account_id = $1
-			ORDER BY realm_id, address_id, domain`, arg: accountID},
+			ORDER BY realm_id, address_id, domain`, arg: accountID, keyset: []string{"realm_id", "address_id", "domain"}},
 		&querySource{tx: tx, table: "agent_email_mailboxes", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -521,7 +529,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'disabled_at', disabled_at, 'retired_at', retired_at)
 			FROM agent_email_mailboxes WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "agent_email_realm_aliases", q: `
 			SELECT jsonb_build_object(
 			  'claim_id', claim_id, 'account_id', account_id,
@@ -531,7 +539,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'suspended_at', suspended_at, 'retired_at', retired_at)
 			FROM agent_email_realm_aliases WHERE account_id = $1
-			ORDER BY realm_id, domain, realm_label, claim_id`, arg: accountID},
+			ORDER BY realm_id, domain, realm_label, claim_id`, arg: accountID, keyset: []string{"realm_id", "domain", "realm_label", "claim_id"}},
 		&querySource{tx: tx, table: "agent_email_custom_domain_routes", q: `
 			SELECT jsonb_build_object(
 			  'domain_request_id', domain_request_id,
@@ -548,7 +556,7 @@ func (s *Store) exportAccount(
 			  'suspended_at', suspended_at, 'retired_at', retired_at)
 			FROM agent_email_custom_domain_routes WHERE account_id = $1
 			ORDER BY realm_id, domain, realm_label,
-			         domain_request_id, realm_alias_claim_id`, arg: accountID},
+			         domain_request_id, realm_alias_claim_id`, arg: accountID, keyset: []string{"realm_id", "domain", "realm_label", "domain_request_id", "realm_alias_claim_id"}},
 		&querySource{tx: tx, table: "agent_email_messages", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -581,7 +589,7 @@ func (s *Store) exportAccount(
 			  'possible_duplicate_of_message_id', possible_duplicate_of_message_id,
 			  'received_at', received_at, 'created_at', created_at)
 			FROM agent_email_messages WHERE account_id = $1
-			ORDER BY realm_id, mailbox_id, received_at, id`, arg: accountID},
+			ORDER BY realm_id, mailbox_id, received_at, id`, arg: accountID, keyset: []string{"realm_id", "mailbox_id", "received_at", "id"}},
 		&querySource{tx: tx, table: "agent_email_deliveries", q: `
 			SELECT jsonb_build_object(
 			  'message_id', message_id, 'account_id', account_id,
@@ -598,10 +606,11 @@ func (s *Store) exportAccount(
 			  'complete_key_hash', complete_key_hash,
 			  'created_at', created_at)
 			FROM agent_email_deliveries WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, delivered_at, message_id, mailbox_id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, delivered_at, message_id, mailbox_id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "delivered_at", "message_id", "mailbox_id"}},
 		// Live retry tests are local, expiring work and never cross cells. Only
 		// accepted proofs move with their immutable message so a provider replay
-		// after cutover cannot create a second delivery.
+		// after cutover cannot create a second delivery. mailbox_id breaks otherwise
+		// equal ordering keys across historical mailboxes for lossless pagination.
 		&querySource{tx: tx, table: "agent_email_retry_canary_arms", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -615,7 +624,7 @@ func (s *Store) exportAccount(
 			  'accepted_at', accepted_at)
 			FROM agent_email_retry_canary_arms
 			WHERE account_id = $1 AND state = 'accepted'
-			ORDER BY realm_id, owner_agent_id, accepted_at, challenge_sha256`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, accepted_at, challenge_sha256, mailbox_id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "accepted_at", "challenge_sha256", "mailbox_id"}},
 		&querySource{tx: tx, table: "agent_email_outbound_messages", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -640,7 +649,7 @@ func (s *Store) exportAccount(
 			  'ambiguous_at', ambiguous_at, 'canceled_at', canceled_at,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM agent_email_outbound_messages
-			WHERE account_id = $1 ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+			WHERE account_id = $1 ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "agent_email_outbound_provider_events", q: `
 			SELECT jsonb_build_object(
 			  'account_id', event.account_id,
@@ -652,7 +661,7 @@ func (s *Store) exportAccount(
 			FROM agent_email_outbound_provider_events event
 			JOIN agent_email_outbound_messages outbound ON outbound.id=event.outbound_id
 			WHERE outbound.account_id = $1
-			ORDER BY event.outbound_id, event.occurred_at, event.provider, event.event_id_hash`, arg: accountID},
+			ORDER BY event.outbound_id, event.occurred_at, event.provider, event.event_id_hash`, arg: accountID, keyset: []string{"event.outbound_id", "event.occurred_at", "event.provider", "event.event_id_hash"}},
 		&querySource{tx: tx, table: "agent_email_outbound_recipient_suppressions", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'recipient_sha256', recipient_sha256,
@@ -660,7 +669,7 @@ func (s *Store) exportAccount(
 			  'provider', provider, 'created_at', created_at,
 			  'updated_at', updated_at)
 			FROM agent_email_outbound_recipient_suppressions
-			WHERE account_id = $1 ORDER BY recipient_sha256`, arg: accountID},
+			WHERE account_id = $1 ORDER BY recipient_sha256`, arg: accountID, keyset: []string{"recipient_sha256"}},
 		// The AVK itself is never exported. These streams preserve only its
 		// public binding plus byte-identical ciphertext and wrapped DEKs so the
 		// same client-held key can reopen the vault after a cell move.
@@ -672,7 +681,7 @@ func (s *Store) exportAccount(
 			  'lifecycle_state', lifecycle_state, 'row_version', row_version,
 			  'created_at', created_at, 'retired_at', retired_at)
 			FROM agent_vault_keys WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, key_version, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, key_version, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "key_version", "id"}},
 		&querySource{tx: tx, table: "agent_vault_key_enrollments", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -695,7 +704,7 @@ func (s *Store) exportAccount(
 			  'consumed_at', consumed_at, 'cancelled_at', cancelled_at,
 			  'expired_at', expired_at)
 			FROM agent_vault_key_enrollments WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "vault_key_enrollment_receipts", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -704,7 +713,7 @@ func (s *Store) exportAccount(
 			  'request_hash', request_hash, 'enrollment_id', enrollment_id,
 			  'result_revision', result_revision, 'created_at', created_at)
 			FROM vault_key_enrollment_receipts WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "operation", "idempotency_key_hash"}},
 		&querySource{tx: tx, table: "secrets", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -714,7 +723,7 @@ func (s *Store) exportAccount(
 			  'updated_at', updated_at, 'archived_at', archived_at,
 			  'deleted_at', deleted_at)
 			FROM secrets WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "secret_fields", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -729,7 +738,7 @@ func (s *Store) exportAccount(
 			  'row_version', row_version, 'created_at', created_at,
 			  'updated_at', updated_at)
 			FROM secret_fields WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, secret_id, name, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, secret_id, name, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "secret_id", "name", "id"}},
 		&querySource{tx: tx, table: "secret_deks", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -744,7 +753,7 @@ func (s *Store) exportAccount(
 			  'retired_at', retired_at)
 			FROM secret_deks WHERE account_id = $1
 			ORDER BY realm_id, owner_agent_id, secret_id, field_id,
-			         dek_generation, id`, arg: accountID},
+			         dek_generation, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "secret_id", "field_id", "dek_generation", "id"}},
 		&querySource{tx: tx, table: "agent_vault_key_rotations", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -759,7 +768,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'updated_at', updated_at,
 			  'committed_at', committed_at, 'cancelled_at', cancelled_at)
 			FROM agent_vault_key_rotations WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "agent_vault_key_rotation_items", q: `
 			SELECT jsonb_build_object(
 			  'rotation_id', rotation_id, 'account_id', account_id,
@@ -779,7 +788,7 @@ func (s *Store) exportAccount(
 			  'target_wrapper_sha256', target_wrapper_sha256,
 			  'staged_at', staged_at)
 			FROM agent_vault_key_rotation_items WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, rotation_id, dek_id`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, rotation_id, dek_id`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "rotation_id", "dek_id"}},
 		&querySource{tx: tx, table: "vault_key_rotation_receipts", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -788,7 +797,7 @@ func (s *Store) exportAccount(
 			  'request_hash', request_hash, 'rotation_id', rotation_id,
 			  'result_revision', result_revision, 'created_at', created_at)
 			FROM vault_key_rotation_receipts WHERE account_id = $1
-			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID},
+			ORDER BY realm_id, owner_agent_id, operation, idempotency_key_hash`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "operation", "idempotency_key_hash"}},
 		&querySource{tx: tx, table: "secret_mutation_receipts", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -801,7 +810,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at)
 			FROM secret_mutation_receipts WHERE account_id = $1
 			ORDER BY realm_id, owner_agent_id, actor_kind, actor_id,
-			         operation, idempotency_key_hash`, arg: accountID},
+			         operation, idempotency_key_hash`, arg: accountID, keyset: []string{"realm_id", "owner_agent_id", "actor_kind", "actor_id", "operation", "idempotency_key_hash"}},
 		&querySource{tx: tx, table: "agent_avatar_profiles", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -824,7 +833,7 @@ func (s *Store) exportAccount(
 			  'revision', revision,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM agent_avatar_profiles WHERE account_id = $1
-			ORDER BY realm_id, agent_id`, arg: accountID},
+			ORDER BY realm_id, agent_id`, arg: accountID, keyset: []string{"realm_id", "agent_id"}},
 		&querySource{tx: tx, table: "agent_avatar_versions", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -847,7 +856,7 @@ func (s *Store) exportAccount(
 			  'proposed_by_id', proposed_by_id,
 			  'proposed_at', proposed_at)
 			FROM agent_avatar_versions WHERE account_id = $1
-			ORDER BY realm_id, agent_id, version`, arg: accountID},
+			ORDER BY realm_id, agent_id, version`, arg: accountID, keyset: []string{"realm_id", "agent_id", "version"}},
 		&querySource{tx: tx, table: "agent_avatar_activations", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -859,7 +868,7 @@ func (s *Store) exportAccount(
 			  'activated_by_id', activated_by_id,
 			  'activated_at', activated_at)
 			FROM agent_avatar_activations WHERE account_id = $1
-			ORDER BY realm_id, agent_id, sequence`, arg: accountID},
+			ORDER BY realm_id, agent_id, sequence`, arg: accountID, keyset: []string{"realm_id", "agent_id", "sequence"}},
 		&querySource{tx: tx, table: "agent_avatar_rejections", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -869,7 +878,7 @@ func (s *Store) exportAccount(
 			  'rejected_by_id', rejected_by_id,
 			  'rejected_at', rejected_at)
 			FROM agent_avatar_rejections WHERE account_id = $1
-			ORDER BY rejected_at, id`, arg: accountID},
+			ORDER BY rejected_at, id`, arg: accountID, keyset: []string{"rejected_at", "id"}},
 		&querySource{tx: tx, table: "agent_avatar_resets", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -882,7 +891,7 @@ func (s *Store) exportAccount(
 			  'reset_by_kind', reset_by_kind, 'reset_by_id', reset_by_id,
 			  'reset_at', reset_at)
 			FROM agent_avatar_resets WHERE account_id = $1
-			ORDER BY realm_id, agent_id, sequence`, arg: accountID},
+			ORDER BY realm_id, agent_id, sequence`, arg: accountID, keyset: []string{"realm_id", "agent_id", "sequence"}},
 		&querySource{tx: tx, table: "avatar_mutation_receipts", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -895,7 +904,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at)
 			FROM avatar_mutation_receipts WHERE account_id = $1
 			ORDER BY realm_id, target_kind, target_id, actor_kind, actor_id,
-			         operation, idempotency_key`, arg: accountID},
+			         operation, idempotency_key`, arg: accountID, keyset: []string{"realm_id", "target_kind", "target_id", "actor_kind", "actor_id", "operation", "idempotency_key"}},
 		&querySource{tx: tx, table: "agent_activity", q: `
 			SELECT jsonb_build_object(
 			  'agent_id', aa.agent_id, 'runtime', aa.runtime,
@@ -907,7 +916,7 @@ func (s *Store) exportAccount(
 			JOIN agents a ON a.id = aa.agent_id
 			JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1
-			ORDER BY aa.agent_id, aa.runtime, aa.location_id`, arg: accountID},
+			ORDER BY aa.agent_id, aa.runtime, aa.location_id`, arg: accountID, keyset: []string{"aa.agent_id", "aa.runtime", "aa.location_id"}},
 		// Dashboard UI preferences are agent-owned account data: the theme
 		// choice follows the agent across cells, so the strictly validated
 		// prefs document rides the archive like every other per-agent row.
@@ -916,14 +925,14 @@ func (s *Store) exportAccount(
 			  'agent_id', agent_id, 'account_id', account_id,
 			  'realm_id', realm_id, 'prefs', prefs, 'updated_at', updated_at)
 			FROM agent_dashboard_preferences WHERE account_id = $1
-			ORDER BY agent_id`, arg: accountID},
+			ORDER BY agent_id`, arg: accountID, keyset: []string{"agent_id"}},
 		&querySource{tx: tx, table: "fact_subjects", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
 			  'owner_agent_id', owner_agent_id, 'canonical_key', canonical_key,
 			  'display_name', display_name, 'aliases', aliases,
 			  'created_at', created_at, 'updated_at', updated_at)
-			FROM fact_subjects WHERE account_id = $1 ORDER BY id`, arg: accountID},
+			FROM fact_subjects WHERE account_id = $1 ORDER BY id`, arg: accountID, keyset: []string{"id"}},
 		&querySource{tx: tx, table: "facts", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -943,7 +952,7 @@ func (s *Store) exportAccount(
 			  'recreated_at', recreated_at,
 			  'replacement_fact_id', replacement_fact_id,
 			  'created_at', created_at, 'updated_at', updated_at)
-			FROM facts WHERE account_id = $1 ORDER BY id`, arg: accountID},
+			FROM facts WHERE account_id = $1 ORDER BY id`, arg: accountID, keyset: []string{"id"}},
 		&querySource{tx: tx, table: "fact_mutation_tombstones", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -952,7 +961,7 @@ func (s *Store) exportAccount(
 			  'idempotency_key_hash', idempotency_key_hash,
 			  'deleted_at', deleted_at)
 			FROM fact_mutation_tombstones WHERE account_id = $1
-			ORDER BY fact_id, surface, id`, arg: accountID},
+			ORDER BY fact_id, surface, id`, arg: accountID, keyset: []string{"fact_id", "surface", "id"}},
 		&querySource{tx: tx, table: "fact_assertions", q: `
 			WITH RECURSIVE assertion_order AS (
 			  SELECT a.*, 0 AS chain_depth
@@ -977,7 +986,7 @@ func (s *Store) exportAccount(
 			  'idempotency_fingerprint', idempotency_fingerprint,
 			  'created_at', created_at)
 			FROM assertion_order
-			ORDER BY fact_id, chain_depth, created_at, id`, arg: accountID},
+			ORDER BY fact_id, chain_depth, created_at, id`, arg: accountID, keyset: []string{"fact_id", "chain_depth", "created_at", "id"}},
 		&querySource{tx: tx, table: "fact_candidates", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1003,7 +1012,7 @@ func (s *Store) exportAccount(
 			  'withdrawal_request_hash', withdrawal_request_hash,
 			  'proposed_at', proposed_at, 'decided_at', decided_at)
 			FROM fact_candidates WHERE account_id = $1
-			ORDER BY proposed_at, id`, arg: accountID},
+			ORDER BY proposed_at, id`, arg: accountID, keyset: []string{"proposed_at", "id"}},
 		&querySource{tx: tx, table: "tokens", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'operator_id', operator_id,
@@ -1011,7 +1020,7 @@ func (s *Store) exportAccount(
 			  'display_name', display_name, 'access_profile', access_profile,
 			  'created_at', created_at,
 			  'expires_at', expires_at, 'consumed_at', consumed_at)
-			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID},
+			FROM tokens WHERE account_id = $1 ORDER BY id`, arg: accountID, keyset: []string{"id"}},
 		// Transcript conversations depend on realms + agents; entries depend
 		// on their conversation and may reply only to an earlier entry. Stable
 		// sequence order therefore makes this stream directly insertable.
@@ -1023,7 +1032,7 @@ func (s *Store) exportAccount(
 			  'next_sequence', next_sequence,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM transcript_conversations WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "transcript_entries", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id,
@@ -1035,7 +1044,7 @@ func (s *Store) exportAccount(
 			  'reply_to_entry_id', reply_to_entry_id,
 			  'artifacts', artifacts, 'created_at', created_at)
 			FROM transcript_entries WHERE account_id = $1
-			ORDER BY transcript_id, sequence, id`, arg: accountID},
+			ORDER BY transcript_id, sequence, id`, arg: accountID, keyset: []string{"transcript_id", "sequence", "id"}},
 		// Usage facts and their fast projections are account-owned data. Both
 		// are preserved so a moved account keeps exact history and can serve
 		// usage immediately without rebuilding rollups during import.
@@ -1048,7 +1057,7 @@ func (s *Store) exportAccount(
 			  'idempotency_key', idempotency_key, 'metadata', metadata,
 			  'occurred_at', occurred_at, 'created_at', created_at)
 			FROM usage_events WHERE account_id = $1
-			ORDER BY occurred_at, id`, arg: accountID},
+			ORDER BY occurred_at, id`, arg: accountID, keyset: []string{"occurred_at", "id"}},
 		&querySource{tx: tx, table: "usage_rollups", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -1057,7 +1066,7 @@ func (s *Store) exportAccount(
 			  'quantity', quantity, 'event_count', event_count,
 			  'updated_at', updated_at)
 			FROM usage_rollups WHERE account_id = $1
-			ORDER BY bucket, bucket_start, agent_id, dimension, unit`, arg: accountID},
+			ORDER BY bucket, bucket_start, agent_id, dimension, unit`, arg: accountID, keyset: []string{"bucket", "bucket_start", "agent_id", "dimension", "unit"}},
 		// Messages depend on realms + agents; recipient delivery state depends
 		// on its message. Preserve bodies here because the account archive is
 		// the durable, encrypted migration unit for all account-owned data.
@@ -1073,7 +1082,7 @@ func (s *Store) exportAccount(
 			  'causal_depth', causal_depth,
 			  'idempotency_key', idempotency_key, 'created_at', created_at)
 			FROM agent_messages WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "agent_message_deliveries", q: `
 			SELECT jsonb_build_object(
 			  'message_id', message_id, 'account_id', account_id,
@@ -1090,7 +1099,7 @@ func (s *Store) exportAccount(
 			  'result_message_id', result_message_id,
 			  'created_at', created_at)
 			FROM agent_message_deliveries WHERE account_id = $1
-			ORDER BY created_at, message_id, recipient_agent_id`, arg: accountID},
+			ORDER BY created_at, message_id, recipient_agent_id`, arg: accountID, keyset: []string{"created_at", "message_id", "recipient_agent_id"}},
 		&querySource{tx: tx, table: "agent_message_requests", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1106,7 +1115,7 @@ func (s *Store) exportAccount(
 			  'expired_at', expired_at,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM agent_message_requests WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "agent_message_request_candidates", q: `
 			SELECT jsonb_build_object(
 			  'request_id', request_id, 'account_id', account_id,
@@ -1117,7 +1126,7 @@ func (s *Store) exportAccount(
 			  'offer_request_hash', offer_request_hash,
 			  'responded_at', responded_at, 'created_at', created_at)
 			FROM agent_message_request_candidates WHERE account_id = $1
-			ORDER BY request_id, agent_id`, arg: accountID},
+			ORDER BY request_id, agent_id`, arg: accountID, keyset: []string{"request_id", "agent_id"}},
 		&querySource{tx: tx, table: "agent_message_request_selections", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'request_id', request_id,
@@ -1127,7 +1136,7 @@ func (s *Store) exportAccount(
 			  'idempotency_key_hash', idempotency_key_hash,
 			  'selection_hash', selection_hash, 'created_at', created_at)
 			FROM agent_message_request_selections WHERE account_id = $1
-			ORDER BY request_id, generation, id`, arg: accountID},
+			ORDER BY request_id, generation, id`, arg: accountID, keyset: []string{"request_id", "generation", "id"}},
 		&querySource{tx: tx, table: "agent_message_request_claims", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'request_id', request_id,
@@ -1144,7 +1153,7 @@ func (s *Store) exportAccount(
 			  'released_at', released_at, 'completed_at', completed_at,
 			  'cancelled_at', cancelled_at, 'updated_at', updated_at)
 			FROM agent_message_request_claims WHERE account_id = $1
-			ORDER BY request_id, selection_id, agent_id, id`, arg: accountID},
+			ORDER BY request_id, selection_id, agent_id, id`, arg: accountID, keyset: []string{"request_id", "selection_id", "agent_id", "id"}},
 		// Memory evidence may refer to transcripts, messages, or other memory
 		// versions, so the external interaction sources above must land first.
 		// Heads and versions form a deferrable FK cycle and can stream directly
@@ -1156,7 +1165,7 @@ func (s *Store) exportAccount(
 			  'last_change_seq', last_change_seq,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memory_change_clocks WHERE account_id = $1
-			ORDER BY realm_id, owner_kind, owner_id`, arg: accountID},
+			ORDER BY realm_id, owner_kind, owner_id`, arg: accountID, keyset: []string{"realm_id", "owner_kind", "owner_id"}},
 		&querySource{tx: tx, table: "memories", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1182,7 +1191,7 @@ func (s *Store) exportAccount(
 			  'deleted_curation_mutation_count', deleted_curation_mutation_count,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memories WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "memory_versions", q: `
 			SELECT jsonb_build_object(
 			  'memory_id', memory_id, 'version', version,
@@ -1210,7 +1219,7 @@ func (s *Store) exportAccount(
 			  'curation_action_id', curation_action_id,
 			  'created_at', created_at)
 			FROM memory_versions WHERE account_id = $1
-			ORDER BY memory_id, version`, arg: accountID},
+			ORDER BY memory_id, version`, arg: accountID, keyset: []string{"memory_id", "version"}},
 		&querySource{tx: tx, table: "memory_vector_profiles", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1222,7 +1231,7 @@ func (s *Store) exportAccount(
 			  'created_by_agent_id', created_by_agent_id,
 			  'created_at', created_at)
 			FROM memory_vector_profiles WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "memory_vectors", q: `
 			SELECT jsonb_build_object(
 			  'profile_id', profile_id, 'memory_id', memory_id,
@@ -1234,7 +1243,7 @@ func (s *Store) exportAccount(
 			  'created_by_agent_id', created_by_agent_id,
 			  'created_at', created_at)
 			FROM memory_vectors WHERE account_id = $1
-			ORDER BY profile_id, memory_id, memory_version`, arg: accountID},
+			ORDER BY profile_id, memory_id, memory_version`, arg: accountID, keyset: []string{"profile_id", "memory_id", "memory_version"}},
 		&querySource{tx: tx, table: "memory_evidence", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1261,7 +1270,7 @@ func (s *Store) exportAccount(
 			  'request_hash', request_hash,
 			  'created_at', created_at)
 			FROM memory_evidence WHERE account_id = $1
-			ORDER BY memory_id, target_version, evidence_change_seq, id`, arg: accountID},
+			ORDER BY memory_id, target_version, evidence_change_seq, id`, arg: accountID, keyset: []string{"memory_id", "target_version", "evidence_change_seq", "id"}},
 		&querySource{tx: tx, table: "memory_relations", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1277,7 +1286,7 @@ func (s *Store) exportAccount(
 			  'reverted_by_action_id', reverted_by_action_id,
 			  'reverted_at', reverted_at, 'created_at', created_at)
 			FROM memory_relations WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "memory_deleted_references", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1289,7 +1298,7 @@ func (s *Store) exportAccount(
 			  'curation_request_id', curation_request_id,
 			  'reason_code', reason_code, 'created_at', created_at)
 			FROM memory_deleted_references WHERE account_id = $1
-			ORDER BY deleted_memory_id, created_at, id`, arg: accountID},
+			ORDER BY deleted_memory_id, created_at, id`, arg: accountID, keyset: []string{"deleted_memory_id", "created_at", "id"}},
 		&querySource{tx: tx, table: "memory_curation_lanes", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -1299,7 +1308,7 @@ func (s *Store) exportAccount(
 			  'active_run_id', active_run_id,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memory_curation_lanes WHERE account_id = $1
-			ORDER BY realm_id, owner_kind, owner_id`, arg: accountID},
+			ORDER BY realm_id, owner_kind, owner_id`, arg: accountID, keyset: []string{"realm_id", "owner_kind", "owner_id"}},
 		&querySource{tx: tx, table: "memory_curation_cursors", q: `
 			SELECT jsonb_build_object(
 			  'account_id', account_id, 'realm_id', realm_id,
@@ -1308,7 +1317,7 @@ func (s *Store) exportAccount(
 			  'position', position,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memory_curation_cursors WHERE account_id = $1
-			ORDER BY realm_id, owner_kind, owner_id, source_kind, source_stream_id`, arg: accountID},
+			ORDER BY realm_id, owner_kind, owner_id, source_kind, source_stream_id`, arg: accountID, keyset: []string{"realm_id", "owner_kind", "owner_id", "source_kind", "source_stream_id"}},
 		&querySource{tx: tx, table: "memory_curation_requests", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1328,7 +1337,7 @@ func (s *Store) exportAccount(
 			  'cancelled_at', cancelled_at, 'dead_lettered_at', dead_lettered_at,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memory_curation_requests WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "memory_curation_runs", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1361,7 +1370,7 @@ func (s *Store) exportAccount(
 			  'terminal_at', terminal_at,
 			  'created_at', created_at, 'updated_at', updated_at)
 			FROM memory_curation_runs WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		&querySource{tx: tx, table: "memory_curation_run_inputs", q: `
 			SELECT jsonb_build_object(
 			  'run_id', run_id, 'ordinal', ordinal,
@@ -1379,7 +1388,7 @@ func (s *Store) exportAccount(
 			  'transcript_pruned_at', transcript_pruned_at,
 			  'created_at', created_at)
 			FROM memory_curation_run_inputs WHERE account_id = $1
-			ORDER BY run_id, ordinal`, arg: accountID},
+			ORDER BY run_id, ordinal`, arg: accountID, keyset: []string{"run_id", "ordinal"}},
 		&querySource{tx: tx, table: "memory_curation_actions", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'run_id', run_id,
@@ -1396,7 +1405,7 @@ func (s *Store) exportAccount(
 			  'created_at', created_at, 'validated_at', validated_at,
 			  'applied_at', applied_at, 'reverted_at', reverted_at)
 			FROM memory_curation_actions WHERE account_id = $1
-			ORDER BY run_id, ordinal`, arg: accountID},
+			ORDER BY run_id, ordinal`, arg: accountID, keyset: []string{"run_id", "ordinal"}},
 		&querySource{tx: tx, table: "memory_curation_mutations", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -1411,7 +1420,7 @@ func (s *Store) exportAccount(
 			  'result_state', result_state, 'receipt_id', receipt_id,
 			  'created_at', created_at)
 			FROM memory_curation_mutations WHERE account_id = $1
-			ORDER BY created_at, id`, arg: accountID},
+			ORDER BY created_at, id`, arg: accountID, keyset: []string{"created_at", "id"}},
 		// account_events streams last because it has no outbound FKs
 		// beyond account_id, and it is the append-only ledger — its rows
 		// point AT the state changes recorded above, not the other way
@@ -1423,7 +1432,7 @@ func (s *Store) exportAccount(
 			  'actor_kind', actor_kind, 'actor_id', actor_id,
 			  'verb', verb, 'metadata', metadata, 'retain_until', retain_until)
 			FROM account_events WHERE account_id = $1
-			ORDER BY occurred_at, id`, arg: accountID},
+			ORDER BY occurred_at, id`, arg: accountID, keyset: []string{"occurred_at", "id"}},
 		// support_tickets + messages stream after account_events because
 		// messages FK-depend on tickets AND on accounts; the importCtx
 		// FK-validation reads ic.tickets which the tickets query
@@ -1440,7 +1449,7 @@ func (s *Store) exportAccount(
 			  'correlation', correlation, 'metadata', metadata,
 			  'retain_until', retain_until)
 			FROM support_tickets WHERE account_id = $1
-			ORDER BY opened_at, id`, arg: accountID},
+			ORDER BY opened_at, id`, arg: accountID, keyset: []string{"opened_at", "id"}},
 		&querySource{tx: tx, table: "support_ticket_messages", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'ticket_id', ticket_id, 'account_id', account_id,
@@ -1448,7 +1457,7 @@ func (s *Store) exportAccount(
 			  'author_kind', author_kind, 'author_id', author_id,
 			  'body', body, 'attachments', attachments, 'metadata', metadata)
 			FROM support_ticket_messages WHERE account_id = $1
-			ORDER BY posted_at, id`, arg: accountID},
+			ORDER BY posted_at, id`, arg: accountID, keyset: []string{"posted_at", "id"}},
 	}
 
 	m := export.Manifest{
@@ -1466,7 +1475,7 @@ func (s *Store) exportAccount(
 	} else if options.self {
 		m.Purpose = export.PurposeSelf
 	}
-	if err := export.Write(ctx, w, m, sources); err != nil {
+	if err := export.Write(ctx, w, m, sources, export.WriteOptions{Flush: options.flush, Logger: slog.Default()}); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1487,33 +1496,85 @@ type querySource struct {
 
 	rows pgx.Rows
 	done bool
+	// LIMIT gives indexed paths low startup cost even for accounts containing
+	// most of a table. Page complete, non-null, unique keys in the same snapshot;
+	// joined and recursive sources also get a bounded top-N when sorting is needed.
+	keyset   []string
+	cursor   []any
+	pageRows int
 }
 
 func (qs *querySource) Table() string { return qs.table }
 
+const exportRowBatchSize = 256
+
 func (qs *querySource) Next(ctx context.Context) ([]byte, error) {
-	if qs.done {
-		return nil, nil
-	}
-	if qs.rows == nil {
-		rows, err := qs.tx.Query(ctx, qs.q, qs.arg)
-		if err != nil {
+	for {
+		if qs.done {
+			return nil, nil
+		}
+		if qs.rows == nil {
+			q, args := qs.query()
+			rows, err := qs.tx.Query(ctx, q, args...)
+			if err != nil {
+				return nil, err
+			}
+			qs.rows = rows
+			qs.pageRows = 0
+		}
+		if !qs.rows.Next() {
+			err := qs.rows.Err()
+			qs.rows.Close()
+			qs.rows = nil
+			if err != nil || len(qs.keyset) == 0 || qs.pageRows < exportRowBatchSize {
+				qs.done = true
+				return nil, err
+			}
+			continue
+		}
+		var raw json.RawMessage
+		dest := make([]any, len(qs.keyset)+1)
+		cursor := make([]any, len(qs.keyset))
+		for i := range cursor {
+			dest[i] = &cursor[i]
+		}
+		dest[len(cursor)] = &raw
+		if err := qs.rows.Scan(dest...); err != nil {
+			qs.rows.Close()
+			qs.done = true
 			return nil, err
 		}
-		qs.rows = rows
+		qs.cursor = cursor
+		qs.pageRows++
+		// jsonb text output is already a single line — NDJSON-safe as-is.
+		return raw, nil
 	}
-	if !qs.rows.Next() {
-		qs.done = true
-		err := qs.rows.Err()
-		qs.rows.Close()
-		return nil, err
+}
+
+// query builds the next bounded page without changing the source cursor.
+func (qs *querySource) query() (string, []any) {
+	q := qs.q
+	args := []any{qs.arg}
+	if len(qs.keyset) > 0 {
+		// Only static SQL identifiers from the source definitions enter this SQL.
+		keys := strings.Join(qs.keyset, ", ")
+		q = strings.Replace(q, "SELECT jsonb_build_object(", "SELECT "+keys+", jsonb_build_object(", 1)
+		at := strings.LastIndex(q, "ORDER BY")
+		prefix, order := q[:at], q[at:]
+		if qs.cursor != nil {
+			params := make([]string, len(qs.cursor))
+			for i, v := range qs.cursor {
+				args = append(args, v)
+				params[i] = fmt.Sprintf("$%d", len(args))
+			}
+			conjunction := " AND "
+			// Recursive sources filter their CTE in the outer SELECT, which has no WHERE yet.
+			if strings.Contains(q, "WITH RECURSIVE") {
+				conjunction = " WHERE "
+			}
+			prefix += conjunction + "(" + keys + ") > (" + strings.Join(params, ", ") + ") "
+		}
+		q = prefix + order + fmt.Sprintf(" LIMIT %d", exportRowBatchSize)
 	}
-	var raw json.RawMessage
-	if err := qs.rows.Scan(&raw); err != nil {
-		qs.rows.Close()
-		qs.done = true
-		return nil, err
-	}
-	// jsonb text output is already a single line — NDJSON-safe as-is.
-	return raw, nil
+	return q, args
 }

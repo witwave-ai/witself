@@ -1363,10 +1363,11 @@ func serve() int {
 			ctx context.Context,
 			accountID, backupID string,
 			w io.Writer,
+			flush func() error,
 		) error {
 			cellName := os.Getenv("WITSELF_CELL_NAME")
 			err := st.ExportAccountBackup(
-				ctx, accountID, backupID, cellName, version.Version, w,
+				ctx, accountID, backupID, cellName, version.Version, w, flush,
 			)
 			switch {
 			case errors.Is(err, store.ErrAccountNotFound):

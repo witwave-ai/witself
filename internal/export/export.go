@@ -3,7 +3,8 @@
 // database dump — so it can be restored into whatever database a future cell
 // runs, through the version upgrader chain (see upgrade.go).
 //
-// Layout: a gzip-compressed tar stream.
+// Layout: a gzip-compressed tar stream. Chunk boundaries include gzip sync
+// flush points; ordinary gzip/tar readers need no special handling.
 //
 //	manifest.json            first entry — version coordinates + account id
 //	<table>/000001.ndjson    bounded chunks (~chunkSize) of one row per line
@@ -28,6 +29,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -93,9 +96,20 @@ type RowSource interface {
 	Next(ctx context.Context) ([]byte, error)
 }
 
+// WriteOptions supplies transport flushing and value-free diagnostics. Flush runs
+// after gzip has emitted a sync flush point; readers still see ordinary tar/gzip.
+type WriteOptions struct {
+	Flush  func() error
+	Logger *slog.Logger
+}
+
 // Write streams a complete archive to w: manifest, chunked table rows, then
 // the trailing checksums. It never buffers more than one chunk.
-func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) error {
+func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource, options ...WriteOptions) error {
+	var opts WriteOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	m.FormatVersion = FormatVersion
 	if m.Compression == "" {
 		m.Compression = "gzip"
@@ -108,6 +122,19 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) er
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 
+	flushStream := func() error {
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if err := gz.Flush(); err != nil {
+			return err
+		}
+		if opts.Flush != nil {
+			return opts.Flush()
+		}
+		return nil
+	}
+
 	sums := Checksums{TableRows: map[string]int{}}
 
 	manifestJSON, err := json.Marshal(m)
@@ -118,8 +145,15 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) er
 		return err
 	}
 
+	if err := flushStream(); err != nil {
+		return err
+	}
+
 	for _, src := range sources {
 		table := src.Table()
+		started := time.Now()
+		next, stop := watchSource(ctx, src, opts.Logger)
+		defer stop()
 		chunkNo := 0
 		buf := make([]byte, 0, chunkSize)
 		rows := 0
@@ -130,7 +164,10 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) er
 			chunkNo++
 			name := fmt.Sprintf("%s/%06d.ndjson", table, chunkNo)
 			if err := writeEntry(tw, name, buf); err != nil {
-				return err
+				return fmt.Errorf("export %s: %w", table, err)
+			}
+			if err := flushStream(); err != nil {
+				return fmt.Errorf("export %s: %w", table, err)
 			}
 			sum := sha256.Sum256(buf)
 			sums.Chunks = append(sums.Chunks, ChunkSum{
@@ -145,7 +182,7 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) er
 			return nil
 		}
 		for {
-			row, err := src.Next(ctx)
+			row, err := next()
 			if err != nil {
 				return fmt.Errorf("export %s: %w", table, err)
 			}
@@ -170,6 +207,11 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource) er
 		}
 		if _, ok := sums.TableRows[table]; !ok {
 			sums.TableRows[table] = 0 // empty tables are recorded, not omitted
+		}
+		stop()
+		if opts.Logger != nil {
+			opts.Logger.InfoContext(ctx, "account export table complete", "table", table,
+				"chunks", chunkNo, "rows", sums.TableRows[table], "elapsed", time.Since(started))
 		}
 	}
 
@@ -196,4 +238,41 @@ func writeEntry(tw *tar.Writer, name string, data []byte) error {
 	}
 	_, err := tw.Write(data)
 	return err
+}
+
+// One reusable timer per table watches only Next (including its first query),
+// never network backpressure. Stop synchronizes with an in-flight warning so
+// no diagnostic can escape the source lifetime. No row or error values enter logs.
+func watchSource(ctx context.Context, src RowSource, logger *slog.Logger) (func() ([]byte, error), func()) {
+	if logger == nil {
+		return func() ([]byte, error) { return src.Next(ctx) }, func() {}
+	}
+	var mu sync.Mutex
+	waiting := false
+	var started time.Time
+	timer := time.AfterFunc(30*time.Second, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if waiting && time.Since(started) >= 30*time.Second {
+			logger.WarnContext(ctx, "account export slow source", "table", src.Table(), "elapsed", time.Since(started))
+		}
+	})
+	timer.Stop()
+	stop := func() {
+		mu.Lock()
+		waiting = false
+		timer.Stop()
+		mu.Unlock()
+	}
+	next := func() ([]byte, error) {
+		mu.Lock()
+		waiting = true
+		started = time.Now()
+		timer.Reset(30 * time.Second)
+		mu.Unlock()
+		row, err := src.Next(ctx)
+		stop()
+		return row, err
+	}
+	return next, stop
 }
