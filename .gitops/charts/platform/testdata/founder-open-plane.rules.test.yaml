@@ -627,7 +627,7 @@ tests:
       - eval_time: 4m
         alertname: WitselfAuditAppendMetricsUnavailable
         exp_alerts: []
-  - name: identity capacity at limit alerts after thirty minutes
+  - name: Professional at elective operator cap 3 of 3 alerts after thirty minutes
     interval: 1m
     input_series:
       - series: witself_identity_capacity_accounts_at_limit{dimension="operator_seats"}
@@ -635,6 +635,9 @@ tests:
       - series: witself_identity_capacity_accounts_at_limit{dimension="realms"}
         values: 0+0x31
     alert_rule_test:
+      - eval_time: 29m
+        alertname: WitselfIdentityCapacityAtLimit
+        exp_alerts: []
       - eval_time: 30m
         alertname: WitselfIdentityCapacityAtLimit
         exp_alerts:
@@ -643,7 +646,8 @@ tests:
               service: identity
               witself_alert: "true"
             exp_annotations:
-              summary: Accounts are blocked from creating identities by a finite capacity limit.
+              summary: Accounts are at an elective identity capacity limit.
+              description: witself_identity_capacity_accounts_at_limit counts live accounts at or above finite caps exceeding the structural minimum; baseline-only caps are excluded. This measures capacity, not rejected creation attempts.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
   - name: identity capacity below limit does not alert
     interval: 1m
@@ -1455,3 +1459,25 @@ tests:
             exp_annotations:
               summary: Secret material delivery volume exceeds a provisional ceiling.
               runbook: docs/runbooks.md#sealed-plane-alerts
+
+  # The store excludes structural caps before exporting these aggregates.
+  - name: Personal alone at structural operator and realm caps does not alert
+    interval: 1m
+    input_series:
+      - series: witself_identity_capacity_accounts_measured{dimension="operator_seats"}
+        values: 1+0x60
+      - series: witself_identity_capacity_accounts_measured{dimension="realms"}
+        values: 1+0x60
+      - series: witself_identity_capacity_accounts_at_limit{dimension="operator_seats"}
+        values: 0+0x60
+      - series: witself_identity_capacity_accounts_at_limit{dimension="realms"}
+        values: 0+0x60
+      - series: witself_identity_capacity_accounts_at_limit{dimension="agents_per_realm"}
+        values: 0+0x60
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfIdentityCapacityAtLimit
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfIdentityCapacityAtLimit
+        exp_alerts: []

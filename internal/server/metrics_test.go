@@ -1280,3 +1280,42 @@ func TestSealedPlanePostureMetricsRenderAndFailValueFree(t *testing.T) {
 		})
 	}
 }
+
+func TestIdentityCapacityElectiveMetricsWire(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		value  IdentityCapacityDimensionMetrics
+		counts [5]string
+	}{
+		{"Personal structural caps", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: 1}, [5]string{"1", "0", "0", "0", "1"}},
+		{"Personal raised cap full", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, AccountsNearLimit: 1, AccountsAtLimit: 1}, [5]string{"1", "1", "1", "0", "0"}},
+		{"Professional three seats full", IdentityCapacityDimensionMetrics{AccountsMeasured: 1, AccountsNearLimit: 1, AccountsAtLimit: 1}, [5]string{"1", "1", "1", "0", "0"}},
+		{"unlimited", IdentityCapacityDimensionMetrics{AccountsUnlimited: 1, MinHeadroomRatio: 1}, [5]string{"0", "0", "0", "1", "1"}},
+		{"eighty percent plus excluded baseline", IdentityCapacityDimensionMetrics{AccountsMeasured: 2, AccountsNearLimit: 1, MinHeadroomRatio: .2}, [5]string{"2", "1", "0", "0", "0.2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			metricsMuxFor(newRuntimeMetrics(), nil, nil, func(context.Context) (IdentityCapacityMetrics, error) {
+				return IdentityCapacityMetrics{Realms: tc.value, AgentsPerRealm: tc.value, OperatorSeats: tc.value}, nil
+			}, nil, nil, nil, nil, nil).ServeHTTP(response, capacityMetricsRequest())
+			output := response.Body.String()
+			want := map[string]string{"witself_identity_capacity_metrics_up": "1"}
+			for _, dimension := range []string{"realms", "agents_per_realm", "operator_seats"} {
+				for i, metric := range []string{"accounts_measured", "accounts_near_limit", "accounts_at_limit", "accounts_unlimited", "min_headroom_ratio"} {
+					want["witself_identity_capacity_"+metric+`{dimension="`+dimension+`"}`] = tc.counts[i]
+				}
+			}
+			assertMetricSamples(t, output, "witself_identity_capacity_", want)
+			for _, help := range []string{
+				"# HELP witself_identity_capacity_accounts_near_limit Live accounts using at least 80 percent of elective capacity (finite identity caps above structural minimums).",
+				"# HELP witself_identity_capacity_accounts_at_limit Live accounts at or above elective capacity (finite identity caps above structural minimums).",
+				"# HELP witself_identity_capacity_min_headroom_ratio Minimum elective capacity headroom in this cell, clamped to [0,1]; 1 when no finite identity cap exceeds its structural minimum.",
+			} {
+				if !strings.Contains(output, help+"\n") {
+					t.Errorf("missing HELP line %q", help)
+				}
+			}
+			assertCapacityMetricsValueFree(t, output)
+		})
+	}
+}

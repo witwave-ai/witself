@@ -55,6 +55,16 @@ type ProvisionedAccount struct {
 
 const consentVersionValidationError = "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens"
 
+// identityCapacityStructuralMinimums describes the account bootstrap baseline,
+// independent of its plan's elective limits. createProvisionedAccountTx seeds
+// exactly one root operator and no agents. The first realm is created separately
+// by CreateRealm; reserve that one-realm baseline even before it exists. No plan
+// seeds additional identities. Keep this beside provisioning, and verify it
+// against provisioned accounts before changing the bootstrap contract.
+func identityCapacityStructuralMinimums() (realms, agentsPerRealm, operatorSeats int64) {
+	return 1, 0, 1
+}
+
 // ProvisionAccount creates a distinct provisioning operation for local and
 // test callers that do not cross an ambiguous HTTP boundary. Production
 // control-plane requests must call ProvisionAccountExact with their

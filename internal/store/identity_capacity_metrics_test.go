@@ -123,7 +123,7 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 	}
 	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: IdentityCapacityDimensionMetrics{
-			AccountsMeasured: 2, AccountsNearLimit: 2, AccountsAtLimit: 1, AccountsUnlimited: 2,
+			AccountsMeasured: 2, AccountsNearLimit: 1, AccountsUnlimited: 2, MinHeadroomRatio: 0.2,
 		},
 		AgentsPerRealm: IdentityCapacityDimensionMetrics{
 			AccountsMeasured: 1, AccountsNearLimit: 1, AccountsUnlimited: 3, MinHeadroomRatio: 0.2,
@@ -136,8 +136,8 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A zero cap is finite, even with zero usage; over-cap usage is clamped
-	// to zero headroom. Accounts with no live realm use zero agents.
+	// Zero caps remain measured but have no elective capacity, even with
+	// over-cap usage. Accounts with no live realm use zero agents.
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE accounts SET plan_limits='{"realms":0,"agents_per_realm":0,"operator_seats":0}'
 		 WHERE id='capacity-at-account-canary'`); err != nil {
@@ -149,8 +149,8 @@ func TestReadIdentityCapacityMetricsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	want = IdentityCapacityDimensionMetrics{
-		AccountsMeasured: 4, AccountsNearLimit: 3, AccountsAtLimit: 2,
-		AccountsUnlimited: 1, MinHeadroomRatio: 0,
+		AccountsMeasured: 4, AccountsNearLimit: 1,
+		AccountsUnlimited: 1, MinHeadroomRatio: 0.2,
 	}
 	assertIdentityCapacityMetrics(ctx, t, st, IdentityCapacityMetrics{
 		Realms: want, AgentsPerRealm: want, OperatorSeats: want,
@@ -185,5 +185,122 @@ func assertIdentityCapacityMetrics(ctx context.Context, t *testing.T, st *Store,
 			math.Abs(dimension.got.MinHeadroomRatio-dimension.want.MinHeadroomRatio) > 1e-12 {
 			t.Errorf("%s = %+v, want %+v", dimension.name, dimension.got, dimension.want)
 		}
+	}
+}
+
+// Provision accounts through the real seed path: this also detects changes to
+// the baseline (especially accidental agent seeding) rather than assuming it
+// from hand-written rows. Limits are applied after fixtures are populated so
+// we can exercise downgraded and over-cap snapshots as well as ordinary usage.
+func TestIdentityCapacityElectiveCapsPostgres(t *testing.T) {
+	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	baseline := IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: 1}
+	full := IdentityCapacityDimensionMetrics{AccountsMeasured: 1, AccountsNearLimit: 1, AccountsAtLimit: 1}
+	near := IdentityCapacityDimensionMetrics{AccountsMeasured: 1, AccountsNearLimit: 1, MinHeadroomRatio: .2}
+	below := IdentityCapacityDimensionMetrics{AccountsMeasured: 1, MinHeadroomRatio: .4}
+	unlimited := IdentityCapacityDimensionMetrics{AccountsUnlimited: 1, MinHeadroomRatio: 1}
+	for _, tc := range []struct {
+		name, plan, limits        string
+		realms, agents, operators int
+		want                      IdentityCapacityMetrics
+	}{
+		{"Personal structural caps", "free", `{"realms":1,"agents_per_realm":10,"operator_seats":1}`, 1, 0, 1, IdentityCapacityMetrics{baseline, baseline, baseline}},
+		{"Personal raised caps full", "free", `{"realms":2,"agents_per_realm":2,"operator_seats":2}`, 2, 2, 2, IdentityCapacityMetrics{full, full, full}},
+		{"Professional three seats", "standard", `{"realms":1,"agents_per_realm":100,"operator_seats":3}`, 1, 0, 3, IdentityCapacityMetrics{baseline, baseline, full}},
+		{"unlimited", "enterprise", `{}`, 2, 6, 3, IdentityCapacityMetrics{unlimited, unlimited, unlimited}},
+		{"explicit null unlimited", "enterprise", `{"realms":null,"agents_per_realm":null,"operator_seats":null}`, 1, 0, 1, IdentityCapacityMetrics{unlimited, unlimited, unlimited}},
+		{"exactly eighty percent", "free", `{"realms":5,"agents_per_realm":5,"operator_seats":5}`, 4, 4, 4, IdentityCapacityMetrics{near, near, near}},
+		{"below eighty percent", "free", `{"realms":5,"agents_per_realm":5,"operator_seats":5}`, 3, 3, 3, IdentityCapacityMetrics{below, below, below}},
+		{"near agents with excluded baseline caps", "free", `{"realms":1,"agents_per_realm":5,"operator_seats":1}`, 1, 4, 1, IdentityCapacityMetrics{baseline, near, baseline}},
+		{"one agent is elective", "free", `{"realms":1,"agents_per_realm":1,"operator_seats":1}`, 1, 1, 1, IdentityCapacityMetrics{baseline, full, baseline}},
+		{"zero caps", "free", `{"realms":0,"agents_per_realm":0,"operator_seats":0}`, 0, 0, 1, IdentityCapacityMetrics{baseline, baseline, baseline}},
+		{"over structural caps", "free", `{"realms":1,"agents_per_realm":0,"operator_seats":1}`, 2, 1, 2, IdentityCapacityMetrics{baseline, baseline, baseline}},
+		{"over elective caps", "free", `{"realms":2,"agents_per_realm":2,"operator_seats":2}`, 3, 3, 3, IdentityCapacityMetrics{full, full, full}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account, err := st.ProvisionAccount(ctx, "capacity@example.test", "capacity", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.ActivateAccount(ctx, account.AccountID); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if _, err := st.pool.Exec(ctx, `UPDATE accounts SET status='suspended' WHERE id=$1`, account.AccountID); err != nil {
+					t.Fatal(err)
+				}
+			})
+			for i := range tc.realms {
+				realm, err := st.CreateRealm(ctx, account.AccountID, fmt.Sprintf("realm-%d", i))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.pool.Exec(ctx, `INSERT INTO agents (id, realm_id, name)
+				 SELECT $1 || '-agent-' || n, $1, 'agent-' || n FROM generate_series(1, $2::int) n`, realm.ID, tc.agents); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The first operator comes from provisioning, not the fixture.
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operators (id, account_id, role)
+			 SELECT $1 || '-operator-' || n, $1, 'account_operator' FROM generate_series(2, $2::int) n`, account.AccountID, tc.operators); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `UPDATE accounts SET plan=$2, plan_limits=$3::jsonb WHERE id=$1`, account.AccountID, tc.plan, tc.limits); err != nil {
+				t.Fatal(err)
+			}
+			assertIdentityCapacityMetrics(ctx, t, st, tc.want)
+		})
+	}
+}
+
+func TestIdentityCapacityBootstrapBaselinePostgres(t *testing.T) {
+	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	account, err := st.ProvisionAccount(ctx, "baseline@example.test", "baseline", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ActivateAccount(ctx, account.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	// Provisioning creates the owner and nothing else: prove no realm or agent
+	// is seeded, so the one-realm baseline below is the stated policy (the first
+	// realm every account creates), not something provisioning does.
+	var seededRealms, seededAgents int64
+	if err := st.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM realms WHERE account_id=$1 AND deleted_at IS NULL),
+		(SELECT count(*) FROM agents a JOIN realms r ON r.id=a.realm_id WHERE r.account_id=$1 AND a.deleted_at IS NULL)`,
+		account.AccountID).Scan(&seededRealms, &seededAgents); err != nil {
+		t.Fatal(err)
+	}
+	if seededRealms != 0 || seededAgents != 0 {
+		t.Fatalf("provisioning seeded %d realms and %d agents; the structural baseline assumes none", seededRealms, seededAgents)
+	}
+	// The first realm is a separate operation. Compare actual counts after it
+	// to the policy consumed by the collector so a changed bootstrap contract
+	// cannot silently drift.
+	if _, err := st.CreateRealm(ctx, account.AccountID, "default"); err != nil {
+		t.Fatal(err)
+	}
+	var realms, agents, operators int64
+	if err := st.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM realms WHERE account_id=$1 AND deleted_at IS NULL),
+		(SELECT count(*) FROM agents a JOIN realms r ON r.id=a.realm_id
+		 WHERE r.account_id=$1 AND r.deleted_at IS NULL AND a.deleted_at IS NULL),
+		(SELECT count(*) FROM operators WHERE account_id=$1 AND deleted_at IS NULL)`,
+		account.AccountID).Scan(&realms, &agents, &operators); err != nil {
+		t.Fatal(err)
+	}
+	wantRealms, wantAgents, wantOperators := identityCapacityStructuralMinimums()
+	if realms != wantRealms || agents != wantAgents || operators != wantOperators {
+		t.Fatalf("bootstrap counts (%d, %d, %d) differ from structural minimums (%d, %d, %d)",
+			realms, agents, operators, wantRealms, wantAgents, wantOperators)
 	}
 }

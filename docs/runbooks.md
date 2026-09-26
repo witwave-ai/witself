@@ -3637,12 +3637,24 @@ until compatible server and worker binaries are deployed, then verify the
 metrics on both scrape targets before enabling it in a separate rollout.
 Existing alert routing and other rules are independent of this gate.
 
+`witself_identity_capacity_accounts_at_limit` counts only elective capacity:
+finite caps above the structural baseline of one root operator, one realm,
+and zero seeded agents per realm. Caps at or below those minimums remain in
+`accounts_measured` but contribute neither to `accounts_at_limit` nor to
+`accounts_near_limit` (80 percent of the total cap), nor to
+`min_headroom_ratio`; headroom is 1 when no eligible finite caps exist.
+Thus Personal's 1/1 operator and realm limits do not alert, while Professional's
+3/3 operator seats do after 30 minutes. Unlimited accounts contribute only to
+`accounts_unlimited`. This measures saturation, not attempted or rejected growth.
+Enabling `collectorAlerts` remains a separate config-only rollout after this
+ships and the deployed metrics have been verified.
+
 First diagnostics once these collector alerts are enabled:
 
 | Alert | First diagnostic step |
 | --- | --- |
 | `WitselfIdentityCapacityMetricsUnavailable` | Check the server scrape target and `witself_identity_capacity_metrics_up`; if the target is healthy but the collector is 0, inspect database reachability and the read-only query's two-second timeout. Error text is intentionally absent from metrics. |
-| `WitselfIdentityCapacityAtLimit` | Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify whether realms, agents per realm, or operator seats block creation. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
+| `WitselfIdentityCapacityAtLimit` | Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify which elective realm, agent-per-realm, or operator-seat caps are saturated. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
 | `WitselfAuditAppendMetricsUnavailable` | Every server and worker replica must expose a healthy collector: compare `witself_up` and `witself_worker_up` with `witself_audit_append_metrics_up` on `namespace`, `pod`, and `container`. A missing collector from any replica, absence of either role's collectors, or any collector value below 1 fires the alert. Verify each process-local audit failure reader is wired and succeeding. |
 | `WitselfAuditAppendFailures` | Compare ten-minute increases in the server's `witself_audit_append_total{result="error",reason="error"}` and both server and worker `witself_audit_append_tx_failures_total` series, then inspect database insert failures in protected process logs. Nonzero counters without the same series in the ten-minutes-ago view also alert, covering startup failures before the first scrape; this can conservatively repeat an alert after a scrape gap. Both counters reset on process restart; a standalone insert failure can affect both, while input-validation errors are excluded from the transaction counter. A successful worker batch can still contain an earlier rolled-back audit failure, so its generic job-failure counter alone is insufficient. |
 

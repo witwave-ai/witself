@@ -260,7 +260,8 @@ groups:
           service: identity
           witself_alert: "true"
         annotations:
-          summary: Accounts are blocked from creating identities by a finite capacity limit.
+          summary: Accounts are at an elective identity capacity limit.
+          description: witself_identity_capacity_accounts_at_limit counts live accounts at or above finite caps exceeding the structural minimum; baseline-only caps are excluded. This measures capacity, not rejected creation attempts.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
       - alert: WitselfAuditAppendMetricsUnavailable
         expr: absent(witself_audit_append_metrics_up{container="witself-server"}) or absent(witself_audit_append_metrics_up{container="witself-worker"}) or min(witself_audit_append_metrics_up) < 1 or count((witself_up or witself_worker_up) unless on (namespace, pod, container) witself_audit_append_metrics_up) > 0

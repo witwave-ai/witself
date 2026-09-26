@@ -1136,8 +1136,8 @@ func writeIdentityCapacityPrometheus(
 		value      func(IdentityCapacityDimensionMetrics) int64
 	}{
 		{"witself_identity_capacity_accounts_measured", "Live accounts with a finite identity limit in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsMeasured }},
-		{"witself_identity_capacity_accounts_near_limit", "Live finite-limit accounts using at least 80 percent of identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsNearLimit }},
-		{"witself_identity_capacity_accounts_at_limit", "Live finite-limit accounts at or above identity capacity.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsAtLimit }},
+		{"witself_identity_capacity_accounts_near_limit", "Live accounts using at least 80 percent of elective capacity (finite identity caps above structural minimums).", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsNearLimit }},
+		{"witself_identity_capacity_accounts_at_limit", "Live accounts at or above elective capacity (finite identity caps above structural minimums).", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsAtLimit }},
 		{"witself_identity_capacity_accounts_unlimited", "Live accounts with unlimited or absent identity limits in this cell.", func(m IdentityCapacityDimensionMetrics) int64 { return m.AccountsUnlimited }},
 	} {
 		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
@@ -1145,7 +1145,7 @@ func writeIdentityCapacityPrometheus(
 			_, _ = fmt.Fprintf(w, "%s%s %d\n", metric.name, labels("dimension", dimension.name), metric.value(dimension.metrics))
 		}
 	}
-	_, _ = fmt.Fprintln(w, "# HELP witself_identity_capacity_min_headroom_ratio Minimum finite-account identity headroom in this cell, clamped to [0,1]; 1 when none is finite.")
+	_, _ = fmt.Fprintln(w, "# HELP witself_identity_capacity_min_headroom_ratio Minimum elective capacity headroom in this cell, clamped to [0,1]; 1 when no finite identity cap exceeds its structural minimum.")
 	_, _ = fmt.Fprintln(w, "# TYPE witself_identity_capacity_min_headroom_ratio gauge")
 	for _, dimension := range dimensions {
 		_, _ = fmt.Fprintf(w, "witself_identity_capacity_min_headroom_ratio%s %s\n", labels("dimension", dimension.name), strconv.FormatFloat(dimension.metrics.MinHeadroomRatio, 'g', -1, 64))
