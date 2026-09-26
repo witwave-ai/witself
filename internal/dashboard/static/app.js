@@ -226,6 +226,112 @@
     applyRowFilter(section);
   }
 
+  // Shared route-owned browse/open navigation. Retain only browse metadata and
+  // geometry in this page; expanded detail and revealed bodies are never cached.
+  var focusLists = Object.create(null);
+  var focusRoute = { section: "", id: "" };
+  function focusState(section) {
+    return focusLists[section] || (focusLists[section] = { selected: "", viewTop: 0, documentTop: 0 });
+  }
+  function focusRouteChanged(current) {
+    var previous = focusRoute;
+    if (previous.section && !previous.id && $("focus-inventory")) {
+      var saved = focusState(previous.section);
+      saved.viewTop = $("view").scrollTop;
+      saved.documentTop = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+    }
+    if (previous.section !== current.section && focusLists[previous.section]) {
+      // Re-entering a section fetches a fresh inventory. Keep only navigation.
+      delete focusLists[previous.section].page;
+      delete focusLists[previous.section].loaded;
+    }
+    focusRoute = { section: current.section, id: current.id || "" };
+    focusState(current.section).returning = previous.section === current.section && !!previous.id && !current.id;
+  }
+  function focusControl(section, id, label) {
+    return '<a class="focus-open" href="#/' + esc(section) + '/' + esc(encodeURIComponent(id)) +
+      '" data-focus-id="' + esc(id) + '" aria-expanded="false" aria-controls="focus-detail">' + esc(label) + '</a>';
+  }
+  function announceFocus(text) {
+    var status = $("focus-status");
+    if (status) { status.textContent = text; }
+  }
+  function focusElement(node) {
+    if (node && typeof node.focus === "function") { node.focus({ preventScroll: true }); }
+  }
+  function renderFocusList(section, html) {
+    var saved = focusState(section), view = $("view");
+    var caret = captureFilterFocus(section);
+    var active = document.activeElement;
+    var hadRowFocus = active && active.classList && active.classList.contains("focus-open");
+    var viewTop = view.scrollTop;
+    var documentTop = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+    view.innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory">' + html +
+      '</div><section id="focus-detail" hidden></section></div>';
+    bindFilter(section);
+    var controls = Array.prototype.slice.call(view.querySelectorAll(".focus-open"));
+    function select(control) {
+      saved.selected = control.getAttribute("data-focus-id");
+      controls.forEach(function (node) {
+        var selected = node === control;
+        node.setAttribute("aria-current", selected ? "true" : "false");
+        node.closest(".row").classList.toggle("selected", selected);
+      });
+    }
+    controls.forEach(function (control) {
+      control.addEventListener("focus", function () { select(control); });
+      control.addEventListener("click", function () { select(control); });
+      control.addEventListener("keydown", function (event) {
+        var visible = controls.filter(function (node) { return node.closest(".row").style.display !== "none"; });
+        var index = visible.indexOf(control), next;
+        if (event.key === "ArrowDown") { next = Math.min(visible.length - 1, index + 1); }
+        if (event.key === "ArrowUp") { next = Math.max(0, index - 1); }
+        if (event.key === "Home") { next = 0; }
+        if (event.key === "End") { next = visible.length - 1; }
+        if (next !== undefined && visible[next]) {
+          event.preventDefault();
+          select(visible[next]);
+          visible[next].focus();
+        } else if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          select(control);
+          window.location.hash = control.getAttribute("href");
+        }
+      });
+    });
+    var selected = controls.filter(function (node) { return node.getAttribute("data-focus-id") === saved.selected; })[0];
+    if (selected) { select(selected); }
+    if (saved.returning) {
+      focusElement(selected && selected.closest(".row").style.display !== "none" ? selected : $("filter-" + section));
+      view.scrollTop = saved.viewTop;
+      if (document.scrollingElement) { document.scrollingElement.scrollTop = saved.documentTop; }
+      saved.returning = false;
+      announceFocus(section + " list expanded.");
+    } else {
+      restoreFilterFocus(section, caret);
+      if (hadRowFocus) { focusElement(selected); }
+      view.scrollTop = viewTop;
+      if (document.scrollingElement) { document.scrollingElement.scrollTop = documentTop; }
+    }
+  }
+  function renderFocusDetail(section, id, label, html, moveFocus) {
+    focusState(section).selected = id;
+    $("view").innerHTML = '<div class="focus-layout"><div id="focus-inventory" class="focus-inventory" hidden></div>' +
+      '<div class="focus-header"><span class="focus-identity">' + esc(label) + '</span>' +
+      '<button type="button" class="focus-back" aria-expanded="true" aria-controls="focus-detail">Back</button></div>' +
+      '<section id="focus-detail" class="focus-detail" tabindex="-1" aria-label="' + esc(label) + '">' + html + '</section></div>';
+    var back = $("view").querySelector(".focus-back");
+    function close() { window.location.hash = "#/" + section; }
+    back.addEventListener("click", close);
+    $("view").querySelector(".focus-layout").addEventListener("keydown", function (event) {
+      if (event.key === "Escape") { event.preventDefault(); close(); }
+    });
+    if (moveFocus !== false) {
+      focusElement($("focus-detail"));
+      announceFocus(section + " list collapsed. " + label + " expanded. Back returns to the list.");
+    }
+  }
+
   // An SSE-driven list re-render replaces the whole panel: the rebuilt input
   // carries the saved filter value but not keyboard focus, so keystrokes
   // landing mid-typing would silently go nowhere. Capture focus and caret
@@ -622,6 +728,7 @@
     var viewGeneration = invalidateEmailView();
     invalidateMessageBodyView();
     var current = parseHash();
+    focusRouteChanged(current);
     setNav(current.section);
     if (current.section === "account") { return viewAccount(current); }
     if (current.section === "transcripts" && current.id) { return viewTranscript(current.id, current.query); }
@@ -1908,25 +2015,24 @@
   }
 
   function renderMemoriesList(page) {
+    focusState("memories").page = page;
     var rows = (page.items || []).map(function (memory) {
-      var label = memory.redacted ? "[redacted " + (memory.kind || "memory") + "]" : (memory.content || memory.id);
-      return '<div class="row"><span class="grow"><a href="#/memories/' + esc(memory.id) + '">' + esc(label) + "</a></span>" +
+      var label = (memory.redacted || memory.sensitive) ? "[redacted " + (memory.kind || "memory") + "]" : (memory.content || memory.id);
+      return '<div class="row"><span class="grow">' + focusControl("memories", memory.id, label) + "</span>" +
         '<span class="dim">' + esc(memory.kind || "") + "</span>" +
         '<span class="dim">' + esc(memory.state || "") + "</span>" +
         '<span class="dim mono">' + esc(memory.salience != null ? memory.salience.toFixed(2) : "") + "</span></div>";
     }).join("");
-    var caret = captureFilterFocus("memories");
-    $("view").innerHTML = '<div class="panel"><h2>Memories</h2>' + filterInputHTML("memories") +
-      '<div class="list">' + (rows || '<div class="empty">no memories</div>') + "</div></div>";
-    bindFilter("memories");
-    restoreFilterFocus("memories", caret);
+    renderFocusList("memories", '<div class="panel"><h2>Memories</h2>' + filterInputHTML("memories") +
+      '<div class="list">' + (rows || '<div class="empty">no memories</div>') + "</div></div>");
   }
 
   function viewMemories() {
     var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories" }]);
     openEvents(null, 0, false, true);
-    fetchJSON("/api/memories?limit=100").then(function (page) {
+    if (focusState("memories").page) { renderMemoriesList(focusState("memories").page); return; }
+    return fetchJSON("/api/memories?limit=100").then(function (page) {
       if (generation !== memoryViewGeneration) { return; }
       renderMemoriesList(page);
     }).catch(function (err) {
@@ -1954,7 +2060,8 @@
     var generation = memoryViewGeneration;
     breadcrumb([{ label: "memories", href: "#/memories" }, { label: id }]);
     openEvents(null);
-    Promise.all([
+    renderFocusDetail("memories", id, id, '<div class="panel" role="status">Loading memory…</div>');
+    return Promise.all([
       fetchJSON("/api/memories/" + encodeURIComponent(id)),
       fetchJSON("/api/memories/" + encodeURIComponent(id) + "/history?limit=50"),
     ]).then(function (results) {
@@ -1969,7 +2076,7 @@
           '<span class="dim">' + esc(version.state || "") + "</span>" +
           '<span class="dim">' + esc((version.created_at || "").slice(0, 19)) + "</span></div>";
       }).join("");
-      $("view").innerHTML =
+      renderFocusDetail("memories", id, id,
         '<div class="panel"><h2>Memory ' + esc(id) + '</h2><div class="memory-content">' + esc(content) + "</div>" +
         '<div class="tags">' + tags + "</div></div>" +
         '<div class="panel"><h2>Details</h2><dl class="kv">' +
@@ -1983,9 +2090,10 @@
         '<div class="panel"><h2>Evidence</h2><div class="list">' +
         (evidenceHTML(memory.evidence) || '<div class="empty">no evidence rows</div>') + "</div></div>" +
         '<div class="panel"><h2>Version history</h2><div class="list">' +
-        (history || '<div class="empty">no versions</div>') + "</div></div>";
+        (history || '<div class="empty">no versions</div>') + "</div></div>", false);
+      focusElement($("focus-detail"));
     }).catch(function (err) {
-      if (generation === memoryViewGeneration) { showError(err); }
+      if (generation === memoryViewGeneration) { renderFocusDetail("memories", id, id, '<div class="error">' + esc(err.message || err) + "</div>"); }
     });
   }
 
@@ -2630,16 +2738,14 @@
   function renderConversationList() {
     invalidateMessageBodyView();
     var rows = buildThreads().map(function (thread) {
-      return '<div class="row"><span class="grow"><a href="#/conversations/' + esc(encodeURIComponent(thread.key)) + '">' + esc(thread.label) + "</a>" +
+      return '<div class="row"><span class="grow">' + focusControl("conversations", thread.key, thread.label) +
         (thread.unread ? ' <span class="unread">' + esc(thread.unread) + "</span>" : "") + "</span>" +
         '<span class="dim">' + esc(thread.messages.length) + " msg" + (thread.messages.length === 1 ? "" : "s") + "</span>" +
         '<span class="dim">' + esc(thread.latestAt.slice(0, 19)) + "</span></div>";
     }).join("");
-    var caret = captureFilterFocus("conversations");
-    $("view").innerHTML = '<div class="panel"><h2>Conversations</h2>' + filterInputHTML("conversations") +
-      '<div class="list">' + (rows || '<div class="empty">no messages</div>') + "</div></div>";
-    bindFilter("conversations");
-    restoreFilterFocus("conversations", caret);
+    focusState("conversations").loaded = true;
+    renderFocusList("conversations", '<div class="panel"><h2>Conversations</h2>' + filterInputHTML("conversations") +
+      '<div class="list">' + (rows || '<div class="empty">no messages</div>') + "</div></div>");
   }
 
   function bubbleHTML(msg) {
@@ -2701,10 +2807,10 @@
     });
     var follow = !renderedIDs || (hasNewMessage && nearBottom);
     var bubbles = thread ? thread.messages.map(bubbleHTML).join("") : "";
-    $("view").innerHTML = '<div class="panel"><h2>' + esc(thread ? thread.label : key) +
+    renderFocusDetail("conversations", key, thread ? thread.label : key, '<div class="panel"><h2>' + esc(thread ? thread.label : key) +
       ' <span class="badge">read-only</span></h2>' +
       '<div class="thread-note">Received bodies stay hidden until you choose Show body. Viewing does not mark a message read or acknowledged.</div>' +
-      '<div class="bubbles">' + (bubbles || '<div class="empty">no messages in this thread</div>') + "</div></div>";
+      '<div class="bubbles">' + (bubbles || '<div class="empty">no messages in this thread</div>') + "</div></div>", !renderedIDs);
     // Retain only preview nodes still represented in this same detail view.
     // A metadata refresh must neither refetch bodies nor move their values
     // into the metadata cache. Removed nodes are cleared before release.
@@ -2855,6 +2961,7 @@
     var serial = conversationViewSerial;
     breadcrumb([{ label: "conversations" }]);
     openEvents(null, 0, true);
+    if (focusState("conversations").loaded) { renderConversationList(); return; }
     return fetchMessages().then(function () {
       var current = parseHash();
       if (serial === conversationViewSerial && current.section === "conversations" && !current.id) { renderConversationList(); }
@@ -2866,10 +2973,12 @@
     var owner = messageBodyView = { key: key };
     breadcrumb([{ label: "conversations", href: "#/conversations" }, { label: key }]);
     openEvents(null, 0, true);
+    if (focusState("conversations").loaded) { renderConversation(key); return; }
+    renderFocusDetail("conversations", key, key, '<div class="panel" role="status">Loading conversation…</div>');
     return fetchMessages().then(function () {
       var current = parseHash();
-      if (messageBodyView === owner && current.section === "conversations" && current.id && decodeURIComponent(current.id) === key) { renderConversation(key); }
-    }).catch(function (err) { if (messageBodyView === owner) { showError(err); } });
+      if (messageBodyView === owner && current.section === "conversations" && current.id && decodeURIComponent(current.id) === key) { focusState("conversations").loaded = true; renderConversation(key); }
+    }).catch(function (err) { if (messageBodyView === owner) { renderFocusDetail("conversations", key, key, '<div class="error">' + esc(err.message || err) + '</div>'); } });
   }
 
   // --- boot -------------------------------------------------------------

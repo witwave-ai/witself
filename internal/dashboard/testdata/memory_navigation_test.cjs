@@ -7,9 +7,9 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { summaryData, openDetails } = require("./overview_harness.cjs");
 
-// The app's route() does not return its memory request chains. Once all
-// controlled fetch/JSON promises have settled, a full event-loop turn lets
-// their real success/catch continuations finish, without elapsed-time sleeps.
+// Once all controlled fetch/JSON promises have settled, a full event-loop
+// turn lets the route's real success/catch continuations finish without
+// elapsed-time sleeps.
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
 // This adapter supplies DOM operations only. The real app owns navigation,
@@ -30,6 +30,7 @@ function dom(check) {
       this.style = {};
       this.listeners = new Map();
       this.value = "";
+      this.scrollTop = 0;
       this.classList = {
         contains: (name) => (this.attrs.class || "").split(/\s+/).includes(name),
         toggle: (name, force) => {
@@ -42,6 +43,8 @@ function dom(check) {
       };
       elements.push(this);
     }
+    get hidden() { return Object.hasOwn(this.attrs, "hidden"); }
+    set hidden(value) { if (value) this.attrs.hidden = ""; else delete this.attrs.hidden; }
     get id() { return this.attrs.id; }
     getAttribute(name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; }
     setAttribute(name, value) {
@@ -53,10 +56,12 @@ function dom(check) {
       if (!this.listeners.has(name)) this.listeners.set(name, []);
       this.listeners.get(name).push(listener);
     }
-    dispatch(name) {
-      for (const listener of this.listeners.get(name) || []) listener.call(this, { target: this });
+    dispatch(name, extra = {}) {
+      const event = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
+      for (const listener of this.listeners.get(name) || []) listener.call(this, event);
+      return event;
     }
-    focus() { activeElement = this; }
+    focus() { activeElement = this; this.dispatch("focus"); }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
     get textContent() { return this.ownText + this.children.map((child) => child.textContent).join(""); }
     set textContent(value) {
@@ -110,7 +115,7 @@ function dom(check) {
     }
   }
   const nodes = Object.fromEntries([
-    "view", "breadcrumb", "agent-name", "realm-name", "agent-id", "version",
+    "view", "focus-status", "breadcrumb", "agent-name", "realm-name", "agent-id", "version",
     "status-poll", "status-addr", "status-upstream", "status-sse", "live-dot", "live-label",
   ].map((id) => {
     const element = new Element();
@@ -128,6 +133,7 @@ function dom(check) {
   return {
     nodes, rail, writes,
     document: {
+      scrollingElement: { scrollTop: 0 },
       get activeElement() { return activeElement; },
       getElementById(id) { return nodes[id] || nodes.view.querySelector("#" + id); },
       querySelectorAll(selector) {
@@ -441,3 +447,86 @@ for (const sameHash of [false, true]) {
     });
   }
 }
+
+for (const back of ["button", "Escape", "history"]) {
+  test(`memory focus open/back restores filter, selection and both scroll owners via ${back}`, options, async (t) => {
+    const h = fixture(t);
+    const list = beginList(h);
+    await h.finish(list[0], { items: [memory("mem_alpha", "match alpha"), memory("mem_beta", "match beta"), memory("mem_hidden", "unrelated")] });
+    const input = h.document.getElementById("filter-memories");
+    input.value = "match";
+    input.dispatch("input");
+    const controls = h.nodes.view.querySelectorAll(".focus-open");
+    controls[0].focus();
+    assert.equal(controls[0].getAttribute("aria-expanded"), "false");
+    for (const [key, index] of [["ArrowDown", 1], ["ArrowDown", 1], ["Home", 0], ["End", 1], ["ArrowUp", 0], ["End", 1]]) {
+      assert.equal(h.document.activeElement.dispatch("keydown", { key }).defaultPrevented, true);
+      assert.equal(h.document.activeElement, controls[index], key + " skips filtered rows");
+    }
+    h.nodes.view.scrollTop = 230;
+    h.document.scrollingElement.scrollTop = 410;
+    const key = back === "button" ? " " : "Enter";
+    assert.equal(controls[1].dispatch("keydown", { key }).defaultPrevented, true);
+    assert.equal(h.window.location.hash, "#/memories/mem_beta");
+    const detail = beginDetail(h, "mem_beta");
+    assert.equal(h.document.getElementById("focus-inventory").hidden, true, "collapse starts before requests settle");
+    await finishDetail(h, detail, "mem_beta", "expanded memory");
+    assert.equal(h.nodes.view.querySelector(".focus-identity").textContent, "mem_beta");
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    assert.equal(h.nodes.view.querySelector(".focus-back").getAttribute("aria-expanded"), "true");
+    assert.match(h.nodes["focus-status"].textContent, /list collapsed/);
+    h.nodes.view.scrollTop = 12;
+    h.document.scrollingElement.scrollTop = 15;
+    if (back === "button") h.nodes.view.querySelector(".focus-back").dispatch("click");
+    else if (back === "Escape") h.nodes.view.querySelector(".focus-layout").dispatch("keydown", { key: "Escape" });
+    else h.window.location.hash = "#/memories";
+    assert.equal(h.window.location.hash, "#/memories");
+    h.begin(h.window.location.hash, []);
+    assert.equal(h.document.getElementById("focus-inventory").hidden, false);
+    assert.equal(h.document.getElementById("focus-detail").hidden, true);
+    assert.equal(h.document.getElementById("filter-memories").value, "match");
+    assert.equal(h.document.activeElement.getAttribute("data-focus-id"), "mem_beta");
+    assert.equal(h.document.activeElement.getAttribute("aria-current"), "true");
+    assert.equal(h.nodes.view.scrollTop, 230);
+    assert.equal(h.document.scrollingElement.scrollTop, 410);
+    assert.match(h.nodes["focus-status"].textContent, /list expanded/);
+    assert.equal(h.requests.length, 3, "only initial inventory plus existing detail/history metadata requests");
+    // Browser Forward is another detail route visit, never a cached reveal.
+    const forward = beginDetail(h, "mem_beta");
+    await finishDetail(h, forward, "mem_beta", "forward metadata");
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+  });
+}
+
+for (const flags of [{ sensitive: true }, { redacted: true }]) {
+  test(`memory deep link stays private with ${Object.keys(flags)[0]} and Back loads inventory`, options, async (t) => {
+    const h = fixture(t);
+    const detail = beginDetail(h, "mem_alpha");
+    await h.finish(detail[0], { memory: { ...memory("mem_alpha", "must never be shown"), ...flags } });
+    await h.finish(detail[1], { versions: [] });
+    // The exact read is the deliberate reveal: only a server-redacted memory hides
+    // its content; a sensitive flag alone shows what the read returned.
+    assert.equal(h.nodes.view.textContent.includes("must never be shown"), !flags.redacted);
+    assert.equal(/sensitive value redacted/.test(h.nodes.view.textContent), !!flags.redacted);
+    assert.equal(h.document.activeElement, h.document.getElementById("focus-detail"));
+    h.nodes.view.querySelector(".focus-back").dispatch("click");
+    const list = beginList(h);
+    await h.finish(list[0], { items: [{ ...memory("mem_alpha", "must never be shown"), ...flags }] });
+    assert.equal(h.nodes.view.textContent.includes("must never be shown"), false);
+    assert.equal(h.document.activeElement.getAttribute("data-focus-id"), "mem_alpha");
+    assert.equal(h.requests.length, 3, "deep-link Back only fetches missing inventory");
+  });
+}
+
+test("memory Back during detail loading fences late completion and keeps browse position", options, async (t) => {
+  const h = fixture(t);
+  await finishList(h, beginList(h), "browse metadata");
+  h.nodes.view.scrollTop = 190;
+  const detail = beginDetail(h, "mem_alpha");
+  h.nodes.view.querySelector(".focus-back").dispatch("click");
+  h.begin(h.window.location.hash, []);
+  const before = currentDestination(t, h, "#/memories", "memories", "memories");
+  await finishDetail(h, detail, "mem_alpha", "late detail");
+  unchangedAfter(h, before, "late detail must not reopen expanded content");
+  assert.equal(h.nodes.view.scrollTop, 190);
+});

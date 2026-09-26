@@ -76,6 +76,24 @@ visible, keeps the selected view and keyboard focus, and labels retained data
 as stale after failure. The footer says cache 30s; polling can pause or vary.
 Workspace details open explicitly beneath the summary.
 
+### Browse, open, and back
+
+Memories and Conversations share a focus view. Browse the filtered list, use
+Up/Down (or Home/End) to select a visible row, and press Enter or Space to open
+it. The list collapses to an identity header with a visible Back control, and
+the detail uses the available content width. Back or Escape restores the filter,
+selected row, keyboard focus, and list scroll position within this page.
+
+Open details keep their `#/memories/:id` and `#/conversations/:key` URLs;
+list URLs represent browse mode. Deep links and browser Back/Forward work too.
+A deep link's Back loads the inventory if this page has not browsed it yet.
+Filter and scroll state stay in the page, not in the URL or persistent storage.
+Opening a memory fetches its existing redacted detail and version history;
+conversation open/back reuses already loaded metadata. Private content never
+auto-reveals: memories the server redacts stay redacted, an exact memory
+read shows what it always showed, and received message bodies still require
+Show body. Leaving a conversation clears any revealed body.
+
 Conversations fetches a received message's body only when Show body is selected,
 using the existing recipient-only observational peek API. The local proxy
 returns only the body text; list and live-refresh responses remain stripped of

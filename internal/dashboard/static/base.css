@@ -594,3 +594,22 @@ a.summary-row:hover { text-decoration: none; background: var(--bg); }
 @media (pointer: coarse) {
   .transcript-select, .transcript-open { min-height: 44px; }
 }
+
+/* Shared Memories / Conversations focus navigation. */
+.focus-layout, .focus-inventory, .focus-detail { min-width: 0; width: 100%; }
+.focus-inventory > .panel:first-child h2, .focus-detail > .panel:first-child h2 { font-size: 1.1rem; color: var(--fg); }
+.focus-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--border); background: var(--bg-panel); }
+.focus-identity { min-width: 0; overflow-wrap: anywhere; }
+.focus-back { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: .4rem .6rem; cursor: pointer; }
+.focus-open { display: inline-block; border: 1px solid transparent; border-radius: 3px; padding: .15rem .25rem; }
+.focus-open[aria-current="true"] { border-color: var(--accent); }
+.focus-inventory .row.selected { box-shadow: inset 3px 0 var(--accent); }
+.focus-open:focus-visible, .focus-back:focus-visible, .focus-detail:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.focus-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (max-width: 700px) {
+  .focus-header { display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; }
+  .focus-back { justify-self: start; }
+}
+@media (pointer: coarse) {
+  .focus-open, .focus-back { min-height: 44px; }
+}
