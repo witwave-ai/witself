@@ -90,7 +90,7 @@ func TestActivityReadWarningIncludesCause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	original := os.Stderr
 	os.Stderr = w
 	defer func() { os.Stderr = original; _ = w.Close() }()

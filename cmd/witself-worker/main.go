@@ -1254,14 +1254,14 @@ func reportMessageRateBucketCleanupBatch(metrics messageRateBucketCleanupMetrics
 	}
 	if result.RateBucketError != nil {
 		metrics.ObserveMessageRateBucketCleanupBatch(worker.RetentionResultError, 0)
-		fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: rate_bucket=%v\n", result.RateBucketError)
+		_, _ = fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: rate_bucket=%v\n", result.RateBucketError)
 	} else {
 		metrics.ObserveMessageRateBucketCleanupBatch(messageRateBucketCleanupMetricResult(result.Deleted), result.Deleted)
 		if result.Deleted > 0 {
-			fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: deleted=%d\n", result.Deleted)
+			_, _ = fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: deleted=%d\n", result.Deleted)
 		}
 	}
 	if result.ActivityRetentionError != nil {
-		fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: activity_retention=%v\n", result.ActivityRetentionError)
+		_, _ = fmt.Fprintf(output, "witself-worker: message rate bucket cleanup: activity_retention=%v\n", result.ActivityRetentionError)
 	}
 }

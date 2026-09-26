@@ -7,12 +7,11 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgconn"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/witwave-ai/witself/internal/activity"
 	"github.com/witwave-ai/witself/internal/testenv"
 )

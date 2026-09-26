@@ -155,7 +155,7 @@ func TestMessageRateBucketCleanupActivityRetentionResult(t *testing.T) {
 					order = append(order, "buckets")
 					return 7, nil
 				},
-				func(batchCtx context.Context, _ time.Time, limit int) (int64, error) {
+				func(_ context.Context, _ time.Time, limit int) (int64, error) {
 					order = append(order, "activity")
 					if limit != 1000 {
 						t.Fatalf("activity batch limit = %d", limit)

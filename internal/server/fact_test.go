@@ -3,12 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/witwave-ai/witself/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/store"
 )
 
 const testFactCandidateRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
