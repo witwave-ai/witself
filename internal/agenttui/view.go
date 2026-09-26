@@ -38,6 +38,80 @@ func fit(s string, w int) string {
 	s = ansi.Truncate(s, w, "…")
 	return s + strings.Repeat(" ", max(0, w-ansi.StringWidth(s)))
 }
+
+// Only identity and viewport bookkeeping survive inventory focus. Metadata
+// remains in the existing allow-listed projection, not in another cache.
+type readerPosition struct {
+	key          string
+	offset       int
+	tail, opened bool
+}
+
+// List inventory and reader share content but have different heights.
+// Save the reader before changing geometry; inventory can show its summary
+// without replacing the reader's offset or intent to follow the live tail.
+func (m *Model) setDetailFocus(focus int) {
+	if m.panel == 0 || m.account.mode {
+		m.focus = focus
+		m.renderDetail(false)
+		return
+	}
+	p := &m.readers[m.panel]
+	if p.key != m.states[m.panel].key {
+		*p = readerPosition{key: m.states[m.panel].key}
+	}
+	restore := m.focus == 0 && focus != 0 && p.opened
+	if m.focus != 0 && focus == 0 {
+		p.offset, p.tail = m.vp.YOffset, m.panel == 1 && m.actionCount() > 0 && m.evidenceFrom == 0 && m.vp.AtBottom()
+		p.opened = p.opened || m.panel != 1 || m.actionCount() > 0
+	}
+	m.focus = focus
+	if focus == 0 {
+		m.vp.GotoTop()
+	}
+	m.renderDetail(false)
+	if restore {
+		if p.tail {
+			m.vp.GotoBottom()
+		} else {
+			m.vp.SetYOffset(p.offset)
+		}
+	}
+	if focus != 0 && (m.panel != 1 || m.actionCount() > 0) {
+		p.opened = true
+	}
+}
+
+// A stacked list reserves a compact selected-row inventory above the reader.
+// The same split drives both rendering and viewport resize.
+func (m *Model) panelHeights(panel, h int) (inventory, detail int) {
+	if h < 7 || (panel != 1 && m.focus == 0 && m.width >= 60) {
+		return 0, h
+	}
+	inventory = min(12, max(8, h/3))
+	if m.focus != 0 {
+		inventory = 5
+	}
+	if m.width < 70 && m.focus == 0 {
+		inventory = min(10, h-3)
+	}
+	inventory = min(inventory, h-3)
+	return inventory, h - inventory
+}
+func (m *Model) panelView(w, h int) string {
+	ih, dh := m.panelHeights(m.panel, h)
+	inv := ""
+	if ih > 0 {
+		var content string
+		if m.panel == 1 {
+			content = m.transcriptInventory(w-4, ih-2)
+		} else {
+			content = m.inventoryView(w-4, ih-2)
+		}
+		inv = m.box(content, w, ih, m.focus == 0) + "\n"
+	}
+	return inv + m.box(m.vp.View(), w, dh, m.focus != 0)
+}
 func (m *Model) layout() (rail, inventory, detail, height int) {
 	top := 2
 	if m.width < 100 {
@@ -51,7 +125,7 @@ func (m *Model) layout() (rail, inventory, detail, height int) {
 	if m.account.mode || (m.panel == 0 && m.summaryView != 3) {
 		return rail, 0, remaining, height
 	}
-	if m.panel == 1 || remaining < 60 {
+	if m.panel == 1 || (m.panel > 0 && m.focus != 0) || remaining < 60 {
 		return rail, 0, remaining, height
 	}
 	inventory = min(32, max(24, remaining/3))
@@ -62,8 +136,8 @@ func (m *Model) resize() {
 	_, _, dw, h := m.layout()
 	m.vp.Width = max(1, dw-4)
 	m.vp.Height = max(1, h-2)
-	if m.panel == 1 && !m.account.mode {
-		_, dh := m.transcriptHeights(h)
+	if m.panel > 0 && !m.account.mode {
+		_, dh := m.panelHeights(m.panel, h)
 		m.vp.Height = max(1, dh-2)
 	}
 	m.account.vp.Width = max(1, dw-4)
@@ -172,8 +246,8 @@ func (m *Model) view() string {
 		if rw > 0 {
 			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
 		}
-	} else if m.panel == 1 {
-		body = m.transcriptView(dw, h)
+	} else if m.panel > 0 && iw == 0 {
+		body = m.panelView(dw, h)
 		if rw > 0 {
 			body = lipgloss.JoinHorizontal(lipgloss.Top, m.railView(rw, h), body)
 		}
@@ -271,6 +345,18 @@ func (m *Model) inventoryView(w, h int) string {
 		if m.filterEditing {
 			filter += "▏"
 		}
+	}
+	if m.panel > 0 && m.focus != 0 {
+		// The collapsed inventory has three inner rows: heading and selection.
+		if state := s.status[primary(m.panel, m.sent)]; state != "" && state != "ready" {
+			lines[0] = m.style(c.fg).Bold(true).Render(fit(title+" · "+stateLabel(state), w))
+		}
+		if row := m.current(); row != nil {
+			lines = append(lines, m.style(c.accent).Bold(true).Render(fit("› "+row.title, w)), m.style(c.dim).Render(fit("  "+row.subtitle, w)))
+		} else {
+			lines = append(lines, inventoryEmptyLabel(s.status[primary(m.panel, m.sent)], s.filter != ""))
+		}
+		return crop(strings.Join(lines, "\n"), w, h)
 	}
 	lines = append(lines, m.style(c.dim).Render(fit(filter, w)), "")
 	state := s.status[primary(m.panel, m.sent)]
@@ -446,6 +532,11 @@ func (m *Model) overlayView(w, h int) string {
 	help := []string{
 		"KEYBOARD / EVERY CONTROL", "", "Workspace", "1–7              Open one of seven panels", "Tab / Shift+Tab  Inventory → detail → detail actions", "j/k or ↑/↓       Move rows, scroll detail, or select action", "Enter            Focus detail / activate selected action", "Esc              Hide private value, go back, or clear filter", "/                Edit inventory filter; Enter keep, Esc cancel", "Ctrl+U           Clear filter while editing", "r                Refresh current panel and identity", "p                Pause / resume live refresh", "t                Choose and save a shared theme", "b                Start or reuse the web console and open browser", "w                Web console status and start / stop controls", "?                Open this help; ↑↓ / PgUp / PgDn scroll", "q / Ctrl+C       Quit and cancel in-flight requests", "", "Summary", "o / l / e        Overview / Timeline / Recent updates", "d                Workspace details and salient memories", "a                Toggle plain ASCII graph characters", "Tab              Switch category selection and scrolling", "Enter            Open the selected category", "", "Web console (w)", "s / b            Start / open in browser", "x / r            Stop / check status", "                 TUI-owned consoles stop when the TUI exits", "                 Existing consoles stay running until explicit stop", "                 Demo never starts a console or opens a browser", "", "Reading", "PgUp / PgDn      Scroll half a page", "Ctrl+U / Ctrl+D  Scroll half a page (outside filter)", "g / Home         Top of detail", "G / End          Bottom of detail / latest transcript entries", "[ / ]            Previous / next detail action", "", "Transcripts", "x / Enter        Expand or collapse selected JSON entry", "[ / ]            Select entry; evidence range is highlighted", "Esc              Return from evidence to its memory", "", "Facts", "v                Explicitly reveal / hide only selected fact", "c                Copy exact fact without displaying it", "                 Requires the application's clipboard callback", "                 Sensitive assertion history always stays hidden", "", "Memories", "v                Reveal / hide sensitive memory content", "e                Focus evidence; ↑↓ selects a locator", "Enter            Open selected transcript evidence", "                 Other locators remain plain text", "", "Conversations", "[ / ]            Select a received or sent message", "v / Enter        Explicitly show / hide selected received body", "                 Sent bodies and all payloads remain unavailable", "", "Email", "s                Switch Received / Sent", "u                Toggle received unread-only filter", "a                Toggle received unacknowledged-only filter", "                 Metadata only; sender claims are unverified", "", "Secrets", "[ / ]            Select one secret field", "v / Enter        Reveal / hide selected non-TOTP field", "c                Copy exact field without displaying it", "                 Revealed values auto-hide after 30 seconds", "                 Hide, navigation, refresh, and quit clear values", "                 TOTP seeds are never available", "", "The seven agent panels use the selected agent's authority.", "Themes save preferences; secret access records a value-free receipt.", "Legal: https://self.witwave.ai/legal",
 	}
+	if m.panel > 0 && !m.account.mode {
+		help = slices.Insert(help, 7,
+			"                 Every list panel collapses its inventory in detail focus",
+			"                 Esc / Shift+Tab restore inventory focus")
+	}
 	if m.account.context.available() {
 		accountHelp := []string{"Account · read-only manager scope", "8                Open Account; 1–7 return to agent panels", "[ / ] or ← / →   Switch permitted subsections", "↑↓ / PgUp/PgDn   Scroll details", "r                Refresh cached section", "p                Pause display; authority checks continue", "t / b / w        Theme / browser / web console controls", "Account uses the current verified manager, distinct from the agent.", ""}
 		if slices.Contains(m.account.context.sections, "support") {
@@ -516,7 +607,7 @@ func (m *Model) renderDetail(follow bool) {
 		m.renderAccount()
 		return
 	}
-	if m.panel == 1 {
+	if m.panel > 0 {
 		m.resize()
 	}
 	old := m.vp.YOffset

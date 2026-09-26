@@ -106,7 +106,7 @@ type Model struct {
 	evidenceFrom, evidenceUntil   int
 	returnMemory                  string
 	actionOffsets                 []int
-	transcriptReader              transcriptReaderPosition
+	readers                       [7]readerPosition
 }
 
 var _ tea.Model = (*Model)(nil)
@@ -559,7 +559,7 @@ func (m *Model) movePanel(panel int) bool {
 	if panel < 0 || panel >= 7 || panel == m.panel {
 		return false
 	}
-	if m.panel == 1 && m.focus != 0 {
+	if m.panel > 0 && m.focus != 0 {
 		m.setDetailFocus(0)
 	}
 	m.states[m.panel].scroll = m.vp.YOffset
@@ -594,9 +594,7 @@ func (m *Model) choose(delta int) tea.Cmd {
 	return m.refresh()
 }
 func (m *Model) resetDetail() {
-	if m.panel == 1 {
-		m.transcriptReader = transcriptReaderPosition{}
-	}
+	m.readers[m.panel] = readerPosition{}
 	s := &m.states[m.panel]
 	for _, r := range []dashboard.Resource{dashboard.ResourceTranscript, dashboard.ResourceFactHistory, dashboard.ResourceMemory, dashboard.ResourceMemoryHistory, dashboard.ResourceSecret} {
 		delete(s.data, r)
@@ -749,8 +747,8 @@ func (m *Model) applyFetch(msg fetchedMsg) tea.Cmd {
 		}
 		m.revealAction()
 		if m.actionCount() > 0 {
-			m.transcriptReader.opened = true
-			m.transcriptReader.key = s.key
+			m.readers[1].opened = true
+			m.readers[1].key = s.key
 		}
 	}
 	if m.wanted {
@@ -1211,10 +1209,10 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "/":
 		m.filterEditing = true
 		m.filterBefore = m.states[m.panel].filter
-		if m.panel == 1 {
-			m.setDetailFocus(0)
-		} else {
+		if m.panel == 0 {
 			m.focus = 0
+		} else {
+			m.setDetailFocus(0)
 		}
 	case "tab":
 		focus := (m.focus + 1) % 3
@@ -1260,7 +1258,7 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 			return m.activateAction()
 		}
 		firstRead := m.panel == 1 && m.focus == 0 &&
-			(!m.transcriptReader.opened || m.transcriptReader.key != m.states[1].key)
+			(!m.readers[1].opened || m.readers[1].key != m.states[1].key)
 		m.setDetailFocus(1)
 		if firstRead {
 			m.revealAction()
@@ -1273,8 +1271,7 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "e":
 		if m.panel == 3 {
-			m.focus = 2
-			m.renderDetail(false)
+			m.setDetailFocus(2)
 			m.revealAction()
 		}
 	case "x":
@@ -1301,6 +1298,7 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 				m.unacked = !m.unacked
 			}
 			m.invalidate()
+			m.readers[5] = readerPosition{}
 			m.states[5].rows = nil
 			delete(m.states[5].data, dashboard.ResourceEmailReceived)
 			m.states[5].selected = 0
@@ -1334,6 +1332,7 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 func (m *Model) switchEmail() tea.Cmd {
 	m.invalidate()
 	m.sent = !m.sent
+	m.readers[5] = readerPosition{}
 	m.states[5].selected = 0
 	m.states[5].key = ""
 	m.reconcileRows()
@@ -1442,8 +1441,7 @@ func (m *Model) moveAction(d int) tea.Cmd {
 	}
 	m.sub = next
 	m.subKey = actionKey(a[m.sub])
-	m.focus = 2
-	m.renderDetail(false)
+	m.setDetailFocus(2)
 	m.revealAction()
 	return nil
 }

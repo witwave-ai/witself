@@ -51,6 +51,16 @@ imply unread-message counts. The summary does not show private record content
 or fetch revealed values. It refreshes through a shared passive projection
 cached for at most 30 seconds; a failed refresh labels retained data as stale.
 
+## Navigation
+
+On every list panel (Transcripts, Facts, Memories, Conversations, Email, and
+Secrets), Tab or Enter from the inventory collapses the list to its heading and
+selected row, giving the detail reader the full content width. Esc or Shift+Tab
+from detail scrolling restores the inventory; from detail actions, Shift+Tab
+first returns to scrolling. The reader position survives focus changes and
+refreshes for the same selected record. Very small terminals prioritize the
+reader. Overview and Account mode retain their existing layouts and navigation.
+
 ## Quick access
 
 Select a fact or secret field and press `v` to reveal or hide it. Press `c` to
