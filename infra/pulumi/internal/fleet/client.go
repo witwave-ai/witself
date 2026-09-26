@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,7 +34,8 @@ var (
 	ErrNotDrained = errors.New("cell is not drained")
 )
 
-// Cell is a fleet registry entry as sent/received over the API.
+// Cell is a fleet registry read record and the input to Register, which sends
+// only registration fields through a separate payload.
 // Keep its wire shape in sync with internal/client.FleetCell in the root module;
 // this local copy keeps the Pulumi module independent, as with internal/tokenfile.
 type Cell struct {
@@ -48,7 +51,7 @@ type Cell struct {
 	// marker. A marked cell must always register accepting=false.
 	BackupValidationTarget bool `json:"backup_validation_target"`
 	// Credential presence is returned by registry reads without exposing either
-	// token. Omitempty keeps these response-only flags out of registrations.
+	// token. Register excludes these response-only flags from its payload.
 	HasProvisionToken bool `json:"has_provision_token,omitempty"`
 	HasBackupToken    bool `json:"has_backup_token,omitempty"`
 	// ProvisionToken is the cell's account-provisioning credential, sent once at
@@ -59,6 +62,35 @@ type Cell struct {
 	// no account-provisioning authority.
 	BackupToken string `json:"backup_token,omitempty"`
 }
+
+// registrationPayload deliberately excludes credential-presence read flags.
+type registrationPayload struct {
+	Name                   string  `json:"name"`
+	Endpoint               string  `json:"endpoint"`
+	Cloud                  string  `json:"cloud,omitempty"`
+	Region                 string  `json:"region,omitempty"`
+	RegionCode             string  `json:"region_code,omitempty"`
+	Channel                string  `json:"channel,omitempty"`
+	Weight                 float64 `json:"weight,omitempty"`
+	Accepting              *bool   `json:"accepting,omitempty"`
+	BackupValidationTarget bool    `json:"backup_validation_target"`
+	ProvisionToken         string  `json:"provision_token,omitempty"`
+	BackupToken            string  `json:"backup_token,omitempty"`
+}
+
+// AcceptingPatchUnsupportedError means the control plane rejected the
+// accepting-only route. It must not trigger a registration fallback or teardown.
+// Older handlers return 405; an unrecognized 404 also fails closed.
+// An authoritative "unknown cell" 404 instead returns ErrNotRegistered.
+type AcceptingPatchUnsupportedError struct {
+	StatusCode int
+}
+
+func (e *AcceptingPatchUnsupportedError) Error() string {
+	return fmt.Sprintf("HTTP %d: accepting-only PATCH was not confirmed; requires control plane >= v0.0.274 (#378); verify PATCH support before teardown", e.StatusCode)
+}
+
+var cellNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
 // registrationAck mirrors internal/client.FleetCellRegistrationAck in the root
 // module while keeping the provisioner's acknowledgement checks module-local.
@@ -130,6 +162,12 @@ func fleetToken(tokenFile string) (string, error) {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) (int, string, error) {
+	if out != nil {
+		target := reflect.ValueOf(out)
+		if target.Kind() != reflect.Pointer || target.IsNil() {
+			return 0, "", fmt.Errorf("control-plane response target must be a non-nil pointer")
+		}
+	}
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -168,7 +206,7 @@ func (c *Client) Register(ctx context.Context, cell Cell) error {
 			"backup validation target must register with accepting=false",
 		)
 	}
-	var ack *registrationAck
+	var ack registrationAck
 	if cell.BackupToken != "" {
 		if err := ValidateRegistrationCredentials(
 			cell.ProvisionToken, cell.BackupToken,
@@ -176,48 +214,47 @@ func (c *Client) Register(ctx context.Context, cell Cell) error {
 			return err
 		}
 	}
-	// Keep out a nil interface when no acknowledgement is required. Passing
-	// a typed-nil *registrationAck makes do try to unmarshal into a nil pointer.
-	var out any
-	if cell.BackupToken != "" || cell.BackupValidationTarget {
-		ack = &registrationAck{}
-		out = ack
+	// Every registration requires an acknowledgement decoded into a real target.
+	payload := registrationPayload{
+		Name: cell.Name, Endpoint: cell.Endpoint, Cloud: cell.Cloud,
+		Region: cell.Region, RegionCode: cell.RegionCode, Channel: cell.Channel,
+		Weight: cell.Weight, Accepting: cell.Accepting,
+		BackupValidationTarget: cell.BackupValidationTarget,
+		ProvisionToken:         cell.ProvisionToken, BackupToken: cell.BackupToken,
 	}
-	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", cell, out)
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", payload, &ack)
 	if err != nil {
 		return err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
 		return fmt.Errorf("register cell: HTTP %d: %s", code, strings.TrimSpace(body))
 	}
-	if ack != nil && ack.SchemaVersion != "witself.v0" {
+	if ack.SchemaVersion != "witself.v0" {
 		return fmt.Errorf(
 			"register cell: control plane returned schema_version %q, want %q",
 			ack.SchemaVersion, "witself.v0",
 		)
 	}
-	if ack != nil && ack.Cell.Name != cell.Name {
+	if ack.Cell.Name != cell.Name {
 		return fmt.Errorf(
 			"register cell: control plane acknowledged cell %q, want %q",
 			ack.Cell.Name, cell.Name,
 		)
 	}
-	if ack != nil &&
-		(cell.BackupToken != "" || cell.HasBackupToken) &&
+	if (cell.BackupToken != "" || cell.HasBackupToken) &&
 		!ack.Cell.HasBackupToken {
 		return fmt.Errorf(
 			"register cell: control plane did not acknowledge backup_token; upgrade the control plane before registering backup credentials",
 		)
 	}
-	if ack != nil &&
-		(ack.Cell.BackupValidationTarget == nil ||
-			*ack.Cell.BackupValidationTarget != cell.BackupValidationTarget) {
+	if ack.Cell.BackupValidationTarget == nil ||
+		*ack.Cell.BackupValidationTarget != cell.BackupValidationTarget {
 		return fmt.Errorf(
 			"register cell: control plane did not acknowledge backup_validation_target=%t; upgrade the control plane before registering this cell",
 			cell.BackupValidationTarget,
 		)
 	}
-	if ack != nil && cell.Accepting != nil &&
+	if cell.Accepting != nil &&
 		(ack.Cell.Accepting == nil || *ack.Cell.Accepting != *cell.Accepting) {
 		return fmt.Errorf(
 			"register cell: control plane did not acknowledge accepting=%t; refuse ambiguous fleet isolation",
@@ -270,31 +307,36 @@ func (c *Client) ListCells(ctx context.Context) ([]Cell, error) {
 	return out.Cells, nil
 }
 
-// lookup fetches the cell's current registry entry.
-func (c *Client) lookup(ctx context.Context, name string) (*Cell, error) {
-	cells, err := c.ListCells(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for i := range cells {
-		if cells[i].Name == name {
-			return &cells[i], nil
-		}
-	}
-	return nil, ErrNotRegistered
-}
-
-// Drain re-registers the cell with accepting=false so placement stops.
-// Registry reads redact credentials; their omitempty fields preserve the
-// control plane's stored tokens when this registration omits them.
+// Drain changes only the authoritative accepting state so placement stops.
+// Never replay the eventually consistent registry projection into registration.
 func (c *Client) Drain(ctx context.Context, name string) error {
-	cell, err := c.lookup(ctx, name)
+	if !cellNamePattern.MatchString(name) {
+		return fmt.Errorf("cell name must contain 1-64 lowercase letters, digits, or hyphens")
+	}
+	var ack registrationAck
+	code, body, err := c.do(ctx, http.MethodPatch, "/v1/cells/"+name, struct {
+		Accepting bool `json:"accepting"`
+	}{Accepting: false}, &ack)
 	if err != nil {
 		return err
 	}
-	f := false
-	cell.Accepting = &f
-	return c.Register(ctx, *cell)
+	if code == http.StatusNotFound && strings.Contains(body, "unknown cell") {
+		return ErrNotRegistered
+	}
+	// Older control planes reject PATCH with 405. Other 404 responses also
+	// fail closed. Do not fall back to an unsafe upsert.
+	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+		return &AcceptingPatchUnsupportedError{StatusCode: code}
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	if ack.SchemaVersion != "witself.v0" || ack.Cell.Name != name ||
+		ack.Cell.Accepting == nil || *ack.Cell.Accepting ||
+		ack.Cell.BackupValidationTarget == nil {
+		return fmt.Errorf("control plane returned an invalid cell accepting acknowledgement")
+	}
+	return nil
 }
 
 // Delete removes a drained, account-free cell from the registry.

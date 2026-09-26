@@ -211,8 +211,8 @@ func TestDestroyRegistryNameAccountGuardAndConfirmation(t *testing.T) {
 func TestDestroyRegistryNamePreflightAndRemoval(t *testing.T) {
 	for _, purge := range []bool{false, true} {
 		t.Run(fmt.Sprintf("purge=%t", purge), func(t *testing.T) {
-			// A backup target exercises the acknowledged registration path.
-			// Ordinary drain has a pre-existing typed-nil decode bug in fleet.Register.
+			// A backup target: drain is one acknowledged accepting-only PATCH on the
+			// mapped registry identity, never a re-registration.
 			calls := &destroyRequestLog{}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.add(r.Method + " " + r.URL.Path)
@@ -220,18 +220,21 @@ func TestDestroyRegistryNamePreflightAndRemoval(t *testing.T) {
 				case "/v1/placement-status":
 					_, _ = fmt.Fprintf(w, `{"cells":[{"name":%q,"account_count":0,"archived_count":0}]}`, mappedRegistryCell)
 				case "/v1/cells":
-					if r.Method == http.MethodGet {
-						_ = json.NewEncoder(w).Encode(map[string]any{"cells": []fleet.Cell{{Name: mappedRegistryCell, BackupValidationTarget: true}}})
-					} else {
-						var cell fleet.Cell
-						if err := json.NewDecoder(r.Body).Decode(&cell); err != nil || cell.Name != mappedRegistryCell || cell.Accepting == nil || *cell.Accepting {
-							t.Error("drain must re-register the existing registry identity with accepting=false")
-						}
-						_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": cell})
+					if r.Method != http.MethodGet {
+						t.Errorf("drain must not re-register; got %s /v1/cells", r.Method)
 					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"cells": []fleet.Cell{{Name: mappedRegistryCell, BackupValidationTarget: true}}})
 				case "/v1/cells/" + mappedRegistryCell + ":purge":
 					_, _ = w.Write([]byte(`{}`))
 				case "/v1/cells/" + mappedRegistryCell:
+					if r.Method == http.MethodPatch {
+						var body map[string]any
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !reflect.DeepEqual(body, map[string]any{"accepting": false}) {
+							t.Errorf("drain must send only accepting=false to the registry identity, got %v", body)
+						}
+						_, _ = fmt.Fprintf(w, `{"schema_version":"witself.v0","cell":{"name":%q,"accepting":false,"backup_validation_target":true}}`, mappedRegistryCell)
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 				case "/v1/cells/" + mappedRegistryCell + ":evacuate":
 					_, _ = w.Write([]byte(`{"remaining":0}`))
@@ -256,7 +259,7 @@ func TestDestroyRegistryNamePreflightAndRemoval(t *testing.T) {
 			disclosure := fmt.Sprintf("output: Destroy target %q (fleet registry entry %q).\n", mappedInventoryCell, mappedRegistryCell)
 			want := []string{
 				fmt.Sprintf("output: warning: --skip-account-check bypassed live/archived account placement verification for cell %q (fleet registry entry %q)\n", mappedInventoryCell, mappedRegistryCell),
-				disclosure, "GET /v1/placement-status", disclosure, "GET /v1/cells", "POST /v1/cells",
+				disclosure, "GET /v1/placement-status", disclosure, "PATCH /v1/cells/" + mappedRegistryCell,
 			}
 			if purge {
 				want = append(want, "POST /v1/cells/"+mappedRegistryCell+":purge")
@@ -340,7 +343,12 @@ func TestDestroyUnmappedOutputUnchanged(t *testing.T) {
 			t.Fatalf("output = %q, want %q", out.String(), want)
 		}
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			// An unregistered cell: the accepting PATCH is refused authoritatively.
+			http.Error(w, "unknown cell", http.StatusNotFound)
+			return
+		}
 		_, _ = w.Write([]byte(`{"cells":[]}`))
 	}))
 	defer srv.Close()

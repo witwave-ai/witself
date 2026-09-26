@@ -3,6 +3,8 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -54,27 +56,16 @@ func TestDrainRedactedCredentials(t *testing.T) {
 				request := r.Method + " " + r.URL.Path
 				requests = append(requests, request)
 				switch request {
-				case "GET /v1/cells":
-					_ = json.NewEncoder(w).Encode(map[string]any{"cells": []any{cell}})
-				case "POST /v1/cells":
+				case "PATCH /v1/cells/cell-a":
 					var body map[string]any
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 						t.Errorf("decode drain: %v", err)
 						http.Error(w, "bad request", http.StatusBadRequest)
 						return
 					}
-					for _, key := range []string{"provision_token", "backup_token"} {
-						if _, present := body[key]; present {
-							t.Errorf("drain must omit %s", key)
-						}
-					}
-					want := map[string]any{
-						"name": "cell-a", "endpoint": "https://cell.example.com",
-						"accepting": false, "backup_validation_target": backupTarget,
-						"has_provision_token": true, "has_backup_token": true,
-					}
+					want := map[string]any{"accepting": false}
 					if !reflect.DeepEqual(body, want) {
-						t.Errorf("registration = %v, want %v", body, want)
+						t.Errorf("drain payload = %v, want %v", body, want)
 					}
 					cell["accepting"] = false
 					drains++
@@ -89,7 +80,7 @@ func TestDrainRedactedCredentials(t *testing.T) {
 			if err := client.Drain(context.Background(), "cell-a"); err != nil {
 				t.Fatalf("drain redacted cell: %v", err)
 			}
-			if want := []string{"GET /v1/cells", "POST /v1/cells"}; !reflect.DeepEqual(requests, want) {
+			if want := []string{"PATCH /v1/cells/cell-a"}; !reflect.DeepEqual(requests, want) {
 				t.Errorf("requests = %v, want %v", requests, want)
 			}
 			if drains != 1 || cell["accepting"] != false {
@@ -132,17 +123,24 @@ func TestRegisterSendsDistinctCredentialShape(t *testing.T) {
 		hc:    server.Client(),
 	}
 	err := client.Register(context.Background(), Cell{
-		Name:           "civo-sandbox-use1-serving",
-		Endpoint:       "https://api.cell.example.com",
-		Cloud:          "civo",
-		Region:         "NYC1",
-		RegionCode:     "use1",
-		Channel:        "experimental",
-		ProvisionToken: "witself_prv_provision-only",
-		BackupToken:    "witself_bak_backup-only",
+		Name:              "civo-sandbox-use1-serving",
+		Endpoint:          "https://api.cell.example.com",
+		Cloud:             "civo",
+		Region:            "NYC1",
+		RegionCode:        "use1",
+		Channel:           "experimental",
+		HasProvisionToken: true,
+		HasBackupToken:    true,
+		ProvisionToken:    "witself_prv_provision-only",
+		BackupToken:       "witself_bak_backup-only",
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, key := range []string{"has_provision_token", "has_backup_token"} {
+		if _, present := body[key]; present {
+			t.Errorf("registration must omit read-only %s", key)
+		}
 	}
 	if got := body["provision_token"]; got != "witself_prv_provision-only" {
 		t.Fatalf("provision_token = %#v", got)
@@ -493,5 +491,158 @@ func TestListCellsKeepsRedactedCredentialsEmpty(t *testing.T) {
 	if !cells[0].BackupValidationTarget ||
 		cells[0].Accepting == nil || *cells[0].Accepting {
 		t.Fatalf("restore-test isolation fields lost: %#v", cells[0])
+	}
+}
+
+// Ordinary registrations must validate the same response contract as targets
+// carrying backup credentials, including omitted/null isolation fields.
+func TestRegisterWithoutBackupTokenRejectsInvalidAcknowledgement(t *testing.T) {
+	for _, response := range []string{
+		``, `not json`, `null`, `{}`,
+		`{"schema_version":"legacy.v0","cell":{"name":"cell-a"}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"other"}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a"}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":null}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":true}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":false}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":false,"accepting":null}}`,
+		`{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":false,"accepting":true}}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				_, _ = w.Write([]byte(response))
+			}))
+			defer server.Close()
+			client := &Client{base: server.URL, hc: server.Client()}
+			accepting := false
+			if err := client.Register(context.Background(), Cell{Name: "cell-a", Accepting: &accepting}); err == nil {
+				t.Fatal("accepted invalid registration acknowledgement")
+			}
+			if calls != 1 {
+				t.Fatalf("requests = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestDrainRejectsInvalidAcknowledgement(t *testing.T) {
+	for _, backupTarget := range []bool{false, true} {
+		for _, tc := range []struct {
+			name     string
+			response string
+		}{
+			{"empty", ``},
+			{"malformed", `not json`},
+			{"null", `null`},
+			{"missing schema", `{"cell":{"name":"cell-a","accepting":false,"backup_validation_target":%t}}`},
+			{"wrong schema", `{"schema_version":"legacy.v0","cell":{"name":"cell-a","accepting":false,"backup_validation_target":%t}}`},
+			{"missing cell", `{"schema_version":"witself.v0"}`},
+			{"missing name", `{"schema_version":"witself.v0","cell":{"accepting":false,"backup_validation_target":%t}}`},
+			{"wrong name", `{"schema_version":"witself.v0","cell":{"name":"other","accepting":false,"backup_validation_target":%t}}`},
+			{"missing accepting", `{"schema_version":"witself.v0","cell":{"name":"cell-a","backup_validation_target":%t}}`},
+			{"null accepting", `{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":null,"backup_validation_target":%t}}`},
+			{"still accepting", `{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":true,"backup_validation_target":%t}}`},
+			{"wrong accepting type", `{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":"false","backup_validation_target":%t}}`},
+			{"missing purpose", `{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":false}}`},
+			{"null purpose", `{"schema_version":"witself.v0","cell":{"name":"cell-a","accepting":false,"backup_validation_target":null}}`},
+		} {
+			t.Run(fmt.Sprintf("backup=%t/%s", backupTarget, tc.name), func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if r.Method != http.MethodPatch || r.URL.Path != "/v1/cells/cell-a" {
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					}
+					_, _ = w.Write([]byte(strings.ReplaceAll(tc.response, "%t", fmt.Sprint(backupTarget))))
+				}))
+				defer server.Close()
+				client := &Client{base: server.URL, hc: server.Client()}
+				if err := client.Drain(context.Background(), "cell-a"); err == nil {
+					t.Fatal("accepted invalid drain acknowledgement")
+				}
+				if calls != 1 {
+					t.Fatalf("requests = %d, want 1", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestDrainOlderControlPlaneFailsClosed(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var requests []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				http.Error(w, "unsupported", status)
+			}))
+			defer server.Close()
+			client := &Client{base: server.URL, hc: server.Client()}
+			err := client.Drain(context.Background(), "cell-a")
+			var unsupported *AcceptingPatchUnsupportedError
+			if !errors.As(err, &unsupported) || unsupported.StatusCode != status || !strings.Contains(err.Error(), "v0.0.274 (#378)") {
+				t.Fatalf("error = %v, want typed PATCH compatibility error", err)
+			}
+			if errors.Is(err, ErrNotRegistered) {
+				t.Fatal("unsupported response must not authorize teardown")
+			}
+			if want := []string{"PATCH /v1/cells/cell-a"}; !reflect.DeepEqual(requests, want) {
+				t.Fatalf("requests = %v, want %v", requests, want)
+			}
+		})
+	}
+}
+
+func TestDrainUnknownCellIsNotRegistered(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		http.Error(w, `{"schema_version":"witself.v0","error":"unknown cell"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+	client := &Client{base: server.URL, hc: server.Client()}
+	err := client.Drain(context.Background(), "cell-a")
+	if !errors.Is(err, ErrNotRegistered) {
+		t.Fatalf("error = %v, want ErrNotRegistered", err)
+	}
+	var unsupported *AcceptingPatchUnsupportedError
+	if errors.As(err, &unsupported) {
+		t.Fatalf("error = %v, authoritative absence is not a compatibility error", err)
+	}
+	if want := []string{"PATCH /v1/cells/cell-a"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
+func TestDoRejectsTypedNilTargetBeforeRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	client := &Client{base: server.URL, hc: server.Client()}
+	var ack *registrationAck
+	code, body, err := client.do(context.Background(), http.MethodPost, "/v1/cells", Cell{Name: "cell-a"}, ack)
+	if err == nil || !strings.Contains(err.Error(), "response target must be a non-nil pointer") {
+		t.Fatalf("error = %v, want clear typed-nil rejection", err)
+	}
+	if calls != 0 || code != 0 || body != "" {
+		t.Fatalf("typed-nil target reached HTTP: requests=%d status=%d", calls, code)
+	}
+	// A genuinely nil interface still supports response-free requests.
+	if _, _, err := client.do(context.Background(), http.MethodDelete, "/v1/cells/cell-a", nil, nil); err != nil || calls != 1 {
+		t.Fatalf("nil interface rejected: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestDrainRejectsInvalidCellNameBeforeRequest(t *testing.T) {
+	client := &Client{}
+	for _, name := range []string{"", "Cell-A", "cell-a/other", "cell-a?query", strings.Repeat("a", 65)} {
+		if err := client.Drain(context.Background(), name); err == nil || !strings.Contains(err.Error(), "cell name must contain") {
+			t.Errorf("name %q: error = %v", name, err)
+		}
 	}
 }
