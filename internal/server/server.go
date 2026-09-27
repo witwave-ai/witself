@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -5632,6 +5633,20 @@ func newBackupArchiveClient() *http.Client {
 	transport.DisableKeepAlives = true
 	transport.ForceAttemptHTTP2 = false
 	transport.ResponseHeaderTimeout = 2 * time.Minute
+	// The cloned default transport may already advertise h2 through ALPN while
+	// this transport, with HTTP/2 disabled and its own dialer, only speaks
+	// HTTP/1.1. Pin ALPN so an h2-capable origin cannot select a protocol the
+	// client will not parse (the failure is an immediate "malformed HTTP
+	// response" on the first SETTINGS frame).
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if transport.TLSClientConfig != nil {
+		tlsConfig = transport.TLSClientConfig.Clone()
+		if tlsConfig.MinVersion < tls.VersionTLS12 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	transport.TLSClientConfig = tlsConfig
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, address)
 		if err != nil {

@@ -145,8 +145,11 @@ func TestAccountBackupArchivePull(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			calls, validations := 0, 0
 			capability := "cap_" + strings.Repeat("a", 64)
-			cp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cp := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
+				if r.ProtoMajor != 1 {
+					t.Errorf("download negotiated %s; the archive client must pin HTTP/1.1 through ALPN", r.Proto)
+				}
 				if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+capability {
 					t.Error("download did not use the capability bearer")
 				}
@@ -170,9 +173,13 @@ func TestAccountBackupArchivePull(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, "archive")
 			}))
+			// The real control plane sits behind an h2-capable edge; the fake must
+			// offer h2 too so an ALPN mismatch in the client cannot hide here.
+			cp.EnableHTTP2 = true
+			cp.StartTLS()
 			defer cp.Close()
 			client := newBackupArchiveClient()
-			client.Transport.(*http.Transport).TLSClientConfig = cp.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+			client.Transport.(*http.Transport).TLSClientConfig.RootCAs = cp.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 			defer client.CloseIdleConnections()
 			origin, source, token, size := cp.URL, cp.URL+"/v1/backups:archive?account_id=acc_backup", capability, "7"
 			want := http.StatusBadRequest
