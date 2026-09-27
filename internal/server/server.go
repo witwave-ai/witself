@@ -251,10 +251,12 @@ type Config struct {
 	// StreamAccountBackup enables the backup-token-authorized
 	// POST /v1/accounts/{id}:export-backup path. It streams a read-only
 	// point-in-time archive and never changes account lifecycle or placement.
+	// The callback flushes compressed chunks through the supplied transport hook.
 	StreamAccountBackup func(
 		ctx context.Context,
 		accountID, backupID string,
 		w io.Writer,
+		flush func() error,
 	) error
 
 	// StreamAccountSelf enables the customer-facing GET /v1/export route.
@@ -5655,7 +5657,13 @@ func accountBackupHandler(cfg Config) http.HandlerFunc {
 			w.Header().Set("X-Witself-Export-Purpose", "backup")
 			w.Header().Set(AccountBackupIDHeader, backupID)
 			err := cfg.StreamAccountBackup(
-				r.Context(), exportAccountID, backupID, w,
+				r.Context(), exportAccountID, backupID, w, func() error {
+					err := http.NewResponseController(w).Flush()
+					if errors.Is(err, http.ErrNotSupported) {
+						return nil
+					}
+					return err
+				},
 			)
 			switch {
 			case errors.Is(err, ErrNotFound):

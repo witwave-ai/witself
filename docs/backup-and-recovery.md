@@ -646,6 +646,18 @@ of routed accounts into the dedicated Cloudflare R2 bucket
   again before catalog commit, so an account move cannot silently attribute a
   backup to the wrong source.
 
+Export-order indexes are built concurrently at startup, so a cell roll carrying
+them must not overlap a pre-migration backup or the nightly periodic backup slot
+around 00:00Z because concurrent builds wait for older snapshots.
+
+Large accounts stream in bounded NDJSON chunks. Each completed chunk flushes
+both gzip and the HTTP response; the outer gzip stream may contain sync flush
+points, which ordinary gunzip/tar readers handle without a format change. The
+cell logs each completed table's name, chunk count, row count, and elapsed time,
+and warns when a source produces no row for 30 seconds. A stalled source cannot
+emit a new data chunk until rows arrive; these warnings help distinguish source
+stalls from transport failures. See [#555](https://github.com/witwave-ai/witself/issues/555).
+
 The schedule is deliberately disabled by default when
 `CP_ACCOUNT_BACKUPS_ENABLED` is absent or false. The committed Worker
 configuration leaves this operator activation binding absent; set it as a

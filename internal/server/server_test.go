@@ -2118,6 +2118,7 @@ func TestExportAccountBackupRequiresDedicatedBackupToken(t *testing.T) {
 		_ context.Context,
 		accountID, receivedBackupID string,
 		w io.Writer,
+		_ func() error,
 	) error {
 		gotAccountID = accountID
 		gotBackupID = receivedBackupID
