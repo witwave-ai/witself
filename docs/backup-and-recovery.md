@@ -674,6 +674,29 @@ account. Their bounded overrides are
 `CP_ACCOUNT_BACKUPS_CONCURRENCY`, `CP_ACCOUNT_BACKUPS_MAX_ATTEMPTS`, and
 `CP_ACCOUNT_BACKUPS_CATALOG_LIMIT`.
 
+The fleet-authenticated `POST /v1/backups:run` accepts `account_id` and an
+optional `scheduled_at` (default: now). It acknowledges the deterministic
+minute-slot generation immediately and executes the export through the
+Durable Object alarm. Every successful acknowledgement includes
+`schema_version: "witself.v0"`, `account_id`, and the requested `backup_id`:
+
+| HTTP | Status | Additional fields and meaning |
+| --- | --- | --- |
+| 202 | `accepted` | `scheduled_at`; this generation is pending or already in flight. |
+| 200 | `committed` | `backup`; this exact generation is already in the immutable catalog. |
+| 200 | `busy` | `current_backup_id`; another generation is pending, running, or retrying. Poll that id instead. |
+| 200 | `failed` | `attempts`; this generation exhausted its attempts or failed terminally. |
+
+Repeating the same `scheduled_at` minute slot is idempotent: an open job is
+acknowledged again without replacing it or resetting its attempts, a committed
+generation is returned unchanged, and the current failed generation is not restarted.
+Omitting `scheduled_at` in a later minute selects a different generation.
+Invalid `account_id` or unparseable `scheduled_at` retains HTTP 400.
+Poll `GET /v1/backups/status?account_id=...`, checking `current_job.status`
+and `last_committed_at`, until the selected id appears in the committed
+catalog. Acceptance alone is not a completed backup. Scheduled scans retain
+their synchronous execution and existing retry acknowledgements.
+
 The Durable Object catalog is a bounded operational index, not the retention
 authority. Cataloged R2 objects are not deleted when old catalog entries age
 out. Configure the `witself-backups` bucket's access policy, multipart-abort

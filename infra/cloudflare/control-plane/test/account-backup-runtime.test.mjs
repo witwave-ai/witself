@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+import { register } from "node:module";
 import test from "node:test";
 import { uptimeProbeMetricsResponse } from "../src/uptime-probes.mjs";
 import { streamToR2Multipart } from "../src/account-lifecycle-runtime.mjs";
@@ -14,8 +16,22 @@ import {
   backupJobIdentity,
   DurableAccountBackup,
   runAccountBackupValidation,
+  runManualAccountBackup,
   runScheduledAccountBackups,
 } from "../src/account-backup-runtime.mjs";
+
+register(new URL("./fixtures/cloudflare-containers-loader.mjs", import.meta.url));
+const worker = (await import("../src/index.js")).default;
+if (typeof crypto.subtle.timingSafeEqual !== "function") {
+  Object.defineProperty(Object.getPrototypeOf(crypto.subtle), "timingSafeEqual", {
+    configurable: true,
+    value(a, b) {
+      const left = new Uint8Array(a);
+      const right = new Uint8Array(b);
+      return left.byteLength === right.byteLength && nodeTimingSafeEqual(left, right);
+    },
+  });
+}
 
 const ACCOUNT = "acct_backup";
 const SOURCE = "aws-us-west-2";
@@ -50,6 +66,10 @@ class Storage {
 
   async setAlarm(value) {
     this.alarm = value;
+  }
+
+  async getAlarm() {
+    return this.alarm;
   }
 
   async deleteAlarm() {
@@ -305,14 +325,15 @@ function runtime({
       now: () => new Date(NOW),
     },
   );
-  const request = () =>
-    new Request("http://account-backup.internal/run", {
+  const request = (path = "/run", overrides = {}) =>
+    new Request(`http://account-backup.internal${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...job,
         max_attempts: maxAttempts,
         catalog_limit: 8,
+        ...overrides,
       }),
     });
   return {
@@ -328,6 +349,257 @@ function runtime({
 async function responseBody(response) {
   return response.json();
 }
+
+function manualEnv(h, fetch = (request) => h.instance.fetch(request)) {
+  return {
+    DIRECTORY: h.directory,
+    BACKUPS: h.bucket,
+    FLEET_TOKEN: "fleet-backup-test-token",
+    ACCOUNT_BACKUP: {
+      idFromName: (name) => ({ name }),
+      get: (id) => {
+        assert.equal(id.name, ACCOUNT);
+        return { fetch: (request) => {
+          assert.equal(new URL(request.url).pathname, "/start");
+          return fetch(request);
+        } };
+      },
+    },
+  };
+}
+
+function manualRoute(env, body) {
+  return worker.fetch(new Request("https://cp.test.invalid/v1/backups:run", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.FLEET_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }), env, { waitUntil() {} });
+}
+
+test("start acknowledges a pending job before export and a cold alarm commits it", async () => {
+  const h = runtime({ fetch: () => assert.fail("start must not export inline") });
+  const response = await h.instance.fetch(h.request("/start"));
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    schema_version: "witself.v0", account_id: ACCOUNT,
+    backup_id: h.job.backup_id, status: "accepted", scheduled_at: h.job.scheduled_at,
+  });
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.revision, 1);
+  assert.deepEqual(state.catalog, []);
+  assert.deepEqual(state.current_job, {
+    ...h.job, status: "pending", attempts: 0, max_attempts: 3,
+    created_at: NOW.toISOString(), source_cell: SOURCE,
+    source_endpoint: "https://source.example", source_registration_id: "reg-source",
+    source_registered_at: sourceCell().registered_at, source_route: sourceRoute(),
+  });
+  assert.equal(h.storage.alarm, NOW.getTime());
+  const cold = runtime({ storage: h.storage, directory: h.directory, bucket: h.bucket });
+  h.storage.alarm = null; // The platform consumes the alarm before invoking it.
+  assert.equal((await cold.instance.alarm()).status, "committed");
+  assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+  assert.equal(h.storage.values.get("account-backups").catalog[0].backup_id, h.job.backup_id);
+  assert.equal(h.storage.alarm, null);
+  const committedState = structuredClone(h.storage.values.get("account-backups"));
+  const repeated = await cold.instance.fetch(h.request("/start"));
+  assert.equal(repeated.status, 200);
+  const committed = await repeated.json();
+  assert.equal(committed.status, "committed");
+  assert.deepEqual(committed.backup, committedState.catalog[0]);
+  assert.deepEqual(h.storage.values.get("account-backups"), committedState);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("repeated start preserves one job and only replaces a missing or unreadable alarm", async () => {
+  const h = runtime();
+  await h.instance.fetch(h.request("/start"));
+  const original = structuredClone(h.storage.values.get("account-backups"));
+  let writes = 0;
+  const setAlarm = h.storage.setAlarm.bind(h.storage);
+  h.storage.setAlarm = async (at) => { writes++; await setAlarm(at); };
+  h.storage.alarm = NOW.getTime() + 120_000;
+  for (let n = 0; n < 2; n++) {
+    const response = await h.instance.fetch(h.request("/start", { max_attempts: 10 }));
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).status, "accepted");
+  }
+  assert.equal(writes, 0);
+  assert.equal(h.storage.alarm, NOW.getTime() + 120_000);
+  h.storage.alarm = null;
+  assert.equal((await h.instance.fetch(h.request("/start"))).status, 202);
+  assert.equal(writes, 1);
+  assert.equal(h.storage.alarm, NOW.getTime());
+  h.storage.getAlarm = undefined;
+  assert.equal((await h.instance.fetch(h.request("/start"))).status, 202);
+  assert.equal(writes, 2);
+  assert.deepEqual(h.storage.values.get("account-backups"), original);
+});
+
+for (const status of ["pending", "running", "retrying"]) {
+  test(`start acknowledges another ${status} generation as busy and arms its retry`, async () => {
+    const h = runtime();
+    await h.instance.fetch(h.request("/start"));
+    const state = h.storage.values.get("account-backups");
+    state.current_job.status = status;
+    state.current_job.attempts = status === "pending" ? 0 : 1;
+    if (status === "retrying") state.current_job.retry_at = new Date(NOW.getTime() + 180_000).toISOString();
+    await h.instance.saveState(state);
+    const before = structuredClone(state);
+    h.storage.alarm = null;
+    const other = backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1);
+    const response = await h.instance.fetch(h.request("/start", other));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      schema_version: "witself.v0", account_id: ACCOUNT,
+      backup_id: other.backup_id, status: "busy", current_backup_id: h.job.backup_id,
+    });
+    assert.equal(h.storage.alarm, NOW.getTime() + (status === "retrying" ? 180_000 : status === "running" ? 60_000 : 0));
+    // An already-armed executor alarm is never pushed later by a busy answer.
+    h.storage.alarm = NOW.getTime() + 5_000;
+    const again = await h.instance.fetch(h.request("/start", other));
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).status, "busy");
+    assert.equal(h.storage.alarm, NOW.getTime() + 5_000);
+    assert.deepEqual(h.storage.values.get("account-backups"), before);
+    assert.deepEqual(h.storage.values.get("account-backups"), before);
+    const repeated = await h.instance.fetch(h.request("/start"));
+    assert.equal(repeated.status, 202);
+    assert.equal((await repeated.json()).status, "accepted");
+    assert.deepEqual(h.storage.values.get("account-backups"), before);
+  });
+}
+
+test("start reports busy or accepted while a slow run holds the fence", { timeout: 10_000 }, async () => {
+  let release;
+  let started;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const exporting = new Promise((resolve) => { started = resolve; });
+  const h = runtime({ fetch: async (_url, options) => {
+    started();
+    await blocked;
+    return new Response("archive", { headers: {
+      "X-Witself-Backup-ID": new Headers(options.headers).get("X-Witself-Backup-ID"),
+    } });
+  } });
+  const running = h.instance.fetch(h.request());
+  try {
+    await exporting;
+    const before = structuredClone(h.storage.values.get("account-backups"));
+    const alarm = h.storage.alarm;
+    const other = backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1);
+    const busy = await h.instance.fetch(h.request("/start", other));
+    assert.equal(busy.status, 200);
+    assert.equal((await busy.json()).current_backup_id, h.job.backup_id);
+    const accepted = await h.instance.fetch(h.request("/start"));
+    assert.equal(accepted.status, 202);
+    assert.equal((await accepted.json()).status, "accepted");
+    // Public requests must also acknowledge the persisted job under contention.
+    for (const [job, status] of [[other, 200], [h.job, 202]]) {
+      const response = await manualRoute(manualEnv(h), { account_id: ACCOUNT, scheduled_at: job.scheduled_at });
+      assert.equal(response.status, status);
+    }
+    assert.deepEqual(h.storage.values.get("account-backups"), before);
+    assert.equal(h.storage.alarm, alarm);
+  } finally {
+    release();
+    assert.equal((await running).status, 200);
+  }
+});
+
+test("start fails closed while the fenced operation has no persisted job yet", async () => {
+  const h = runtime();
+  await h.instance.fence.run(async () => {
+    const response = await h.instance.fetch(h.request("/start"));
+    assert.equal(response.status, 503);
+    assert.equal(h.storage.values.size, 0);
+    assert.equal(h.storage.alarm, null);
+  });
+});
+
+test("start shares run input validation and never mutates on invalid input", async () => {
+  const h = runtime();
+  for (const overrides of [
+    { account_id: "acct_other" }, { backup_id: "backup_invalid" },
+    { object: "accounts/other/archive" }, { scheduled_at: "bad-date" },
+    { max_attempts: 0 }, { catalog_limit: 0 },
+  ]) {
+    for (const path of ["/run", "/start"]) {
+      assert.equal((await h.instance.fetch(h.request(path, overrides))).status, 400);
+    }
+  }
+  assert.equal((await h.instance.fetch(new Request("http://account-backup.internal/start", {
+    method: "POST", body: "{",
+  }))).status, 400);
+  assert.equal(h.storage.values.size, 0);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("manual dispatch and public route return accepted, busy, committed and failed acknowledgements", async () => {
+  const h = runtime();
+  const env = manualEnv(h);
+  const accepted = await runManualAccountBackup(env, ACCOUNT, SCHEDULED_AT);
+  assert.deepEqual(accepted, {
+    schema_version: "witself.v0", account_id: ACCOUNT, backup_id: h.job.backup_id,
+    status: "accepted", scheduled_at: h.job.scheduled_at,
+  });
+  const body = { account_id: ACCOUNT, scheduled_at: h.job.scheduled_at };
+  const response = await manualRoute(env, body);
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), accepted);
+  const otherTime = SCHEDULED_AT + 60_000;
+  const busy = await runManualAccountBackup(env, ACCOUNT, otherTime);
+  assert.equal(busy.status, "busy");
+  assert.equal(busy.current_backup_id, h.job.backup_id);
+  const busyResponse = await manualRoute(env, { ...body, scheduled_at: new Date(otherTime).toISOString() });
+  assert.equal(busyResponse.status, 200);
+  assert.deepEqual(await busyResponse.json(), busy);
+  await h.instance.alarm();
+  const committed = await runManualAccountBackup(env, ACCOUNT, SCHEDULED_AT);
+  assert.equal(committed.status, "committed");
+  const committedResponse = await manualRoute(env, body);
+  assert.equal(committedResponse.status, 200);
+  assert.deepEqual(await committedResponse.json(), committed);
+
+  const failed = runtime({ maxAttempts: 1, fetch: async () => new Response("unavailable", { status: 503 }) });
+  await failed.instance.fetch(failed.request("/start"));
+  await failed.instance.alarm();
+  const failedState = structuredClone(failed.storage.values.get("account-backups"));
+  const failedBody = await runManualAccountBackup(manualEnv(failed), ACCOUNT, SCHEDULED_AT);
+  assert.equal(failedBody.status, "failed");
+  assert.equal(failedBody.attempts, 1);
+  const failedResponse = await manualRoute(manualEnv(failed), body);
+  assert.equal(failedResponse.status, 200);
+  assert.deepEqual(await failedResponse.json(), failedBody);
+  assert.deepEqual(failed.storage.values.get("account-backups"), failedState);
+  assert.equal(failed.storage.alarm, null);
+});
+
+test("manual dispatch rejects malformed, mismatched and unsuccessful acknowledgements", async () => {
+  const h = runtime();
+  const valid = {
+    schema_version: "witself.v0", account_id: ACCOUNT, backup_id: h.job.backup_id,
+    status: "accepted", scheduled_at: h.job.scheduled_at,
+  };
+  for (const body of [null, {}, { ...valid, schema_version: "other" },
+    { ...valid, account_id: "other" }, { ...valid, backup_id: "other" },
+    { ...valid, status: "retrying" }, { ...valid, status: "unknown" }]) {
+    await assert.rejects(runManualAccountBackup(manualEnv(h, () => Response.json(body)), ACCOUNT, SCHEDULED_AT), /not acknowledged/);
+  }
+  for (const response of [new Response("not-json"), Response.json(valid, { status: 500 })]) {
+    await assert.rejects(runManualAccountBackup(manualEnv(h, () => response), ACCOUNT, SCHEDULED_AT), /not acknowledged/);
+  }
+});
+
+test("manual public route preserves account and scheduled-time validation", async () => {
+  const h = runtime();
+  const env = manualEnv(h, () => assert.fail("invalid route input must not dispatch"));
+  for (const body of [{ account_id: "bad account" }, { account_id: ACCOUNT, scheduled_at: "invalid" }]) {
+    assert.equal((await manualRoute(env, body)).status, 400);
+  }
+});
 
 test("scheduled backups are disabled by default without touching bindings", async () => {
   const env = new Proxy({}, {
@@ -1211,6 +1483,35 @@ function streamingRuntime() {
     get aborted() { return aborted; },
   };
 }
+
+test("a cold start alarm retains the export idle watchdog and retry policy", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = streamingRuntime();
+  assert.equal((await h.instance.fetch(h.request("/start"))).status, 202);
+  assert.equal(h.signal, undefined);
+  // Recreate the object with the streaming dependencies but the persisted job.
+  const cold = new DurableAccountBackup(
+    { id: { name: ACCOUNT }, storage: h.storage }, h.instance.env,
+    { fetch: h.instance.fetchImpl, streamArchive: h.instance.streamArchive,
+      validateArchive: h.instance.validateArchive, now: h.instance.now },
+  );
+  h.storage.alarm = null;
+  const running = cold.alarm();
+  await flush();
+  assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+  assert.equal(h.signal.aborted, false);
+  t.mock.timers.tick(IDLE_TIMEOUT_MS);
+  assert.equal((await running).status, "retrying");
+  await flush();
+  assert.equal(h.signal.aborted, true);
+  assert.equal(h.cancelled, true);
+  assert.equal(h.aborted, true);
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.current_job.last_error, "export_idle_timeout");
+  assert.equal(state.current_job.status, "retrying");
+  assert.deepEqual(state.catalog, []);
+  assert.ok(h.storage.alarm > NOW.getTime());
+});
 
 for (const emptyChunks of [false, true]) {
   test(`idle watchdog aborts with no bytes (empty chunks: ${emptyChunks})`, { timeout: 10_000 }, async (t) => {

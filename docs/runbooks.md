@@ -3340,15 +3340,20 @@ curl --fail-with-body -X POST \
   "${CONTROL_PLANE}/v1/backups:run"
 ```
 
-A **502 from the manual run is ambiguous** (#554): check the per-account
-catalog and `current_job` before retrying. The export may still be running or
-may already have committed after the caller lost its acknowledgement. Match
-the requested generation/time; do not create repeated manual generations to
-probe completion.
-
-Copy the returned `backup_id`. If the run reports `retrying`, poll the
-account-specific status endpoint until that exact id appears in the committed
-catalog. Then run the isolated rollback-only restore drill:
+The call returns HTTP 202 `accepted` with the `backup_id` immediately; the
+Durable Object alarm performs the export. Copy that id. If it returns HTTP 200
+`busy`, use `current_backup_id`, the generation already in flight, instead.
+Poll `GET /v1/backups/status?account_id=...` until that exact id appears in
+the committed catalog. Inspect `current_job.status` for progress or failure
+and `last_committed_at` for the latest committed timestamp; the timestamp
+alone does not prove the selected generation committed. A repeat for an
+already committed id returns HTTP 200 `committed`; a terminally failed id
+returns HTTP 200 `failed`. A 502 is still possible in the sub-second window
+while another operation is preparing its first durable job; repeating the
+same call (same `scheduled_at`, or none within the same minute) is safe and
+idempotent, so retry it instead of probing with new generations. Then run
+the isolated rollback-only restore drill only after the selected id is
+committed:
 
 ```sh
 BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
