@@ -7,6 +7,11 @@ apps:
     backup:
       enabled: {{.PostgresBackup}}
     storage: 8Gi
+    # This cell is the restore-drill target: a rollback-only import of the
+    # largest routed account's archive (326 MB on 2026-09-27) OOM-killed
+    # PostgreSQL under nano's 192Mi limit on every drill. Medium (1Gi request,
+    # 1.5Gi limit) leaves the import headroom on this 2.25 GiB single node.
+    resourcesPreset: medium
     # Cells have drifted to different latest digests. Preserve this cell's
     # running image content; cross-cell alignment is a separate reviewed change.
     # A tag-to-digest reference change can still roll the StatefulSet pod.
