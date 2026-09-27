@@ -6811,10 +6811,13 @@ func validBackupID(value string) bool {
 	return validOperationID(value)
 }
 
-var cellNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// cellNamePattern is the control plane's registration grammar for cell names
+// (the same one its backup runtime applies to source cells), so any name the
+// fleet can register is accepted here.
+var cellNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
 func validCellName(value string) bool {
-	return len(value) >= 1 && len(value) <= 64 && cellNamePattern.MatchString(value)
+	return cellNamePattern.MatchString(value)
 }
 
 // Support-ticket handlers. Every one runs behind requireOperator so the

@@ -21,6 +21,10 @@ func TestAccountBackupCellManifestAndEcho(t *testing.T) {
 		{"registered-name", "civo-sandbox-usw2-dev", "civo-sandbox-usw2-dev"},
 		{"absent", "", configuredCell},
 		{"configured-name", configuredCell, configuredCell},
+		{"leading-hyphen", "-leading", "-leading"},
+		{"trailing-hyphen", "trailing-", "trailing-"},
+		{"double-hyphen", "double--hyphen", "double--hyphen"},
+		{"max-length", strings.Repeat("z", 64), strings.Repeat("z", 64)},
 		{"minimum-length", "0", "0"},
 		{"maximum-length", strings.Repeat("z", 64), strings.Repeat("z", 64)},
 	} {
@@ -70,8 +74,8 @@ func TestAccountBackupCellManifestAndEcho(t *testing.T) {
 func TestAccountBackupCellInvalidDoesNotStartExport(t *testing.T) {
 	t.Setenv("WITSELF_CELL_NAME", "configured-cell")
 	for _, names := range [][]string{
-		{""}, {"UPPER"}, {"bad_name"}, {"-leading"}, {"trailing-"},
-		{"double--hyphen"}, {"with.dot"}, {"with/slash"}, {"with space"},
+		{""}, {"UPPER"}, {"bad_name"},
+		{"with.dot"}, {"with/slash"}, {"with space"},
 		{" padded"}, {"padded "}, {"nonascii-é"}, {"newline\n"},
 		{strings.Repeat("z", 65)}, {"one", "two"}, {"one", "one"},
 	} {

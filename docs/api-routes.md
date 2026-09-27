@@ -65,8 +65,8 @@ for watchdog error codes and ambiguous manual-run acknowledgements.
 Cell `POST /v1/accounts/{id}:export-backup` requires the dedicated backup bearer
 and `X-Witself-Backup-ID`. The control plane also sends `X-Witself-Backup-Cell`
 with the registered source cell name to stamp into the archive manifest. If
-present, the cell-name header must be a single value of 1–64 characters matching
-`^[a-z0-9]+(-[a-z0-9]+)*$`; invalid values return HTTP 400 with
+present, the cell-name header must be a single value matching the control
+plane's registration grammar `^[a-z0-9-]{1,64}$`; invalid values return HTTP 400 with
 `a valid backup cell name is required` before export starts. If absent, the cell
 uses `WITSELF_CELL_NAME` for compatibility with older control planes. The cell
 echoes both headers before streaming. A missing or different cell echo makes
