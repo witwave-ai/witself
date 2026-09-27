@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
 )
@@ -206,11 +207,14 @@ func TestAccountBackupArchivePull(t *testing.T) {
 				source = strings.Replace(source, "https://", "https://user@", 1)
 			case "fragment":
 				source += "#fragment"
-			case "size-mismatch", "non-200", "short-body", "redirect":
+			case "size-mismatch", "non-200", "redirect":
 				want = http.StatusBadGateway
 			default:
+				// short-body fails after the streamed headers: status 200 with an
+				// error object instead of the acknowledgement.
 				want = http.StatusOK
 			}
+			downloadFailedAfterHeaders := name == "short-body"
 			cfg := Config{
 				BackupToken: "witself_bkp_test", BackupValidationEnabled: true, BackupValidationArchiveOrigin: origin,
 				ValidateAccountBackup: func(_ context.Context, accountID, backupID string, body io.Reader) (ImportSummary, error) {
@@ -243,10 +247,14 @@ func TestAccountBackupArchivePull(t *testing.T) {
 				t.Fatal("expected exactly one request without redirect")
 			}
 			var result map[string]any
-			if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+			if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
 				t.Fatal(err)
 			}
-			if want == http.StatusOK {
+			if downloadFailedAfterHeaders {
+				if result["error"] != "backup archive download failed" || result["validated"] != nil {
+					t.Fatal("short body must fail closed after the streamed headers")
+				}
+			} else if want == http.StatusOK {
 				if result["validated"] != true || result["account_id"] != "acc_backup" || result["backup_id"] != "bkp_cell_test" || result["purpose"] != "backup" || result["archive_schema_version"] != float64(73) {
 					t.Fatal("missing exact acknowledgement")
 				}
@@ -258,6 +266,67 @@ func TestAccountBackupArchivePull(t *testing.T) {
 				if result["error"] != message || result["validated"] != nil {
 					t.Fatal("failure leaked details or acknowledged validation")
 				}
+			}
+		})
+	}
+}
+
+func TestAccountBackupArchivePullHeartbeats(t *testing.T) {
+	previous := backupValidationHeartbeat
+	backupValidationHeartbeat = 20 * time.Millisecond
+	defer func() { backupValidationHeartbeat = previous }()
+	for _, name := range []string{"ack", "bad-archive"} {
+		t.Run(name, func(t *testing.T) {
+			capability := "cap_" + strings.Repeat("b", 64)
+			cp := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "7")
+				_, _ = io.WriteString(w, "archive")
+			}))
+			cp.EnableHTTP2 = true
+			cp.StartTLS()
+			defer cp.Close()
+			client := newBackupArchiveClient()
+			client.Transport.(*http.Transport).TLSClientConfig.RootCAs = cp.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+			defer client.CloseIdleConnections()
+			cfg := Config{
+				BackupToken: "witself_bkp_test", BackupValidationEnabled: true, BackupValidationArchiveOrigin: cp.URL,
+				ValidateAccountBackup: func(_ context.Context, accountID, backupID string, body io.Reader) (ImportSummary, error) {
+					_, _ = io.Copy(io.Discard, body)
+					time.Sleep(5 * backupValidationHeartbeat)
+					if name == "bad-archive" {
+						return ImportSummary{}, ErrBadArchive
+					}
+					return ImportSummary{AccountID: accountID, BackupID: backupID, Status: "active", SchemaVersion: 73}, nil
+				},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/accounts/acc_backup:validate-backup", nil)
+			req.Header.Set("Authorization", "Bearer witself_bkp_test")
+			req.Header.Set(AccountBackupIDHeader, "bkp_cell_test")
+			req.Header.Set("X-Witself-Backup-Archive-URL", cp.URL+"/v1/backups:archive?account_id=acc_backup")
+			req.Header.Set("X-Witself-Backup-Archive-Token", capability)
+			req.Header.Set("X-Witself-Backup-Archive-Size", "7")
+			recorder := httptest.NewRecorder()
+			accountBackupHandlerWithArchiveClient(cfg, client)(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d want=200 (headers must be sent before the slow validation)", recorder.Code)
+			}
+			raw := recorder.Body.String()
+			heartbeats := len(raw) - len(strings.TrimLeft(raw, "\n"))
+			if heartbeats < 2 {
+				t.Fatalf("expected newline heartbeats before the body, got %d", heartbeats)
+			}
+			var result map[string]any
+			if err := json.NewDecoder(strings.NewReader(raw)).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if name == "bad-archive" {
+				if result["error"] != "invalid or mismatched backup archive" || result["validated"] != nil {
+					t.Fatal("failure after the streamed headers must be a value-free error object")
+				}
+				return
+			}
+			if result["validated"] != true || result["backup_id"] != "bkp_cell_test" || result["purpose"] != "backup" {
+				t.Fatal("missing exact acknowledgement after heartbeats")
 			}
 		})
 	}
