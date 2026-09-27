@@ -62,6 +62,21 @@ the cell's response body text. See
 [periodic account backup operations](runbooks.md#operate-periodic-account-backups)
 for watchdog error codes and ambiguous manual-run acknowledgements.
 
+Cell `POST /v1/accounts/{id}:export-backup` requires the dedicated backup bearer
+and `X-Witself-Backup-ID`. The control plane also sends `X-Witself-Backup-Cell`
+with the registered source cell name to stamp into the archive manifest. If
+present, the cell-name header must be a single value of 1–64 characters matching
+`^[a-z0-9]+(-[a-z0-9]+)*$`; invalid values return HTTP 400 with
+`a valid backup cell name is required` before export starts. If absent, the cell
+uses `WITSELF_CELL_NAME` for compatibility with older control planes. The cell
+echoes both headers before streaming. A missing or different cell echo makes
+the control plane cancel the body and retry with
+`backup export did not acknowledge the exact source cell`.
+`POST /v1/accounts/{id}:validate-backup` retains its existing backup-id and
+archive validation behavior; it does not use the cell-name header.
+Deploy cells before the control plane; see
+[periodic logical account snapshots](backup-and-recovery.md#periodic-logical-account-snapshots).
+
 > **Sealed-plane implementation amendment (accepted 2026-07-23):** schema 67
 > extends the current agent-owned ciphertext API through multi-installation AVK
 > enrollment, crash-resumable AVK rotation, retained-secret status/enforcement,

@@ -17,7 +17,7 @@ func TestAccountBackupFlushReachesHTTPBeforeCompletion(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	srv := httptest.NewServer(apiMux(Config{
 		BackupToken: "witself_bkp_test",
-		StreamAccountBackup: func(ctx context.Context, _, _ string, w io.Writer, flush func() error) error {
+		StreamAccountBackup: func(ctx context.Context, _, _, _ string, w io.Writer, flush func() error) error {
 			if _, err := io.WriteString(w, "chunk"); err != nil {
 				return err
 			}
@@ -76,7 +76,7 @@ func TestAccountBackupFlushUnavailableOrFailed(t *testing.T) {
 			var reported error
 			handler := accountBackupHandler(Config{
 				BackupToken: "witself_bkp_test",
-				StreamAccountBackup: func(_ context.Context, _, _ string, w io.Writer, flush func() error) error {
+				StreamAccountBackup: func(_ context.Context, _, _, _ string, w io.Writer, flush func() error) error {
 					_, _ = io.WriteString(w, "chunk")
 					return flush()
 				},

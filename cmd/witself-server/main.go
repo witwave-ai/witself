@@ -1361,11 +1361,13 @@ func serve() int {
 		}
 		cfg.StreamAccountBackup = func(
 			ctx context.Context,
-			accountID, backupID string,
+			accountID, backupID, cellName string,
 			w io.Writer,
 			flush func() error,
 		) error {
-			cellName := os.Getenv("WITSELF_CELL_NAME")
+			if cellName != os.Getenv("WITSELF_CELL_NAME") {
+				_, _ = fmt.Fprintln(os.Stderr, "account backup manifest stamped with the control plane's cell name")
+			}
 			err := st.ExportAccountBackup(
 				ctx, accountID, backupID, cellName, version.Version, w, flush,
 			)

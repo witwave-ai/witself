@@ -869,6 +869,7 @@ export class DurableAccountBackup {
             headers: {
               Authorization: `Bearer ${source.backup_token}`,
               "X-Witself-Backup-ID": job.backup_id,
+              "X-Witself-Backup-Cell": source.name,
             },
             signal: watchdog.signal,
           },
@@ -883,6 +884,15 @@ export class DurableAccountBackup {
           response.body.cancel().catch(() => {});
           throw new Error(
             "backup export did not acknowledge the exact backup id",
+          );
+        }
+
+        if (
+          response.headers.get("X-Witself-Backup-Cell") !== source.name
+        ) {
+          response.body.cancel().catch(() => {});
+          throw new Error(
+            "backup export did not acknowledge the exact source cell",
           );
         }
 
