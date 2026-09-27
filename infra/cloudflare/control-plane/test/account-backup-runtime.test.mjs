@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { uptimeProbeMetricsResponse } from "../src/uptime-probes.mjs";
+import { streamToR2Multipart } from "../src/account-lifecycle-runtime.mjs";
 
 import {
   ACCOUNT_BACKUP_SCAN_KEY,
+  ACCOUNT_BACKUP_SCAN_SCHEMA,
   ACCOUNT_BACKUP_STATE_SCHEMA,
+  IDLE_TIMEOUT_MS,
+  OVERALL_TIMEOUT_MS,
+  accountBackupHealth,
+  accountBackupStatus,
   backupJobIdentity,
   DurableAccountBackup,
   runAccountBackupValidation,
@@ -484,6 +491,7 @@ test("scheduled scan preserves bounded failures across later successful pages", 
   );
   const finalScan = directoryBinding.value(
     ACCOUNT_BACKUP_SCAN_KEY,
+  ACCOUNT_BACKUP_SCAN_SCHEMA,
   );
 
   assert.equal(first.complete, false);
@@ -1164,4 +1172,444 @@ test("backup validation rechecks target isolation before recording its receipt",
     true,
   );
   assert.deepEqual(receipts, []);
+});
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+function streamingRuntime() {
+  let upstream;
+  let signal;
+  let cancelled = false;
+  let aborted = false;
+  const bucket = new Bucket();
+  let bytes = 0;
+  bucket.createMultipartUpload = async (object, options) => ({
+    uploadPart: async (partNumber, body) => {
+      bytes += body.byteLength;
+      return { partNumber, etag: `part-${partNumber}` };
+    },
+    complete: async () => bucket.write(object, "x".repeat(bytes), options.customMetadata),
+    abort: async () => { aborted = true; },
+  });
+  const harness = runtime({
+    bucket,
+    fetch: async (_url, options) => {
+      signal = options.signal;
+      return new Response(new ReadableStream({
+        start(controller) { upstream = controller; },
+        cancel() { cancelled = true; },
+      }), { headers: { "X-Witself-Backup-ID": harness.job.backup_id } });
+    },
+    // Exercise the real multipart abort/complete path as well as body reads.
+    streamArchive: streamToR2Multipart,
+  });
+  return {
+    ...harness,
+    get upstream() { return upstream; },
+    get signal() { return signal; },
+    get cancelled() { return cancelled; },
+    get aborted() { return aborted; },
+  };
+}
+
+for (const emptyChunks of [false, true]) {
+  test(`idle watchdog aborts with no bytes (empty chunks: ${emptyChunks})`, { timeout: 10_000 }, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = streamingRuntime();
+    const running = h.instance.fetch(h.request());
+    await flush();
+    t.mock.timers.tick(IDLE_TIMEOUT_MS - 1);
+    if (emptyChunks) h.upstream.enqueue(new Uint8Array());
+    await flush();
+    assert.equal(h.signal.aborted, false);
+    t.mock.timers.tick(1);
+    assert.equal((await (await running).json()).status, "retrying");
+    await flush();
+    assert.equal(h.storage.values.get("account-backups").current_job.last_error, "export_idle_timeout");
+    assert.equal(h.signal.aborted, true);
+    assert.equal(h.cancelled, true);
+    assert.equal(h.aborted, true);
+    assert.deepEqual(h.storage.values.get("account-backups").catalog, []);
+  });
+}
+
+test("idle watchdog also bounds a fetch that never returns headers", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let signal;
+  const h = runtime({ fetch: (_url, options) => {
+    signal = options.signal;
+    return new Promise(() => {});
+  } });
+  const running = h.instance.fetch(h.request());
+  await flush();
+  t.mock.timers.tick(IDLE_TIMEOUT_MS);
+  assert.equal((await (await running).json()).status, "retrying");
+  assert.equal(signal.aborted, true);
+  assert.equal(h.storage.values.get("account-backups").current_job.last_error, "export_idle_timeout");
+});
+
+test("body progress continues beyond five minutes and commits verified multipart", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = streamingRuntime();
+  const running = h.instance.fetch(h.request());
+  await flush();
+  for (let minute = 0; minute < 7; minute++) {
+    t.mock.timers.tick(60_000);
+    h.upstream.enqueue(new Uint8Array([1]));
+    await flush();
+    assert.equal(h.signal.aborted, false);
+  }
+  h.upstream.close();
+  assert.equal((await (await running).json()).status, "committed");
+  t.mock.timers.tick(OVERALL_TIMEOUT_MS);
+  assert.equal(h.signal.aborted, false, "settlement clears both timers");
+  assert.equal(h.aborted, false);
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.catalog.length, 1);
+  assert.equal(state.catalog[0].committed_at, NOW.toISOString());
+});
+
+test("overall ceiling aborts even with continuous body progress", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = streamingRuntime();
+  const running = h.instance.fetch(h.request());
+  await flush();
+  for (let elapsed = 60_000; elapsed < OVERALL_TIMEOUT_MS; elapsed += 60_000) {
+    t.mock.timers.tick(60_000);
+    h.upstream.enqueue(new Uint8Array([1]));
+    await flush();
+    assert.equal(h.signal.aborted, false);
+  }
+  t.mock.timers.tick(60_000);
+  assert.equal((await (await running).json()).status, "retrying");
+  await flush();
+  assert.equal(h.storage.values.get("account-backups").current_job.last_error, "export_overall_timeout");
+  assert.equal(h.aborted, true);
+  assert.equal(h.cancelled, true);
+});
+
+for (const phase of ["fetch", "body"]) {
+  test(`connection loss during ${phase} has a bounded code and retains retry policy`, async () => {
+    const h = phase === "body" ? streamingRuntime() : runtime({
+      fetch: async () => { throw new Error("Network connection lost. private upstream detail"); },
+    });
+    const running = h.instance.fetch(h.request());
+    if (phase === "body") {
+      await flush();
+      h.upstream.error(new Error("Network connection lost. private upstream detail"));
+    }
+    assert.equal((await (await running).json()).status, "retrying");
+    const state = h.storage.values.get("account-backups");
+    assert.equal(state.current_job.last_error, "connection_lost");
+    assert.notEqual(h.storage.alarm, null);
+    assert.deepEqual(state.catalog, []);
+  });
+}
+
+function healthEnv(records) {
+  const entries = {};
+  for (const id of Object.keys(records)) entries[`acct:${id}`] = sourceRoute();
+  return {
+    CP_ACCOUNT_BACKUPS_ENABLED: "true",
+    DIRECTORY: new KV(entries),
+    BACKUPS: {},
+    ACCOUNT_BACKUP: {
+      idFromName: (name) => name,
+      get: (id) => ({ fetch: async () => {
+        const backups = records[id];
+        return backups ? Response.json({
+          schema_version: "witself.v0", account_id: id, backups,
+        }) : new Response("unavailable", { status: 503 });
+      } }),
+    },
+  };
+}
+
+function catalogState(id, dates) {
+  return {
+    schema_version: ACCOUNT_BACKUP_STATE_SCHEMA,
+    account_id: id, revision: 1, current_job: null, failures: [],
+    catalog: dates.map((at, index) => ({
+      ...committedRecord(backupJobIdentity(id, SCHEDULED_AT - index * 60_000, 1)),
+      account_id: id, verified_at: at,
+    })),
+  };
+}
+
+test("status uses newest committed evidence, null for none, and excludes nonlive accounts", async () => {
+  const now = Date.now();
+  const at = (age) => new Date(now - age * 1000).toISOString();
+  const records = {
+    acct_old: catalogState("acct_old", [at(400_000), at(200_000)]),
+    acct_fresh: catalogState("acct_fresh", [at(30)]),
+    acct_never: catalogState("acct_never", []),
+    acct_archived: catalogState("acct_archived", []),
+    acct_pending: catalogState("acct_pending", []),
+  };
+  records.acct_fresh.catalog[0].committed_at = at(10);
+  const env = healthEnv(records);
+  await env.DIRECTORY.put("archived:acct_archived", "true");
+  await env.DIRECTORY.put("pending:acct_pending", "true");
+  const status = await accountBackupStatus(env);
+  assert.equal(status.stale_accounts, 1);
+  assert.equal(status.never_committed_accounts, 1);
+  assert.equal(status.health_available, true);
+  assert.ok(status.oldest_committed_age_seconds >= 200_000);
+  assert.ok(status.oldest_committed_age_seconds < 200_002);
+  assert.equal((await accountBackupStatus(env, "acct_old")).account.last_committed_at, at(200_000));
+  assert.equal((await accountBackupStatus(env, "acct_fresh")).account.last_committed_at, at(10));
+  assert.equal((await accountBackupStatus(env, "acct_never")).account.last_committed_at, null);
+  assert.deepEqual(await accountBackupHealth(healthEnv({})), {
+    stale_accounts: 0, oldest_committed_age_seconds: null, never_committed_accounts: 0, health_available: true,
+  });
+  const h = runtime();
+  assert.equal((await (await h.instance.fetch(new Request("http://backup/status"))).json()).last_committed_at, null);
+  await h.instance.fetch(h.request());
+  assert.equal((await (await h.instance.fetch(new Request("http://backup/status"))).json()).last_committed_at, NOW.toISOString());
+});
+
+test("fleet health traverses pages and uses strictly greater than twice interval", async () => {
+  const now = Date.now();
+  const env = healthEnv({});
+  const seen = [];
+  const result = await accountBackupHealth(env, {
+    now: () => now,
+    activeAccountPage: async (_env, _limit, cursor) => {
+      seen.push(cursor);
+      return cursor ? { account_ids: ["acct_late"], next_cursor: null }
+        : { account_ids: ["acct_boundary"], next_cursor: "next" };
+    },
+    status: async (_env, id) => ({
+      last_committed_at: new Date(now - (172_800_000 + (id === "acct_late" ? 1 : 0))).toISOString(),
+      backups: { current_job: null, failures: [] },
+    }),
+  });
+  assert.deepEqual(seen, [undefined, "next"]);
+  assert.deepEqual(result, { stale_accounts: 1, oldest_committed_age_seconds: 172800, never_committed_accounts: 0, health_available: true });
+  await assert.rejects(accountBackupHealth(env, {
+    activeAccountPage: async () => ({ account_ids: [], next_cursor: "cycle" }),
+  }), /incomplete/);
+  const broken = healthEnv({ acct_broken: null });
+  await broken.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify({ retained: true }));
+  const degraded = await accountBackupStatus(broken);
+  assert.equal(degraded.schema_version, "witself.v0");
+  assert.equal(degraded.schedule.enabled, true);
+  assert.deepEqual(degraded.scan, { retained: true });
+  assert.equal(degraded.health_available, false);
+  assert.equal(degraded.stale_accounts, null);
+  assert.equal(degraded.oldest_committed_age_seconds, null);
+  assert.equal(degraded.never_committed_accounts, null);
+
+  let pages = 0;
+  broken.DIRECTORY.list = async () => ({ keys: [], list_complete: false, cursor: `page-${++pages}` });
+  const capped = await accountBackupStatus(broken);
+  assert.equal(pages, 100);
+  assert.equal(capped.health_available, false);
+  assert.equal(capped.stale_accounts, null);
+  assert.deepEqual(capped.scan, { retained: true });
+});
+
+test("scan counts previous-slot terminal failures once before dispatch across pages", async () => {
+  const env = healthEnv({});
+  const slot = backupJobIdentity("slot", SCHEDULED_AT, 1440).scheduled_at;
+  const previous = new Date(Date.parse(slot) - 86400_000).toISOString();
+  const events = [];
+  const dependencies = {
+    activeAccountPage: async (_env, _limit, cursor) => cursor
+      ? { account_ids: ["acct_unavailable", "acct_older"], next_cursor: null }
+      : { account_ids: ["acct_failed", "acct_retrying"], next_cursor: "next" },
+    status: async (_env, id) => {
+      events.push(`status:${id}`);
+      if (id === "acct_unavailable") throw new Error("unavailable");
+      const job = { status: id === "acct_retrying" ? "retrying" : "failed",
+        scheduled_at: id === "acct_older" ? "2026-07-01T00:00:00.000Z" : previous };
+      return { last_committed_at: null, backups: { current_job: job, failures: [job] } };
+    },
+    dispatch: async (_env, job) => {
+      assert.ok(events.includes(`status:${job.account_id}`));
+      return { accepted: true, status: "retrying" };
+    },
+  };
+  await runScheduledAccountBackups(env, SCHEDULED_AT, dependencies);
+  const result = await runScheduledAccountBackups(env, SCHEDULED_AT, dependencies);
+  const cached = await runScheduledAccountBackups(env, SCHEDULED_AT, dependencies);
+  assert.equal(result.accepted, 4);
+  assert.equal(result.failed, 0);
+  assert.equal(result.previous_slot_terminal_failures, 1);
+  assert.equal(result.previous_slot_status_unavailable, 1);
+  assert.equal(cached.previous_slot_terminal_failures, 1);
+  assert.equal(env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).previous_slot_terminal_failures, 1);
+});
+
+test("public scrape reads only the persisted backup snapshot and fails KV reads as scrape failures", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: SCHEDULED_AT });
+  const env = healthEnv({});
+  const health = {
+    stale_accounts: 2, never_committed_accounts: 3,
+    oldest_committed_age_seconds: 200_000, health_available: true,
+    computed_at: new Date(SCHEDULED_AT - 60_000).toISOString(),
+    private_metadata: "acct_private",
+  };
+  await env.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify({
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health,
+  }));
+  const get = env.DIRECTORY.get.bind(env.DIRECTORY);
+  const reads = [];
+  env.DIRECTORY.get = async (key, options) => {
+    assert.ok(!key.startsWith("acct:"));
+    reads.push(key);
+    return get(key, options);
+  };
+  env.DIRECTORY.list = () => assert.fail("scrape must not list accounts");
+  env.ACCOUNT_BACKUP.get = () => assert.fail("scrape must not read Durable Objects");
+  const scrape = () => uptimeProbeMetricsResponse(new Request("https://example/metrics/probes"), env);
+  const response = await scrape();
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.match(text, /witself_control_plane_account_backup_stale_accounts 2\n/);
+  assert.match(text, /witself_control_plane_account_backup_never_committed_accounts 3\n/);
+  assert.match(text, /witself_control_plane_account_backup_oldest_committed_age_seconds 200000\n/);
+  assert.match(text, /witself_control_plane_account_backup_health_available 1\n/);
+  assert.match(text, /witself_control_plane_account_backup_health_age_seconds 60\n/);
+  assert.match(text, /witself_control_plane_account_backup_interval_seconds 86400\n/);
+  assert.equal(reads.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length, 1);
+  assert.doesNotMatch(text, /acct_private|account_id|backup_id/);
+  env.DIRECTORY.get = (key, options) => key === ACCOUNT_BACKUP_SCAN_KEY
+    ? new Promise(() => {}) : get(key, options);
+  const running = scrape();
+  await flush();
+  t.mock.timers.tick(5000);
+  const failed = await running;
+  assert.equal(failed.status, 503);
+  assert.equal(await failed.text(), "probe results unavailable\n");
+});
+
+test("missing, legacy, malformed and failed health snapshots cannot publish healthy counts", async () => {
+  const env = healthEnv({});
+  for (const scan of [null, {}, {
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
+    health: { computed_at: NOW.toISOString(), health_available: true, stale_accounts: "private" },
+  }, {
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
+    health: { computed_at: NOW.toISOString(), health_available: false, stale_accounts: 1 },
+  }]) {
+    await env.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
+    const response = await uptimeProbeMetricsResponse(new Request("https://example/metrics/probes"), env);
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /witself_control_plane_account_backup_health_available 0\n/);
+    assert.doesNotMatch(text, /account_backup_stale_accounts|account_backup_never_committed_accounts/);
+  }
+});
+
+test("never committed accounts get strictly two intervals from their earliest known job", async () => {
+  const now = SCHEDULED_AT;
+  const at = (age) => new Date(now - age).toISOString();
+  const records = {
+    new: { current_job: null, failures: [] },
+    recent: { current_job: { scheduled_at: at(60_000) }, failures: [] },
+    boundary: { current_job: { scheduled_at: at(172_800_000) }, failures: [] },
+    late: { current_job: { scheduled_at: at(172_800_001) }, failures: [] },
+    history: { current_job: { scheduled_at: at(60_000) }, failures: [
+      { scheduled_at: at(120_000) }, { scheduled_at: at(172_800_001) },
+    ] },
+  };
+  const health = await accountBackupHealth(healthEnv({}), {
+    now: () => now,
+    activeAccountPage: async () => ({ account_ids: Object.keys(records), next_cursor: null }),
+    status: async (_env, id) => ({ last_committed_at: null, backups: records[id] }),
+  });
+  assert.deepEqual(health, { stale_accounts: 2, never_committed_accounts: 5,
+    oldest_committed_age_seconds: null, health_available: true });
+});
+
+test("scan health accumulates before dispatch and retains a completed snapshot across pages and slots", async () => {
+  const env = healthEnv({});
+  const staleAt = new Date(SCHEDULED_AT - 172_800_001).toISOString();
+  let statusReads = 0;
+  const deps = {
+    activeAccountPage: async (_env, _limit, cursor) => cursor
+      ? { account_ids: ["acct_never"], next_cursor: null }
+      : { account_ids: ["acct_old"], next_cursor: "next" },
+    status: async (_env, id) => {
+      statusReads++;
+      return { last_committed_at: id === "acct_old" ? staleAt : null,
+        backups: { current_job: null, failures: [] } };
+    },
+    dispatch: async () => ({ accepted: true, status: "committed" }),
+  };
+  await runScheduledAccountBackups(env, SCHEDULED_AT, deps);
+  assert.equal(env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).health.health_available, false);
+  await runScheduledAccountBackups(env, SCHEDULED_AT + 60_000, deps);
+  const health = env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).health;
+  assert.deepEqual(health, { stale_accounts: 1, never_committed_accounts: 1,
+    oldest_committed_age_seconds: 172800, health_available: true,
+    computed_at: new Date(SCHEDULED_AT).toISOString() });
+  assert.equal(statusReads, 2, "health reuses pre-dispatch reads");
+  assert.deepEqual((await accountBackupStatus(env)).scan.health, health);
+  await runScheduledAccountBackups(env, SCHEDULED_AT + 86400_000, deps);
+  assert.deepEqual(env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).health, health);
+  deps.status = async () => { throw new Error("private failure"); };
+  await runScheduledAccountBackups(env, SCHEDULED_AT + 86460_000, deps);
+  assert.deepEqual(env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).health, {
+    stale_accounts: null, never_committed_accounts: null, oldest_committed_age_seconds: null,
+    health_available: false, computed_at: new Date(SCHEDULED_AT + 86400_000).toISOString(),
+  });
+});
+
+test("empty scans are healthy but resumed legacy pages cannot fabricate complete health", async () => {
+  const env = healthEnv({});
+  const deps = {
+    activeAccountPage: async () => ({ account_ids: [], next_cursor: null }),
+    dispatch: () => assert.fail("empty scan must not dispatch"),
+  };
+  await runScheduledAccountBackups(env, SCHEDULED_AT, deps);
+  const scan = env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY);
+  assert.deepEqual(scan.health, { stale_accounts: 0, never_committed_accounts: 0,
+    oldest_committed_age_seconds: null, health_available: true,
+    computed_at: new Date(SCHEDULED_AT).toISOString() });
+  const text = await (await uptimeProbeMetricsResponse(new Request("https://example/metrics/probes"), env)).text();
+  assert.match(text, /witself_control_plane_account_backup_oldest_committed_age_seconds 0\n/);
+  assert.match(text, /witself_control_plane_account_backup_health_available 1\n/);
+  delete scan.health;
+  delete scan.health_progress;
+  Object.assign(scan, { complete: false, cursor: "legacy-page", scanned: 1, accepted: 1 });
+  await env.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
+  await runScheduledAccountBackups(env, SCHEDULED_AT, deps);
+  const resumed = env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).health;
+  assert.equal(resumed.health_available, false);
+  assert.equal(resumed.stale_accounts, null);
+  assert.equal(resumed.never_committed_accounts, null);
+});
+
+test("EOF stops idle timeout but overall ceiling still bounds a stuck multipart completion", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = streamingRuntime();
+  const original = h.bucket.createMultipartUpload;
+  h.bucket.createMultipartUpload = async (...args) => ({
+    ...await original(...args), complete: () => new Promise(() => {}),
+  });
+  const running = h.instance.fetch(h.request());
+  await flush();
+  h.upstream.enqueue(new Uint8Array([1]));
+  h.upstream.close();
+  await flush();
+  t.mock.timers.tick(IDLE_TIMEOUT_MS);
+  assert.equal(h.signal.aborted, false);
+  t.mock.timers.tick(OVERALL_TIMEOUT_MS - IDLE_TIMEOUT_MS);
+  assert.equal((await (await running).json()).status, "retrying");
+  assert.equal(h.storage.values.get("account-backups").current_job.last_error, "export_overall_timeout");
+  assert.deepEqual(h.storage.values.get("account-backups").catalog, []);
+});
+
+test("watchdog failure code survives the final attempt and clears the alarm", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = runtime({ maxAttempts: 1, fetch: () => new Promise(() => {}) });
+  const running = h.instance.fetch(h.request());
+  await flush();
+  t.mock.timers.tick(IDLE_TIMEOUT_MS);
+  assert.equal((await (await running).json()).status, "failed");
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.failures[0].last_error, "export_idle_timeout");
+  assert.equal(h.storage.alarm, null);
 });

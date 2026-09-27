@@ -1,3 +1,4 @@
+import { ACCOUNT_BACKUP_SCAN_KEY, accountBackupConfig, accountBackupHealthSnapshot } from "./account-backup-runtime.mjs";
 import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
 
 // Use a dedicated five-minute Workers cron and reuse DIRECTORY. An Actions
@@ -341,6 +342,33 @@ async function readRun(directory, signal) {
   };
 }
 
+async function accountBackupLines(env) {
+  const enabled = String(env.CP_ACCOUNT_BACKUPS_ENABLED ?? "").trim().toLowerCase() === "true";
+  const values = { enabled: Number(enabled), health_available: 0 };
+  if (enabled) {
+    const scan = await bounded(
+      () => env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" }),
+      SNAPSHOT_TIMEOUT_MS,
+    );
+    const health = accountBackupHealthSnapshot(scan);
+    values.interval_seconds = accountBackupConfig(env).interval_minutes * 60;
+    values.health_available = Number(health.health_available);
+    if (health.computed_at !== null) {
+      values.health_age_seconds = Math.max(0, Math.floor((Date.now() - Date.parse(health.computed_at)) / 1000));
+    }
+    if (health.health_available) {
+      values.stale_accounts = health.stale_accounts;
+      values.never_committed_accounts = health.never_committed_accounts;
+      // Prometheus has no null; zero means no committed catalog exists.
+      values.oldest_committed_age_seconds = health.oldest_committed_age_seconds ?? 0;
+    }
+  }
+  return Object.entries(values).flatMap(([suffix, value]) => {
+    const name = `witself_control_plane_account_backup_${suffix}`;
+    return [`# TYPE ${name} gauge`, `${name} ${value}`];
+  });
+}
+
 export async function uptimeProbeMetricsResponse(request, env) {
   const headers = {
     "Cache-Control": "no-store",
@@ -354,6 +382,8 @@ export async function uptimeProbeMetricsResponse(request, env) {
   // Failure-isolated and independently bounded: an entitlement checkpoint
   // outage must not change healthy probe exposition to HTTP 503.
   const delivery = entitlementDeliveryLines(env);
+  // A failed KV read is a scrape failure, not a newly computed unhealthy fleet.
+  const backups = accountBackupLines(env).catch(() => null);
   try {
     const { scheduler, targets, writeOk, recoveredFromMalformed = false } = await bounded(
       (signal) => readRun(env.DIRECTORY, signal), SNAPSHOT_TIMEOUT_MS,
@@ -391,7 +421,9 @@ export async function uptimeProbeMetricsResponse(request, env) {
     for (const row of targets.filter((row) => targetState(row) === "skipped")) {
       lines.push(`witself_probe_skipped{target="${row.target}"} 1`);
     }
-    lines.push(...await delivery);
+    const backupLines = await backups;
+    if (backupLines === null) throw new Error("backup snapshot unavailable");
+    lines.push(...await delivery, ...backupLines);
     return new Response(`${lines.join("\n")}\n`, { headers });
   } catch {
     return new Response("probe results unavailable\n", { status: 503, headers });

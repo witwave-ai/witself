@@ -1,5 +1,67 @@
 # Witself API Routes
 
+## Periodic account backup status (control plane)
+
+`GET /v1/backups/status[?account_id=ACCOUNT_ID]` uses the fleet bearer.
+It returns `schema_version: "witself.v0"`, the existing `schedule` configuration,
+and the persisted `scan` (or null). Additive fields:
+
+| Scope | Field | Meaning |
+| --- | --- | --- |
+| Fleet (no account selector) | `stale_accounts` | Live routed accounts whose newest commit is strictly older than 2 × interval, or which have never committed and whose earliest known job is strictly older than 2 × interval. Pending/archived accounts are excluded. Null when live health is unavailable. |
+| Fleet | `oldest_committed_age_seconds` | Nonnegative integer maximum age of each live account's newest commit; null when no account has a commit or live health is unavailable. |
+| Fleet | `never_committed_accounts` | All live accounts without a commit, including overdue ones also counted as stale. Null when live health is unavailable. |
+| Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
+| Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
+| Scan | `previous_slot` | Immediately preceding scheduled interval's timestamp. |
+| Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot; deduplicated between current job and failure history. |
+| Scan | `previous_slot_status_unavailable` | Accounts whose previous-slot state could not be read; never interpreted as success. |
+| Scan | `health` | Persisted fleet health snapshot used by Prometheus: `stale_accounts`, `oldest_committed_age_seconds`, `never_committed_accounts`, `health_available`, and `computed_at`. |
+| Scan | `health_progress` | Internal aggregate progress for the current traversal; not published as complete health. |
+
+Scan counters accumulate over cursor pages; `complete` marks full traversal.
+Existing `accepted` and `failed` retain dispatch semantics. Each scheduled scan
+reuses the pre-dispatch account-status reads to compute health. On completion,
+it publishes `scan.health`; while a subsequent scan is incomplete, the prior
+snapshot remains visible. `computed_at` is the first page's observation time,
+also used to calculate ages and staleness throughout that traversal. An unreadable
+account makes the completed snapshot unavailable with null aggregate counts.
+Legacy scan records have no health snapshot until a new full scan completes.
+
+Authenticated fleet health reads current catalogs with bounded concurrency and
+a maximum of 100 directory pages. Any health failure returns HTTP 200 with the
+existing `schedule` and `scan`, `health_available: false`, and all three live
+aggregate fields null. This preserves operational status during an account
+outage; null must not be interpreted as zero. The persisted `scan.health` can
+differ from these live fields because it describes the last completed scan.
+No account values are included in the new aggregate health fields.
+
+For an account with no committed backup, the earliest known job is the minimum
+of `backups.current_job.scheduled_at` and all `backups.failures[].scheduled_at`.
+With no known job, or a job at most two intervals old, the account contributes
+only to `never_committed_accounts`, which has no critical alert. An overdue
+never-committed account contributes to both counts.
+
+Public `/metrics/probes` reads the persisted scan once, without listing accounts
+or reading account Durable Objects. Aggregate gauges use the prefix
+`witself_control_plane_account_backup_`: `enabled`, `interval_seconds`,
+`health_available`, `health_age_seconds`, `stale_accounts`,
+`never_committed_accounts`, and `oldest_committed_age_seconds`. Snapshot age is
+time since `computed_at`; commit age is the age recorded at computation, or zero
+when no commits exist. Disabled schedules expose only enabled/availability.
+Missing, legacy, malformed or unavailable snapshots expose availability zero
+and omit aggregate counts; snapshot age is omitted without a valid timestamp.
+The single snapshot read has a five-second budget; a read failure returns a
+value-free HTTP 503, not a newly computed health failure. The health alert fires
+when enabled and snapshot availability is zero or snapshot age exceeds three
+configured intervals, sustained for five minutes. Existing scrape availability
+alerts cover HTTP failures.
+
+A non-OK cell export records `last_error` as `backup export <status>` without
+the cell's response body text. See
+[periodic account backup operations](runbooks.md#operate-periodic-account-backups)
+for watchdog error codes and ambiguous manual-run acknowledgements.
+
 > **Sealed-plane implementation amendment (accepted 2026-07-23):** schema 67
 > extends the current agent-owned ciphertext API through multi-installation AVK
 > enrollment, crash-resumable AVK rotation, retained-secret status/enforcement,

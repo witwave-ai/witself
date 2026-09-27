@@ -3340,6 +3340,12 @@ curl --fail-with-body -X POST \
   "${CONTROL_PLANE}/v1/backups:run"
 ```
 
+A **502 from the manual run is ambiguous** (#554): check the per-account
+catalog and `current_job` before retrying. The export may still be running or
+may already have committed after the caller lost its acknowledgement. Match
+the requested generation/time; do not create repeated manual generations to
+probe completion.
+
 Copy the returned `backup_id`. If the run reports `retrying`, poll the
 account-specific status endpoint until that exact id appears in the committed
 catalog. Then run the isolated rollback-only restore drill:
@@ -3369,7 +3375,64 @@ printf '%s' true |
 ```
 
 Confirm `/v1/backups/status` reports `schedule.enabled=true`, then watch it
-through at least one complete cursor scan. Set the secret to `false` (or delete
+through at least one complete cursor scan. `scan.accepted` counts dispatch
+acceptance, not completion; `scan.failed` remains dispatch failures. Inspect
+`scan.previous_slot_terminal_failures` for accounts with a terminal failure
+in the immediately preceding scheduled slot, and
+`scan.previous_slot_status_unavailable` for accounts whose state could not be
+read. These counters accumulate over the scan's pages, before new dispatches;
+only `scan.complete=true` represents the whole scan. Retry-in-progress is not
+a terminal failure. Failures from older slots are not included in that counter.
+
+Per-account `account.last_committed_at` is null until a verified catalog entry
+exists. New entries retain `committed_at`; older entries use `verified_at` as
+the best retained commit-time evidence. Fleet `stale_accounts` counts live
+routed accounts (excluding pending/archived accounts) with a newest commit
+strictly older than twice the configured interval. Accounts without a commit
+become stale only when their earliest known current or failed job's
+`scheduled_at` is strictly older than twice the interval. All accounts without
+a commit also contribute to `never_committed_accounts`; that gauge alone never
+pages. With no known job there is no overdue evidence.
+`oldest_committed_age_seconds` is the maximum age of those accounts' newest
+commits, or null when none has a commit. Authenticated live health discovery is
+capped at 100 pages. Failed or incomplete health reads preserve HTTP 200 and
+`schedule`/`scan`, with `health_available: false` and all live aggregates null.
+
+The export watchdog aborts after 120 seconds without body bytes (including
+waiting for response headers); each nonempty chunk resets that deadline.
+A separate 60-minute ceiling bounds fetch and multipart transfer even with
+progress. EOF stops the idle timer; the ceiling still bounds R2 completion.
+Catalog `current_job.last_error`/`failures[].last_error` distinguish
+`export_idle_timeout`, `export_overall_timeout`, and `connection_lost`.
+The existing retry budget and backoff still apply. This does not extend the
+edge/provider's own connection or invocation lifetime; cell streaming and
+provider-compatible execution remain necessary.
+
+The public `/metrics/probes` scrape reads only `scan.health`, persisted by the
+scheduled scan using the same per-account status reads as previous-slot failure
+accounting. Counts cover the entire traversal; the last completed snapshot stays
+visible while a later scan progresses. `computed_at` is the first page's
+observation time, used throughout that traversal for age and stale calculations.
+Compare this snapshot with the authenticated fleet route's live health fields.
+
+Gauges prefixed `witself_control_plane_account_backup_` are `enabled`,
+`interval_seconds`, `health_available`, `health_age_seconds`, `stale_accounts`,
+`never_committed_accounts`, and `oldest_committed_age_seconds`. The last gauge
+is the computed commit age (zero when no commits exist); snapshot age measures
+time since `computed_at`. Missing or incomplete health evidence sets availability
+to zero and omits aggregate counts. Disabled schedules expose enabled/availability
+only. A failed five-second snapshot KV read returns HTTP 503 and is covered by
+existing scrape availability alerts.
+
+With uptime-probe scraping and founder-open-plane rules enabled,
+`WitselfAccountBackupStale` pages after five minutes of overdue backup evidence.
+`WitselfAccountBackupHealthUnavailable` pages after five minutes of availability
+zero or snapshot age greater than three configured intervals. For old snapshots,
+inspect scan cursor progress and the scheduler; do not infer fresh health from
+old counts. These metrics contain no account ids, backup ids, object paths, or
+error text.
+
+Set the secret to `false` (or delete
 it, since absence is disabled) to stop future periodic scans. Do not
 enable the schedule when the backup bucket, credential rollout, or drill-cell
 is incomplete. Provider PostgreSQL PITR remains required.
