@@ -106,7 +106,8 @@ helm template witself-apps "$apps_chart" \
   --set cell.name=civo-ci-use1-legacy \
   --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.chartVersion=0.0.223 \
-  --set apps.witselfServer.imageTag=0.0.223 >"$civo_legacy_apps_render"
+  --set apps.witselfServer.imageTag=0.0.223 \
+  --set apps.civoPostgres.resourcesPreset=nano >"$civo_legacy_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --set-string apps.civoPostgres.resourcesPreset= >"$civo_default_preset_apps_render"
@@ -641,8 +642,10 @@ extract_document Application witself-postgresql "$civo_legacy_apps_render" "$civ
 extract_document Application witself-postgresql "$civo_default_preset_apps_render" "$civo_default_preset_postgres_application"
 require_line "          resourcesPreset: micro" "$civo_postgres_application"
 reject_line "          resourcesPreset: nano" "$civo_postgres_application"
-require_line "          resourcesPreset: nano" "$civo_backup_postgres_application"
-reject_line "          resourcesPreset: micro" "$civo_backup_postgres_application"
+# The restore-drill target imports the largest routed account's archive; nano
+# OOM-killed it (2026-09-27), so the backup cell pins the medium preset.
+require_line "          resourcesPreset: medium" "$civo_backup_postgres_application"
+reject_line "          resourcesPreset: nano" "$civo_backup_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_legacy_postgres_application"
 reject_line "          resourcesPreset: micro" "$civo_legacy_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
