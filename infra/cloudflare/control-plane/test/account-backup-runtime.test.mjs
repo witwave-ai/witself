@@ -165,7 +165,7 @@ class Bucket {
       return null;
     }
     return value
-      ? { body: new Response(value.bytes).body }
+      ? { body: new Response(value.bytes).body, size: value.bytes.length, etag: value.etag }
       : null;
   }
 
@@ -1218,6 +1218,10 @@ function backupNamespace(record, receipts) {
             },
           });
         }
+        if (path === "/archive-capability") {
+          assert.deepEqual(await request.json(), { backup_id: record.backup_id, target_cell: TARGET, ttl_seconds: 1800 });
+          return Response.json({ token: "cap_" + "b".repeat(64) });
+        }
         assert.equal(path, "/validation-verified");
         receipts.push(await request.json());
         return Response.json({
@@ -1270,6 +1274,7 @@ test("rollback-only validation uses the target backup token and never changes ro
     },
     {
       now: () => new Date("2026-07-25T12:36:00.000Z"),
+      origin: "https://cp.test.invalid",
       validateArchive: () => validVerification(job),
       fetch: async (url, options) => {
         validationCalls += 1;
@@ -1290,7 +1295,10 @@ test("rollback-only validation uses the target backup token and never changes ro
           headers.get("X-Witself-Backup-Validation"),
           "true",
         );
-        assert.ok(options.body);
+        assert.equal(options.body, undefined);
+        assert.equal(headers.get("X-Witself-Backup-Archive-URL"), `https://cp.test.invalid/v1/backups:archive?account_id=${ACCOUNT}&backup_id=${job.backup_id}`);
+        assert.ok(/^cap_[0-9a-f]{64}$/.test(headers.get("X-Witself-Backup-Archive-Token")));
+        assert.equal(headers.get("X-Witself-Backup-Archive-Size"), String(record.size));
         return Response.json({
           schema_version: "witself.v0",
           account_id: ACCOUNT,
@@ -1317,10 +1325,7 @@ test("rollback-only validation uses the target backup token and never changes ro
   }]);
   assert.deepEqual(directoryBinding.writes, []);
   assert.deepEqual(directoryBinding.deletes, []);
-  assert.deepEqual(bucket.conditionedGets, [{
-    key: record.object,
-    etagMatches: record.r2_etag,
-  }]);
+  assert.deepEqual(bucket.conditionedGets, []);
 });
 
 test("backup validation requires the marker, drain, and backup token", async () => {
@@ -1419,7 +1424,8 @@ test("backup validation rejects an R2 etag change between reread phases", async 
         target_cell: TARGET,
       },
       {
-        validateArchive: () => {
+        origin: "https://cp.test.invalid",
+      validateArchive: () => {
           bucket.write(
             record.object,
             "valid-backup-object",
@@ -1482,7 +1488,8 @@ test("backup validation rechecks target isolation before recording its receipt",
         target_cell: TARGET,
       },
       {
-        validateArchive: () => validVerification(job),
+        origin: "https://cp.test.invalid",
+      validateArchive: () => validVerification(job),
         fetch: async () => {
           // Leave KV stale and marked while the authoritative cell
           // coordinator observes the same registration reopened/unmarked.
@@ -1979,4 +1986,138 @@ test("watchdog failure code survives the final attempt and clears the alarm", { 
   const state = h.storage.values.get("account-backups");
   assert.equal(state.failures[0].last_error, "export_idle_timeout");
   assert.equal(h.storage.alarm, null);
+});
+
+function capabilityFixture() {
+  const job = backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1);
+  const record = committedRecord(job);
+  const storage = new Storage();
+  storage.values.set("account-backups", {
+    schema_version: ACCOUNT_BACKUP_STATE_SCHEMA, account_id: ACCOUNT,
+    revision: 1, current_job: null, catalog: [record], failures: [],
+  });
+  let now = NOW.getTime();
+  const durable = new DurableAccountBackup({ storage, id: { name: ACCOUNT } }, {}, { now: () => new Date(now) });
+  const call = (path, input) => durable.fetch(new Request(`https://internal${path}`, {
+    method: "POST", body: JSON.stringify(input),
+  }));
+  const mint = (overrides = {}) => call("/archive-capability", { backup_id: job.backup_id, target_cell: TARGET, ttl_seconds: 1800, ...overrides });
+  const bucket = new Bucket();
+  bucket.write(record.object, "valid-backup-object", objectMetadata(job), record.r2_etag);
+  const env = {
+    BACKUPS: bucket,
+    PUBLIC_IP_LIMITER: { limit: () => assert.fail("archive route reached generic limiter") },
+    ACCOUNT_BACKUP: { idFromName: (name) => ({ name }), get: (id) => ({ fetch: (request) => id.name === ACCOUNT ? durable.fetch(request) : new Response(null, { status: 404 }) }) },
+  };
+  const route = (token, backup = job.backup_id, method = "GET", account = ACCOUNT) => worker.fetch(new Request(
+    `https://cp.test.invalid/v1/backups:archive?account_id=${account}&backup_id=${backup}`,
+    { method, headers: { Authorization: `Bearer ${token}` } },
+  ), env, {});
+  return { durable, record, storage, call, mint, bucket, route, expire: () => { now += 1800_000; } };
+}
+
+test("archive capabilities bind committed identity, hash storage keys, consume once and expire", async () => {
+  const f = capabilityFixture();
+  const response = await f.mint();
+  assert.equal(response.status, 200);
+  const { token } = await response.json();
+  assert.ok(/^cap_[0-9a-f]{64}$/.test(token));
+  const entries = [...(await f.storage.list({ prefix: "archive-capability:" }))];
+  assert.equal(entries.length, 1);
+  assert.ok(/^archive-capability:[0-9a-f]{64}$/.test(entries[0][0]));
+  assert.ok(!JSON.stringify(entries).includes(token));
+  const consume = () => f.call("/archive-capability:consume", { token });
+  const results = await Promise.all([consume(), consume()]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 404]);
+  assert.deepEqual(await results.find((r) => r.status === 200).json(), {
+    backup_id: f.record.backup_id, object: f.record.object, r2_etag: f.record.r2_etag,
+    size: f.record.size, source_cell: SOURCE, target_cell: TARGET,
+  });
+  assert.equal((await consume()).status, 404);
+  const next = await (await f.mint()).json();
+  assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 1);
+  f.expire();
+  assert.equal((await f.call("/archive-capability:consume", next)).status, 404);
+  assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+});
+
+test("archive mint rejects missing/uncommitted records and invalid bounds", async () => {
+  for (const overrides of [{ ttl_seconds: 59 }, { ttl_seconds: 3601 }, { ttl_seconds: 60.5 }, { target_cell: "Bad" }, { backup_id: "backup_20260725T123500Z" }]) {
+    const f = capabilityFixture();
+    assert.equal((await f.mint(overrides)).status, 404);
+    assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+  }
+  const f = capabilityFixture();
+  const state = await f.storage.get("account-backups");
+  state.catalog = [];
+  assert.equal((await f.mint()).status, 404);
+  for (const ttl_seconds of [60, 3600]) {
+    assert.equal((await capabilityFixture().mint({ ttl_seconds })).status, 200);
+  }
+});
+
+test("archive public route streams exact conditioned object without fleet auth and rejects replay", async () => {
+  const f = capabilityFixture();
+  const { token } = await (await f.mint()).json();
+  const response = await f.route(token);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Content-Type"), "application/gzip");
+  assert.equal(response.headers.get("Content-Length"), String(f.record.size));
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("X-Witself-Backup-ID"), f.record.backup_id);
+  assert.equal(response.headers.get("X-Witself-Backup-Cell"), SOURCE);
+  assert.equal(await response.text(), "valid-backup-object");
+  assert.deepEqual(f.bucket.conditionedGets, [{ key: f.record.object, etagMatches: f.record.r2_etag }]);
+  assert.equal((await f.route(token)).status, 404);
+});
+
+test("archive public route conceals missing, expired, mismatched and changed sources", async () => {
+  for (const mode of ["missing", "bad-token", "expired", "backup", "account", "etag", "size", "no-object", "method", "bad-id"]) {
+    const f = capabilityFixture();
+    let { token } = await (await f.mint()).json();
+    let backup = f.record.backup_id, account = ACCOUNT, method = "GET";
+    if (mode === "missing") token = "cap_" + "c".repeat(64);
+    if (mode === "bad-token") token = "not-a-capability";
+    if (mode === "expired") f.expire();
+    if (mode === "backup") backup = "backup_20260725T123500Z";
+    if (mode === "bad-id") backup = "bad";
+    if (mode === "account") account = "other";
+    if (mode === "etag") f.bucket.write(f.record.object);
+    if (mode === "size") f.bucket.write(f.record.object, "short", {}, f.record.r2_etag);
+    if (mode === "no-object") f.bucket.values.clear();
+    if (mode === "method") method = "POST";
+    const response = await f.route(token, backup, method, account);
+    assert.equal(response.status, 404, mode);
+    assert.deepEqual(await response.json(), { error: "backup archive is not available" }, mode);
+    assert.equal(response.headers.get("Cache-Control"), "no-store", mode);
+    if (mode === "backup") assert.equal((await f.route(token)).status, 404, "mismatch must burn capability");
+  }
+});
+
+test("pull drill rejects generic and mismatched acknowledgements without receipts", async () => {
+  for (const acknowledgement of [{}, { schema_version: "witself.v0", account_id: ACCOUNT, backup_id: "wrong", purpose: "backup", status: "active", archive_schema_version: 73, validated: true }]) {
+    const f = capabilityFixture();
+    const receipts = [];
+    const binding = directory({ [`cell:${TARGET}`]: { endpoint: "https://validation.example", accepting: false,
+      backup_validation_target: true, provision_token: "provision", backup_token: "backup",
+      registration_id: "reg-target", registered_at: "2026-07-25T00:00:00.000Z" } });
+    await assert.rejects(runAccountBackupValidation({ DIRECTORY: binding, CELL_COORDINATOR: projectedCellCoordinator(binding),
+      ACCOUNT_BACKUP: backupNamespace(f.record, receipts), BACKUPS: f.bucket },
+    { account_id: ACCOUNT, backup_id: f.record.backup_id, target_cell: TARGET },
+    { origin: "https://cp.test.invalid", validateArchive: () => validVerification(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1)),
+      fetch: async (_url, options) => { assert.equal(options.body, undefined); return Response.json(acknowledgement); } }), /backup validation 200/);
+    assert.deepEqual(receipts, []);
+  }
+});
+
+
+test("independent capabilities serialize without sharing the long export fence", async () => {
+  const f = capabilityFixture();
+  f.durable.fence.busy = true;
+  const minted = await Promise.all([f.mint(), f.mint()]);
+  assert.deepEqual(minted.map((r) => r.status), [200, 200]);
+  const tokens = await Promise.all(minted.map((r) => r.json()));
+  assert.ok(tokens[0].token !== tokens[1].token);
+  const results = await Promise.all(tokens.map((token) => f.call("/archive-capability:consume", token)));
+  assert.deepEqual(results.map((r) => r.status), [200, 200]);
 });

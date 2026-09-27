@@ -1483,6 +1483,40 @@ A managed or self-hosted restore should proceed in this order:
     `key.rotated` and sealed-plane events when the sealed plane is enabled. See
     [audit-retention.md](audit-retention.md).
 
+## Restore drill archive pull protocol
+
+Restore drills pull the committed archive from the control plane. Pushing it in
+the Worker-to-cell request can exceed Cloudflare's plan-dependent request body
+limit, even when the cell accepts larger streams. Streaming the archive as a
+Worker response avoids that request upload boundary.
+
+For each drill, the account Durable Object mints a random 256-bit bearer
+capability with a 30-minute TTL, bound to the committed backup object, ETag,
+size, source cell and target cell. Only a SHA-256 hash indexes the stored
+capability. Consumption marks it used durably before returning its object
+identity; expired and used entries are opportunistically removed. A failed
+or interrupted pull requires a new drill and capability, not a retry of the
+same token.
+
+The Worker sends the target an empty validation POST with the archive URL,
+capability and size headers described in [API routes](api-routes.md). The public
+archive URL uses the origin of the fleet request that started the drill.
+The cell requires an explicit HTTPS origin allow-list setting,
+`backup.validation.archiveOrigin` (for example `https://self.witwave.ai`),
+rejects redirects, and verifies the advertised download length before returning
+its existing rollback-only validation acknowledgement. The Worker still checks
+the exact acknowledgement and target isolation before recording a receipt.
+It allows 20 minutes for the cell request.
+
+Roll out cells first, including the drill cell's archive origin configuration,
+and the control plane second. The cell retains legacy request-body validation
+for older Workers; the new Worker has no push fallback. The generated backup-cell
+field is `apps.witselfServer.backup.validationArchiveOrigin`; the apps chart maps
+it to `backup.validation.archiveOrigin` once the cell's server chart is 0.0.310 or
+newer, so the value is inert until the cell rolls. Confirm the rendered
+ConfigMap contains `WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`. Never log archive
+capabilities or archive URL query strings.
+
 ## Related Docs
 
 - [requirements.md](requirements.md)

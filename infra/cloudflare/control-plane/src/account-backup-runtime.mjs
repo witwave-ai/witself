@@ -28,7 +28,14 @@ const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_CATALOG_LIMIT = 64;
 export const IDLE_TIMEOUT_MS = 120_000;
 export const OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
-const VALIDATION_TIMEOUT_MS = 5 * 60 * 1000;
+const VALIDATION_TIMEOUT_MS = 20 * 60 * 1000;
+const ARCHIVE_CAPABILITY = /^cap_[0-9a-f]{64}$/;
+const CAPABILITY_PREFIX = "archive-capability:";
+
+async function capabilityKey(token) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return CAPABILITY_PREFIX + Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 const BASE_RETRY_MS = 60_000;
 const MAX_RETRY_MS = 30 * 60_000;
 const SCAN_FAILURE_SAMPLE_LIMIT = 16;
@@ -536,6 +543,8 @@ export class DurableAccountBackup {
     this.env = env;
     this.accountId = ctx.id?.name ?? null;
     this.fence = new AccountLifecycleFence();
+    // Capability operations serialize independently of long-running exports.
+    this.capabilityQueue = Promise.resolve();
     this.fetchImpl =
       dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.streamArchive =
@@ -547,6 +556,47 @@ export class DurableAccountBackup {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === "POST" && ["/archive-capability", "/archive-capability:consume"].includes(url.pathname)) {
+      try {
+        const input = await request.json();
+        const operation = this.capabilityQueue.then(async () => {
+          const now = this.now().getTime();
+          const entries = await this.storage.list({ prefix: CAPABILITY_PREFIX });
+          for (const [key, value] of entries) {
+            if (value.used || value.expires_at <= now) await this.storage.delete(key);
+          }
+          if (url.pathname === "/archive-capability:consume") {
+            if (!ARCHIVE_CAPABILITY.test(input?.token ?? "")) throw new Error("unavailable");
+            const key = await capabilityKey(input.token);
+            const value = await this.storage.get(key);
+            if (!value || value.used || value.expires_at <= now) throw new Error("unavailable");
+            await this.storage.put(key, { ...value, used: true });
+            const { used, expires_at, ...record } = value;
+            return json(record);
+          }
+          if (!BACKUP_ID.test(input?.backup_id ?? "") || !CELL_NAME.test(input?.target_cell ?? "") ||
+              !Number.isInteger(input?.ttl_seconds) || input.ttl_seconds < 60 || input.ttl_seconds > 3600) {
+            throw new Error("unavailable");
+          }
+          const state = await this.loadState();
+          // Only catalog members have crossed the durable commit boundary.
+          // record.status is the account status, not the backup job status.
+          const record = state.catalog.find((entry) => entry.backup_id === input.backup_id);
+          if (!record || !validCatalogRecord(record, this.accountId)) throw new Error("unavailable");
+          const token = "cap_" + Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
+          await this.storage.put(await capabilityKey(token), {
+            backup_id: record.backup_id, object: record.object,
+            r2_etag: record.r2_etag, size: record.size, source_cell: record.source_cell,
+            target_cell: input.target_cell, expires_at: now + input.ttl_seconds * 1000, used: false,
+          });
+          return json({ token });
+        });
+        this.capabilityQueue = operation.catch(() => {});
+        return await operation;
+      } catch {
+        return json({ error: "backup archive is not available" }, 404);
+      }
+    }
     if (request.method === "GET" && url.pathname === "/status") {
       try {
         const backups = await this.loadState();
@@ -1792,20 +1842,23 @@ export async function runAccountBackupValidation(
     before.size,
     before.etag,
   );
-  const object = await env.BACKUPS.get(record.object, {
-    onlyIf: { etagMatches: record.r2_etag },
-  });
-  if (!object?.body) {
-    throw new ArchiveIntegrityError(
-      "backup validation object changed before its conditioned read",
-    );
+  const origin = new URL(dependencies.origin);
+  if (origin.protocol !== "https:" || origin.origin !== dependencies.origin) {
+    throw new Error("backup validation requires the public request origin");
   }
-  assertR2ObjectIdentity(
-    record,
-    await env.BACKUPS.head(record.object),
-    before.size,
-    before.etag,
+  const capabilityResponse = await (await backupStub(env, input.account_id)).fetch(
+    new Request("http://account-backup.internal/archive-capability", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backup_id: input.backup_id, target_cell: input.target_cell, ttl_seconds: 1800 }),
+    }),
   );
+  const capability = capabilityResponse.ok ? await capabilityResponse.json() : null;
+  if (!ARCHIVE_CAPABILITY.test(capability?.token ?? "")) {
+    throw new Error("backup archive capability is not available");
+  }
+  const archiveURL = new URL("/v1/backups:archive", origin);
+  archiveURL.searchParams.set("account_id", input.account_id);
+  archiveURL.searchParams.set("backup_id", input.backup_id);
 
   const fetchImpl =
     dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
@@ -1818,8 +1871,10 @@ export async function runAccountBackupValidation(
         "Content-Type": "application/octet-stream",
         "X-Witself-Backup-ID": input.backup_id,
         "X-Witself-Backup-Validation": "true",
+        "X-Witself-Backup-Archive-URL": archiveURL.toString(),
+        "X-Witself-Backup-Archive-Token": capability.token,
+        "X-Witself-Backup-Archive-Size": String(record.size),
       },
-      body: object.body,
       signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
     },
   );
@@ -1832,9 +1887,7 @@ export async function runAccountBackupValidation(
   }
   if (!response.ok || !exactValidationAck(acknowledgement, record)) {
     throw new Error(
-      `backup validation ${response.status}: ${
-        text.slice(0, 200) || "missing exact acknowledgement"
-      }`,
+      `backup validation ${response.status}: missing exact acknowledgement`,
     );
   }
 
@@ -2061,5 +2114,36 @@ export async function runScheduledAccountBackups(
       `account-backup: scheduled tick unavailable: ${boundedReason(error)}`,
     );
     return { ran: true, configured: true, succeeded: false };
+  }
+}
+
+// Bearer capabilities are deliberately independent of fleet credentials.
+export async function accountBackupArchive(request, env) {
+  const unavailable = () => new Response(JSON.stringify({ error: "backup archive is not available" }), {
+    status: 404, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+  try {
+    const url = new URL(request.url);
+    const accountID = url.searchParams.get("account_id");
+    const backupID = url.searchParams.get("backup_id");
+    const authorization = request.headers.get("Authorization") ?? "";
+    if (request.method !== "GET" || !ACCOUNT_ID.test(accountID ?? "") || !BACKUP_ID.test(backupID ?? "") ||
+        !/^Bearer cap_[0-9a-f]{64}$/.test(authorization)) return unavailable();
+    const response = await (await backupStub(env, accountID)).fetch(new Request("http://account-backup.internal/archive-capability:consume", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: authorization.slice(7) }),
+    }));
+    if (!response.ok) return unavailable();
+    const record = await response.json();
+    if (record.backup_id !== backupID) return unavailable();
+    const object = await env.BACKUPS.get(record.object, { onlyIf: { etagMatches: record.r2_etag } });
+    if (!object?.body || object.size !== record.size || object.etag !== record.r2_etag) return unavailable();
+    return new Response(object.body, { headers: {
+      "Content-Type": "application/gzip", "Content-Length": String(record.size),
+      "Cache-Control": "no-store", "X-Witself-Backup-ID": record.backup_id,
+      "X-Witself-Backup-Cell": record.source_cell,
+    } });
+  } catch {
+    return unavailable();
   }
 }

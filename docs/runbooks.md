@@ -3279,6 +3279,15 @@ plan, and independent review.
 
 ## Operate periodic account backups
 
+Before a pull-based drill, configure the drill cell with
+`backup.validation.archiveOrigin: https://self.witwave.ai` (environment
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`) and verify that value in its rendered
+ConfigMap. The generated overlay field is `backup.validationArchiveOrigin`
+under `apps.witselfServer`; the apps chart maps it into the server chart from
+chart version 0.0.310. Roll cells first, then the control plane. A drill can take 20 minutes;
+the curl below permits 1500 seconds. Each attempt receives a fresh single-use,
+30-minute archive capability. Do not print the capability or archive URL query.
+
 Periodic logical backups use the dedicated `witself-backups` R2 bucket and are
 independent of cell-evacuation archives. Before activation:
 
@@ -3358,7 +3367,7 @@ committed:
 ```sh
 BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
 
-curl --fail-with-body -X POST \
+curl --fail-with-body -m 1500 -X POST \
   -H "Authorization: Bearer ${FLEET_TOKEN}" \
   -H "Content-Type: application/json" \
   --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\"}" \

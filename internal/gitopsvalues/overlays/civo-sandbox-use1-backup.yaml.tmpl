@@ -37,6 +37,7 @@ apps:
     backup:
       enabled: true
       validationEnabled: true
+      validationArchiveOrigin: https://self.witwave.ai
       targetName: witself-backup
     # Keep replicas/PDB/topology unchanged on this single-node cell: a PDB
     # minAvailable of 1 with 1 server replica would block node drains.

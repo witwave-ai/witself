@@ -81,6 +81,8 @@ backup:
     name: ""
     tokenKey: backup_token
   validation:
+    # Exact HTTPS control-plane origin permitted for archive pulls.
+    archiveOrigin: ""
     # Enables the rollback-only validation endpoint. Keep this false on every
     # serving cell. A dedicated, non-routing validation cell may opt in; the
     # importer executes the full restore contract and rolls the transaction
