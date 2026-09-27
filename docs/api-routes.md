@@ -94,7 +94,10 @@ mismatch) returns 502 `backup archive download failed`. Once the download
 starts, the cell answers 200 immediately and writes a newline heartbeat every
 ten seconds while it downloads and imports, because the control plane's fetch
 would otherwise time out waiting for the first byte of a multi-minute
-validation. The body ends with either the exact acknowledgement object or a
+validation. The cell spools the archive to its writable temporary storage at
+network speed and proves the exact advertised size before it validates from
+that spool, so the control plane's stream is never paced by the import; the
+spool is removed when the request ends. The body ends with either the exact acknowledgement object or a
 value-free `{"schema_version":"witself.v0","error":…}` object (short body,
 mismatched or too-new archive, target conflict, internal failure); the control
 plane accepts only the exact acknowledgement, so every failure stays closed.

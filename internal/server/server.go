@@ -244,6 +244,11 @@ type Config struct {
 	// include archive content; accountID and the exact export error are the
 	// complete input.
 	ReportAccountExportFailure func(ctx context.Context, accountID string, err error)
+	// ReportAccountBackupValidationFailure observes a rollback-only validation
+	// that could not acknowledge: a failed archive download or a classified
+	// import error. The handler answers the control plane with a value-free
+	// error either way; this hook is the only place the cause is logged.
+	ReportAccountBackupValidationFailure func(ctx context.Context, accountID string, err error)
 
 	// BackupToken is a dedicated control-plane -> cell credential for the
 	// backup protocol. It is intentionally distinct from ProvisionToken so
@@ -5678,19 +5683,6 @@ func backupArchiveSource(r *http.Request, origin string) (*neturl.URL, int64, bo
 	return u, size, valid
 }
 
-type backupArchiveReader struct {
-	reader io.Reader
-	err    error
-}
-
-func (r *backupArchiveReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if err != nil && err != io.EOF {
-		r.err = err
-	}
-	return n, err
-}
-
 // backupValidationHeartbeat is how often a pull-path validation writes a
 // newline to the already-started response so no proxy between the control
 // plane and the cell times out waiting for the first byte while the cell
@@ -5835,9 +5827,12 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 		}
 
 		var body io.Reader = r.Body
-		var limited *io.LimitedReader
-		var downloaded *backupArchiveReader
 		var stream *validationStream
+		report := func(err error) {
+			if cfg.ReportAccountBackupValidationFailure != nil {
+				cfg.ReportAccountBackupValidationFailure(r.Context(), validateAccountID, err)
+			}
+		}
 		if _, present := r.Header[http.CanonicalHeaderKey("X-Witself-Backup-Archive-URL")]; present {
 			u, size, valid := backupArchiveSource(r, cfg.BackupValidationArchiveOrigin)
 			if !valid {
@@ -5852,21 +5847,51 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			download.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Witself-Backup-Archive-Token"))
 			response, err := client.Do(download)
 			if err != nil {
+				report(fmt.Errorf("start backup archive download: %w", err))
 				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
 				return
 			}
 			defer func() { _ = response.Body.Close() }()
 			if response.StatusCode != http.StatusOK || response.ContentLength != size {
+				report(fmt.Errorf("backup archive download answered status %d with content length %d for advertised size %d", response.StatusCode, response.ContentLength, size))
 				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
 				return
 			}
-			limited = &io.LimitedReader{R: response.Body, N: size}
-			downloaded = &backupArchiveReader{reader: limited}
-			body = downloaded
 			// The download and the rollback-only import together take minutes;
 			// send the headers now and heartbeat so the control plane's fetch is
 			// never left waiting for a first byte.
 			stream = startValidationStream(w, backupValidationHeartbeat)
+			// Spool the archive to the pod's writable temp directory at network
+			// speed and prove the exact advertised size before validating. The
+			// import must never pace the control plane's stream: a single slow
+			// import step would otherwise exceed the download client's idle read
+			// deadline and fail a healthy archive.
+			spool, err := os.CreateTemp("", "witself-backup-validate-*.tar.gz")
+			if err != nil {
+				report(fmt.Errorf("spool backup archive: %w", err))
+				stream.finish(map[string]any{"schema_version": "witself.v0", "error": "could not validate backup"})
+				return
+			}
+			spoolPath := spool.Name()
+			defer func() {
+				_ = spool.Close()
+				_ = os.Remove(spoolPath)
+			}()
+			copied, copyErr := io.Copy(spool, io.LimitReader(response.Body, size))
+			if copyErr != nil || copied != size {
+				if copyErr == nil {
+					copyErr = io.ErrUnexpectedEOF
+				}
+				report(fmt.Errorf("download backup archive (%d of %d bytes): %w", copied, size, copyErr))
+				stream.finish(map[string]any{"schema_version": "witself.v0", "error": "backup archive download failed"})
+				return
+			}
+			if _, err := spool.Seek(0, io.SeekStart); err != nil {
+				report(fmt.Errorf("rewind backup archive spool: %w", err))
+				stream.finish(map[string]any{"schema_version": "witself.v0", "error": "could not validate backup"})
+				return
+			}
+			body = spool
 		}
 		fail := func(status int, msg string) {
 			if stream != nil {
@@ -5878,14 +5903,8 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 		sum, err := cfg.ValidateAccountBackup(
 			r.Context(), validateAccountID, backupID, body,
 		)
-		if downloaded != nil {
-			// Validate may stop early. Still prove the complete advertised transfer
-			// before returning either an acknowledgement or an archive error.
-			_, readErr := io.Copy(io.Discard, downloaded)
-			if readErr != nil || downloaded.err != nil || limited.N != 0 {
-				fail(http.StatusBadGateway, "backup archive download failed")
-				return
-			}
+		if err != nil {
+			report(err)
 		}
 		switch {
 		case errors.Is(err, ErrConflict):

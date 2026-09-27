@@ -1698,6 +1698,9 @@ func serve() int {
 		}
 		cfg.BackupValidationEnabled = backupValidationEnabled
 		cfg.BackupValidationArchiveOrigin = os.Getenv("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN")
+		cfg.ReportAccountBackupValidationFailure = func(_ context.Context, accountID string, err error) {
+			logAccountBackupValidationFailure(os.Stderr, accountID, os.Getenv("WITSELF_CELL_NAME"), err)
+		}
 		if backupValidationEnabled {
 			cfg.ValidateAccountBackup = func(
 				ctx context.Context,
@@ -2033,6 +2036,15 @@ func serve() int {
 func managedRealmEmailRoutesConfigured(provisionToken, backendKind string) bool {
 	return strings.TrimSpace(provisionToken) != "" ||
 		strings.EqualFold(strings.TrimSpace(backendKind), "managed")
+}
+
+// logAccountBackupValidationFailure records why a rollback-only validation
+// could not acknowledge. Identifiers are routing context and the error is a
+// classified import or download failure; archive content never reaches it.
+func logAccountBackupValidationFailure(w io.Writer, accountID, cellName string, err error) {
+	_, _ = fmt.Fprintf(w,
+		"witself-server: account backup validation failed account_id=%q cell=%q error=%q\n",
+		accountID, cellName, err)
 }
 
 func logAccountExportFailure(w io.Writer, accountID, cellName string, err error) {
