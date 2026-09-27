@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -5690,6 +5691,62 @@ func (r *backupArchiveReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// backupValidationHeartbeat is how often a pull-path validation writes a
+// newline to the already-started response so no proxy between the control
+// plane and the cell times out waiting for the first byte while the cell
+// downloads and imports an archive that can take many minutes.
+var backupValidationHeartbeat = 10 * time.Second
+
+// validationStream sends the response headers for a pull-path validation
+// immediately and keeps the connection alive with newline heartbeats until
+// finish writes the exact acknowledgement or a value-free error object. The
+// control plane accepts only the exact acknowledgement, so a failure after
+// the headers stays fail-closed even though the status is already 200.
+type validationStream struct {
+	w    http.ResponseWriter
+	mu   sync.Mutex
+	stop chan struct{}
+	done chan struct{}
+}
+
+func flushResponse(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return
+	}
+}
+
+func startValidationStream(w http.ResponseWriter, interval time.Duration) *validationStream {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	flushResponse(w)
+	s := &validationStream{w: w, stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(s.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.stop:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				_, _ = io.WriteString(s.w, "\n")
+				flushResponse(s.w)
+				s.mu.Unlock()
+			}
+		}
+	}()
+	return s
+}
+
+func (s *validationStream) finish(body map[string]any) {
+	close(s.stop)
+	<-s.done
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = json.NewEncoder(s.w).Encode(body)
+}
+
 // accountBackupHandler is a separate authority boundary from account
 // lifecycle and provisioning. A provisioning credential is explicitly
 // rejected even if configuration accidentally gives both token classes the
@@ -5780,6 +5837,7 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 		var body io.Reader = r.Body
 		var limited *io.LimitedReader
 		var downloaded *backupArchiveReader
+		var stream *validationStream
 		if _, present := r.Header[http.CanonicalHeaderKey("X-Witself-Backup-Archive-URL")]; present {
 			u, size, valid := backupArchiveSource(r, cfg.BackupValidationArchiveOrigin)
 			if !valid {
@@ -5805,6 +5863,17 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			limited = &io.LimitedReader{R: response.Body, N: size}
 			downloaded = &backupArchiveReader{reader: limited}
 			body = downloaded
+			// The download and the rollback-only import together take minutes;
+			// send the headers now and heartbeat so the control plane's fetch is
+			// never left waiting for a first byte.
+			stream = startValidationStream(w, backupValidationHeartbeat)
+		}
+		fail := func(status int, msg string) {
+			if stream != nil {
+				stream.finish(map[string]any{"schema_version": "witself.v0", "error": msg})
+				return
+			}
+			writeJSONError(w, status, msg)
 		}
 		sum, err := cfg.ValidateAccountBackup(
 			r.Context(), validateAccountID, backupID, body,
@@ -5814,38 +5883,25 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			// before returning either an acknowledgement or an archive error.
 			_, readErr := io.Copy(io.Discard, downloaded)
 			if readErr != nil || downloaded.err != nil || limited.N != 0 {
-				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
+				fail(http.StatusBadGateway, "backup archive download failed")
 				return
 			}
 		}
 		switch {
 		case errors.Is(err, ErrConflict):
-			writeJSONError(
-				w, http.StatusConflict,
-				"backup validation target already contains the account",
-			)
+			fail(http.StatusConflict, "backup validation target already contains the account")
 			return
 		case errors.Is(err, ErrArchiveTooNew):
-			writeJSONError(
-				w, http.StatusConflict,
-				"backup schema is newer than this cell — upgrade the cell first",
-			)
+			fail(http.StatusConflict, "backup schema is newer than this cell — upgrade the cell first")
 			return
 		case errors.Is(err, ErrBadArchive):
-			writeJSONError(
-				w, http.StatusBadRequest,
-				"invalid or mismatched backup archive",
-			)
+			fail(http.StatusBadRequest, "invalid or mismatched backup archive")
 			return
 		case err != nil:
-			writeJSONError(
-				w, http.StatusInternalServerError,
-				"could not validate backup",
-			)
+			fail(http.StatusInternalServerError, "could not validate backup")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		ack := map[string]any{
 			"schema_version":         "witself.v0",
 			"account_id":             sum.AccountID,
 			"status":                 sum.Status,
@@ -5853,7 +5909,13 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			"purpose":                "backup",
 			"backup_id":              sum.BackupID,
 			"validated":              true,
-		})
+		}
+		if stream != nil {
+			stream.finish(ack)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ack)
 	}
 }
 

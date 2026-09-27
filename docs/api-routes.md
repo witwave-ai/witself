@@ -89,8 +89,15 @@ The URL must use HTTPS and exactly match the cell's configured
 `WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`; the token must match
 `^cap_[0-9a-f]{64}$` and size must be a positive integer at most 8 GiB.
 Invalid sources return 400 `a valid backup archive source is required` before
-network access. Download failures (including response length mismatch or a
-short body) return 502 `backup archive download failed`, without acknowledgement.
+network access, and a download that cannot start (non-200, response length
+mismatch) returns 502 `backup archive download failed`. Once the download
+starts, the cell answers 200 immediately and writes a newline heartbeat every
+ten seconds while it downloads and imports, because the control plane's fetch
+would otherwise time out waiting for the first byte of a multi-minute
+validation. The body ends with either the exact acknowledgement object or a
+value-free `{"schema_version":"witself.v0","error":…}` object (short body,
+mismatched or too-new archive, target conflict, internal failure); the control
+plane accepts only the exact acknowledgement, so every failure stays closed.
 The cell follows no redirects, allows 15 minutes overall for the download and
 two minutes of idle read time, and forwards only the capability as a bearer.
 Without the URL header, legacy body validation remains available.
