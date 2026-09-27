@@ -169,6 +169,9 @@ data:
   WITSELF_BILLING_ENDPOINT: {{ $billingEndpoint | quote }}
 {{- end }}
   WITSELF_BACKUP_VALIDATION_ENABLED: {{ .Values.backup.validation.enabled | quote }}
+  {{- with .Values.backup.validation.archiveOrigin }}
+  WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN: {{ . | quote }}
+  {{- end }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
   WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.admissionBytes) | quote }}
   WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.admissionRows) | quote }}

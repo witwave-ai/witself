@@ -72,8 +72,29 @@ uses `WITSELF_CELL_NAME` for compatibility with older control planes. The cell
 echoes both headers before streaming. A missing or different cell echo makes
 the control plane cancel the body and retry with
 `backup export did not acknowledge the exact source cell`.
-`POST /v1/accounts/{id}:validate-backup` retains its existing backup-id and
-archive validation behavior; it does not use the cell-name header.
+`GET /v1/backups:archive?account_id=<id>&backup_id=<id>` is a control-plane
+capability route, independent of fleet authentication. It accepts only
+`Authorization: Bearer cap_<64 lowercase hex>`, consumes the capability once,
+and streams the committed R2 object conditioned on its catalog ETag. Success
+includes `Content-Type: application/gzip`, exact `Content-Length`,
+`Cache-Control: no-store`, `X-Witself-Backup-ID`, and `X-Witself-Backup-Cell`
+(the source cell). Unavailable, expired, used, invalid, or mismatched capabilities
+all return 404 `{"error":"backup archive is not available"}`.
+
+`POST /v1/accounts/{id}:validate-backup` keeps the dedicated cell backup bearer,
+`X-Witself-Backup-ID`, and `X-Witself-Backup-Validation: true`. New control planes
+send an empty body and three headers: `X-Witself-Backup-Archive-URL`,
+`X-Witself-Backup-Archive-Token`, and `X-Witself-Backup-Archive-Size`.
+The URL must use HTTPS and exactly match the cell's configured
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`; the token must match
+`^cap_[0-9a-f]{64}$` and size must be a positive integer at most 8 GiB.
+Invalid sources return 400 `a valid backup archive source is required` before
+network access. Download failures (including response length mismatch or a
+short body) return 502 `backup archive download failed`, without acknowledgement.
+The cell follows no redirects, allows 15 minutes overall for the download and
+two minutes of idle read time, and forwards only the capability as a bearer.
+Without the URL header, legacy body validation remains available.
+Validation continues to ignore the cell-name header.
 Deploy cells before the control plane; see
 [periodic logical account snapshots](backup-and-recovery.md#periodic-logical-account-snapshots).
 

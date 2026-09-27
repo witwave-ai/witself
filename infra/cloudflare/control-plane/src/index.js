@@ -135,6 +135,7 @@ import {
   accountBackupStatus,
   DurableAccountBackup,
   runAccountBackupValidation,
+  accountBackupArchive,
   runManualAccountBackup,
   runScheduledAccountBackups,
 } from "./account-backup-runtime.mjs";
@@ -352,6 +353,7 @@ const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
 const PLACEMENT_RESCUE_PATH = /^\/v1\/placement\/archives\/([A-Za-z0-9_-]{1,128}):rescue$/;
 const PLACEMENT_RESCUE_AXES = new Set(["cloud", "region", "channel"]);
 const ACCOUNT_BACKUP_STATUS_PATH = "/v1/backups/status";
+const ACCOUNT_BACKUP_ARCHIVE_PATH = "/v1/backups:archive";
 const ACCOUNT_BACKUP_RUN_PATH = "/v1/backups:run";
 const ACCOUNT_BACKUP_RESTORE_DRILL_PATH =
   "/v1/backups:restore-drill";
@@ -4570,6 +4572,7 @@ async function handleProbe(request, env, cellName) {
 // by CP_ACCOUNT_BACKUPS_ENABLED=false, while these explicit calls make the MVP
 // observable and testable before that clock is activated.
 async function handleAccountBackups(request, env, url) {
+  if (url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH) return accountBackupArchive(request, env);
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -4623,7 +4626,7 @@ async function handleAccountBackups(request, env, url) {
       account_id: body.account_id,
       backup_id: body.backup_id,
       target_cell: body.target_cell,
-    }));
+    }, { origin: url.origin }));
   } catch (error) {
     const message = String(error?.message ?? error).slice(0, 300);
     const conflict =
@@ -4680,6 +4683,7 @@ function isProtectedWorkerRoute(pathname) {
     pathname === "/v1/placement:run" ||
     pathname === "/v1/placement:restore" ||
     pathname === "/v1/placement:rebalance" ||
+    pathname === ACCOUNT_BACKUP_ARCHIVE_PATH ||
     pathname === ACCOUNT_BACKUP_STATUS_PATH ||
     pathname === ACCOUNT_BACKUP_RUN_PATH ||
     pathname === ACCOUNT_BACKUP_RESTORE_DRILL_PATH ||
@@ -4692,6 +4696,12 @@ function isProtectedWorkerRoute(pathname) {
 
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // Capabilities have their own uniform failure boundary, before public
+    // limiters or account/container dispatch can substitute other responses.
+    if (url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH) {
+      return accountBackupArchive(request, env);
+    }
 
     // Public metrics terminate before rate limiting, account lookups, auth or
     // container dispatch. The outer security-header wrapper still applies.
@@ -5015,6 +5025,7 @@ async function handleFetch(request, env, ctx) {
     }
 
     if (
+      url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH ||
       url.pathname === ACCOUNT_BACKUP_STATUS_PATH ||
       url.pathname === ACCOUNT_BACKUP_RUN_PATH ||
       url.pathname === ACCOUNT_BACKUP_RESTORE_DRILL_PATH

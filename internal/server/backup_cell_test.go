@@ -139,3 +139,119 @@ func TestValidateAccountBackupIgnoresBackupCellHeader(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountBackupArchivePull(t *testing.T) {
+	for _, name := range []string{"success", "wrong-origin", "http", "missing-config", "bad-token", "bad-size", "too-large", "zero", "negative", "empty-url", "userinfo", "fragment", "size-mismatch", "non-200", "short-body", "redirect", "early-validator"} {
+		t.Run(name, func(t *testing.T) {
+			calls, validations := 0, 0
+			capability := "cap_" + strings.Repeat("a", 64)
+			cp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+capability {
+					t.Error("download did not use the capability bearer")
+				}
+				if name == "redirect" {
+					w.Header().Set("Location", "/redirected")
+					w.WriteHeader(http.StatusFound)
+					return
+				}
+				if name == "non-200" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if name == "size-mismatch" {
+					w.Header().Set("Content-Length", "8")
+				} else {
+					w.Header().Set("Content-Length", "7")
+				}
+				if name == "short-body" {
+					_, _ = io.WriteString(w, "short")
+					return
+				}
+				_, _ = io.WriteString(w, "archive")
+			}))
+			defer cp.Close()
+			client := newBackupArchiveClient()
+			client.Transport.(*http.Transport).TLSClientConfig = cp.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+			defer client.CloseIdleConnections()
+			origin, source, token, size := cp.URL, cp.URL+"/v1/backups:archive?account_id=acc_backup", capability, "7"
+			want := http.StatusBadRequest
+			switch name {
+			case "wrong-origin":
+				origin = "https://wrong.invalid"
+			case "http":
+				source = strings.Replace(source, "https:", "http:", 1)
+			case "missing-config":
+				origin = ""
+			case "bad-token":
+				token = "cap_bad"
+			case "bad-size":
+				size = "1.5"
+			case "too-large":
+				size = "8589934593"
+			case "zero":
+				size = "0"
+			case "negative":
+				size = "-1"
+			case "empty-url":
+				source = ""
+			case "userinfo":
+				source = strings.Replace(source, "https://", "https://user@", 1)
+			case "fragment":
+				source += "#fragment"
+			case "size-mismatch", "non-200", "short-body", "redirect":
+				want = http.StatusBadGateway
+			default:
+				want = http.StatusOK
+			}
+			cfg := Config{
+				BackupToken: "witself_bkp_test", BackupValidationEnabled: true, BackupValidationArchiveOrigin: origin,
+				ValidateAccountBackup: func(_ context.Context, accountID, backupID string, body io.Reader) (ImportSummary, error) {
+					validations++
+					if name != "early-validator" {
+						data, err := io.ReadAll(body)
+						if name != "short-body" && (err != nil || string(data) != "archive") {
+							t.Error("archive did not stream intact")
+						}
+					}
+					return ImportSummary{AccountID: accountID, BackupID: backupID, Status: "active", SchemaVersion: 73}, nil
+				},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/accounts/acc_backup:validate-backup", nil)
+			req.Header.Set("Authorization", "Bearer witself_bkp_test")
+			req.Header.Set(AccountBackupIDHeader, "bkp_cell_test")
+			req.Header.Set(AccountBackupCellHeader, "INVALID IGNORED CELL")
+			req.Header.Set("X-Witself-Backup-Archive-URL", source)
+			req.Header.Set("X-Witself-Backup-Archive-Token", token)
+			req.Header.Set("X-Witself-Backup-Archive-Size", size)
+			recorder := httptest.NewRecorder()
+			accountBackupHandlerWithArchiveClient(cfg, client)(recorder, req)
+			if recorder.Code != want {
+				t.Fatalf("status=%d want=%d", recorder.Code, want)
+			}
+			if want == http.StatusBadRequest && (calls != 0 || validations != 0) {
+				t.Fatal("invalid source downloaded or validated")
+			}
+			if want != http.StatusBadRequest && calls != 1 {
+				t.Fatal("expected exactly one request without redirect")
+			}
+			var result map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if want == http.StatusOK {
+				if result["validated"] != true || result["account_id"] != "acc_backup" || result["backup_id"] != "bkp_cell_test" || result["purpose"] != "backup" || result["archive_schema_version"] != float64(73) {
+					t.Fatal("missing exact acknowledgement")
+				}
+			} else {
+				message := "a valid backup archive source is required"
+				if want == http.StatusBadGateway {
+					message = "backup archive download failed"
+				}
+				if result["error"] != message || result["validated"] != nil {
+					t.Fatal("failure leaked details or acknowledged validation")
+				}
+			}
+		})
+	}
+}

@@ -274,7 +274,9 @@ type Config struct {
 	// back; it never exposes a routine committed restore API.
 	// ValidateAccountBackup must additionally be set for the route to exist.
 	BackupValidationEnabled bool
-	ValidateAccountBackup   func(
+	// BackupValidationArchiveOrigin is the exact HTTPS origin allowed for drill pulls.
+	BackupValidationArchiveOrigin string
+	ValidateAccountBackup         func(
 		ctx context.Context,
 		accountID, backupID string,
 		body io.Reader,
@@ -5614,12 +5616,75 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 	}
 }
 
+// Each socket read gets a fresh idle deadline; the client timeout also bounds
+// the complete response download. No redirect may forward the capability.
+type backupArchiveConn struct{ net.Conn }
+
+func (c backupArchiveConn) Read(p []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(2 * time.Minute)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
+}
+
+func newBackupArchiveClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
+	transport.ForceAttemptHTTP2 = false
+	transport.ResponseHeaderTimeout = 2 * time.Minute
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return backupArchiveConn{conn}, nil
+	}
+	return &http.Client{
+		Transport: transport, Timeout: 15 * time.Minute,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+var backupArchiveCapabilityPattern = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
+var backupArchiveSizePattern = regexp.MustCompile(`^[0-9]+$`)
+
+func backupArchiveSource(r *http.Request, origin string) (*neturl.URL, int64, bool) {
+	u, err := neturl.Parse(r.Header.Get("X-Witself-Backup-Archive-URL"))
+	allowed, allowedErr := neturl.Parse(origin)
+	sizeText := r.Header.Get("X-Witself-Backup-Archive-Size")
+	size, sizeErr := strconv.ParseInt(sizeText, 10, 64)
+	valid := err == nil && allowedErr == nil && origin != "" &&
+		u.Scheme == "https" && allowed.Scheme == "https" && u.Host != "" && u.Host == allowed.Host &&
+		u.User == nil && u.Fragment == "" && allowed.User == nil && allowed.Path == "" &&
+		allowed.RawQuery == "" && allowed.Fragment == "" &&
+		backupArchiveCapabilityPattern.MatchString(r.Header.Get("X-Witself-Backup-Archive-Token")) &&
+		backupArchiveSizePattern.MatchString(sizeText) && sizeErr == nil && size > 0 && size <= 8<<30
+	return u, size, valid
+}
+
+type backupArchiveReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (r *backupArchiveReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && err != io.EOF {
+		r.err = err
+	}
+	return n, err
+}
+
 // accountBackupHandler is a separate authority boundary from account
 // lifecycle and provisioning. A provisioning credential is explicitly
 // rejected even if configuration accidentally gives both token classes the
 // same value. Disabled backup actions return 404 before authentication so a
 // routine committed restore endpoint cannot appear by configuration drift.
 func accountBackupHandler(cfg Config) http.HandlerFunc {
+	return accountBackupHandlerWithArchiveClient(cfg, newBackupArchiveClient())
+}
+
+func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setAuthenticatedNoStoreDefault(w)
 		exportAccountID, exportBackup := pathActionID(
@@ -5697,9 +5762,47 @@ func accountBackupHandler(cfg Config) http.HandlerFunc {
 			return
 		}
 
+		var body io.Reader = r.Body
+		var limited *io.LimitedReader
+		var downloaded *backupArchiveReader
+		if _, present := r.Header[http.CanonicalHeaderKey("X-Witself-Backup-Archive-URL")]; present {
+			u, size, valid := backupArchiveSource(r, cfg.BackupValidationArchiveOrigin)
+			if !valid {
+				writeJSONError(w, http.StatusBadRequest, "a valid backup archive source is required")
+				return
+			}
+			download, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "a valid backup archive source is required")
+				return
+			}
+			download.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Witself-Backup-Archive-Token"))
+			response, err := client.Do(download)
+			if err != nil {
+				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
+				return
+			}
+			defer func() { _ = response.Body.Close() }()
+			if response.StatusCode != http.StatusOK || response.ContentLength != size {
+				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
+				return
+			}
+			limited = &io.LimitedReader{R: response.Body, N: size}
+			downloaded = &backupArchiveReader{reader: limited}
+			body = downloaded
+		}
 		sum, err := cfg.ValidateAccountBackup(
-			r.Context(), validateAccountID, backupID, r.Body,
+			r.Context(), validateAccountID, backupID, body,
 		)
+		if downloaded != nil {
+			// Validate may stop early. Still prove the complete advertised transfer
+			// before returning either an acknowledgement or an archive error.
+			_, readErr := io.Copy(io.Discard, downloaded)
+			if readErr != nil || downloaded.err != nil || limited.N != 0 {
+				writeJSONError(w, http.StatusBadGateway, "backup archive download failed")
+				return
+			}
+		}
 		switch {
 		case errors.Is(err, ErrConflict):
 			writeJSONError(

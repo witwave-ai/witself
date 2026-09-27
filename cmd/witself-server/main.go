@@ -1697,6 +1697,7 @@ func serve() int {
 			}, nil
 		}
 		cfg.BackupValidationEnabled = backupValidationEnabled
+		cfg.BackupValidationArchiveOrigin = os.Getenv("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN")
 		if backupValidationEnabled {
 			cfg.ValidateAccountBackup = func(
 				ctx context.Context,

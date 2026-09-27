@@ -195,6 +195,12 @@
 {{- with .Values.apps.witselfServer.imageDigest -}}
 {{- $_ := set $serverValues.image "digest" . -}}
 {{- end -}}
+{{- /* Drill-cell archive pulls: the server chart accepts the key from 0.0.310. */ -}}
+{{- if semverCompare ">=0.0.310-0" .Values.apps.witselfServer.chartVersion -}}
+{{- with $backup.validationArchiveOrigin -}}
+{{- $_ := set $serverValues.backup.validation "archiveOrigin" . -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.egressPolicy.enabled -}}
 {{- $egress := deepCopy .Values.egressPolicy -}}
 {{- $_ := set $egress "postgresNamespace" .Values.apps.civoPostgres.namespace -}}
