@@ -276,6 +276,14 @@ function validVerification(job, overrides = {}) {
   };
 }
 
+function exportResponseHeaders(options) {
+  const headers = new Headers(options.headers);
+  return {
+    "X-Witself-Backup-ID": headers.get("X-Witself-Backup-ID"),
+    "X-Witself-Backup-Cell": headers.get("X-Witself-Backup-Cell"),
+  };
+}
+
 function runtime({
   storage = new Storage(),
   directory: directoryBinding = directory(),
@@ -296,9 +304,10 @@ function runtime({
       headers.get("X-Witself-Backup-ID"),
       job.backup_id,
     );
+    assert.equal(headers.get("X-Witself-Backup-Cell"), SOURCE);
     return new Response("archive", {
       status: 200,
-      headers: { "X-Witself-Backup-ID": job.backup_id },
+      headers: exportResponseHeaders(options),
     });
   };
   const defaultStream = async (
@@ -348,6 +357,76 @@ function runtime({
 
 async function responseBody(response) {
   return response.json();
+}
+
+test("export stamps the registered source name instead of the cell's environment name", async () => {
+  const configuredCell = "runtime-local-cell";
+  let manifestCell;
+  const harness = runtime({
+    fetch: async (_url, options) => {
+      const headers = new Headers(options.headers);
+      const requestedCell = headers.get("X-Witself-Backup-Cell");
+      assert.equal(requestedCell, SOURCE);
+      assert.notEqual(requestedCell, configuredCell);
+      // Model a cell that stamps the requested name into its archive. The
+      // synthetic payload is stored and read back through verifyObject below.
+      const verification = validVerification(harness.job, {
+        manifest: { cell: requestedCell ?? configuredCell },
+      });
+      return new Response(JSON.stringify(verification), {
+        headers: exportResponseHeaders(options),
+      });
+    },
+    streamArchive: async (bucket, object, body, options) => {
+      bucket.write(object, await new Response(body).text(), options.customMetadata);
+      return (await bucket.head(object)).size;
+    },
+    validateArchive: async (bucket, object) => {
+      const verification = await new Response((await bucket.get(object)).body).json();
+      manifestCell = verification.manifest.cell;
+      return verification;
+    },
+  });
+  const response = await harness.instance.fetch(harness.request());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).status, "committed");
+  const state = harness.storage.values.get("account-backups");
+  assert.equal(manifestCell, state.current_job.source_cell);
+  assert.equal(state.catalog[0].source_cell, manifestCell);
+});
+
+for (const echo of [null, "wrong-cell"]) {
+  test(`a ${echo === null ? "missing" : "mismatched"} source cell echo cancels export and retries`, async () => {
+    let cancelled = false;
+    let streams = 0;
+    let verified = 0;
+    const harness = runtime({
+      fetch: async (_url, options) => {
+        assert.equal(new Headers(options.headers).get("X-Witself-Backup-Cell"), SOURCE);
+        const headers = exportResponseHeaders(options);
+        if (echo === null) delete headers["X-Witself-Backup-Cell"];
+        else headers["X-Witself-Backup-Cell"] = echo;
+        return new Response(new ReadableStream({
+          cancel() { cancelled = true; },
+        }), { headers });
+      },
+      streamArchive: async () => { streams += 1; assert.fail("unacknowledged export uploaded"); },
+      validateArchive: async () => { verified += 1; assert.fail("unacknowledged export verified"); },
+    });
+    const response = await harness.instance.fetch(harness.request());
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).status, "retrying");
+    assert.equal(cancelled, true);
+    assert.equal(streams, 0);
+    assert.equal(verified, 0);
+    const state = harness.storage.values.get("account-backups");
+    assert.equal(state.current_job.attempts, 1);
+    assert.equal(state.current_job.last_error,
+      "backup export did not acknowledge the exact source cell");
+    assert.notEqual(harness.storage.alarm, null);
+    assert.deepEqual(state.catalog, []);
+    assert.equal(harness.bucket.values.size, 0);
+  });
 }
 
 function manualEnv(h, fetch = (request) => h.instance.fetch(request)) {
@@ -480,9 +559,7 @@ test("start reports busy or accepted while a slow run holds the fence", { timeou
   const h = runtime({ fetch: async (_url, options) => {
     started();
     await blocked;
-    return new Response("archive", { headers: {
-      "X-Witself-Backup-ID": new Headers(options.headers).get("X-Witself-Backup-ID"),
-    } });
+    return new Response("archive", { headers: exportResponseHeaders(options) });
   } });
   const running = h.instance.fetch(h.request());
   try {
@@ -894,10 +971,7 @@ test("an existing verified object makes an ambiguous upload retry idempotent", a
       );
       return new Response("archive", {
         status: 200,
-        headers: {
-          "X-Witself-Backup-ID":
-            backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1).backup_id,
-        },
+        headers: exportResponseHeaders(options),
       });
     },
     streamArchive: async (binding, object, _body, options) => {
@@ -939,11 +1013,7 @@ test("a manual run arms its Durable Object alarm before outbound export", async 
       observedArmedAlarm = storage.alarm !== null;
       return new Response("archive", {
         status: 200,
-        headers: {
-          "X-Witself-Backup-ID": new Headers(options.headers).get(
-            "X-Witself-Backup-ID",
-          ),
-        },
+        headers: exportResponseHeaders(options),
       });
     },
   });
@@ -974,11 +1044,7 @@ test("an early alarm blocked by the active run rearms crash recovery", async () 
       await blocked;
       return new Response("archive", {
         status: 200,
-        headers: {
-          "X-Witself-Backup-ID": new Headers(options.headers).get(
-            "X-Witself-Backup-ID",
-          ),
-        },
+        headers: exportResponseHeaders(options),
       });
     },
   });
@@ -1470,7 +1536,7 @@ function streamingRuntime() {
       return new Response(new ReadableStream({
         start(controller) { upstream = controller; },
         cancel() { cancelled = true; },
-      }), { headers: { "X-Witself-Backup-ID": harness.job.backup_id } });
+      }), { headers: exportResponseHeaders(options) });
     },
     // Exercise the real multipart abort/complete path as well as body reads.
     streamArchive: streamToR2Multipart,

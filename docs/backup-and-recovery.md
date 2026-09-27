@@ -646,6 +646,21 @@ of routed accounts into the dedicated Cloudflare R2 bucket
   again before catalog commit, so an account move cannot silently attribute a
   backup to the wrong source.
 
+The backup manifest's `cell` field is the control plane's registered name for
+the source cell. It can differ from `WITSELF_CELL_NAME` after re-registration
+under a legacy registry name, as in the 2026-09-19 recovery: the serving cell's
+environment name is `civo-sandbox-use1-serving`, while its registered name is
+`civo-sandbox-usw2-dev`. The control plane sends that registered name in
+`X-Witself-Backup-Cell`, alongside `X-Witself-Backup-ID`, and requires the cell
+to echo both exactly before accepting the archive stream. A missing or different
+cell echo cancels the stream and produces a retryable dispatch failure.
+
+Roll out this protocol change to **cells first, control plane second**. An old
+cell does not echo `X-Witself-Backup-Cell`, so a new control plane rejects its
+export. A new cell with an old control plane keeps the previous behavior: when
+the header is absent, it stamps and echoes `WITSELF_CELL_NAME`. Manifest source
+checks on commit and restore drills remain exact.
+
 Export-order indexes are built concurrently at startup, so a cell roll carrying
 them must not overlap a pre-migration backup or the nightly periodic backup slot
 around 00:00Z because concurrent builds wait for older snapshots.

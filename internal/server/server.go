@@ -252,9 +252,11 @@ type Config struct {
 	// POST /v1/accounts/{id}:export-backup path. It streams a read-only
 	// point-in-time archive and never changes account lifecycle or placement.
 	// The callback flushes compressed chunks through the supplied transport hook.
+	// cellName is the control plane's registered source name, or the configured
+	// cell name when an older control plane omits AccountBackupCellHeader.
 	StreamAccountBackup func(
 		ctx context.Context,
-		accountID, backupID string,
+		accountID, backupID, cellName string,
 		w io.Writer,
 		flush func() error,
 	) error
@@ -1180,6 +1182,9 @@ const (
 	// AccountBackupIDHeader binds an export/restore request to one exact
 	// periodic backup object without overloading the evacuation epoch.
 	AccountBackupIDHeader = "X-Witself-Backup-ID"
+	// AccountBackupCellHeader carries the control plane's registered source
+	// cell name for the archive manifest and its exact export acknowledgement.
+	AccountBackupCellHeader = "X-Witself-Backup-Cell"
 
 	// AccountProvisionProtocolVersion advertises required caller-stable
 	// provision ids and durable cell-side replay receipts.
@@ -5652,12 +5657,21 @@ func accountBackupHandler(cfg Config) http.HandlerFunc {
 		}
 
 		if exportBackup {
+			cellName := os.Getenv("WITSELF_CELL_NAME")
+			if names, present := r.Header[http.CanonicalHeaderKey(AccountBackupCellHeader)]; present {
+				if len(names) != 1 || !validCellName(names[0]) {
+					writeJSONError(w, http.StatusBadRequest, "a valid backup cell name is required")
+					return
+				}
+				cellName = names[0]
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-Witself-Export-Format", "1")
 			w.Header().Set("X-Witself-Export-Purpose", "backup")
 			w.Header().Set(AccountBackupIDHeader, backupID)
+			w.Header().Set(AccountBackupCellHeader, cellName)
 			err := cfg.StreamAccountBackup(
-				r.Context(), exportAccountID, backupID, w, func() error {
+				r.Context(), exportAccountID, backupID, cellName, w, func() error {
 					err := http.NewResponseController(w).Flush()
 					if errors.Is(err, http.ErrNotSupported) {
 						return nil
@@ -6795,6 +6809,15 @@ func validEvacuationID(value string) bool {
 
 func validBackupID(value string) bool {
 	return validOperationID(value)
+}
+
+// cellNamePattern is the control plane's registration grammar for cell names
+// (the same one its backup runtime applies to source cells), so any name the
+// fleet can register is accepted here.
+var cellNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+func validCellName(value string) bool {
+	return cellNamePattern.MatchString(value)
 }
 
 // Support-ticket handlers. Every one runs behind requireOperator so the
