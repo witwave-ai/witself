@@ -746,6 +746,14 @@ func validAgentEmailConfigGeneratedID(value, prefix string) bool {
 }
 
 func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Store, receive server.AgentEmailReceiveConfig) error {
+	return configureAgentEmailWithLog(ctx, cfg, st, receive, os.Stderr)
+}
+
+func agentEmailProductionCohortStartupLine(r store.AgentEmailProductionCohortResidency) string {
+	return fmt.Sprintf("witself-server: agent-email production receive cohort configured=%d resident=%d departed=%d unknown=%d retry_canary=%s", r.ConfiguredAccountCount, r.ResidentAccountCount, r.DepartedAccountCount, r.UnknownAccountCount, r.RetryCanary)
+}
+
+func configureAgentEmailWithLog(ctx context.Context, cfg *server.Config, st *store.Store, receive server.AgentEmailReceiveConfig, log io.Writer) error {
 	cfg.AgentEmailReceive = receive
 	if rawToken, present := os.LookupEnv(agentEmailProviderEventTokenEnv); present {
 		cfg.AgentEmailProviderEventToken = strings.TrimSpace(rawToken)
@@ -911,11 +919,13 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 	}
 	scope := toStoreAgentEmailReceiveScope(receive)
 	if receive.Mode == server.AgentEmailReceiveModeProduction {
-		if err := st.ValidateAgentEmailProductionCohort(ctx, scope); err != nil {
+		residency, err := st.ValidateAgentEmailProductionCohort(ctx, scope)
+		if err != nil {
 			return newAgentEmailLogSafeError(
 				"agent-email production startup preflight", "preflight_failed", err,
 			)
 		}
+		_, _ = fmt.Fprintln(log, agentEmailProductionCohortStartupLine(residency))
 	} else if _, err := st.ReconcileAgentEmailPilot(ctx, scope); err != nil {
 		return newAgentEmailLogSafeError(
 			"agent-email pilot startup reconciliation", "reconciliation_failed", err,

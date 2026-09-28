@@ -289,10 +289,12 @@ function registry(options = {}) {
   };
   const failingClaimIDs = new Set();
   const missingRealmIDs = new Set();
+  const fetchOrigins = [];
   let fetchCallCount = 0;
   const fetchImpl = async (url, init = {}) => {
     fetchCallCount++;
     const parsed = new URL(url);
+    fetchOrigins.push({ origin: parsed.origin, pathname: parsed.pathname, method: init.method });
     assert.equal(init.headers.Authorization, "Bearer witself_prv_cell");
     if (parsed.pathname === `/v1/accounts/${ACCOUNT}:plan` &&
         init.method === "GET") {
@@ -423,6 +425,7 @@ function registry(options = {}) {
     cellClaims,
     logs,
     env,
+    fetchOrigins,
     fetchCallCount() {
       return fetchCallCount;
     },
@@ -4235,4 +4238,45 @@ test("alarm scheduling cannot erase a concurrently committed due row", async () 
   blocker.release();
   await Promise.all([staleSchedule, freshSchedule]);
   assert.equal(storage.alarmAt, dueAt);
+});
+
+
+test("applied alias follows an account move to the production origin", async () => {
+  const { runtime, directory, emailDirectory, fetchOrigins } = registry();
+  const requested = await requestAlias(runtime, "move-production");
+  await approve(runtime, requested.body.request);
+  const key = realmEmailRouteKey(DOMAIN, "move-production");
+  const before = emailDirectory.value(key);
+  assert.equal(before.state, "applied");
+  assert.equal(before.cell_audience, "cell-one");
+  const fence = { account_id: ACCOUNT, operation_id: "alias-production-move", epoch: 2, activation_enabled: true };
+  const reconcile = async (action) => {
+    for (let i = 0; i < 10; i++) {
+      const result = await call(runtime, "/account-lifecycle/reconcile", { ...fence, action });
+      assert.equal(result.response.status, 200);
+      if (result.body.complete) return;
+    }
+    assert.fail("lifecycle did not complete");
+  };
+  await reconcile("suspend");
+  const suspended = emailDirectory.value(key);
+  assert.equal(suspended.state, "suspended");
+  assert.equal(suspended.suspension_disposition, "retry");
+  assert.equal(suspended.cell_audience, undefined);
+  assert.equal(suspended.ingest_url, undefined);
+  const origin = "https://api.civo-prod-use1-serving.cells.witself.witwave.ai";
+  directory.values.set(`acct:${ACCOUNT}`, { cell: "civo-prod-use1-serving" });
+  directory.values.set("cell:civo-prod-use1-serving", { endpoint: origin, provision_token: "witself_prv_cell" });
+  const start = fetchOrigins.length;
+  await reconcile("republish");
+  const projection = emailDirectory.value(key);
+  assert.equal(projection.state, "applied");
+  assert.equal(projection.cell_audience, "civo-prod-use1-serving");
+  assert.equal(projection.ingest_url, `${origin}/v1/internal/agent-email:ingest`);
+  assert.ok(projection.controller_revision > before.controller_revision);
+  const requests = fetchOrigins.slice(start);
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every((request) => request.origin === origin));
+  assert.ok(requests.some((request) => request.method === "POST" && request.pathname.endsWith(":email-realm-alias")));
+  assert.ok(requests.some((request) => request.method === "GET" && request.pathname.endsWith(":email-realm-alias")));
 });

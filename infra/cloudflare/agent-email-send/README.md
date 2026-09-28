@@ -347,15 +347,21 @@ every account target names its current cell, each cell carries all unexpired
 signer provenance for its accounts, and every callback is HTTPS. Never print
 the JSON values to verify them.
 
-For an account move, first import the suspended archive and make the destination
-callback healthy. In one replacement `EVENT_TARGETS_JSON` value, add the
-destination cell if needed, carry every unexpired signer key ID for that
-account into the destination cell's `accepted_signer_key_ids`, and repoint only
-that account's `account_targets` entry. Install the replacement interactively
-with `wrangler_prod secret put EVENT_TARGETS_JSON`. A secret update can create a
-new Worker version, so reapply the intended values with `deploy_gates`, verify
-that version and the Queue state, and only then activate the imported account.
-Keep the source cell entry while any other account still targets it.
+For an account move, prepare the destination entry and signer provenance before
+evacuation. Carry every unexpired signer key ID for the moving account into
+the destination cell's `accepted_signer_key_ids`, and retain the source entry.
+For a lifecycle-driven move, install the replacement `EVENT_TARGETS_JSON`
+secret repointing that account's `account_targets` between `cells evacuate`
+and `cells restore`. Install interactively with
+`wrangler_prod secret put EVENT_TARGETS_JSON`, re-apply intended values with
+`deploy_gates`, and verify the Worker version and Queue state before starting
+restore. Repoint and verification must precede activation: lifecycle restore
+offers no operator pause between import and activation. Events arriving after
+the repoint retry until import commits; the Queue allows 25 retries at 60
+seconds and then dead-letters for manual re-drive. Start restore promptly.
+Keep the source cell entry while any account still targets it, and preserve
+its Secrets and signer until retirement for reverse moves. Rollback while the
+account is archived also requires repointing its target back before restore.
 
 ## Rollout order
 

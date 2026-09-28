@@ -376,6 +376,14 @@ passes this shape only when the server chart and image are both `0.0.241` or
 newer. Fleet and portable defaults remain false; no live cell is enabled by the
 release itself.
 
+For a new production cell's first sync, keep receive and outbound disabled and
+the provider-event Secret name empty until the cell's operator Secrets exist.
+Retain the other email settings. Provision the four operator Secrets, prove
+cohort/canary byte equality with the source, and prepare send Worker signer
+and event-target configuration before enabling email in a later config-only
+change. Outbound requires a named provider-event Secret; receive may be
+enabled independently. Keep retention policy under its separate rollout.
+
 The managed app-of-apps commits only
 `accountIDsExistingSecret.name`/`.key`, never the IDs. The referenced Secret
 must be immutable, versioned, and present in the server namespace before
@@ -398,10 +406,59 @@ rotation creates a new immutable name before changing its values reference.
 The age custody identity remains on the operator side, outside Git, CI and
 the cells.
 
-Serving replicas do only a bounded read-only check that each configured account
-exists in the cell and is active or suspended, plus one optional canary
-membership check. They do not scan agents and never provision mailboxes during
-startup. This makes 20 API replicas equivalent to one for receive setup. A
+Starting with `v0.0.317`, serving startup treats the production cohort as a
+fleet allowlist. Each pod uses one bounded read-only snapshot and emits:
+
+```text
+witself-server: agent-email production receive cohort configured=N resident=N departed=N unknown=N retry_canary=STATE
+```
+
+Absent accounts are skipped: `departed` means this cell finalized their
+evacuation; otherwise they are `unknown`. Configured equals resident plus
+departed plus unknown. The canary state is `none`, `ready`, or `absent`.
+A resident account must still be `active` or `suspended`; a `closed` account
+stops startup. An existing canary must be live in a resident cohort account;
+an absent canary is reported instead of failing startup.
+
+
+Expected line per state (one cohort account, the Founder):
+
+| Cell and moment | Line |
+|---|---|
+| Source before any move | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
+| Destination pre-listing, account not arrived | `configured=1 resident=0 departed=0 unknown=1 retry_canary=absent` |
+| Destination after arrival, on the next pod start | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
+| Source after the account left, on the next pod start | `configured=1 resident=0 departed=1 unknown=0 retry_canary=absent` |
+
+After ANY change of a cohort or canary Secret, read this line on every server
+pod and confirm `resident` equals the number of cohort accounts that live on
+that cell. An `unknown` count on a cell that holds the account means a wrong
+ID: roll the Secret back before mail for that account bounces permanently.
+Byte equality with the source covers a copy, not a rotation that changes
+content.
+
+This line does not validate IDs. `unknown` is expected only on a destination
+pre-listing an account before its first arrival; a mistyped ID looks identical.
+An `absent` canary likewise does not prove its ID is right. Before enablement,
+the operator must prove the cohort and canary Secret bytes equal the source
+cell's, comparing in memory and printing only match/mismatch, never values or
+digests. Repeat after any Secret re-creation. For a planned move, list the
+account on the destination before arrival and leave it on the source. A cohort
+miss at ingest remains a permanent rejection.
+
+Explicit backfill, preflight, and canary-manifest operations remain strict:
+every listed account must be resident, and the configured canary must be live
+in the cohort. A cohort spanning cells fails these operations on every cell;
+this move procedure is acceptable only while the cohort is one account.
+Run the strict read-only canary-manifest operation on the destination
+immediately after restore. Pods older than `v0.0.317` exit at startup when a
+cohort lists a non-resident account. Before rolling below that floor, install
+a resident-only cohort using a new immutable Secret name, or disable receive.
+When no cohort account is resident on the cell (the source after the Founder
+left), a resident-only cohort would be empty and the parser rejects an empty
+cohort, so disabling receive is the only option.
+
+Serving replicas never provision mailboxes or scan all agents at startup. A
 Personal account accidentally present in the cohort does not prevent
 startup: the local plan entitlement remains authoritative, and an attempted
 delivery is accepted and discarded without persisting message content. A plan

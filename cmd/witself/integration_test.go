@@ -3508,7 +3508,11 @@ func TestLegacyAutomaticCuratorContinuationExposesNoCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	var raw []byte
-	deadline := time.Now().Add(3 * time.Second)
+	// The helper is a detached shell process. The loop returns as soon as its
+	// output appears, so a generous bound costs nothing on an idle machine
+	// and keeps the test honest under a loaded gate (a 3-second bound flaked
+	// with the race detector and parallel packages running).
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		raw, err = os.ReadFile(logPath)
 		if err == nil && len(raw) > 0 {
