@@ -11,10 +11,10 @@ index 22a9501..16561cc 100644
        postgres_backup: true
        memory_alerts: false
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index 8cb13e6..43b4a63 100644
+index 1cd953a..6611f11 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -217,20 +217,44 @@ apps:
+@@ -218,20 +218,44 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -66,10 +66,10 @@ index 8cb13e6..43b4a63 100644
      enabled: false
    certManager:
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-index 23acc1c..3aeaa51 100644
+index e9d5cce..aa0de15 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-@@ -196,20 +196,61 @@ apps:
+@@ -197,20 +197,61 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -138,7 +138,7 @@ index 23acc1c..3aeaa51 100644
      enabled: false
    certManager:
 diff --git a/internal/gitopsvalues/generate_test.go b/internal/gitopsvalues/generate_test.go
-index e4e50ff..69fdf1f 100644
+index c52a6fc..708b9e4 100644
 --- a/internal/gitopsvalues/generate_test.go
 +++ b/internal/gitopsvalues/generate_test.go
 @@ -82,8 +82,8 @@ func TestSealedPlaneAlertsTemplate(t *testing.T) {
@@ -192,8 +192,12 @@ index e4e50ff..69fdf1f 100644
  			}
  			if hasCollector {
  				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
-@@ -227,3 +229,3 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
+@@ -224,7 +226,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
+ 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
+ 					}
+ 					wantMonitoring := entry.Role == "serving" && monitoringEnabled
 -					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
 +					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
  						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
  					}
+ 					if entry.Role == "backup" && postgres.Metrics.ServiceMonitor.Enabled {

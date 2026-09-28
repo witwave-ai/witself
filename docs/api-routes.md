@@ -91,12 +91,12 @@ capability. A missing or failed limiter fails closed with the same uniform 404.
 send an empty body and three headers: `X-Witself-Backup-Archive-URL`,
 `X-Witself-Backup-Archive-Token`, and `X-Witself-Backup-Archive-Size`.
 The URL must use HTTPS and exactly match the cell's configured
-`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`. When backup validation is enabled,
-a nonempty origin is validated at startup: HTTPS with a host, no userinfo,
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`. A nonempty origin is validated
+at startup even when backup validation is disabled: HTTPS with a host, no userinfo,
 path, query, or fragment; one trailing slash is normalized away. Invalid values
 stop startup with a value-free error. An empty setting leaves pull validation
 unconfigured while preserving legacy body validation. Startup logs only whether
-pull validation is configured. The token must match
+archive pulls are configured. The token must match
 `^cap_[0-9a-f]{64}$` and size must be a positive integer at most 8 GiB.
 Invalid sources return 400 `a valid backup archive source is required` before
 network access, and a download that cannot start (non-200, response length
@@ -1904,3 +1904,27 @@ and SVG boundaries.
 - [agent-avatars.md](agent-avatars.md)
 - [deployment-cells.md](deployment-cells.md)
 - [observability-and-operations.md](observability-and-operations.md)
+
+## Evacuation archive pull
+
+`GET /v1/archives:pull?account_id=<id>&evacuation_id=<id>` is a public
+capability-only control-plane route. It passes through `PUBLIC_IP_LIMITER`
+before Durable Object access, and accepts only `Authorization: Bearer cap_`
+followed by 64 lowercase hexadecimal characters. The capability is single-use,
+expires after 30 minutes, and is bound to the account, evacuation, target cell,
+object, ETag and size. The R2 read uses `onlyIf.etagMatches`; success includes
+`Content-Length`, `Content-Type: application/gzip`, `Cache-Control: no-store`,
+and `X-Witself-Evacuation-ID`. Failures uniformly return no-store 404, except an
+explicit IP limiter denial returns 429 with `Retry-After: 60`.
+
+`POST /v1/accounts/{account_id}:import-evacuation` still authenticates with the
+cell provision token and requires `X-Witself-Evacuation-ID`. Protocol 2 adds
+`X-Witself-Archive-URL`, `X-Witself-Archive-Token`, and `X-Witself-Archive-Size`
+with an empty body. The URL must use the exact HTTPS origin configured by
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`. Invalid sources return 400
+`a valid archive source is required` without network access. Valid pulls start
+a JSON 200 response immediately and heartbeat with newlines every 10 seconds.
+Only the final exact import acknowledgement indicates success; a value-free
+error object is failure even under HTTP 200. `already_imported` and
+`evacuation_completed` retain their prior meanings. Omitting the URL header
+preserves the legacy request-body import contract.

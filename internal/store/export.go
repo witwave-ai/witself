@@ -112,13 +112,18 @@ func (s *Store) ExportAccountEvacuation(
 	ctx context.Context,
 	accountID, evacuationID, cellName, serverVersion string,
 	w io.Writer,
+	flush ...func() error,
 ) error {
 	if err := validateEvacuationID(evacuationID); err != nil {
 		return err
 	}
+	var flushHook func() error
+	if len(flush) > 0 {
+		flushHook = flush[0]
+	}
 	return s.exportAccount(
 		ctx, accountID, cellName, serverVersion, w,
-		accountExportOptions{evacuationID: evacuationID},
+		accountExportOptions{evacuationID: evacuationID, flush: flushHook},
 	)
 }
 

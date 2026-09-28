@@ -118,6 +118,11 @@
     // five-minute probe off until a reviewed cost decision flips this plain
     // variable and both deployment verifier pins together; no secret is used.
     "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED": "false",
+    // Public HTTPS origin every cell trusts for evacuation archive pulls
+    // (WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN). The lifecycle runtime pins
+    // it on each operation at claim time so cron-driven and alarm-resumed
+    // moves never depend on the host an operator request arrived on.
+    "CP_PUBLIC_ORIGIN": "https://self.witwave.ai",
     // Open self-service signup is ACTIVE (ratified 2026-08-29 per the keyed
     // procedure in docs/signup-abuse-hardening.md). Invite-less signups
     // require Turnstile plus the daily quotas below; setting this back to

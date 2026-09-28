@@ -118,7 +118,7 @@ import {
   validateMintHandle,
 } from "./admin-handles.mjs";
 import { renderSupportEmail } from "./support-notify.mjs";
-import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
+import { DurableAccountLifecycle, accountArchivePull } from "./account-lifecycle-runtime.mjs";
 import {
   DurableAccountSignup,
   inviteVerdict,
@@ -353,6 +353,7 @@ const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
 const PLACEMENT_RESCUE_PATH = /^\/v1\/placement\/archives\/([A-Za-z0-9_-]{1,128}):rescue$/;
 const PLACEMENT_RESCUE_AXES = new Set(["cloud", "region", "channel"]);
 const ACCOUNT_BACKUP_STATUS_PATH = "/v1/backups/status";
+const ACCOUNT_ARCHIVE_PULL_PATH = "/v1/archives:pull";
 const ACCOUNT_BACKUP_ARCHIVE_PATH = "/v1/backups:archive";
 const ACCOUNT_BACKUP_RUN_PATH = "/v1/backups:run";
 const ACCOUNT_BACKUP_RESTORE_DRILL_PATH =
@@ -3614,7 +3615,7 @@ async function runAccountLifecycle(env, accountId, input) {
     new Request("https://account-lifecycle.internal/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account_id: accountId, ...input }),
+      body: JSON.stringify({ account_id: accountId, request_origin: env.lifecycleRequestOrigin, ...input }),
     }),
   );
   const body = await response.json().catch(() => null);
@@ -4706,6 +4707,7 @@ function isProtectedWorkerRoute(pathname) {
     pathname === "/v1/placement:run" ||
     pathname === "/v1/placement:restore" ||
     pathname === "/v1/placement:rebalance" ||
+    pathname === ACCOUNT_ARCHIVE_PULL_PATH ||
     pathname === ACCOUNT_BACKUP_ARCHIVE_PATH ||
     pathname === ACCOUNT_BACKUP_STATUS_PATH ||
     pathname === ACCOUNT_BACKUP_RUN_PATH ||
@@ -4719,10 +4721,11 @@ function isProtectedWorkerRoute(pathname) {
 
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
+    env = { ...env, lifecycleRequestOrigin: url.origin };
 
     // Throttle before any capability storage access. All failures except an
     // explicit limiter denial retain the capability route's uniform 404.
-    if (url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH) {
+    if ([ACCOUNT_BACKUP_ARCHIVE_PATH, ACCOUNT_ARCHIVE_PULL_PATH].includes(url.pathname)) {
       try {
         const result = await env.PUBLIC_IP_LIMITER.limit({ key: sourceIP(request) });
         if (result?.success === false) {
@@ -4732,9 +4735,9 @@ async function handleFetch(request, env, ctx) {
           return response;
         }
         if (result?.success !== true) throw new Error("archive limiter unavailable");
-        return accountBackupArchive(request, env);
+        return url.pathname === ACCOUNT_ARCHIVE_PULL_PATH ? accountArchivePull(request, env) : accountBackupArchive(request, env);
       } catch {
-        return new Response(JSON.stringify({ error: "backup archive is not available" }), {
+        return new Response(JSON.stringify({ error: url.pathname === ACCOUNT_ARCHIVE_PULL_PATH ? "archive is not available" : "backup archive is not available" }), {
           status: 404, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
         });
       }

@@ -1,2 +1,4 @@
 *.sh text eol=lf
 .goreleaser.yaml text eol=lf
+# Recovery patch fixtures legitimately contain space-then-tab context lines.
+scripts/testdata/monitoring-recovery/*.patch -whitespace

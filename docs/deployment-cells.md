@@ -820,3 +820,25 @@ These are open; this document records them without resolving them.
 - [billing-and-limits.md](billing-and-limits.md) — account-level billing
 - [backup-and-recovery.md](backup-and-recovery.md) — per-cell backup and migration data movement
 - [agent-collaboration.md](agent-collaboration.md) — cross-realm collaboration over the shared global directory
+
+## Account evacuation transport rollout
+
+Roll cells first, then the control plane. `/v1/version` advertises
+`account_evacuation_protocol: 2` for pull imports. All potential import targets,
+including serving cells, must configure `backup.validationArchiveOrigin` as
+`https://self.witwave.ai`. The existing environment setting
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` permits that exact HTTPS control-plane
+origin for every archive pull, both restore-drill validation and account import;
+its name remains unchanged. The apps chart mapping is available from 0.0.310.
+
+Protocol 1 remains compatible with close operations and evacuation source
+exports. A protocol-1 import target accepts legacy pushes only up to 90 MiB;
+larger archives remain retryable until the target rolls to protocol 2. Verify
+the rendered ConfigMap and the target version before initiating account moves.
+
+No lifecycle operation may start or be in flight between the cell roll and the
+control-plane deploy: the previous control plane requires protocol 1 exactly and
+answers 409 to drains, moves, restores and `witself-infra destroy` against a
+protocol-2 cell until the new control plane is deployed (in-flight operations
+retry every 60 seconds and resume afterwards). The Worker var `CP_PUBLIC_ORIGIN`
+must equal the origin every cell configures.

@@ -993,6 +993,11 @@ test("release renderer injects matching immutable container and Worker identity"
   );
   assert.match(
     config,
+    /"CP_PUBLIC_ORIGIN"\s*:\s*"https:\/\/self\.witwave\.ai"/,
+    "release config must pin the archive pull origin cells trust",
+  );
+  assert.match(
+    config,
     /"CP_SIGNUP_DAILY_LIMIT_PER_IP"\s*:\s*"10"/,
     "release config must pin the reviewed per-IP daily signup quota",
   );
@@ -1330,6 +1335,7 @@ function deployedVersion(overrides = {}) {
           ["CP_SIGNUP_LEGAL_ENFORCEMENT", "true"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
           ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
+          ["CP_PUBLIC_ORIGIN", "https://self.witwave.ai"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
           name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",

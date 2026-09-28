@@ -1512,11 +1512,11 @@ It allows 20 minutes for the cell request. Rejected acknowledgements report only
 the cell's fixed `error` string, sanitized to printable ASCII and capped at 120
 characters; other responses report `missing exact acknowledgement`.
 
-With backup validation enabled, startup rejects a nonempty
+Startup rejects a nonempty
 `WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` unless it is HTTPS with a host and
 no path, query, fragment, or userinfo. One trailing slash is removed. Empty
 keeps legacy body validation available but leaves pulls unconfigured. The startup
-line reports only whether pull validation is configured, never the origin.
+line reports only whether archive pulls are configured, never the origin.
 
 Roll out cells first, including the drill cell's archive origin configuration,
 and the control plane second. The cell retains legacy request-body validation
@@ -1554,3 +1554,44 @@ capabilities or archive URL query strings.
 - [threat-model.md](threat-model.md)
 - [implementation-plan.md](implementation-plan.md)
 - [post-v0-roadmap.md](post-v0-roadmap.md)
+
+## Evacuation archive transport (protocol 2)
+
+Roll cells before the control plane. Evacuation exports flush the compressed
+manifest and each chunk. The control plane allows up to 60 minutes overall,
+with a 120-second idle-progress watchdog driven by archive bytes.
+
+For protocol-2 targets, the lifecycle Durable Object issues a fresh single-use,
+30-minute capability for each import attempt. Only its SHA-256 hash is stored;
+the record binds account, evacuation, target cell, R2 object, ETag, and size.
+The target pulls through `GET /v1/archives:pull` at the origin pinned on the
+operation at claim time: `CP_PUBLIC_ORIGIN` (`https://self.witwave.ai` in the
+Worker vars, the one origin every cell trusts) when configured, otherwise the
+initiating request's origin. Operations claimed before the origin existed fall
+back to `CP_PUBLIC_ORIGIN` at import time. Alarm resumes retain the stored origin.
+
+Budgets: the cell's download client allows 15 minutes per attempt inside the
+control plane's 30-minute import deadline (about 360 KB/s for a 327 MB archive).
+Cloudflare caps one Durable Object alarm invocation at 15 minutes of wall time,
+so an alarm-resumed export or import step that cannot finish inside that window
+is cut off and retried from scratch every 60 seconds; the operator-driven path
+has no wall limit while the admin client stays connected. Measure export,
+verification and import durations for the largest account during the migration
+rehearsal before moving it. An account whose steps approach the alarm window
+needs the import split into a cell-side job, not a longer timeout.
+
+The cell validates the exact configured HTTPS origin, token grammar and size
+(up to 8 GiB) before any network access, refuses redirects, and spools to its
+writable temporary directory before database import. Provision-token-authenticated
+import requests send an empty body and archive URL/token/size headers. The cell
+sends JSON response headers immediately, then newline heartbeats every 10 seconds;
+the control plane waits up to 30 minutes and advances only on the exact import
+acknowledgement. An error object after HTTP 200 records a retryable operation
+failure; a retry mints a fresh capability. Downloading retains the shared
+15-minute total and two-minute socket-idle bounds.
+
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` now governs both validation and import
+pulls; configure it on serving cells as well as validation cells. Legacy body
+imports remain available when the archive URL header is absent. Protocol-1
+targets use that path only for archives no larger than 90 MiB; larger archives
+require protocol 2. These changes do not alter backup drill behavior.

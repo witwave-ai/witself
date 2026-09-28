@@ -1,3 +1,4 @@
+import { ExportWatchdog } from "./account-backup-runtime.mjs";
 import {
   AccountLifecycleBusyError,
   AccountLifecycleFence,
@@ -492,6 +493,12 @@ export class DurableAccountLifecycle {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/archive-capability:consume") {
+      try {
+        const input = await request.json();
+        return json(await this.consumeArchiveCapability(input));
+      } catch { return archiveUnavailable(); }
+    }
     if (
       request.method === "POST" &&
       url.pathname === "/reservation-status"
@@ -535,6 +542,54 @@ export class DurableAccountLifecycle {
         : 500;
       return errorResponse(String(error?.message ?? error), status);
     }
+  }
+
+  // Separate from the lifecycle fence: the target must consume while /run
+  // waits for its import acknowledgement. Serialize all capability mutations.
+  async withCapabilities(work) {
+    const pending = (this.capabilityQueue ?? Promise.resolve()).then(async () => {
+      const now = this.now().getTime();
+      for (const [key, value] of await this.storage.list({ prefix: "archive-capability:" })) {
+        if (value.expires_at <= now) await this.storage.delete(key);
+      }
+      return work(now);
+    });
+    this.capabilityQueue = pending.catch(() => {});
+    return pending;
+  }
+
+  async mintArchiveCapability(operation, object) {
+    return this.withCapabilities(async (now) => {
+      if (!object?.etag || !Number.isSafeInteger(object.size) || object.size <= 0 || object.size > 8 * 1024 ** 3) {
+        fail("archive metadata is unavailable for pull import", 502);
+      }
+      const token = "cap_" + Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
+      await this.storage.put(await archiveCapabilityKey(token), {
+        account_id: this.accountId, evacuation_id: operation.evacuation_id,
+        object: operation.archive.object, r2_etag: object.etag, size: object.size,
+        target_cell: operation.target_cell, expires_at: now + 30 * 60_000,
+      });
+      return token;
+    });
+  }
+
+  async consumeArchiveCapability(input) {
+    return this.withCapabilities(async () => {
+      if (!/^cap_[0-9a-f]{64}$/.test(input?.token ?? "")) throw new Error("unavailable");
+      const key = await archiveCapabilityKey(input.token);
+      const record = await this.storage.get(key);
+      if (!record) throw new Error("unavailable");
+      // Delete before returning metadata, including on a mismatched use.
+      await this.storage.delete(key);
+      const state = await this.loadState();
+      const operation = state?.operation;
+      if (record.account_id !== this.accountId || input.account_id !== record.account_id ||
+          input.evacuation_id !== record.evacuation_id ||
+          operation?.evacuation_id !== record.evacuation_id ||
+          operation?.target_cell !== record.target_cell || operation?.archive?.object !== record.object ||
+          !["route_retired", "target_reserved"].includes(operation?.phase)) throw new Error("unavailable");
+      return record;
+    });
   }
 
   async reservationStatus(request) {
@@ -954,7 +1009,7 @@ export class DurableAccountLifecycle {
     }
     const resolved = { ...cell, name };
     if (evacuationProtocol) {
-      await this.requireEvacuationProtocol(resolved);
+      resolved.account_evacuation_protocol = await this.requireEvacuationProtocol(resolved);
     }
     return resolved;
   }
@@ -1012,13 +1067,14 @@ export class DurableAccountLifecycle {
     if (
       !response.ok ||
       !isObject(body) ||
-      body.account_evacuation_protocol !== 1
+      ![1, 2].includes(body.account_evacuation_protocol)
     ) {
       fail(
-        `cell ${cell.name} does not attest account evacuation protocol 1: HTTP ${response.status} ${text.slice(0, 120)}`,
+        `cell ${cell.name} does not attest account evacuation protocol 1 or 2: HTTP ${response.status} ${text.slice(0, 120)}`,
         409,
       );
     }
+    return body.account_evacuation_protocol;
   }
 
   async run(input) {
@@ -1278,7 +1334,7 @@ export class DurableAccountLifecycle {
       targetPreflight = {
         cell: target.name,
         endpoint: target.endpoint,
-        protocol: 1,
+        protocol: target.account_evacuation_protocol,
         registration_id:
           target.registration_id ?? target.registered_at ?? null,
         accepted_at: this.now().toISOString(),
@@ -1427,7 +1483,10 @@ export class DurableAccountLifecycle {
         fail("unsupported lifecycle action", 400);
     }
     state = claimOperation(state, claim);
-    state = operationMetadata(state, metadata);
+    // The configured public origin wins: cells trust exactly one origin and
+    // cron-driven claims carry no request. The request origin is a fallback
+    // for unconfigured (test) deployments only.
+    state = operationMetadata(state, { ...metadata, archive_origin: this.env.CP_PUBLIC_ORIGIN ?? input.request_origin ?? null });
     // Arm durable resumption before the claim becomes authoritative. An alarm
     // without a claim is harmless; a claim without an alarm can become
     // undiscoverable after its last KV projection is retired.
@@ -1770,12 +1829,13 @@ export class DurableAccountLifecycle {
     });
     let placementPolicy;
     let pointer;
+    const watchdog = new ExportWatchdog();
     try {
       placementPolicy = await this.readPlacementPolicy(
         cell,
         this.accountId,
       );
-      const response = await this.fetchImpl(
+      const response = await watchdog.wait(this.fetchImpl(
         `${cell.endpoint}/v1/accounts/${this.accountId}:export-evacuation`,
         {
           method: "POST",
@@ -1783,21 +1843,21 @@ export class DurableAccountLifecycle {
             Authorization: `Bearer ${cell.provision_token}`,
             "X-Witself-Evacuation-ID": operation.evacuation_id,
           },
-          signal: AbortSignal.timeout(300_000),
+          signal: watchdog.signal,
         },
-      );
+      ));
       if (!response.ok || !response.body) {
-        const { text } = await responseBody(response);
+        const { text } = await watchdog.wait(responseBody(response));
         fail(
           `export ${response.status}: ${text.slice(0, 200)}`,
           [404, 405].includes(response.status) ? 502 : response.status,
         );
       }
       const streamedAt = this.now().toISOString();
-      const size = await this.streamArchive(
+      const size = await watchdog.wait(this.streamArchive(
         this.env.ARCHIVES,
         operation.archive.object,
-        response.body,
+        watchdog.body(response.body),
         {
           httpMetadata: {
             contentType: "application/gzip",
@@ -1811,8 +1871,8 @@ export class DurableAccountLifecycle {
             exported_at: streamedAt,
           },
         },
-      );
-      const verification = await this.verifyArchive(
+      ));
+      const verification = await watchdog.wait(this.verifyArchive(
         this.env.ARCHIVES,
         operation.archive.object,
         this.accountId,
@@ -1820,7 +1880,7 @@ export class DurableAccountLifecycle {
           evacuationID: operation.evacuation_id,
           allowLegacyEvacuationID: false,
         },
-      );
+      ));
       const manifest = verification?.manifest;
       const exportedAt = manifest?.exported_at;
       const archiveStatus = manifest?.status;
@@ -1850,6 +1910,8 @@ export class DurableAccountLifecycle {
       // was lost, in which case the streaming helper never returned success.
       await this.abortPreArchive(state, error);
       throw error;
+    } finally {
+      watchdog.close();
     }
 
     // This is the no-rollback boundary. Durable Object storage may commit a
@@ -1952,6 +2014,27 @@ export class DurableAccountLifecycle {
   }
 
   async importTarget(state) {
+    try {
+      return await this.importTargetAttempt(state);
+    } catch (error) {
+      // Reload before recording: a lost storage acknowledgement may already
+      // have advanced the phase. Never roll back that durable acknowledgement.
+      const latest = await this.loadState();
+      if (latest?.operation?.operation_id === state.operation.operation_id &&
+          latest.operation.phase === state.operation.phase) {
+        const message = error?.message === "archive import above 90 MiB requires target account evacuation protocol 2"
+          ? error.message : "archive import failed; retry required";
+        // A 4xx verdict (target deregistered, acknowledgement for another
+        // account or evacuation) needs an operator; the alarm still retries,
+        // but status readers must not be told the failure is transient.
+        const permanent = error instanceof AccountLifecycleRuntimeError && error.status >= 400 && error.status < 500;
+        await this.saveState(operationMetadata(latest, { last_error: message, retryable: !permanent }));
+      }
+      throw error;
+    }
+  }
+
+  async importTargetAttempt(state) {
     const operation = state.operation;
     const cell = await this.cell(operation.target_cell, {
       evacuationProtocol: true,
@@ -1975,22 +2058,38 @@ export class DurableAccountLifecycle {
       await this.quarantineArchive(operation.archive);
       await this.settleQuarantinedRestore(state, error);
     }
-    const object = await this.env.ARCHIVES.get(operation.archive.object);
-    if (!object?.body) {
-      fail(`archive ${operation.archive.object} is not readable from R2`, 502);
+    const pull = cell.account_evacuation_protocol >= 2;
+    const object = pull
+      ? await this.env.ARCHIVES.head(operation.archive.object)
+      : await this.env.ARCHIVES.get(operation.archive.object);
+    if (!object || !Number.isSafeInteger(object.size) || object.size <= 0) {
+      fail("archive metadata is not readable from R2", 502);
+    }
+    if (!pull && object.size > 90 * 1024 ** 2) {
+      await object.body?.cancel();
+      fail("archive import above 90 MiB requires target account evacuation protocol 2", 502);
+    }
+    const headers = {
+      Authorization: `Bearer ${cell.provision_token}`,
+      "Content-Type": "application/octet-stream",
+      "X-Witself-Evacuation-ID": operation.evacuation_id,
+    };
+    if (pull) {
+      const origin = archiveOrigin(operation.archive_origin ?? this.env.CP_PUBLIC_ORIGIN);
+      if (!origin) fail("control-plane archive pull origin is not configured", 502);
+      const url = new URL("/v1/archives:pull", origin);
+      url.searchParams.set("account_id", this.accountId);
+      url.searchParams.set("evacuation_id", operation.evacuation_id);
+      headers["X-Witself-Archive-URL"] = url.toString();
+      headers["X-Witself-Archive-Token"] = await this.mintArchiveCapability(operation, object);
+      headers["X-Witself-Archive-Size"] = String(object.size);
+    } else if (!object.body) {
+      fail("archive body is not readable from R2", 502);
     }
     const response = await this.fetchImpl(
       `${cell.endpoint}/v1/accounts/${this.accountId}:import-evacuation`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${cell.provision_token}`,
-          "Content-Type": "application/octet-stream",
-          "X-Witself-Evacuation-ID": operation.evacuation_id,
-        },
-        body: object.body,
-        signal: AbortSignal.timeout(300_000),
-      },
+      { method: "POST", headers, ...(pull ? {} : { body: object.body }),
+        signal: AbortSignal.timeout(30 * 60_000) },
     );
     const { text, body } = await responseBody(response);
     if (!response.ok) {
@@ -2006,6 +2105,8 @@ export class DurableAccountLifecycle {
     );
     state = operationMetadata(state, {
       imported_status: body.status,
+      last_error: null,
+      retryable: false,
       ...(body.evacuation_completed === true
         ? { restored_status: body.status }
         : {}),
@@ -2772,4 +2873,46 @@ export async function streamToR2Multipart(bucket, key, stream, options) {
     }
     throw error;
   }
+}
+
+function archiveOrigin(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password &&
+      url.pathname === "/" && !url.search && !url.hash ? url.origin : null;
+  } catch { return null; }
+}
+
+async function archiveCapabilityKey(token) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return "archive-capability:" + Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function archiveUnavailable() {
+  return json({ error: "archive is not available" }, 404, { "Cache-Control": "no-store" });
+}
+
+export async function accountArchivePull(request, env) {
+  try {
+    const url = new URL(request.url);
+    const accountID = url.searchParams.get("account_id");
+    const evacuationID = url.searchParams.get("evacuation_id");
+    const authorization = request.headers.get("Authorization") ?? "";
+    if (request.method !== "GET" || !ACCOUNT_ID.test(accountID ?? "") || !EVACUATION_ID.test(evacuationID ?? "") ||
+        !/^Bearer cap_[0-9a-f]{64}$/.test(authorization)) return archiveUnavailable();
+    const stub = env.ACCOUNT_LIFECYCLE.get(env.ACCOUNT_LIFECYCLE.idFromName(accountID));
+    const response = await stub.fetch(new Request("https://account-lifecycle.internal/archive-capability:consume", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountID, evacuation_id: evacuationID, token: authorization.slice(7) }),
+    }));
+    if (!response.ok) return archiveUnavailable();
+    const record = await response.json();
+    if (record.account_id !== accountID || record.evacuation_id !== evacuationID) return archiveUnavailable();
+    const object = await env.ARCHIVES.get(record.object, { onlyIf: { etagMatches: record.r2_etag } });
+    if (!object?.body || object.size !== record.size || object.etag !== record.r2_etag) return archiveUnavailable();
+    return new Response(object.body, { headers: {
+      "Content-Type": "application/gzip", "Content-Length": String(record.size),
+      "Cache-Control": "no-store", "X-Witself-Evacuation-ID": evacuationID,
+    } });
+  } catch { return archiveUnavailable(); }
 }
