@@ -14,7 +14,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
+  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] [--evidence-cells BACKUP,SERVING] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
 }
 
 die() {
@@ -23,6 +23,7 @@ die() {
 }
 
 BACKUP_EVIDENCE=()
+EVIDENCE_CELLS=""
 NO_SCHEMA_CHANGE=false
 PIN_BACKUP_IMAGE=false
 PIN_POSTGRES_IMAGE=false
@@ -36,6 +37,12 @@ while [ "$#" -gt 0 ]; do
     --postgres-image)
       PIN_POSTGRES_IMAGE=true
       shift
+      ;;
+    --evidence-cells)
+      [ "$#" -ge 2 ] || die "--evidence-cells requires BACKUP,SERVING"
+      [ -z "$EVIDENCE_CELLS" ] || die "--evidence-cells may be specified only once"
+      EVIDENCE_CELLS=$2
+      shift 2
       ;;
     --backup-evidence)
       if [ "$#" -lt 2 ]; then
@@ -86,6 +93,25 @@ fi
 CELL="${POSITIONAL[0]}"
 VERSION="${POSITIONAL[1]}"
 
+# Standalone rolls default to the existing pair, or the production pair when
+# rolling the production serving cell. Trains always pass their selected pair.
+if [ -z "$EVIDENCE_CELLS" ]; then
+  EVIDENCE_CELLS=civo-sandbox-use1-backup,civo-sandbox-use1-serving
+  if [ "$CELL" = civo-prod-use1-serving ]; then
+    EVIDENCE_CELLS=civo-sandbox-use1-backup,civo-prod-use1-serving
+  fi
+fi
+if [ "$NO_SCHEMA_CHANGE" = false ]; then
+  case "$EVIDENCE_CELLS" in
+    civo-sandbox-use1-backup,civo-sandbox-use1-serving|civo-sandbox-use1-backup,civo-prod-use1-serving) ;;
+    *) die "--evidence-cells requires a reviewed BACKUP,SERVING pair" ;;
+  esac
+  case "$CELL" in
+    "${EVIDENCE_CELLS%,*}"|"${EVIDENCE_CELLS#*,}") ;;
+    *) die "selected evidence pair does not cover the cell being rolled" ;;
+  esac
+fi
+
 if [ "$NO_SCHEMA_CHANGE" = true ] && [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ]; then
   usage
   die "--no-schema-change and --backup-evidence are mutually exclusive"
@@ -94,7 +120,7 @@ if [ "$PIN_POSTGRES_IMAGE" = true ] && [ "$NO_SCHEMA_CHANGE" = true ]; then
   die "PostgreSQL image switch requires fresh --backup-evidence; --no-schema-change cannot cover the StatefulSet restart"
 fi
 if [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
-  die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for civo-sandbox-use1-backup and civo-sandbox-use1-serving, or attest --no-schema-change"
+  die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for the selected pair ($EVIDENCE_CELLS), or attest --no-schema-change"
 fi
 
 # Version must match Witself's release tag shape. Anything else and the
@@ -124,7 +150,7 @@ else
   if [ -z "$ADMIN_PATH" ] || [ ! -f "$ADMIN_PATH" ] || [ ! -x "$ADMIN_PATH" ]; then
     die "backup evidence verifier is not executable; set WITSELF_ADMIN_BIN to an executable witself-admin binary"
   fi
-  if ! "$ADMIN" backup-evidence verify --release "$VERSION" -- "${BACKUP_EVIDENCE[@]}"; then
+  if ! "$ADMIN" backup-evidence verify --release "$VERSION" --cell "${EVIDENCE_CELLS%,*}" --cell "${EVIDENCE_CELLS#*,}" -- "${BACKUP_EVIDENCE[@]}"; then
     die "backup evidence verification failed; rollout aborted before any values file edit"
   fi
   echo "backup evidence verified for release $VERSION (${#BACKUP_EVIDENCE[@]} artifact directories)"

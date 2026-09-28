@@ -36,7 +36,7 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/evidence"
 # Use actual, integrity-valid artifact triples matching the verifier fixtures.
 # Their release and reviewed-cell coverage must pass the real offline verifier:
 # unrelated evidence cannot become relevant merely because --cells changes.
-for cell in "$BACKUP" "$SERVING"; do
+for cell in "$BACKUP" "$SERVING" civo-prod-use1-serving; do
   backup_id="$cell-pre-v$VERSION-20260820T113000Z-0a1b2c3d"
   evidence="$TEST_ROOT/evidence/$backup_id"
   mkdir "$evidence"
@@ -67,12 +67,23 @@ for cell in "$BACKUP" "$SERVING"; do
 done
 (
   cd "$SOURCE_ROOT"
-  go run ./cmd/witself-admin backup-evidence verify --release "$VERSION" -- \
+  go run ./cmd/witself-admin backup-evidence verify --release "$VERSION" --cell "$BACKUP" --cell "$SERVING" -- \
     "$EVIDENCE_A" "$EVIDENCE_B"
 ) >"$TEST_ROOT/evidence-verification" 2>&1 || {
   cat "$TEST_ROOT/evidence-verification" >&2
   fail 'reviewed-cell fixture evidence must pass the real verifier'
 }
+
+PRODUCTION_EVIDENCE="$TEST_ROOT/evidence/civo-prod-use1-serving-pre-v$VERSION-20260820T113000Z-0a1b2c3d"
+(
+  cd "$SOURCE_ROOT"
+  go run ./cmd/witself-admin backup-evidence verify --release "$VERSION" \
+    --cell "$BACKUP" --cell civo-prod-use1-serving -- "$EVIDENCE_A" "$PRODUCTION_EVIDENCE"
+) >"$TEST_ROOT/production-verification" 2>&1 || fail 'production pair must pass the real verifier'
+if (cd "$SOURCE_ROOT" && go run ./cmd/witself-admin backup-evidence verify --release "$VERSION" \
+    --cell "$BACKUP" --cell civo-prod-use1-serving -- "$EVIDENCE_A" "$EVIDENCE_B") >"$TEST_ROOT/wrong-pair" 2>&1; then
+  fail 'sandbox serving evidence covered production serving'
+fi
 
 # Only the two local git path reads needed by dry-run are allowed. Every other
 # operational call would be a failure, before network access or pin mutation.
@@ -106,7 +117,7 @@ for cells in "civo-synthetic-unreviewed,$SERVING" "$BACKUP,civo-synthetic-other"
     status=0
     bash "$TRAIN" "${args[@]}" >"$TEST_ROOT/output" 2>&1 || status=$?
     [ "$status" -eq 2 ] || fail "$mode custom evidence pair should fail argument validation: $cells (exit $status)"
-    grep -Fq -- '--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-use1-serving' "$TEST_ROOT/output" ||
+    grep -Fq -- '--backup-evidence requires a reviewed BACKUP,SERVING pair' "$TEST_ROOT/output" ||
       fail "$mode custom pair did not explain verifier coverage"
     [ ! -s "$TEST_LOG" ] || fail "$mode custom evidence pair reached an operational command"
     [ ! -e "$TEST_ROOT/train" ] || fail "$mode custom evidence pair created a workdir"
@@ -115,10 +126,11 @@ done
 
 # Preserve both supported configurations: the default evidence pair, and an
 # explicitly attested custom pair. Dry-run does not verify or mutate anything.
-for selection in default explicit; do
+for selection in default explicit production; do
   args=("$VERSION" --backup-evidence "$EVIDENCE_A"
     --backup-evidence "$EVIDENCE_B" --dry-run)
   if [ "$selection" = explicit ]; then args+=(--cells "$BACKUP,$SERVING"); fi
+  if [ "$selection" = production ]; then args+=(--cells "$BACKUP,civo-prod-use1-serving"); fi
   bash "$TRAIN" "${args[@]}" >"$TEST_ROOT/output" 2>&1 || fail "$selection reviewed-cell pair was rejected"
 done
 bash "$TRAIN" "$VERSION" --cells "civo-synthetic-unreviewed,$SERVING" \
@@ -130,6 +142,11 @@ bash "$TRAIN" "$VERSION" --cells "civo-synthetic-unreviewed,$SERVING" \
 # Every live read is a fixture, and all registry/network commands remain refused.
 # shellcheck disable=SC1090,SC1091 # This local, sourceable script is exercised below.
 source "$TRAIN"
+# Exercise argument construction in-process so a dry run also proves the exact
+# selector that each wave forwards to roll-cell, without operational calls.
+main "$VERSION" --cells "$BACKUP,civo-prod-use1-serving" --backup-evidence "$EVIDENCE_A" \
+  --backup-evidence "$PRODUCTION_EVIDENCE" --dry-run >"$TEST_ROOT/output"
+[ "${GATE_ARGS[*]}" = "--evidence-cells $BACKUP,civo-prod-use1-serving" ] || fail 'train lost selected evidence pair'
 yq() { "$ROLL_TRAIN_REAL_YQ" "$@"; }
 PIN_ROOT="$TEST_ROOT/pin-repo"
 PIN_VALUES="$PIN_ROOT/.gitops/cells/$BACKUP/values.yaml"

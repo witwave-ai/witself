@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -181,9 +182,9 @@ func TestCatalogPostgresBackupSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, cell := range cfg.Cells {
-		supported := name == "civo-sandbox-use1-serving" || name == "civo-sandbox-use1-backup"
+		supported := isCivoRollCell(cfg.Cells[name])
 		if cell.Switches.PostgresBackup && !supported {
-			t.Errorf("%s activates postgres_backup; only the two reviewed Civo cells may", name)
+			t.Errorf("%s activates postgres_backup; only Civo serving and backup cells may", name)
 		}
 	}
 }
@@ -194,7 +195,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cell := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup"} {
+	for _, cell := range civoRollCells(t) {
 		for _, monitoringEnabled := range []bool{false, true} {
 			name := cell + "/monitoring-off"
 			if monitoringEnabled {
@@ -224,11 +225,11 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
 					if monitoring.PostgresBackupAlerts.Enabled == nil || *monitoring.PostgresBackupAlerts.Enabled != enabled {
 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
 					}
-					wantMonitoring := cell == "civo-sandbox-use1-serving" && monitoringEnabled
+					wantMonitoring := entry.Role == "serving" && monitoringEnabled
 					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
 						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
 					}
-					if cell == "civo-sandbox-use1-backup" && postgres.Metrics.ServiceMonitor.Enabled {
+					if entry.Role == "backup" && postgres.Metrics.ServiceMonitor.Enabled {
 						t.Errorf("postgres_backup=%v enabled a ServiceMonitor without a monitoring stack", enabled)
 					}
 					// Activation changes only the two derived flags. In particular,
@@ -265,7 +266,7 @@ func TestGeneratedValuesPostgresBackupsDefaultOff(t *testing.T) {
 		values := decodePostgresBackupValues(t, body)
 		backup := values.Apps.CivoPostgres.Backup.Enabled
 		alerts := values.Platform.Monitoring.PostgresBackupAlerts.Enabled
-		if cell == "civo-sandbox-use1-serving" || cell == "civo-sandbox-use1-backup" {
+		if isCivoRollCell(cfg.Cells[cell]) {
 			want := cfg.Cells[cell].Switches.PostgresBackup
 			if backup == nil || alerts == nil {
 				t.Errorf("%s must explicitly set both backup and backup alerts", cell)
@@ -329,5 +330,88 @@ func repoRoot(t *testing.T) string {
 			t.Fatal("could not find go.mod walking upward")
 		}
 		dir = parent
+	}
+}
+
+// Catalog selection includes every overlapping serving cell in roll contracts.
+func isCivoRollCell(cell CellConfig) bool {
+	return cell.Cloud == "civo" && (cell.Role == "serving" || cell.Role == "backup")
+}
+
+func civoRollCells(t *testing.T) []string {
+	t.Helper()
+	cfg, err := loadCatalog(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cells []string
+	for name := range cfg.Cells {
+		if isCivoRollCell(cfg.Cells[name]) {
+			cells = append(cells, name)
+		}
+	}
+	if len(cells) == 0 {
+		t.Fatal("catalog has no Civo roll cells")
+	}
+	sort.Strings(cells)
+	return cells
+}
+
+func TestProductionServingOnboarding(t *testing.T) {
+	root := repoRoot(t)
+	cfg, err := loadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := cfg.Cells["civo-prod-use1-serving"]
+	if cell.Cloud != "civo" || cell.AccountAlias != "prod" || cell.Region != "nyc1" || cell.Role != "serving" || cell.Domain != "" || cell.Switches.DomainDocumentationOnly {
+		t.Fatal("production cell identity must derive its real host")
+	}
+	if cell.Switches.Monitoring || cell.Switches.SealedPlaneAlerts || cell.Switches.PostgresBackup || cell.Switches.MemoryAlerts {
+		t.Fatal("production operational switches must remain dark")
+	}
+	charts, err := loadChartPins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, monitoring := range []bool{false, true} {
+		cell.Switches.Monitoring = monitoring
+		cfg.Cells["civo-prod-use1-serving"] = cell
+		body, err := generateCell(root, "civo-prod-use1-serving", cfg, charts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var values map[string]any
+		if err := yaml.Unmarshal(body, &values); err != nil {
+			t.Fatal(err)
+		}
+		wants := map[string]any{
+			"cell.apiHost":                      "api.civo-prod-use1-serving.cells.witself.witwave.ai",
+			"apps.civoPostgres.resourcesPreset": "medium",
+			"apps.witselfServer.agentEmail.receiveProduction.audience":   "civo-prod-use1-serving",
+			"apps.witselfServer.worker.agentEmailOutbound.dispatchKeyID": "civo-prod-use1-serving-2026-10",
+			"apps.witselfServer.backup.validationArchiveOrigin":          "https://self.witwave.ai",
+			"platform.monitoring.enabled":                                monitoring,
+			"platform.monitoring.uptimeProbes.enabled":                   false,
+			"platform.monitoring.entitlementDelivery.enabled":            false,
+			// A fresh cluster has no monitoring CRDs until phase 1 of the
+			// monitoring rollout; ServiceMonitors would fail the first sync.
+			"apps.civoPostgres.metrics.serviceMonitor.enabled":         false,
+			"apps.witselfServer.metrics.serviceMonitor.enabled":        false,
+			"apps.witselfServer.worker.metrics.serviceMonitor.enabled": false,
+		}
+		for path, want := range wants {
+			var got any = values
+			for _, key := range strings.Split(path, ".") {
+				fields, ok := got.(map[string]any)
+				if !ok {
+					t.Fatalf("%s: missing mapping", path)
+				}
+				got = fields[key]
+			}
+			if got != want {
+				t.Errorf("%s: got %v want %v", path, got, want)
+			}
+		}
 	}
 }

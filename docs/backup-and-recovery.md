@@ -1247,8 +1247,8 @@ witself-admin backup-evidence verify \
   "$BACKUP_ROOT"/<use1-serving-backup-id>
 ```
 
-The command exits 0 only when every gate property holds for both reviewed
-cells: the exact `witself.civo-pre-migration-backup.v1` schema with no
+The command exits 0 only when every gate property holds for every selected
+cell (by default every reviewed cell; `roll-cell.sh` selects the pair it rolls): the exact `witself.civo-pre-migration-backup.v1` schema with no
 unknown fields, duplicate keys, or trailing data; a `verified` restore
 drill whose restored schema version equals the source schema version, with
 zero invalid indexes, zero unvalidated constraints, a matching pgvector

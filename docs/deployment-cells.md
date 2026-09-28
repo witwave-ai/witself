@@ -1,5 +1,13 @@
 # Witself Deployment Cells & Multi-Cloud
 
+> **Production onboarding:** `civo-prod-use1-serving` (Civo NYC1, account alias
+> `prod`) is **onboarded, not provisioned** until the migration runbook's
+> provisioning step. Its intended host is
+> `api.civo-prod-use1-serving.cells.witself.witwave.ai`. The existing sandbox
+> serving and backup cells remain in the catalog during the overlap. Its
+> ServiceMonitors stay off with the monitoring stack until the runbook's
+> three-phase monitoring rollout (a fresh cluster has no monitoring CRDs).
+
 Status: draft. This document captures the go-forward deployment topology for both
 managed Witself Cloud and self-hosted Witself: a fleet of independent cells under a
 thin global control plane. Decided 2026-06-28.

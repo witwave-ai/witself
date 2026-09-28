@@ -627,14 +627,15 @@ main() {
     GATE_ARGS=(--no-schema-change)
     SCHEMA_STATEMENT="Schema attestation: operator explicitly attests that release $VERSION cannot advance the database schema (--no-schema-change)."
   else
-    # roll-cell's verifier requires the closed ReviewedCells pair and does not
-    # receive the selected cells. Evidence for that pair cannot cover another
-    # database, so reject unsupported selections before any operational call.
+    # Evidence must cover the selected backup/serving pair, including overlap.
     if [ "${#evidence_dirs[@]}" -gt 0 ]; then
-      [ "$cells" = civo-sandbox-use1-backup,civo-sandbox-use1-serving ] ||
-        usage_error "--backup-evidence requires --cells civo-sandbox-use1-backup,civo-sandbox-use1-serving; verifier coverage does not support other cell pairs"
+      case "$cells" in
+        civo-sandbox-use1-backup,civo-sandbox-use1-serving|civo-sandbox-use1-backup,civo-prod-use1-serving) ;;
+        *) usage_error "--backup-evidence requires a reviewed BACKUP,SERVING pair" ;;
+      esac
+      GATE_ARGS=(--evidence-cells "$cells")
     fi
-    SCHEMA_STATEMENT="Schema attestation: none; roll-cell.sh must verify backup/restore evidence for both reviewed cells before editing either pin in each wave."
+    SCHEMA_STATEMENT="Schema attestation: none; roll-cell.sh must verify backup/restore evidence for the selected pair before editing either pin in each wave."
   fi
   if [ -n "$SERVING_URL" ]; then
     SERVING_URL=${SERVING_URL%/}

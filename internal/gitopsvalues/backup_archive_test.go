@@ -15,7 +15,7 @@ func TestBackupValidationArchiveOriginOverlay(t *testing.T) {
 	}
 	for name, data := range generated {
 		present := bytes.Contains(data, []byte("validationArchiveOrigin: https://self.witwave.ai"))
-		if present != (name == "civo-sandbox-use1-backup") {
+		if present != (name == "civo-sandbox-use1-backup" || name == "civo-prod-use1-serving") {
 			t.Errorf("unexpected archive origin configuration for %s", name)
 		}
 	}

@@ -7,7 +7,7 @@ apply_roll_state() {
 root, generator, state = ARGV
 catalog = YAML.safe_load(File.read(File.join(root, ".gitops/cells/catalog.yaml")), aliases: false)
 cells = catalog.fetch("cells").select { |_, c| c["cloud"] == "civo" && %w[backup serving].include?(c["role"]) }
-abort "roll-state fixture requires serving and backup cells" unless cells.values.map { |c| c["role"] }.sort == %w[backup serving]
+abort "roll-state fixture requires serving and backup cells" unless %w[backup serving].all? { |role| cells.values.any? { |c| c["role"] == role } }
 def values_path(root, cell)
   File.join(root, ".gitops/cells", cell, "values.yaml")
 end
