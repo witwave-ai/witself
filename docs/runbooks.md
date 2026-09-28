@@ -462,6 +462,13 @@ recovery window allow the subsequent soft-delete destroy.
 
 ## Account moves in a chosen order
 
+Updated `witself-admin cells restore` reports `pending`, `attempts`, and
+`retryable` while an async import continues. `pending` with `reason:"busy"`
+means another `/run` or alarm holds the lifecycle fence; it is expected during
+an in-flight import and is not a failure. Re-run `cells restore` after fixing a
+cause to immediately re-drive a non-running job. Remaining work includes
+pending accounts, even when the command exits zero.
+
 Upgrade the control plane to support `account_id` selectors before using this
 sequence. Older handlers ignore that field and can evacuate a different account.
 
@@ -3579,6 +3586,34 @@ use the restore lifecycle above when placement on another instance is needed.
 
 ## Diagnose an interrupted restore or source finalization
 
+For protocol-3 import, inspect pending rows (`attempts`/`retryable`) from
+`witself-admin cells restore`, and the cell's value-free start and finish stderr
+lines (`account_id`, `cell`, `evacuation_id`, `outcome`, `duration`). A busy pending
+row means another driver owns the lifecycle fence. `wrangler tail` shows the
+alarm's failure log with fixed `last_error` text. There is currently no residency
+status or Durable Object HTTP route exposing `last_error` or `import_job`; a
+read-only operator status route is a follow-up.
+
+Observe the import owner without acquiring its lock (bind `$1` to account and
+`$2` to evacuation):
+
+```sql
+WITH k AS (
+  SELECT hashtextextended(current_database() || ':witself:account-import:v1:' || $1 || ':' || $2, 0) AS key
+)
+SELECT l.pid FROM pg_locks l, k
+WHERE l.locktype = 'advisory' AND l.granted
+  AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND l.classid = ((k.key >> 32) & 4294967295)::oid
+  AND l.objid = (k.key & 4294967295)::oid AND l.objsubid = 1;
+```
+
+For an independently confirmed stuck owner, an operator-approved recovery may
+use `SELECT pg_terminate_backend(<confirmed_pid>)`; this rolls back uncommitted
+import work and releases session ownership. Retain the archive, confirm status
+is absent, then re-run `cells restore` for a fresh download. Do not terminate a
+backend based on an unverified or stale PID.
+
 Successful restore no longer requires normal-path SQL cleanup on a losing
 source cell. After the target import and resume are acknowledged and the target
 route becomes authoritative, the account lifecycle coordinator calls
@@ -3930,22 +3965,47 @@ persistence is aggregate observation persistence, not the age of one account.
 
 ## Account-move transport rollout
 
-Roll protocol-2 cells first and the control plane second. On every potential
-target, verify `/v1/version` reports `account_evacuation_protocol: 2` and the
-rendered ConfigMap sets `WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` to the exact
-control-plane HTTPS origin (`https://self.witwave.ai` for the serving cell).
-The setting covers both backup validation and account import pulls. The Worker
-var `CP_PUBLIC_ORIGIN` must equal that origin. Start no drain, move, restore or
-`witself-infra destroy` between the cell roll and the control-plane deploy: the
-previous control plane requires protocol 1 exactly and answers 409 against a
-protocol-2 cell until the new control plane is deployed.
+The confirmed order is **control plane first, then cells** with
+`roll-train.sh VERSION --no-schema-change …`. Schema remains 98. The new control
+plane accepts protocols 1, 2 and 3: protocol 1 uses legacy push only up to 90 MiB,
+protocol 2 keeps synchronous pull, and protocol 3 adds asynchronous, resumable
+pull import while retaining the protocol-2 route.
 
-Account moves now use single-use R2 pull capabilities and empty import request
-bodies. Never log archive capability headers. A heartbeat HTTP 200 is pending
-work until its exact import acknowledgement arrives. Error objects retain the
-import phase and record a value-free retryable error; retries mint fresh
-capabilities. A protocol-1 target can receive only archives up to 90 MiB through
-the legacy push path. Upgrade larger-archive targets before retrying. Exports
-are bounded by 120 seconds without byte progress and 60 minutes overall;
-imports have a 30-minute control-plane deadline. Keep capacity for the complete
-archive spool in the target's writable temporary directory.
+This inverts the protocol-2 cells-first rule: that rule was specific to an old
+control plane that could only push archives up to 90 MiB. The new control plane
+can be deployed against protocol-2 cells without freezing operations. If cells
+are rolled first instead, the existing freeze applies: start no drain, move,
+restore or `witself-infra destroy`, and have no such operation in flight between
+the roll and control-plane deployment. The old control plane answers 409
+`does not attest account evacuation protocol 1 or 2` at every protocol-3 probe
+until it is upgraded.
+
+During a two-replica rolling update, `/v1/version` may answer 2 or 3. Each import
+tick re-probes; it does not reuse `target_preflight.protocol`. Without async job
+metadata, a protocol-2 probe uses synchronous import; a later protocol-3 probe
+switches to async. In-flight synchronous requests finish synchronously. Once
+`import_job` exists, that operation never falls back to streaming: a protocol-2
+probe waits retryably for the roll. Rolling a target back to protocol 2 therefore
+stalls its async moves until protocol 3 returns. On upgraded replicas, the import transaction advisory lock also excludes a
+synchronous request racing an async job for the same epoch. Old protocol-2
+binaries do not take this new lock: it cannot prevent overlapping downloads
+from those replicas during the roll; exact receipt checks remain mandatory.
+A pod roll cancels an in-flight import and it is re-started automatically at the
+cost of a re-download; the other replica cannot use its ephemeral spool or spent
+capability.
+
+All potential targets, including serving cells, must configure
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` (chart setting
+`backup.validationArchiveOrigin`) to the exact control-plane HTTPS origin,
+`https://self.witwave.ai` for managed cells. `CP_PUBLIC_ORIGIN` must match it.
+Keep temporary disk capacity for the entire archive. Pre-slice `witself-admin`
+binaries ignore pending fields and print `ok`; `remaining >= 1` is their only
+signal that import is still pending. Updated `witself-admin` and `witself-infra`
+understand pending rows.
+
+Never log capability headers. Export still has a 120-second idle-progress
+watchdog and a 60-minute overall budget, and remains exposed to the 15-minute
+alarm invocation cap. Until the founder export plus verification is measured
+below 15 minutes, keep the operator `witself-admin cells evacuate --account`
+`/run` request connected for that phase. Protocol-3 import no longer requires
+that connected request. See [backup budgets](backup-and-recovery.md#evacuation-archive-transport-protocols-2-and-3).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -441,6 +442,9 @@ func TestFleetMoveRequestsAndProjection(t *testing.T) {
 
 func TestFleetMoveRejectsInvalidAcknowledgements(t *testing.T) {
 	for _, body := range []string{
+		`{"schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"chosen","ok":false,"pending":true}],"remaining":1}`,
+		`{"schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"chosen","ok":true,"pending":true,"attempts":-1}],"remaining":1}`,
+
 		`{}`, `{ "schema_version":"witself.v0","cell":"src","evacuated":[],"remaining":0 }`,
 		`{ "schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"other","ok":true}],"remaining":0 }`,
 		`{ "schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"chosen"}],"remaining":0 }`,
@@ -474,5 +478,24 @@ func TestFleetMoveRejectsInvalidInputBeforeRequest(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("requests = %d", calls)
+	}
+}
+
+func TestFleetMoveAcceptsPendingRow(t *testing.T) {
+	for _, extra := range []string{"", `,"attempts":2,"retryable":true`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","cell":"src","restored":[{"account_id":"chosen","ok":true,"pending":true`+extra+`}],"remaining":1}`)
+		}))
+		result, err := RestoreFleetCell(context.Background(), srv.URL, "fixture", "src", 1, false)
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Results[0].Pending || !result.Results[0].OK || result.Remaining != 1 {
+			t.Fatal("pending acknowledgement lost")
+		}
+		if extra != "" && (!result.Results[0].Retryable || result.Results[0].Attempts != 2) {
+			t.Fatal("pending diagnostics lost")
+		}
 	}
 }

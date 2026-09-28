@@ -118,7 +118,7 @@ import {
   validateMintHandle,
 } from "./admin-handles.mjs";
 import { renderSupportEmail } from "./support-notify.mjs";
-import { DurableAccountLifecycle, accountArchivePull } from "./account-lifecycle-runtime.mjs";
+import { DurableAccountLifecycle, accountArchivePull, IMPORT_INLINE_BUDGET_MS } from "./account-lifecycle-runtime.mjs";
 import {
   DurableAccountSignup,
   inviteVerdict,
@@ -3610,6 +3610,14 @@ async function requestCellCoordinator(env, cellName, path, payload) {
   }
 }
 
+const RESTORE_CALL_DEADLINE_MS = 8 * 60_000;
+const PLACEMENT_RUN_DEADLINE_MS = 4 * 60_000;
+const lifecycleBusyMessage = "account lifecycle operation already in progress";
+function pendingImportRow(result) {
+  return { ok: true, pending: true, retryable: result.retryable, attempts: result.import_job?.attempts ?? 0 };
+}
+function importInlineBudget(deadline) { return Math.max(0, Math.min(IMPORT_INLINE_BUDGET_MS, deadline - Date.now())); }
+
 async function runAccountLifecycle(env, accountId, input) {
   const response = await accountLifecycleStub(env, accountId).fetch(
     new Request("https://account-lifecycle.internal/run", {
@@ -3643,9 +3651,11 @@ async function restoreAccount(
   _cell,
   accountId,
   archived,
+  inline_budget_ms,
 ) {
   return runAccountLifecycle(env, accountId, {
     action: "restore",
+    inline_budget_ms,
     cell_name: cellName,
     archive_object: archived?.object,
     archive_id: archived?.archive_id,
@@ -3663,6 +3673,7 @@ async function moveAccount(
 ) {
   return runAccountLifecycle(env, accountId, {
     action: "move",
+    inline_budget_ms: opts.inline_budget_ms,
     source_cell: sourceCellName,
     target_cell: targetCellName,
     expected_epoch: route?.epoch,
@@ -3691,7 +3702,7 @@ function isRestorableArchive(archived) {
 // drained cell
 // (accepting=false): dumping accounts onto a cell that will not accept them
 // would just move the "awaiting placement" state to a place harder to see.
-async function handleRestore(request, env, cellName) {
+async function handleRestore(request, env, cellName, deadline = Date.now() + RESTORE_CALL_DEADLINE_MS) {
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -3772,12 +3783,16 @@ async function handleRestore(request, env, cellName) {
 
   const results = [];
   for (const { accountId, archived } of targets) {
+    const inline_budget_ms = importInlineBudget(deadline);
+    if (inline_budget_ms === 0) break;
     try {
-      await restoreAccount(env, cellName, cell, accountId, archived);
+      const result = await restoreAccount(env, cellName, cell, accountId, archived, inline_budget_ms);
+      if (result.import_pending === true) { results.push({ account_id: accountId, ...pendingImportRow(result) }); continue; }
       progress.done += 1;
       results.push({ account_id: accountId, ok: true });
     } catch (e) {
       const msg = String(e?.message ?? e);
+      if (msg === lifecycleBusyMessage) { results.push({ account_id: accountId, ok: true, pending: true, retryable: true, reason: "busy" }); continue; }
       progress.failed = [
         ...(progress.failed ?? []).filter((f) => f.account_id !== accountId),
         { account_id: accountId, error: msg, at: new Date().toISOString() },
@@ -3793,7 +3808,7 @@ async function handleRestore(request, env, cellName) {
   // Those accounts are already routed to the target cell; treating stale
   // archived: keys as remaining makes the CLI report a false stalled restore.
   const restoredOK = new Set(
-    results.filter((r) => r.ok).map((r) => r.account_id),
+    results.filter((r) => r.ok && !r.pending).map((r) => r.account_id),
   );
   let remaining = 0;
   let cursor2;
@@ -3833,7 +3848,7 @@ async function handleRestore(request, env, cellName) {
   });
 }
 
-async function handlePlacementRestore(request, env) {
+async function handlePlacementRestore(request, env, deadline = Date.now() + PLACEMENT_RUN_DEADLINE_MS, scheduled = false) {
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -3900,19 +3915,23 @@ async function handlePlacementRestore(request, env) {
 
   const results = [];
   for (const { accountId, archived, cell } of targets) {
+    const inline_budget_ms = importInlineBudget(deadline);
+    if (inline_budget_ms === 0 && !scheduled) break;
     try {
-      await restoreAccount(env, cell.name, cell, accountId, archived);
+      const result = await restoreAccount(env, cell.name, cell, accountId, archived, inline_budget_ms);
+      if (result.import_pending === true) { results.push({ account_id: accountId, cell: cell.name, ...pendingImportRow(result) }); continue; }
       counts.set(cell.name, (counts.get(cell.name) ?? 0) + 1);
       results.push({ account_id: accountId, ok: true, cell: cell.name });
     } catch (e) {
       const msg = String(e?.message ?? e);
+      if (msg === lifecycleBusyMessage) { results.push({ account_id: accountId, cell: cell.name, ok: true, pending: true, retryable: true, reason: "busy" }); continue; }
       results.push({ account_id: accountId, ok: false, cell: cell.name, error: msg });
       console.log(`placement restore ${cell.name}/${accountId} failed: ${msg}`);
     }
   }
 
   const restoredOK = new Set(
-    results.filter((r) => r.ok).map((r) => r.account_id),
+    results.filter((r) => r.ok && !r.pending).map((r) => r.account_id),
   );
   const blockedAfter = [];
   let remaining = 0;
@@ -4010,7 +4029,7 @@ async function rebalanceTargetForAccount(
   };
 }
 
-async function handlePlacementRebalance(request, env) {
+async function handlePlacementRebalance(request, env, deadline = Date.now() + PLACEMENT_RUN_DEADLINE_MS, scheduled = false) {
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -4112,15 +4131,18 @@ async function handlePlacementRebalance(request, env) {
       continue;
     }
 
+    const inline_budget_ms = importInlineBudget(deadline);
+    if (inline_budget_ms === 0 && !scheduled) break;
     try {
-      await moveAccount(
+      const result = await moveAccount(
         env,
         accountId,
         target.current.name,
         target.target.name,
         target.route,
-        { reason: "placement rebalance" },
+        { reason: "placement rebalance", inline_budget_ms },
       );
+      if (result.import_pending === true) { results.push({ account_id: accountId, from_cell: target.current.name, to_cell: target.target.name, reason: target.reason, ...pendingImportRow(result) }); continue; }
       counts.set(target.current.name, Math.max(0, (counts.get(target.current.name) ?? 0) - 1));
       counts.set(target.target.name, (counts.get(target.target.name) ?? 0) + 1);
       results.push({
@@ -4132,6 +4154,7 @@ async function handlePlacementRebalance(request, env) {
       });
     } catch (e) {
       const msg = String(e?.message ?? e);
+      if (msg === lifecycleBusyMessage) { results.push({ account_id: accountId, from_cell: target.current.name, to_cell: target.target.name, ok: true, pending: true, retryable: true, reason: "busy" }); continue; }
       results.push({
         account_id: accountId,
         ok: false,
@@ -4143,7 +4166,7 @@ async function handlePlacementRebalance(request, env) {
     }
   }
 
-  let remaining = 0;
+  const remainingAccounts = new Set();
   let cursor2;
   do {
     const page = await env.DIRECTORY.list({ prefix: "acct:", cursor: cursor2 });
@@ -4163,12 +4186,14 @@ async function handlePlacementRebalance(request, env) {
         destinationOptions,
       );
       if (candidate.target) {
-        remaining += 1;
+        remainingAccounts.add(accountId);
       }
     }
     cursor2 = page.list_complete ? undefined : page.cursor;
   } while (cursor2);
 
+  for (const row of results) if (row.pending) remainingAccounts.add(row.account_id);
+  const remaining = remainingAccounts.size;
   return json({
     schema_version: "witself.v0",
     dry_run: dryRun,
@@ -4227,7 +4252,7 @@ async function handlePlacementRunner(request, env) {
   return json({ schema_version: "witself.v0", placement_runner: next });
 }
 
-async function callInternalFleetHandler(env, path, body, handler) {
+async function callInternalFleetHandler(env, path, body, handler, deadline, scheduled) {
   if (!env.FLEET_TOKEN) {
     return { ok: false, status: 501, body: { error: "FLEET_TOKEN is not configured" } };
   }
@@ -4239,7 +4264,7 @@ async function callInternalFleetHandler(env, path, body, handler) {
     },
     body: JSON.stringify(body ?? {}),
   });
-  const resp = await handler(req, env);
+  const resp = await handler(req, env, deadline, scheduled);
   const text = await resp.text();
   let parsed = {};
   try {
@@ -4250,7 +4275,7 @@ async function callInternalFleetHandler(env, path, body, handler) {
   return { ok: resp.ok, status: resp.status, body: parsed };
 }
 
-async function runPlacementRunner(env, cfg) {
+async function runPlacementRunner(env, cfg, deadline = Date.now() + PLACEMENT_RUN_DEADLINE_MS, scheduled = false) {
   const config = normalizePlacementRunnerConfig(cfg);
   const out = {
     schema_version: "witself.v0",
@@ -4264,7 +4289,7 @@ async function runPlacementRunner(env, cfg) {
         batch: config.restore_batch,
         all_regions: config.restore_any_region,
       },
-      handlePlacementRestore,
+      handlePlacementRestore, deadline, scheduled,
     );
     out.restore = restore.body;
     if (!restore.ok) {
@@ -4277,7 +4302,7 @@ async function runPlacementRunner(env, cfg) {
       env,
       "/v1/placement:rebalance",
       { batch: config.rebalance_batch },
-      handlePlacementRebalance,
+      handlePlacementRebalance, deadline, scheduled,
     );
     out.rebalance = rebalance.body;
     if (!rebalance.ok) {
@@ -4313,13 +4338,14 @@ async function runScheduledPlacementRunner(env) {
     if (!cfg.enabled) {
       return;
     }
-    const res = await runPlacementRunner(env, cfg);
-    const restored = res.restore?.restored?.filter((r) => r.ok).length ?? 0;
-    const rebalanced = res.rebalance?.rebalanced?.filter((r) => r.ok).length ?? 0;
+    const res = await runPlacementRunner(env, cfg, Date.now(), true);
+    const restored = res.restore?.restored?.filter((r) => r.ok && !r.pending).length ?? 0;
+    const rebalanced = res.rebalance?.rebalanced?.filter((r) => r.ok && !r.pending).length ?? 0;
+    const pending = [...(res.restore?.restored ?? []), ...(res.rebalance?.rebalanced ?? [])].filter((r) => r.pending).length;
     const restoreRemaining = res.restore?.remaining ?? 0;
     const rebalanceRemaining = res.rebalance?.remaining ?? 0;
     console.log(
-      `placement-runner: restored=${restored} rebalanced=${rebalanced} restore_remaining=${restoreRemaining} rebalance_remaining=${rebalanceRemaining}`,
+      `placement-runner: pending=${pending} restored=${restored} rebalanced=${rebalanced} restore_remaining=${restoreRemaining} rebalance_remaining=${rebalanceRemaining}`,
     );
   } catch (e) {
     console.log(`placement-runner failed: ${String(e?.message ?? e)}`);

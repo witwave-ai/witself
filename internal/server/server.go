@@ -29,11 +29,24 @@ import (
 	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
+	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
 // Config holds the listen addresses for the three witself-server listeners.
 type Config struct {
+	// BeginAccountImport acquires exclusive cross-replica import ownership.
+	BeginAccountImport func(context.Context, string, string) (AccountImportLease, error)
+	// AccountImportStatus reads durable receipts and advisory lock state only.
+	AccountImportStatus func(context.Context, string, string) (ImportSummary, AccountImportState, error)
+	// AccountImportJobTimeout bounds download and import; zero defaults to 3h.
+	AccountImportJobTimeout time.Duration
+	// AccountImportJobConcurrency bounds per-replica jobs; zero defaults to one.
+	AccountImportJobConcurrency int
+	// ReportAccountImportJob emits value-free start and completion diagnostics.
+	ReportAccountImportJob func(accountID, evacuationID, outcome string, duration time.Duration)
+	accountImportJobs      *accountImportJobs
+
 	CellName    string // startup cell identity used by backup and export handlers
 	APIAddr     string // public /v1 API
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
@@ -1185,9 +1198,9 @@ const (
 	PrincipalKindAgent    = "agent"
 
 	// AccountEvacuationProtocolVersion is advertised by /v1/version. A fleet
-	// control plane requires protocol 2 for pull imports. Protocol 1 retains
-	// the database-backed exact-epoch fence and supports bounded legacy pushes.
-	AccountEvacuationProtocolVersion = 2
+	// protocol 3 supports asynchronous, resumable pull import; protocol 2 is
+	// synchronous pull, and protocol 1 supports bounded legacy push.
+	AccountEvacuationProtocolVersion = 3
 
 	// AccountEvacuationIDHeader carries the opaque Durable Object move epoch
 	// on streaming export/import and restore-maintenance requests.
@@ -2288,6 +2301,9 @@ func ConfigFromEnv() Config {
 func Run(ctx context.Context, cfg Config) error {
 	metrics := newRuntimeMetrics()
 	instrumentedConfig := metrics.instrumentConfig(cfg)
+	jobs := newAccountImportJobs(ctx, cfg.AccountImportJobConcurrency)
+	defer jobs.cancel()
+	instrumentedConfig.accountImportJobs = jobs
 	defs := []struct {
 		name, addr string
 		handler    http.Handler
@@ -2338,9 +2354,11 @@ func Run(ctx context.Context, cfg Config) error {
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	jobs.cancel()
 	for _, r := range servers {
 		_ = r.srv.Shutdown(shutCtx)
 	}
+	jobs.wait(shutCtx)
 	return runErr
 }
 
@@ -2382,10 +2400,10 @@ func apiMux(cfg Config) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(
 			w,
-			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d}\n",
+			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d,\"store_schema_version\":%d}\n",
 			version.Version, version.Commit, version.Date,
 			AccountEvacuationProtocolVersion,
-			AccountProvisionProtocolVersion,
+			AccountProvisionProtocolVersion, store.SchemaVersion(),
 		)
 	})
 	agentEmailReceive := cfg.AgentEmailReceive
@@ -4574,6 +4592,12 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 }
 
 func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) http.HandlerFunc {
+	if cfg.accountImportJobs == nil {
+		cfg.accountImportJobs = newAccountImportJobs(context.Background(), cfg.AccountImportJobConcurrency)
+	}
+	jobClient := newBackupArchiveClientWithTimeout(accountImportTimeout(cfg))
+	// Preserve injected transport policy for handler tests and custom trust roots.
+	jobClient.Transport = client.Transport
 	return func(w http.ResponseWriter, r *http.Request) {
 		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
@@ -5157,6 +5181,16 @@ func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) h
 			_ = json.NewEncoder(w).Encode(ack)
 			return
 		}
+		if cfg.ImportAccountArchive != nil && cfg.BeginAccountImport != nil && cfg.AccountImportStatus != nil {
+			if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "start-import-evacuation"); ok {
+				accountImportAction(w, r, cfg, jobClient, accountID, true)
+				return
+			}
+			if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "import-evacuation-status"); ok {
+				accountImportAction(w, r, cfg, jobClient, accountID, false)
+				return
+			}
+		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "import-evacuation"); ok && cfg.ImportAccountArchive != nil {
 			evacuationID := strings.TrimSpace(
 				r.Header.Get(AccountEvacuationIDHeader),
@@ -5690,6 +5724,10 @@ func (c backupArchiveConn) Read(p []byte) (int, error) {
 }
 
 func newBackupArchiveClient() *http.Client {
+	return newBackupArchiveClientWithTimeout(15 * time.Minute)
+}
+
+func newBackupArchiveClientWithTimeout(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = true
 	transport.ForceAttemptHTTP2 = false
@@ -5716,7 +5754,7 @@ func newBackupArchiveClient() *http.Client {
 		return backupArchiveConn{conn}, nil
 	}
 	return &http.Client{
-		Transport: transport, Timeout: 15 * time.Minute,
+		Transport: transport, Timeout: timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
@@ -7376,11 +7414,15 @@ func metricsMuxFor(
 // downloadImportArchive completes the network transfer before database work.
 // Errors deliberately exclude URLs, capabilities, and remote response bodies.
 func downloadImportArchive(r *http.Request, client *http.Client, u *neturl.URL, size int64) (*os.File, error) {
-	download, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	return downloadImportArchiveContext(r.Context(), client, u, r.Header.Get("X-Witself-Archive-Token"), size)
+}
+
+func downloadImportArchiveContext(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64) (*os.File, error) {
+	download, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, errors.New("invalid archive download request")
 	}
-	download.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Witself-Archive-Token"))
+	download.Header.Set("Authorization", "Bearer "+token)
 	response, err := client.Do(download)
 	if err != nil {
 		return nil, errors.New("archive download request failed")

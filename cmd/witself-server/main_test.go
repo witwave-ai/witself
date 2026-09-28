@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 )
@@ -806,5 +807,47 @@ func TestLogAccountImportFailureQuotesContext(t *testing.T) {
 	logAccountImportFailure(&got, "acc_test\nforged", "cell\nforged", errors.New("archive download failed\nDETAIL"))
 	if strings.Count(got.String(), "\n") != 1 || !strings.Contains(got.String(), "account import failed") || !strings.Contains(got.String(), `error="archive download failed\nDETAIL"`) {
 		t.Fatal("import diagnostic must retain the error in one quoted record")
+	}
+}
+
+func TestMapAccountImportError(t *testing.T) {
+	for _, tc := range []struct{ in, want error }{
+		{nil, nil}, {store.ErrAccountExists, server.ErrConflict}, {store.ErrAccountEvacuationInProgress, server.ErrConflict}, {store.ErrAccountEvacuationMismatch, server.ErrConflict},
+		{export.ErrArchiveTooNew, server.ErrArchiveTooNew}, {store.ErrImportAuditContradiction, server.ErrBadArchive}, {store.ErrArchiveAccountMismatch, server.ErrBadArchive}, {store.ErrArchiveContent, server.ErrBadArchive}, {export.ErrCorrupt, server.ErrBadArchive}, {store.ErrAccountImportBusy, store.ErrAccountImportBusy},
+	} {
+		if got := mapAccountImportError(tc.in); !errors.Is(got, tc.want) {
+			t.Fatalf("map = %v, want %v", got, tc.want)
+		}
+	}
+}
+func TestAccountImportJobConfig(t *testing.T) {
+	for _, key := range []string{"WITSELF_ACCOUNT_IMPORT_JOB_TIMEOUT", "WITSELF_ACCOUNT_IMPORT_JOB_CONCURRENCY"} {
+		t.Setenv(key, "")
+	}
+	d, n, err := accountImportJobConfig()
+	if err != nil || d != 3*time.Hour || n != 1 {
+		t.Fatal("incorrect defaults")
+	}
+	for _, key := range []string{"WITSELF_ACCOUNT_IMPORT_JOB_TIMEOUT", "WITSELF_ACCOUNT_IMPORT_JOB_CONCURRENCY"} {
+		for _, raw := range []string{"0", "-1", "abc"} {
+			t.Setenv(key, raw)
+			if _, _, err := accountImportJobConfig(); err == nil {
+				t.Fatal("invalid config accepted")
+			}
+			t.Setenv(key, "")
+		}
+	}
+	t.Setenv("WITSELF_ACCOUNT_IMPORT_JOB_TIMEOUT", "4h")
+	t.Setenv("WITSELF_ACCOUNT_IMPORT_JOB_CONCURRENCY", "2")
+	d, n, err = accountImportJobConfig()
+	if err != nil || d != 4*time.Hour || n != 2 {
+		t.Fatal("overrides ignored")
+	}
+}
+func TestAccountImportJobLogValueFree(t *testing.T) {
+	var b bytes.Buffer
+	logAccountImportJob(&b, "acc_job", "cell-test", "evac_job", "imported", time.Second)
+	if b.String() != `witself-server: account import job account_id="acc_job" cell="cell-test" evacuation_id="evac_job" outcome="imported" duration=1s`+"\n" {
+		t.Fatal("unexpected job diagnostic shape")
 	}
 }

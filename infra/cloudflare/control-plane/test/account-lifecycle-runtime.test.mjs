@@ -4735,3 +4735,161 @@ test("pull origin uses configured fallback only when the operation has no origin
     }
   }
 });
+
+function asyncImportFixture() {
+  const f = evacuationPullFixture({ protocol: 3 });
+  let now = f.coordinator.now().getTime();
+  f.coordinator.now = () => new Date(now);
+  f.advance = (ms) => { now += ms; };
+  f.sleeps = [];
+  f.coordinator.sleep = async (ms) => { f.sleeps.push(ms); f.advance(ms); };
+  f.calls = []; f.validations = 0; f.renewals = 0; f.protocol = 3; f.schema = 98;
+  f.startBody = { import_job: { state: "running", started: true } };
+  f.pollBody = { import_job: { state: "running" } };
+  f.coordinator.validateArchive = async () => { f.validations++; return { manifest: { schema_version: 98 } }; };
+  f.coordinator.renewTargetReservation = async () => { f.renewals++; };
+  f.coordinator.fetchImpl = async (url, init) => {
+    if (url.endsWith("/v1/version")) return Response.json({ account_evacuation_protocol: f.protocol, store_schema_version: f.schema });
+    f.calls.push({ url, init });
+    if (url.endsWith(":start-import-evacuation")) {
+      if (f.startThrows) throw new Error("private transport URL");
+      return Response.json(f.startBody, { status: f.startStatus ?? 200, headers: f.startHeaders });
+    }
+    assert.ok(url.endsWith(":import-evacuation-status"));
+    assert.deepEqual(Object.keys(init.headers).sort(), ["Authorization", "X-Witself-Evacuation-ID"]);
+    return Response.json(f.pollBody, { status: f.pollStatus ?? 200 });
+  };
+  f.latest = () => f.storage.values.get("account-lifecycle");
+  f.tick = (budget = 0) => f.coordinator.importTarget(f.latest(), budget);
+  f.ack = { account_id: ACCOUNT, evacuation_id: OPERATION_ID, evacuation_role: "target", status: "suspended" };
+  return f;
+}
+
+for (const protocol of [0, 1, 2, 3, 4]) {
+  test(`async import protocol attestation ${protocol}`, async () => {
+    const f = asyncImportFixture(); f.protocol = protocol;
+    if ([0, 4].includes(protocol)) await assert.rejects(f.coordinator.cell(TARGET, { evacuationProtocol: true }), /does not attest account evacuation protocol 1, 2 or 3/);
+    else { const cell = await f.coordinator.cell(TARGET, { evacuationProtocol: true }); assert.equal(cell.account_evacuation_protocol, protocol); assert.equal(cell.store_schema_version, 98); }
+  });
+}
+for (const completed of [false, true]) {
+  test(`async import inline acknowledgement completed=${completed}`, async () => {
+    const f = asyncImportFixture(); f.startBody = { ...f.ack, ...(completed ? { evacuation_completed: true, already_imported: true, status: "active" } : {}) };
+    const result = await f.tick();
+    assert.equal(result.operation.phase, completed ? "target_resumed" : "target_imported");
+    assert.equal(result.operation.import_job, null); assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].init.headers["X-Witself-Import-Wait"], "20");
+    assert.equal(f.validations, 1);
+  });
+}
+test("async running null retry_at only polls and status receipt clears metadata", async () => {
+  const f = asyncImportFixture(); assert.deepEqual(await f.tick(), { pending: true });
+  let job = f.latest().operation.import_job; assert.equal(job.attempts, 1); assert.equal(job.retry_at, null);
+  const token = f.calls[0].init.headers["X-Witself-Archive-Token"];
+  await f.coordinator.alarm();
+  assert.equal(f.calls.length, 2); assert.ok(f.calls[1].url.endsWith(":import-evacuation-status")); assert.ok(f.renewals >= 1);
+  assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 1);
+  f.pollBody = f.ack; const result = await f.tick(); assert.equal(result.operation.import_job, null);
+  assert.ok(!JSON.stringify(result).includes(token));
+});
+test("async absent backoff, operator re-drive, fresh capability and ETag verification cache", async () => {
+  const f = asyncImportFixture(); await f.tick(); const token = f.calls[0].init.headers["X-Witself-Archive-Token"];
+  f.pollBody = { import_job: { state: "absent" } }; await f.tick();
+  const job = f.latest().operation.import_job; assert.equal(job.attempts, 1); assert.equal(job.retry_at, f.coordinator.now().getTime() + 60_000);
+  await f.tick(); assert.equal(f.calls.length, 2);
+  f.startBody = f.ack; await f.tick(1);
+  assert.equal(f.calls.length, 3); assert.ok(f.calls[2].init.headers["X-Witself-Archive-Token"] !== token); assert.equal(f.validations, 1);
+  const g = asyncImportFixture(); await g.tick(); g.pollBody = { import_job: { state: "absent" } }; await g.tick();
+  g.bucket.head = async () => ({ etag: "changed", size: 7 }); g.advance(60_000); g.startBody = g.ack; await g.tick(); assert.equal(g.validations, 2);
+});
+test("async 503 capacity leaves attempts unchanged and honors Retry-After", async () => {
+  const f = asyncImportFixture(); f.startStatus = 503; f.startHeaders = { "Retry-After": "120" };
+  await f.tick(); const job = f.latest().operation.import_job;
+  assert.equal(job.attempts, 0); assert.equal(job.started_at, null); assert.equal(job.retry_at, f.coordinator.now().getTime() + 120_000);
+  assert.equal(f.latest().operation.last_error, "import capacity exhausted; retry scheduled"); await f.tick(); assert.equal(f.calls.length, 1);
+});
+for (const message of ["account exists under a different evacuation", "archive schema is newer than this cell — upgrade the cell first", "invalid or corrupt archive", "archive download failed", "could not import account", "private token and URL"]) {
+  test(`async start classifies value-free error ${message.split(" ")[0]}`, async () => {
+    const f = asyncImportFixture(); f.startBody = { error: message }; await f.tick();
+    const operation = f.latest().operation;
+    const permanent = ["account exists under a different evacuation", "archive schema is newer than this cell — upgrade the cell first", "invalid or corrupt archive"].includes(message);
+    assert.equal(operation.retryable, !permanent); assert.equal(operation.last_error, permanent ? message : "archive import failed; retry required");
+    assert.equal(operation.import_job.retry_at, f.coordinator.now().getTime() + (permanent ? 6 * 3600_000 : 60_000));
+  });
+}
+test("async status errors and ambiguous starts preserve polling ownership", async () => {
+  for (const timeout of [false, true]) {
+    const f = asyncImportFixture(); f.startThrows = timeout;
+    if (timeout) await assert.rejects(f.tick()); else await f.tick();
+    assert.equal(f.latest().operation.import_job.retry_at, null);
+    f.pollStatus = 409; await assert.rejects(f.tick()); assert.equal(f.latest().operation.retryable, false);
+    await assert.rejects(f.tick()); assert.equal(f.calls.filter((c) => c.url.endsWith(":start-import-evacuation")).length, 1);
+    assert.equal(f.latest().operation.last_error, "archive import failed; retry required");
+  }
+});
+test("async exhaustion and age limit preserve eventual receipt polling", async () => {
+  const f = asyncImportFixture(); await f.tick(); let state = f.latest(); state.operation.import_job.attempts = 6;
+  await f.storage.put("account-lifecycle", state); f.pollBody = { import_job: { state: "absent" } }; await f.tick();
+  assert.equal(f.latest().operation.last_error, "import job exhausted its attempts; operator attention required");
+  assert.equal(f.latest().operation.import_job.retry_at, f.coordinator.now().getTime() + 6 * 3600_000);
+  const g = asyncImportFixture(); await g.tick(); g.advance(3.5 * 3600_000 + 1); await g.tick();
+  assert.equal(g.latest().operation.last_error, "import job exceeded its age limit; operator attention required"); assert.equal(g.latest().operation.retryable, false);
+  g.pollBody = g.ack; assert.equal((await g.tick()).operation.phase, "target_imported");
+});
+test("async job survives mixed protocol roll without streaming fallback", async () => {
+  const f = asyncImportFixture(); await f.tick(); const job = structuredClone(f.latest().operation.import_job);
+  f.protocol = 2; await f.tick(); assert.equal(f.calls.length, 1); assert.deepEqual(f.latest().operation.import_job, job);
+  assert.equal(f.latest().operation.last_error, "target cell attests protocol 2 while an import job is in flight; waiting for the roll");
+  f.protocol = 3; await f.tick(); assert.ok(f.calls[1].url.endsWith(":import-evacuation-status"));
+});
+test("async inline budget uses injected clock and sleep and renews between polls", async () => {
+  const f = asyncImportFixture(); await f.tick(25_000);
+  assert.equal(f.calls.length, 3); assert.deepEqual(f.sleeps, [10_000, 10_000, 5_000]); assert.equal(f.renewals, 3);
+  const g = asyncImportFixture(); const result = await g.coordinator.runMove(g.latest(), { importBudgetMs: 0 });
+  assert.equal(result.import_pending, true); assert.equal(result.import_job.attempts, 1); assert.equal(result.retryable, true); assert.ok(g.storage.alarm);
+});
+test("async schema precheck prevents mint and metadata survives state validation", async () => {
+  const f = asyncImportFixture(); f.schema = 97; await assert.rejects(f.tick(), /target cell schema is older/);
+  assert.equal(f.calls.length, 0); assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+  const state = validateLifecycleState(f.latest()); assert.equal(state.operation.import_job.attempts, 0); assert.equal(state.operation.retryable, false);
+  assert.equal(state.operation.import_job.retry_at, f.coordinator.now().getTime() + 6 * 3600_000);
+});
+test("async inline budget input is a nonnegative safe integer", () => {
+  const f = asyncImportFixture();
+  for (const value of [-1, 0.1, "1", null, Number.MAX_SAFE_INTEGER + 1]) assert.equal(f.coordinator.validInput({ account_id: ACCOUNT, action: "restore", cell_name: TARGET, inline_budget_ms: value }), false);
+  for (const value of [undefined, 0, 120_000]) assert.equal(f.coordinator.validInput({ account_id: ACCOUNT, action: "restore", cell_name: TARGET, inline_budget_ms: value }), true);
+});
+
+test("async start records ownership before transport and validates before minting", async () => {
+  const f = asyncImportFixture();
+  f.coordinator.validateArchive = async () => {
+    assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+    return { manifest: { schema_version: 98 } };
+  };
+  const fetch = f.coordinator.fetchImpl;
+  f.coordinator.fetchImpl = async (url, init) => {
+    if (url.endsWith(":start-import-evacuation")) {
+      assert.equal(f.latest().operation.import_job.attempts, 1);
+      assert.equal(f.latest().operation.import_job.retry_at, null);
+    }
+    return fetch(url, init);
+  };
+  await f.tick();
+});
+
+test("async pending rebalance accounting survives route retirement", async () => {
+  const f = asyncImportFixture();
+  const result = await f.coordinator.runMove(f.latest(), { importBudgetMs: 0 });
+  assert.equal(result.import_pending, true);
+  assert.equal(result.epoch, f.latest().epoch);
+  assert.equal(result.phase, "route_retired");
+  assert.equal(result.evacuation_id, OPERATION_ID);
+});
+
+test("async invalid acknowledgement never echoes remote status text", async () => {
+  const f = asyncImportFixture();
+  f.startBody = { ...f.ack, status: "https://private.invalid/archive?private-marker" };
+  await assert.rejects(f.tick(), { message: "archive import failed; retry required" });
+  assert.equal(f.latest().operation.last_error, "archive import failed; retry required");
+  assert.equal(f.latest().operation.import_job.retry_at, null);
+});

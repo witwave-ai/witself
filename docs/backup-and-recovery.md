@@ -1555,43 +1555,61 @@ capabilities or archive URL query strings.
 - [implementation-plan.md](implementation-plan.md)
 - [post-v0-roadmap.md](post-v0-roadmap.md)
 
-## Evacuation archive transport (protocol 2)
+## Evacuation archive transport (protocols 2 and 3)
 
-Roll cells before the control plane. Evacuation exports flush the compressed
-manifest and each chunk. The control plane allows up to 60 minutes overall,
-with a 120-second idle-progress watchdog driven by archive bytes.
+Deploy the control plane first, then protocol-3 cells with
+`roll-train.sh VERSION --no-schema-change …`; schema remains 98. See
+[the rollout matrix and mixed-version rules](deployment-cells.md#account-evacuation-transport-rollout).
 
-For protocol-2 targets, the lifecycle Durable Object issues a fresh single-use,
-30-minute capability for each import attempt. Only its SHA-256 hash is stored;
-the record binds account, evacuation, target cell, R2 object, ETag, and size.
-The target pulls through `GET /v1/archives:pull` at the origin pinned on the
-operation at claim time: `CP_PUBLIC_ORIGIN` (`https://self.witwave.ai` in the
-Worker vars, the one origin every cell trusts) when configured, otherwise the
-initiating request's origin. Operations claimed before the origin existed fall
-back to `CP_PUBLIC_ORIGIN` at import time. Alarm resumes retain the stored origin.
+For protocol-2 and protocol-3 targets, the lifecycle Durable Object issues a
+single-use, 30-minute capability for each new import start. Only its SHA-256
+hash is stored, bound to account, evacuation, target cell, R2 object, ETag and
+size. The target pulls `GET /v1/archives:pull` at the operation's pinned origin:
+configured `CP_PUBLIC_ORIGIN`, otherwise the initiating request's origin;
+older operations fall back to configured `CP_PUBLIC_ORIGIN`.
 
-Budgets: the cell's download client allows 15 minutes per attempt inside the
-control plane's 30-minute import deadline (about 360 KB/s for a 327 MB archive).
-Cloudflare caps one Durable Object alarm invocation at 15 minutes of wall time,
-so an alarm-resumed export or import step that cannot finish inside that window
-is cut off and retried from scratch every 60 seconds; the operator-driven path
-has no wall limit while the admin client stays connected. Measure export,
-verification and import durations for the largest account during the migration
-rehearsal before moving it. An account whose steps approach the alarm window
-needs the import split into a cell-side job, not a longer timeout.
+Protocol 3 starts a cell-side job with a 20-second inline wait and a 90-second
+start-call timeout. Alarm ticks poll every 60 seconds, with a 15-second poll
+request timeout. Operator requests poll inline every 10 seconds for up to
+120 seconds per account (maximum requested inline budget 240 seconds). The
+cell job and its download client default to 3 hours. The control plane flags
+jobs older than 3.5 hours from their first start for operator attention while
+continuing to poll for a receipt. Absent or retryable failed jobs use exponential
+backoff from 60 seconds to 30 minutes; after six attempts they retry on a
+6-hour cadence and need operator attention. Capacity 503 honors `Retry-After`
+(clamped to 60 seconds–30 minutes), without charging an attempt. Re-running
+`witself-admin cells restore` immediately re-drives a non-running job even
+before its backoff expires. Polls never mint or present a capability.
 
-The cell validates the exact configured HTTPS origin, token grammar and size
-(up to 8 GiB) before any network access, refuses redirects, and spools to its
-writable temporary directory before database import. Provision-token-authenticated
-import requests send an empty body and archive URL/token/size headers. The cell
-sends JSON response headers immediately, then newline heartbeats every 10 seconds;
-the control plane waits up to 30 minutes and advances only on the exact import
-acknowledgement. An error object after HTTP 200 records a retryable operation
-failure; a retry mints a fresh capability. Downloading retains the shared
-15-minute total and two-minute socket-idle bounds.
+Each server replica runs at most one import by default. A PostgreSQL session
+advisory lock owns the job across replicas; receipts survive a lost response.
+The session uses TCP keepalives (30-second idle, 10-second interval, six probes)
+for approximately 90-second detection of a vanished pod without a FIN. Shutdown
+cancels downloads and statements and closes the pinned session. A replacement
+job uses a fresh capability and re-downloads; spools are ephemeral per pod.
 
-`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` now governs both validation and import
-pulls; configure it on serving cells as well as validation cells. Legacy body
-imports remain available when the archive URL header is absent. Protocol-1
-targets use that path only for archives no larger than 90 MiB; larger archives
-require protocol 2. These changes do not alter backup drill behavior.
+Protocol-2 targets retain the 30-minute synchronous import contract and
+15-minute download client. Their alarm-resumed import still risks Cloudflare's
+15-minute alarm wall-time cap. The export step is unchanged for every protocol:
+compressed manifest/chunks flush, the watchdog allows 60 minutes overall and
+120 seconds without byte progress, followed by full archive verification.
+Until founder export plus verification is measured to fit within 15 minutes,
+that phase still needs the connected operator `/run` path via
+`witself-admin cells evacuate --account`. Protocol-3 import no longer does.
+First-start archive validation still reads the entire R2 object and is residual
+alarm-cap exposure; a successful pass is cached only for the same operation
+and ETag. Download-only, import-only, validation and export-plus-verification
+measurements must come from drill logs, not the combined drill duration.
+
+The cell validates exact HTTPS origin, capability grammar and size (up to 8 GiB)
+before network access, refuses redirects, and spools before import. Both download
+clients retain the two-minute per-read deadline and pinned HTTP/1.1 transport.
+Start and status require provision-token authentication. Inline responses send
+newline heartbeats every 10 seconds and finish with an exact acknowledgement,
+a running object, or a value-free error; HTTP 200 alone is not completion.
+Receipt replay omits `archive_schema_version` because no manifest was read.
+
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` governs validation and import pulls;
+configure it on serving and validation cells. Legacy request-body imports and
+backup drills are unchanged. Protocol-1 targets accept legacy pushes only up
+to 90 MiB; larger archives require protocol 2 or 3.

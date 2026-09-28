@@ -164,6 +164,8 @@ hard placement pins still apply.
 Move output contains `schema_version`, `cell`, `results` (account IDs, `ok`,
 and a generic error on failure), and `remaining`. Tables show account/status
 and remaining. Raw errors, archive details, and progress records are omitted.
+Protocol-3 restores expose `pending`, `attempts`, and `retryable`; pending tables
+show the attempt and `needs operator` when retryability is false.
 An account failure exits 1 even on HTTP 200; remaining work alone is not failure.
 `remaining` is the cell's routed count for evacuation and the destination's
 eligible archive count for restore, not just the selected account.

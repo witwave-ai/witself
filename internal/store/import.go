@@ -6421,7 +6421,7 @@ func validateImportedAccountAuditConsistencyTx(
 // is restoring; a manifest naming anyone else refuses before rows stream.
 func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r io.Reader) (export.Manifest, error) {
 	m, _, err := s.importAccount(
-		ctx, expectedAccountID, accountImportOptions{}, r,
+		ctx, s.pool, expectedAccountID, accountImportOptions{}, r,
 	)
 	return m, err
 }
@@ -6456,7 +6456,7 @@ func (s *Store) ImportAccountEvacuation(
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	return s.importAccount(
-		ctx, expectedAccountID,
+		ctx, s.pool, expectedAccountID,
 		accountImportOptions{evacuationID: evacuationID},
 		r,
 	)
@@ -6476,7 +6476,7 @@ func (s *Store) ValidateAccountBackup(
 		return export.Manifest{}, err
 	}
 	m, _, err := s.importAccount(
-		ctx, expectedAccountID,
+		ctx, s.pool, expectedAccountID,
 		accountImportOptions{
 			backupValidation: true,
 			backupID:         expectedBackupID,
@@ -6494,15 +6494,25 @@ type accountImportOptions struct {
 
 func (s *Store) importAccount(
 	ctx context.Context,
+	beginner txBeginner,
 	expectedAccountID string,
 	options accountImportOptions,
 	r io.Reader,
 ) (export.Manifest, AccountImportDisposition, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginner.Begin(ctx)
 	if err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if options.evacuationID != "" {
+		var locked bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(`+AccountImportAdvisoryKeySQL+`)`, expectedAccountID, options.evacuationID).Scan(&locked); err != nil {
+			return export.Manifest{}, AccountImportDisposition{}, err
+		}
+		if !locked {
+			return export.Manifest{}, AccountImportDisposition{}, ErrAccountImportBusy
+		}
+	}
 	if options.evacuationID != "" {
 		if err := setEvacuationAuthorityTx(
 			ctx, tx, options.evacuationID,

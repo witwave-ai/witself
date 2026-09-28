@@ -52,6 +52,10 @@ disables one. Closed-account purge and outbound dispatch are independently
 default-off; when enabled, closed-account purge defaults to preview. New job
 types must opt in explicitly; the worker is not an arbitrary command runner.
 
+Asynchronous evacuation imports run in `witself-server`, not worker jobs: the
+worker has no provision token or archive origin, cannot see another pod's
+ephemeral spool, and cannot reuse the request-scoped single-use capability.
+
 ## Cooperative Scaling
 
 Adding replicas must add useful capacity without allowing duplicate work.
