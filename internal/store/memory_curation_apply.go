@@ -1126,7 +1126,7 @@ func fulfillMemoryCurationGenerationTx(
 	if err != nil {
 		return MemoryCurationRequest{}, nil, err
 	}
-	followUpKey := "curation-follow-up:" + run.ID
+	followUpKey := memoryCurationFollowUpKeyPrefix + run.ID
 	followUpHash, err := memoryRequestHash(struct {
 		Operation  string `json:"operation"`
 		RunID      string `json:"run_id"`
@@ -1139,9 +1139,9 @@ func fulfillMemoryCurationGenerationTx(
 	if err != nil {
 		return MemoryCurationRequest{}, nil, err
 	}
-	triggerReason := "generation_follow_up"
+	triggerReason := memoryCurationFollowUpTrigger
 	if backlog {
-		triggerReason = "source_backlog"
+		triggerReason = memoryCurationSourceBacklogTrigger
 	}
 	followUp, err := scanMemoryCurationRequest(tx.QueryRow(ctx, `
 		INSERT INTO memory_curation_requests
