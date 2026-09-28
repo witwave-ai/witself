@@ -302,6 +302,7 @@ function cpVersion(id = cpVersionID, { releaseVersion = release.version } = {}) 
         { name: "LEGAL_DOCUMENTS", type: "service", service: "witself-legal" },
         plain("CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"),
         plain("CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"),
+        plain("CP_PUBLIC_ORIGIN", "https://self.witwave.ai"),
         secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
         secret("SUPPORT_EMAIL_INTAKE_TOKEN"),

@@ -145,9 +145,15 @@ class Bucket {
     this.failDeleteOnce = false;
   }
 
+  async head(key) {
+    if (!this.values.has(key)) return null;
+    return { size: new Blob([this.values.get(key)]).size, etag: "fixture-etag" };
+  }
+
   async get(key) {
     if (!this.values.has(key)) return null;
     return {
+      ...await this.head(key),
       body: new Response(this.values.get(key)).body,
     };
   }
@@ -172,6 +178,7 @@ class ErroringBodyBucket extends Bucket {
     if (!this.values.has(key)) return null;
     const error = this.error;
     return {
+      ...await this.head(key),
       body: new ReadableStream({
         pull(controller) {
           controller.error(error);
@@ -4471,4 +4478,260 @@ test("abort evacuation rejects a target-role receipt", async () => {
   const state = coordinator.storage.values.get("account-lifecycle");
   assert.equal(state.operation.phase, "abort_requested");
   assert.equal(state.last_completed, null);
+});
+
+function evacuationPullFixture({ protocol = 2, size = 7 } = {}) {
+  const pointer = { archive_id: "archive_pull", object: `archives/${ACCOUNT}/pull.tar.gz`,
+    evacuation_id: OPERATION_ID, cell: SOURCE, source_cell: SOURCE,
+    source_registration_id: `reg-${SOURCE}`, status: "suspended" };
+  const state = archivedOperationState("move", pointer, TARGET);
+  state.operation.archive_origin = "https://initiator.example";
+  const storage = new Storage();
+  storage.values.set("account-lifecycle", state);
+  const directory = new KV({ [`cell:${TARGET}`]: cell(TARGET, "https://target.example") });
+  const bucket = new Bucket();
+  bucket.values.set(pointer.object, "archive");
+  bucket.head = async () => ({ etag: "bound-etag", size });
+  let now = new Date("2026-07-25T12:00:00Z");
+  const requests = [];
+  const coordinator = runtime({ directory, bucket, storage, fetch: async (url, init) => {
+    if (url.endsWith("/v1/version")) return Response.json({ account_evacuation_protocol: protocol });
+    requests.push(init);
+    return new Response("\n\n" + JSON.stringify({ account_id: ACCOUNT, evacuation_id: OPERATION_ID,
+      evacuation_role: "target", status: "suspended" }));
+  } });
+  coordinator.now = () => now;
+  const env = { ARCHIVES: bucket, PUBLIC_IP_LIMITER: { limit: () => ({ success: true }) },
+    ACCOUNT_LIFECYCLE: { idFromName: (id) => id, get: (id) => ({ fetch: (r) => id === ACCOUNT ? coordinator.fetch(r) : new Response(null, { status: 404 }) }) } };
+  return { coordinator, state, storage, bucket, requests, env, pointer,
+    expire: () => { now = new Date(now.getTime() + 1800_000); } };
+}
+
+const { accountArchivePull } = await import("../src/account-lifecycle-runtime.mjs");
+const { ExportWatchdog } = await import("../src/account-backup-runtime.mjs");
+
+function pullRequest(token, evacuationID = OPERATION_ID) {
+  return new Request(`https://initiator.example/v1/archives:pull?account_id=${ACCOUNT}&evacuation_id=${evacuationID}`, {
+    headers: { Authorization: `Bearer ${token}`, "CF-Connecting-IP": "192.0.2.48" },
+  });
+}
+
+test("evacuation capability binds operation and ETag, hashes at rest, and consumes once concurrently", async () => {
+  const f = evacuationPullFixture();
+  const token = await f.coordinator.mintArchiveCapability(f.state.operation, await f.bucket.head());
+  const entries = [...await f.storage.list({ prefix: "archive-capability:" })];
+  assert.equal(entries.length, 1);
+  assert.ok(/^archive-capability:[0-9a-f]{64}$/.test(entries[0][0]));
+  assert.ok(!JSON.stringify(entries).includes(token));
+  assert.equal(entries[0][1].target_cell, TARGET);
+  f.bucket.get = async (object, options) => {
+    assert.equal(object, f.pointer.object);
+    assert.deepEqual(options, { onlyIf: { etagMatches: "bound-etag" } });
+    return { body: new Response("archive").body, size: 7, etag: "bound-etag" };
+  };
+  const responses = await Promise.all([accountArchivePull(pullRequest(token), f.env), accountArchivePull(pullRequest(token), f.env)]);
+  assert.deepEqual(responses.map((r) => r.status).sort(), [200, 404]);
+  const success = responses.find((r) => r.status === 200);
+  assert.equal(success.headers.get("Content-Length"), "7");
+  assert.equal(success.headers.get("Content-Type"), "application/gzip");
+  assert.equal(success.headers.get("Cache-Control"), "no-store");
+  assert.equal(success.headers.get("X-Witself-Evacuation-ID"), OPERATION_ID);
+  assert.equal(await success.text(), "archive");
+  assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+});
+
+for (const fault of ["expired", "wrong-id", "wrong-account", "changed-target", "changed-object", "etag", "size", "r2-failure", "bad-token", "method"]) {
+  test(`evacuation archive uniform 404: ${fault}`, async () => {
+    const f = evacuationPullFixture();
+    const token = await f.coordinator.mintArchiveCapability(f.state.operation, await f.bucket.head());
+    let req = pullRequest(token);
+    if (fault === "expired") f.expire();
+    if (fault === "wrong-id") req = pullRequest(token, "different");
+    if (fault === "wrong-account") req = new Request(req.url.replace(ACCOUNT, "other"), req);
+    if (fault === "changed-target") f.state.operation.target_cell = "different";
+    if (fault === "changed-object") f.state.operation.archive.object = "different";
+    if (fault === "bad-token") req = pullRequest("bad");
+    if (fault === "method") req = new Request(req.url, { method: "POST", headers: req.headers });
+    f.bucket.get = async () => {
+      if (fault === "r2-failure") throw new Error("private provider failure");
+      return { body: new Response("archive").body, size: fault === "size" ? 8 : 7, etag: fault === "etag" ? "changed" : "bound-etag" };
+    };
+    const response = await accountArchivePull(req, f.env);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.deepEqual(await response.json(), { error: "archive is not available" });
+  });
+}
+
+for (const [protocol, size, outcome] of [[2, 327 * 1024 ** 2, "pull"], [1, 90 * 1024 ** 2, "push"], [1, 90 * 1024 ** 2 + 1, "error"]]) {
+  test(`evacuation protocol ${protocol}, size ${size}: ${outcome}`, async () => {
+    const f = evacuationPullFixture({ protocol, size });
+    if (outcome === "error") {
+      await assert.rejects(f.coordinator.importTarget(f.state), /requires target account evacuation protocol 2/);
+      assert.equal(f.requests.length, 0);
+      assert.equal(f.storage.values.get("account-lifecycle").operation.retryable, true);
+      return;
+    }
+    const result = await f.coordinator.importTarget(f.state);
+    assert.equal(result.operation.phase, "target_imported");
+    const init = f.requests[0];
+    if (outcome === "pull") {
+      assert.equal(init.body, undefined);
+      assert.equal(init.headers["X-Witself-Archive-Size"], String(size));
+      assert.ok(/^cap_[0-9a-f]{64}$/.test(init.headers["X-Witself-Archive-Token"]));
+      assert.equal(new URL(init.headers["X-Witself-Archive-URL"]).origin, "https://initiator.example");
+    } else {
+      assert.ok(init.body instanceof ReadableStream);
+      assert.equal(init.headers["X-Witself-Archive-Token"], undefined);
+    }
+  });
+}
+
+test("heartbeat error persists retryable import failure and a cold retry mints a fresh capability", async () => {
+  const f = evacuationPullFixture();
+  const original = f.coordinator.fetchImpl;
+  let firstToken;
+  f.coordinator.fetchImpl = async (url, init) => {
+    if (url.endsWith("/v1/version")) return original(url, init);
+    firstToken = init.headers["X-Witself-Archive-Token"];
+    return new Response('\n\n{"error":"could not import account"}');
+  };
+  await assert.rejects(f.coordinator.importTarget(f.state), /without an exact/);
+  const failed = f.storage.values.get("account-lifecycle");
+  assert.equal(failed.operation.phase, "route_retired");
+  assert.equal(failed.operation.last_error, "archive import failed; retry required");
+  assert.equal(failed.operation.retryable, true);
+  const resumed = new DurableAccountLifecycle(context(f.storage), { ...f.coordinator.env, CP_PUBLIC_ORIGIN: "https://wrong-fallback.example" }, {
+    fetch: original, validateArchive: f.coordinator.validateArchive, now: f.coordinator.now,
+  });
+  const result = await resumed.importTarget(failed);
+  assert.equal(result.operation.phase, "target_imported");
+  assert.ok(f.requests[0].headers["X-Witself-Archive-Token"] !== firstToken);
+  assert.equal(new URL(f.requests[0].headers["X-Witself-Archive-URL"]).origin, "https://initiator.example");
+});
+
+test("evacuation export watchdog aborts idle bodies and allows progress beyond five minutes", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const watchdog = new ExportWatchdog();
+  let source;
+  const reader = watchdog.body(new ReadableStream({ start(controller) { source = controller; } })).getReader();
+  for (let i = 0; i < 7; i++) {
+    t.mock.timers.tick(60_000);
+    source.enqueue(new Uint8Array([i]));
+    await reader.read();
+    assert.equal(watchdog.signal.aborted, false);
+  }
+  const pending = reader.read();
+  t.mock.timers.tick(120_000);
+  await assert.rejects(pending, /export_idle_timeout/);
+  watchdog.close();
+});
+
+test("evacuation public route applies the IP limiter before capability consumption", async () => {
+  const { register } = await import("node:module");
+  register(new URL("./fixtures/cloudflare-containers-loader.mjs", import.meta.url));
+  const worker = (await import("../src/index.js")).default;
+  for (const limiter of [undefined, { limit: () => ({}) }, { limit: () => { throw new Error("private"); } }, { limit: () => ({ success: false }) }]) {
+    const f = evacuationPullFixture();
+    f.env.PUBLIC_IP_LIMITER = limiter;
+    f.env.ACCOUNT_LIFECYCLE.get = () => assert.fail("limiter failure reached capability storage");
+    const response = await worker.fetch(pullRequest("bad"), f.env, {});
+    assert.ok([404, 429].includes(response.status));
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+  }
+  const f = evacuationPullFixture();
+  let limited = 0;
+  f.env.PUBLIC_IP_LIMITER.limit = ({ key }) => { assert.equal(key, "192.0.2.48"); limited++; return { success: true }; };
+  const response = await worker.fetch(pullRequest("bad"), f.env, {});
+  assert.equal(response.status, 404);
+  assert.equal(limited, 1);
+});
+
+test("claim stores the initiating origin and the observed target protocol", async () => {
+  const f = evacuationPullFixture();
+  await f.coordinator.env.DIRECTORY.put(`cell:${SOURCE}`, JSON.stringify(cell(SOURCE, "https://source.example")));
+  const initial = bootstrapLiveState({ account_id: ACCOUNT, route: sourceRoute() });
+  const claimed = await f.coordinator.claim(initial, {
+    action: "move", source_cell: SOURCE, target_cell: TARGET, request_origin: "https://request.example",
+  });
+  assert.equal(claimed.operation.archive_origin, "https://request.example");
+  assert.equal(claimed.operation.target_preflight.protocol, 2);
+  assert.equal(f.storage.values.get("account-lifecycle").operation.archive_origin, "https://request.example");
+});
+
+test("claim pins the configured public origin over the request origin and records null without either", async () => {
+  for (const [configured, requested, want] of [
+    ["https://self.example", "https://request.example", "https://self.example"],
+    ["https://self.example", undefined, "https://self.example"],
+    [undefined, undefined, null],
+  ]) {
+    const f = evacuationPullFixture();
+    if (configured !== undefined) f.coordinator.env.CP_PUBLIC_ORIGIN = configured;
+    await f.coordinator.env.DIRECTORY.put(`cell:${SOURCE}`, JSON.stringify(cell(SOURCE, "https://source.example")));
+    const initial = bootstrapLiveState({ account_id: ACCOUNT, route: sourceRoute() });
+    const claimed = await f.coordinator.claim(initial, {
+      action: "move", source_cell: SOURCE, target_cell: TARGET,
+      ...(requested === undefined ? {} : { request_origin: requested }),
+    });
+    assert.equal(claimed.operation.archive_origin, want);
+  }
+});
+
+for (const mode of ["idle", "progress", "overall"]) {
+  test(`exportArchive uses the shared watchdog: ${mode}`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let state = claimOperation(bootstrapLiveState({ account_id: ACCOUNT, route: sourceRoute() }), {
+      kind: "evacuate", operation_id: OPERATION_ID, evacuation_id: OPERATION_ID, source_cell: SOURCE,
+      archive: { archive_id: "archive_watchdog", object: `archives/${ACCOUNT}/watchdog.tar.gz` },
+    });
+    state = acknowledgeStep(state, { operation_id: OPERATION_ID, from_phase: "claimed", to_phase: "source_suspended" });
+    const directory = new KV({ [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example") });
+    let source, signal, aborted = false;
+    const coordinator = runtime({ directory, bucket: new Bucket(), fetch: async (url, init) => {
+      if (url.endsWith("/v1/version")) return protocolResponse();
+      signal = init.signal;
+      return new Response(new ReadableStream({ start(controller) { source = controller; } }));
+    } });
+    coordinator.readPlacementPolicy = async () => null;
+    coordinator.abortPreArchive = async () => { aborted = true; };
+    coordinator.streamArchive = async (_bucket, _key, body) => {
+      let size = 0;
+      for await (const chunk of body) size += chunk.byteLength;
+      return size;
+    };
+    const pending = coordinator.exportArchive(state);
+    const failure = mode !== "progress" ? assert.rejects(pending, mode === "idle" ? /export_idle_timeout/ : /export_overall_timeout/) : null;
+    await new Promise(setImmediate);
+    if (mode === "idle") {
+      t.mock.timers.tick(120_000);
+    } else {
+      for (let i = 0; i < (mode === "overall" ? 60 : 7); i++) {
+        t.mock.timers.tick(60_000);
+        if (!signal.aborted) source.enqueue(new Uint8Array([1]));
+        await new Promise(setImmediate);
+      }
+      if (mode === "progress") {
+        assert.equal(signal.aborted, false);
+        source.close();
+        assert.equal((await pending).operation.phase, "archive_committed");
+      }
+    }
+    if (failure) { await failure; assert.equal(aborted, true); assert.equal(signal.aborted, true); }
+  });
+}
+
+test("pull origin uses configured fallback only when the operation has no origin", async () => {
+  for (const origin of [undefined, "http://unsafe.example", "https://bad.example/path"]) {
+    const f = evacuationPullFixture();
+    f.state.operation.archive_origin = origin;
+    f.coordinator.env.CP_PUBLIC_ORIGIN = "https://fallback.example";
+    if (origin === undefined) {
+      await f.coordinator.importTarget(f.state);
+      assert.equal(new URL(f.requests[0].headers["X-Witself-Archive-URL"]).origin, "https://fallback.example");
+    } else {
+      await assert.rejects(f.coordinator.importTarget(f.state), /origin is not configured/);
+      assert.equal(f.requests.length, 0);
+      assert.equal((await f.storage.list({ prefix: "archive-capability:" })).size, 0);
+    }
+  }
 });

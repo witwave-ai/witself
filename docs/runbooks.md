@@ -3927,3 +3927,25 @@ account; preserve the CP as entitlement authority. Do not force an apply,
 override a plan, change billing, or bypass a fit check as monitoring remediation.
 A later completely measured healthy traversal clears the gap. Its 30-minute
 persistence is aggregate observation persistence, not the age of one account.
+
+## Account-move transport rollout
+
+Roll protocol-2 cells first and the control plane second. On every potential
+target, verify `/v1/version` reports `account_evacuation_protocol: 2` and the
+rendered ConfigMap sets `WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` to the exact
+control-plane HTTPS origin (`https://self.witwave.ai` for the serving cell).
+The setting covers both backup validation and account import pulls. The Worker
+var `CP_PUBLIC_ORIGIN` must equal that origin. Start no drain, move, restore or
+`witself-infra destroy` between the cell roll and the control-plane deploy: the
+previous control plane requires protocol 1 exactly and answers 409 against a
+protocol-2 cell until the new control plane is deployed.
+
+Account moves now use single-use R2 pull capabilities and empty import request
+bodies. Never log archive capability headers. A heartbeat HTTP 200 is pending
+work until its exact import acknowledgement arrives. Error objects retain the
+import phase and record a value-free retryable error; retries mint fresh
+capabilities. A protocol-1 target can receive only archives up to 90 MiB through
+the legacy push path. Upgrade larger-archive targets before retrying. Exports
+are bounded by 120 seconds without byte progress and 60 minutes overall;
+imports have a 30-minute control-plane deadline. Keep capacity for the complete
+archive spool in the target's writable temporary directory.

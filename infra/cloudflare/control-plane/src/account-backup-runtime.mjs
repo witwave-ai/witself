@@ -433,7 +433,7 @@ function boundedReason(error) {
 
 // Only body bytes constitute progress. Keep at most the stream's normal
 // backpressure buffer; never tee or accumulate the archive in this watchdog.
-class ExportWatchdog {
+export class ExportWatchdog {
   constructor() {
     this.controller = new AbortController();
     this.signal = this.controller.signal;

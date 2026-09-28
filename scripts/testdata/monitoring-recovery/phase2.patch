@@ -1,5 +1,5 @@
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index c8f688b..8cb13e6 100644
+index 32e7b8b..1cd953a 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 @@ -42,8 +42,11 @@ apps:
@@ -16,8 +16,8 @@ index c8f688b..8cb13e6 100644
    witselfServer:
      enabled: true
      namespace: witself
-@@ -89,6 +92,21 @@ apps:
-       validationEnabled: false
+@@ -90,6 +93,21 @@ apps:
+       validationArchiveOrigin: https://self.witwave.ai
        targetName: witself-backup
      replicaCount: 2
 +    # Phase 2 of the monitoring rollout: expose server metrics to the
@@ -38,7 +38,7 @@ index c8f688b..8cb13e6 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -130,6 +148,20 @@ apps:
+@@ -131,6 +149,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -59,7 +59,7 @@ index c8f688b..8cb13e6 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -185,8 +217,8 @@ apps:
+@@ -186,8 +218,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -71,7 +71,7 @@ index c8f688b..8cb13e6 100644
      enabled: true
      alerting:
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-index e731c27..23acc1c 100644
+index 9b461ef..e9d5cce 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 @@ -22,8 +22,11 @@ apps:
@@ -88,8 +88,8 @@ index e731c27..23acc1c 100644
    witselfServer:
      enabled: true
      namespace: witself
-@@ -68,6 +71,21 @@ apps:
-       validationEnabled: false
+@@ -69,6 +72,21 @@ apps:
+       validationArchiveOrigin: https://self.witwave.ai
        targetName: witself-backup
      replicaCount: 2
 +    # Phase 2 of the monitoring rollout: expose server metrics to the
@@ -110,7 +110,7 @@ index e731c27..23acc1c 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -109,6 +127,20 @@ apps:
+@@ -110,6 +128,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -131,7 +131,7 @@ index e731c27..23acc1c 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -164,8 +196,8 @@ apps:
+@@ -165,8 +197,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:

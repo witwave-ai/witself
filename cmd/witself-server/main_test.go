@@ -770,7 +770,8 @@ func TestConfigureBackupValidation(t *testing.T) {
 	}{
 		{name: "normalized", enabled: true, origin: "https://cp.example/", want: "https://cp.example"},
 		{name: "legacy body validation", enabled: true},
-		{name: "disabled ignores dormant setting", origin: "http://private/path"},
+		{name: "serving import origin", origin: "https://cp.example/", want: "https://cp.example"},
+		{name: "disabled rejects invalid origin", origin: "http://private/path", wantErr: true},
 		{name: "invalid enabled origin", enabled: true, origin: "https://user:private@cp.example/path", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -789,13 +790,21 @@ func TestConfigureBackupValidation(t *testing.T) {
 			if cfg.BackupValidationEnabled != tc.enabled || cfg.BackupValidationArchiveOrigin != tc.want {
 				t.Fatal("backup validation configuration mismatch")
 			}
-			wantLog := "witself-server: backup pull validation configured=false\n"
+			wantLog := "witself-server: archive pull configured=false\n"
 			if tc.want != "" {
-				wantLog = "witself-server: backup pull validation configured=true\n"
+				wantLog = "witself-server: archive pull configured=true\n"
 			}
 			if output.String() != wantLog {
 				t.Fatal("startup did not emit exactly one value-free configuration line")
 			}
 		})
+	}
+}
+
+func TestLogAccountImportFailureQuotesContext(t *testing.T) {
+	var got strings.Builder
+	logAccountImportFailure(&got, "acc_test\nforged", "cell\nforged", errors.New("archive download failed\nDETAIL"))
+	if strings.Count(got.String(), "\n") != 1 || !strings.Contains(got.String(), "account import failed") || !strings.Contains(got.String(), `error="archive download failed\nDETAIL"`) {
+		t.Fatal("import diagnostic must retain the error in one quoted record")
 	}
 }

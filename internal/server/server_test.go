@@ -2039,7 +2039,7 @@ func TestExportAccountArchiveFailureReported(t *testing.T) {
 	}
 	reported := make(chan exportFailure, 1)
 	var exportedAccountID, exportedEvacuationID string
-	export := func(_ context.Context, accountID, gotEvacuationID string, w io.Writer) error {
+	export := func(_ context.Context, accountID, gotEvacuationID string, w io.Writer, _ func() error) error {
 		exportedAccountID = accountID
 		exportedEvacuationID = gotEvacuationID
 		_, _ = io.WriteString(w, "partial-archive")

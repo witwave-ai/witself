@@ -237,7 +237,7 @@ type Config struct {
 	// (ErrConflict): the write freeze is what makes the snapshot consistent.
 	// Errors after the first byte can only be signaled in-stream; the
 	// archive's trailing checksums entry is the truncation detector.
-	StreamAccountExport func(ctx context.Context, accountID, evacuationID string, w io.Writer) error
+	StreamAccountExport func(ctx context.Context, accountID, evacuationID string, w io.Writer, flush func() error) error
 	// ReportAccountExportFailure observes an unexpected stream failure after
 	// the export response has switched to archive delivery. The handler cannot
 	// safely append a JSON error at that point, so this callback is the
@@ -250,6 +250,9 @@ type Config struct {
 	// import error. The handler answers the control plane with a value-free
 	// error either way; this hook is the only place the cause is logged.
 	ReportAccountBackupValidationFailure func(ctx context.Context, accountID string, err error)
+
+	// ReportAccountImportFailure observes import and archive download failures.
+	ReportAccountImportFailure func(ctx context.Context, accountID string, err error)
 
 	// BackupToken is a dedicated control-plane -> cell credential for the
 	// backup protocol. It is intentionally distinct from ProvisionToken so
@@ -282,7 +285,8 @@ type Config struct {
 	// back; it never exposes a routine committed restore API.
 	// ValidateAccountBackup must additionally be set for the route to exist.
 	BackupValidationEnabled bool
-	// BackupValidationArchiveOrigin is the exact HTTPS origin allowed for drill pulls.
+	// BackupValidationArchiveOrigin is the exact HTTPS origin allowed for both
+	// backup validation and evacuation import pulls.
 	BackupValidationArchiveOrigin string
 	ValidateAccountBackup         func(
 		ctx context.Context,
@@ -1181,10 +1185,9 @@ const (
 	PrincipalKindAgent    = "agent"
 
 	// AccountEvacuationProtocolVersion is advertised by /v1/version. A fleet
-	// control plane must see this exact integer before its first evacuation
-	// mutation; older servers otherwise accept extra JSON/header fields while
-	// lacking the database-backed exact-epoch fence.
-	AccountEvacuationProtocolVersion = 1
+	// control plane requires protocol 2 for pull imports. Protocol 1 retains
+	// the database-backed exact-epoch fence and supports bounded legacy pushes.
+	AccountEvacuationProtocolVersion = 2
 
 	// AccountEvacuationIDHeader carries the opaque Durable Object move epoch
 	// on streaming export/import and restore-maintenance requests.
@@ -4567,6 +4570,10 @@ func accountPlacementPolicySystemSetHandler(
 // recover: 200 with a fresh root-bound bootstrap token after rotating every
 // live root credential; 409 unless the account is active.
 func accountLifecycleHandler(cfg Config) http.HandlerFunc {
+	return accountLifecycleHandlerWithArchiveClient(cfg, newBackupArchiveClient())
+}
+
+func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setAuthenticatedNoStoreDefault(w)
 		tok, ok := bearerToken(r)
@@ -5158,25 +5165,66 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
 				return
 			}
+			var body io.Reader = r.Body
+			var stream *validationStream
+			report := func(err error) {
+				if cfg.ReportAccountImportFailure != nil {
+					cfg.ReportAccountImportFailure(r.Context(), accountID, err)
+				}
+			}
+			if _, present := r.Header[http.CanonicalHeaderKey("X-Witself-Archive-URL")]; present {
+				// Reuse the exact backup origin/token/size policy without changing
+				// its wire headers or legacy validation behavior.
+				source := r.Clone(r.Context())
+				for _, name := range []string{"URL", "Token", "Size"} {
+					source.Header.Set("X-Witself-Backup-Archive-"+name, r.Header.Get("X-Witself-Archive-"+name))
+				}
+				u, size, valid := backupArchiveSource(source, cfg.BackupValidationArchiveOrigin)
+				if !valid {
+					writeJSONError(w, http.StatusBadRequest, "a valid archive source is required")
+					return
+				}
+				stream = startValidationStream(w, backupValidationHeartbeat)
+				spool, err := downloadImportArchive(r, client, u, size)
+				if err != nil {
+					report(err)
+					stream.finish(map[string]any{"schema_version": "witself.v0", "error": "archive download failed"})
+					return
+				}
+				defer func() {
+					_ = spool.Close()
+					_ = os.Remove(spool.Name())
+				}()
+				body = spool
+			}
+			fail := func(status int, message string) {
+				if stream != nil {
+					stream.finish(map[string]any{"schema_version": "witself.v0", "error": message})
+					return
+				}
+				writeJSONError(w, status, message)
+			}
 			sum, err := cfg.ImportAccountArchive(
-				r.Context(), accountID, evacuationID, r.Body,
+				r.Context(), accountID, evacuationID, body,
 			)
+			if err != nil {
+				report(err)
+			}
 			switch {
 			case errors.Is(err, ErrConflict):
-				writeJSONError(w, http.StatusConflict, "account exists under a different evacuation")
+				fail(http.StatusConflict, "account exists under a different evacuation")
 				return
 			case errors.Is(err, ErrArchiveTooNew):
-				writeJSONError(w, http.StatusConflict, "archive schema is newer than this cell — upgrade the cell first")
+				fail(http.StatusConflict, "archive schema is newer than this cell — upgrade the cell first")
 				return
 			case errors.Is(err, ErrBadArchive):
-				writeJSONError(w, http.StatusBadRequest, "invalid or corrupt archive")
+				fail(http.StatusBadRequest, "invalid or corrupt archive")
 				return
 			case err != nil:
-				writeJSONError(w, http.StatusInternalServerError, "could not import account")
+				fail(http.StatusInternalServerError, "could not import account")
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			ack := map[string]any{
 				"schema_version":         "witself.v0",
 				"account_id":             sum.AccountID,
 				"status":                 sum.Status,
@@ -5185,7 +5233,13 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"evacuation_role":        sum.EvacuationRole,
 				"already_imported":       sum.AlreadyImported,
 				"evacuation_completed":   sum.EvacuationCompleted,
-			})
+			}
+			if stream != nil {
+				stream.finish(ack)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ack)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "events"); ok && cfg.LogAccountEvent != nil {
@@ -5237,7 +5291,7 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-Witself-Export-Format", "1")
 			err := cfg.StreamAccountExport(
-				r.Context(), accountID, evacuationID, w,
+				r.Context(), accountID, evacuationID, w, http.NewResponseController(w).Flush,
 			)
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -7317,4 +7371,42 @@ func metricsMuxFor(
 		}
 	})
 	return securityResponseHeaders(mux)
+}
+
+// downloadImportArchive completes the network transfer before database work.
+// Errors deliberately exclude URLs, capabilities, and remote response bodies.
+func downloadImportArchive(r *http.Request, client *http.Client, u *neturl.URL, size int64) (*os.File, error) {
+	download, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, errors.New("invalid archive download request")
+	}
+	download.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Witself-Archive-Token"))
+	response, err := client.Do(download)
+	if err != nil {
+		return nil, errors.New("archive download request failed")
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.ContentLength != size {
+		return nil, errors.New("archive download status or size mismatch")
+	}
+	spool, err := os.CreateTemp("", "witself-account-import-*.tar.gz")
+	if err != nil {
+		return nil, errors.New("archive spool creation failed")
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = spool.Close()
+			_ = os.Remove(spool.Name())
+		}
+	}()
+	copied, err := io.Copy(spool, io.LimitReader(response.Body, size+1))
+	if err != nil || copied != size {
+		return nil, errors.New("archive download incomplete or oversized")
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.New("archive spool rewind failed")
+	}
+	complete = true
+	return spool, nil
 }

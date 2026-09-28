@@ -1347,10 +1347,11 @@ func serve() int {
 			ctx context.Context,
 			accountID, evacuationID string,
 			w io.Writer,
+			flush func() error,
 		) error {
 			cellName := cfg.CellName
 			err := st.ExportAccountEvacuation(
-				ctx, accountID, evacuationID, cellName, version.Version, w,
+				ctx, accountID, evacuationID, cellName, version.Version, w, flush,
 			)
 			switch {
 			case errors.Is(err, store.ErrAccountNotFound):
@@ -1700,6 +1701,9 @@ func serve() int {
 				AlreadyImported:     disposition.AlreadyImported,
 				EvacuationCompleted: disposition.EvacuationCompleted,
 			}, nil
+		}
+		cfg.ReportAccountImportFailure = func(_ context.Context, accountID string, err error) {
+			logAccountImportFailure(os.Stderr, accountID, cfg.CellName, err)
 		}
 		cfg.ReportAccountBackupValidationFailure = func(_ context.Context, accountID string, err error) {
 			logAccountBackupValidationFailure(os.Stderr, accountID, cfg.CellName, err)
@@ -2075,14 +2079,14 @@ func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
 func configureBackupValidation(cfg *server.Config, enabled bool, origin string, w io.Writer) error {
 	cfg.BackupValidationEnabled = enabled
 	cfg.BackupValidationArchiveOrigin = ""
-	if enabled {
-		normalized, err := server.NormalizeBackupValidationArchiveOrigin(origin)
-		if err != nil {
-			return fmt.Errorf("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN: %w", err)
-		}
-		cfg.BackupValidationArchiveOrigin = normalized
+	// The origin also authorizes evacuation pulls on ordinary serving cells,
+	// where rollback-only backup validation must remain disabled.
+	normalized, err := server.NormalizeBackupValidationArchiveOrigin(origin)
+	if err != nil {
+		return fmt.Errorf("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN: %w", err)
 	}
-	_, _ = fmt.Fprintf(w, "witself-server: backup pull validation configured=%t\n", cfg.BackupValidationArchiveOrigin != "")
+	cfg.BackupValidationArchiveOrigin = normalized
+	_, _ = fmt.Fprintf(w, "witself-server: archive pull configured=%t\n", normalized != "")
 	return nil
 }
 
@@ -2850,4 +2854,8 @@ func toServerUsageReport(report store.UsageReport) server.UsageReport {
 		Since: report.Since, Until: report.Until, Bucket: report.Bucket,
 		Points: points, Totals: totals, Truncated: report.Truncated,
 	}
+}
+
+func logAccountImportFailure(w io.Writer, accountID, cellName string, err error) {
+	_, _ = fmt.Fprintf(w, "witself-server: account import failed account_id=%q cell=%q error=%q\n", accountID, cellName, err)
 }

@@ -272,6 +272,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "CP_SIGNUP_LEGAL_ENFORCEMENT",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
+    "CP_PUBLIC_ORIGIN",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "WITSELF_EDGE_RELEASE_COMMIT",
@@ -664,6 +665,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "LEGAL_DOCUMENTS",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED",
+    "CP_PUBLIC_ORIGIN",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
@@ -744,6 +746,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_SIGNUP_OPEN", "true"],
     ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
     ["CP_UPTIME_PROBES_CONTROL_PLANE_ENABLED", "false"],
+    ["CP_PUBLIC_ORIGIN", "https://self.witwave.ai"],
   ]) {
     exactPlainBinding(bindings, name, value);
   }
