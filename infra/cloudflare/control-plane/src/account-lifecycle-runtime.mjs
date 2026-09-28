@@ -1,3 +1,4 @@
+import { projectLifecycleStatus } from "./account-lifecycle-status.mjs";
 import { ExportWatchdog } from "./account-backup-runtime.mjs";
 import {
   AccountLifecycleBusyError,
@@ -551,6 +552,9 @@ export class DurableAccountLifecycle {
     ) {
       return this.residencyStatus(request);
     }
+    if (request.method === "POST" && url.pathname === "/lifecycle-status") {
+      return this.lifecycleStatus(request);
+    }
     if (request.method !== "POST" || url.pathname !== "/run") {
       return errorResponse("account lifecycle endpoint not found", 404);
     }
@@ -671,6 +675,40 @@ export class DurableAccountLifecycle {
       target_cell: input.target_cell,
       active,
       terminal: !active,
+    });
+  }
+
+  async lifecycleStatus(request) {
+    let input;
+    try { input = await request.json(); } catch {
+      return errorResponse("invalid lifecycle status request", 400);
+    }
+    if (!isObject(input) || Object.keys(input).length !== 1 ||
+        typeof input.account_id !== "string" || !ACCOUNT_ID.test(input.account_id) ||
+        input.account_id !== this.accountId) {
+      return errorResponse("invalid lifecycle status request", 400);
+    }
+    let state;
+    let quarantine;
+    try {
+      const stored = await this.storage.get(STATE_KEY);
+      state = stored == null ? null : validateLifecycleState(stored);
+      if (state !== null && state.account_id !== this.accountId) {
+        return errorResponse("account lifecycle state is unavailable", 503);
+      }
+      const record = await this.storage.get(RESTORE_QUARANTINE_KEY);
+      quarantine = record == null ? null : validRestoreQuarantine(record, this.accountId) ? record : { invalid: true };
+    } catch {
+      return errorResponse("account lifecycle state is unavailable", 503);
+    }
+    let alarmAt = null;
+    try {
+      if (typeof this.storage.getAlarm === "function") alarmAt = await this.storage.getAlarm();
+    } catch { /* An unavailable alarm does not hide lifecycle authority. */ }
+    const driverActive = this.fence.busy === true;
+    const now = this.now().getTime();
+    return json({ ok: true, account_id: input.account_id,
+      status: projectLifecycleStatus({ accountID: input.account_id, state, quarantine, alarmAt, driverActive, now }),
     });
   }
 

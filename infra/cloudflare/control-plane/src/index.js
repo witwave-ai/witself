@@ -351,6 +351,8 @@ const REGION_NAME = /^[a-z0-9-]{2,32}$/;
 const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
 const PLACEMENT_RESCUE_PATH = /^\/v1\/placement\/archives\/([A-Za-z0-9_-]{1,128}):rescue$/;
+const ACCOUNT_LIFECYCLE_STATUS_PREFIX = "/v1/placement/accounts/";
+const ACCOUNT_LIFECYCLE_STATUS_PATH = /^\/v1\/placement\/accounts\/([A-Za-z0-9_-]{1,128})\/lifecycle$/;
 const PLACEMENT_RESCUE_AXES = new Set(["cloud", "region", "channel"]);
 const ACCOUNT_BACKUP_STATUS_PATH = "/v1/backups/status";
 const ACCOUNT_ARCHIVE_PULL_PATH = "/v1/archives:pull";
@@ -4369,6 +4371,52 @@ async function archivedCountsByCell(env) {
   return counts;
 }
 
+async function handleAccountLifecycleStatus(request, env, url) {
+  if (!fleetAuthorized(request, env)) return err("unauthorized", 401);
+  const match = url.pathname.match(ACCOUNT_LIFECYCLE_STATUS_PATH);
+  if (!match) return err("account lifecycle route not found", 404);
+  if (request.method !== "GET") return err("method not allowed", 405);
+  if (url.search !== "") return err("query parameters are not allowed", 400);
+  const accountId = match[1];
+  let status;
+  try {
+    const response = await accountLifecycleStub(env, accountId).fetch(new Request(
+      "https://account-lifecycle.internal/lifecycle-status", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_id: accountId }),
+      },
+    ));
+    if (!response.ok) throw new Error();
+    const body = await response.json();
+    status = body.status;
+    if (body.ok !== true || body.account_id !== accountId ||
+        !status || typeof status !== "object" || Array.isArray(status) ||
+        status.account_id !== accountId || typeof status.initialized !== "boolean") throw new Error();
+  } catch { return err("account lifecycle status is unavailable", 503); }
+  let directory = null;
+  try {
+    const live = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+    const archived = await env.DIRECTORY.get(`archived:${accountId}`, { type: "json" });
+    const archivedCell = archived?.cell ?? archived?.source_cell;
+    directory = {
+      live_cell: typeof live?.cell === "string" && CELL_NAME.test(live.cell) ? live.cell : null,
+      archived_cell: typeof archivedCell === "string" && CELL_NAME.test(archivedCell) ? archivedCell : null,
+    };
+  } catch { /* Preserve projection unavailability separately from absence. */ }
+  if (!status.initialized) {
+    if (directory === null) return err("account lifecycle status is unavailable", 503);
+    if (directory.live_cell === null && directory.archived_cell === null) return err("unknown account", 404);
+  }
+  return json({
+    schema_version: "witself.v0",
+    account_id: status.account_id, observed_at: status.observed_at, initialized: status.initialized,
+    revision: status.revision, epoch: status.epoch, location: status.location,
+    driver_active: status.driver_active, alarm_at: status.alarm_at, operation: status.operation,
+    projections: status.projections, last_completed: status.last_completed,
+    restore_quarantine: status.restore_quarantine, directory,
+  });
+}
+
 async function handlePlacementStatus(request, env, url) {
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
@@ -4731,6 +4779,7 @@ function isProtectedWorkerRoute(pathname) {
     pathname === "/v1/placement-runner" ||
     pathname === "/v1/placement-status" ||
     PLACEMENT_RESCUE_PATH.test(pathname) ||
+    pathname.startsWith(ACCOUNT_LIFECYCLE_STATUS_PREFIX) ||
     pathname === "/v1/placement:run" ||
     pathname === "/v1/placement:restore" ||
     pathname === "/v1/placement:rebalance" ||
@@ -5067,6 +5116,9 @@ async function handleFetch(request, env, ctx) {
     }
     if (url.pathname === "/v1/placement-status") {
       return handlePlacementStatus(request, env, url);
+    }
+    if (url.pathname.startsWith(ACCOUNT_LIFECYCLE_STATUS_PREFIX)) {
+      return handleAccountLifecycleStatus(request, env, url);
     }
     const placementRescue = url.pathname.match(PLACEMENT_RESCUE_PATH);
     if (placementRescue) {

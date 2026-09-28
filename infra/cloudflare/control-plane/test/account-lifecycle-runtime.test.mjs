@@ -5390,3 +5390,145 @@ test("export split disarmed watchdog ignores later progress", t => {
     watchdog.close();
   }
 });
+
+// Slice 53: read-only lifecycle status. Existing fixtures remain unchanged.
+function lifecycleStatusRequest(accountID = ACCOUNT) {
+  return new Request("https://account-lifecycle.internal/lifecycle-status", { method: "POST", body: JSON.stringify({ account_id: accountID }) });
+}
+async function lifecycleStatusRead(f) {
+  const response = await f.coordinator.fetch(lifecycleStatusRequest());
+  assert.equal(response.status, 200);
+  return (await response.json()).status;
+}
+
+test("lifecycle status does not bootstrap state or touch directory and alarm", async () => {
+  const storage = new Storage();
+  let reads = 0;
+  const directory = { get() { reads++; throw new Error("unexpected directory read"); } };
+  const coordinator = runtime({ storage, directory, bucket: {}, fetch: () => { throw new Error("unexpected fetch"); } });
+  const result = await lifecycleStatusRead({ coordinator });
+  assert.equal(result.initialized, false); assert.equal(result.alarm_at, null); assert.equal(storage.values.size, 0); assert.equal(storage.alarm, null); assert.equal(reads, 0);
+});
+
+test("lifecycle status write traps and unavailable alarm preserve exact stored state", async () => {
+  const f = asyncImportFixture(); await f.tick();
+  const before = structuredClone(f.storage.values);
+  const trap = () => { throw new Error("unexpected write or external access"); };
+  for (const key of ["put", "delete", "list", "setAlarm", "deleteAlarm", "transaction"]) f.storage[key] = trap;
+  f.coordinator.env.DIRECTORY = new Proxy({}, { get: trap }); f.coordinator.env.ARCHIVES = new Proxy({}, { get: trap });
+  f.coordinator.fetchImpl = trap; f.coordinator.targetCoordinatorRequest = trap;
+  f.storage.getAlarm = async () => Date.parse("2026-09-28T12:00:00Z");
+  assert.equal((await lifecycleStatusRead(f)).alarm_at, "2026-09-28T12:00:00.000Z");
+  f.storage.getAlarm = trap; assert.equal((await lifecycleStatusRead(f)).alarm_at, null);
+  assert.deepEqual(f.storage.values, before);
+});
+
+test("lifecycle status reads during a blocked run without claiming or releasing its fence", async () => {
+  async function run(withStatus) {
+    const f = asyncImportFixture();
+    let release; let entered;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    const ready = new Promise((resolve) => { entered = resolve; });
+    const fetch = f.coordinator.fetchImpl;
+    f.coordinator.fetchImpl = async (url, init) => {
+      if (url.endsWith(":start-import-evacuation")) { entered(); await blocked; }
+      return fetch(url, init);
+    };
+    const request = () => new Request("https://account-lifecycle.internal/run", { method: "POST", body: JSON.stringify({ account_id: ACCOUNT, action: "move", source_cell: SOURCE, target_cell: TARGET, inline_budget_ms: 0 }) });
+    const pending = f.coordinator.fetch(request()); await ready;
+    if (withStatus) assert.equal((await lifecycleStatusRead(f)).driver_active, true);
+    assert.equal((await f.coordinator.fetch(request())).status, 409);
+    release(); const response = await pending; assert.equal(response.status, 200);
+    return { body: await response.json(), calls: f.calls.map((c) => new URL(c.url).pathname), state: f.latest() };
+  }
+  assert.deepEqual(await run(true), await run(false));
+});
+
+test("lifecycle status after real START is value-free and does not perturb subsequent alarms", async () => {
+  async function scenario(read) {
+    const f = asyncImportFixture(); await f.tick(); await f.coordinator.alarm();
+    if (read) {
+      const status = await lifecycleStatusRead(f); assert.equal(status.operation.phase, "route_retired"); assert.equal(status.operation.import_job.attempts, 1); assert.equal(status.operation.import_job.next_alarm_action, "poll"); assert.equal(status.operation.retryable, true); assert.equal(status.operation.last_error, null);
+      const body = JSON.stringify(status);
+      const token = f.calls[0].init.headers["X-Witself-Archive-Token"];
+      for (const secret of [token, "bound-etag", f.pointer.object, "https://target.example", "https://initiator.example", f.calls[0].init.headers.Authorization]) {
+        assert.equal(body.includes(secret), false, "private import material is absent");
+      }
+    }
+    await f.coordinator.alarm(); return f.calls.map((c) => new URL(c.url).pathname);
+  }
+  assert.deepEqual(await scenario(true), await scenario(false));
+});
+
+test("lifecycle status returns each reachable persisted fixed import error", async () => {
+  const { LIFECYCLE_STATUS_ERRORS } = await import("../src/account-lifecycle-status.mjs");
+  const setups = [
+    async (f) => { f.protocol = 1; f.bucket.head = async () => ({ etag: "bound-etag", size: 91 * 1024 * 1024 }); await assert.rejects(f.tick()); },
+    async (f) => { f.schema = 97; await assert.rejects(f.tick()); },
+    async (f) => { f.startBody = { error: "private upstream" }; await f.tick(); },
+    async (f) => { await f.tick(); f.protocol = 2; await f.tick(); },
+    async (f) => { await f.tick(); f.pollBody = { import_job: { state: "absent" } }; await f.tick(); },
+    async (f) => { await f.tick(); f.latest().operation.import_job.attempts = 6; f.pollBody = { import_job: { state: "absent" } }; await f.tick(); },
+    async (f) => { f.startStatus = 503; await f.tick(); },
+    async (f) => { await f.tick(); f.advance(3.5 * 3600_000 + 1); await f.tick(); },
+    ...LIFECYCLE_STATUS_ERRORS.slice(8).map((error) => async (f) => { f.startBody = { error }; await f.tick(); }),
+  ];
+  for (let i = 0; i < setups.length; i++) { const f = asyncImportFixture(); await setups[i](f); assert.equal((await lifecycleStatusRead(f)).operation.last_error, LIFECYCLE_STATUS_ERRORS[i]); }
+});
+
+test("lifecycle status rejects invalid requests and unreadable state with fixed responses", async () => {
+  const f = asyncImportFixture();
+  for (const body of ["{", "null", "[]", JSON.stringify({ account_id: "wrong" }), JSON.stringify({ account_id: "bad space" }), JSON.stringify({ account_id: ACCOUNT, extra: true })]) {
+    const response = await f.coordinator.fetch(new Request("https://internal/lifecycle-status", { method: "POST", body })); assert.equal(response.status, 400); assert.equal((await response.json()).error, "invalid lifecycle status request");
+  }
+  assert.equal((await f.coordinator.fetch(new Request("https://internal/lifecycle-status"))).status, 404);
+  for (const state of [{}, { ...f.state, account_id: "other" }]) { f.storage.values.set("account-lifecycle", state); const response = await f.coordinator.fetch(lifecycleStatusRequest()); assert.equal(response.status, 503); assert.equal((await response.json()).error, "account lifecycle state is unavailable"); }
+  f.storage.values.set("account-lifecycle", f.state); f.storage.values.set("restore-quarantine", { private: true });
+  assert.equal((await lifecycleStatusRead(f)).restore_quarantine.reason, "unreadable");
+  const get = f.storage.get.bind(f.storage); f.storage.get = (key) => { if (key === "restore-quarantine") throw new Error("private read failure"); return get(key); };
+  assert.equal((await f.coordinator.fetch(lifecycleStatusRequest())).status, 503);
+});
+
+test("lifecycle Worker seam reads the real coordinator status envelope", async () => {
+  const { register } = await import("node:module");
+  register(new URL("./fixtures/cloudflare-containers-loader.mjs", import.meta.url));
+  const worker = (await import("../src/index.js")).default;
+  const { timingSafeEqual } = await import("node:crypto");
+  if (typeof crypto.subtle.timingSafeEqual !== "function") Object.defineProperty(Object.getPrototypeOf(crypto.subtle), "timingSafeEqual", {
+    configurable: true, value: (a, b) => a.byteLength === b.byteLength && timingSafeEqual(new Uint8Array(a), new Uint8Array(b)),
+  });
+  const f = asyncImportFixture(); await f.tick();
+  f.env.FLEET_TOKEN = "fixture-fleet"; f.env.DIRECTORY = { get: async () => null };
+  const response = await worker.fetch(new Request(`https://cp.invalid/v1/placement/accounts/${ACCOUNT}/lifecycle`, { headers: { Authorization: "Bearer fixture-fleet" } }), f.env, {});
+  assert.equal(response.status, 200); const body = await response.json();
+  const { readFileSync } = await import("node:fs");
+  const golden = JSON.parse(readFileSync(new URL("./fixtures/account-lifecycle-status.golden.json", import.meta.url), "utf8")).cases.import_running;
+  for (const [actual, expected] of [[body, golden], [body.operation, golden.operation], [body.operation.import_job, golden.operation.import_job]]) assert.deepEqual(Object.keys(actual).sort(), Object.keys(expected).sort());
+});
+
+test("lifecycle status exposes each persisted export checkpoint without writes", async () => {
+  const f = splitExportFixture();
+  const put = f.storage.put.bind(f.storage);
+  const statuses = [];
+  f.storage.put = async (key, value) => {
+    await put(key, value);
+    if (key !== "account-lifecycle" || !value.operation?.export_job) return;
+    const before = structuredClone(f.storage.values);
+    const status = await lifecycleStatusRead(f);
+    assert.deepEqual(f.storage.values, before);
+    assert.equal(status.operation.phase, "source_suspended");
+    const job = status.operation.export_job;
+    assert.deepEqual(Object.keys(job).sort(), ["stream_attempts", "verify_attempts", "stream_started_at", "streamed", "streamed_at", "stream_ms"].sort());
+    assert.equal(job.stream_started_at, new Date(value.operation.export_job.stream_started_at).toISOString());
+    assert.equal(job.streamed_at, job.streamed ? new Date(value.operation.export_job.streamed.streamed_at).toISOString() : null);
+    assert.equal(job.stream_ms, job.streamed ? value.operation.export_job.streamed.stream_ms : null);
+    statuses.push([status.revision, job.stream_attempts, job.verify_attempts, job.streamed]);
+  };
+  await f.coordinator.exportArchive(f.state);
+  assert.deepEqual(statuses, [
+    [f.state.revision + 1, 1, 0, false],
+    [f.state.revision + 2, 1, 0, true],
+    [f.state.revision + 3, 1, 1, true],
+  ]);
+  assert.equal((await lifecycleStatusRead(f)).operation.export_job, null);
+});

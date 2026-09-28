@@ -500,7 +500,9 @@ Updated `witself-admin cells restore` reports `pending`, `attempts`, and
 means another `/run` or alarm holds the lifecycle fence; it is expected during
 an in-flight import and is not a failure. Re-run `cells restore` after fixing a
 cause to immediately re-drive a non-running job. Remaining work includes
-pending accounts, even when the command exits zero.
+pending accounts, even when the command exits zero. Inspect a pending or busy
+account with `witself-admin placement lifecycle --account-id ID` without
+competing for its fence.
 
 Upgrade the control plane to support `account_id` selectors before using this
 sequence. Older handlers ignore that field and can evacuate a different account.
@@ -3644,10 +3646,31 @@ operator diagnostics, unlike the new timing lines.
 For protocol-3 import, inspect pending rows (`attempts`/`retryable`) from
 `witself-admin cells restore`, and the cell's value-free start and finish stderr
 lines (`account_id`, `cell`, `evacuation_id`, `outcome`, `duration`). A busy pending
-row means another driver owns the lifecycle fence. `wrangler tail` shows the
-alarm's failure log with fixed `last_error` text. There is currently no residency
-status or Durable Object HTTP route exposing `last_error` or `import_job`; a
-read-only operator status route is a follow-up.
+row means another driver owns the lifecycle fence. Read status without competing for that fence:
+
+```sh
+witself-admin placement lifecycle --account-id ACCOUNT_ID
+```
+
+- **Running:** `driver active`. During export, `revision` advances at stream
+  start, stream completion and verify start. `export_job` shows the stream and
+  verify attempt counters, with a budget of three attempts each. An unchanged
+  revision with `driver_active:false` and no alarm is the signal worth
+  investigating.
+- **Waiting:** the import job shows `next alarm action wait` with `retry at` in
+  the future. Backoff runs up to 30 minutes, or six hours after exhaustion or a
+  permanent error; revision does not change during the wait.
+- **Nothing is driving:** an operation exists, driver is idle, and alarm is `-`
+  or more than two minutes in the past. Re-drive with the applicable move verb.
+- **Needs operator:** the `attention` row reports `needs operator`.
+- **Not visible here:** a non-import phase failing on every alarm retains
+  `last error -` and re-arms the alarm. Only `wrangler tail` shows that failure.
+
+In `wrangler tail`, `pending:` carries fixed `last_error` text; `failed:` carries
+raw exception text, may contain upstream detail, and must not be pasted into
+tickets. The status table's `evacuation` value supplies `$2` in the existing
+`pg_locks` query below. Poll no faster than every five seconds. Deploy the
+control plane before using the new CLI route.
 
 Observe the import owner without acquiring its lock (bind `$1` to account and
 `$2` to evacuation):

@@ -1,0 +1,361 @@
+{
+  "cases": {
+    "import_running": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 1,
+      "epoch": 1,
+      "location": {
+        "kind": "live",
+        "cell": "source"
+      },
+      "driver_active": true,
+      "alarm_at": "2026-09-28T12:01:00.000Z",
+      "operation": {
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "move",
+        "phase": "route_retired",
+        "epoch": 1,
+        "request_epoch": 0,
+        "source_cell": "source",
+        "target_cell": "target",
+        "source_registration_id": "reg-source",
+        "target_registration_id": "reg-target",
+        "target_protocol": 3,
+        "has_archive": true,
+        "has_archive_origin": true,
+        "next_step": {
+          "type": "cell",
+          "action": "import_target",
+          "target": null
+        },
+        "imported_status": null,
+        "restored_status": null,
+        "source_finalization": null,
+        "target_reservation_expires_at": null,
+        "retryable": true,
+        "last_error": null,
+        "export_job": null,
+        "import_job": {
+          "attempts": 1,
+          "first_started_at": "2026-09-28T12:00:00.000Z",
+          "started_at": "2026-09-28T12:00:00.000Z",
+          "last_polled_at": null,
+          "retry_at": null,
+          "validated": true,
+          "manifest_schema_version": 98,
+          "next_alarm_action": "poll"
+        }
+      },
+      "projections": {
+        "route": null,
+        "archive": null,
+        "cleanup": null
+      },
+      "last_completed": null,
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "export_running": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 1,
+      "epoch": 1,
+      "location": {
+        "kind": "live",
+        "cell": "source"
+      },
+      "driver_active": true,
+      "alarm_at": null,
+      "operation": {
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "move",
+        "phase": "source_suspended",
+        "epoch": 1,
+        "request_epoch": 0,
+        "source_cell": "source",
+        "target_cell": "target",
+        "source_registration_id": "reg-source",
+        "target_registration_id": "reg-target",
+        "target_protocol": 3,
+        "has_archive": true,
+        "has_archive_origin": true,
+        "next_step": {
+          "type": "archive",
+          "action": "export_validate_and_commit",
+          "target": null
+        },
+        "imported_status": null,
+        "restored_status": null,
+        "source_finalization": null,
+        "target_reservation_expires_at": null,
+        "retryable": true,
+        "last_error": null,
+        "export_job": {
+          "stream_attempts": 2,
+          "verify_attempts": 1,
+          "stream_started_at": "2026-09-28T11:59:59.000Z",
+          "streamed": true,
+          "streamed_at": "2026-09-28T12:00:00.000Z",
+          "stream_ms": 1000
+        },
+        "import_job": null
+      },
+      "projections": {
+        "route": null,
+        "archive": null,
+        "cleanup": null
+      },
+      "last_completed": null,
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "projections_pending": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 1,
+      "epoch": 1,
+      "location": {
+        "kind": "live",
+        "cell": "source"
+      },
+      "driver_active": false,
+      "alarm_at": null,
+      "operation": {
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "move",
+        "phase": "route_retired",
+        "epoch": 1,
+        "request_epoch": 0,
+        "source_cell": "source",
+        "target_cell": "target",
+        "source_registration_id": "reg-source",
+        "target_registration_id": "reg-target",
+        "target_protocol": 3,
+        "has_archive": true,
+        "has_archive_origin": true,
+        "next_step": {
+          "type": "cell",
+          "action": "import_target",
+          "target": null
+        },
+        "imported_status": null,
+        "restored_status": null,
+        "source_finalization": null,
+        "target_reservation_expires_at": null,
+        "retryable": true,
+        "last_error": null,
+        "export_job": null,
+        "import_job": {
+          "attempts": 1,
+          "first_started_at": "2026-09-28T12:00:00.000Z",
+          "started_at": "2026-09-28T12:00:00.000Z",
+          "last_polled_at": null,
+          "retry_at": null,
+          "validated": true,
+          "manifest_schema_version": 98,
+          "next_alarm_action": "poll"
+        }
+      },
+      "projections": {
+        "route": {
+          "action": "put",
+          "status": "pending"
+        },
+        "archive": {
+          "action": "delete",
+          "status": "pending"
+        },
+        "cleanup": {
+          "action": "delete",
+          "status": "pending"
+        }
+      },
+      "last_completed": null,
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "operation_attention": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 1,
+      "epoch": 1,
+      "location": {
+        "kind": "live",
+        "cell": "source"
+      },
+      "driver_active": false,
+      "alarm_at": null,
+      "operation": {
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "move",
+        "phase": "route_retired",
+        "epoch": 1,
+        "request_epoch": 0,
+        "source_cell": "source",
+        "target_cell": "target",
+        "source_registration_id": "reg-source",
+        "target_registration_id": "reg-target",
+        "target_protocol": 3,
+        "has_archive": true,
+        "has_archive_origin": true,
+        "next_step": {
+          "type": "cell",
+          "action": "import_target",
+          "target": null
+        },
+        "imported_status": "suspended",
+        "restored_status": "active",
+        "source_finalization": "cell_receipt",
+        "target_reservation_expires_at": "2026-09-28T12:01:00.000Z",
+        "retryable": false,
+        "last_error": "invalid or corrupt archive",
+        "export_job": null,
+        "import_job": {
+          "attempts": 1,
+          "first_started_at": "2026-09-28T12:00:00.000Z",
+          "started_at": "2026-09-28T12:00:00.000Z",
+          "last_polled_at": null,
+          "retry_at": null,
+          "validated": true,
+          "manifest_schema_version": 98,
+          "next_alarm_action": "poll"
+        }
+      },
+      "projections": {
+        "route": null,
+        "archive": null,
+        "cleanup": null
+      },
+      "last_completed": null,
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "restore_completed": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 10,
+      "epoch": 1,
+      "location": {
+        "kind": "live",
+        "cell": "source"
+      },
+      "driver_active": false,
+      "alarm_at": null,
+      "operation": null,
+      "projections": {
+        "route": null,
+        "archive": null,
+        "cleanup": null
+      },
+      "last_completed": {
+        "operation_id": "restore-operation",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "restore",
+        "outcome": "completed",
+        "epoch": 1,
+        "source_cell": "source",
+        "target_cell": "target",
+        "completed_revision": 10,
+        "final_location": {
+          "kind": "live",
+          "cell": "target"
+        }
+      },
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "quarantined": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": true,
+      "revision": 10,
+      "epoch": 1,
+      "location": {
+        "kind": "archived",
+        "cell": "source"
+      },
+      "driver_active": false,
+      "alarm_at": null,
+      "operation": null,
+      "projections": {
+        "route": null,
+        "archive": null,
+        "cleanup": null
+      },
+      "last_completed": {
+        "operation_id": "restore-operation",
+        "evacuation_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "restore",
+        "outcome": "quarantined",
+        "epoch": 1,
+        "source_cell": "source",
+        "target_cell": "target",
+        "completed_revision": 10,
+        "final_location": {
+          "kind": "archived",
+          "cell": "source"
+        }
+      },
+      "restore_quarantine": {
+        "reason": "archive_integrity",
+        "quarantined_at": "2026-09-28T08:00:00.000Z",
+        "matches_operation": false,
+        "matches_location": true
+      },
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    },
+    "uninitialized_resident": {
+      "schema_version": "witself.v0",
+      "account_id": "acct_runtime",
+      "observed_at": "2026-09-28T12:00:00.000Z",
+      "initialized": false,
+      "revision": null,
+      "epoch": null,
+      "location": null,
+      "driver_active": false,
+      "alarm_at": null,
+      "operation": null,
+      "projections": null,
+      "last_completed": null,
+      "restore_quarantine": null,
+      "directory": {
+        "live_cell": "source",
+        "archived_cell": null
+      }
+    }
+  }
+}

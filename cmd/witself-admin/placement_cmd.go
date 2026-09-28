@@ -12,10 +12,12 @@ import (
 
 func placementCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin placement rescue --account-id ID [--axes cloud,region,channel]")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin placement (rescue|lifecycle) --account-id ID")
 		return 2
 	}
 	switch args[0] {
+	case "lifecycle":
+		return placementLifecycleCmd(args[1:])
 	case "rescue":
 		return placementRescueCmd(args[1:])
 	default:
