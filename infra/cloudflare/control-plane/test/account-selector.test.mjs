@@ -57,7 +57,7 @@ function fixture(t) {
     }), env, { waitUntil() {} });
     return { status: res.status, body: await res.json() };
   }
-  return { values, calls, request };
+  return { values, calls, request, env };
 }
 
 for (const batch of [0, 10, "ignored", { toString: null, valueOf: null }]) {
@@ -138,3 +138,16 @@ for (const [path, field] of [["/v1/cells/src:evacuate", "evacuated"], ["/v1/plac
     assert.equal(res.body.remaining, 1);
   });
 }
+
+
+test("evacuate fence busy is pending without completed or failed progress", async t => {
+  const f = fixture(t);
+  f.env.ACCOUNT_LIFECYCLE.get = () => ({ fetch: async () => Response.json({ error: "account lifecycle operation already in progress" }, { status: 409 }) });
+  const res = await f.request("/v1/cells/src:evacuate", { account_id: "chosen" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.evacuated, [{ account_id: "chosen", ok: true, pending: true, retryable: true, reason: "busy" }]);
+  assert.equal(res.body.remaining, 3);
+  assert.equal(res.body.progress.done, 0);
+  assert.deepEqual(f.values.get("evac:src").failed, []);
+  assert.equal(f.values.get("acct:chosen").cell, "src");
+});

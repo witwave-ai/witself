@@ -378,6 +378,10 @@ type EvacuatedAccount struct {
 	OK        bool   `json:"ok"`
 	Error     string `json:"error,omitempty"`
 	Reaped    bool   `json:"reaped,omitempty"`
+	// Pending marks an account whose lifecycle another driver currently
+	// holds (the control plane's fence-busy row). It is not evacuated yet.
+	Pending   bool `json:"pending,omitempty"`
+	Retryable bool `json:"retryable,omitempty"`
 }
 
 // Evacuate asks the control plane to move a batch of the cell's accounts into
@@ -415,8 +419,8 @@ func (c *Client) evacuate(ctx context.Context, name string, batch int, accountID
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	// Evacuation streams whole account archives to R2; the per-call ceiling
-	// needs to be well above the routine registry HTTP client's 30s.
-	hc := &http.Client{Timeout: 10 * time.Minute}
+	// matches the admin client's 30-minute evacuate timeout.
+	hc := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return EvacuationResult{}, fmt.Errorf("control plane %s: %w", c.base, err)

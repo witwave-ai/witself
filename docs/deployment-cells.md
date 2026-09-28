@@ -823,6 +823,11 @@ These are open; this document records them without resolving them.
 
 ## Account evacuation transport rollout
 
+The resumable export stream/verify split is control-plane only (protocol 3 and
+schema 98 unchanged, no cell roll or rollout-order constraint); deploy with no
+evacuation, move, restore or train in flight, and ship the updated admin CLI in
+the same release for the 30-minute evacuate timeout (older clients still work).
+
 The confirmed order is **control plane first, then cells** with
 `roll-train.sh VERSION --no-schema-change …`. Schema remains 98. The new control
 plane accepts protocols 1, 2 and 3: protocol 1 uses legacy push only up to 90 MiB,

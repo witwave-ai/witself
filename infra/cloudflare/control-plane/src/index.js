@@ -3413,6 +3413,7 @@ async function handleEvacuate(request, env, cellName) {
       });
     } catch (e) {
       const msg = String(e?.message ?? e);
+      if (msg === lifecycleBusyMessage) { results.push({ account_id: accountId, ok: true, pending: true, retryable: true, reason: "busy" }); continue; }
       progress.failed = [
         ...(progress.failed ?? []).filter((f) => f.account_id !== accountId),
         { account_id: accountId, error: msg, at: new Date().toISOString() },

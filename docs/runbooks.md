@@ -462,6 +462,39 @@ recovery window allow the subsequent soft-delete destroy.
 
 ## Account moves in a chosen order
 
+For a large account, use **`cells evacuate` then `cells restore`**, and rehearse
+the evacuation path with its stream/verify timing lines. The conservative rule
+is that an archive above about 400 MB needs rehearsal evidence or the cell-side
+asynchronous export follow-up before moving. This guidance does not cover kind
+`move` (rebalance): its target reservation lease is five minutes and is renewed
+only between steps; the verify tick also continues into import START, which
+reads the whole archive again.
+
+Run outside **00:00–00:30Z** (a conservative backup exclusion window), with the
+placement runner disabled, no open backup job for the account, and no train or
+control-plane deploy. Keep `witself-admin cells evacuate NAME --account ID`
+connected. Updated clients allow 30 minutes for evacuation; restore remains at
+10 minutes, and old evacuation clients still time out at 10 minutes. The message
+`evacuate request failed; inspect control-plane diagnostics` indicates a request
+failure; when caused by the client deadline it is not proof that evacuation
+failed. Check `GET /v1/directory/ID` before deciding what to do next.
+
+After a client timeout or cut stream, an alarm can re-stream successfully only
+if the earlier cell-side export has ended. Otherwise the retry waits on the
+account row lock, hits the 120-second idle timeout, and aborts. The account is
+reactivated on the source once the earlier export ends; re-run the evacuation
+afterwards. Re-running while a tick holds the fence (up to 15 minutes) returns a
+`pending` row with `reason:"busy"` and exits zero, without adding a failed account
+or incrementing completed progress. Wait and read the directory. Between ticks,
+a re-run resumes verification inline without re-exporting. After completion,
+evacuating the same account from the old cell returns 404 because it is no
+longer routed there.
+
+`witself-infra` follows the same contract in its evacuate and restore loops: it
+prints `pending ACCOUNT on CELL`, never counts a pending row as evacuated or
+restored, waits 30 seconds when every row of a batch was pending, and stops
+with the account named when a pending row is not retryable.
+
 Updated `witself-admin cells restore` reports `pending`, `attempts`, and
 `retryable` while an async import continues. `pending` with `reason:"busy"`
 means another `/run` or alarm holds the lifecycle fence; it is expected during
@@ -3586,6 +3619,28 @@ use the restore lifecycle above when placement on another instance is needed.
 
 ## Diagnose an interrupted restore or source finalization
 
+For evacuation export, use `wrangler tail` on the control-plane Worker to observe
+these fixed-format lines (no object key, ETag, endpoint or credential):
+
+```text
+account lifecycle export for <account_id> streamed attempt=<n> bytes=<size> ms=<ms>
+account lifecycle export for <account_id> verified attempt=<n> bytes=<size> ms=<ms>
+account lifecycle export for <account_id> aborted reason=stream_attempts_exhausted
+account lifecycle export for <account_id> aborted reason=verify_attempts_exhausted
+```
+
+`streamed` confirms the durable stream checkpoint; `verified` is emitted only
+after archive authority is saved. An exhausted budget aborts and reactivates the
+account on the source. If a cut consumer leaves its cell-side evacuation export
+running, the next export waits on that transaction's account row lock without
+headers. After 120 seconds the watchdog raises `export_idle_timeout`; abort
+needs the same row and its request times out after 15 seconds. The operation
+remains `abort_requested`, retried every 60 seconds until the earlier export ends
+and source reactivation is acknowledged. Use `GET /v1/directory/ID` to determine
+the routed outcome; a client timeout alone does not prove failure. The existing
+alarm failure line may include upstream error details; handle it as sensitive
+operator diagnostics, unlike the new timing lines.
+
 For protocol-3 import, inspect pending rows (`attempts`/`retryable`) from
 `witself-admin cells restore`, and the cell's value-free start and finish stderr
 lines (`account_id`, `cell`, `evacuation_id`, `outcome`, `duration`). A busy pending
@@ -4003,9 +4058,20 @@ binaries ignore pending fields and print `ok`; `remaining >= 1` is their only
 signal that import is still pending. Updated `witself-admin` and `witself-infra`
 understand pending rows.
 
-Never log capability headers. Export still has a 120-second idle-progress
-watchdog and a 60-minute overall budget, and remains exposed to the 15-minute
-alarm invocation cap. Until the founder export plus verification is measured
-below 15 minutes, keep the operator `witself-admin cells evacuate --account`
-`/run` request connected for that phase. Protocol-3 import no longer requires
-that connected request. See [backup budgets](backup-and-recovery.md#evacuation-archive-transport-protocols-2-and-3).
+Never log capability headers. Lifecycle export streams and verifies in separate
+alarm invocations, while `/run` remains inline. The persisted R2 ETag and size
+must match before and after verification; the persisted placement policy is
+carried into archive authority. Three stream attempts and three verify attempts
+bound cut invocations; exhaustion aborts and reactivates the source account,
+while a thrown stream or verification error aborts immediately (a lost-ownership
+stop and a failed source version probe do not abort and do not count an attempt). Export retains the 120-second idle
+watchdog and 60-minute overall bound; verification-only ticks disarm idle.
+Each alarm stage still faces the 15-minute invocation cap. BACKUP measurements
+on 2026-09-27/28 carried export plus verify/commit in 5 m 11 s and about 7 m 54 s.
+The nightly 16-minute span is inferred to be two overlapping exports, not one
+invocation; the 15-minute cap was not exercised. Clean 327 MB export rates were
+1.12–1.27 MB/s. The overlapping 669.5 s request's 0.49 MB/s is an upper-bound
+artefact, not a clean rate. Conservatively, above about 400 MB requires evacuation
+rehearsal evidence or the cell-side asynchronous export follow-up. BACKUP
+exports do not exercise the evacuation row lock. Protocol-3 import no longer
+requires a connected request. See [backup budgets and dated measurements](backup-and-recovery.md#evacuation-archive-transport-protocols-2-and-3).

@@ -442,9 +442,14 @@ export class ExportWatchdog {
   }
 
   progress() {
-    if (this.closed) return;
+    if (this.closed || this.idleDisarmed) return;
     clearTimeout(this.idle);
     this.idle = setTimeout(() => this.abort("export_idle_timeout"), IDLE_TIMEOUT_MS);
+  }
+
+  disarmIdle() {
+    clearTimeout(this.idle);
+    this.idleDisarmed = true;
   }
 
   abort(code) {

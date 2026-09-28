@@ -1329,6 +1329,26 @@ func removeCell(ctx context.Context, controlPlane, fleetTokenFile, cellName stri
 	return nil
 }
 
+// pendingPause is how long the evacuate and restore loops wait before asking
+// again when every row of a batch was pending. A variable so tests can
+// shorten it.
+var pendingPause = 30 * time.Second
+
+// maxPendingWaits bounds consecutive all-pending batches (about 20 minutes at
+// the default pause) so a fence that never clears cannot spin the loop.
+var maxPendingWaits = 40
+
+func pausePending(ctx context.Context) error {
+	timer := time.NewTimer(pendingPause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // evacuateCell loops the control-plane's :evacuate batches until every
 // account on the cell is archived (remaining=0). Fails fast if any account
 // batch reports a failure — a stuck evacuation must not silently proceed to
@@ -1341,6 +1361,7 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 	// server's Remaining doesn't strictly decrease (a control-plane bug
 	// leaving acct: pointers behind would spin this loop forever otherwise).
 	prevRemaining := -1
+	pendingWaits := 0
 	for iter := 0; ; iter++ {
 		res, err := cl.Evacuate(ctx, cellName, batch)
 		if err != nil {
@@ -1349,9 +1370,20 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 			}
 			return fmt.Errorf("evacuate cell: %w", err)
 		}
+		pending := 0
 		for _, a := range res.Evacuated {
 			if !a.OK {
 				return fmt.Errorf("evacuation failed for %s on %s: %s", a.AccountID, cellName, a.Error)
+			}
+			if a.Pending {
+				if !a.Retryable {
+					return fmt.Errorf("evacuation pending for %s on %s needs operator attention (not retryable)", a.AccountID, cellName)
+				}
+				// Another driver holds this account's lifecycle; it is not
+				// evacuated yet and must not count toward the total.
+				pending++
+				fmt.Fprintf(os.Stderr, "pending %s on %s\n", a.AccountID, cellName)
+				continue
 			}
 			total++
 			if a.Reaped {
@@ -1374,13 +1406,27 @@ func evacuateCell(ctx context.Context, cl *fleet.Client, cellName string) error 
 			// stuck. Either way, silently looping is wrong.
 			return fmt.Errorf("evacuation stalled on cell %s with %d account(s) still routing", cellName, res.Remaining)
 		}
-		if prevRemaining != -1 && res.Remaining >= prevRemaining {
+		// Pending rows stay counted in Remaining by design, so the stall check
+		// applies to the rows this batch actually completed.
+		done := len(res.Evacuated) - pending
+		if done > 0 && prevRemaining != -1 && res.Remaining >= prevRemaining {
 			// A batch fired (accounts reported "ok") but the fleet's count
 			// didn't decrease. The archived: entry landed but the acct:
 			// pointer didn't retire, or the same accounts are being re-
 			// listed — a control-plane bug that would otherwise burn all
 			// day. Fail loudly; Pulumi destroy stays parked.
 			return fmt.Errorf("evacuation on cell %s is not making progress (%d accounts remaining after batch reported success)", cellName, res.Remaining)
+		}
+		if done == 0 {
+			pendingWaits++
+			if pendingWaits > maxPendingWaits {
+				return fmt.Errorf("evacuation on cell %s is still pending after %d waits (%d account(s) remaining); inspect the lifecycle status and re-run", cellName, maxPendingWaits, res.Remaining)
+			}
+			if err := pausePending(ctx); err != nil {
+				return err
+			}
+		} else {
+			pendingWaits = 0
 		}
 		prevRemaining = res.Remaining
 	}
@@ -1394,6 +1440,7 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 	const batch = 4
 	total := 0
 	prevRemaining := -1
+	pendingWaits := 0
 	for iter := 0; ; iter++ {
 		res, err := cl.RestorePlacement(ctx, batch, allRegions)
 		if err != nil {
@@ -1447,20 +1494,25 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 			// would be wrong.
 			return fmt.Errorf("placement restore stalled with %d eligible archived account(s) still awaiting placement", res.Remaining)
 		}
-		if pending == 0 && prevRemaining != -1 && res.Remaining >= prevRemaining {
+		// Pending rows stay counted in Remaining by design, so the stall check
+		// applies to the rows this batch actually completed.
+		done := len(res.Restored) - pending
+		if done > 0 && prevRemaining != -1 && res.Remaining >= prevRemaining {
 			// A batch fired (per-account "ok") but the count didn't drop.
 			// The acct: pointer never landed, or the archived: entry
 			// wasn't retired — either way, spinning is the wrong answer.
 			return fmt.Errorf("placement restore is not making progress (%d eligible account(s) remaining after batch reported success)", res.Remaining)
 		}
-		if pending == len(res.Restored) {
-			timer := time.NewTimer(30 * time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
+		if done == 0 {
+			pendingWaits++
+			if pendingWaits > maxPendingWaits {
+				return fmt.Errorf("placement restore is still pending after %d waits (%d eligible account(s) remaining); inspect the lifecycle status and re-run", maxPendingWaits, res.Remaining)
 			}
+			if err := pausePending(ctx); err != nil {
+				return err
+			}
+		} else {
+			pendingWaits = 0
 		}
 		prevRemaining = res.Remaining
 	}

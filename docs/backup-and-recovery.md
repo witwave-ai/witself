@@ -1590,16 +1590,56 @@ job uses a fresh capability and re-downloads; spools are ephemeral per pod.
 
 Protocol-2 targets retain the 30-minute synchronous import contract and
 15-minute download client. Their alarm-resumed import still risks Cloudflare's
-15-minute alarm wall-time cap. The export step is unchanged for every protocol:
-compressed manifest/chunks flush, the watchdog allows 60 minutes overall and
-120 seconds without byte progress, followed by full archive verification.
-Until founder export plus verification is measured to fit within 15 minutes,
-that phase still needs the connected operator `/run` path via
-`witself-admin cells evacuate --account`. Protocol-3 import no longer does.
-First-start archive validation still reads the entire R2 object and is residual
-alarm-cap exposure; a successful pass is cached only for the same operation
-and ETag. Download-only, import-only, validation and export-plus-verification
-measurements must come from drill logs, not the combined drill duration.
+15-minute alarm wall-time cap. Lifecycle export now streams and verifies in
+separate alarm invocations; a connected `/run` still does both inline. The stream
+checkpoint records the completed R2 object's ETag and size, and verification
+checks that identity before and after reading the full object at rest. Placement
+policy travels with the checkpoint. Objects without a stream checkpoint are
+never adopted. There are at most three stream attempts and three verification
+attempts; an exhausted budget aborts and reactivates the account on the source.
+A thrown stream or verification error aborts immediately, including a
+non-integrity verification error. Two cases do not abort: an invocation that
+finds it has lost durable ownership stops without touching the operation, and
+a failed `/v1/version` probe of the source ends the tick before an attempt is
+counted.
+Only an invocation cut without an exception resumes from its durable checkpoint.
+The watchdog still allows 120 seconds without export-byte progress and 60 minutes
+overall; verification-only ticks disarm the idle timer. Each alarm invocation
+still faces the platform's 15-minute cap. Up to six cut attempts can therefore
+leave the source suspended for about 90 minutes, plus scheduling overhead and
+any wait for a lingering cell-side export before abort is acknowledged.
+
+The 2026-09-27/28 measurements below are **BACKUP exports**, using a read-only
+snapshot with no account row lock; they are not evacuation rehearsal evidence.
+Cell-request timings were reconstructed from Prometheus, and verify/commit times
+from the remaining ledger interval, rather than retained per-table export logs.
+
+| Run (UTC) | Executor | Cell export | Verify + commit | Total |
+| --- | --- | --- | --- | --- |
+| 2026-09-27 10:30 manual | alarm | 257.1 s | approximately 48–54 s | 5 m 11 s |
+| 2026-09-27 06:09–06:40 manual attempts | alarm | 283.8, 290.6, 290.6, 291.2 s | failed later | — |
+| 2026-09-28 00:00 nightly, first request | cron → `/run` fetch | 669.5 s | did not commit | — |
+| 2026-09-28 00:00 nightly, second request | alarm (inferred) | 346.2 s | approximately 128 s | approximately 7 m 54 s |
+
+The two-attempt reading of the nightly run and the founder attribution remain
+inferences: metrics have no account label, and the live backup job attempt
+counters were not read for this review. The 16-minute ledger span includes overlapping
+exports; it is not one invocation and did not exercise the 15-minute cap.
+For the 327 MB archive, clean rates were 1.12–1.27 MB/s; 346.2 s was 0.94 MB/s
+with overlap. The 669.5 s rate of **0.49 MB/s is an upper-bound artefact**: that
+request overlapped its successor and outlived its consumer. At that artefact
+rate, 15 minutes carries about 440 MB; it is not a proven sustainable rate.
+Conservatively, an archive above about **400 MB** is not proven to fit one stream
+tick and needs evacuation rehearsal evidence or the cell-side asynchronous
+export follow-up. Time a real evacuation using the new stream/verify log lines;
+an evacuation holds the account row lock and performs reconciliation writes.
+Use the [large-account operator sequence](runbooks.md#account-moves-in-a-chosen-order).
+
+Protocol-3 import no longer requires a connected operator request. First-start
+archive validation still reads the entire R2 object and is residual alarm-cap
+exposure; a successful pass is cached only for the same operation and ETag.
+Download-only, import-only, validation, stream and verification measurements
+must come from drill logs, not the combined drill duration.
 
 The cell validates exact HTTPS origin, capability grammar and size (up to 8 GiB)
 before network access, refuses redirects, and spools before import. Both download
