@@ -1,5 +1,11 @@
 # .gitops — Argo CD source of truth
 
+> **Production onboarding:** `civo-prod-use1-serving` (Civo NYC1, account alias
+> `prod`) is **onboarded, not provisioned** until the migration runbook's
+> provisioning step. Its intended host is
+> `api.civo-prod-use1-serving.cells.witself.witwave.ai`. The existing sandbox
+> serving and backup cells remain in the catalog during the overlap.
+
 This directory is the Git-owned desired state that Argo CD watches after
 `witself-infra up -argocd` installs Argo in a cell. It is not an application by
 itself; it is the control tree Argo reads to decide which platform services and

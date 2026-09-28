@@ -33,7 +33,7 @@ func TestCatalogMemoryAlertsSwitch(t *testing.T) {
 			t.Errorf("%s: memory alerts must remain dark", name)
 		}
 	}
-	for _, name := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup"} {
+	for _, name := range civoRollCells(t) {
 		cell := cfg.Cells[name]
 		cell.Switches.MemoryAlerts = true
 		cfg.Cells[name] = cell
@@ -48,7 +48,7 @@ func TestCatalogMemoryAlertsSwitch(t *testing.T) {
 }
 
 func TestMemoryAlertsTemplates(t *testing.T) {
-	for _, name := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup"} {
+	for _, name := range civoRollCells(t) {
 		for _, monitoring := range []bool{false, true} {
 			for _, enabled := range []bool{false, true} {
 				data := templateData{MemoryAlerts: enabled, Monitoring: monitoring}
@@ -69,9 +69,13 @@ func TestGeneratedValuesMemoryAlertsRemainDark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := loadCatalog(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, body := range generated {
 		enabled := memoryAlertsEnabled(t, body)
-		if name == "civo-sandbox-use1-serving" || name == "civo-sandbox-use1-backup" {
+		if isCivoRollCell(cfg.Cells[name]) {
 			if enabled == nil || *enabled {
 				t.Errorf("%s: memory alerts must be explicitly false", name)
 			}

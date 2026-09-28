@@ -3,7 +3,7 @@
 // produced by scripts/civo-pre-migration-backup.sh.
 //
 // It is the scripted equivalent of the manual manifest gate in the
-// operations runbook: both reviewed Civo cells must present a verified,
+// operations runbook: each selected Civo cell must present a verified,
 // integrity-checked, release-matched artifact triple before a
 // schema-advancing rollout may change GitOps. The verifier is strictly
 // offline — it reads only the artifact directories it is given, makes no
@@ -70,7 +70,7 @@ const (
 
 // ReviewedCells is the closed set of source cells the backup script
 // accepts. The verifier refuses evidence claiming any other cell.
-var ReviewedCells = []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"}
+var ReviewedCells = []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving", "civo-prod-use1-serving"}
 
 var (
 	releasePattern     = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
@@ -130,7 +130,7 @@ type Options struct {
 	// v prefix. Every manifest must target exactly this release.
 	Release string
 	// RequiredCells is the set of source cells that must each be covered
-	// by exactly one verified input. Empty means both reviewed cells, the
+	// by exactly one verified input. Empty means all reviewed cells, the
 	// documented hard-gate default.
 	RequiredCells []string
 	// MaxAge, when positive, rejects evidence whose created_at is older.

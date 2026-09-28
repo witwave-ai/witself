@@ -38,7 +38,7 @@ Verifies the encrypted pre-migration backup artifact triples produced by
 scripts/civo-pre-migration-backup.sh (the <backup-id>/.dump.age, .sha256,
 and .json layout) against the documented rollout gate: verified restore
 drill, matching release and schema fences, intact ciphertext checksums, and
-owner-only storage. By default evidence for both reviewed Civo cells is
+owner-only storage. By default evidence for all reviewed Civo cells is
 required. Offline; output is count-only and safe to retain.`
 
 type cellListFlag []string
@@ -59,7 +59,7 @@ func backupEvidenceVerifyCmd(args []string) int {
 	fs.SetOutput(os.Stderr)
 	release := fs.String("release", "", "intended rollout version, MAJOR.MINOR.PATCH without a v prefix (required)")
 	var cells cellListFlag
-	fs.Var(&cells, "cell", "required source cell (repeatable; default: both reviewed Civo cells)")
+	fs.Var(&cells, "cell", "required source cell (repeatable; default: all reviewed Civo cells)")
 	maxAge := fs.Duration("max-age", 0, "reject evidence whose created_at is older than this duration (0 disables)")
 	jsonOut := fs.Bool("json", false, "emit the count-only report as JSON")
 	evidenceOut := fs.String("evidence-out", "", "additionally write the count-only report to this new file (create-only, mode 0600)")

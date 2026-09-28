@@ -88,7 +88,7 @@ func TestBackupEvidenceVerifyCmdPass(t *testing.T) {
 	root := t.TempDir()
 	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
 	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
-	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", dirA, dirB}); code != 0 {
+	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-backup", "--cell", "civo-sandbox-use1-serving", dirA, dirB}); code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 }
@@ -165,7 +165,7 @@ func TestBackupEvidenceVerifyCmdEvidenceOut(t *testing.T) {
 	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-serving", "0.0.258", "4e5f6071")
 	out := filepath.Join(t.TempDir(), "evidence.json")
 	code := backupEvidenceCmd([]string{
-		"verify", "--release", "0.0.258", "--evidence-out", out, dirA, dirB,
+		"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-backup", "--cell", "civo-sandbox-use1-serving", "--evidence-out", out, dirA, dirB,
 	})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
@@ -195,7 +195,7 @@ func TestBackupEvidenceVerifyCmdEvidenceOut(t *testing.T) {
 	}
 	// A second run must refuse to overwrite the retained evidence file.
 	code = backupEvidenceCmd([]string{
-		"verify", "--release", "0.0.258", "--evidence-out", out, dirA, dirB,
+		"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-backup", "--cell", "civo-sandbox-use1-serving", "--evidence-out", out, dirA, dirB,
 	})
 	if code != 1 {
 		t.Fatalf("expected exit 1 when evidence file exists, got %d", code)
@@ -238,7 +238,7 @@ func TestBackupEvidenceVerifyCmdStderrCarriesNoPathsOrValues(t *testing.T) {
 	var codes []int
 	stderr := captureStderr(t, func() {
 		codes = append(codes, backupEvidenceCmd([]string{
-			"verify", "--release", "0.0.258", "--evidence-out", occupied, dirA, dirB,
+			"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-backup", "--cell", "civo-sandbox-use1-serving", "--evidence-out", occupied, dirA, dirB,
 		}))
 		codes = append(codes, backupEvidenceCmd([]string{
 			"verify", "--release", "0.0.258", dirA, missingInput,
@@ -260,5 +260,24 @@ func TestBackupEvidenceVerifyCmdStderrCarriesNoPathsOrValues(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "input_path_invalid") {
 		t.Fatalf("the bounded finding classification must still be diagnosable:\n%s", stderr)
+	}
+}
+
+func TestBackupEvidenceVerifyCmdProductionPair(t *testing.T) {
+	root := t.TempDir()
+	a := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
+	b := writeBackupEvidenceFixture(t, root, "civo-prod-use1-serving", "0.0.258", "4e5f6071")
+	for _, serving := range []string{"civo-prod-use1-serving", "civo-sandbox-use1-serving"} {
+		want := 0
+		if serving == "civo-sandbox-use1-serving" {
+			want = 1
+		}
+		code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", "--cell", "civo-sandbox-use1-backup", "--cell", serving, a, b})
+		if code != want {
+			t.Fatalf("selected pair exit=%d want %d", code, want)
+		}
+	}
+	if code := backupEvidenceCmd([]string{"verify", "--release", "0.0.258", a, b}); code != 1 {
+		t.Fatal("default must require all reviewed cells")
 	}
 }

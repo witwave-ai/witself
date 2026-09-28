@@ -334,7 +334,8 @@ witself-admin backup-evidence verify --release 0.0.267 \
 the release, schema, restore-drill, checksum, and owner-only storage contract.
 `--release` is required in `MAJOR.MINOR.PATCH` form without `v`; one or more
 artifact directories follow the flags. Repeat `--cell` to select required
-source cells; omitting it requires both reviewed Civo cells. `--max-age 0`
+source cells; omitting it requires every reviewed Civo cell (three during the
+production overlap, so `roll-cell.sh` always passes the selected pair explicitly). `--max-age 0`
 disables the age limit. The optional evidence output file is create-only,
 mode `0600`. Both output modes contain counts and findings categories.
 

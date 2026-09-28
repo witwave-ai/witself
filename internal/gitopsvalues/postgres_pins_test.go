@@ -78,7 +78,7 @@ func TestPostgresVerificationSettingKeepsDefaultImage(t *testing.T) {
 }
 
 func TestPostgresOverlayDigestRemainsGeneratorSourceOfTruth(t *testing.T) {
-	for _, cell := range []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"} {
+	for _, cell := range civoRollCells(t) {
 		for _, mirrored := range []bool{false, true} {
 			name := cell + "/upstream"
 			if mirrored {
@@ -210,7 +210,7 @@ func TestPostgresImageRewritePreservesComments(t *testing.T) {
 }
 
 func TestRollPostgresMirrorPreservesContentAndRegenerates(t *testing.T) {
-	for _, cell := range []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"} {
+	for _, cell := range civoRollCells(t) {
 		t.Run(cell, func(t *testing.T) {
 			root := copyGenerationFixture(t)
 			version := "0.0.999"

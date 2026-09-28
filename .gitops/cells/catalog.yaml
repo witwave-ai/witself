@@ -41,6 +41,17 @@ cells:
     cloud: gcp
     region: us-west2
     gcp_project: witself-sandbox
+  civo-prod-use1-serving:
+    cloud: civo
+    account_alias: prod
+    region: nyc1
+    role: serving
+    overlay: civo-prod-use1-serving.yaml.tmpl
+    switches:
+      monitoring: false
+      sealed_plane_alerts: false
+      postgres_backup: false
+      memory_alerts: false
   civo-sandbox-use1-backup:
     cloud: civo
     region: nyc1

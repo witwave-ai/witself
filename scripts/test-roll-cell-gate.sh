@@ -504,6 +504,10 @@ backup-evidence
 verify
 --release
 $VERSION
+--cell
+civo-sandbox-use1-backup
+--cell
+civo-sandbox-use1-serving
 --
 $EVIDENCE_A
 $EVIDENCE_B
@@ -512,6 +516,27 @@ cmp -s "$TEST_ROOT/admin.expected" "$ADMIN_LOG" ||
   fail "verifier argv or invocation count was incorrect"
 expect_output "backup evidence verified for release $VERSION" "verified backup evidence"
 assert_values "$ROLLED" "verified backup evidence"
+
+# The overlap pair is forwarded explicitly while rolling the shared backup.
+reset_case
+run_roll "$CELL" "$VERSION" --evidence-cells civo-sandbox-use1-backup,civo-prod-use1-serving \
+  --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+  fail "production evidence pair did not proceed"
+sed 's/civo-sandbox-use1-serving/civo-prod-use1-serving/' "$TEST_ROOT/admin.expected" >"$TEST_ROOT/production.expected"
+# Evidence paths are opaque and must be preserved, not rewritten with the selector.
+sed "s|$TEST_ROOT/evidence/civo-prod-use1-serving|$EVIDENCE_B|" "$TEST_ROOT/production.expected" >"$TEST_ROOT/production-paths.expected"
+cmp -s "$TEST_ROOT/production-paths.expected" "$ADMIN_LOG" || fail "production pair was not forwarded exactly"
+assert_values "$ROLLED" "production evidence pair"
+
+for pair in civo-sandbox-use1-serving,civo-prod-use1-serving civo-sandbox-use1-backup,civo-sandbox-use1-backup; do
+  reset_case
+  if run_roll "$CELL" "$VERSION" --evidence-cells "$pair" --backup-evidence "$EVIDENCE_A" >"$CASE_OUTPUT" 2>&1; then
+    fail "invalid evidence pair accepted"
+  fi
+  [ ! -e "$ADMIN_LOG" ] || fail "invalid evidence pair invoked verifier"
+  [ ! -e "$REGISTRY_LOG" ] || fail "invalid evidence pair reached registry"
+  assert_values "$BASELINE" "invalid evidence pair"
+done
 
 # A verifier rejection blocks registry access and all edits.
 reset_case
@@ -574,6 +599,10 @@ backup-evidence
 verify
 --release
 $VERSION
+--cell
+civo-sandbox-use1-backup
+--cell
+civo-sandbox-use1-serving
 --
 $EVIDENCE_A
 $EVIDENCE_B
@@ -854,9 +883,9 @@ assert_values "$BASELINE" 'PostgreSQL image opt-in evidence failure'
 
 # The serving cell selects its own release tag and distinct approved upstream
 # bytes. In this fixture its upstream is a single manifest, not a rebuilt index.
-(
+for serving_cell in civo-sandbox-use1-serving civo-prod-use1-serving; do (
   reset_case
-  CELL=civo-sandbox-use1-serving
+  CELL=$serving_cell
   VALUES="$REPO_ROOT/.gitops/cells/$CELL/values.yaml"
   BASELINE="$TEST_ROOT/serving-values.baseline.yaml"
   cp "$VALUES" "$BASELINE"
@@ -866,7 +895,18 @@ assert_values "$BASELINE" 'PostgreSQL image opt-in evidence failure'
   assert_values "$ROLLED" 'serving PostgreSQL mirror' false true
   "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
     fail 'serving PostgreSQL mirror did not survive generation'
-)
+  grep -Fxq -- "$CELL" "$ADMIN_LOG" || fail 'standalone serving roll did not require its own evidence'
+  reset_case
+  other_serving=civo-prod-use1-serving
+  if [ "$CELL" = "$other_serving" ]; then other_serving=civo-sandbox-use1-serving; fi
+  if run_roll "$CELL" "$VERSION" --evidence-cells "civo-sandbox-use1-backup,$other_serving" \
+      --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1; then
+    fail 'roll accepted a pair that excludes its target cell'
+  fi
+  [ ! -e "$ADMIN_LOG" ] || fail 'uncovered target invoked verifier'
+  [ ! -e "$REGISTRY_LOG" ] || fail 'uncovered target contacted registry'
+  assert_values "$BASELINE" 'uncovered target'
+); done
 
 # Explicit registry tag validation rejects paths, options, and duplicates
 # before curl; the PostgreSQL success cases prove valid suffixed tags work.

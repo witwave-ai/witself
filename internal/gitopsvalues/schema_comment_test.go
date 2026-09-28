@@ -37,7 +37,7 @@ func TestCompatibilityCommentMatchesMigrationSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cell := range []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"} {
+	for _, cell := range civoRollCells(t) {
 		body := string(generated[cell])
 		if !strings.Contains(body, "# Schema-28's compatibility hold expired long ago;") {
 			t.Errorf("%s: missing historical compatibility explanation", cell)

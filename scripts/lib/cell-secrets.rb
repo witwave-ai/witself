@@ -13,7 +13,7 @@ module CellSecrets
   ROOT = File.expand_path('../..', __dir__)
   DIRECTORY = File.join(ROOT, '.gitops/secrets')
   RECIPIENT = 'age10ck02we3wzes85qd0e0eylxqupw7ectqjvv7wlykzdtts8nsugwshkp8ue'.freeze
-  CELLS = %w[civo-sandbox-use1-serving civo-sandbox-use1-backup].freeze
+  CELLS = %w[civo-prod-use1-serving civo-sandbox-use1-serving civo-sandbox-use1-backup].freeze
   PATH_REGEX = '^\.gitops/secrets/.*\.sops$'.freeze
   LIMIT = 4 * 1024 * 1024
   class Refusal < StandardError; end

@@ -1,8 +1,8 @@
 diff --git a/.gitops/cells/catalog.yaml b/.gitops/cells/catalog.yaml
-index 59fdd373..8abf0e60 100644
+index 22a9501..16561cc 100644
 --- a/.gitops/cells/catalog.yaml
 +++ b/.gitops/cells/catalog.yaml
-@@ -62,6 +62,6 @@ cells:
+@@ -73,6 +73,6 @@ cells:
        domain_documentation_only: true
        monitoring: true
        collector_alerts: false
@@ -11,10 +11,10 @@ index 59fdd373..8abf0e60 100644
        postgres_backup: true
        memory_alerts: false
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index e79f9b17..d1d61c89 100644
+index 8cb13e6..43b4a63 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -194,20 +194,44 @@ apps:
+@@ -217,20 +217,44 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -66,10 +66,10 @@ index e79f9b17..d1d61c89 100644
      enabled: false
    certManager:
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-index fba57d5d..67bc09f5 100644
+index 23acc1c..3aeaa51 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-@@ -180,20 +180,61 @@ apps:
+@@ -196,20 +196,61 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -138,10 +138,10 @@ index fba57d5d..67bc09f5 100644
      enabled: false
    certManager:
 diff --git a/internal/gitopsvalues/generate_test.go b/internal/gitopsvalues/generate_test.go
-index 9e7fb93d..76b47d54 100644
+index e4e50ff..69fdf1f 100644
 --- a/internal/gitopsvalues/generate_test.go
 +++ b/internal/gitopsvalues/generate_test.go
-@@ -74,8 +74,8 @@ func TestSealedPlaneAlertsTemplate(t *testing.T) {
+@@ -82,8 +82,8 @@ func TestSealedPlaneAlertsTemplate(t *testing.T) {
  				}
  				return
  			}
@@ -152,7 +152,7 @@ index 9e7fb93d..76b47d54 100644
  			}
  		})
  	}
-@@ -100,20 +100,22 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
+@@ -108,20 +108,22 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
  	if err != nil {
  		t.Fatal(err)
  	}
@@ -181,7 +181,7 @@ index 9e7fb93d..76b47d54 100644
  			}
  			continue
  		}
-@@ -133,8 +135,8 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
+@@ -141,8 +143,8 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
  		hasSealed := strings.Contains(body, sealedPlaneAlertsBlock)
  		hasCollector := strings.Contains(body, "    collectorAlerts:\n      enabled: true\n")
  		if cell == "civo-sandbox-use1-serving" {
@@ -192,12 +192,8 @@ index 9e7fb93d..76b47d54 100644
  			}
  			if hasCollector {
  				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
-@@ -216,7 +218,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
- 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
- 					}
- 					wantMonitoring := cell == "civo-sandbox-use1-serving" && monitoringEnabled
+@@ -227,3 +229,3 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
 -					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
 +					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
  						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
  					}
- 					if cell == "civo-sandbox-use1-backup" && postgres.Metrics.ServiceMonitor.Enabled {

@@ -1,8 +1,8 @@
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index 2b524e00..e79f9b17 100644
+index c8f688b..8cb13e6 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-@@ -36,8 +36,11 @@ apps:
+@@ -42,8 +42,11 @@ apps:
        enabled: true
        allowExternal: false
      metrics:
@@ -16,7 +16,7 @@ index 2b524e00..e79f9b17 100644
    witselfServer:
      enabled: true
      namespace: witself
-@@ -82,6 +85,21 @@ apps:
+@@ -89,6 +92,21 @@ apps:
        validationEnabled: false
        targetName: witself-backup
      replicaCount: 2
@@ -38,7 +38,7 @@ index 2b524e00..e79f9b17 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -107,6 +125,20 @@ apps:
+@@ -130,6 +148,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -59,7 +59,7 @@ index 2b524e00..e79f9b17 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -162,8 +194,8 @@ apps:
+@@ -185,8 +217,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:
@@ -71,7 +71,7 @@ index 2b524e00..e79f9b17 100644
      enabled: true
      alerting:
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
-index b3760205..fba57d5d 100644
+index e731c27..23acc1c 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 +++ b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 @@ -22,8 +22,11 @@ apps:
@@ -110,7 +110,7 @@ index b3760205..fba57d5d 100644
      podDisruptionBudget:
        enabled: true
        minAvailable: 1
-@@ -93,6 +111,20 @@ apps:
+@@ -109,6 +127,20 @@ apps:
          enabled: true
          mode: enforce
        replicaCount: 2
@@ -131,7 +131,7 @@ index b3760205..fba57d5d 100644
        podDisruptionBudget:
          enabled: true
          minAvailable: 1
-@@ -148,8 +180,8 @@ apps:
+@@ -164,8 +196,8 @@ apps:
          targetName: witself-provision
          tokenKey: token
  platform:

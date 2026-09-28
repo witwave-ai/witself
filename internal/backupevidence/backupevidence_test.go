@@ -143,8 +143,9 @@ func (f *fixture) makePending(t *testing.T) {
 
 func verifyDirs(dirs []string, edit func(*Options)) (Report, []Finding) {
 	opts := Options{
-		Release: "0.0.258",
-		Now:     func() time.Time { return testNow },
+		RequiredCells: []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"},
+		Release:       "0.0.258",
+		Now:           func() time.Time { return testNow },
 	}
 	if edit != nil {
 		edit(&opts)
@@ -999,5 +1000,34 @@ func TestPublicationErrorsCarryNoEvidenceValues(t *testing.T) {
 				t.Fatalf("error leaked %q: %s", forbidden, text)
 			}
 		}
+	}
+}
+
+func TestVerifySelectedPairDuringOverlap(t *testing.T) {
+	for _, serving := range []string{"civo-sandbox-use1-serving", "civo-prod-use1-serving"} {
+		t.Run(serving, func(t *testing.T) {
+			root := t.TempDir()
+			a := makeFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
+			b := makeFixture(t, root, serving, "0.0.258", "4e5f6071")
+			dirs := []string{a.dir, b.dir}
+			report, findings := verifyDirs(dirs, func(o *Options) { o.RequiredCells = []string{"civo-sandbox-use1-backup", serving} })
+			if report.Result != "pass" || len(findings) != 0 || report.CellsRequired != 2 {
+				t.Fatalf("selected pair rejected: %+v %v", report, findings)
+			}
+			report, findings = verifyDirs(dirs, func(o *Options) { o.RequiredCells = nil })
+			requireReason(t, findings, ReasonCellMissing)
+			if report.CellsRequired != len(ReviewedCells) {
+				t.Fatal("default must require every reviewed cell")
+			}
+			other := "civo-prod-use1-serving"
+			if serving == other {
+				other = "civo-sandbox-use1-serving"
+			}
+			report, findings = verifyDirs(dirs, func(o *Options) { o.RequiredCells = []string{"civo-sandbox-use1-backup", other} })
+			requireReason(t, findings, ReasonCellMissing)
+			if report.Result != "fail" {
+				t.Fatal("other serving cell evidence covered selected pair")
+			}
+		})
 	}
 }

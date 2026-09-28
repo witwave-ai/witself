@@ -67,7 +67,7 @@ func TestReadBackupImagePins(t *testing.T) {
 }
 
 func TestRollBackupImagePreservesOtherBytesAndRegenerates(t *testing.T) {
-	for _, cell := range []string{"civo-sandbox-use1-backup", "civo-sandbox-use1-serving"} {
+	for _, cell := range civoRollCells(t) {
 		t.Run(cell, func(t *testing.T) {
 			root := copyGenerationFixture(t)
 			serverDigest := "sha256:" + strings.Repeat("a", 64)
