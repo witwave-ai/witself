@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -329,5 +332,81 @@ func TestAccountBackupArchivePullHeartbeats(t *testing.T) {
 				t.Fatal("missing exact acknowledgement after heartbeats")
 			}
 		})
+	}
+}
+
+func TestAccountBackupArchivePullSpoolsBeforeValidation(t *testing.T) {
+	previous := backupValidationHeartbeat
+	backupValidationHeartbeat = 20 * time.Millisecond
+	defer func() { backupValidationHeartbeat = previous }()
+	spoolGlob := filepath.Join(os.TempDir(), "witself-backup-validate-*.tar.gz")
+	before, _ := filepath.Glob(spoolGlob)
+	for _, name := range []string{"slow-validator", "bad-archive"} {
+		t.Run(name, func(t *testing.T) {
+			capability := "cap_" + strings.Repeat("c", 64)
+			served := make(chan struct{})
+			cp := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "7")
+				_, _ = io.WriteString(w, "archive")
+				close(served)
+			}))
+			cp.EnableHTTP2 = true
+			cp.StartTLS()
+			defer cp.Close()
+			client := newBackupArchiveClient()
+			client.Transport.(*http.Transport).TLSClientConfig.RootCAs = cp.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+			defer client.CloseIdleConnections()
+			var reported error
+			cfg := Config{
+				BackupToken: "witself_bkp_test", BackupValidationEnabled: true, BackupValidationArchiveOrigin: cp.URL,
+				ReportAccountBackupValidationFailure: func(_ context.Context, accountID string, err error) {
+					if accountID != "acc_backup" {
+						t.Errorf("failure reported for %q", accountID)
+					}
+					reported = err
+				},
+				ValidateAccountBackup: func(_ context.Context, accountID, backupID string, body io.Reader) (ImportSummary, error) {
+					// The control plane's stream must already be complete: the
+					// validator only starts reading after the fake server has
+					// finished serving and several heartbeats have passed.
+					<-served
+					time.Sleep(4 * backupValidationHeartbeat)
+					data, err := io.ReadAll(body)
+					if err != nil || string(data) != "archive" {
+						t.Errorf("spooled archive did not read back intact: %q %v", data, err)
+					}
+					if name == "bad-archive" {
+						return ImportSummary{}, ErrBadArchive
+					}
+					return ImportSummary{AccountID: accountID, BackupID: backupID, Status: "active", SchemaVersion: 73}, nil
+				},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/accounts/acc_backup:validate-backup", nil)
+			req.Header.Set("Authorization", "Bearer witself_bkp_test")
+			req.Header.Set(AccountBackupIDHeader, "bkp_cell_test")
+			req.Header.Set("X-Witself-Backup-Archive-URL", cp.URL+"/v1/backups:archive?account_id=acc_backup")
+			req.Header.Set("X-Witself-Backup-Archive-Token", capability)
+			req.Header.Set("X-Witself-Backup-Archive-Size", "7")
+			recorder := httptest.NewRecorder()
+			accountBackupHandlerWithArchiveClient(cfg, client)(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d want=200", recorder.Code)
+			}
+			var result map[string]any
+			if err := json.NewDecoder(strings.NewReader(recorder.Body.String())).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if name == "bad-archive" {
+				if result["error"] != "invalid or mismatched backup archive" || !errors.Is(reported, ErrBadArchive) {
+					t.Fatalf("classified failure must answer an error object and reach the report hook (reported=%v)", reported)
+				}
+			} else if result["validated"] != true || reported != nil {
+				t.Fatalf("expected acknowledgement without a reported failure (reported=%v)", reported)
+			}
+		})
+	}
+	after, _ := filepath.Glob(spoolGlob)
+	if len(after) != len(before) {
+		t.Fatalf("spool files leaked: before=%d after=%d", len(before), len(after))
 	}
 }
