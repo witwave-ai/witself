@@ -774,6 +774,8 @@ GET  /v1/export
 # Provision-token-authorized account-move primitives; not customer routes.
 POST /v1/accounts/{account_id}:export-evacuation
 POST /v1/accounts/{account_id}:import-evacuation
+POST /v1/accounts/{account_id}:start-import-evacuation
+POST /v1/accounts/{account_id}:import-evacuation-status
 
 # Target account-token billing surface; the implemented control-plane routes
 # are account-scoped and listed above.
@@ -1928,3 +1930,43 @@ Only the final exact import acknowledgement indicates success; a value-free
 error object is failure even under HTTP 200. `already_imported` and
 `evacuation_completed` retain their prior meanings. Omitting the URL header
 preserves the legacy request-body import contract.
+
+
+Protocol 3 additionally exposes provision-token-authorized
+`POST /v1/accounts/{account_id}:start-import-evacuation` with the same evacuation
+and archive headers, empty body, and optional `X-Witself-Import-Wait`: canonical
+decimal `0`–`300`, default `0`. Invalid wait returns 400
+`a valid import wait is required`. Nonzero waits stream JSON headers immediately
+and newlines every 10 seconds. The terminal object is one of:
+
+- Exact import acknowledgement with `schema_version`, `account_id`, `status`,
+  `archive_schema_version`, `evacuation_id`, `evacuation_role:"target"`,
+  `already_imported`, and `evacuation_completed`.
+- `{"schema_version":"witself.v0","account_id":"…","evacuation_id":"…","import_job":{"state":"running","started":true}}`.
+  A lease owned by the other replica returns `started:false` without consuming
+  the capability. Same-replica duplicate starts share one job.
+- `{"schema_version":"witself.v0","error":"…"}` with one fixed classification:
+  `archive download failed`, `account exists under a different evacuation`,
+  `archive schema is newer than this cell — upgrade the cell first`,
+  `invalid or corrupt archive`, or `could not import account`.
+
+Capacity exhaustion (including pool acquisition timeout) returns 503
+`import capacity exhausted` and `Retry-After: 60`, before consuming a capability.
+Pre-stream receipt conflicts return 409 `account exists under a different evacuation`.
+
+`POST /v1/accounts/{account_id}:import-evacuation-status` requires only provision
+Authorization and `X-Witself-Evacuation-ID`; no body, capability or heartbeat.
+Its bounded database read returns the exact receipt acknowledgement first,
+otherwise `{"schema_version":"witself.v0","account_id":"…","evacuation_id":"…","import_job":{"state":"running"}}`
+when either a session or transaction import lock is held, or the same shape
+with `state:"absent"`. Conflicts return 409. Receipt replay on either action
+sets `already_imported:true`, uses the current account status, sets
+`evacuation_completed:true` only for a completed receipt with no live marker,
+and **omits `archive_schema_version`**. A stale completed receipt under another
+live evacuation never acknowledges success. `import_job.state:"failed"` plus
+a value-free `code` is reserved for a future table-backed protocol and is not
+emitted by this implementation.
+
+The unauthenticated `/v1/version` response adds `store_schema_version` (currently
+98) alongside `account_evacuation_protocol:3`. The control plane rejects a newer
+archive schema before minting a capability when this attestation is available.

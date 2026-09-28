@@ -253,6 +253,9 @@ func fleetRequestURL(endpoint, route string) (string, error) {
 
 // FleetMoveAccount is the value-free outcome of one account operation.
 type FleetMoveAccount struct {
+	Pending   bool   `json:"pending,omitempty"`
+	Retryable bool   `json:"retryable,omitempty"`
+	Attempts  int    `json:"attempts,omitempty"`
 	AccountID string `json:"account_id"`
 	OK        bool   `json:"ok"`
 	Error     string `json:"error,omitempty"`
@@ -297,6 +300,9 @@ func fleetMove(ctx context.Context, endpoint, token, name, action string, body m
 		return nil, err
 	}
 	type outcome struct {
+		Pending   *bool  `json:"pending"`
+		Retryable *bool  `json:"retryable"`
+		Attempts  *int   `json:"attempts"`
 		AccountID string `json:"account_id"`
 		OK        *bool  `json:"ok"`
 	}
@@ -322,10 +328,19 @@ func fleetMove(ctx context.Context, endpoint, token, name, action string, body m
 	}
 	result := &FleetMoveResult{SchemaVersion: out.SchemaVersion, Cell: name, Remaining: *out.Remaining, Results: make([]FleetMoveAccount, 0, len(rows))}
 	for _, row := range rows {
-		if !fleetAccountIDPattern.MatchString(row.AccountID) || row.OK == nil {
+		if !fleetAccountIDPattern.MatchString(row.AccountID) || row.OK == nil || (row.Pending != nil && *row.Pending && (!*row.OK || (row.Attempts != nil && *row.Attempts < 0))) {
 			return nil, fmt.Errorf("invalid account move outcome")
 		}
 		item := FleetMoveAccount{AccountID: row.AccountID, OK: *row.OK}
+		if row.Pending != nil {
+			item.Pending = *row.Pending
+		}
+		if row.Retryable != nil {
+			item.Retryable = *row.Retryable
+		}
+		if row.Attempts != nil {
+			item.Attempts = *row.Attempts
+		}
 		if !item.OK {
 			item.Error = "operation failed"
 		}

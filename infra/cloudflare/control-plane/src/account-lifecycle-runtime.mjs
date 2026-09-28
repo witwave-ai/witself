@@ -47,6 +47,19 @@ const EVACUATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const STATE_KEY = "account-lifecycle";
 const RESTORE_QUARANTINE_KEY = "restore-quarantine";
 const RESTORE_QUARANTINE_SCHEMA = "witself.restore-quarantine.v1";
+export const IMPORT_START_WAIT_SECONDS = 20;
+export const IMPORT_START_TIMEOUT_MS = 90_000;
+export const IMPORT_POLL_TIMEOUT_MS = 15_000;
+export const IMPORT_INLINE_POLL_MS = 10_000;
+export const IMPORT_INLINE_BUDGET_MS = 120_000;
+export const IMPORT_INLINE_BUDGET_MAX_MS = 240_000;
+export const IMPORT_JOB_MAX_AGE_MS = 3.5 * 60 * 60_000;
+export const IMPORT_RETRY_BASE_MS = 60_000;
+export const IMPORT_RETRY_MAX_MS = 30 * 60_000;
+export const IMPORT_MAX_ATTEMPTS = 6;
+export const IMPORT_RETRY_EXHAUSTED_MS = 6 * 60 * 60_000;
+export const IMPORT_CAPACITY_RETRY_MIN_MS = 60_000;
+
 const LIFECYCLE_RETRY_MS = 60_000;
 const PENDING_ERROR = "account is pending — not suspendable";
 
@@ -463,6 +476,7 @@ export class DurableAccountLifecycle {
       ((cellName, path, payload) =>
         this.requestTargetCoordinator(cellName, path, payload));
     this.now = dependencies.now ?? (() => new Date());
+    this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.reconcileRealmEmailAliases =
       dependencies.reconcileRealmEmailAliases ??
       ((accountID, fence) =>
@@ -694,7 +708,8 @@ export class DurableAccountLifecycle {
       !ACCOUNT_ID.test(input.account_id ?? "") ||
       input.account_id !== this.accountId ||
       !["close", "evacuate", "restore", "move"].includes(input.action) ||
-      !validExpectedEpoch(input.expected_epoch)
+      !validExpectedEpoch(input.expected_epoch) ||
+      (input.inline_budget_ms !== undefined && (!Number.isSafeInteger(input.inline_budget_ms) || input.inline_budget_ms < 0))
     ) {
       return false;
     }
@@ -1009,7 +1024,9 @@ export class DurableAccountLifecycle {
     }
     const resolved = { ...cell, name };
     if (evacuationProtocol) {
-      resolved.account_evacuation_protocol = await this.requireEvacuationProtocol(resolved);
+      const attestation = await this.requireEvacuationProtocol(resolved);
+      resolved.account_evacuation_protocol = attestation.protocol;
+      resolved.store_schema_version = attestation.store_schema_version;
     }
     return resolved;
   }
@@ -1056,25 +1073,21 @@ export class DurableAccountLifecycle {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
       });
-    } catch (error) {
-      fail(
-        `cell ${cell.name} evacuation protocol probe failed: ${String(error?.message ?? error)}`,
-        502,
-        { cause: error },
-      );
+    } catch {
+      fail(`cell ${cell.name} evacuation protocol probe failed`, 502);
     }
-    const { text, body } = await responseBody(response);
+    const { body } = await responseBody(response);
     if (
       !response.ok ||
       !isObject(body) ||
-      ![1, 2].includes(body.account_evacuation_protocol)
+      ![1, 2, 3].includes(body.account_evacuation_protocol)
     ) {
       fail(
-        `cell ${cell.name} does not attest account evacuation protocol 1 or 2: HTTP ${response.status} ${text.slice(0, 120)}`,
+        `cell ${cell.name} does not attest account evacuation protocol 1, 2 or 3: HTTP ${response.status}`,
         409,
       );
     }
-    return body.account_evacuation_protocol;
+    return { protocol: body.account_evacuation_protocol, store_schema_version: Number.isSafeInteger(body.store_schema_version) ? body.store_schema_version : null };
   }
 
   async run(input) {
@@ -1106,7 +1119,7 @@ export class DurableAccountLifecycle {
     if (input.action === "close") {
       return this.runClose(state, input);
     }
-    const result = await this.runMove(state);
+    const result = await this.runMove(state, { importBudgetMs: Math.max(0, Math.min(input.inline_budget_ms ?? IMPORT_INLINE_BUDGET_MS, IMPORT_INLINE_BUDGET_MAX_MS)) });
     if (result.aborted === true) {
       fail("pre-archive export was aborted; cleanup completed", 502);
     }
@@ -1495,7 +1508,7 @@ export class DurableAccountLifecycle {
     return state;
   }
 
-  async runMove(initialState) {
+  async runMove(initialState, { importBudgetMs = 0 } = {}) {
     let state = initialState;
     while (state.operation) {
       // Abort owns the original source/object fence but no longer needs an
@@ -1540,9 +1553,21 @@ export class DurableAccountLifecycle {
         case "export_validate_and_commit":
           state = await this.exportArchive(state);
           break;
-        case "import_target":
-          state = await this.importTarget(state);
+        case "import_target": {
+          const imported = await this.importTarget(state, importBudgetMs);
+          if (imported?.pending) {
+            await this.scheduleWakeup();
+            const { operation, epoch } = await this.loadState();
+            const job = operation.import_job;
+            return { import_pending: true, operation_id: operation.operation_id,
+              evacuation_id: operation.evacuation_id, epoch, target_cell: operation.target_cell,
+              phase: operation.phase, retryable: operation.retryable,
+              import_job: job ? { attempts: job.attempts, first_started_at: job.first_started_at,
+                started_at: job.started_at, retry_at: job.retry_at, last_polled_at: job.last_polled_at } : null };
+          }
+          state = imported;
           break;
+        }
         case "resume_target":
           state = await this.resumeTarget(state);
           break;
@@ -2013,16 +2038,16 @@ export class DurableAccountLifecycle {
     return this.saveState(state);
   }
 
-  async importTarget(state) {
+  async importTarget(state, budgetMs = 0) {
     try {
-      return await this.importTargetAttempt(state);
+      return await this.importTargetAttempt(state, budgetMs);
     } catch (error) {
       // Reload before recording: a lost storage acknowledgement may already
       // have advanced the phase. Never roll back that durable acknowledgement.
       const latest = await this.loadState();
       if (latest?.operation?.operation_id === state.operation.operation_id &&
           latest.operation.phase === state.operation.phase) {
-        const message = error?.message === "archive import above 90 MiB requires target account evacuation protocol 2"
+        const message = ["archive import above 90 MiB requires target account evacuation protocol 2", "target cell schema is older than the archive; upgrade the target cell first"].includes(error?.message)
           ? error.message : "archive import failed; retry required";
         // A 4xx verdict (target deregistered, acknowledgement for another
         // account or evacuation) needs an operator; the alarm still retries,
@@ -2034,12 +2059,26 @@ export class DurableAccountLifecycle {
     }
   }
 
-  async importTargetAttempt(state) {
+  async importTargetAttempt(state, budgetMs = 0) {
     const operation = state.operation;
     const cell = await this.cell(operation.target_cell, {
       evacuationProtocol: true,
       expectedRegistrationID: operation.target_registration_id,
     });
+    if (cell.account_evacuation_protocol < 3) {
+      if (operation.import_job != null) {
+        await this.saveState(operationMetadata(state, {
+          last_error: "target cell attests protocol 2 while an import job is in flight; waiting for the roll", retryable: true,
+        }));
+        return { pending: true };
+      }
+      return this.importTargetStreaming(state, cell);
+    }
+    return this.importTargetAsync(state, cell, budgetMs);
+  }
+
+  async importTargetStreaming(state, cell) {
+    const operation = state.operation;
     try {
       await this.validateArchive(
         this.env.ARCHIVES,
@@ -2125,6 +2164,131 @@ export class DurableAccountLifecycle {
       });
     }
     return this.saveState(state);
+  }
+
+  async importTargetAsync(state, cell, budgetMs) {
+    const deadline = this.now().getTime() + budgetMs;
+    const operatorDriven = budgetMs > 0;
+    do {
+      const operation = state.operation;
+      let job = operation.import_job ?? null;
+      const now = this.now().getTime();
+      const mode = job === null ? "START" : typeof job.retry_at === "number"
+        ? (job.retry_at <= now || operatorDriven ? "START" : "WAIT") : "POLL";
+      const persist = async (metadata) => {
+        state = await this.saveState(operationMetadata(state, metadata));
+        job = state.operation.import_job;
+      };
+      const backoff = async (message = "import job ended without a receipt; retry required") => {
+        const exhausted = job.attempts >= IMPORT_MAX_ATTEMPTS;
+        await persist({ import_job: { ...job, retry_at: this.now().getTime() + (exhausted
+          ? IMPORT_RETRY_EXHAUSTED_MS : Math.min(IMPORT_RETRY_BASE_MS * 2 ** Math.max(0, job.attempts - 1), IMPORT_RETRY_MAX_MS)) },
+          last_error: exhausted ? "import job exhausted its attempts; operator attention required" : message, retryable: !exhausted });
+      };
+      let response;
+      if (mode === "START") {
+        const object = await this.env.ARCHIVES.head(operation.archive.object);
+        if (!object || !Number.isSafeInteger(object.size) || object.size <= 0) fail("archive metadata is not readable from R2", 502);
+        let validated = job?.validated ?? null;
+        if (!validated || validated.etag !== object.etag) {
+          try {
+            const verification = await this.validateArchive(this.env.ARCHIVES, operation.archive.object, this.accountId, {
+              evacuationID: operation.evacuation_id, allowLegacyEvacuationID: operation.legacy_evacuation_id === true,
+            });
+            validated = { etag: object.etag, manifest_schema_version: verification.manifest.schema_version };
+          } catch (error) {
+            if (!(error instanceof ArchiveIntegrityError)) throw error;
+            await this.quarantineArchive(operation.archive);
+            await this.settleQuarantinedRestore(state, error);
+          }
+        }
+        const previous = job ?? { first_started_at: now, started_at: null, attempts: 0, last_polled_at: null, retry_at: null, validated: null };
+        if (typeof cell.store_schema_version === "number" && validated.manifest_schema_version > cell.store_schema_version) {
+          await persist({ import_job: { ...previous, validated, retry_at: now + IMPORT_RETRY_EXHAUSTED_MS } });
+          fail("target cell schema is older than the archive; upgrade the target cell first", 409);
+        }
+        const origin = archiveOrigin(operation.archive_origin ?? this.env.CP_PUBLIC_ORIGIN);
+        if (!origin) fail("control-plane archive pull origin is not configured", 502);
+        const url = new URL("/v1/archives:pull", origin);
+        url.searchParams.set("account_id", this.accountId);
+        url.searchParams.set("evacuation_id", operation.evacuation_id);
+        const headers = { Authorization: `Bearer ${cell.provision_token}`, "Content-Type": "application/octet-stream",
+          "X-Witself-Evacuation-ID": operation.evacuation_id, "X-Witself-Archive-URL": url.toString(),
+          "X-Witself-Archive-Token": await this.mintArchiveCapability(operation, object),
+          "X-Witself-Archive-Size": String(object.size), "X-Witself-Import-Wait": String(IMPORT_START_WAIT_SECONDS) };
+        const started = { first_started_at: previous.first_started_at, started_at: now,
+          attempts: previous.attempts + 1, last_polled_at: null, retry_at: null, validated };
+        // Persist ambiguous ownership before issuing the request: a killed driver
+        // must poll. An explicit pre-spawn 503 below restores the attempt count.
+        await persist({ import_job: started, last_error: null, retryable: true });
+        try {
+          response = await this.fetchImpl(`${cell.endpoint}/v1/accounts/${this.accountId}:start-import-evacuation`,
+            { method: "POST", headers, signal: AbortSignal.timeout(IMPORT_START_TIMEOUT_MS) });
+        } catch {
+          fail("archive import failed; retry required", 502);
+        }
+        if (response.status === 503) {
+          const seconds = Number(response.headers.get("Retry-After"));
+          const delay = Math.max(IMPORT_CAPACITY_RETRY_MIN_MS, Math.min(Number.isFinite(seconds) ? seconds * 1000 : IMPORT_CAPACITY_RETRY_MIN_MS, IMPORT_RETRY_MAX_MS));
+          await persist({ import_job: { ...previous, validated, retry_at: now + delay },
+            last_error: "import capacity exhausted; retry scheduled", retryable: true });
+          await response.body?.cancel().catch(() => {});
+          response = null;
+        } else {
+          await persist({ import_job: started, last_error: null, retryable: true });
+        }
+      } else if (mode === "POLL") {
+        try {
+          response = await this.fetchImpl(`${cell.endpoint}/v1/accounts/${this.accountId}:import-evacuation-status`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${cell.provision_token}`, "X-Witself-Evacuation-ID": operation.evacuation_id },
+            signal: AbortSignal.timeout(IMPORT_POLL_TIMEOUT_MS),
+          });
+        } catch {
+          fail("archive import failed; retry required", 502);
+        }
+      }
+      if (response) {
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          fail("archive import failed; retry required", [404, 405].includes(response.status) ? 502 : response.status);
+        }
+        const { body } = await responseBody(response);
+        if (body?.import_job?.state === "running") {
+          const polledAt = this.now().getTime();
+          await persist({ import_job: { ...job, last_polled_at: polledAt },
+            ...(polledAt - job.first_started_at > IMPORT_JOB_MAX_AGE_MS
+              ? { last_error: "import job exceeded its age limit; operator attention required", retryable: false } : {}) });
+        } else if (body?.import_job?.state === "absent") {
+          await backoff();
+        } else if (mode === "START" && typeof body?.error === "string") {
+          const permanent = ["account exists under a different evacuation", "archive schema is newer than this cell — upgrade the cell first", "invalid or corrupt archive"];
+          if (permanent.includes(body.error)) {
+            await persist({ import_job: { ...job, retry_at: this.now().getTime() + IMPORT_RETRY_EXHAUSTED_MS }, last_error: body.error, retryable: false });
+          } else { await backoff("archive import failed; retry required"); }
+        } else {
+          try {
+            requireImportAck(body, this.accountId, operation.evacuation_id);
+          } catch {
+            fail("archive import failed; retry required", 502);
+          }
+          state = operationMetadata(state, { imported_status: body.status, last_error: null, retryable: false, import_job: null,
+            ...(body.evacuation_completed === true ? { restored_status: body.status } : {}) });
+          state = acknowledgeStep(state, { operation_id: operation.operation_id,
+            from_phase: operation.kind === "move" ? "route_retired" : "target_reserved", to_phase: "target_imported" });
+          if (body.evacuation_completed === true) state = acknowledgeStep(state, {
+            operation_id: operation.operation_id, from_phase: "target_imported", to_phase: "target_resumed" });
+          return this.saveState(state);
+        }
+      }
+      const remaining = deadline - this.now().getTime();
+      if (remaining <= 0) break;
+      await this.renewTargetReservation(state.operation);
+      const retryWait = typeof job?.retry_at === "number" && job.retry_at > this.now().getTime()
+        ? job.retry_at - this.now().getTime() : IMPORT_INLINE_POLL_MS;
+      await this.sleep(Math.min(IMPORT_INLINE_POLL_MS, retryWait, Math.max(0, deadline - this.now().getTime())));
+    } while (this.now().getTime() < deadline);
+    return { pending: true };
   }
 
   async settleQuarantinedRestore(state, cause = undefined) {
@@ -2619,7 +2783,11 @@ export class DurableAccountLifecycle {
           await this.runClose(state, {});
           return;
         }
-        await this.runMove(state);
+        const result = await this.runMove(state, { importBudgetMs: 0 });
+        if (result.import_pending === true) {
+          const latest = await this.loadState();
+          if (latest?.operation?.last_error) console.log(`account lifecycle retry for ${this.accountId} pending: ${latest.operation.last_error}`);
+        }
       });
     } catch (error) {
       console.log(

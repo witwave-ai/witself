@@ -875,3 +875,31 @@ func TestCellsMoveCLIFileFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestCellsRestorePendingOutput(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_FLEET_TOKEN", "fixture-pending")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","cell":"src","restored":[{"account_id":"chosen","ok":true,"pending":true,"attempts":2,"retryable":false},{"account_id":"busy1","ok":true,"pending":true,"retryable":true,"reason":"busy"}],"remaining":2}`))
+	}))
+	defer srv.Close()
+	for _, jsonOut := range []bool{false, true} {
+		args := []string{"cells", "restore", "src", "--endpoint", srv.URL}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		out, _, code := captureEmailAliasAdminCLI(t, func() int { return run(args) })
+		if code != 0 {
+			t.Fatal("pending failed command")
+		}
+		if jsonOut {
+			if !strings.Contains(out, `"pending": true`) || !strings.Contains(out, `"attempts": 2`) {
+				t.Fatal("pending JSON lost")
+			}
+		} else if !strings.Contains(out, "pending attempt 2 needs operator") {
+			t.Fatal("pending table status lost")
+		} else if !strings.Contains(out, "busy1\tpending\n") || strings.Contains(out, "busy1\tpending needs operator") {
+			t.Fatal("busy row must render as plain pending")
+		}
+	}
+}

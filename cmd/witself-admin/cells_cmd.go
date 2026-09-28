@@ -337,6 +337,14 @@ func cellsMove(args []string, restore bool) int {
 			status := "ok"
 			if !row.OK {
 				status = "error"
+			} else if row.Pending {
+				status = "pending"
+				if row.Attempts > 0 {
+					status += fmt.Sprintf(" attempt %d", row.Attempts)
+				}
+				if !row.Retryable {
+					status += " needs operator"
+				}
 			}
 			_, _ = fmt.Fprintf(w, "%s\t%s\n", row.AccountID, status)
 		}

@@ -1408,6 +1408,7 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 				return fmt.Errorf("restore archives: %w", err)
 			}
 		}
+		pending := 0
 		for _, a := range res.Restored {
 			dest := a.Cell
 			if dest == "" {
@@ -1415,6 +1416,16 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 			}
 			if !a.OK {
 				return fmt.Errorf("restore failed for %s onto %s: %s", a.AccountID, dest, a.Error)
+			}
+			if a.Pending {
+				if !a.Retryable {
+					// The control plane exhausted or permanently failed this
+					// import; re-driving would re-download the archive forever.
+					return fmt.Errorf("restore pending for %s onto %s needs operator attention (not retryable)", a.AccountID, dest)
+				}
+				pending++
+				fmt.Fprintf(os.Stderr, "pending %s onto %s\n", a.AccountID, dest)
+				continue
 			}
 			total++
 			fmt.Fprintf(os.Stderr, "restored %s onto %s\n", a.AccountID, dest)
@@ -1436,11 +1447,20 @@ func restoreCell(ctx context.Context, cl *fleet.Client, cellName string, allRegi
 			// would be wrong.
 			return fmt.Errorf("placement restore stalled with %d eligible archived account(s) still awaiting placement", res.Remaining)
 		}
-		if prevRemaining != -1 && res.Remaining >= prevRemaining {
+		if pending == 0 && prevRemaining != -1 && res.Remaining >= prevRemaining {
 			// A batch fired (per-account "ok") but the count didn't drop.
 			// The acct: pointer never landed, or the archived: entry
 			// wasn't retired — either way, spinning is the wrong answer.
 			return fmt.Errorf("placement restore is not making progress (%d eligible account(s) remaining after batch reported success)", res.Remaining)
+		}
+		if pending == len(res.Restored) {
+			timer := time.NewTimer(30 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 		prevRemaining = res.Remaining
 	}

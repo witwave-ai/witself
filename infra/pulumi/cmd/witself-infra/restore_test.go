@@ -171,3 +171,59 @@ type restoreResponse struct {
 	Remaining int    `json:"remaining"`
 	Region    string `json:"region"`
 }
+
+func TestRestoreCellPendingThenStall(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"restored": []map[string]any{{"account_id": "acc_pending", "cell": "cell-a", "ok": true, "pending": calls == 1, "retryable": calls == 1}}, "remaining": 1})
+	}))
+	defer srv.Close()
+	credential := filepath.Join(t.TempDir(), "fixture-credential")
+	if err := os.WriteFile(credential, []byte("test-fleet"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := fleet.NewClient(srv.URL, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.CreateTemp(t.TempDir(), "restore-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = log
+	defer func() { os.Stderr = old; _ = log.Close() }()
+	err = restoreCell(context.Background(), cl, "cell-a", false)
+	if err == nil || !strings.Contains(err.Error(), "not making progress") || calls != 2 {
+		t.Fatalf("pending/stall = %v calls=%d", err, calls)
+	}
+	data, err := os.ReadFile(log.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "pending acc_pending onto cell-a") != 1 || strings.Count(string(data), "restored acc_pending onto cell-a") != 1 {
+		t.Fatal("pending counted as restored")
+	}
+}
+
+func TestRestoreCellPendingNotRetryableStops(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"restored": []map[string]any{{"account_id": "acc_stuck", "cell": "cell-a", "ok": true, "pending": true, "retryable": false, "attempts": 6}}, "remaining": 1})
+	}))
+	defer srv.Close()
+	credential := filepath.Join(t.TempDir(), "fixture-credential")
+	if err := os.WriteFile(credential, []byte("test-fleet"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := fleet.NewClient(srv.URL, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = restoreCell(context.Background(), cl, "cell-a", false)
+	if err == nil || !strings.Contains(err.Error(), "acc_stuck") || !strings.Contains(err.Error(), "not retryable") || calls != 1 {
+		t.Fatalf("non-retryable pending must stop after one call: err=%v calls=%d", err, calls)
+	}
+}

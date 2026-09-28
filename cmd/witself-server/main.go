@@ -147,6 +147,11 @@ func serve() int {
 	defer stop()
 
 	cfg := server.ConfigFromEnv()
+	cfg.AccountImportJobTimeout, cfg.AccountImportJobConcurrency, err = accountImportJobConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	cfg.CellName = os.Getenv("WITSELF_CELL_NAME")
 	if err := configureBackupValidation(&cfg, backupValidationEnabled, os.Getenv("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN"), os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -1671,22 +1676,8 @@ func serve() int {
 			m, disposition, err := st.ImportAccountEvacuation(
 				ctx, accountID, evacuationID, body,
 			)
-			switch {
-			case errors.Is(err, store.ErrAccountExists):
-				return server.ImportSummary{}, server.ErrConflict
-			case errors.Is(err, store.ErrAccountEvacuationInProgress),
-				errors.Is(err, store.ErrAccountEvacuationMismatch):
-				return server.ImportSummary{}, server.ErrConflict
-			case errors.Is(err, export.ErrArchiveTooNew):
-				return server.ImportSummary{}, server.ErrArchiveTooNew
-			case errors.Is(err, store.ErrImportAuditContradiction):
-				return server.ImportSummary{}, server.ErrBadArchive
-			case errors.Is(err, store.ErrArchiveAccountMismatch),
-				errors.Is(err, store.ErrArchiveContent),
-				errors.Is(err, export.ErrCorrupt):
-				return server.ImportSummary{}, server.ErrBadArchive
-			case err != nil:
-				return server.ImportSummary{}, err
+			if err != nil {
+				return server.ImportSummary{}, mapAccountImportError(err)
 			}
 			status := m.Status
 			if disposition.AlreadyImported {
@@ -1701,6 +1692,31 @@ func serve() int {
 				AlreadyImported:     disposition.AlreadyImported,
 				EvacuationCompleted: disposition.EvacuationCompleted,
 			}, nil
+		}
+		cfg.BeginAccountImport = func(ctx context.Context, accountID, evacuationID string) (server.AccountImportLease, error) {
+			lease, err := st.AcquireAccountImportLease(ctx, accountID, evacuationID)
+			switch {
+			case errors.Is(err, store.ErrAccountImportLeaseHeld):
+				return nil, server.ErrAccountImportLeaseHeld
+			case errors.Is(err, store.ErrAccountImportLeaseUnavailable):
+				return nil, server.ErrAccountImportLeaseUnavailable
+			case err != nil:
+				return nil, mapAccountImportError(err)
+			}
+			return &serverAccountImportLease{lease: lease, accountID: accountID, evacuationID: evacuationID}, nil
+		}
+		cfg.AccountImportStatus = func(ctx context.Context, accountID, evacuationID string) (server.ImportSummary, server.AccountImportState, error) {
+			d, present, running, err := st.AccountImportStatus(ctx, accountID, evacuationID)
+			state := server.AccountImportAbsent
+			if present {
+				state = server.AccountImportImported
+			} else if running {
+				state = server.AccountImportRunning
+			}
+			return accountImportReceiptSummary(accountID, evacuationID, d), state, mapAccountImportError(err)
+		}
+		cfg.ReportAccountImportJob = func(accountID, evacuationID, outcome string, duration time.Duration) {
+			logAccountImportJob(os.Stderr, accountID, cfg.CellName, evacuationID, outcome, duration)
 		}
 		cfg.ReportAccountImportFailure = func(_ context.Context, accountID string, err error) {
 			logAccountImportFailure(os.Stderr, accountID, cfg.CellName, err)
@@ -2858,4 +2874,76 @@ func toServerUsageReport(report store.UsageReport) server.UsageReport {
 
 func logAccountImportFailure(w io.Writer, accountID, cellName string, err error) {
 	_, _ = fmt.Fprintf(w, "witself-server: account import failed account_id=%q cell=%q error=%q\n", accountID, cellName, err)
+}
+
+func mapAccountImportError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrAccountExists):
+		return server.ErrConflict
+	case errors.Is(err, store.ErrAccountEvacuationInProgress),
+		errors.Is(err, store.ErrAccountEvacuationMismatch):
+		return server.ErrConflict
+	case errors.Is(err, export.ErrArchiveTooNew):
+		return server.ErrArchiveTooNew
+	case errors.Is(err, store.ErrImportAuditContradiction):
+		return server.ErrBadArchive
+	case errors.Is(err, store.ErrArchiveAccountMismatch),
+		errors.Is(err, store.ErrArchiveContent),
+		errors.Is(err, export.ErrCorrupt):
+		return server.ErrBadArchive
+	case err != nil:
+		return err
+	}
+	return nil
+}
+
+type serverAccountImportLease struct {
+	lease                   *store.AccountImportLease
+	accountID, evacuationID string
+}
+
+func accountImportReceiptSummary(accountID, evacuationID string, d store.AccountImportDisposition) server.ImportSummary {
+	return server.ImportSummary{AccountID: accountID, EvacuationID: evacuationID, Status: d.CurrentStatus, EvacuationRole: d.EvacuationRole, AlreadyImported: d.AlreadyImported, EvacuationCompleted: d.EvacuationCompleted}
+}
+func (l *serverAccountImportLease) Receipt() (server.ImportSummary, bool) {
+	d, present := l.lease.Receipt()
+	return accountImportReceiptSummary(l.accountID, l.evacuationID, d), present
+}
+func (l *serverAccountImportLease) Import(ctx context.Context, r io.Reader) (server.ImportSummary, error) {
+	m, d, err := l.lease.Import(ctx, r)
+	sum := accountImportReceiptSummary(l.accountID, l.evacuationID, d)
+	sum.SchemaVersion = m.SchemaVersion
+	if !d.AlreadyImported {
+		sum.Status = m.Status
+	}
+	return sum, mapAccountImportError(err)
+}
+func (l *serverAccountImportLease) Close() { l.lease.Close() }
+
+func accountImportJobConfig() (time.Duration, int, error) {
+	timeout := 3 * time.Hour
+	concurrency := 1
+	if raw := strings.TrimSpace(os.Getenv("WITSELF_ACCOUNT_IMPORT_JOB_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			return 0, 0, errors.New("WITSELF_ACCOUNT_IMPORT_JOB_TIMEOUT must be a positive duration")
+		}
+		timeout = parsed
+	}
+	if raw := strings.TrimSpace(os.Getenv("WITSELF_ACCOUNT_IMPORT_JOB_CONCURRENCY")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			return 0, 0, errors.New("WITSELF_ACCOUNT_IMPORT_JOB_CONCURRENCY must be a positive integer")
+		}
+		concurrency = parsed
+	}
+	return timeout, concurrency, nil
+}
+
+func logAccountImportJob(w io.Writer, accountID, cellName, evacuationID, outcome string, duration time.Duration) {
+	if outcome == "" {
+		_, _ = fmt.Fprintf(w, "witself-server: account import job started account_id=%q cell=%q evacuation_id=%q duration=%s\n", accountID, cellName, evacuationID, duration)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "witself-server: account import job account_id=%q cell=%q evacuation_id=%q outcome=%q duration=%s\n", accountID, cellName, evacuationID, outcome, duration)
 }

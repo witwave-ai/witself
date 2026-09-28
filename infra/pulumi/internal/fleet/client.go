@@ -514,6 +514,8 @@ type RestoreResult struct {
 // RestoredAccount is one line in a restore batch's report. Same shape as
 // EvacuatedAccount, distinct type so a caller cannot accidentally mix them.
 type RestoredAccount struct {
+	Pending   bool   `json:"pending,omitempty"`
+	Retryable bool   `json:"retryable,omitempty"`
 	AccountID string `json:"account_id"`
 	OK        bool   `json:"ok"`
 	Cell      string `json:"cell,omitempty"`

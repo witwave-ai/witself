@@ -823,22 +823,40 @@ These are open; this document records them without resolving them.
 
 ## Account evacuation transport rollout
 
-Roll cells first, then the control plane. `/v1/version` advertises
-`account_evacuation_protocol: 2` for pull imports. All potential import targets,
-including serving cells, must configure `backup.validationArchiveOrigin` as
-`https://self.witwave.ai`. The existing environment setting
-`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` permits that exact HTTPS control-plane
-origin for every archive pull, both restore-drill validation and account import;
-its name remains unchanged. The apps chart mapping is available from 0.0.310.
+The confirmed order is **control plane first, then cells** with
+`roll-train.sh VERSION --no-schema-change …`. Schema remains 98. The new control
+plane accepts protocols 1, 2 and 3: protocol 1 uses legacy push only up to 90 MiB,
+protocol 2 keeps synchronous pull, and protocol 3 adds asynchronous, resumable
+pull import while retaining the protocol-2 route.
 
-Protocol 1 remains compatible with close operations and evacuation source
-exports. A protocol-1 import target accepts legacy pushes only up to 90 MiB;
-larger archives remain retryable until the target rolls to protocol 2. Verify
-the rendered ConfigMap and the target version before initiating account moves.
+This inverts the protocol-2 cells-first rule: that rule was specific to an old
+control plane that could only push archives up to 90 MiB. The new control plane
+can be deployed against protocol-2 cells without freezing operations. If cells
+are rolled first instead, the existing freeze applies: start no drain, move,
+restore or `witself-infra destroy`, and have no such operation in flight between
+the roll and control-plane deployment. The old control plane answers 409
+`does not attest account evacuation protocol 1 or 2` at every protocol-3 probe
+until it is upgraded.
 
-No lifecycle operation may start or be in flight between the cell roll and the
-control-plane deploy: the previous control plane requires protocol 1 exactly and
-answers 409 to drains, moves, restores and `witself-infra destroy` against a
-protocol-2 cell until the new control plane is deployed (in-flight operations
-retry every 60 seconds and resume afterwards). The Worker var `CP_PUBLIC_ORIGIN`
-must equal the origin every cell configures.
+During a two-replica rolling update, `/v1/version` may answer 2 or 3. Each import
+tick re-probes; it does not reuse `target_preflight.protocol`. Without async job
+metadata, a protocol-2 probe uses synchronous import; a later protocol-3 probe
+switches to async. In-flight synchronous requests finish synchronously. Once
+`import_job` exists, that operation never falls back to streaming: a protocol-2
+probe waits retryably for the roll. Rolling a target back to protocol 2 therefore
+stalls its async moves until protocol 3 returns. On upgraded replicas, the import transaction advisory lock also excludes a
+synchronous request racing an async job for the same epoch. Old protocol-2
+binaries do not take this new lock: it cannot prevent overlapping downloads
+from those replicas during the roll; exact receipt checks remain mandatory.
+A pod roll cancels an in-flight import and it is re-started automatically at the
+cost of a re-download; the other replica cannot use its ephemeral spool or spent
+capability.
+
+All potential targets, including serving cells, must configure
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` (chart setting
+`backup.validationArchiveOrigin`) to the exact control-plane HTTPS origin,
+`https://self.witwave.ai` for managed cells. `CP_PUBLIC_ORIGIN` must match it.
+Keep temporary disk capacity for the entire archive. Pre-slice `witself-admin`
+binaries ignore pending fields and print `ok`; `remaining >= 1` is their only
+signal that import is still pending. Updated `witself-admin` and `witself-infra`
+understand pending rows.

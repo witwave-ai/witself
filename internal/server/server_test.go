@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/store"
 )
 
 func TestConfigFromEnvPreservesRawListenerValues(t *testing.T) {
@@ -1490,11 +1491,17 @@ func TestVersionEndpointIsBare(t *testing.T) {
 	// capabilities at the top level.
 	for _, k := range []string{
 		"schema_version", "version", "commit", "date",
-		"account_evacuation_protocol", "account_provision_protocol",
+		"account_evacuation_protocol", "account_provision_protocol", "store_schema_version",
 	} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("version missing %q; got %v", k, m)
 		}
+	}
+	if m["account_evacuation_protocol"] != float64(3) {
+		t.Fatal("protocol 3 not advertised")
+	}
+	if m["store_schema_version"] != float64(store.SchemaVersion()) {
+		t.Fatal("incorrect store schema version")
 	}
 	if got := m["account_provision_protocol"]; got != float64(
 		AccountProvisionProtocolVersion,
