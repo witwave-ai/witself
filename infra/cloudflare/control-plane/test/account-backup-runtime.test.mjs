@@ -1768,7 +1768,8 @@ test("fleet health traverses pages and uses strictly greater than twice interval
   const degraded = await accountBackupStatus(broken);
   assert.equal(degraded.schema_version, "witself.v0");
   assert.equal(degraded.schedule.enabled, true);
-  assert.deepEqual(degraded.scan, { retained: true });
+  assert.deepEqual(degraded.scan, { retained: true, computed_at: null, health_available: false,
+    stale_accounts: null, never_committed_accounts: null, oldest_committed_age_seconds: null });
   assert.equal(degraded.health_available, false);
   assert.equal(degraded.stale_accounts, null);
   assert.equal(degraded.oldest_committed_age_seconds, null);
@@ -1780,7 +1781,7 @@ test("fleet health traverses pages and uses strictly greater than twice interval
   assert.equal(pages, 100);
   assert.equal(capped.health_available, false);
   assert.equal(capped.stale_accounts, null);
-  assert.deepEqual(capped.scan, { retained: true });
+  assert.deepEqual(capped.scan, degraded.scan);
 });
 
 test("scan counts previous-slot terminal failures once before dispatch across pages", async () => {
@@ -2006,15 +2007,51 @@ function capabilityFixture() {
   bucket.write(record.object, "valid-backup-object", objectMetadata(job), record.r2_etag);
   const env = {
     BACKUPS: bucket,
-    PUBLIC_IP_LIMITER: { limit: () => assert.fail("archive route reached generic limiter") },
+    PUBLIC_IP_LIMITER: { limit: () => ({ success: true }) },
     ACCOUNT_BACKUP: { idFromName: (name) => ({ name }), get: (id) => ({ fetch: (request) => id.name === ACCOUNT ? durable.fetch(request) : new Response(null, { status: 404 }) }) },
   };
   const route = (token, backup = job.backup_id, method = "GET", account = ACCOUNT) => worker.fetch(new Request(
     `https://cp.test.invalid/v1/backups:archive?account_id=${account}&backup_id=${backup}`,
-    { method, headers: { Authorization: `Bearer ${token}` } },
+    { method, headers: { Authorization: `Bearer ${token}`, "CF-Connecting-IP": "192.0.2.47" } },
   ), env, {});
-  return { durable, record, storage, call, mint, bucket, route, expire: () => { now += 1800_000; } };
+  return { env, durable, record, storage, call, mint, bucket, route, expire: () => { now += 1800_000; } };
 }
+
+test("archive limiter runs once per IP before storage and preserves unused capabilities", async () => {
+  const f = capabilityFixture();
+  const { token } = await (await f.mint()).json();
+  const counts = new Map();
+  f.env.PUBLIC_IP_LIMITER.limit = ({ key }) => {
+    assert.equal(key, "192.0.2.47");
+    const count = (counts.get(key) ?? 0) + 1;
+    counts.set(key, count);
+    return { success: count <= 2 };
+  };
+  assert.equal((await f.route("bad")).status, 404);
+  assert.equal((await f.route("bad")).status, 404);
+  const originalGet = f.env.ACCOUNT_BACKUP.get;
+  f.env.ACCOUNT_BACKUP.get = () => assert.fail("throttled request reached Durable Object");
+  const denied = await f.route(token);
+  assert.equal(denied.status, 429);
+  assert.equal(denied.headers.get("Retry-After"), "60");
+  assert.equal(denied.headers.get("Cache-Control"), "no-store");
+  assert.equal(f.bucket.conditionedGets.length, 0);
+  counts.clear(); // The binding's next window admits the one-request drill.
+  f.env.ACCOUNT_BACKUP.get = originalGet;
+  assert.equal((await f.route(token)).status, 200);
+  assert.equal(counts.get("192.0.2.47"), 1);
+});
+
+test("archive limiter failure or missing binding fails closed with the uniform 404", async () => {
+  for (const limiter of [undefined, { limit: () => ({}) }, { limit: () => null }, { limit: () => { throw new Error("private provider failure"); } }]) {
+    const f = capabilityFixture();
+    f.env.PUBLIC_IP_LIMITER = limiter;
+    f.env.ACCOUNT_BACKUP.get = () => assert.fail("unavailable limiter reached Durable Object");
+    const response = await f.route("bad");
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "backup archive is not available" });
+  }
+});
 
 test("archive capabilities bind committed identity, hash storage keys, consume once and expire", async () => {
   const f = capabilityFixture();
@@ -2095,7 +2132,15 @@ test("archive public route conceals missing, expired, mismatched and changed sou
 });
 
 test("pull drill rejects generic and mismatched acknowledgements without receipts", async () => {
-  for (const acknowledgement of [{}, { schema_version: "witself.v0", account_id: ACCOUNT, backup_id: "wrong", purpose: "backup", status: "active", archive_schema_version: 73, validated: true }]) {
+  for (const [acknowledgement, expected] of [
+    [{}, "missing exact acknowledgement"],
+    [{ error: 123, other: "private" }, "missing exact acknowledgement"],
+    [{ error: "invalid or mismatched backup archive", other: "private" }, "invalid or mismatched backup archive"],
+    [{ error: " \n" + "x".repeat(121) + "\u0000é" }, "x".repeat(120)],
+    [{ error: "bad\n\u0000 archive! é" }, "bad archive!"],
+    [{ error: "\n\u0000" }, "missing exact acknowledgement"],
+    [{ schema_version: "witself.v0", account_id: ACCOUNT, backup_id: "wrong", purpose: "backup", status: "active", archive_schema_version: 73, validated: true }, "missing exact acknowledgement"],
+  ]) {
     const f = capabilityFixture();
     const receipts = [];
     const binding = directory({ [`cell:${TARGET}`]: { endpoint: "https://validation.example", accepting: false,
@@ -2105,7 +2150,11 @@ test("pull drill rejects generic and mismatched acknowledgements without receipt
       ACCOUNT_BACKUP: backupNamespace(f.record, receipts), BACKUPS: f.bucket },
     { account_id: ACCOUNT, backup_id: f.record.backup_id, target_cell: TARGET },
     { origin: "https://cp.test.invalid", validateArchive: () => validVerification(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1)),
-      fetch: async (_url, options) => { assert.equal(options.body, undefined); return Response.json(acknowledgement); } }), /backup validation 200/);
+      fetch: async (_url, options) => { assert.equal(options.body, undefined); return Response.json(acknowledgement); } }), (error) => {
+      assert.equal(error.message, `backup validation 200: ${expected}`);
+      assert.ok(!error.message.includes("private"));
+      return true;
+    });
     assert.deepEqual(receipts, []);
   }
 });
@@ -2120,4 +2169,33 @@ test("independent capabilities serialize without sharing the long export fence",
   assert.ok(tokens[0].token !== tokens[1].token);
   const results = await Promise.all(tokens.map((token) => f.call("/archive-capability:consume", token)));
   assert.deepEqual(results.map((r) => r.status), [200, 200]);
+});
+
+test("status exposes persisted probe health after a fresh Worker and without live health", async () => {
+  const env = healthEnv({});
+  env.FLEET_TOKEN = "fleet-test";
+  const request = () => new Request("https://cp.test.invalid/v1/backups/status", {
+    headers: { Authorization: "Bearer fleet-test" },
+  });
+  env.DIRECTORY.list = () => { throw new Error("live listing unavailable"); };
+  const health = { computed_at: NOW.toISOString(), health_available: true,
+    stale_accounts: 2, never_committed_accounts: 1, oldest_committed_age_seconds: 123 };
+  for (const snapshot of [null, { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health },
+    { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health: { ...health, health_available: false } },
+    { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health: { ...health, stale_accounts: "invalid" } }]) {
+    if (snapshot) await env.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(snapshot));
+    const response = await worker.fetch(request(), env, {});
+    assert.equal(response.status, 200);
+    const status = await response.json();
+    assert.equal(status.health_available, false, "live fleet health stays independent");
+    if (snapshot === null) {
+      assert.equal(status.scan, null);
+    } else {
+      const available = snapshot.health.health_available && typeof snapshot.health.stale_accounts === "number";
+      assert.equal(status.scan.health_available, available);
+      assert.equal(status.scan.stale_accounts, available ? 2 : null);
+      const probes = await uptimeProbeMetricsResponse(new Request("https://cp.test.invalid/metrics/probes"), env);
+      assert.match(await probes.text(), new RegExp(`witself_control_plane_account_backup_health_available ${Number(available)}\\n`));
+    }
+  }
 });

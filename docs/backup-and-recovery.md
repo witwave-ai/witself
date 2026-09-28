@@ -1496,7 +1496,9 @@ size, source cell and target cell. Only a SHA-256 hash indexes the stored
 capability. Consumption marks it used durably before returning its object
 identity; expired and used entries are opportunistically removed. A failed
 or interrupted pull requires a new drill and capability, not a retry of the
-same token.
+same token. The public archive route shares the public IP limiter (300 requests
+per 60 seconds, keyed by `CF-Connecting-IP`) before accessing capability storage.
+Throttles return 429 with `Retry-After: 60`; other failures retain the uniform 404.
 
 The Worker sends the target an empty validation POST with the archive URL,
 capability and size headers described in [API routes](api-routes.md). The public
@@ -1506,7 +1508,15 @@ The cell requires an explicit HTTPS origin allow-list setting,
 rejects redirects, and verifies the advertised download length before returning
 its existing rollback-only validation acknowledgement. The Worker still checks
 the exact acknowledgement and target isolation before recording a receipt.
-It allows 20 minutes for the cell request.
+It allows 20 minutes for the cell request. Rejected acknowledgements report only
+the cell's fixed `error` string, sanitized to printable ASCII and capped at 120
+characters; other responses report `missing exact acknowledgement`.
+
+With backup validation enabled, startup rejects a nonempty
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN` unless it is HTTPS with a host and
+no path, query, fragment, or userinfo. One trailing slash is removed. Empty
+keeps legacy body validation available but leaves pulls unconfigured. The startup
+line reports only whether pull validation is configured, never the origin.
 
 Roll out cells first, including the drill cell's archive origin configuration,
 and the control plane second. The cell retains legacy request-body validation

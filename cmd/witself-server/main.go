@@ -147,6 +147,11 @@ func serve() int {
 	defer stop()
 
 	cfg := server.ConfigFromEnv()
+	cfg.CellName = os.Getenv("WITSELF_CELL_NAME")
+	if err := configureBackupValidation(&cfg, backupValidationEnabled, os.Getenv("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN"), os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	provisionToken := strings.TrimSpace(os.Getenv(provisionTokenEnv))
 	backupToken := strings.TrimSpace(os.Getenv(backupTokenEnv))
 	if err := validateBackupConfiguration(
@@ -1343,7 +1348,7 @@ func serve() int {
 			accountID, evacuationID string,
 			w io.Writer,
 		) error {
-			cellName := os.Getenv("WITSELF_CELL_NAME")
+			cellName := cfg.CellName
 			err := st.ExportAccountEvacuation(
 				ctx, accountID, evacuationID, cellName, version.Version, w,
 			)
@@ -1365,7 +1370,7 @@ func serve() int {
 			w io.Writer,
 			flush func() error,
 		) error {
-			if cellName != os.Getenv("WITSELF_CELL_NAME") {
+			if cellName != cfg.CellName {
 				_, _ = fmt.Fprintln(os.Stderr, "account backup manifest stamped with the control plane's cell name")
 			}
 			err := st.ExportAccountBackup(
@@ -1387,7 +1392,7 @@ func serve() int {
 			accountID string,
 			w io.Writer,
 		) error {
-			cellName := os.Getenv("WITSELF_CELL_NAME")
+			cellName := cfg.CellName
 			err := st.ExportAccountSelf(
 				ctx, accountID, cellName, version.Version, w,
 			)
@@ -1401,7 +1406,7 @@ func serve() int {
 		}
 		cfg.ReportAccountExportFailure = func(_ context.Context, accountID string, err error) {
 			logAccountExportFailure(os.Stderr,
-				accountID, os.Getenv("WITSELF_CELL_NAME"), err)
+				accountID, cfg.CellName, err)
 		}
 		cfg.ResumeAccountOwner = func(ctx context.Context, accountID, operatorID string) error {
 			err := st.ResumeAccountOwner(ctx, accountID, operatorID)
@@ -1696,10 +1701,8 @@ func serve() int {
 				EvacuationCompleted: disposition.EvacuationCompleted,
 			}, nil
 		}
-		cfg.BackupValidationEnabled = backupValidationEnabled
-		cfg.BackupValidationArchiveOrigin = os.Getenv("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN")
 		cfg.ReportAccountBackupValidationFailure = func(_ context.Context, accountID string, err error) {
-			logAccountBackupValidationFailure(os.Stderr, accountID, os.Getenv("WITSELF_CELL_NAME"), err)
+			logAccountBackupValidationFailure(os.Stderr, accountID, cfg.CellName, err)
 		}
 		if backupValidationEnabled {
 			cfg.ValidateAccountBackup = func(
@@ -2067,6 +2070,20 @@ func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
 			avatarPayloadCompactionEnabledEnv, err)
 	}
 	return enabled, nil
+}
+
+func configureBackupValidation(cfg *server.Config, enabled bool, origin string, w io.Writer) error {
+	cfg.BackupValidationEnabled = enabled
+	cfg.BackupValidationArchiveOrigin = ""
+	if enabled {
+		normalized, err := server.NormalizeBackupValidationArchiveOrigin(origin)
+		if err != nil {
+			return fmt.Errorf("WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN: %w", err)
+		}
+		cfg.BackupValidationArchiveOrigin = normalized
+	}
+	_, _ = fmt.Fprintf(w, "witself-server: backup pull validation configured=%t\n", cfg.BackupValidationArchiveOrigin != "")
+	return nil
 }
 
 func backupValidationEnabledFromEnv() (bool, error) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -759,5 +760,42 @@ func TestMessageRequestAdaptersPreserveProtocolFields(t *testing.T) {
 	}
 	if len(detail.Claims) != 1 || detail.Claims[0].ClaimID != "mrc_1" || detail.Claims[0].LeaseExpiresAt == nil || !detail.Claims[0].LeaseExpiresAt.Equal(leaseExpiresAt) {
 		t.Fatalf("claim adapter = %#v", detail.Claims)
+	}
+}
+
+func TestConfigureBackupValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, want string
+		enabled, wantErr   bool
+	}{
+		{name: "normalized", enabled: true, origin: "https://cp.example/", want: "https://cp.example"},
+		{name: "legacy body validation", enabled: true},
+		{name: "disabled ignores dormant setting", origin: "http://private/path"},
+		{name: "invalid enabled origin", enabled: true, origin: "https://user:private@cp.example/path", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			var cfg server.Config
+			err := configureBackupValidation(&cfg, tc.enabled, tc.origin, &output)
+			if (err != nil) != tc.wantErr {
+				t.Fatal("unexpected configuration result")
+			}
+			if tc.wantErr {
+				if !strings.Contains(err.Error(), "WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN") || strings.Contains(err.Error(), "private") || output.Len() != 0 {
+					t.Fatal("invalid configuration diagnostic leaked input or claimed success")
+				}
+				return
+			}
+			if cfg.BackupValidationEnabled != tc.enabled || cfg.BackupValidationArchiveOrigin != tc.want {
+				t.Fatal("backup validation configuration mismatch")
+			}
+			wantLog := "witself-server: backup pull validation configured=false\n"
+			if tc.want != "" {
+				wantLog = "witself-server: backup pull validation configured=true\n"
+			}
+			if output.String() != wantLog {
+				t.Fatal("startup did not emit exactly one value-free configuration line")
+			}
+		})
 	}
 }

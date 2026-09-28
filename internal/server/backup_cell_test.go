@@ -18,7 +18,7 @@ import (
 
 func TestAccountBackupCellManifestAndEcho(t *testing.T) {
 	const configuredCell = "civo-sandbox-use1-serving"
-	t.Setenv("WITSELF_CELL_NAME", configuredCell)
+	t.Setenv("WITSELF_CELL_NAME", "changed-after-startup")
 	for _, tc := range []struct {
 		name, header, want string
 	}{
@@ -36,6 +36,7 @@ func TestAccountBackupCellManifestAndEcho(t *testing.T) {
 			calls := 0
 			handler := accountBackupHandler(Config{
 				BackupToken: "witself_bkp_test",
+				CellName:    configuredCell,
 				StreamAccountBackup: func(ctx context.Context, accountID, backupID, cellName string, w io.Writer, _ func() error) error {
 					calls++
 					return archiveexport.Write(ctx, w, archiveexport.Manifest{
@@ -408,5 +409,19 @@ func TestAccountBackupArchivePullSpoolsBeforeValidation(t *testing.T) {
 	after, _ := filepath.Glob(spoolGlob)
 	if len(after) != len(before) {
 		t.Fatalf("spool files leaked: before=%d after=%d", len(before), len(after))
+	}
+}
+
+func TestNormalizeBackupValidationArchiveOrigin(t *testing.T) {
+	for _, origin := range []string{"", "https://cp.example", "https://cp.example/", "https://cp.example:8443/", "https://[::1]:443/"} {
+		got, err := NormalizeBackupValidationArchiveOrigin(origin)
+		if err != nil || got != strings.TrimSuffix(origin, "/") {
+			t.Fatalf("valid origin: normalized=%q err=%v", got, err)
+		}
+	}
+	for _, origin := range []string{"http://cp.example", "https://", "https://:443", "https://cp.example//", "https://cp.example/path", "https://cp.example/%2f", "https://cp.example?", "https://cp.example?q=private", "https://cp.example#", "https://cp.example#private", "https://user:private@cp.example", " https://cp.example", "https://cp.example/\n", "https:cp.example", "://private"} {
+		if got, err := NormalizeBackupValidationArchiveOrigin(origin); err == nil || got != "" || strings.Contains(err.Error(), "private") {
+			t.Fatal("invalid origin accepted or disclosed")
+		}
 	}
 }

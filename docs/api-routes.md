@@ -16,6 +16,7 @@ and the persisted `scan` (or null). Additive fields:
 | Scan | `previous_slot` | Immediately preceding scheduled interval's timestamp. |
 | Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot; deduplicated between current job and failure history. |
 | Scan | `previous_slot_status_unavailable` | Accounts whose previous-slot state could not be read; never interpreted as success. |
+| Scan | `health_available`, `stale_accounts`, `oldest_committed_age_seconds`, `never_committed_accounts`, `computed_at` | Validated persisted health projection shared with Prometheus, including immediately after a Worker deploy. Malformed snapshots report unavailable; `scan` is null only when no snapshot exists. |
 | Scan | `health` | Persisted fleet health snapshot used by Prometheus: `stale_accounts`, `oldest_committed_age_seconds`, `never_committed_accounts`, `health_available`, and `computed_at`. |
 | Scan | `health_progress` | Internal aggregate progress for the current traversal; not published as complete health. |
 
@@ -79,14 +80,23 @@ and streams the committed R2 object conditioned on its catalog ETag. Success
 includes `Content-Type: application/gzip`, exact `Content-Length`,
 `Cache-Control: no-store`, `X-Witself-Backup-ID`, and `X-Witself-Backup-Cell`
 (the source cell). Unavailable, expired, used, invalid, or mismatched capabilities
-all return 404 `{"error":"backup archive is not available"}`.
+all return 404 `{"error":"backup archive is not available"}` below the rate limit.
+Before capability storage access, the route uses the shared `PUBLIC_IP_LIMITER`
+bucket keyed by `CF-Connecting-IP` (300 requests per 60 seconds per IP).
+Over-limit requests return 429 with `Retry-After: 60` and do not consume a
+capability. A missing or failed limiter fails closed with the same uniform 404.
 
 `POST /v1/accounts/{id}:validate-backup` keeps the dedicated cell backup bearer,
 `X-Witself-Backup-ID`, and `X-Witself-Backup-Validation: true`. New control planes
 send an empty body and three headers: `X-Witself-Backup-Archive-URL`,
 `X-Witself-Backup-Archive-Token`, and `X-Witself-Backup-Archive-Size`.
 The URL must use HTTPS and exactly match the cell's configured
-`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`; the token must match
+`WITSELF_BACKUP_VALIDATION_ARCHIVE_ORIGIN`. When backup validation is enabled,
+a nonempty origin is validated at startup: HTTPS with a host, no userinfo,
+path, query, or fragment; one trailing slash is normalized away. Invalid values
+stop startup with a value-free error. An empty setting leaves pull validation
+unconfigured while preserving legacy body validation. Startup logs only whether
+pull validation is configured. The token must match
 `^cap_[0-9a-f]{64}$` and size must be a positive integer at most 8 GiB.
 Invalid sources return 400 `a valid backup archive source is required` before
 network access, and a download that cannot start (non-200, response length

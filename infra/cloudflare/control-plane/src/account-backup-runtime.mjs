@@ -1540,7 +1540,7 @@ export async function accountBackupStatus(env, accountID = undefined) {
   const base = {
     schema_version: "witself.v0",
     schedule: config,
-    scan: isObject(scan) ? scan : null,
+    scan: isObject(scan) ? { ...scan, ...accountBackupHealthSnapshot(scan) } : null,
   };
   if (accountID === undefined || accountID === null || accountID === "") {
     try {
@@ -1886,8 +1886,12 @@ export async function runAccountBackupValidation(
     // A generic 2xx is never accepted as proof of rollback-only validation.
   }
   if (!response.ok || !exactValidationAck(acknowledgement, record)) {
+    // Only the cell's fixed error field may cross this diagnostic boundary.
+    const detail = isObject(acknowledgement) && typeof acknowledgement.error === "string"
+      ? acknowledgement.error.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 120)
+      : "";
     throw new Error(
-      `backup validation ${response.status}: missing exact acknowledgement`,
+      `backup validation ${response.status}: ${detail || "missing exact acknowledgement"}`,
     );
   }
 

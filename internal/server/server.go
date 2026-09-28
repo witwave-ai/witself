@@ -34,6 +34,7 @@ import (
 
 // Config holds the listen addresses for the three witself-server listeners.
 type Config struct {
+	CellName    string // startup cell identity used by backup and export handlers
 	APIAddr     string // public /v1 API
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
 	MetricsAddr string // Prometheus metrics
@@ -5669,12 +5670,28 @@ func newBackupArchiveClient() *http.Client {
 var backupArchiveCapabilityPattern = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
 var backupArchiveSizePattern = regexp.MustCompile(`^[0-9]+$`)
 
+// NormalizeBackupValidationArchiveOrigin validates the optional pull origin.
+// Empty leaves legacy request-body validation available without enabling pulls.
+func NormalizeBackupValidationArchiveOrigin(origin string) (string, error) {
+	if origin == "" {
+		return "", nil
+	}
+	normalized := strings.TrimSuffix(origin, "/")
+	u, err := neturl.Parse(normalized)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(normalized, "?#") {
+		return "", errors.New("backup validation archive origin must be an HTTPS origin with a host and no path, query, fragment, or userinfo")
+	}
+	return normalized, nil
+}
+
 func backupArchiveSource(r *http.Request, origin string) (*neturl.URL, int64, bool) {
 	u, err := neturl.Parse(r.Header.Get("X-Witself-Backup-Archive-URL"))
-	allowed, allowedErr := neturl.Parse(origin)
+	normalized, originErr := NormalizeBackupValidationArchiveOrigin(origin)
+	allowed, allowedErr := neturl.Parse(normalized)
 	sizeText := r.Header.Get("X-Witself-Backup-Archive-Size")
 	size, sizeErr := strconv.ParseInt(sizeText, 10, 64)
-	valid := err == nil && allowedErr == nil && origin != "" &&
+	valid := err == nil && originErr == nil && allowedErr == nil && normalized != "" &&
 		u.Scheme == "https" && allowed.Scheme == "https" && u.Host != "" && u.Host == allowed.Host &&
 		u.User == nil && u.Fragment == "" && allowed.User == nil && allowed.Path == "" &&
 		allowed.RawQuery == "" && allowed.Fragment == "" &&
@@ -5786,7 +5803,7 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 		}
 
 		if exportBackup {
-			cellName := os.Getenv("WITSELF_CELL_NAME")
+			cellName := cfg.CellName
 			if names, present := r.Header[http.CanonicalHeaderKey(AccountBackupCellHeader)]; present {
 				if len(names) != 1 || !validCellName(names[0]) {
 					writeJSONError(w, http.StatusBadRequest, "a valid backup cell name is required")
