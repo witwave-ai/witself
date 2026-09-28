@@ -386,7 +386,24 @@ type EvacuatedAccount struct {
 // Remaining is zero. Uses a longer HTTP timeout than the routine registry
 // endpoints because each account's archive can stream for a while.
 func (c *Client) Evacuate(ctx context.Context, name string, batch int) (EvacuationResult, error) {
-	body := map[string]int{"batch": batch}
+	return c.evacuate(ctx, name, batch, "")
+}
+
+var accountIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// EvacuateAccount evacuates exactly one routed account, leaving other accounts alone.
+func (c *Client) EvacuateAccount(ctx context.Context, name, accountID string) (EvacuationResult, error) {
+	if !accountIDPattern.MatchString(accountID) {
+		return EvacuationResult{}, fmt.Errorf("invalid account_id")
+	}
+	return c.evacuate(ctx, name, 1, accountID)
+}
+
+func (c *Client) evacuate(ctx context.Context, name string, batch int, accountID string) (EvacuationResult, error) {
+	body := struct {
+		Batch     int    `json:"batch"`
+		AccountID string `json:"account_id,omitempty"`
+	}{batch, accountID}
 	rdr, err := marshalBody(body)
 	if err != nil {
 		return EvacuationResult{}, err
@@ -735,12 +752,26 @@ func (c *Client) RestorePlacement(ctx context.Context, batch int, allRegions boo
 // Rebalance asks the control plane to move live accounts to better
 // eligible cells by placement policy (POST /v1/placement:rebalance).
 func (c *Client) Rebalance(ctx context.Context, batch int, dryRun bool) (RebalanceResult, error) {
+	return c.rebalance(ctx, batch, dryRun, "")
+}
+
+// RebalanceAccount evaluates or moves exactly one eligible account.
+func (c *Client) RebalanceAccount(ctx context.Context, accountID string, dryRun bool) (RebalanceResult, error) {
+	if !accountIDPattern.MatchString(accountID) {
+		return RebalanceResult{}, fmt.Errorf("invalid account_id")
+	}
+	return c.rebalance(ctx, 1, dryRun, accountID)
+}
+
+func (c *Client) rebalance(ctx context.Context, batch int, dryRun bool, accountID string) (RebalanceResult, error) {
 	body := struct {
-		Batch  int  `json:"batch"`
-		DryRun bool `json:"dry_run,omitempty"`
+		AccountID string `json:"account_id,omitempty"`
+		Batch     int    `json:"batch"`
+		DryRun    bool   `json:"dry_run,omitempty"`
 	}{
-		Batch:  batch,
-		DryRun: dryRun,
+		AccountID: accountID,
+		Batch:     batch,
+		DryRun:    dryRun,
 	}
 	rdr, err := marshalBody(body)
 	if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -724,5 +725,153 @@ func writeCellsAdminTestJSON(t *testing.T, w http.ResponseWriter, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Errorf("encode test response: %v", err)
+	}
+}
+
+func TestCellsMoveCLI(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_FLEET_TOKEN", "")
+	tokenPath := filepath.Join(t.TempDir(), "fleet-credential")
+	if err := os.WriteFile(tokenPath, []byte("fixture-fleet\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		want   map[string]any
+		field  string
+		failed bool
+	}{
+		{"evacuate", []string{"evacuate", "src", "--account", "chosen", "--batch", "99"}, map[string]any{"account_id": "chosen", "batch": float64(1)}, "evacuated", false},
+		{"restore defaults", []string{"restore", "src"}, map[string]any{"batch": float64(4), "all_regions": false}, "restored", false},
+		{"restore all regions", []string{"restore", "--batch", "1", "--all-regions"}, map[string]any{"batch": float64(1), "all_regions": true}, "restored", false},
+		{"account failure", []string{"evacuate", "src", "--account", "chosen"}, map[string]any{"account_id": "chosen", "batch": float64(1)}, "evacuated", true},
+	} {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", tc.name, jsonOut), func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if r.Method != http.MethodPost || r.URL.RequestURI() != "/v1/cells/src:"+tc.args[0] || r.Header.Get("Authorization") != "Bearer fixture-fleet" {
+						t.Error("unexpected request or authorization")
+					}
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if !reflect.DeepEqual(body, tc.want) {
+						t.Errorf("body = %#v; want %#v", body, tc.want)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": "src", "remaining": 2, tc.field: []map[string]any{{"account_id": "chosen", "ok": !tc.failed, "error": "private-backend", "token": "fixture-fleet"}}, "progress": map[string]any{"failed": "private-backend"}})
+				}))
+				defer server.Close()
+				args := append([]string{"cells"}, tc.args...)
+				args = append(args, "--endpoint", server.URL, "--token-file", tokenPath)
+				if jsonOut {
+					args = append(args, "--json")
+				}
+				if tc.name == "restore all regions" {
+					args = append(args, "src")
+				}
+				stdout, stderr, code := captureEmailAliasAdminCLI(t, func() int { return run(args) })
+				wantCode := 0
+				if tc.failed {
+					wantCode = 1
+				}
+				if code != wantCode || calls != 1 {
+					t.Fatalf("exit=%d calls=%d stderr=%s", code, calls, stderr)
+				}
+				if !strings.Contains(stdout, "chosen") || !strings.Contains(stdout, "remaining") {
+					t.Fatalf("missing outcome: %s", stdout)
+				}
+				for _, secret := range []string{"fixture-fleet", "private-backend", "progress"} {
+					if strings.Contains(stdout+stderr, secret) {
+						t.Error("output leaked private response material")
+					}
+				}
+				if jsonOut {
+					var result struct {
+						Results []struct {
+							OK bool `json:"ok"`
+						} `json:"results"`
+						Remaining int `json:"remaining"`
+					}
+					if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+						t.Fatal(err)
+					}
+					if result.Remaining != 2 || len(result.Results) != 1 || result.Results[0].OK == tc.failed {
+						t.Fatalf("bad result: %s", stdout)
+					}
+				} else if tc.failed && !strings.Contains(stdout, "error") {
+					t.Fatal("failure missing from table")
+				}
+			})
+		}
+	}
+}
+
+func TestCellsMoveCLIValidationAndHelp(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_FLEET_TOKEN", "")
+	for _, args := range [][]string{
+		{"evacuate", "src"}, {"evacuate", "src", "--account", "bad/id"},
+		{"restore", "src", "--batch", "0"}, {"restore", "src", "--batch", "11"},
+		{"restore", "src", "--batch", "bad"}, {"restore", "src", "--account", "chosen"},
+		{"evacuate", "src", "--account", "chosen", "--all-regions"},
+		{"restore", "src", "--token-file", filepath.Join(t.TempDir(), "missing")},
+		{"restore", "src", "--fleet-token", "fixture"}, {"restore", "src", "--token", "fixture"},
+	} {
+		_, _, code := captureEmailAliasAdminCLI(t, func() int { return run(append([]string{"cells"}, args...)) })
+		if code != 2 {
+			t.Fatalf("args=%v exit=%d", args, code)
+		}
+	}
+	for _, verb := range []string{"evacuate", "restore"} {
+		_, stderr, code := captureEmailAliasAdminCLI(t, func() int { return run([]string{"cells", verb, "--help"}) })
+		if code != 0 || !strings.Contains(stderr, "-token-file") {
+			t.Fatalf("help exit=%d stderr=%s", code, stderr)
+		}
+	}
+}
+
+func TestCellsMoveCLISuppressesBackendErrors(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_FLEET_TOKEN", "fixture-fleet")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"private-upstream fixture-fleet"}`))
+	}))
+	defer server.Close()
+	stdout, stderr, code := captureEmailAliasAdminCLI(t, func() int { return run([]string{"cells", "restore", "src", "--endpoint", server.URL}) })
+	if code != 1 || strings.Contains(stdout+stderr, "private-upstream") || strings.Contains(stdout+stderr, "fixture-fleet") {
+		t.Fatal("unsafe error output or successful exit")
+	}
+}
+
+func TestCellsMoveCLIFileFailures(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	// An explicit bad file must not fall back to an otherwise usable environment token.
+	t.Setenv("WITSELF_FLEET_TOKEN", "fixture-fleet")
+	for _, tc := range []struct {
+		name, content string
+		mode          os.FileMode
+	}{
+		{"empty", "", 0o600}, {"whitespace", " \n\t", 0o600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fleet-credential")
+			if err := os.WriteFile(path, []byte(tc.content), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; w.WriteHeader(http.StatusNoContent) }))
+			defer server.Close()
+			stdout, stderr, code := captureEmailAliasAdminCLI(t, func() int {
+				return run([]string{"cells", "restore", "src", "--endpoint", server.URL, "--token-file", path})
+			})
+			if code != 2 || calls != 0 || strings.Contains(stdout+stderr, "fixture-fleet") {
+				t.Fatalf("exit=%d calls=%d", code, calls)
+			}
+		})
 	}
 }

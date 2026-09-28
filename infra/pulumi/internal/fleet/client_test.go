@@ -646,3 +646,55 @@ func TestDrainRejectsInvalidCellNameBeforeRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountSelectorRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		want       map[string]any
+		call       func(*Client) error
+	}{
+		{"evacuate batch", "/v1/cells/src:evacuate", map[string]any{"batch": float64(4)}, func(c *Client) error { _, err := c.Evacuate(context.Background(), "src", 4); return err }},
+		{"evacuate account", "/v1/cells/src:evacuate", map[string]any{"batch": float64(1), "account_id": "chosen"}, func(c *Client) error { _, err := c.EvacuateAccount(context.Background(), "src", "chosen"); return err }},
+		{"rebalance batch", "/v1/placement:rebalance", map[string]any{"batch": float64(3)}, func(c *Client) error { _, err := c.Rebalance(context.Background(), 3, false); return err }},
+		{"rebalance account", "/v1/placement:rebalance", map[string]any{"batch": float64(1), "account_id": "chosen"}, func(c *Client) error { _, err := c.RebalanceAccount(context.Background(), "chosen", false); return err }},
+		{"rebalance preview", "/v1/placement:rebalance", map[string]any{"batch": float64(1), "account_id": "chosen", "dry_run": true}, func(c *Client) error { _, err := c.RebalanceAccount(context.Background(), "chosen", true); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.RequestURI() != tc.path || r.Header.Get("Authorization") != "Bearer fixture-fleet" {
+					t.Error("unexpected request or authorization")
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if !reflect.DeepEqual(body, tc.want) {
+					t.Errorf("body = %#v; want %#v", body, tc.want)
+				}
+				_, _ = w.Write([]byte(`{"evacuated":[],"rebalanced":[],"remaining":0}`))
+			}))
+			defer server.Close()
+			c := &Client{base: server.URL, token: "fixture-fleet"}
+			if err := tc.call(c); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("calls = %d", calls)
+			}
+		})
+	}
+}
+
+func TestAccountSelectorsRejectInvalidID(t *testing.T) {
+	c := &Client{base: ":invalid"}
+	for _, id := range []string{"", "bad/id", strings.Repeat("a", 129)} {
+		if _, err := c.EvacuateAccount(context.Background(), "src", id); err == nil || err.Error() != "invalid account_id" {
+			t.Fatalf("invalid evacuation selector: %v", err)
+		}
+		if _, err := c.RebalanceAccount(context.Background(), id, false); err == nil || err.Error() != "invalid account_id" {
+			t.Fatalf("invalid rebalance selector: %v", err)
+		}
+	}
+}

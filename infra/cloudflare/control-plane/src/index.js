@@ -3352,7 +3352,12 @@ async function handleEvacuate(request, env, cellName) {
   // Coerce carefully — Number(undefined) is NaN, and NaN slips past
   // Math.min/Math.max to become the loop limit. Anything non-finite falls
   // back to the default, then we clamp.
-  let batch = Number(body.batch);
+  const accountId = body?.account_id;
+  if (accountId !== undefined &&
+      (typeof accountId !== "string" || !ACCOUNT_ID.test(accountId))) {
+    return err("invalid account_id", 400);
+  }
+  let batch = accountId === undefined ? Number(body?.batch) : 1;
   if (!Number.isFinite(batch) || batch < 1) {
     batch = 4;
   }
@@ -3360,23 +3365,31 @@ async function handleEvacuate(request, env, cellName) {
 
   // Iterate acct: entries pointing at this cell.
   const targets = [];
-  let cursor;
-  do {
-    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
-    for (const k of page.keys) {
-      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry?.cell === cellName) {
-        targets.push(k.name.slice("acct:".length));
-        if (targets.length >= batch) {
-          break;
+  if (accountId !== undefined) {
+    const entry = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
+    if (entry?.cell !== cellName) {
+      return err("account is not routed to this cell", 404);
+    }
+    targets.push(accountId);
+  } else {
+    let cursor;
+    do {
+      const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+      for (const k of page.keys) {
+        const entry = await env.DIRECTORY.get(k.name, { type: "json" });
+        if (entry?.cell === cellName) {
+          targets.push(k.name.slice("acct:".length));
+          if (targets.length >= batch) {
+            break;
+          }
         }
       }
-    }
-    if (targets.length >= batch) {
-      break;
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+      if (targets.length >= batch) {
+        break;
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }
 
   // Track cross-batch progress. This entry is best-effort; the true state of
   // the world is the acct:/archived: pairs.
@@ -4009,12 +4022,17 @@ async function handlePlacementRebalance(request, env) {
   } catch {
     // defaults are fine
   }
-  let batch = Number(body.batch);
+  const accountId = body?.account_id;
+  if (accountId !== undefined &&
+      (typeof accountId !== "string" || !ACCOUNT_ID.test(accountId))) {
+    return err("invalid account_id", 400);
+  }
+  let batch = accountId === undefined ? Number(body?.batch) : 1;
   if (!Number.isFinite(batch) || batch < 1) {
     batch = 1;
   }
   batch = Math.min(Math.floor(batch), 5);
-  const dryRun = body.dry_run === true;
+  const dryRun = body?.dry_run === true;
 
   const backupsEnabled = accountBackupSchedulingEnabled(env);
   const destinationOptions = { backupsEnabled };
@@ -4030,7 +4048,9 @@ async function handlePlacementRebalance(request, env) {
 
   let cursor;
   do {
-    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
+    const page = accountId !== undefined
+      ? { keys: [{ name: `acct:${accountId}` }], list_complete: true }
+      : await env.DIRECTORY.list({ prefix: "acct:", cursor });
     for (const k of page.keys) {
       const accountId = k.name.slice("acct:".length);
       const route = await env.DIRECTORY.get(k.name, { type: "json" });
@@ -4071,6 +4091,10 @@ async function handlePlacementRebalance(request, env) {
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
+
+  if (accountId !== undefined && targets.length === 0) {
+    return err("account is not a rebalance candidate", 409);
+  }
 
   const results = [];
   for (const target of targets) {
