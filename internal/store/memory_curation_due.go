@@ -18,6 +18,16 @@ import (
 // absorbing a generation whose omitted sources would then never be scanned.
 const automaticMemoryCurationCoalescingKey = "system.automatic.owner"
 
+// Server-generated requests under the reserved coalescing key carry one of two
+// idempotency-key shapes. The importer accepts exactly these, so both writers
+// and the archive validator must share the constants.
+const (
+	automaticMemoryCurationKeyPrefix   = "automatic:"
+	memoryCurationFollowUpKeyPrefix    = "curation-follow-up:"
+	memoryCurationFollowUpTrigger      = "generation_follow_up"
+	memoryCurationSourceBacklogTrigger = "source_backlog"
+)
+
 // lockMemoryCurationSourceLaneTx establishes the global owner mutation order
 // used by source writers and curation apply: account -> curation lane -> source
 // clocks/heads. Callers that may later mark work due acquire this lock before
@@ -66,7 +76,7 @@ func (s *Store) markMemoryCurationDueTx(
 	}
 
 	digest := sha256.Sum256([]byte(p.AccountID + "\x00" + p.RealmID + "\x00" + p.ID + "\x00" + sourceKind + "\x00" + sourceKey))
-	idempotencyKey := "automatic:" + sourceKind + ":" + hex.EncodeToString(digest[:])
+	idempotencyKey := automaticMemoryCurationKeyPrefix + sourceKind + ":" + hex.EncodeToString(digest[:])
 	requestHash, err := memoryRequestHash(struct {
 		Operation     string `json:"operation"`
 		SourceKind    string `json:"source_kind"`

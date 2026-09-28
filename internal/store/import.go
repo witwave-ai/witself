@@ -3975,9 +3975,16 @@ func validateImportedCurationRequestContent(obj map[string]any) error {
 		idempotencyKey, keyOK := obj["idempotency_key"].(string)
 		readOnlyReplay, replayOK := obj["read_only_replay"].(bool)
 		_, hasReplayRun := optionalStringField(obj, "replay_run_id")
+		// The server writes two shapes under the reserved key: source
+		// triggers ("automatic:<source>:<digest>") and the generation
+		// follow-ups an applied run queues ("curation-follow-up:<run id>"
+		// with a follow-up trigger reason). Anything else is not server
+		// generated and must not be imported as automatic work.
+		serverShape := keyOK && (strings.HasPrefix(idempotencyKey, automaticMemoryCurationKeyPrefix) ||
+			(strings.HasPrefix(idempotencyKey, memoryCurationFollowUpKeyPrefix) &&
+				(triggerReason == memoryCurationFollowUpTrigger || triggerReason == memoryCurationSourceBacklogTrigger)))
 		if scopeErr != nil || !sameCanonicalMemoryCurationJSON(decoded, defaultScope) ||
-			!priorityOK || priority != 0 || !keyOK ||
-			!strings.HasPrefix(idempotencyKey, "automatic:") || !replayOK ||
+			!priorityOK || priority != 0 || !serverShape || !replayOK ||
 			readOnlyReplay || hasReplayRun {
 			return fmt.Errorf("reserved automatic request shape is invalid")
 		}
@@ -7870,11 +7877,16 @@ func validateImportedMemoryCurationGraph(ic *importCtx) error {
 		if run.fencingGeneration > maxFenceByOwner[run.owner] {
 			maxFenceByOwner[run.owner] = run.fencingGeneration
 		}
+		// The run receipt counts value-free transcript coverage inputs under
+		// the transcript count, exactly as the planner does when it records
+		// the receipt; the importer must add the two kinds up the same way.
+		observedTranscripts := run.observedByKind[MemoryCurationInputTranscript] +
+			run.observedByKind[MemoryCurationInputTranscriptCoverage]
 		if run.observedInputs != run.inputCount ||
-			run.observedByKind["memory"] != run.memoryInputCount ||
-			run.observedByKind["evidence"] != run.evidenceInputCount ||
-			run.observedByKind["transcript"] != run.transcriptInputCount ||
-			run.observedByKind["cursor"] != run.cursorInputCount {
+			run.observedByKind[MemoryCurationInputMemory] != run.memoryInputCount ||
+			run.observedByKind[MemoryCurationInputEvidence] != run.evidenceInputCount ||
+			observedTranscripts != run.transcriptInputCount ||
+			run.observedByKind[MemoryCurationInputCursor] != run.cursorInputCount {
 			return fmt.Errorf("run %q materialized input counts do not match its receipt", runID)
 		}
 	}
