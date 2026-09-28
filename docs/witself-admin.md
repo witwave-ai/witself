@@ -83,13 +83,13 @@ witself-admin cells deregister civo-example --yes --yes-cell civo-example --json
 ```
 
 `list` uses the admin token and reports registration, live/archived account
-counts, and cell version. The other five verbs use the fleet token:
+counts, and cell version. The registry repair verbs use the fleet token:
 `--fleet-token` or its `--token` alias, then `--token-file`, then
 `WITSELF_FLEET_TOKEN`, then managed `fleet.token`. Do not combine
 `--fleet-token` with `--token`. They do not fall back to an admin token.
 Each verb accepts `--endpoint` and `--json`. Cell names contain 1–64 lowercase
 letters, digits, or hyphens and may appear before or after the flags.
-The five repair verbs return success for `--help`.
+All repair and move verbs return success for `--help`.
 For these repair verbs, the control-plane endpoint must be an HTTP or HTTPS
 origin, optionally ending in `/`, without a base path, credentials, query,
 or fragment. This applies equally to `--endpoint` and `WITSELF_CONTROL_PLANE`.
@@ -101,6 +101,8 @@ or fragment. This applies equally to `--endpoint` and `WITSELF_CONTROL_PLANE`.
 | `register NAME` | `POST /v1/cells` | Upserted registry entry |
 | `drain NAME` | `PATCH /v1/cells/{name}` with `{"accepting":false}` | Stop accepting placements |
 | `undrain NAME` | `PATCH /v1/cells/{name}` with `{"accepting":true}` | Resume accepting placements |
+| `evacuate NAME --account ID [--batch N]` | `POST /v1/cells/{name}:evacuate` with `account_id` and `batch:1` | One account archived; source must be drained |
+| `restore NAME [--batch N] [--all-regions]` | `POST /v1/cells/{name}:restore` | One bounded eligible archive batch |
 | `deregister NAME` | Safe `DELETE /v1/cells/{name}` | Registry removal receipt |
 
 `register` requires `--cell-endpoint`, an HTTPS URL without embedded
@@ -142,6 +144,61 @@ accounts through the existing operator workflow before retrying. There is
 no `--force` override or purge path in these repair commands. Successful JSON
 is
 `{"schema_version":"witself.v0","name":"civo-example","deleted":true}`.
+
+### Account moves
+
+Deploy the selector-aware control plane before using per-account evacuation
+or rebalance. Older handlers ignore `account_id` and may move the first account
+in directory order instead. Client acknowledgement checks happen after the
+operation and cannot make an older server safe for selected moves.
+
+The move verbs use `--token-file PATH`, `WITSELF_FLEET_TOKEN`, or the managed
+fleet token file, in that order. They do not accept token values on argv.
+They accept the same `--endpoint` origin and `--json` options as repair verbs.
+Evacuation requires `--account ID` (1–128 ASCII letters, digits, `_` or `-`),
+ignores `--batch`, and moves only that account. A missing or wrong-cell route
+returns 404. Restore defaults to batch 4, accepts 1–10, and requires an accepting
+destination. `--all-regions` bypasses only the legacy archive region filter;
+hard placement pins still apply.
+
+Move output contains `schema_version`, `cell`, `results` (account IDs, `ok`,
+and a generic error on failure), and `remaining`. Tables show account/status
+and remaining. Raw errors, archive details, and progress records are omitted.
+An account failure exits 1 even on HTTP 200; remaining work alone is not failure.
+`remaining` is the cell's routed count for evacuation and the destination's
+eligible archive count for restore, not just the selected account.
+
+Move one account at a time in operator-chosen order (for example, founder last):
+
+```sh
+witself-admin cells drain SRC
+witself-admin cells evacuate SRC --account ID
+witself-admin cells restore DST --batch 1
+# Verify GET /v1/directory/ID reports DST before moving the next account.
+```
+
+Use fleet registry names for SRC and DST. Ensure DST is accepting and policy
+eligible. Coordinate with the placement runner and other operators: restore
+has no account selector and `--batch 1` chooses the first eligible archive,
+which can be another account if an archive backlog exists. Check the returned
+account ID and directory route before continuing.
+
+Before restoring to DST, rollback of the archived account is:
+
+```sh
+witself-admin cells undrain SRC
+witself-admin cells restore SRC --batch 1
+# Verify GET /v1/directory/ID reports SRC.
+```
+
+Same-cell restore verifies the archive and promotes the frozen source rows in
+place. This rollback applies while the account is archived; an account already
+routed to DST requires a new drain/evacuate/restore sequence back to SRC.
+
+The fleet API also accepts `account_id` on `POST /v1/placement:rebalance`.
+It evaluates only that account, ignores batch, and returns 409 for a
+non-candidate. `dry_run: true` evaluates without moving. Without the selector,
+both API handlers retain their existing bounded batch selection behavior.
 
 ## Events
 

@@ -21,15 +21,19 @@ import (
 )
 
 var cellRegistryName = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+var cellMoveAccountID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 func cellsUsage(w io.Writer) {
-	cliout.Line(w, "usage: witself-admin cells list|show|register|deregister|drain|undrain ...")
+	cliout.Line(w, "usage: witself-admin cells list|show|register|deregister|drain|undrain|evacuate|restore ...")
 	cliout.Line(w, "  list                         Admin-token fleet view with account counts")
 	cliout.Line(w, "  show NAME                    Inspect one registry entry (fleet token)")
 	cliout.Line(w, "  register NAME --cell-endpoint HTTPS_URL [flags]  Upsert a registry entry")
 	cliout.Line(w, "  drain NAME                   Stop new placements; existing accounts remain")
 	cliout.Line(w, "  undrain NAME                 Resume placements (except backup validation targets)")
 	cliout.Line(w, "  deregister NAME --yes [--yes-cell NAME]  Remove a drained, account-free entry")
+	cliout.Line(w, "  evacuate NAME --account ID [--batch N]  Archive exactly one account (drain first)")
+	cliout.Line(w, "  restore NAME [--batch N] [--all-regions]  Restore an eligible archive batch")
+	cliout.Line(w, "Move flags: --endpoint URL, --token-file PATH (or managed fleet token / environment), --json")
 	cliout.Line(w, "Repair flags: --endpoint URL, --fleet-token TOKEN (or --token / --token-file), --json")
 	cliout.Line(w, "Deregister requires exact-name confirmation; scripts need --yes --yes-cell NAME.")
 	cliout.Line(w, "Deregister uses safe DELETE; the control plane refuses cells with accounts or new placements enabled.")
@@ -45,15 +49,21 @@ type cellRegistryFlags struct {
 }
 
 func newCellRegistryFlags(verb string) cellRegistryFlags {
+	c := newCellRegistryFileFlags(verb)
+	c.fleetToken = c.fs.String("fleet-token", "", "fleet shared secret")
+	c.token = c.fs.String("token", "", "fleet shared secret (alias for --fleet-token; not an admin token)")
+	return c
+}
+
+func newCellRegistryFileFlags(verb string) cellRegistryFlags {
 	fs := flag.NewFlagSet("cells "+verb, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	return cellRegistryFlags{
 		fs:         fs,
 		endpoint:   fs.String("endpoint", "", "control-plane URL"),
-		fleetToken: fs.String("fleet-token", "", "fleet shared secret"),
-		token:      fs.String("token", "", "fleet shared secret (alias for --fleet-token; not an admin token)"),
-		tokenFile:  fs.String("token-file", "", "file containing the fleet shared secret"),
-		json:       jsonFlag(fs),
+		fleetToken: new(string), token: new(string),
+		tokenFile: fs.String("token-file", "", "file containing the fleet shared secret"),
+		json:      jsonFlag(fs),
 	}
 }
 
@@ -271,5 +281,70 @@ func printFleetCell(res *client.FleetCellResult, jsonOut bool) int {
 		tabSafe(c.Name), tabSafe(c.Endpoint), tabSafe(c.Cloud), tabSafe(c.Region), tabSafe(c.RegionCode),
 		tabSafe(c.Channel), c.Weight, accepting, c.BackupValidationTarget, c.HasProvisionToken, c.HasBackupToken)
 	flush()
+	return 0
+}
+
+// cellsMove uses only file/environment credentials, so secrets need not appear on argv.
+func cellsMove(args []string, restore bool) int {
+	verb := "evacuate"
+	if restore {
+		verb = "restore"
+	}
+	c := newCellRegistryFileFlags(verb)
+	batch := c.fs.Int("batch", 4, "batch size 1-10 (ignored with --account)")
+	var accountID string
+	var allRegions bool
+	if restore {
+		c.fs.BoolVar(&allRegions, "all-regions", false, "allow legacy archives from any region; hard placement pins still apply")
+	} else {
+		c.fs.StringVar(&accountID, "account", "", "exact account ID to evacuate (required)")
+	}
+	name, err := c.parse(args)
+	if err != nil {
+		return cellRegistryError(err, 2)
+	}
+	if !restore && !cellMoveAccountID.MatchString(accountID) {
+		return cellRegistryError(fmt.Errorf("--account requires 1-128 letters, digits, underscores, or hyphens"), 2)
+	}
+	if restore && (*batch < 1 || *batch > 10) {
+		return cellRegistryError(fmt.Errorf("--batch must be between 1 and 10"), 2)
+	}
+	ep, tok, err := c.credentials()
+	if err != nil {
+		return cellRegistryError(fmt.Errorf("fleet token unavailable; use --token-file or the managed fleet token"), 2)
+	}
+	var res *client.FleetMoveResult
+	if restore {
+		res, err = client.RestoreFleetCell(context.Background(), ep, tok, name, *batch, allRegions)
+	} else {
+		res, err = client.EvacuateFleetAccount(context.Background(), ep, tok, name, accountID)
+	}
+	if err != nil {
+		// Backend errors can include upstream response bodies and credentials.
+		return cellRegistryError(fmt.Errorf("%s request failed; inspect control-plane diagnostics", verb), 1)
+	}
+	failed := false
+	for _, row := range res.Results {
+		failed = failed || !row.OK
+	}
+	if *c.json {
+		if code := printJSON(res); code != 0 {
+			return code
+		}
+	} else {
+		w, flush := tableWriter("account\tstatus")
+		for _, row := range res.Results {
+			status := "ok"
+			if !row.OK {
+				status = "error"
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\n", row.AccountID, status)
+		}
+		flush()
+		fmt.Printf("remaining\t%d\n", res.Remaining)
+	}
+	if failed {
+		return 1
+	}
 	return 0
 }

@@ -460,6 +460,46 @@ native deletion flags, the Azure database lock, or the applied
 snapshots fail closed. Azure's irreversible purge protection and AWS's prod
 recovery window allow the subsequent soft-delete destroy.
 
+## Account moves in a chosen order
+
+Upgrade the control plane to support `account_id` selectors before using this
+sequence. Older handlers ignore that field and can evacuate a different account.
+
+Use fleet registry names (which may differ from inventory names) and the managed
+fleet token or `--token-file PATH`; never place a credential value on argv.
+Confirm DST is accepting and satisfies the account's placement policy. Coordinate
+with the placement runner and other operators so they do not restore the archive
+before this sequence finishes.
+
+```sh
+witself-admin cells drain SRC
+witself-admin cells evacuate SRC --account ID
+witself-admin cells restore DST --batch 1
+# Verify GET /v1/directory/ID resolves to DST before continuing.
+```
+
+Repeat per account in the chosen order, leaving the founder until last if needed.
+Evacuation selects exactly ID and ignores `--batch`. Restore has no account
+selector: `--batch 1` restores the first eligible archive, so an existing backlog
+can select a different account. Inspect the returned account ID and verify the
+specific directory route after every restore. Restore defaults to batch 4;
+`--all-regions` relaxes only legacy archive region matching, never hard policy pins.
+Move commands print only account IDs, success/error status, and remaining work
+(with schema and cell metadata in JSON); an account failure exits nonzero.
+
+While ID remains archived, rollback is:
+
+```sh
+witself-admin cells undrain SRC
+witself-admin cells restore SRC --batch 1
+# Verify GET /v1/directory/ID resolves to SRC.
+```
+
+Same-cell restore verifies the archive and promotes frozen rows in place. Once
+the account is routed to DST, rollback requires another evacuation from DST
+and restore to SRC. See [admin account moves](witself-admin.md#account-moves)
+for selector grammar, output, and fleet rebalance dry-run behavior.
+
 ## Decommission a cell and preserve its accounts
 
 `witself-infra destroy` is the fleet operator's counterpart to signup: it drains

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // ErrFleetCellNotRegistered means the control plane has no registry entry for
@@ -248,4 +249,87 @@ func fleetRequestURL(endpoint, route string) (string, error) {
 		return "", fmt.Errorf("invalid cell request route")
 	}
 	return u.String(), nil
+}
+
+// FleetMoveAccount is the value-free outcome of one account operation.
+type FleetMoveAccount struct {
+	AccountID string `json:"account_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// FleetMoveResult deliberately excludes backend progress and raw error text.
+type FleetMoveResult struct {
+	SchemaVersion string             `json:"schema_version"`
+	Cell          string             `json:"cell"`
+	Results       []FleetMoveAccount `json:"results"`
+	Remaining     int                `json:"remaining"`
+}
+
+var fleetAccountIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// EvacuateFleetAccount archives exactly one account routed to a drained cell.
+func EvacuateFleetAccount(ctx context.Context, endpoint, token, name, accountID string) (*FleetMoveResult, error) {
+	if !fleetAccountIDPattern.MatchString(accountID) {
+		return nil, fmt.Errorf("invalid account_id")
+	}
+	return fleetMove(ctx, endpoint, token, name, "evacuate", map[string]any{"account_id": accountID, "batch": 1}, accountID)
+}
+
+// RestoreFleetCell restores a bounded batch of eligible archives into a cell.
+func RestoreFleetCell(ctx context.Context, endpoint, token, name string, batch int, allRegions bool) (*FleetMoveResult, error) {
+	if batch < 1 || batch > 10 {
+		return nil, fmt.Errorf("batch must be between 1 and 10")
+	}
+	return fleetMove(ctx, endpoint, token, name, "restore", map[string]any{"batch": batch, "all_regions": allRegions}, "")
+}
+
+func fleetMove(ctx context.Context, endpoint, token, name, action string, body map[string]any, accountID string) (*FleetMoveResult, error) {
+	if err := validateFleetCellName(name); err != nil {
+		return nil, err
+	}
+	requestURL, err := fleetRequestURL(endpoint, "/v1/cells/"+name+":"+action)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	type outcome struct {
+		AccountID string `json:"account_id"`
+		OK        *bool  `json:"ok"`
+	}
+	var out struct {
+		SchemaVersion string    `json:"schema_version"`
+		Cell          string    `json:"cell"`
+		Evacuated     []outcome `json:"evacuated"`
+		Restored      []outcome `json:"restored"`
+		Remaining     *int      `json:"remaining"`
+	}
+	if err := doJSONWithHeadersTimeout(ctx, http.MethodPost, requestURL, token, nil, payload, &out, 10*time.Minute); err != nil {
+		return nil, err
+	}
+	rows := out.Evacuated
+	if action == "restore" {
+		rows = out.Restored
+	}
+	if out.SchemaVersion != "witself.v0" || out.Cell != name || out.Remaining == nil || *out.Remaining < 0 || rows == nil {
+		return nil, fmt.Errorf("invalid cell move acknowledgement")
+	}
+	if accountID != "" && (len(rows) != 1 || rows[0].AccountID != accountID) {
+		return nil, fmt.Errorf("control plane did not acknowledge the selected account")
+	}
+	result := &FleetMoveResult{SchemaVersion: out.SchemaVersion, Cell: name, Remaining: *out.Remaining, Results: make([]FleetMoveAccount, 0, len(rows))}
+	for _, row := range rows {
+		if !fleetAccountIDPattern.MatchString(row.AccountID) || row.OK == nil {
+			return nil, fmt.Errorf("invalid account move outcome")
+		}
+		item := FleetMoveAccount{AccountID: row.AccountID, OK: *row.OK}
+		if !item.OK {
+			item.Error = "operation failed"
+		}
+		result.Results = append(result.Results, item)
+	}
+	return result, nil
 }

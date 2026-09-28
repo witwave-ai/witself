@@ -34,6 +34,10 @@ func cellsCmd(args []string) int {
 		return cellsSetAccepting(args[1:], false)
 	case "undrain":
 		return cellsSetAccepting(args[1:], true)
+	case "evacuate":
+		return cellsMove(args[1:], false)
+	case "restore":
+		return cellsMove(args[1:], true)
 	case "help", "--help", "-h":
 		cellsUsage(os.Stdout)
 		return 0

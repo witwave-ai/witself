@@ -394,3 +394,85 @@ func TestFleetSetAcceptingRejectsAmbiguousAcknowledgements(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetMoveRequestsAndProjection(t *testing.T) {
+	for _, restore := range []bool{false, true} {
+		t.Run(map[bool]string{false: "evacuate", true: "restore"}[restore], func(t *testing.T) {
+			action, field := "evacuate", "evacuated"
+			want := map[string]any{"account_id": "chosen", "batch": float64(1)}
+			if restore {
+				action, field = "restore", "restored"
+				want = map[string]any{"batch": float64(2), "all_regions": true}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.RequestURI() != "/v1/cells/src:"+action || r.Header.Get("Authorization") != "Bearer fixture-fleet" {
+					t.Error("unexpected request or authorization")
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if !reflect.DeepEqual(body, want) {
+					t.Errorf("body = %#v", body)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": "src", "remaining": 3, field: []map[string]any{{"account_id": "chosen", "ok": false, "error": "private-upstream", "token": "private-upstream"}}, "progress": map[string]any{"failed": "private-upstream"}})
+			}))
+			defer server.Close()
+			var result *FleetMoveResult
+			var err error
+			if restore {
+				result, err = RestoreFleetCell(context.Background(), server.URL, "fixture-fleet", "src", 2, true)
+			} else {
+				result, err = EvacuateFleetAccount(context.Background(), server.URL, "fixture-fleet", "src", "chosen")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "private-upstream") || result.Remaining != 3 || len(result.Results) != 1 || result.Results[0].Error != "operation failed" {
+				t.Fatalf("unsafe or invalid projection: %s", raw)
+			}
+		})
+	}
+}
+
+func TestFleetMoveRejectsInvalidAcknowledgements(t *testing.T) {
+	for _, body := range []string{
+		`{}`, `{ "schema_version":"witself.v0","cell":"src","evacuated":[],"remaining":0 }`,
+		`{ "schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"other","ok":true}],"remaining":0 }`,
+		`{ "schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"chosen"}],"remaining":0 }`,
+		`{ "schema_version":"witself.v0","cell":"src","evacuated":[{"account_id":"chosen","ok":true}],"remaining":-1 }`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+		_, err := EvacuateFleetAccount(context.Background(), server.URL, "fixture", "src", "chosen")
+		server.Close()
+		if err == nil {
+			t.Fatalf("accepted invalid acknowledgement %s", body)
+		}
+	}
+}
+
+func TestFleetMoveRejectsInvalidInputBeforeRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; w.WriteHeader(http.StatusNoContent) }))
+	defer server.Close()
+	for _, tc := range []struct{ name, account, endpoint string }{
+		{"src", "", server.URL}, {"src", "bad/id", server.URL},
+		{"bad/cell", "chosen", server.URL}, {"src", "chosen", server.URL + "#"},
+	} {
+		if _, err := EvacuateFleetAccount(context.Background(), tc.endpoint, "fixture", tc.name, tc.account); err == nil {
+			t.Error("accepted invalid move input")
+		}
+	}
+	for _, batch := range []int{0, 11} {
+		if _, err := RestoreFleetCell(context.Background(), server.URL, "fixture", "src", batch, false); err == nil {
+			t.Error("accepted invalid restore batch")
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("requests = %d", calls)
+	}
+}
