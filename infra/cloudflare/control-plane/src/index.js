@@ -4572,7 +4572,6 @@ async function handleProbe(request, env, cellName) {
 // by CP_ACCOUNT_BACKUPS_ENABLED=false, while these explicit calls make the MVP
 // observable and testable before that clock is activated.
 async function handleAccountBackups(request, env, url) {
-  if (url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH) return accountBackupArchive(request, env);
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -4697,10 +4696,24 @@ function isProtectedWorkerRoute(pathname) {
 async function handleFetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Capabilities have their own uniform failure boundary, before public
-    // limiters or account/container dispatch can substitute other responses.
+    // Throttle before any capability storage access. All failures except an
+    // explicit limiter denial retain the capability route's uniform 404.
     if (url.pathname === ACCOUNT_BACKUP_ARCHIVE_PATH) {
-      return accountBackupArchive(request, env);
+      try {
+        const result = await env.PUBLIC_IP_LIMITER.limit({ key: sourceIP(request) });
+        if (result?.success === false) {
+          const response = rateLimited();
+          response.headers.set("Retry-After", "60");
+          response.headers.set("Cache-Control", "no-store");
+          return response;
+        }
+        if (result?.success !== true) throw new Error("archive limiter unavailable");
+        return accountBackupArchive(request, env);
+      } catch {
+        return new Response(JSON.stringify({ error: "backup archive is not available" }), {
+          status: 404, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
     }
 
     // Public metrics terminate before rate limiting, account lookups, auth or
