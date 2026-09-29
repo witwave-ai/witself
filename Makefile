@@ -397,6 +397,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	WITSELF_ROLL_STATES_JOBS=$(WITSELF_ROLL_STATES_JOBS) bash scripts/test-cell-roll-states.sh
 	bash scripts/test-fetch-test-postgresql-chart.sh
 	bash scripts/test-roll-cell-gate.sh
+	bash scripts/test-roll-train.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
 	bash scripts/test-workflow-runner-labels.sh

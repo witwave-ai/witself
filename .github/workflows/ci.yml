@@ -637,6 +637,10 @@ jobs:
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh
 
+      - name: roll train offline contract checks
+        timeout-minutes: 10
+        run: bash scripts/test-roll-train.sh
+
       - name: memory load quality workflow contract checks
         run: bash scripts/test-memory-load-quality-workflow.sh
       - name: hosted runner image and required check name contract checks
