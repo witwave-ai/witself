@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 )
 
 const configSkeleton = `# witself-infra cell inventory.
@@ -142,14 +144,33 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	if !label.MatchString(get("role")) {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", get("role"))
 	}
+
+	if effective("backend") != "r2" && (explicit["r2-bucket"] || explicit["r2-endpoint"]) {
+		return fmt.Errorf("-r2-bucket and -r2-endpoint apply only to -backend r2")
+	}
+	if effective("backend") == "r2" {
+		if get("cloud") != "civo" {
+			return fmt.Errorf("-backend r2 is only implemented for -cloud civo")
+		}
+		settings := backend.R2Settings{Bucket: effective("r2-bucket"), Endpoint: effective("r2-endpoint")}
+		if err := backend.ValidateR2Settings(settings); err != nil {
+			return err
+		}
+		if explicit["state-dir"] {
+			return fmt.Errorf("-state-dir does not apply to -backend r2 (inventory key state_dir)")
+		}
+		if err := backend.R2SettingsContainSecret(settings, os.Getenv); err != nil {
+			return err
+		}
+	}
 	if get("cloud") == "civo" {
 		for _, ignored := range []string{"cidr", "db-version", "domain"} {
 			if explicit[ignored] {
 				return fmt.Errorf("-%s does not apply to -cloud civo", ignored)
 			}
 		}
-		if effective("backend") != "local" {
-			return fmt.Errorf("-cloud civo requires -backend local")
+		if effective("backend") != "local" && effective("backend") != "r2" {
+			return fmt.Errorf("-cloud civo requires -backend local or r2")
 		}
 		if !civoProfiles[effective("profile")] {
 			return fmt.Errorf("-cloud civo supports only -profile minimal or prod")
@@ -212,6 +233,8 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	backendVal := effective("backend")
 	entry.Backend = &backendVal
 	str("state-dir", &entry.StateDir)
+	str("r2-bucket", &entry.R2Bucket)
+	str("r2-endpoint", &entry.R2Endpoint)
 	str("control-plane", &entry.ControlPlane)
 	str("fleet-token-file", &entry.FleetTokenFile)
 	if explicit["argocd"] {
@@ -289,6 +312,9 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		fmt.Println("note: add-cell rewrites the file — YAML comments are not preserved")
 	}
 	fmt.Printf("try: witself-infra preview -cell %s\n", cellName)
+	if backendVal == "r2" {
+		fmt.Printf("first: witself-infra state-check -cell %s\n", cellName)
+	}
 	return nil
 }
 

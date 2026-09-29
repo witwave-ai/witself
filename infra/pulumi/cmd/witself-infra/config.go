@@ -29,6 +29,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 )
 
 // witselfHome is the managed root shared with the other witself CLIs:
@@ -134,6 +136,8 @@ type cellEntry struct {
 	BootstrapTokenFile     *string          `yaml:"bootstrap_token_file,omitempty"`
 	Backend                *string          `yaml:"backend,omitempty"`
 	StateDir               *string          `yaml:"state_dir,omitempty"`
+	R2Bucket               *string          `yaml:"r2_bucket,omitempty"`
+	R2Endpoint             *string          `yaml:"r2_endpoint,omitempty"`
 	ControlPlane           *string          `yaml:"control_plane,omitempty"`
 	FleetTokenFile         *string          `yaml:"fleet_token_file,omitempty"`
 	CivoNodeSize           *string          `yaml:"civo_node_size,omitempty"`
@@ -223,6 +227,8 @@ func (e *cellEntry) flagValues() map[string]string {
 	set("bootstrap-token-file", e.BootstrapTokenFile)
 	set("backend", e.Backend)
 	set("state-dir", e.StateDir)
+	set("r2-bucket", e.R2Bucket)
+	set("r2-endpoint", e.R2Endpoint)
 	set("control-plane", e.ControlPlane)
 	set("fleet-token-file", e.FleetTokenFile)
 	set("civo-node-size", e.CivoNodeSize)
@@ -323,6 +329,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		if d.Backend != nil || d.StateDir != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set backend/state_dir — stack addressing is per-cell only", path)
 		}
+		if d.R2Bucket != nil || d.R2Endpoint != nil {
+			return nil, path, fmt.Errorf("%s: defaults must not set r2_bucket/r2_endpoint — stack addressing is per-cell only", path)
+		}
 		if d.BackupValidationTarget != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set backup_validation_target — restore-test isolation is per-cell only", path)
 		}
@@ -350,6 +359,30 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 			return nil, path, fmt.Errorf("%s: cell %q registry_name %q duplicates cell %q registry_name", path, name, registryName, owner)
 		}
 		registryOwners[registryName] = name
+	}
+
+	for _, name := range names {
+		e := cfg.Cells[name]
+		kind := ""
+		if e.Backend != nil {
+			kind = *e.Backend
+		}
+		if kind == "r2" {
+			if e.Cloud == nil || *e.Cloud != "civo" {
+				return nil, path, fmt.Errorf("%s: cell %q: backend r2 is only implemented for cloud civo", path, name)
+			}
+			if e.StateDir != nil {
+				return nil, path, fmt.Errorf("%s: cell %q: state_dir does not apply to backend r2", path, name)
+			}
+			if e.R2Bucket == nil || e.R2Endpoint == nil {
+				return nil, path, fmt.Errorf("%s: cell %q: backend r2 requires r2_bucket and r2_endpoint", path, name)
+			}
+			if err := backend.ValidateR2Settings(backend.R2Settings{Bucket: *e.R2Bucket, Endpoint: *e.R2Endpoint}); err != nil {
+				return nil, path, fmt.Errorf("%s: cell %q: %w", path, name, err)
+			}
+		} else if e.R2Bucket != nil || e.R2Endpoint != nil {
+			return nil, path, fmt.Errorf("%s: cell %q: r2_bucket/r2_endpoint apply only to backend r2", path, name)
+		}
 	}
 	return &cfg, path, nil
 }

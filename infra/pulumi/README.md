@@ -25,7 +25,7 @@ build from the repo-root module.
 infra/pulumi/
   cmd/witself-infra/    # the CLI: up | preview | destroy | refresh | outputs |
                         #   config | whoami | dashboard | version | fleet verbs
-  internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS, Azure Blob)
+  internal/backend/      # state backend bootstrap/lookup (AWS S3, GCP GCS, Azure Blob) and the R2 check
   internal/cell/        # the inline Pulumi program — the cell definition
   internal/fleet/       # control-plane fleet-registry client
 ```
@@ -224,6 +224,9 @@ Civo currently uses an explicit local Pulumi backend for these cells; `bootstrap
 civo-sandbox-use1-serving` initializes that directory locally and performs no
 cloud-side backend work.
 
+A Civo cell can keep its state in Cloudflare R2 instead; see
+[Cloudflare R2 state backend](#cloudflare-r2-state-backend-civo-cells).
+
 The Civo `minimal` profile (and the default when `-profile` is omitted) uses one
 K3s node. The `prod` profile uses a fixed two-node K3s pool; no cluster
 autoscaler is wired. This fixed two-node production default reflects the Civo
@@ -247,6 +250,9 @@ State is stored in a cloud object-storage backend for real cells — shared,
 durable, cloud-KMS-encrypted secrets (no passphrase), **one object-store backend
 and one cloud key per account/project/subscription + region**. (`-backend local`
 is the dev opt-out.)
+
+A Civo cell can use Cloudflare R2 with a passphrase that the operator supplies;
+see [Cloudflare R2 state backend](#cloudflare-r2-state-backend-civo-cells).
 
 AWS uses S3 + AWS KMS and remains the default backend:
 
@@ -412,6 +418,173 @@ archive restore completes, the CLI reads the GKE API directly with ADC and waits
 for every Argo CD Application to report `Synced/Healthy`. That makes Google
 ManagedCertificate status lag visible as a normal waiter instead of a surprise
 operator caveat after the command exits.
+
+## Cloudflare R2 state backend (Civo cells)
+
+`-backend r2` keeps a Civo cell's Pulumi state in a Cloudflare R2 bucket, so
+the state does not live on one machine. It is accepted only with `-cloud civo`.
+AWS, GCP and Azure cells keep their own backends. A Civo cell recorded with
+`backend: local` keeps its local state until it is migrated, which is a
+separate later step (see the end of this section).
+
+### What the owner creates
+
+`witself-infra` creates no bucket, no token and no bucket setting. It writes
+objects into the bucket that the owner created: Pulumi's state files and, for
+the check, one small probe object that it deletes again.
+
+1. **The bucket.** Create it in the Cloudflare dashboard or with
+   `wrangler r2 bucket create <name>`. A name has 3-63 characters: lowercase
+   letters, digits and hyphens. One bucket can hold the stacks of several
+   cells.
+2. **A bucket-scoped token.** On the R2 API tokens page, create a token with
+   the permission **Object Read & Write** and apply it to that bucket only.
+   Cloudflare shows the Access Key ID and the Secret Access Key once. The token
+   cannot create a bucket or change bucket settings. A new token can take up
+   to a minute to work.
+3. **The state passphrase.** Generate at least 20 characters in the password
+   manager and keep it there. It encrypts the secrets inside the state, and
+   every machine that operates the cell must use the same value. For an R2
+   cell `witself-infra` never generates a passphrase, never reads one from a
+   file and never writes one to disk. A lost passphrase cannot be recovered.
+
+### Record the cell
+
+```sh
+witself-infra config add-cell \
+  -cloud civo -account-alias prod -region nyc1 -role serving -profile prod \
+  -backend r2 \
+  -r2-bucket <bucket> \
+  -r2-endpoint https://<account-id>.r2.cloudflarestorage.com \
+  -civo-token-file "$HOME/.witself/tokens/civo-sandbox.token" \
+  -civo-expected-account-id 00000000-0000-0000-0000-000000000000 \
+  -civo-admin-cidr 203.0.113.7/32 \
+  -argocd \
+  -control-plane https://self.witwave.ai
+```
+
+The inventory stores the bucket name and the endpoint as `r2_bucket` and
+`r2_endpoint`. Both are per-cell only and neither is a secret. A bucket created
+with a jurisdiction uses the `eu`, `us` or `fedramp` form of the endpoint host.
+`-state-dir` does not apply.
+
+A `witself-infra` older than the release that introduced these two keys rejects
+an inventory that contains them, for every cell. Install the new binary before
+you add the first R2 cell.
+
+### Variables to export
+
+The three secret values come only from the environment of the process:
+
+| Variable | Value |
+|---|---|
+| `WITSELF_INFRA_R2_ACCESS_KEY_ID` | the token's Access Key ID |
+| `WITSELF_INFRA_R2_SECRET_ACCESS_KEY` | the token's Secret Access Key |
+| `WITSELF_INFRA_STATE_PASSPHRASE` | the state passphrase |
+
+```sh
+printf 'R2 access key id: ';     read -rs WITSELF_INFRA_R2_ACCESS_KEY_ID;     echo
+printf 'R2 secret access key: '; read -rs WITSELF_INFRA_R2_SECRET_ACCESS_KEY; echo
+printf 'State passphrase: ';     read -rs WITSELF_INFRA_STATE_PASSPHRASE;     echo
+export WITSELF_INFRA_R2_ACCESS_KEY_ID WITSELF_INFRA_R2_SECRET_ACCESS_KEY WITSELF_INFRA_STATE_PASSPHRASE
+```
+
+If a variable is absent, the command refuses and names it. The values are
+never written to `infra.yaml`. `witself-infra` replaces the three values in its
+final error line, in progress events and in the stack-output error of the
+`cell-health` report. Other output is not filtered: the Pulumi CLI writes its
+own progress to the terminal and into the dashboard's log files.
+
+Do not export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or
+`PULUMI_CONFIG_PASSPHRASE` for this purpose. Those names also reach the AWS
+cells and the local-state cells that you operate from the same shell, and they
+change which credentials and which passphrase those cells use. `witself-infra`
+maps the three dedicated variables to the names Pulumi reads, inside the R2
+cell's own Pulumi process only.
+
+All R2 cells operated from one shell share the three values. The dashboard
+runs its operations and its background health probes as child processes, so
+export the variables in the shell that starts the dashboard.
+
+### Check the backend
+
+```sh
+witself-infra state-check -cell <cell>
+```
+
+`state-check` lists the bucket, writes one small probe object under
+`.pulumi/locks/witself-infra-state-check/`, reads it back, confirms that a
+listing shows it, deletes it and confirms that a listing no longer shows it.
+These are the operations Pulumi's lock depends on. It then prints whether the
+cell's stack file exists and how many lock, history and backup objects the
+cell has. `up`, `preview`, `refresh`, `destroy` and `bootstrap` run the same
+probe first. `outputs` and `cell-health` never run the probe. `whoami` checks
+the Civo identity only. For an R2 cell `bootstrap` runs the probe and creates
+no bucket and no local file, and `-bootstrap` is accepted and ignored.
+
+The first Pulumi command on a bucket writes `.pulumi/meta.yaml`, whichever
+verb it is.
+
+On an R2 cell, `outputs`, `cell-health`, `refresh` and `destroy` never create
+a stack. If the bucket holds no stack for the cell they refuse. Only `preview`
+and `up` create the stack of a new cell.
+
+### What R2 does not offer, and what stands in for it
+
+R2 has no bucket versioning, no S3 object lock calls, no bucket policy and no
+KMS-managed key. It encrypts every object at rest itself. R2 also accepts
+encryption keys supplied per request (SSE-C); the backend URL below does not
+use them.
+
+Pulumi keeps its own copies inside the bucket:
+
+- `.pulumi/history/witself-infra/<cell>/` holds one entry and one copy of the
+  state per operation;
+- `.pulumi/backups/witself-infra/<cell>/` holds a timestamped copy of the
+  state after every `up`, `refresh` and `destroy`, whether or not the
+  operation changed anything;
+- `<cell>.json.bak` beside the active state file holds the previous version.
+
+Optionally, add R2 bucket lock rules for the two prefixes `.pulumi/history/`
+and `.pulumi/backups/`, so that these copies cannot be deleted or overwritten
+during a retention period. Never add a rule without a prefix. Never add one on
+`.pulumi/`, on `.pulumi/stacks/`, on `.pulumi/locks/` or on any prefix below
+`.pulumi/locks/`: Pulumi overwrites the active state file and deletes its lock
+object in every operation. `state-check` finds a rule that covers
+`.pulumi/locks/` as a whole; it does not find a rule on one cell's lock folder.
+Bucket lock rules are set by the owner; the state token cannot change them.
+Try the rules on a scratch bucket first.
+
+### The Pulumi URL
+
+`witself-infra` builds this backend URL and needs Pulumi CLI 3.263.0 or newer:
+
+```text
+s3://<bucket>?endpoint=https%3A%2F%2F<account-id>.r2.cloudflarestorage.com&region=auto&request_checksum_calculation=when_required&use_path_style=true
+```
+
+- `endpoint` is the R2 S3 endpoint, with its scheme.
+- `region=auto` is R2's region; the AWS SDK requires one.
+- `use_path_style=true` addresses the bucket in the path.
+- `request_checksum_calculation=when_required` stops the AWS SDK from adding
+  checksums that a store other than AWS may reject.
+
+### A stale lock
+
+Pulumi's lock is an object under
+`.pulumi/locks/organization/witself-infra/<cell>/`. It has no expiry. A run
+that was killed leaves it behind, and every later `up`, `refresh` and
+`destroy` refuses. `state-check` prints the number of lock objects.
+`witself-infra` has no verb that removes a lock. Confirm that no operation is
+running on any machine or in any dashboard, then delete the objects of that
+folder in the Cloudflare dashboard.
+
+### Migrating an existing local stack
+
+Moving a cell from `backend: local` to `backend: r2` is a separate later step
+and is not supported by this tool yet. Do not change `backend` on the record
+of an existing cell: the cell would then address a new, empty state while its
+real resources stay in the old one.
 
 ## GitOps (Argo CD)
 
