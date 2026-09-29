@@ -904,6 +904,19 @@ storage or a shared sending-domain/provider budget; schema 91 addresses the
 cell-storage half only. Cohort expansion still requires global provider
 backpressure.
 
+From `v0.0.318` a resident account that is missing from a cell's receive
+cohort defers instead of bouncing. That deferral never succeeds until an
+operator corrects the cohort, so it is a deliberate exception to the rule that
+permanent conditions reject. It needs a signed relay for an address that
+exists in a resident account and that no route check refuses. For canonical
+and alias routes it is reachable only for an account that the edge allowlist
+admits. Custom-domain routes are not subject to that allowlist; they reach a
+cell only while the separate custom-domain delivery gate is enabled at the
+edge. The deferral stores nothing and is decided before the cell's rate
+breakers, like the `receive_disabled` deferral. Each retry still costs an edge
+read and relay of up to 25 MiB and one cell body read under the two-reader
+admission bound.
+
 The deployed hardened public outbound-dispatch Worker charges a hashed
 source-IP lane before authentication, verifies the Ed25519 header envelope
 before reading the body, then reads and hashes at most 2 MiB of JSON. It

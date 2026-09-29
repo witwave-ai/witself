@@ -433,7 +433,7 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 	outOfCohort.AccountIDs = map[string]bool{"acc_aaaaaaaaaaaaaaaa": true}
 	if _, err := st.IngestAgentEmailPilot(
 		ctx, outOfCohort, ingestInput,
-	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+	); !errors.Is(err, ErrAgentEmailReceiveCohortDeferred) {
 		t.Fatalf("out-of-cohort production ingest error = %v", err)
 	}
 

@@ -181,7 +181,7 @@ func TestAgentEmailCohortMovePostgres(t *testing.T) {
 		t.Fatal("pre-move scope did not accept ingest", err)
 	}
 	omitted := cohortScope("acc_zzzzzzzzzzzzzzzz", "", dstScope.Audience)
-	if _, err := destination.IngestAgentEmailPilot(ctx, omitted, in); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+	if _, err := destination.IngestAgentEmailPilot(ctx, omitted, in); !errors.Is(err, ErrAgentEmailReceiveCohortDeferred) {
 		t.Fatalf("omitted cohort: %v", err)
 	}
 	in.Relay.Audience = srcScope.Audience

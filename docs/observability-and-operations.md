@@ -252,7 +252,7 @@ Initial metric families should include:
 | `witself_messages_total` | Messaging events by stage (`sent`, `delivered`, `read`), recipient kind, and result. |
 | `witself_message_rate_limit_rejections_total` | Implemented shared message-write budget refusals, including both retryable exhaustion and non-retryable zero/oversized-debit cases. Labels are the closed sets `limit_dimension` (`message_sent`, `message_delivered`, or `unknown`), `scope` (`agent`, `realm`, `recipient`, or `unknown`), and `operation` (`send`, `reply`, `complete`, `request_open`, `request_offer`, `request_complete`, or `unknown`). It never carries account, realm, agent, recipient, request, or message ids; plan/source names; limit/usage/retry values; content; or error text. |
 | `witself_message_processing_operations_total` | Implemented completed processing callback calls, including successful idempotent replays, with only `operation` (`claim`, `renew`, `release`, `request_claim`, `request_renew`, `request_release`, `unknown`) and `result` (`success`, `feature_disabled`, `rate_limited`, `bad_input`, `not_found`, `forbidden`, `plan_limited`, `busy`, `conflict`, `error`). All 70 series start at zero per server process and reset on restart. `busy` is claim contention; `conflict` includes stale fences. Unclassified errors, including cancellation/deadline errors, are `error`; this is not a paging policy. Calls rejected before reaching a configured callback remain in generic HTTP metrics only. These counters do not measure unique messages, durable transitions, active leases or expiry events. No identity, retry key, lease/failure/limit value, plan name, content or error text is collected; scraping invokes no messaging callback. |
-| `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `storage_full`, `feature_disabled`, `receive_disabled`, `unknown_recipient`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. `storage_full` is the independent schema-91 cell-ledger refusal; it is not an account-plan limit. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
+| `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `storage_full`, `feature_disabled`, `receive_disabled`, `rate_limited`, `unknown_recipient`, `cohort_deferred`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. `storage_full` is the independent schema-91 cell-ledger refusal; it is not an account-plan limit. `cohort_deferred` counts deliveries that were deferred because the recipient's account is resident in the cell and missing from its receive cohort; the series is exported at 0 from process start wherever ingest is configured. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
 | `witself_agent_email_cell_storage_metrics_up`, `witself_agent_email_cell_storage_retained_bytes`, `witself_agent_email_cell_storage_admission_bytes`, `witself_agent_email_cell_storage_hard_bytes`, `witself_agent_email_cell_storage_root_rows`, `witself_agent_email_cell_storage_admission_root_rows`, `witself_agent_email_cell_storage_counted_rows`, `witself_agent_email_cell_storage_hard_counted_rows` | Implemented unlabeled, value-free schema-91 cell-ledger gauges. The server performs one read-only singleton query per scrape under a fixed two-second deadline. A read/query/invariant failure emits only `metrics_up 0` and omits the seven values; it never exports database error text or account/message identity. These are logical charges and thresholds, not PostgreSQL relation size, PVC usage, or billable account allowance. |
 | `witself_agent_email_rate_limit_rejections_total` | Signed inbound safety refusals with only closed `limit_dimension`, `scope`, and `source` labels. Account scope is explicit and bounded; no tenant, sender, address, limit value, or arbitrary key becomes a label. |
 | `witself_worker_agent_email_outbound_batches_total`, `witself_worker_agent_email_outbound_items_total`, `witself_worker_agent_email_outbound_last_success_timestamp_seconds` | Durable outbound worker health and value-free closed outcomes. No sender, recipient, message, provider id, or error text is a label. |
@@ -460,6 +460,44 @@ only where those surfaces are deployed: relay/federation/conversation metrics on
 realms that participate in cross-realm collaboration, and placement/migration
 metrics on the thin global control plane that owns those decisions (a separate
 surface from any per-cell `/v1` route).
+
+### Receive cohort deferral signals
+
+A rising `cohort_deferred` count means that a cell's receive cohort leaves out
+an account that lives in that cell. Mail for that account is deferred and is
+not delivered until the cohort is corrected.
+
+- Prometheus, on a cell whose server ServiceMonitor is enabled:
+
+  ```promql
+  sum(increase(witself_agent_email_ingests_total{outcome="cohort_deferred"}[30m])) > 0
+  ```
+
+  Any result means a wrong cohort. The counter is per process and resets on
+  restart. No alert rule uses it. A cell without receive exports no series of
+  this family.
+- Pod log, on every cell with receive, including a cell whose ServiceMonitors
+  are still off:
+
+  ```text
+  witself-server: agent-email production receive cohort deferral count=N
+  ```
+
+  Each server process writes the line at its first deferral and then at most
+  once per minute. `N` is the number of deferrals since its previous line.
+  Deferrals after the last line are written with the next deferral, not on a
+  timer; the counter is exact. The line carries no account, address, sender
+  or digest.
+- Edge: the deferral appears as outcome `tempfail_cell_response`, phase
+  `response`, status 503, like every other `temporary` cell answer. The edge
+  cannot tell them apart.
+
+A cohort deferral is answered with HTTP 503, so it counts toward
+`WitselfServerHighErrorRatio`; sustained deferrals on a scraped cell are a
+possible cause of that alert. While a cohort is wrong, the retry canary's edge
+proof sequence (`tempfail_cell_response` / `response` / `503`, then
+`accepted`) cannot be told apart from cohort deferrals at the edge; read the
+cell's `retry_canary_temporary` count instead.
 
 ## Label And Privacy Rules
 

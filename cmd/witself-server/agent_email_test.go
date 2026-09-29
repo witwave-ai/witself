@@ -430,6 +430,24 @@ func TestAgentEmailRealmAliasProjectionDomainAllowed(t *testing.T) {
 }
 
 func TestAgentEmailErrorMapping(t *testing.T) {
+	for _, err := range []error{
+		store.ErrAgentEmailReceiveCohortDeferred,
+		fmt.Errorf("wrapped: %w", store.ErrAgentEmailReceiveCohortDeferred),
+	} {
+		mapped := mapAgentEmailIngestError(err)
+		if !errors.Is(mapped, server.ErrAgentEmailCohortDeferred) || errors.Is(mapped, server.ErrAgentEmailUnknownRecipient) {
+			t.Fatal("cohort deferral did not preserve its distinct ingest class")
+		}
+	}
+	if !errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailAddressMissing), server.ErrAgentEmailUnknownRecipient) {
+		t.Fatal("missing address did not remain an unknown recipient")
+	}
+	if mapAgentEmailIngestError(store.ErrAccountNotActive) != store.ErrAccountNotActive {
+		t.Fatal("inactive account ingest error changed")
+	}
+	if mapAgentEmailError(store.ErrAgentEmailReceiveCohortDeferred) != store.ErrAgentEmailReceiveCohortDeferred {
+		t.Fatal("owner surface acquired an ingest-only error class")
+	}
 	rateLimit := &store.AgentEmailRateLimitError{
 		Dimension:  "email_received_bytes",
 		Scope:      "recipient",

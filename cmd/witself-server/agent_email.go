@@ -931,12 +931,17 @@ func configureAgentEmailWithLog(ctx context.Context, cfg *server.Config, st *sto
 			"agent-email pilot startup reconciliation", "reconciliation_failed", err,
 		)
 	}
+	cohortDeferralLog := newAgentEmailCohortDeferralLog(log, time.Now)
 	cfg.IngestAgentEmailPilot = func(ctx context.Context, relay agentemail.RelayMetadata, raw []byte) error {
 		message, err := st.IngestAgentEmailPilot(
 			ctx, scope, store.AgentEmailIngestInput{Relay: relay, Raw: raw},
 		)
 		if err != nil {
-			return mapAgentEmailIngestError(err)
+			mapped := mapAgentEmailIngestError(err)
+			if errors.Is(mapped, server.ErrAgentEmailCohortDeferred) {
+				cohortDeferralLog.observe()
+			}
+			return mapped
 		}
 		if message.PayloadRetentionState == store.AgentEmailPayloadOmittedCapacity {
 			return server.ErrAgentEmailAttachmentOmitted
@@ -1162,6 +1167,8 @@ func mapAgentEmailIngestError(err error) error {
 		errors.Is(err, store.ErrAgentEmailPilotNotEnrolled),
 		errors.Is(err, store.ErrAgentEmailAddressMissing):
 		return server.ErrAgentEmailUnknownRecipient
+	case errors.Is(err, store.ErrAgentEmailReceiveCohortDeferred):
+		return server.ErrAgentEmailCohortDeferred
 	case errors.Is(err, store.ErrAgentEmailReceiveDisabled):
 		return server.ErrAgentEmailReceiveDisabled
 	case errors.Is(err, store.ErrFeatureNotEnabled):

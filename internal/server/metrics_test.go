@@ -296,6 +296,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		errors.Join(ErrNotFound, errors.New("emsg_private_identifier")),
 		ErrAgentEmailRetryCanaryTemporary,
 		ErrAgentEmailRetryCanaryPermanent,
+		errors.Join(ErrAgentEmailCohortDeferred, errors.New("account_private_identifier cohort_private_identifier")),
 		errors.New("database_private_host tenant_private_identifier"),
 	}
 	nextOutcome := 0
@@ -335,6 +336,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		"unknown_recipient":      2,
 		"retry_canary_temporary": 1,
 		"retry_canary_rejected":  1,
+		"cohort_deferred":        1,
 		"error":                  1,
 	}
 	if len(metrics.agentEmailIngests) != len(expected) {
@@ -381,6 +383,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"account_private_identifier",
+		"cohort_private_identifier",
 		"attachment_private_identifier",
 		"plan_private_name",
 		"emsg_private_identifier",
@@ -397,6 +400,42 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("agent-email metrics exposed %q:\n%s", forbidden, text)
 		}
+	}
+}
+
+func TestRuntimeMetricsExportCohortDeferredFromStart(t *testing.T) {
+	for _, withIngest := range []bool{true, false} {
+		name := "without ingest"
+		if withIngest {
+			name = "with ingest"
+		}
+		t.Run(name, func(t *testing.T) {
+			metrics := newRuntimeMetrics()
+			cfg := Config{}
+			if withIngest {
+				cfg.IngestAgentEmailPilot = func(context.Context, agentemail.RelayMetadata, []byte) error {
+					return nil
+				}
+			}
+			_ = metrics.instrumentConfig(cfg)
+			var output bytes.Buffer
+			metrics.writePrometheus(&output)
+			var samples []string
+			for _, line := range strings.Split(output.String(), "\n") {
+				if strings.HasPrefix(line, "witself_agent_email_ingests_total") {
+					samples = append(samples, line)
+				}
+			}
+			if !withIngest {
+				if len(samples) != 0 {
+					t.Fatalf("unconfigured ingest exports %d samples", len(samples))
+				}
+				return
+			}
+			if len(samples) != 1 || samples[0] != `witself_agent_email_ingests_total{outcome="cohort_deferred"} 0` {
+				t.Fatalf("initial ingest samples = %q", samples)
+			}
+		})
 	}
 }
 
