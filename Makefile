@@ -392,6 +392,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	npm --prefix infra/cloudflare/control-plane run bundle:check
 	bash scripts/test-helm-rollout.sh
 	bash scripts/test-cell-secrets.sh
+	bash scripts/test-copy-cell-secrets.sh
 	bash scripts/gitops-cell-values.sh --check
 	bash scripts/test-gitops-cell-values.sh
 	WITSELF_ROLL_STATES_JOBS=$(WITSELF_ROLL_STATES_JOBS) bash scripts/test-cell-roll-states.sh

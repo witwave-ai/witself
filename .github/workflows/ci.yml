@@ -615,6 +615,7 @@ jobs:
         run: |
           make check-cell-secrets
           bash scripts/test-cell-secrets.sh
+          bash scripts/test-copy-cell-secrets.sh
 
       - name: gitops cell values drift check
         run: |
