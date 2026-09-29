@@ -160,6 +160,7 @@ ignores `--batch`, and moves only that account. A missing or wrong-cell route
 returns 404. Restore defaults to batch 4, accepts 1–10, and requires an accepting
 destination. `--all-regions` bypasses only the legacy archive region filter;
 hard placement pins still apply.
+Evacuate requests allow 30 minutes; restore requests retain their 10-minute timeout.
 
 Move output contains `schema_version`, `cell`, `results` (account IDs, `ok`,
 and a generic error on failure), and `remaining`. Tables show account/status

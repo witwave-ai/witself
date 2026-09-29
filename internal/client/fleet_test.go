@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fleetTestCell() map[string]any {
@@ -497,5 +498,53 @@ func TestFleetMoveAcceptsPendingRow(t *testing.T) {
 		if extra != "" && (!result.Results[0].Retryable || result.Results[0].Attempts != 2) {
 			t.Fatal("pending diagnostics lost")
 		}
+	}
+}
+
+type fleetMoveDeadlineTransport struct {
+	base  http.RoundTripper
+	t     *testing.T
+	want  time.Duration
+	calls int
+}
+
+func (tr *fleetMoveDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.calls++
+	deadline, ok := req.Context().Deadline()
+	if !ok {
+		tr.t.Error("fleet move has no timeout")
+	} else if remaining := time.Until(deadline); remaining < tr.want-time.Minute || remaining > tr.want {
+		tr.t.Errorf("fleet move timeout = %s, want %s", remaining, tr.want)
+	}
+	return tr.base.RoundTrip(req)
+}
+
+func TestFleetMoveTimeoutByAction(t *testing.T) {
+	for _, tc := range []struct {
+		action  string
+		timeout time.Duration
+	}{
+		{"evacuate", 30 * time.Minute}, {"restore", 10 * time.Minute},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				field := "evacuated"
+				if tc.action == "restore" {
+					field = "restored"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "cell": "test-cell", field: []any{}, "remaining": 0})
+			}))
+			defer server.Close()
+			original := http.DefaultTransport
+			transport := &fleetMoveDeadlineTransport{base: original, t: t, want: tc.timeout}
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = original }()
+			if _, err := fleetMove(context.Background(), server.URL, "fixture-token", "test-cell", tc.action, map[string]any{"batch": 1}, ""); err != nil {
+				t.Fatal(err)
+			}
+			if transport.calls != 1 {
+				t.Fatalf("requests = %d, want 1", transport.calls)
+			}
+		})
 	}
 }

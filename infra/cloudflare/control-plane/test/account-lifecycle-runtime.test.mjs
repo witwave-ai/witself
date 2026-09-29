@@ -3695,6 +3695,9 @@ test("pre-archive abort resumes every durable and external failure boundary", as
         }
         assert.equal(f.storage.alarm, null);
         assert.equal(f.calls.export, fault === "abort_requested:before" ? 2 : 1);
+        if (fault === "abort_requested:before") {
+          assert.equal(f.storage.savedStates.findLast(s => s.operation?.phase === "source_suspended").operation.export_job.stream_attempts, 2);
+        }
         assert.equal(f.calls.abort,
           ["abort_cleanup_pending:before", "abort_response:before", "abort_response:after"].includes(fault) ? 2 : 1);
         assert.equal(f.authority.reservations.size, 0);
@@ -4697,6 +4700,7 @@ for (const mode of ["idle", "progress", "overall"]) {
     coordinator.streamArchive = async (_bucket, _key, body) => {
       let size = 0;
       for await (const chunk of body) size += chunk.byteLength;
+      _bucket.values.set(_key, new Uint8Array(size));
       return size;
     };
     const pending = coordinator.exportArchive(state);
@@ -4892,4 +4896,497 @@ test("async invalid acknowledgement never echoes remote status text", async () =
   await assert.rejects(f.tick(), { message: "archive import failed; retry required" });
   assert.equal(f.latest().operation.last_error, "archive import failed; retry required");
   assert.equal(f.latest().operation.import_job.retry_at, null);
+});
+
+// A seeded, write-frozen source drives the real alarm/run state machine.
+function splitExportFixture({ job, seeded = true } = {}) {
+  const storage = new Storage();
+  const bucket = new Bucket();
+  const directory = new KV({
+    [`acct:${ACCOUNT}`]: sourceRoute(),
+    [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example", false),
+  });
+  const policy = { allowed_clouds: ["aws", "civo"] };
+  const object = `archives/${ACCOUNT}/${OPERATION_ID}.tar.gz`;
+  let state = claimOperation(bootstrapLiveState({ account_id: ACCOUNT, route: sourceRoute() }), {
+    kind: "evacuate", operation_id: OPERATION_ID, evacuation_id: OPERATION_ID, source_cell: SOURCE,
+    archive: { archive_id: OPERATION_ID, object },
+  });
+  state = acknowledgeStep(state, { operation_id: OPERATION_ID, from_phase: "claimed", to_phase: "source_suspended" });
+  state.operation.source_registration_id = `reg-${SOURCE}`;
+  state.operation.request_epoch = 0;
+  if (job !== undefined) state.operation.export_job = structuredClone(job);
+  if (seeded) storage.values.set("account-lifecycle", structuredClone(state));
+  const calls = { placement: 0, export: 0, verify: 0, head: 0, abort: 0 };
+  const saved = () => storage.values.get("account-lifecycle");
+  const abortReceipt = { account_id: ACCOUNT, evacuation_id: OPERATION_ID, evacuation_role: "source", status: "active", aborted: true };
+  const coordinator = runtime({ storage, bucket, directory, fetch: async (url, init) => {
+    if (url.endsWith("/v1/version")) return protocolResponse();
+    if (url.endsWith(":begin-evacuation")) return Response.json({ ...abortReceipt, status: "suspended", aborted: false });
+    if (url.endsWith("/placement-policy")) {
+      calls.placement++;
+      assert.equal(saved().operation.export_job.stream_attempts, (job?.stream_attempts ?? 0) + 1);
+      assert.equal(saved().operation.export_job.streamed, null);
+      return Response.json({ account_id: ACCOUNT, placement_policy: policy });
+    }
+    if (url.endsWith(":export-evacuation")) {
+      calls.export++;
+      assert.equal(saved().operation.export_job.stream_attempts, (job?.stream_attempts ?? 0) + 1);
+      return new Response(new Uint8Array([1, 2, 3]));
+    }
+    if (url.endsWith(":abort-evacuation")) {
+      calls.abort++;
+      assert.equal(saved().operation.phase, "abort_requested");
+      assert.equal(JSON.parse(init.body).evacuation_id, OPERATION_ID);
+      return Response.json(abortReceipt);
+    }
+    if (url.endsWith(":finalize-evacuation")) return Response.json({
+      account_id: ACCOUNT, evacuation_id: OPERATION_ID, source_status: "suspended",
+      finalized: true, already_finalized: false, finalized_at: "2026-07-25T12:00:00.000Z",
+    });
+    throw new Error("unexpected export fixture request");
+  } });
+  const verify = coordinator.verifyArchive;
+  coordinator.verifyArchive = async (...args) => { calls.verify++; return verify(...args); };
+  const head = bucket.head.bind(bucket);
+  bucket.head = async (...args) => { calls.head++; return head(...args); };
+  const states = [];
+  const put = storage.put.bind(storage);
+  storage.put = async (key, value) => { states.push(structuredClone(value)); return put(key, value); };
+  return { coordinator, storage, bucket, directory, state, object, policy, calls, saved, states, abortReceipt };
+}
+
+function streamedExportJob(overrides = {}) {
+  return { stream_attempts: 1, verify_attempts: 0, stream_started_at: 1000,
+    placement_policy: { allowed_clouds: ["aws", "civo"] },
+    streamed: { etag: "fixture-etag", size: 3, streamed_at: 2000, stream_ms: 1000 }, ...overrides };
+}
+
+function seedStreamedObject(f) { f.bucket.values.set(f.object, new Uint8Array([1, 2, 3])); }
+
+function assertExportAborted(f) {
+  assert.equal(f.saved().operation, null);
+  assert.equal(f.saved().last_completed.outcome, "aborted");
+  assert.deepEqual(f.saved().location.route, sourceRoute());
+  assert.deepEqual(f.states.find(s => s.operation?.phase === "abort_cleanup_pending").operation.abort_receipt, f.abortReceipt);
+  assert.equal(f.directory.value(`archived:${ACCOUNT}`), null);
+  assert.equal(f.bucket.values.has(f.object), false);
+  assert.deepEqual(f.bucket.deleted, [f.object]);
+}
+
+test("export split inline commits only after verification and exactly two identity heads", async () => {
+  const f = splitExportFixture();
+  const state = await f.coordinator.exportArchive(f.state);
+  assert.equal(state.operation.phase, "archive_committed");
+  assert.equal(state.operation.export_job, null);
+  assert.deepEqual(f.calls, { placement: 1, export: 1, verify: 1, head: 2, abort: 0 });
+  assert.deepEqual(state.operation.placement_policy, f.policy);
+  const revisions = f.states.map(s => s.revision);
+  assert.deepEqual(revisions, [f.state.revision + 1, f.state.revision + 2, f.state.revision + 3, f.state.revision + 5]);
+});
+
+test("export split run remains inline from claim through completion", async () => {
+  const f = splitExportFixture({ seeded: false });
+  const response = await f.coordinator.fetch(request("evacuate", { cell_name: SOURCE }));
+  assert.equal(response.status, 200);
+  assert.equal("export_pending" in (await response.json()).result, false);
+  assert.equal(f.saved().operation, null);
+  assert.equal(f.calls.export, 1);
+  assert.equal(f.calls.verify, 1);
+});
+
+test("export split alarms persist stream then verify with identical inline archive authority", async () => {
+  const inline = splitExportFixture();
+  await inline.coordinator.runMove(inline.state);
+  const f = splitExportFixture();
+  await f.coordinator.alarm();
+  assert.equal(f.saved().operation.phase, "source_suspended");
+  assert.equal(f.saved().operation.export_job.streamed.size, 3);
+  assert.equal(f.storage.alarm, f.coordinator.now().getTime());
+  assert.deepEqual(f.calls, { placement: 1, export: 1, verify: 0, head: 1, abort: 0 });
+  await f.coordinator.alarm();
+  assert.deepEqual(f.calls, { placement: 1, export: 1, verify: 1, head: 3, abort: 0 });
+  assert.equal(f.saved().operation, null);
+  assert.deepEqual(f.directory.value(`archived:${ACCOUNT}`), inline.directory.value(`archived:${ACCOUNT}`));
+  assert.deepEqual(f.directory.value(`archived:${ACCOUNT}`).placement_policy, f.policy);
+});
+
+for (const orphan of [false, true]) {
+  test(`export split cut stream counts next attempt and never adopts unrecorded object: ${orphan}`, async () => {
+    const f = splitExportFixture({ job: streamedExportJob({ streamed: null }) });
+    if (orphan) f.bucket.values.set(f.object, new Uint8Array([9]));
+    await f.coordinator.alarm();
+    assert.equal(f.saved().operation.export_job.stream_attempts, 2);
+    assert.equal(f.calls.export, 1);
+    assert.equal(f.calls.verify, 0);
+    assert.equal(f.calls.head, 1);
+    assert.deepEqual([...f.bucket.values.get(f.object)], [1, 2, 3]);
+  });
+}
+
+for (const stage of ["stream", "verify"]) {
+  test(`export split exhausted ${stage} budget aborts without another attempt`, async () => {
+    const f = splitExportFixture({ job: streamedExportJob(stage === "stream"
+      ? { stream_attempts: 3, streamed: null } : { verify_attempts: 3 }) });
+    seedStreamedObject(f);
+    const response = await f.coordinator.fetch(request("evacuate", { cell_name: SOURCE }));
+    assert.equal(response.status, 504);
+    assert.equal((await response.json()).error, stage === "stream"
+      ? "export stream did not complete within its attempt budget"
+      : "archive verification did not complete within its attempt budget");
+    assert.equal(f.calls.export, 0);
+    assert.equal(f.calls.placement, 0);
+    assert.equal(f.calls.verify, 0);
+    assertExportAborted(f);
+  });
+}
+
+test("export split cut verification resumes with durable attempt count before verify", async () => {
+  const f = splitExportFixture({ job: streamedExportJob({ verify_attempts: 1 }) });
+  seedStreamedObject(f);
+  const verify = f.coordinator.verifyArchive;
+  f.coordinator.verifyArchive = async (...args) => {
+    assert.equal(f.saved().operation.export_job.verify_attempts, 2);
+    return verify(...args);
+  };
+  await f.coordinator.alarm();
+  assert.equal(f.saved().operation, null);
+  assert.deepEqual(f.calls, { placement: 0, export: 0, verify: 1, head: 2, abort: 0 });
+});
+
+for (const change of [{ etag: "changed" }, { size: 4 }]) {
+  test(`export split rejects changed identity before verification: ${Object.keys(change)[0]}`, async () => {
+    const f = splitExportFixture({ job: streamedExportJob() });
+    seedStreamedObject(f);
+    f.bucket.head = async () => ({ etag: "fixture-etag", size: 3, ...change });
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "exported archive identity changed before verification" });
+    assert.equal(f.calls.verify, 0);
+    assertExportAborted(f);
+  });
+}
+
+for (const change of [null, { etag: "changed", size: 3 }, { etag: "fixture-etag", size: 4 }]) {
+  test(`export split rejects changed identity during verification: ${JSON.stringify(change)}`, async () => {
+    const f = splitExportFixture({ job: streamedExportJob() });
+    seedStreamedObject(f);
+    let heads = 0;
+    f.bucket.head = async () => ++heads === 1 ? { etag: "fixture-etag", size: 3 } : change;
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "exported archive identity changed during verification" });
+    assert.equal(f.calls.verify, 1);
+    assertExportAborted(f);
+  });
+}
+
+test("export split missing recorded object re-streams without resetting verify budget", async () => {
+  const f = splitExportFixture({ job: streamedExportJob({ verify_attempts: 2 }) });
+  await f.coordinator.alarm();
+  assert.equal(f.saved().operation.export_job.stream_attempts, 2);
+  assert.equal(f.saved().operation.export_job.verify_attempts, 2);
+  assert.equal(f.calls.export, 1);
+  assert.equal(f.calls.verify, 0);
+  assert.equal(f.calls.head, 2);
+});
+
+for (const head of [null, { size: 4, etag: "fixture-etag" }, { size: 3, etag: "" }, { size: 3, etag: 12 }]) {
+  test(`export split refuses unprovable streamed identity: ${JSON.stringify(head)}`, async () => {
+    const f = splitExportFixture();
+    f.bucket.head = async () => head;
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "exported archive identity is not provable" });
+    assert.equal(f.calls.verify, 0);
+    assertExportAborted(f);
+  });
+}
+
+test("export split run between alarm ticks finishes without re-export", async () => {
+  const f = splitExportFixture();
+  await f.coordinator.alarm();
+  const response = await f.coordinator.fetch(request("evacuate", { cell_name: SOURCE }));
+  assert.equal(response.status, 200);
+  assert.equal("export_pending" in (await response.json()).result, false);
+  assert.equal(f.saved().operation, null);
+  assert.equal(f.calls.export, 1);
+  assert.equal(f.calls.placement, 1);
+  assert.equal(f.calls.verify, 1);
+});
+
+test("export split lock wait times out then retries only abort until source releases", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = splitExportFixture({ job: streamedExportJob({ streamed: null }) });
+  const fetch = f.coordinator.fetchImpl;
+  let exports = 0, aborts = 0;
+  f.coordinator.fetchImpl = async (url, init) => {
+    if (url.endsWith(":export-evacuation")) { exports++; return new Promise(() => {}); }
+    if (url.endsWith(":abort-evacuation") && ++aborts === 1) throw new Error("source row still locked");
+    return fetch(url, init);
+  };
+  const pending = f.coordinator.alarm();
+  await new Promise(setImmediate);
+  t.mock.timers.tick(120_000);
+  await pending;
+  assert.equal(f.saved().operation.phase, "abort_requested");
+  assert.equal(f.storage.alarm, f.coordinator.now().getTime() + 60_000);
+  await f.coordinator.alarm();
+  assertExportAborted(f);
+  assert.equal(exports, 1);
+  assert.equal(aborts, 2);
+});
+
+for (const timeout of [false, true]) {
+  test(`export split verify-only alarm disarms idle but preserves overall timeout: ${timeout}`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = splitExportFixture({ job: streamedExportJob() });
+    seedStreamedObject(f);
+    const verify = f.coordinator.verifyArchive;
+    let finish;
+    f.coordinator.verifyArchive = async (...args) => {
+      await new Promise(resolve => { finish = resolve; });
+      return verify(...args);
+    };
+    const logs = [];
+    t.mock.method(console, "log", line => logs.push(line));
+    const pending = f.coordinator.alarm();
+    await new Promise(setImmediate);
+    assert.equal(typeof finish, "function");
+    t.mock.timers.tick(timeout ? 60 * 60_000 : 121_000);
+    if (!timeout) finish();
+    await pending;
+    if (timeout) {
+      assertExportAborted(f);
+      assert.ok(logs.some(line => line.endsWith("failed: export_overall_timeout")));
+    } else {
+      assert.equal(f.saved().operation, null);
+      assert.equal(f.saved().last_completed.outcome, "completed");
+      assert.equal(f.calls.verify, 1);
+    }
+    assert.equal(f.calls.export, 0);
+  });
+}
+
+for (const stage of ["stream", "verify"]) {
+  test(`export split stale ${stage} loses ownership without writes or abort`, async () => {
+    const f = splitExportFixture();
+    let staleState;
+    const method = stage === "stream" ? "streamArchive" : "verifyArchive";
+    const original = f.coordinator[method];
+    f.coordinator[method] = async (...args) => {
+      const result = await original(...args);
+      staleState = structuredClone(f.saved());
+      if (stage === "stream") staleState.operation.export_job.stream_attempts++;
+      else staleState.revision++;
+      await f.storage.put("account-lifecycle", staleState);
+      return result;
+    };
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "export attempt lost durable ownership", status: 409 });
+    assert.deepEqual(f.saved(), staleState);
+    assert.equal(f.calls.abort, 0);
+    assert.equal(f.bucket.deleted.length, 0);
+    assert.equal(f.saved().operation.phase, "source_suspended");
+    if (stage === "stream") assert.equal(f.saved().operation.export_job.streamed, null);
+  });
+}
+
+for (const field of ["operation_id", "phase"]) {
+  test(`export split ownership guard compares ${field} at an unchanged revision`, async () => {
+    const f = splitExportFixture();
+    const original = f.coordinator.streamArchive;
+    const load = f.coordinator.loadState.bind(f.coordinator);
+    let durable;
+    f.coordinator.streamArchive = async (...args) => {
+      const result = await original(...args);
+      durable = structuredClone(f.saved());
+      // Same revision and counters; only the compared field differs.
+      f.coordinator.loadState = async () => {
+        const foreign = structuredClone(await load());
+        if (field === "phase") foreign.operation.phase = "abort_requested";
+        else foreign.operation.operation_id = `${foreign.operation.operation_id}-other`;
+        return foreign;
+      };
+      return result;
+    };
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "export attempt lost durable ownership", status: 409 });
+    assert.deepEqual(f.saved(), durable);
+    assert.equal(f.saved().operation.export_job.streamed, null);
+    assert.equal(f.calls.abort, 0);
+    assert.equal(f.bucket.deleted.length, 0);
+  });
+}
+
+test("export split abort acts on the reloaded durable state, not the invocation's stale copy", async () => {
+  const f = splitExportFixture();
+  const failure = new Error("stream failed after a newer save");
+  let newer;
+  f.coordinator.streamArchive = async () => {
+    newer = structuredClone(f.saved());
+    newer.revision++;
+    await f.storage.put("account-lifecycle", newer);
+    throw failure;
+  };
+  let abortedWith;
+  const abort = f.coordinator.abortPreArchive.bind(f.coordinator);
+  f.coordinator.abortPreArchive = async (state, error) => {
+    abortedWith = structuredClone(state);
+    return abort(state, error);
+  };
+  await assert.rejects(f.coordinator.exportArchive(f.state), error => error === failure);
+  assert.equal(abortedWith.revision, newer.revision);
+  assert.equal(f.calls.abort, 1);
+});
+
+test("export split exhausted verify budget with a missing object aborts without re-streaming", async () => {
+  const f = splitExportFixture({ job: streamedExportJob({ verify_attempts: 3 }) });
+  await assert.rejects(f.coordinator.exportArchive(f.state), { message: "archive verification did not complete within its attempt budget" });
+  assert.equal(f.calls.export, 0);
+  assert.equal(f.calls.verify, 0);
+  assertExportAborted(f);
+});
+
+test("export split stream error cannot abort another durable phase", async () => {
+  const f = splitExportFixture();
+  const original = new Error("stream failed after another owner advanced");
+  f.coordinator.streamArchive = async () => {
+    seedStreamedObject(f);
+    const newer = structuredClone(f.saved());
+    newer.operation.phase = "abort_requested";
+    newer.revision++;
+    await f.storage.put("account-lifecycle", newer);
+    throw original;
+  };
+  await assert.rejects(f.coordinator.exportArchive(f.state), error => error === original);
+  assert.equal(f.saved().operation.phase, "abort_requested");
+  assert.equal(f.calls.abort, 0);
+  assert.equal(f.bucket.values.has(f.object), true);
+});
+
+test("export split reload failure preserves original error without abort", async () => {
+  const f = splitExportFixture();
+  const original = new Error("stream failed");
+  f.coordinator.streamArchive = async () => {
+    f.coordinator.loadState = async () => { throw new Error("reload failed"); };
+    throw original;
+  };
+  await assert.rejects(f.coordinator.exportArchive(f.state), error => error === original);
+  assert.equal(f.calls.abort, 0);
+  assert.equal(f.bucket.deleted.length, 0);
+});
+
+test("export split pending projection reloads durable counters and omits identity", async () => {
+  const f = splitExportFixture();
+  f.coordinator.scheduleWakeupNow = async () => {
+    const newer = structuredClone(f.saved());
+    newer.operation.export_job.verify_attempts = 2;
+    newer.revision++;
+    await f.storage.put("account-lifecycle", newer);
+  };
+  const result = await f.coordinator.runMove(f.state, { splitExport: true });
+  assert.deepEqual(result, { export_pending: true, operation_id: OPERATION_ID,
+    evacuation_id: OPERATION_ID, epoch: f.saved().epoch, target_cell: null,
+    phase: "source_suspended", export_job: { stream_attempts: 1, verify_attempts: 2,
+      size: 3, streamed_at: f.coordinator.now().getTime() } });
+  assert.equal(JSON.stringify(result).includes("etag"), false);
+});
+
+for (const job of [false, [], "bad", {}, streamedExportJob({ stream_attempts: -1 }),
+  streamedExportJob({ verify_attempts: 0.5 }), streamedExportJob({ stream_attempts: Number.MAX_SAFE_INTEGER + 1 }),
+  streamedExportJob({ streamed: false }), streamedExportJob({ streamed: {} }),
+  streamedExportJob({ streamed: { etag: "", size: 3 } }), streamedExportJob({ streamed: { etag: "x", size: 0 } })]) {
+  test(`export split malformed metadata aborts with fixed text: ${JSON.stringify(job)}`, async () => {
+    const f = splitExportFixture({ job });
+    await assert.rejects(f.coordinator.exportArchive(f.state), { message: "export job metadata is invalid", status: 500 });
+    assert.equal(f.calls.export, 0);
+    assertExportAborted(f);
+  });
+}
+
+test("export split logs exact bounded timings only after successful saves", async t => {
+  const logs = [];
+  t.mock.method(console, "log", line => logs.push(line));
+  const f = splitExportFixture();
+  let now = 1000;
+  f.coordinator.now = () => new Date(now += 100);
+  await f.coordinator.exportArchive(f.state);
+  assert.deepEqual(logs, [
+    `account lifecycle export for ${ACCOUNT} streamed attempt=1 bytes=3 ms=200`,
+    `account lifecycle export for ${ACCOUNT} verified attempt=1 bytes=3 ms=100`,
+  ]);
+  for (const stage of ["stream", "verify"]) {
+    const exhausted = splitExportFixture({ job: streamedExportJob(stage === "stream"
+      ? { stream_attempts: 3, streamed: null } : { verify_attempts: 3 }) });
+    seedStreamedObject(exhausted);
+    await assert.rejects(exhausted.coordinator.exportArchive(exhausted.state));
+  }
+  assert.deepEqual(logs.slice(2), [
+    `account lifecycle export for ${ACCOUNT} aborted reason=stream_attempts_exhausted`,
+    `account lifecycle export for ${ACCOUNT} aborted reason=verify_attempts_exhausted`,
+  ]);
+  for (const line of logs) {
+    assert.equal(line.includes(f.object), false);
+    assert.doesNotMatch(line, /fixture-etag|https:|Bearer|token|archives\//);
+  }
+  const lostCommit = splitExportFixture();
+  lostCommit.storage.put = async (key, state) => {
+    if (state.operation?.phase === "archive_committed") throw new Error("commit save failed");
+    lostCommit.storage.values.set(key, structuredClone(state));
+  };
+  await assert.rejects(lostCommit.coordinator.exportArchive(lostCommit.state), /commit save failed/);
+  assert.equal(logs.filter(line => line.includes(" verified ")).length, 1);
+  assert.equal(lostCommit.calls.abort, 0);
+});
+
+test("export split metadata remains compatible with existing lifecycle state phases", () => {
+  const f = splitExportFixture({ job: streamedExportJob() });
+  for (const phase of ["source_suspended", "abort_requested", "archive_committed"]) {
+    const state = structuredClone(f.state);
+    state.operation.phase = phase;
+    assert.doesNotThrow(() => validateLifecycleState(state));
+  }
+});
+
+for (const error of [new ArchiveIntegrityError("fixture verification failed"), new Error("fixture R2 read failed")]) {
+  test(`export split verification error aborts immediately: ${error.constructor.name}`, async () => {
+    const f = splitExportFixture({ job: streamedExportJob() });
+    seedStreamedObject(f);
+    f.coordinator.verifyArchive = async () => { f.calls.verify++; throw error; };
+    await assert.rejects(f.coordinator.exportArchive(f.state), caught => caught === error);
+    assert.equal(f.calls.verify, 1);
+    assert.equal(f.calls.export, 0);
+    assertExportAborted(f);
+  });
+}
+
+
+test("export split null metadata starts at attempt one", async () => {
+  const f = splitExportFixture({ job: null });
+  await f.coordinator.alarm();
+  assert.equal(f.saved().operation.export_job.stream_attempts, 1);
+  assert.equal(f.saved().operation.export_job.verify_attempts, 0);
+  assert.equal(f.calls.verify, 0);
+});
+
+test("export split resumed stale owner cannot increment verification attempts", async () => {
+  const f = splitExportFixture({ job: streamedExportJob() });
+  seedStreamedObject(f);
+  const newer = structuredClone(f.saved());
+  newer.operation.export_job.verify_attempts = 1;
+  await f.storage.put("account-lifecycle", newer);
+  const writes = f.states.length;
+  await assert.rejects(f.coordinator.exportArchive(f.state), { message: "export attempt lost durable ownership" });
+  assert.equal(f.states.length, writes);
+  assert.deepEqual(f.saved(), newer);
+  assert.equal(f.calls.verify, 0);
+  assert.equal(f.calls.abort, 0);
+});
+
+test("export split disarmed watchdog ignores later progress", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const watchdog = new ExportWatchdog();
+  try {
+    watchdog.disarmIdle();
+    watchdog.progress();
+    t.mock.timers.tick(121_000);
+    assert.equal(watchdog.signal.aborted, false);
+    t.mock.timers.tick(60 * 60_000 - 121_000);
+    assert.equal(watchdog.signal.reason.message, "export_overall_timeout");
+  } finally {
+    watchdog.close();
+  }
 });

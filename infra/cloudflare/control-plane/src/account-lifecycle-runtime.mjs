@@ -60,6 +60,8 @@ export const IMPORT_MAX_ATTEMPTS = 6;
 export const IMPORT_RETRY_EXHAUSTED_MS = 6 * 60 * 60_000;
 export const IMPORT_CAPACITY_RETRY_MIN_MS = 60_000;
 
+const EXPORT_MAX_STREAM_ATTEMPTS = 3;
+const EXPORT_MAX_VERIFY_ATTEMPTS = 3;
 const LIFECYCLE_RETRY_MS = 60_000;
 const PENDING_ERROR = "account is pending — not suspendable";
 
@@ -91,6 +93,13 @@ export class AccountLifecycleRuntimeError extends Error {
   }
 }
 
+class ExportOwnershipLostError extends AccountLifecycleRuntimeError {
+  constructor() {
+    super("export attempt lost durable ownership", 409);
+    this.name = "ExportOwnershipLostError";
+  }
+}
+
 class RestoreArchiveQuarantinedError
   extends AccountLifecycleRuntimeError {
   constructor(archive, options = {}) {
@@ -111,6 +120,23 @@ function fail(message, status = 500, options = {}) {
 function isObject(value) {
   return value !== null && typeof value === "object" &&
     !Array.isArray(value);
+}
+
+function exportJob(operation) {
+  const job = operation.export_job;
+  if (job === undefined || job === null) {
+    return { stream_attempts: 0, verify_attempts: 0, stream_started_at: null,
+      placement_policy: null, streamed: null };
+  }
+  if (!isObject(job) ||
+    !Number.isSafeInteger(job.stream_attempts) || job.stream_attempts < 0 ||
+    !Number.isSafeInteger(job.verify_attempts) || job.verify_attempts < 0 ||
+    (job.streamed != null && (!isObject(job.streamed) ||
+      typeof job.streamed.etag !== "string" || job.streamed.etag.length === 0 ||
+      !Number.isSafeInteger(job.streamed.size) || job.streamed.size <= 0))) {
+    fail("export job metadata is invalid", 500);
+  }
+  return job;
 }
 
 function exactArchive(left, right) {
@@ -1508,7 +1534,7 @@ export class DurableAccountLifecycle {
     return state;
   }
 
-  async runMove(initialState, { importBudgetMs = 0 } = {}) {
+  async runMove(initialState, { importBudgetMs = 0, splitExport = false } = {}) {
     let state = initialState;
     while (state.operation) {
       // Abort owns the original source/object fence but no longer needs an
@@ -1550,9 +1576,21 @@ export class DurableAccountLifecycle {
         case "suspend_source":
           state = await this.suspendSource(state);
           break;
-        case "export_validate_and_commit":
-          state = await this.exportArchive(state);
+        case "export_validate_and_commit": {
+          const exported = await this.exportArchive(state, { split: splitExport });
+          if (exported?.pending) {
+            await this.scheduleWakeupNow();
+            const { operation, epoch } = await this.loadState();
+            const job = operation.export_job;
+            return { export_pending: true, operation_id: operation.operation_id,
+              evacuation_id: operation.evacuation_id, epoch, target_cell: operation.target_cell,
+              phase: operation.phase, export_job: { stream_attempts: job.stream_attempts,
+                verify_attempts: job.verify_attempts, size: job.streamed.size,
+                streamed_at: job.streamed.streamed_at } };
+          }
+          state = exported;
           break;
+        }
         case "import_target": {
           const imported = await this.importTarget(state, importBudgetMs);
           if (imported?.pending) {
@@ -1846,7 +1884,18 @@ export class DurableAccountLifecycle {
     }
   }
 
-  async exportArchive(state) {
+  async requireExportOwnership(state) {
+    const persisted = await this.loadState();
+    if (persisted?.revision !== state.revision ||
+      persisted?.operation?.operation_id !== state.operation.operation_id ||
+      persisted?.operation?.phase !== "source_suspended" ||
+      persisted.operation.export_job?.stream_attempts !== state.operation.export_job?.stream_attempts ||
+      persisted.operation.export_job?.verify_attempts !== state.operation.export_job?.verify_attempts) {
+      throw new ExportOwnershipLostError();
+    }
+  }
+
+  async exportArchive(state, { split = false } = {}) {
     const operation = state.operation;
     const cell = await this.cell(operation.source_cell, {
       evacuationProtocol: true,
@@ -1854,49 +1903,96 @@ export class DurableAccountLifecycle {
     });
     let placementPolicy;
     let pointer;
+    let job;
+    let verifyMs;
     const watchdog = new ExportWatchdog();
     try {
-      placementPolicy = await this.readPlacementPolicy(
-        cell,
-        this.accountId,
-      );
-      const response = await watchdog.wait(this.fetchImpl(
-        `${cell.endpoint}/v1/accounts/${this.accountId}:export-evacuation`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${cell.provision_token}`,
-            "X-Witself-Evacuation-ID": operation.evacuation_id,
-          },
-          signal: watchdog.signal,
-        },
-      ));
-      if (!response.ok || !response.body) {
-        const { text } = await watchdog.wait(responseBody(response));
-        fail(
-          `export ${response.status}: ${text.slice(0, 200)}`,
-          [404, 405].includes(response.status) ? 502 : response.status,
-        );
+      job = exportJob(operation);
+      let head = null;
+      if (job.streamed != null) {
+        head = await watchdog.wait(this.env.ARCHIVES.head(operation.archive.object));
+        if (head && (head.etag !== job.streamed.etag || head.size !== job.streamed.size)) {
+          fail("exported archive identity changed before verification", 502);
+        }
       }
-      const streamedAt = this.now().toISOString();
-      const size = await watchdog.wait(this.streamArchive(
-        this.env.ARCHIVES,
-        operation.archive.object,
-        watchdog.body(response.body),
-        {
-          httpMetadata: {
-            contentType: "application/gzip",
-            contentDisposition:
-              `attachment; filename="${this.accountId}.tar.gz"`,
+      if (!head) {
+        if (job.stream_attempts >= EXPORT_MAX_STREAM_ATTEMPTS) {
+          console.log(`account lifecycle export for ${this.accountId} aborted reason=stream_attempts_exhausted`);
+          fail("export stream did not complete within its attempt budget", 504);
+        }
+        if (job.verify_attempts >= EXPORT_MAX_VERIFY_ATTEMPTS) {
+          // Re-streaming could not be verified afterwards; abort before it.
+          console.log(`account lifecycle export for ${this.accountId} aborted reason=verify_attempts_exhausted`);
+          fail("archive verification did not complete within its attempt budget", 504);
+        }
+        job = { ...job, stream_attempts: job.stream_attempts + 1,
+          stream_started_at: this.now().getTime(), placement_policy: null, streamed: null };
+        state = await this.saveState(operationMetadata(state, { export_job: job }));
+        placementPolicy = await this.readPlacementPolicy(
+          cell,
+          this.accountId,
+        );
+        const response = await watchdog.wait(this.fetchImpl(
+          `${cell.endpoint}/v1/accounts/${this.accountId}:export-evacuation`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${cell.provision_token}`,
+              "X-Witself-Evacuation-ID": operation.evacuation_id,
+            },
+            signal: watchdog.signal,
           },
-          customMetadata: {
-            account_id: this.accountId,
-            cell: operation.source_cell,
-            evacuation_id: operation.evacuation_id,
-            exported_at: streamedAt,
+        ));
+        if (!response.ok || !response.body) {
+          const { text } = await watchdog.wait(responseBody(response));
+          fail(
+            `export ${response.status}: ${text.slice(0, 200)}`,
+            [404, 405].includes(response.status) ? 502 : response.status,
+          );
+        }
+        const streamedAt = this.now().toISOString();
+        const size = await watchdog.wait(this.streamArchive(
+          this.env.ARCHIVES,
+          operation.archive.object,
+          watchdog.body(response.body),
+          {
+            httpMetadata: {
+              contentType: "application/gzip",
+              contentDisposition:
+                `attachment; filename="${this.accountId}.tar.gz"`,
+            },
+            customMetadata: {
+              account_id: this.accountId,
+              cell: operation.source_cell,
+              evacuation_id: operation.evacuation_id,
+              exported_at: streamedAt,
+            },
           },
-        },
-      ));
+        ));
+        head = await watchdog.wait(this.env.ARCHIVES.head(operation.archive.object));
+        if (!head || head.size !== size || typeof head.etag !== "string" || head.etag.length === 0) {
+          fail("exported archive identity is not provable", 502);
+        }
+        const completedAt = this.now().getTime();
+        await this.requireExportOwnership(state);
+        job = { ...job, placement_policy: placementPolicy, streamed: {
+          etag: head.etag, size, streamed_at: completedAt, stream_ms: completedAt - job.stream_started_at,
+        } };
+        state = await this.saveState(operationMetadata(state, { export_job: job }));
+        console.log(`account lifecycle export for ${this.accountId} streamed attempt=${job.stream_attempts} bytes=${job.streamed.size} ms=${job.streamed.stream_ms}`);
+        if (split) return { pending: true };
+      } else {
+        // A resumed verification consumes no export body bytes.
+        watchdog.disarmIdle();
+      }
+      if (job.verify_attempts >= EXPORT_MAX_VERIFY_ATTEMPTS) {
+        console.log(`account lifecycle export for ${this.accountId} aborted reason=verify_attempts_exhausted`);
+        fail("archive verification did not complete within its attempt budget", 504);
+      }
+      await this.requireExportOwnership(state);
+      job = { ...job, verify_attempts: job.verify_attempts + 1 };
+      state = await this.saveState(operationMetadata(state, { export_job: job }));
+      const verifyStartedAt = this.now().getTime();
       const verification = await watchdog.wait(this.verifyArchive(
         this.env.ARCHIVES,
         operation.archive.object,
@@ -1906,6 +2002,11 @@ export class DurableAccountLifecycle {
           allowLegacyEvacuationID: false,
         },
       ));
+      const verifiedHead = await watchdog.wait(this.env.ARCHIVES.head(operation.archive.object));
+      verifyMs = this.now().getTime() - verifyStartedAt;
+      if (!verifiedHead || verifiedHead.etag !== job.streamed.etag || verifiedHead.size !== job.streamed.size) {
+        fail("exported archive identity changed during verification", 502);
+      }
       const manifest = verification?.manifest;
       const exportedAt = manifest?.exported_at;
       const archiveStatus = manifest?.status;
@@ -1924,16 +2025,24 @@ export class DurableAccountLifecycle {
         sourceCell: cell,
         exportedAt,
         status: archiveStatus,
-        size,
-        placementPolicy,
+        size: job.streamed.size,
+        placementPolicy: job.placement_policy,
       });
+      await this.requireExportOwnership(state);
     } catch (error) {
-      // Before durable archive authority exists, persist abort intent before
-      // giving the source back, then persist its exact receipt before cleanup.
-      // Always delete the attempt-unique full object key: R2
-      // multipart complete may have committed the object before its response
-      // was lost, in which case the streaming helper never returned success.
-      await this.abortPreArchive(state, error);
+      if (error instanceof ExportOwnershipLostError) throw error;
+      let persisted;
+      try {
+        persisted = await this.loadState();
+      } catch {
+        throw error;
+      }
+      // Only the still-suspended operation may give the source back and delete
+      // its candidate. A newer commit or abort owns its own recovery.
+      if (persisted?.operation?.operation_id === operation.operation_id &&
+        persisted.operation.phase === "source_suspended") {
+        await this.abortPreArchive(persisted, error);
+      }
       throw error;
     } finally {
       watchdog.close();
@@ -1944,14 +2053,17 @@ export class DurableAccountLifecycle {
     // or saveState begins, never delete the object or abort the source: an
     // exact retry must inspect persisted state and continue projection.
     state = operationMetadata(state, {
-      placement_policy: placementPolicy,
+      placement_policy: job.placement_policy,
+      export_job: null,
       source_exported_at: pointer.exported_at,
     });
     state = commitArchived(state, {
       operation_id: operation.operation_id,
       archived: pointer,
     });
-    return this.saveState(state);
+    state = await this.saveState(state);
+    console.log(`account lifecycle export for ${this.accountId} verified attempt=${job.verify_attempts} bytes=${job.streamed.size} ms=${verifyMs}`);
+    return state;
   }
 
   async abortPreArchive(state, originalError) {
@@ -2734,6 +2846,12 @@ export class DurableAccountLifecycle {
     return state;
   }
 
+  async scheduleWakeupNow() {
+    if (typeof this.storage.setAlarm === "function") {
+      await this.storage.setAlarm(this.now().getTime());
+    }
+  }
+
   async scheduleWakeup() {
     if (typeof this.storage.setAlarm === "function") {
       await this.storage.setAlarm(
@@ -2783,7 +2901,7 @@ export class DurableAccountLifecycle {
           await this.runClose(state, {});
           return;
         }
-        const result = await this.runMove(state, { importBudgetMs: 0 });
+        const result = await this.runMove(state, { importBudgetMs: 0, splitExport: true });
         if (result.import_pending === true) {
           const latest = await this.loadState();
           if (latest?.operation?.last_error) console.log(`account lifecycle retry for ${this.accountId} pending: ${latest.operation.last_error}`);

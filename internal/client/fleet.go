@@ -313,7 +313,11 @@ func fleetMove(ctx context.Context, endpoint, token, name, action string, body m
 		Restored      []outcome `json:"restored"`
 		Remaining     *int      `json:"remaining"`
 	}
-	if err := doJSONWithHeadersTimeout(ctx, http.MethodPost, requestURL, token, nil, payload, &out, 10*time.Minute); err != nil {
+	timeout := 10 * time.Minute
+	if action == "evacuate" {
+		timeout = 30 * time.Minute
+	}
+	if err := doJSONWithHeadersTimeout(ctx, http.MethodPost, requestURL, token, nil, payload, &out, timeout); err != nil {
 		return nil, err
 	}
 	rows := out.Evacuated

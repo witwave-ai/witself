@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
 )
@@ -173,6 +174,9 @@ type restoreResponse struct {
 }
 
 func TestRestoreCellPendingThenStall(t *testing.T) {
+	previous := pendingPause
+	pendingPause = 10 * time.Millisecond
+	defer func() { pendingPause = previous }()
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
@@ -225,5 +229,29 @@ func TestRestoreCellPendingNotRetryableStops(t *testing.T) {
 	err = restoreCell(context.Background(), cl, "cell-a", false)
 	if err == nil || !strings.Contains(err.Error(), "acc_stuck") || !strings.Contains(err.Error(), "not retryable") || calls != 1 {
 		t.Fatalf("non-retryable pending must stop after one call: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestRestoreCellPendingBound(t *testing.T) {
+	previous, previousWaits := pendingPause, maxPendingWaits
+	pendingPause, maxPendingWaits = 10*time.Millisecond, 3
+	defer func() { pendingPause, maxPendingWaits = previous, previousWaits }()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"restored": []map[string]any{{"account_id": "acc_busy", "cell": "cell-a", "ok": true, "pending": true, "retryable": true}}, "remaining": 1})
+	}))
+	defer srv.Close()
+	credential := filepath.Join(t.TempDir(), "fixture-credential")
+	if err := os.WriteFile(credential, []byte("test-fleet"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := fleet.NewClient(srv.URL, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = restoreCell(context.Background(), cl, "cell-a", false)
+	if err == nil || !strings.Contains(err.Error(), "still pending after 3 waits") || calls != 4 {
+		t.Fatalf("pending bound: err=%v calls=%d", err, calls)
 	}
 }
