@@ -15,7 +15,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     # Manual dispatch is the acceptance and diagnostic drill. Add a schedule
     # only when continuous monitoring is intentionally enabled.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: agent-email-canary
     timeout-minutes: 15
     defaults:

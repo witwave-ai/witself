@@ -259,7 +259,8 @@ expected = {'subject-name' => '${{ steps.mirror.outputs.image }}', 'subject-dige
 raise 'provenance does not bind the verified registry subject' unless attest.fetch('with') == expected
 ci = YAML.load_file(File.join(root, '.github/workflows/ci.yml')).fetch('jobs')
 tripwire = ci.fetch('postgres-image-mirror')
-raise 'mirror tripwire must run on release runner OS' unless tripwire.fetch('runs-on') == 'ubuntu-latest'
+raise 'release mirror must run on the pinned hosted image' unless mirror.fetch('runs-on') == 'ubuntu-24.04'
+raise 'mirror tripwire must run on release runner OS' unless tripwire.fetch('runs-on') == mirror.fetch('runs-on')
 raise 'PR mirror tripwire can be skipped' if tripwire.key?('if')
 tripwire_steps = tripwire.fetch('steps')
 install = tripwire_steps.find { |step| step['name'] == 'Install digest-preserving registry copier' }.fetch('run')

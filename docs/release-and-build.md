@@ -322,6 +322,67 @@ CI should use minimal permissions by default:
 
 Use concurrency cancellation so superseded pushes do not leave stale CI running.
 
+## Hosted Runner Images And Required Check Names
+
+Every hosted Linux job requests `ubuntu-24.04` or `ubuntu-24.04-arm`, spelled
+exactly so. `ubuntu-latest` is not used as a runner label: GitHub's
+[announced migration](https://github.com/actions/runner-images/issues/14748)
+from Ubuntu 24.04 to Ubuntu 26.04 runs from 2026-10-19 to 2026-11-19, during which
+the floating label can select either image. `scripts/test-workflow-runner-labels.sh`
+enforces the pins in the `helm` check, release `verify`, and `make check-infra`.
+
+Moving to a newer image is its own reviewed change. First prove the image
+without merging anything: on a branch, change the label in a workflow that
+already has a `workflow_dispatch` trigger and run it against that branch with
+`gh workflow run <workflow> --ref <branch>`. The guard inspects every workflow
+file, so a workflow that requests the new label cannot merge before the allowed
+list changes. Then change the runner labels, the guard's allowed list and its
+canaries, and the label assertions in
+`scripts/test-memory-load-quality-workflow.sh`,
+`scripts/test-provider-contract-workflow.sh`, and
+`scripts/test-mirror-postgresql-image.sh` together. The canaries name the
+current label, and the `unreviewed new image` canary must name an image that is
+still not allowed. macOS and Windows labels are unchanged by this rule.
+
+These six required check names are contract strings, not runner labels:
+
+- `go`
+- `release-config`
+- `homebrew-formula`
+- `helm`
+- `avatar-renderer-portability (ubuntu-latest)`
+- `avatar-renderer-portability (ubuntu-24.04-arm)`
+
+The x64 avatar check keeps its earlier name while running on `ubuntu-24.04`.
+Renaming a required check needs three ordered changes:
+
+1. Expand: CI reports both the old and the new name. The ruleset and release
+   train floor still name the old one.
+2. Switch: with no release train in flight, a repository administrator replaces
+   the context in the ruleset. Older open pull requests must update their branch
+   so they report the new name.
+3. Contract: remove the old name from CI and change the release train floor,
+   its test fixture, and the guard's required-name list. Run the train from a
+   checkout containing this change.
+
+The dashboard acceptance job name and artifact name carry a frozen target name
+(`ubuntu-latest`, `macos-15`, or `windows-latest`), not the runner label. The Linux
+target runs on `ubuntu-24.04`, so tools that match release job or artifact names
+keep working. The load-quality hardware tiers `ubuntu-latest-pg16`,
+`ubuntu-latest-pg17`, and `ubuntu-latest-pg18` also remain frozen evidence
+identifiers for the standard GitHub-hosted Linux x64 runner class. Keeping them
+preserves manifest validation across the image pin; the manifest does not record
+the hosted runner image, and hardware tier identifiers must be dotless.
+
+Workflow authors must extend the guard in the same pull request when a change
+needs a form it cannot evaluate. It rejects a runner expression other than a
+matrix reference, a runner group that is not self-hosted, and YAML aliases.
+Where a runner label refers to the matrix, and for every matrix job in `ci.yml`,
+it also rejects a matrix with `exclude`, a matrix mixing list keys with
+`include`, and a whole-matrix expression. In `ci.yml` it also rejects a job name
+that is not static after matrix substitution. A reusable workflow call is not
+inspected; the called workflow is inspected when it lives in this repository.
+
 ## Release Action
 
 The repository's current release workflow is `.github/workflows/release.yml`.
@@ -733,7 +794,7 @@ tag. Require both the published server release and successful mirror publication
 before activation. Manual snapshot runs publish no mirror. The mirror has no
 `latest` channel.
 
-PR-time CI installs skopeo on `ubuntu-latest` and runs
+PR-time CI installs skopeo on `ubuntu-24.04` and runs
 `make check-postgres-image-mirror`, which copies to temporary local image
 directories with digest verification. This exercises the
 runner package installation, required copy flags, and initial Docker Hub fetch

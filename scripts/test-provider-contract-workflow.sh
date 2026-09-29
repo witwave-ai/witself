@@ -33,7 +33,7 @@ def check(text, workflow):
     aggregate = job(text, "provider-contract-evidence")
     require("fail-fast: false" in native, "all native outcomes run")
     require(re.findall(r"- target: ([\w-]+)\n\s+runner: ([\w.-]+)", native) == [
-        ("linux-x64", "ubuntu-latest"), ("linux-arm64", "ubuntu-24.04-arm"),
+        ("linux-x64", "ubuntu-24.04"), ("linux-arm64", "ubuntu-24.04-arm"),
         ("macos-intel", "macos-15-intel"), ("macos-arm64", "macos-15"),
         ("windows-x64", "windows-latest")], "exact native matrix")
     for name in ("Universal installer artifact smoke", "Windows binary installer smoke",
@@ -166,6 +166,7 @@ def check(text, workflow):
 try:
     canaries = [
         ("matrix omission", "- target: linux-arm64", "- target: unsupported"),
+        ("floating linux runner", "runner: ubuntu-24.04\n", "runner: ubuntu-latest\n"),
         ("missing neighbor", "name: Codex Windows hook contract", "name: Removed hook gate"),
         ("missing signup recovery step", "name: Native signup journal and recovery", "name: Removed signup gate"),
         ("missing native directory sync probe", "TestWindowsAccountProvisionJournalSyncBoundary|", ""),
