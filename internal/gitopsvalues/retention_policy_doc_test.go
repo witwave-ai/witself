@@ -266,7 +266,7 @@ func TestRetentionPolicyDocMatchesCheckedInCells(t *testing.T) {
 }
 
 func TestRetentionPolicyTableCheckDetectsDrift(t *testing.T) {
-	const current = "| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (backup) | `civo-prod-use1-serving` (serving; onboarded, not yet provisioned; see note) |\n|---|---|---|---|\n| Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` | `true` / `enforce` |\n| Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `true` / `preview` | `true` / `enforce` |\n| Transcripts: `worker.transcriptRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |\n| Messages: `worker.messageRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |\n| Audit trail | No implemented retention worker or chart flag | No implemented retention worker or chart flag | No implemented retention worker or chart flag |"
+	const current = "| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (backup) | `civo-prod-use1-serving` (serving; configuration checked in, cell not yet created; see note) |\n|---|---|---|---|\n| Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` | `true` / `enforce` |\n| Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `true` / `preview` | `true` / `preview` |\n| Transcripts: `worker.transcriptRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |\n| Messages: `worker.messageRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |\n| Audit trail | No implemented retention worker or chart flag | No implemented retention worker or chart flag | No implemented retention worker or chart flag |"
 	const previous = "| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (rollback) |\n|---|---|---|\n| Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` |\n| Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `false` / `preview` (inactive defaults) |\n| Transcripts: `worker.transcriptRetention.enabled` / `.mode` | `false` / `preview` (inactive defaults) | `false` / `preview` (inactive defaults) |\n| Messages: `worker.messageRetention.enabled` / `.mode` | `false` / `preview` (inactive defaults) | `false` / `preview` (inactive defaults) |\n| Audit trail | No implemented retention worker or chart flag | No implemented retention worker or chart flag |"
 	cells := []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup", "civo-prod-use1-serving"}
 	lines := strings.Split(current, "\n")
@@ -314,6 +314,7 @@ func TestRetentionPolicyTableCheckDetectsDrift(t *testing.T) {
 				}
 			}
 			fixture[cells[1]]["agentEmailRetention"] = retentionPolicyPair{"true", "preview"}
+			fixture[cells[2]]["agentEmailRetention"] = retentionPolicyPair{"true", "preview"}
 			if tt.flipFixture {
 				fixture[cells[0]]["transcriptRetention"] = retentionPolicyPair{"true", "enforce"}
 			}
