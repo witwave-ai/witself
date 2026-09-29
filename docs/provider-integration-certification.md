@@ -88,7 +88,7 @@ The native installer and platform-primitives matrix is:
 
 | Target | GitHub runner |
 | --- | --- |
-| Linux x64 | `ubuntu-latest` |
+| Linux x64 | `ubuntu-24.04` |
 | Linux ARM64 | `ubuntu-24.04-arm` |
 | macOS Intel | `macos-15-intel` |
 | macOS Apple Silicon | `macos-15` |

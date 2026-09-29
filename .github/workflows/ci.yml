@@ -19,7 +19,7 @@ jobs:
     name: go
     if: ${{ always() }}
     needs: [go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -40,7 +40,7 @@ jobs:
           done
 
   go-rest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     services:
@@ -150,7 +150,7 @@ jobs:
           govulncheck ./...
 
   go-store:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     services:
@@ -208,7 +208,7 @@ jobs:
           if-no-files-found: error
 
   go-infra:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -240,7 +240,7 @@ jobs:
           golangci-lint run ./...
 
   postgres-backup-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -250,13 +250,13 @@ jobs:
         run: make check-postgres-backup-image
 
   postgres-image-mirror:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install digest-preserving registry copier
         # Ubuntu 24.04 ships Skopeo 1.13.3. The helper also rejects < 1.5,
-        # which cannot enforce --preserve-digests, if ubuntu-latest changes.
+        # which cannot enforce --preserve-digests, if the pinned image changes.
         run: |
           sudo apt-get update
           sudo apt-get install --yes skopeo
@@ -266,7 +266,7 @@ jobs:
         run: make check-postgres-image-mirror
 
   release-config:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -310,7 +310,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   static-analysis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Pin and run ShellCheck and actionlint
@@ -340,7 +340,7 @@ jobs:
       matrix:
         include:
           - target: linux-x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: linux-arm64
             runner: ubuntu-24.04-arm
           - target: macos-intel
@@ -490,7 +490,7 @@ jobs:
   provider-contract-evidence:
     needs: [provider-integration-contract]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -534,11 +534,20 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # Both check names are required by the repository ruleset and by the
+  # release train's floor in scripts/roll-train.sh. They are frozen contract
+  # strings, not runner labels: the x64 name predates the explicit image pin.
+  # Renaming either needs the ordered procedure in docs/release-and-build.md.
   avatar-renderer-portability:
+    name: avatar-renderer-portability (${{ matrix.check }})
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - check: ubuntu-latest
+            runner: ubuntu-24.04
+          - check: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -558,7 +567,7 @@ jobs:
           -count=1
 
   helm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -630,6 +639,8 @@ jobs:
 
       - name: memory load quality workflow contract checks
         run: bash scripts/test-memory-load-quality-workflow.sh
+      - name: hosted runner image and required check name contract checks
+        run: bash scripts/test-workflow-runner-labels.sh
 
       - name: monitoring rollout capability checks
         run: |

@@ -80,7 +80,7 @@ with open(sys.argv[1], 'rb') as manifest:
 PY
 }
 # Digest preservation was introduced in skopeo 1.5. Check explicitly before
-# invoking a copy, including on the ubuntu-latest PR runner.
+# invoking a copy, including on the hosted PR runner.
 if ! skopeo --version >"$work_dir/version" 2>"$work_dir/version.log"; then
   fail 'could not determine skopeo version'
 fi

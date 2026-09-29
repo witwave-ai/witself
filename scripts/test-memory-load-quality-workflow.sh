@@ -24,7 +24,7 @@ def check(text):
     require(not re.search(r"^[ \t]+(?:permissions|environment):", text, re.M), "no job permissions or protected environment dependency")
     require(not re.search(r"\$\{\{\s*secrets\s*[.\[]", text), "no secrets")
     require("self-hosted" not in text, "no self-hosted runners")
-    require(re.findall(r"^\s+runs-on:\s*(.*)$", text, re.M) == ["ubuntu-latest", "ubuntu-latest"], "hosted runners only")
+    require(re.findall(r"^\s+runs-on:\s*(.*)$", text, re.M) == ["ubuntu-24.04", "ubuntu-24.04"], "pinned hosted runner image only")
     uses = re.findall(r"^\s*-?\s*uses:\s*(.*)$", text, re.M)
     require(len(uses) == 3 and all(re.fullmatch(r"[\w/-]+@[0-9a-f]{40} # v[\w.+-]+", value) for value in uses), "version-commented SHA pins")
     require("group: memory-load-quality\n  cancel-in-progress: false" in text, "serialized uncancelled runs")
@@ -61,7 +61,10 @@ try:
         ("write permission", "contents: read", "contents: write"),
         ("job environment", "    timeout-minutes: 90", "    environment: private\n    timeout-minutes: 90"),
         ("secret", "          POSTGRES_IMAGE:", "          SECRET: ${{ secrets.DSN }}\n          POSTGRES_IMAGE:"),
-        ("self-hosted", "runs-on: ubuntu-latest", "runs-on: self-hosted"),
+        ("self-hosted", "runs-on: ubuntu-24.04", "runs-on: self-hosted"),
+        ("floating runner image", "runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"),
+        ("unreviewed runner image", "runs-on: ubuntu-24.04", "runs-on: ubuntu-26.04"),
+        ("renamed hardware tier", "HARDWARE_TIER: ubuntu-latest-", "HARDWARE_TIER: ubuntu-24-04-"),
         ("floating pin", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v7"),
         ("temporary socket readiness", "pg_isready -h 127.0.0.1 -U witself", "pg_isready -U witself"),
         ("retention", "retention-days: 90", "retention-days: 7"),
@@ -85,5 +88,5 @@ try:
 except (AssertionError, OSError) as error:
     print(f"memory load quality workflow test: FAIL: {error}", file=sys.stderr)
     sys.exit(1)
-print("memory load quality workflow test: PASS (workflow contract and 15 rejecting canaries)")
+print("memory load quality workflow test: PASS (workflow contract and 18 rejecting canaries)")
 PY

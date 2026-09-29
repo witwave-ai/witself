@@ -29,7 +29,7 @@ jobs:
     name: go
     if: ${{ always() }}
     needs: [go-rest, go-store, go-infra]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -47,7 +47,7 @@ jobs:
           done
 
   go-rest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     services:
@@ -157,7 +157,7 @@ jobs:
           govulncheck ./...
 
   go-store:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     services:
@@ -215,7 +215,7 @@ jobs:
           if-no-files-found: error
 
   go-infra:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -249,7 +249,7 @@ jobs:
   # The remaining Helm, static-analysis and release contract gates also
   # block publication through goreleaser.needs.
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -317,6 +317,8 @@ jobs:
 
       - name: Test provider evidence workflow contract
         run: bash scripts/test-provider-contract-workflow.sh
+      - name: hosted runner image and required check name contract checks
+        run: bash scripts/test-workflow-runner-labels.sh
 
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh
@@ -347,7 +349,7 @@ jobs:
       matrix:
         include:
           - target: linux-x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: linux-arm64
             runner: ubuntu-24.04-arm
           - target: macos-intel
@@ -495,7 +497,7 @@ jobs:
   provider-contract-evidence:
     needs: [provider-integration-verify]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -546,9 +548,16 @@ jobs:
       fail-fast: false
       matrix:
         # Three OS families cover browser behavior; arm/intel variants are not
-        # needed for this browser-driven Console check.
-        target: [ubuntu-latest, macos-15, windows-latest]
-    runs-on: ${{ matrix.target }}
+        # needed for this browser-driven Console check. Each target is a frozen
+        # name carried by the job and artifact names; the runner is the image.
+        include:
+          - target: ubuntu-latest
+            runner: ubuntu-24.04
+          - target: macos-15
+            runner: macos-15
+          - target: windows-latest
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -644,7 +653,7 @@ jobs:
   # Ubuntu shares the goreleaser job's warmed release cache key, taking this
   # job to publish-job speeds (~20m cold, ~4m warm).
   homebrew-verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -727,7 +736,7 @@ jobs:
   # index keeps every architecture; a source platform manifest stays a platform
   # manifest. Release tags include the cell because these digests differ.
   postgres-mirror-cells:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -745,7 +754,7 @@ jobs:
       fail-fast: false
       matrix:
         cell: ${{ fromJSON(needs.postgres-mirror-cells.outputs.cells) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -809,7 +818,7 @@ jobs:
 
   goreleaser:
     needs: [go, verify, provider-integration-verify, provider-contract-evidence, dashboard-acceptance, homebrew-verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1132,7 +1141,7 @@ jobs:
   promote-latest:
     if: github.event_name == 'push'
     needs: goreleaser
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: witself-ghcr-latest
       cancel-in-progress: false

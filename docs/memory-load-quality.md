@@ -1145,13 +1145,18 @@ gh workflow run memory-load-quality.yml --ref main \
 
 Choose `pgvector/pgvector:pg16` (default), `pgvector/pgvector:pg17`, or
 `pgvector/pgvector:pg18`. The job starts a disposable PostgreSQL container on
-`ubuntu-latest`; it uses only the container's throwaway local test credential.
+the pinned `ubuntu-24.04` hosted runner; it uses only the container's throwaway
+local test credential.
 Result metadata records provider `github-hosted` and hardware tier
 `ubuntu-latest-pg16`, `ubuntu-latest-pg17`, or `ubuntu-latest-pg18`. These labels
-identify the requested image tier; the exact PostgreSQL version remains in each
-slice result, and `SHOW server_version_num` supplies the manifest's numeric
-version. Hosted runner resources can vary between runs; these measurements are
-reference evidence, not production SLOs or a reason to change defaults.
+identify the requested PostgreSQL image tier; the exact PostgreSQL version
+remains in each slice result, and `SHOW server_version_num` supplies the
+manifest's numeric version. The `ubuntu-latest` prefix is a frozen evidence
+identifier for the standard GitHub-hosted Linux x64 runner class, kept so
+manifests from before and after the runner image pin validate identically. It
+does not name the hosted runner image, which the manifest does not record.
+Hosted runner resources can vary between runs; these measurements are reference
+evidence, not production SLOs or a reason to change defaults.
 
 `slices=all` retains lexical, curation, recall, archive, and concurrency results.
 A single named slice is also available for investigation; a passing single-slice
