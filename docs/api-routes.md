@@ -209,6 +209,103 @@ identity. Credential-bearing API requests never follow redirects; a changed
 origin must be rediscovered and revalidated explicitly. Billing-disabled cells
 never fall back to a public control plane.
 
+## Account lifecycle status (control plane)
+
+`GET /v1/placement/accounts/{account_id}/lifecycle` requires the fleet bearer.
+Account IDs contain 1–128 ASCII letters, digits, underscores or hyphens. The
+Worker terminates the entire `/v1/placement/accounts/` prefix, including malformed
+paths. No query parameters are accepted.
+
+The fourteen response keys are `schema_version` (`witself.v0`), `account_id`,
+`observed_at`, `initialized`, `revision`, `epoch`, `location`, `driver_active`,
+`alarm_at`, `operation`, `projections`, `last_completed`, `restore_quarantine`,
+and `directory`. Nullable fields are always present. Timestamps are canonical
+UTC RFC3339 instants, bounded to years 1970–9999; unsafe stored text becomes null.
+
+- `location`: `{kind, cell}`, with kind `live`, `archived`, `closed_archived` or
+  `closed`; an archived cell is the source cell, a closed cell is null.
+- `operation`: `{operation_id, evacuation_id, kind, phase, epoch, request_epoch,
+  source_cell, target_cell, source_registration_id, target_registration_id,
+  target_protocol, has_archive, has_archive_origin, next_step, imported_status,
+  restored_status, source_finalization, target_reservation_expires_at, retryable,
+  last_error, export_job, import_job}`. Kinds are `evacuate`, `move`, `restore`, `close`;
+  close has null evacuation and target. Protocol is 1–99 or null. Statuses are
+  `active`, `suspended`, `closed` or null. Finalization modes are `same_cell_target`,
+  `legacy_unfenced_source`, `source_cell_unregistered`, `source_cell_replaced`,
+  `cell_receipt`, or null.
+- `next_step`: null or `{type, action, target}`; safe lowercase symbolic names
+  only. Unknown phases yield an unavailable next step.
+- `export_job`: null or `{stream_attempts, verify_attempts, stream_started_at,
+  streamed, streamed_at, stream_ms}`. `streamed` indicates a stored stream result
+  object; counters and timestamps are null when malformed or absent. Archive
+  identity, size and placement policy are excluded.
+- `import_job`: null or `{attempts, first_started_at, started_at, last_polled_at,
+  retry_at, validated, manifest_schema_version, next_alarm_action}`. The next
+  zero-budget alarm action is `start` for a due numeric retry, `wait` for a
+  future numeric retry, and `poll` otherwise, including null retry times.
+- `projections`: null when uninitialized; otherwise `{route, archive, cleanup}`,
+  each null or `{action, status}` (`put`/`delete`, `pending`/`applied`).
+- `last_completed`: null or `{operation_id, evacuation_id, kind, outcome, epoch,
+  source_cell, target_cell, completed_revision, final_location}`. Outcomes are
+  `completed`, `aborted`, `reaped`, `cancelled`, `quarantined`. Final location
+  uses the same `{kind, cell}` projection.
+- `restore_quarantine`: null or `{reason, quarantined_at, matches_operation,
+  matches_location}`; reason is `archive_integrity` or `unreadable`. Location
+  comparison remains meaningful after the quarantined operation retires.
+- `directory`: `{live_cell, archived_cell}` or null. This is an eventually
+  consistent projection; `location` is authority. Null means the directory
+  could not be read, rather than that both entries are absent. Signup residents
+  may have a directory entry and `initialized:false` with no lifecycle state.
+
+`last_error` is recorded for the import step only. It is null, one of the eleven
+fixed strings below, or `unrecognized lifecycle error` for an unknown stored
+string. Other phase failures remain visible only in control-plane diagnostics.
+
+- `archive import above 90 MiB requires target account evacuation protocol 2`
+- `target cell schema is older than the archive; upgrade the target cell first`
+- `archive import failed; retry required`
+- `target cell attests protocol 2 while an import job is in flight; waiting for the roll`
+- `import job ended without a receipt; retry required`
+- `import job exhausted its attempts; operator attention required`
+- `import capacity exhausted; retry scheduled`
+- `import job exceeded its age limit; operator attention required`
+- `account exists under a different evacuation`
+- `archive schema is newer than this cell — upgrade the cell first`
+- `invalid or corrupt archive`
+
+All responses have `Cache-Control: no-store`, including errors and the shared
+public-IP limiter's 429. Status errors use fixed text:
+
+| Status | Error |
+|---|---|
+| 401 | `unauthorized` |
+| 404 | `account lifecycle route not found` or `unknown account` |
+| 405 | `method not allowed` |
+| 400 | `query parameters are not allowed` |
+| 429 | `too many requests — try again later` |
+| 503 | `account lifecycle status is unavailable` |
+
+The shared limit is 300 requests per minute per IP. Poll no faster than every
+five seconds. Reads do not claim the lifecycle fence, arm or delete an alarm,
+write state or KV, access R2, mint or consume capabilities, or contact cells.
+They are safe while an operation is running. Reading an uninitialized object
+creates no durable state. A directory read failure on an uninitialized account
+returns 503, never a false unknown-account response.
+
+Operation and evacuation IDs identify the archive: for move/evacuate they are
+the archive UUID, and restore retains the original evacuation ID. Together with
+the account ID this permits deriving the archive object key. These IDs and cell
+registration IDs are operator-internal identifiers, not secrets. Fleet-token
+access is required; an object key grants no access without R2 credentials or a
+single-use capability. The route never returns an object key, etag, size,
+capability, credential, cell endpoint, archive origin, or receipt body.
+
+Roll out the control plane first, then upgrade `witself-admin`. Worker and
+Durable Object ship together; no cell, protocol, schema, variable, binding,
+class or migration changes are needed. A new CLI against an older control plane
+falls through to the Go container and prints a fixed failure diagnostic; this
+route cannot prevent that older-server behavior. Older binaries are unaffected.
+
 ## Implemented sealed-plane routes
 
 ```text

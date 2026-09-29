@@ -18,7 +18,7 @@ Managed token files live under `~/.witself/tokens`; `WITSELF_HOME` replaces
 | Credential | Resolution, highest priority first | Commands |
 |---|---|---|
 | Admin token | `--token`, `--token-file`, `WITSELF_ADMIN_TOKEN`, managed `admin.token` | `whoami`, tickets, account policies, email aliases/domains, `cells list`, events |
-| Fleet token | `--fleet-token`, `WITSELF_FLEET_TOKEN`, managed `fleet.token` | `admin`, `invite`, `placement rescue`, `settings`, `cells show` and repairs; see cell and settings authentication below |
+| Fleet token | `--fleet-token`, `WITSELF_FLEET_TOKEN`, managed `fleet.token` | `admin`, `invite`, `placement rescue`, `placement lifecycle` (file, environment or managed token only; no token on argv), `settings`, `cells show` and repairs; see cell and settings authentication below |
 | Domain recovery token, in addition to the admin token | `--recovery-token-file`, `WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE`, managed `agent-email-domain-recovery.token` | `email-domain journal` and `email-domain recovery` |
 
 Recovery token files must be regular files, must not be symlinks, and must have
@@ -167,6 +167,8 @@ and a generic error on failure), and `remaining`. Tables show account/status
 and remaining. Raw errors, archive details, and progress records are omitted.
 Protocol-3 restores expose `pending`, `attempts`, and `retryable`; pending tables
 show the attempt and `needs operator` when retryability is false.
+Inspect pending or busy rows without re-driving them with
+`witself-admin placement lifecycle --account-id ID`.
 An account failure exits 1 even on HTTP 200; remaining work alone is not failure.
 `remaining` is the cell's routed count for evacuation and the destination's
 eligible archive count for restore, not just the selected account.
@@ -235,6 +237,40 @@ witself-admin placement rescue --account-id ACCOUNT_ID \
 `--axes` defaults to all three axes; it accepts a comma-separated subset of
 `cloud`, `region`, and `channel`. JSON wraps the receipt in `placement_rescue`
 and includes whether anything changed.
+
+`witself-admin placement lifecycle --account-id ID [--endpoint URL]
+[--token-file PATH] [--json]` reads account movement and restore progress without
+claiming the fence or mutating anything. This is distinct from the billing plan
+lifecycle. IDs accept 1–128 ASCII letters, digits, underscores or hyphens;
+positionals are rejected. `--help` needs no credential. Token resolution is an
+explicit file, `WITSELF_FLEET_TOKEN`, then the managed fleet token file; an
+unreadable or empty explicit file never falls back. There is no `--fleet-token`
+or `--token` flag and no watch loop.
+
+The table rows are account, initialized, location, directory, epoch, revision,
+driver, alarm, operation; then evacuation, phase, cells, target protocol, next
+step, retryable and last error when an operation exists; then export job, import job, last
+completed, quarantine and observed. `attention: needs operator` appears when an
+operation is non-retryable and has an error. Export jobs show `stream attempt N;
+verify attempt M; streamed yes|no at T; stream ms X`. Import jobs show attempt count,
+next alarm action, retry time, first start, latest start and last poll. Times
+are UTC RFC3339, absent scalars are `-`, and absent operations/jobs/completions/
+quarantines are `none`. Directory shows live and/or archived cells, `none` for
+absent entries, or `unavailable` for a failed read; compare it with authoritative
+location to diagnose drift. JSON uses `{"account_lifecycle": <typed status>}`
+with explicit nulls, dropping unknown fields and substituting safe text for
+unknown enum values.
+
+A successful read exits 0, including needs-operator status. Argument or
+credential failures exit 2; request failures exit 1. Unauthorized responses
+print `not authorized (check the fleet token)`; 404 prints `account not found,
+or the control plane predates the lifecycle status route`; all other failures
+print `lifecycle status request failed; inspect control-plane diagnostics`.
+Server response bodies and credentials are never printed. Success bodies are
+bounded to 64 KiB; shared error-body decoding remains unbounded.
+Deploy the control plane before upgrading the CLI: an older control plane
+forwards this unmatched route to its Go container, yielding a fixed CLI failure.
+Poll no faster than every five seconds under the shared 300/minute/IP limit.
 
 ## Settings
 
