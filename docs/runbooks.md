@@ -1167,6 +1167,18 @@ aliased or misconfigured kube context that returns another cell's Application
 stops the train with an "unexpected cell identity" diagnostic instead of
 certifying that cell's workloads.
 
+Run the train's offline contract suite without a cluster or credentials (the
+only network use is Go fetching modules into a cold module cache):
+
+```sh
+bash scripts/test-roll-train.sh
+```
+
+It substitutes `git`, `gh`, `kubectl`, `curl` and `roll-cell.sh` with fixtures
+and then runs the five `scripts/test-roll-train-*.sh` suites. It needs `git`,
+`jq`, Mike Farah's `yq`, `go` and `shasum` on `PATH`. Both `make check-infra`
+and the CI `helm` job run it.
+
 ## K3s minor upgrade (Civo)
 
 Keep the desired K3s version in each cell's `k8s_version` field in the

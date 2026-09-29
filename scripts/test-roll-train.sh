@@ -24,6 +24,12 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required'
 command -v yq >/dev/null 2>&1 || fail 'yq is required'
 ROLL_TRAIN_REAL_YQ=$(command -v yq)
 export ROLL_TRAIN_REAL_YQ
+# This suite rotted once because no gate ran it. These two checks prove only
+# that each wiring line is present as a whole line somewhere in its file.
+grep -Fxq $'\tbash scripts/test-roll-train.sh' "$SOURCE_ROOT/Makefile" \
+  || fail 'the roll train wiring line is not present as a whole line in Makefile'
+grep -Fxq '        run: bash scripts/test-roll-train.sh' "$SOURCE_ROOT/.github/workflows/ci.yml" \
+  || fail 'the roll train wiring line is not present as a whole line in .github/workflows/ci.yml'
 FIXTURE_ROOT="$TEST_ROOT/repo"
 STUB_BIN="$TEST_ROOT/bin"
 STATE_DIR="$TEST_ROOT/state"
@@ -442,6 +448,21 @@ assert_no_wave() {
   fi
 }
 
+# Compare every recorded roll-cell call, in order, with the expected calls as
+# whole lines. A missing, extra, reordered or changed argument fails, and so
+# does a missing, repeated or out-of-order call.
+assert_roll_cell_calls() {
+  local label=$1 expected actual
+  shift
+  expected=$(printf '%s\n' "$@")
+  actual=$(grep '^roll-cell ' "$TEST_LOG" || true)
+  if [ "$actual" != "$expected" ]; then
+    printf 'roll train test: expected roll-cell calls:\n%s\n' "$expected" >&2
+    printf 'roll train test: recorded roll-cell calls:\n%s\n' "${actual:-<none>}" >&2
+    fail "$label"
+  fi
+}
+
 for scenario in backup_chart_newer backup_image_newer partial_pin backup_live_newer \
   newer_pod_spec newer_running_image newer_deployment malformed_running_inventory unsafe_merge_driver; do
   reset_case
@@ -540,10 +561,16 @@ printf 'roll train test: pending and missing matrix checks time out before merge
 
 reset_case
 SCENARIO=checks_transport_failure
-expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 1 --poll-interval 1
+# This deadline only bounds a regression that retries the failure as pending.
+# It must not expire during the first read: SECONDS has one-second resolution,
+# so a one-second deadline can pass inside a single stub call.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 30 --poll-interval 1
 if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail 'checks transport failure reached merge'; fi
 if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'checks transport failure was retried as pending'; fi
 grep -Fq 'gh exit 1' "$TEST_ROOT/output" || fail 'checks transport failure lost the CLI error'
+# The deadline above no longer bounds a retry, so count the reads: the train
+# must stop on the first failed read.
+[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 1 ] || fail 'checks transport failure was retried'
 printf 'roll train test: checks transport failure stops immediately\n'
 
 for scenario in postmerge_cancelled postmerge_wrong_sha argo_timeout; do
@@ -717,6 +744,9 @@ reset_case
 bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 >"$TEST_ROOT/output" 2>&1 \
   || fail 'offline two-wave train failed'
 [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'train did not merge exactly two waves'
+assert_roll_cell_calls 'schema attestation was not forwarded exactly, once per wave' \
+  "roll-cell <$BACKUP> <$VERSION> <--no-schema-change>" \
+  "roll-cell <$SERVING> <$VERSION> <--no-schema-change>"
 [ "$(grep -Fc '<--match-head-commit> <aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa>' "$TEST_LOG")" -eq 2 ] \
   || fail 'merges were not fenced to the approved OID'
 [ "$(grep -Fc '<--workflow> <ci.yml>' "$TEST_LOG")" -eq 2 ] || fail 'post-merge CI was not verified for both waves'
@@ -792,13 +822,13 @@ mkdir -p "$TEST_ROOT/evidence backup" "$TEST_ROOT/evidence serving"
   bash "$TRAIN" "$VERSION" --backup-evidence 'evidence backup' --backup-evidence 'evidence serving' \
     --workdir relative-work --poll-interval 1
 ) >"$TEST_ROOT/output" 2>&1 || fail 'backup evidence train failed'
-for cell in "$BACKUP" "$SERVING"; do
-  grep -Fq "roll-cell <$cell> <$VERSION> <--backup-evidence> <$TEST_ROOT/evidence backup> <--backup-evidence> <$TEST_ROOT/evidence serving>" "$TEST_LOG" \
-    || fail 'backup evidence paths were not forwarded intact to both waves'
-done
+evidence_gate="<--evidence-cells> <$BACKUP,$SERVING> <--backup-evidence> <$TEST_ROOT/evidence backup> <--backup-evidence> <$TEST_ROOT/evidence serving>"
+assert_roll_cell_calls 'backup evidence gate arguments were not forwarded exactly, once per wave' \
+  "roll-cell <$BACKUP> <$VERSION> $evidence_gate" \
+  "roll-cell <$SERVING> <$VERSION> $evidence_gate"
 [ -d "$TEST_ROOT/relative-work" ] || fail 'relative --workdir was not resolved from invocation directory'
 if grep -Fq '<--no-schema-change>' "$TEST_LOG"; then fail 'evidence path introduced a schema attestation'; fi
-printf 'roll train test: evidence paths with spaces reach both gates; relative workdir preserved\n'
+printf 'roll train test: evidence pair and paths with spaces reach both gates exactly; relative workdir preserved\n'
 
 for scenario in delayed_checks delayed_required; do
   reset_case
