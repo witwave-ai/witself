@@ -1107,8 +1107,11 @@ scripts/roll-train.sh "$VERSION" \
 The host needs Bash, Git, authenticated `gh`, `jq`, Mike Farah's `yq`,
 `kubectl`, and `curl`, plus a configured Git author for signed-off commits.
 The backup-evidence route also requires the verifier described above and
-accepts only the default ordered cell pair: the verifier checks
-those two databases. Custom `--cells` pairs require `--no-schema-change`.
+accepts only a reviewed cell pair in `BACKUP,SERVING` order: the default pair,
+or `civo-sandbox-use1-backup,civo-prod-use1-serving` for the production serving
+cell. Each wave forwards the selected pair to `roll-cell.sh` as
+`--evidence-cells`, so the verifier checks those two databases. Any other
+`--cells` pair requires `--no-schema-change`.
 The script checks `gh auth status`, namespace access to `argocd` in each context
 with a 20-second request timeout, a published `v<VERSION>` release, and a
 successful latest `release.yml` run on that tag. Before starting the train,
@@ -1155,6 +1158,37 @@ GitOps pins, CI, and live state before continuing manually. The script never
 force-pushes. After the serving wave, it prints and verifies the serving
 `/v1/version`, then prints `witself-infra health --json` if that binary is
 available.
+
+To roll the production serving cell, select its pair explicitly; the default
+stays the sandbox pair:
+
+```sh
+scripts/roll-train.sh "$VERSION" \
+  --cells civo-sandbox-use1-backup,civo-prod-use1-serving \
+  --backup-evidence "$BACKUP_CELL_EVIDENCE_DIR" \
+  --backup-evidence "$PRODUCTION_CELL_EVIDENCE_DIR"
+```
+
+Read the plan with `--dry-run` first, and pass `--serving-url` when the live
+host differs from the cell values. The production cell must be provisioned,
+reachable through its kube context and answering `/v1/version`, and
+`witself-admin` must be 0.0.315 or newer.
+
+Wave 1 is still `civo-sandbox-use1-backup`. Wave 2 is `civo-prod-use1-serving`,
+read through the kube context `witself-civo-prod-use1-serving`, and the serving
+URL defaults to that cell's `apiHost`. The version guards compare each cell
+with `VERSION`, never with the other cell. A serving cell that pins an older
+release than the backup cell is rolled straight to `VERSION`. A train cannot
+target the release that the backup cell already pins: wave 1 refuses it with
+`must be strictly lower` before any pin is edited, and keeps its worktree and
+branch for inspection. Raising a lagging cell to exactly that release is
+outside the train. Roll only that cell with `scripts/roll-cell.sh CELL
+"$VERSION"`, passing `--no-schema-change` or one evidence directory for each
+cell of its pair, both targeting `VERSION`. With `--no-schema-change` the
+attestation must hold for every release between that cell's pin and `VERSION`.
+Then follow the per-cell steps of the manual rollout below and skip its
+backup-cell steps. `roll-cell.sh` has no version guard, so compare the cell's
+pins with `VERSION` by hand first.
 
 The manual rollout remains the fallback: use `scripts/roll-cell.sh` with the
 same attestation or backup evidence, create and merge a reviewed PR for the

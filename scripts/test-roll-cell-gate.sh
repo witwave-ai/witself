@@ -517,6 +517,16 @@ cmp -s "$TEST_ROOT/admin.expected" "$ADMIN_LOG" ||
 expect_output "backup evidence verified for release $VERSION" "verified backup evidence"
 assert_values "$ROLLED" "verified backup evidence"
 
+# A train always forwards its selected pair. The explicit default pair must
+# reach the verifier exactly as the standalone default does.
+reset_case
+run_roll "$CELL" "$VERSION" --evidence-cells civo-sandbox-use1-backup,civo-sandbox-use1-serving \
+  --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+  fail "explicit default evidence pair did not proceed"
+cmp -s "$TEST_ROOT/admin.expected" "$ADMIN_LOG" ||
+  fail "explicit default pair was not forwarded exactly"
+assert_values "$ROLLED" "explicit default evidence pair"
+
 # The overlap pair is forwarded explicitly while rolling the shared backup.
 reset_case
 run_roll "$CELL" "$VERSION" --evidence-cells civo-sandbox-use1-backup,civo-prod-use1-serving \
@@ -896,6 +906,21 @@ for serving_cell in civo-sandbox-use1-serving civo-prod-use1-serving; do (
   "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
     fail 'serving PostgreSQL mirror did not survive generation'
   grep -Fxq -- "$CELL" "$ADMIN_LOG" || fail 'standalone serving roll did not require its own evidence'
+  # Wave two of a train: the serving cell is rolled with the pair its train
+  # forwards and without an image opt-in, so only the server pins change.
+  reset_case
+  run_roll "$CELL" "$VERSION" --evidence-cells "civo-sandbox-use1-backup,$CELL" \
+    --backup-evidence "$EVIDENCE_A" --backup-evidence "$EVIDENCE_B" >"$CASE_OUTPUT" 2>&1 ||
+    fail "serving wave of $CELL with its train pair did not proceed"
+  train_expected="$TEST_ROOT/admin.expected"
+  if [ "$CELL" = civo-prod-use1-serving ]; then train_expected="$TEST_ROOT/production-paths.expected"; fi
+  cmp -s "$train_expected" "$ADMIN_LOG" || fail "serving wave of $CELL did not forward its train pair exactly"
+  assert_values "$ROLLED" "serving wave of $CELL with its train pair"
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+    fail "serving wave of $CELL did not survive generation"
+  if grep -Fq 'witwave-ai/images/postgresql' "$REGISTRY_LOG"; then
+    fail "serving wave of $CELL contacted the PostgreSQL registry without opt-in"
+  fi
   reset_case
   other_serving=civo-prod-use1-serving
   if [ "$CELL" = "$other_serving" ]; then other_serving=civo-sandbox-use1-serving; fi

@@ -20,7 +20,8 @@ usage: scripts/roll-train.sh VERSION [options]
 
 VERSION must be MAJOR.MINOR.PATCH without v. A real roll requires either
 --no-schema-change or --backup-evidence; these options are mutually exclusive.
-Backup evidence supports only the default --cells pair, in its default order.
+Backup evidence requires a reviewed --cells pair in BACKUP,SERVING order: the
+default pair or civo-sandbox-use1-backup,civo-prod-use1-serving.
 Uses configured Git identity and Signed-off-by, never force-pushes, and leaves
 the current worktree and PR for inspection on failure. No automatic resume.
 EOF

@@ -36,6 +36,7 @@ STATE_DIR="$TEST_ROOT/state"
 TRAIN="$FIXTURE_ROOT/scripts/roll-train.sh"
 BACKUP=civo-sandbox-use1-backup
 SERVING=civo-sandbox-use1-serving
+PRODUCTION=civo-prod-use1-serving
 VERSION=1.2.3
 OLD_DIGEST="sha256:$(printf 'a%.0s' {1..64})"
 BACKUP_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
@@ -47,7 +48,11 @@ mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/.git" "$STUB_BIN" "$STATE_DIR"
 mkdir -p "$FIXTURE_ROOT/.gitops/charts/apps"
 cp "$SOURCE_ROOT/.gitops/charts/apps/values.yaml" "$FIXTURE_ROOT/.gitops/charts/apps/values.yaml"
 cp "$SOURCE_ROOT/scripts/roll-train.sh" "$TRAIN"
-for cell in "$BACKUP" "$SERVING"; do
+for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
+  # The production fixture pins an older release than the sandbox pair, as the
+  # committed production cell does, so the per-cell guards see different pins.
+  pin=1.2.2
+  [ "$cell" != "$PRODUCTION" ] || pin=1.2.1
   mkdir -p "$FIXTURE_ROOT/.gitops/cells/$cell"
   cat >"$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml" <<EOF_VALUES
 cell:
@@ -57,8 +62,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 1.2.2
-    imageTag: 1.2.2
+    chartVersion: $pin
+    imageTag: $pin
     worker:
       enabled: true
 EOF_VALUES
@@ -135,6 +140,15 @@ case "$1" in
           serving_pins_newer:*wave-2-*)
             sed 's/1.2.2/1.2.4/g' "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml" >"$STATE_DIR/new-values"
             cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
+            ;;
+          production_backup_at_target:*)
+            sed 's/1\.2\.2/1.2.3/g' \
+              "$path/.gitops/cells/civo-sandbox-use1-backup/values.yaml" >"$STATE_DIR/new-values"
+            cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
+            ;;
+          production_pins_newer:*wave-2-*)
+            sed 's/1\.2\.1/1.2.4/g' "$path/.gitops/cells/civo-prod-use1-serving/values.yaml" >"$STATE_DIR/new-values"
+            cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-prod-use1-serving/values.yaml"
             ;;
         esac
         printf '%s\n' "$path" >>"$STATE_DIR/worktrees"
@@ -244,6 +258,7 @@ version=1.2.3
 case "$SCENARIO:$*" in
   backup_live_newer:*witself-civo-sandbox-use1-backup*) version=1.2.4 ;;
   serving_live_newer:*witself-civo-sandbox-use1-serving*) version=1.2.4 ;;
+  production_live_newer:*witself-civo-prod-use1-serving*) version=1.2.4 ;;
   concurrent_live:*) [ ! -f "$STATE_DIR/checks_seen" ] || version=1.2.4 ;;
 esac
 cell=$(printf '%s\n' "$*" | sed -nE 's/.*--context witself-([a-z0-9-]+).*/\1/p')
@@ -252,7 +267,8 @@ if [[ "$SCENARIO" = digest_* ]] && { [ "$SCENARIO" != digest_from_tag ] || [ -f 
   digest=$OLD_DIGEST
   if [ -f "$STATE_DIR/merged-$cell" ]; then
     digest=$BACKUP_DIGEST
-    [ "$cell" != civo-sandbox-use1-serving ] || digest=$SERVING_DIGEST
+    # Wave two is whichever serving cell the train selected.
+    [ "$cell" = civo-sandbox-use1-backup ] || digest=$SERVING_DIGEST
   elif [ "$SCENARIO" = digest_concurrent_live ] && [ -f "$STATE_DIR/checks_seen" ]; then
     digest=$SERVING_DIGEST
   fi
@@ -351,8 +367,13 @@ printf 'curl' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 case "${!#}" in */v1/version) ;; *) printf 'unexpected curl URL\n' >&2; exit 97 ;; esac
+# Fixture hosts are api.<cell>.invalid. Answer for the cell that the requested
+# host names: its own older release until that cell has been rolled. A URL taken
+# from another cell's values can then never certify the serving wave.
+host_cell=$(printf '%s\n' "${!#}" | sed -nE 's#^https://api\.([a-z0-9-]+)\.invalid/v1/version$#\1#p')
 version=1.2.2
-if [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = civo-sandbox-use1-serving ]; then version=1.2.3; fi
+[ "$host_cell" != civo-prod-use1-serving ] || version=1.2.1
+if [ -n "$host_cell" ] && [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = "$host_cell" ]; then version=1.2.3; fi
 printf '{"version":"%s"}\n' "$version"
 EOF_CURL
 
@@ -402,7 +423,7 @@ printf '\n' >>"$TEST_LOG"
 printf '%s\n' "$1" >"$STATE_DIR/cell"
 if [[ "$SCENARIO" = digest_* ]]; then
   pin=$BACKUP_DIGEST
-  [ "$1" != civo-sandbox-use1-serving ] || pin=$SERVING_DIGEST
+  [ "$1" = civo-sandbox-use1-backup ] || pin=$SERVING_DIGEST
   PIN=$pin "$ROLL_TRAIN_REAL_YQ" -i '
     .apps.witselfServer.chartVersion = "1.2.3" |
     .apps.witselfServer.imageTag = "1.2.3" |
@@ -425,13 +446,13 @@ reset_case() {
   fi
   : >"$TEST_LOG"
   SCENARIO=success
-  for cell in "$BACKUP" "$SERVING"; do
+  for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
     "$ROLL_TRAIN_REAL_YQ" -i 'del(.apps.witselfServer.imageDigest)' "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml"
   done
 }
 
 pin_fixture_cells() {
-  for cell in "$BACKUP" "$SERVING"; do
+  for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
     "$ROLL_TRAIN_REAL_YQ" -i '.apps.witselfServer.imageDigest = strenv(OLD_DIGEST)' "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml"
   done
 }
@@ -840,6 +861,89 @@ for scenario in delayed_checks delayed_required; do
   [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail "$scenario did not complete both waves"
 done
 printf 'roll train test: initial missing checks and required checks wait for registration\n'
+
+# The production pair keeps the shared backup cell as wave one and rolls the
+# production serving cell as wave two. That cell pins an older release than the
+# backup cell. Every name, kube context and URL must come from the selected
+# pair: the default serving cell must not appear anywhere.
+reset_case
+mkdir -p "$TEST_ROOT/evidence backup" "$TEST_ROOT/evidence production"
+production_args=("$VERSION" --cells "$BACKUP,$PRODUCTION"
+  --backup-evidence "$TEST_ROOT/evidence backup" --backup-evidence "$TEST_ROOT/evidence production"
+  --workdir "$TEST_ROOT/work")
+bash "$TRAIN" "${production_args[@]}" --dry-run >"$TEST_ROOT/output" 2>&1 || fail 'production pair dry run failed'
+grep -Fxq "Wave 1: $BACKUP (context witself-$BACKUP)" "$TEST_ROOT/output" \
+  || fail 'production pair plan lost the backup wave'
+grep -Fxq "Wave 2: $PRODUCTION (context witself-$PRODUCTION), only after wave 1 verified." "$TEST_ROOT/output" \
+  || fail 'production pair plan lost the production wave'
+grep -Fxq "Serving origin: https://<origin/main .gitops/cells/$PRODUCTION/values.yaml cell.apiHost>" "$TEST_ROOT/output" \
+  || fail 'production pair plan does not read the serving origin from the production cell'
+SCENARIO=digest_success
+pin_fixture_cells
+bash "$TRAIN" "${production_args[@]}" --poll-interval 1 >"$TEST_ROOT/output" 2>&1 \
+  || fail 'production pair train failed'
+production_gate="<--evidence-cells> <$BACKUP,$PRODUCTION> <--backup-evidence> <$TEST_ROOT/evidence backup> <--backup-evidence> <$TEST_ROOT/evidence production>"
+assert_roll_cell_calls 'production pair gate arguments were not forwarded exactly, once per wave' \
+  "roll-cell <$BACKUP> <$VERSION> $production_gate" \
+  "roll-cell <$PRODUCTION> <$VERSION> $production_gate"
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'production pair train did not merge exactly two waves'
+[ "$(grep -Fc '<--match-head-commit> <aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa>' "$TEST_LOG")" -eq 2 ] \
+  || fail 'production pair merges were not fenced to the approved OID'
+for title in "Roll $BACKUP to v$VERSION (wave 1)" "Roll $PRODUCTION to v$VERSION (wave 2)"; do
+  [ "$(grep -Fc "<--title> <$title>" "$TEST_LOG")" -eq 1 ] || fail "production pair train did not open exactly one PR titled: $title"
+done
+awk -v serving="$PRODUCTION" '
+  /^gh <pr> <merge>/ { merged++ }
+  /^kubectl/ && /<get> <deployments>/ && merged > 0 { verified++ }
+  /^roll-cell/ && index($0, "<" serving ">") { if (verified < 1) exit 1; serving_seen=1 }
+  END { if (!serving_seen) exit 1 }
+' "$TEST_LOG" || fail 'production wave preceded backup pod verification'
+if grep -Fq "$SERVING" "$TEST_LOG" "$TEST_ROOT/output"; then fail 'production pair train touched the default serving cell'; fi
+outside=$(grep '^kubectl ' "$TEST_LOG" \
+  | grep -Fvc -e "<--context> <witself-$BACKUP>" -e "<--context> <witself-$PRODUCTION>" || true)
+[ "$outside" = 0 ] || fail 'production pair train used a kube context outside the selected pair'
+for cell in "$BACKUP" "$PRODUCTION"; do
+  grep -Fxq "kubectl <--context> <witself-$cell> <--request-timeout=20s> <get> <ns> <argocd>" "$TEST_LOG" \
+    || fail "production pair train did not check the argocd namespace of $cell"
+done
+production_version="curl <--fail> <--silent> <--show-error> <--connect-timeout> <10> <--max-time> <20> <https://api.$PRODUCTION.invalid/v1/version>"
+[ "$(grep '^curl ' "$TEST_LOG")" = "$(printf '%s\n%s' "$production_version" "$production_version")" ] \
+  || fail 'serving version was not read exactly twice from the production cell host'
+grep -Fxq "roll-train: Preconditions verified; serving version 1.2.1 -> $VERSION" "$TEST_ROOT/output" \
+  || fail 'production pair train did not start from the older production release'
+[ "$(grep -Fc 'image digests match the cell values pin' "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'production pair train did not verify both cell-specific digests'
+[ "$(grep -Fxc "ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'production pair train omitted or duplicated the certified backup image'
+[ "$(grep -Fxc "ghcr.io/witwave-ai/witself-server@$SERVING_DIGEST" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'production pair train omitted or duplicated the certified production image'
+grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'production pair train omitted final serving version'
+grep -Fq 'witself-infra <health> <--json>' "$TEST_LOG" || fail 'production pair train did not invoke the available infra health binary'
+while IFS= read -r path; do [ ! -d "$path" ] || fail 'production pair train retained a verified worktree'; done <"$STATE_DIR/worktrees"
+printf 'roll train test: production pair train forwards its pair, reads only its contexts and host, and rolls backup first\n'
+
+# Guards compare each cell with the target, never with the other cell. With the
+# backup cell already on the target release, wave one refuses before any edit
+# and the older production cell stays untouched.
+reset_case
+SCENARIO=production_backup_at_target
+expect_failure "${production_args[@]}"
+grep -Fq "$BACKUP desired chartVersion '1.2.3' must be strictly lower than $VERSION" "$TEST_ROOT/output" \
+  || fail 'backup cell on the target release was not refused by its own pin guard'
+if grep -Eq '^(roll-cell|git <(add|commit|push)>|gh <pr> <(create|merge)>)' "$TEST_LOG"; then
+  fail 'production_backup_at_target edited pins or published a wave'
+fi
+for scenario in production_pins_newer production_live_newer; do
+  reset_case
+  SCENARIO=$scenario
+  expect_failure "${production_args[@]}"
+  refusal="$PRODUCTION desired chartVersion '1.2.4' must be strictly lower than $VERSION"
+  [ "$scenario" != production_live_newer ] || refusal="$PRODUCTION live Argo revision '1.2.4' is invalid or newer than $VERSION"
+  grep -Fq "$refusal" "$TEST_ROOT/output" || fail "$scenario missed the production version guard"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail "$scenario did not verify backup first"
+  if grep -Fq "roll-cell <$PRODUCTION>" "$TEST_LOG"; then fail "$scenario overwrote a newer production cell"; fi
+done
+printf 'roll train test: production pair guards are per cell: backup on target refuses wave one; newer production stops wave two\n'
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-evidence.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-readiness.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-values.sh"
