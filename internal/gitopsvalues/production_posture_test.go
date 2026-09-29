@@ -110,7 +110,7 @@ func generatedPostureValues(t *testing.T, cellName string, monitoring bool) map[
 	}
 	cell, ok := catalog.Cells[cellName]
 	if !ok {
-		postureFatal(t, "catalog cell %s: missing", cellName)
+		postureFatal(t, "catalog cell %s: missing; if the cell was retired, remove its cases from this table", cellName)
 	}
 	cell.Switches.Monitoring = monitoring
 	catalog.Cells[cellName] = cell
@@ -204,7 +204,7 @@ func TestReceiverSecretNamesPerServingCell(t *testing.T) {
 		{name: "production on, old names", cell: production, monitoring: true, pagerduty: pagerV1, deadman: deadmanV1, wantError: "receiver.secretName"},
 		{name: "sandbox serving, new names", cell: sandbox, monitoring: true, pagerduty: pagerV2, deadman: deadmanV2, wantError: "receiver.secretName"},
 		{name: "production on, dead-man", cell: production, monitoring: true, pagerduty: pagerV2, deadman: deadmanV2, block: "receiverDeadman", field: "secretName", value: deadmanV1, wantError: "receiverDeadman.secretName"},
-		{name: "production off, names expected", cell: production, pagerduty: pagerV2, deadman: deadmanV2, wantError: "missing"},
+		{name: "production off, names expected", cell: production, pagerduty: pagerV2, deadman: deadmanV2, wantError: "receiver: missing"},
 		{name: "production on, none expected", cell: production, monitoring: true, wantError: "must be absent"},
 		{name: "extra key", cell: production, monitoring: true, pagerduty: pagerV2, deadman: deadmanV2, block: "receiver", field: "extra", value: true, wantError: "unexpected key"},
 		{name: "one name", cell: production, monitoring: true, pagerduty: pagerV2, wantError: "both names"},
