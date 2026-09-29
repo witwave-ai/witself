@@ -47,12 +47,7 @@ func TestAccountImportLeaseOwnershipPostgres(t *testing.T) {
 	}
 	lease.Close()
 	lease.Close()
-	if running, err := st.AccountImportInProgress(ctx, accountID, epoch); err != nil || running {
-		t.Fatal("closed lease remains locked", err)
-	}
-	if st.pool.Stat().AcquiredConns() != baseline {
-		t.Fatal("pool connection leaked")
-	}
+	waitAccountImportLeaseReleased(ctx, t, st, accountID, epoch, baseline)
 	conn, err := st.pool.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -97,24 +92,32 @@ func TestAccountImportLeaseCancelledStatementPostgres(t *testing.T) {
 		t.Fatalf("statement not cancelled: %v", err)
 	}
 	lease.Close()
-	// Closing a cancelled pgx connection sends teardown without waiting for
-	// the backend to process it; observe eventual release within the drain bound.
-	deadline := time.Now().Add(2 * time.Second)
+	waitAccountImportLeaseReleased(ctx, t, st, accountID, "evac_cancel", baseline)
+}
+
+// waitAccountImportLeaseReleased observes a closed lease's eventual release.
+// Closing a pgx connection sends teardown without waiting for the backend to
+// end the session that holds the advisory lock, and the pool destroys a closed
+// connection in a goroutine, so neither is visible at once. The bound only
+// separates a leak from a slow release on a loaded machine.
+func waitAccountImportLeaseReleased(ctx context.Context, t *testing.T, st *Store, accountID, epoch string, baseline int32) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		running, err := st.AccountImportInProgress(ctx, accountID, "evac_cancel")
+		running, err := st.AccountImportInProgress(ctx, accountID, epoch)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !running {
-			break
+		if !running && st.pool.Stat().AcquiredConns() == baseline {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("cancelled session lock leaked")
+			if running {
+				t.Fatal("closed lease remains locked")
+			}
+			t.Fatal("pool connection leaked")
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if st.pool.Stat().AcquiredConns() != baseline {
-		t.Fatal("cancelled connection leaked")
 	}
 }
 
