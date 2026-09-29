@@ -41,14 +41,15 @@ apps:
     avatarPayloadCompactionEnabled: true
     billing:
       endpoint: https://self.witwave.ai
+    # Keep receive, outbound, and provider-event wiring dark until operator Secrets exist.
     agentEmail:
       providerEventTokenSecret:
-        name: witself-agent-email-provider-event-v2
+        name: ""
         key: token
       receivePilot:
         enabled: false
       receiveProduction:
-        enabled: true
+        enabled: false
         domain: witmail.net
         acceptedLegacyDomains:
           - agent-mail.witwave.ai
@@ -154,7 +155,7 @@ apps:
               app.kubernetes.io/instance: witself-server
               app.kubernetes.io/component: worker
       agentEmailOutbound:
-        enabled: true
+        enabled: false
         dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
         dispatchAudience: witself-agent-email-send
         dispatchKeyID: civo-prod-use1-serving-2026-10

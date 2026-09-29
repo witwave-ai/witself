@@ -542,6 +542,66 @@ the account is routed to DST, rollback requires another evacuation from DST
 and restore to SRC. See [admin account moves](witself-admin.md#account-moves)
 for selector grammar, output, and fleet rebalance dry-run behavior.
 
+### Agent email across a move
+
+Before a cohort account leaves, converge `v0.0.317` or newer on source and
+destination (and backup cells), including the destination's first-sync pins.
+Start a new cell with email dark until its four operator Secrets exist, then
+enable through the separate config-only rollout. Pre-list the moving account
+on the destination and leave it in the source fleet cohort. Prove the cohort
+and retry-canary Secret bytes equal the source's using in-memory comparisons
+that emit only match/mismatch. Startup counts cannot prove ID correctness.
+Provision a destination provider-event token and per-cell dispatch key; retain
+the fleet receive relay key and use the destination registry name as audience.
+Prepare the send Worker's signer entry with the exact sending accounts, and
+its destination event-target entry with the new signer plus every unexpired
+historical signer. Keep the source entry, Secrets, and signer for reverse moves.
+These are operator prerequisites, not actions performed by the move command.
+
+The lifecycle suspends email projections before removing the source route,
+imports email tables with the account archive, and republishes projections
+after committing the destination route. Frozen accounts tempfail. A missing
+ingest cohort entry still rejects permanently, so destination pre-listing is
+required. Evacuation refuses while an outbound row is `provider_started`;
+wait and retry.
+
+Between `cells evacuate SRC --account ACCOUNT` and `cells restore DST --batch 1`,
+replace `EVENT_TARGETS_JSON` so the account targets DST and retains all required
+signer provenance. Re-apply the send Worker gates, verify its version and Queue
+state, then promptly start restore. Repoint and verification must precede
+activation: lifecycle restore has no operator pause between import and
+activation. Events reaching DST before import commits retry; the frozen
+source refuses receipt writes. The budget is 25 retries at 60 seconds, then
+the dead-letter Queue requires manual re-drive. The account stays archived
+while the replacement is installed and verified.
+
+Immediately after restore, verify the directory route, one accepted inbound
+message, an accepted outbound send under the destination signer, a provider
+event callback answered 204, and the strict read-only destination canary
+manifest. That operation requires every cohort account to be resident and the
+canary to be live. Update canary and near-limit endpoint variables and any
+explicit operator `--endpoint` to DST when their recipients moved.
+
+Before the first move, prove only public `/v1/version`, the control plane's
+cell probe, Secret byte equality, the startup line, and the send Worker's
+version and gates. These do not prove edge-to-cell ingest for a real recipient,
+send-Worker-to-cell provider-event callbacks, or an `applied` republish with
+the new audience and URL. The receive smoke relay forwards only to loopback
+and needs a resident mailbox. `witself-server agent-email provider-event-canary`
+binds a loopback listener and needs a recent accepted send for a resident
+account. Under the Founder-only cohort contract, the first end-to-end proof
+is the Founder move itself; an edge transport failure tempfails and provider
+events have the bounded retry budget above.
+
+While the account is archived, rollback to SRC also requires pointing its
+event target back to SRC and verifying the replacement before restore. After
+activation on DST, use a reverse evacuation and restore with the same ordering.
+Before rolling a cell below `v0.0.317`, first disable receive or select a new
+immutable resident-only cohort Secret (disable receive when no cohort account
+is resident, because an empty cohort is rejected). Keep historical signer provenance until
+all its routes pass their 400-day expiry; keep the source cell's configuration
+until retirement so the reverse move remains possible.
+
 ## Decommission a cell and preserve its accounts
 
 `witself-infra destroy` is the fleet operator's counterpart to signup: it drains
@@ -1417,13 +1477,65 @@ approve custom-domain provider delivery or turn on any control-plane, edge, MX,
 catch-all, canonical-delivery, or alias-delivery gate. Those remain dark until
 their own reviewed stage.
 
+Starting with `v0.0.317`, serving startup treats the production cohort as a
+fleet allowlist. Each pod uses one bounded read-only snapshot and emits:
+
+```text
+witself-server: agent-email production receive cohort configured=N resident=N departed=N unknown=N retry_canary=STATE
+```
+
+Absent accounts are skipped: `departed` means this cell finalized their
+evacuation; otherwise they are `unknown`. Configured equals resident plus
+departed plus unknown. The canary state is `none`, `ready`, or `absent`.
+A resident account must still be `active` or `suspended`; a `closed` account
+stops startup. An existing canary must be live in a resident cohort account;
+an absent canary is reported instead of failing startup.
+
+
+Expected line per state (one cohort account, the Founder):
+
+| Cell and moment | Line |
+|---|---|
+| Source before any move | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
+| Destination pre-listing, account not arrived | `configured=1 resident=0 departed=0 unknown=1 retry_canary=absent` |
+| Destination after arrival, on the next pod start | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
+| Source after the account left, on the next pod start | `configured=1 resident=0 departed=1 unknown=0 retry_canary=absent` |
+
+After ANY change of a cohort or canary Secret, read this line on every server
+pod and confirm `resident` equals the number of cohort accounts that live on
+that cell. An `unknown` count on a cell that holds the account means a wrong
+ID: roll the Secret back before mail for that account bounces permanently.
+Byte equality with the source covers a copy, not a rotation that changes
+content.
+
+This line does not validate IDs. `unknown` is expected only on a destination
+pre-listing an account before its first arrival; a mistyped ID looks identical.
+An `absent` canary likewise does not prove its ID is right. Before enablement,
+the operator must prove the cohort and canary Secret bytes equal the source
+cell's, comparing in memory and printing only match/mismatch, never values or
+digests. Repeat after any Secret re-creation. For a planned move, list the
+account on the destination before arrival and leave it on the source. A cohort
+miss at ingest remains a permanent rejection.
+
+Explicit backfill, preflight, and canary-manifest operations remain strict:
+every listed account must be resident, and the configured canary must be live
+in the cohort. A cohort spanning cells fails these operations on every cell;
+this move procedure is acceptable only while the cohort is one account.
+Run the strict read-only canary-manifest operation on the destination
+immediately after restore. Pods older than `v0.0.317` exit at startup when a
+cohort lists a non-resident account. Before rolling below that floor, install
+a resident-only cohort using a new immutable Secret name, or disable receive.
+When no cohort account is resident on the cell (the source after the Founder
+left), a resident-only cohort would be empty and the parser rejects an empty
+cohort, so disabling receive is the only option.
+
 1. Create and verify the normal pre-migration backup. Deploy matching chart and
    image `v0.0.245` or newer with both `receivePilot.enabled` and
    `receiveProduction.enabled` false. Wait for every old writer to drain and
    verify the release's migrations plus API health before changing receive
    configuration.
-2. Build one canonical, byte-sorted CSV of 1-100 exact account IDs resident in
-   this cell, with no whitespace or trailing newline. Store it outside Git and
+2. Build one canonical, byte-sorted CSV of 1-100 exact account IDs in the fleet
+   allowlist, with no whitespace or trailing newline. Store it outside Git and
    provision it as one immutable, versioned Kubernetes Secret data value in the
    server namespace. Set only `accountIDsExistingSecret.name` and `.key` in
    managed cell values; leave the literal `accountIDs` array and
@@ -1432,13 +1544,15 @@ their own reviewed stage.
    the identical CSV to the
    separately guarded control-plane/edge cohort settings, but keep every
    delivery gate false. There is no wildcard. A missing Secret/key, duplicated,
-   malformed, whitespace-padded, unsorted, or cross-cell account must stop the
-   rollout. Never mutate the referenced Secret in place: create the next
+   malformed, whitespace-padded, or unsorted CSV must stop the rollout.
+   Before pre-listing a cross-cell account, converge `v0.0.317` or newer and
+   prove cohort and canary Secret byte equality with the source cell. Never
+   mutate the referenced Secret in place: create the next
    immutable Secret and update its versioned reference name, which rolls every
    API pod. Verify the new cohort before changing edge state.
 3. Enable only `agentEmail.receiveProduction` in the cell. Its startup is
-   read-only and O(cohort): each API pod verifies account presence/status and,
-   after the second rollout below, the selected retry-canary membership. It
+   read-only and O(cohort): each API pod reports fleet cohort residency and,
+   after the second rollout below, retry-canary readiness or absence. It
    never scans or mutates all agents.
    Missing existing mailboxes therefore do not block readiness. From this point,
    every successful new-agent create in the cohort includes its mailbox in the

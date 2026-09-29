@@ -2249,3 +2249,33 @@ durability, and the email billing dimensions (all in the sections above).
 - [deployment-cells.md](deployment-cells.md) /
   [self-hosting.md](self-hosting.md): cell-local webhook termination and the
   self-host domain story.
+
+
+## Agent email across cells and account moves
+
+Receive routing follows the account's directory placement. The control plane
+projects the cell registry name as audience and its endpoint plus
+`/v1/internal/agent-email:ingest` as the ingest URL. Do not write an
+`agent_email_audience` override. The receive Worker has no static cell list;
+it signs the projected audience with one fleet relay key. The cell overlay
+retains that public key and its own receive audience; no new receive Worker
+or control-plane deployment is required solely for a cell move.
+
+Outbound uses a per-cell dispatch key configured in the cell's worker overlay
+and a private-key Kubernetes Secret. The send Worker's `DISPATCH_SIGNERS_JSON`
+secret holds public signer keys and exact account allowlists. Its
+`EVENT_TARGETS_JSON` secret holds cell callback URLs, provider-event tokens,
+accepted historical signer IDs, and account-to-cell targets. These are Worker
+secrets, not source-code cell lists. Carry every unexpired historical signer
+when repointing an account, including its source-cell signer.
+
+From `v0.0.317`, serving startup treats the receive cohort as a fleet allowlist
+and reports value-free resident/departed/unknown counts and canary readiness
+or absence. Unknown account and absent canary IDs are not validated; operator
+Secret byte equality replaces that guard. Pre-list accounts before arrival and
+leave them on the source. Explicit operations remain strict and ingest cohort
+misses remain permanent rejections. Follow [Agent email across a move](runbooks.md#agent-email-across-a-move)
+for the event-target repoint between evacuation and restore, strict post-restore
+verification, version floor, and rollback. New production cells start with
+receive/outbound and provider-event wiring dark until operator Secrets exist;
+retention has its own policy and is unchanged by this procedure.

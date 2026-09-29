@@ -834,3 +834,13 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 		_ = os.Unsetenv(name)
 	}
 }
+
+func TestAgentEmailProductionCohortStartupLine(t *testing.T) {
+	for _, state := range []string{store.AgentEmailRetryCanaryNone, store.AgentEmailRetryCanaryReady, store.AgentEmailRetryCanaryAbsent} {
+		got := agentEmailProductionCohortStartupLine(store.AgentEmailProductionCohortResidency{ConfiguredAccountCount: 6, ResidentAccountCount: 1, DepartedAccountCount: 2, UnknownAccountCount: 3, RetryCanary: state})
+		want := "witself-server: agent-email production receive cohort configured=6 resident=1 departed=2 unknown=3 retry_canary=" + state
+		if got != want {
+			t.Fatalf("startup line = %q; want %q", got, want)
+		}
+	}
+}

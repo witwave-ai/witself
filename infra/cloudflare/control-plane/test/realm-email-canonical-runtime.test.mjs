@@ -164,7 +164,7 @@ function fixture({
   const fetches = [];
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url);
-    fetches.push({ method: init.method, pathname: parsed.pathname });
+    fetches.push({ method: init.method, pathname: parsed.pathname, origin: parsed.origin });
     assert.equal(init.headers.Authorization, "Bearer witself_prv_cell");
     if (parsed.pathname === `/v1/accounts/${ACCOUNT}:plan` &&
         init.method === "GET") {
@@ -1668,4 +1668,50 @@ test("realm-close alarm retry locks every persisted canonical domain lane", asyn
   releaseDrain();
   await Promise.all([alarm, competing]);
   assert.equal(legacyLaneEntered, true);
+});
+
+
+test("canonical account move republishes to the production registry audience and origin", async () => {
+  const { runtime, directory, emailDirectory, fetches } = fixture();
+  const key = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal((await call(runtime, "/canonical/inventory/reconcile")).response.status, 200);
+  const before = emailDirectory.value(key);
+  assert.equal(before.state, "applied");
+  assert.equal(before.cell_audience, "cell-one");
+  const fence = { account_id: ACCOUNT, operation_id: "production-cell-move", epoch: 2, activation_enabled: true };
+  const reconcile = async (action) => {
+    for (let i = 0; i < 10; i++) {
+      const result = await call(runtime, "/account-lifecycle/reconcile", { ...fence, action });
+      assert.equal(result.response.status, 200);
+      if (result.body.complete) return;
+    }
+    assert.fail("lifecycle did not complete");
+  };
+  await reconcile("suspend");
+  const suspended = emailDirectory.value(key);
+  assert.equal(suspended.state, "suspended");
+  assert.equal(suspended.suspension_disposition, "retry");
+  assert.equal(suspended.cell_audience, undefined);
+  assert.equal(suspended.ingest_url, undefined);
+  const origin = "https://api.civo-prod-use1-serving.cells.witself.witwave.ai";
+  directory.values.set(`acct:${ACCOUNT}`, { cell: "civo-prod-use1-serving" });
+  directory.values.set("cell:civo-prod-use1-serving", { endpoint: origin, provision_token: "witself_prv_cell" });
+  const start = fetches.length;
+  await reconcile("republish");
+  const applied = emailDirectory.value(key);
+  assert.equal(applied.state, "applied");
+  assert.equal(applied.cell_audience, "civo-prod-use1-serving");
+  assert.equal(applied.ingest_url, `${origin}/v1/internal/agent-email:ingest`);
+  assert.ok(applied.controller_revision > before.controller_revision);
+  assert.ok(fetches.length > start);
+  assert.ok(fetches.slice(start).every((request) => request.origin === origin));
+});
+
+test("canonical malformed audience falls back to registry cell name", async () => {
+  const { runtime, directory, emailDirectory } = fixture();
+  directory.values.get("cell:cell-one").agent_email_audience = "Cell_One";
+  assert.equal((await call(runtime, "/canonical/inventory/reconcile")).response.status, 200);
+  const projection = emailDirectory.value(realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa"));
+  assert.equal(projection.state, "applied");
+  assert.equal(projection.cell_audience, "cell-one");
 });
