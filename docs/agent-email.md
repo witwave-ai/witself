@@ -2277,5 +2277,7 @@ leave them on the source. Explicit operations remain strict and ingest cohort
 misses remain permanent rejections. Follow [Agent email across a move](runbooks.md#agent-email-across-a-move)
 for the event-target repoint between evacuation and restore, strict post-restore
 verification, version floor, and rollback. New production cells start with
-receive/outbound and provider-event wiring dark until operator Secrets exist;
-retention has its own policy and is unchanged by this procedure.
+receive/outbound and provider-event wiring dark until operator Secrets exist.
+Agent-email retention on `civo-prod-use1-serving` starts in `preview`; any
+promotion to `enforce` is a separate reviewed change, made only after the
+value-free counts have been reviewed.

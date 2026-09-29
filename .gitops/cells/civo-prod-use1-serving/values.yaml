@@ -173,9 +173,11 @@ apps:
         dispatchPrivateKeySecret:
           name: witself-agent-email-outbound-dispatch-v1
           key: private-key
+      # Preview reports value-free counts only.
+      # The flip to enforce is a separate reviewed config-only change.
       agentEmailRetention:
         enabled: true
-        mode: enforce
+        mode: preview
         batchSize: 100
         interval: 1m
         batchTimeout: 2m
