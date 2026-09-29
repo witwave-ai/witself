@@ -74,5 +74,5 @@ func (p *progressSink) errPhase(cell, phase string, err error) {
 	if err == nil {
 		return
 	}
-	p.emit(cell, phase, "error", err.Error())
+	p.emit(cell, phase, "error", redactR2(err.Error()))
 }

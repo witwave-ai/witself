@@ -138,7 +138,7 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 			}
 			return emitHealth(report)
 		}
-		report.Kubernetes = sh(healthBad, "read stack outputs: "+oneLine(err.Error()))
+		report.Kubernetes = sh(healthBad, "read stack outputs: "+oneLine(redactR2(err.Error())))
 		return emitHealth(report)
 	}
 

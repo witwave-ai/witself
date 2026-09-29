@@ -444,6 +444,7 @@ func TestAuthCommandExplainsCivoTokenFlow(t *testing.T) {
 
 func TestCivoBootstrapInitializesOnlyLocalState(t *testing.T) {
 	t.Setenv("CIVO_TOKEN", "")
+	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "")
 	stateDir := filepath.Join(t.TempDir(), "state")
 	if err := run([]string{
 		"bootstrap",

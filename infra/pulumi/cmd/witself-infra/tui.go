@@ -296,6 +296,19 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	if backend == "local" {
 		str("state dir", defaultStateDir(), e.StateDir, func(x *cellEntry) *string { return x.StateDir })
 	}
+	if backend == "r2" {
+		for _, field := range []struct {
+			key   string
+			value *string
+		}{{"state bucket", e.R2Bucket}, {"state endpoint", e.R2Endpoint}} {
+			value := "required"
+			if field.value != nil {
+				value = *field.value
+			}
+			out = append(out, settingRow{key: field.key, value: value, fromEntry: field.value != nil})
+		}
+		out = append(out, settingRow{key: "state secrets", value: "environment (WITSELF_INFRA_R2_*, WITSELF_INFRA_STATE_PASSPHRASE)", fromEntry: false})
+	}
 	return out
 }
 

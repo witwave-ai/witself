@@ -39,6 +39,8 @@ func newTestFlagSet() *flag.FlagSet {
 	fs.String("civo-admin-cidr", "", "")
 	fs.String("backend", "s3", "")
 	fs.String("state-dir", "/tmp/state", "")
+	fs.String("r2-bucket", "", "")
+	fs.String("r2-endpoint", "", "")
 	fs.String("control-plane", "", "")
 	fs.String("fleet-token-file", "", "")
 	fs.String("cell", "", "")

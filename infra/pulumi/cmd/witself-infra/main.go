@@ -133,6 +133,7 @@ commands:
   destroy   tear the cell down
   refresh   reconcile state with the real cloud
   outputs   print the cell's stack outputs
+  state-check verify an R2 state backend: list, write, read and delete one probe object
   health    probe configured control planes and cells for automation
   rebalance move live accounts to better eligible cells by placement policy
   placement-runner show, enable, disable, or trigger scheduled placement work
@@ -199,9 +200,12 @@ flags:
   -azure-subscription Azure subscription name or ID for Azure cells/state backend
   -civo-token-file Civo API token file (default: CIVO_TOKEN environment)
   -civo-expected-account-id expected Civo account UUID safety pin
-  -backend        state backend: s3|gcs|azblob|local           (default "s3")
+  -backend        state backend: s3|gcs|azblob|r2|local        (default "s3")
   -bootstrap      with -backend s3/gcs/azblob, create backend if missing
+                  (accepted and ignored with -backend r2)
   -state-dir      local Pulumi state backend dir (backend=local)
+  -r2-bucket      R2 bucket that holds the state (backend=r2, -cloud civo)
+  -r2-endpoint    R2 S3 endpoint, https://<account-id>.r2.cloudflarestorage.com
   -control-plane  fleet control plane URL, e.g. https://self.witwave.ai
                   up: registers the cell after provisioning
                   destroy: drains the cell, evacuates every account to
@@ -268,7 +272,7 @@ func versionLine() string {
 func main() {
 	err := run(os.Args[1:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "witself-infra: "+err.Error())
+		fmt.Fprintln(os.Stderr, fatalMessage(err, os.Getenv))
 	}
 	if code := commandExitCode(err); code != 0 {
 		os.Exit(code)
@@ -337,9 +341,11 @@ func run(args []string) error {
 	civoExpectedAccountID := fs.String("civo-expected-account-id", "", "expected Civo account UUID safety pin")
 	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size (development default: 2 vCPU / 4 GB)")
 	civoAdminCIDR := fs.String("civo-admin-cidr", "", "CIDR allowed to reach the Civo Kubernetes API, normally your public IP /32")
-	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|local (local is a dev opt-out)")
+	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|r2|local (local is a dev opt-out; r2 is for -cloud civo)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs/azblob: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
+	r2Bucket := fs.String("r2-bucket", "", "R2 bucket that holds the Pulumi state (backend=r2; the owner creates it)")
+	r2Endpoint := fs.String("r2-endpoint", "", "R2 S3 endpoint, https://<account-id>.r2.cloudflarestorage.com (backend=r2)")
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
@@ -464,6 +470,9 @@ func run(args []string) error {
 	if !clouds[*cloud] {
 		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure|civo)", *cloud)
 	}
+	if cmd == "state-check" && *backendFlag != "r2" {
+		return fmt.Errorf("state-check is only implemented for -backend r2")
+	}
 	regionCode, placementRegionCode, ok := resolveRegionCode(*cloud, *region)
 	if !ok {
 		return fmt.Errorf("unknown -region %q for -cloud %s; add it to regions/catalog.json or the legacy region table", *region, *cloud)
@@ -491,9 +500,13 @@ func run(args []string) error {
 	if *k8sVersion == "" {
 		*k8sVersion = defaultK8sVersion(*cloud)
 	}
+	r2Settings, r2Secrets, err := resolveR2Backend(*backendFlag, *cloud, *r2Bucket, *r2Endpoint, *stateDir, os.Getenv)
+	if err != nil {
+		return err
+	}
 	if *cloud == "civo" {
-		if *backendFlag != "local" {
-			return fmt.Errorf("-cloud civo currently requires -backend local (development state must be an explicit opt-out)")
+		if *backendFlag != "local" && *backendFlag != "r2" {
+			return fmt.Errorf("-cloud civo requires -backend local or r2")
 		}
 		if (cmd == "up" || cmd == "preview") && !civoProfiles[*profile] {
 			return fmt.Errorf("-cloud civo supports only -profile minimal or prod")
@@ -509,7 +522,7 @@ func run(args []string) error {
 				return fmt.Errorf("-%s does not apply to -cloud civo; Civo uses provider networking, native DNS, and in-cluster PostgreSQL", ignored)
 			}
 		}
-		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" && cmd != "bootstrap" {
+		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" && cmd != "bootstrap" && cmd != "state-check" {
 			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo")
 		}
 		if *civoAdminCIDR != "" {
@@ -517,7 +530,7 @@ func run(args []string) error {
 				return fmt.Errorf("-civo-admin-cidr %q is not a valid CIDR", *civoAdminCIDR)
 			}
 		}
-		if cmd != "outputs" && cmd != "cell-health" && cmd != "bootstrap" && cmd != "destroy" {
+		if cmd != "outputs" && cmd != "cell-health" && cmd != "bootstrap" && cmd != "destroy" && cmd != "state-check" {
 			token, err := resolveCivoToken(*civoTokenFile)
 			if err != nil {
 				return err
@@ -568,6 +581,9 @@ func run(args []string) error {
 	// cell op, so it skips the stack/passphrase machinery below.
 	if cmd == "bootstrap" {
 		if *cloud == "civo" {
+			if *backendFlag == "r2" {
+				return runR2Bootstrap(context.Background(), os.Stdout, r2Settings, r2Secrets, strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-"))
+			}
 			if err := os.MkdirAll(*stateDir, 0o755); err != nil {
 				return fmt.Errorf("create Civo local state dir: %w", err)
 			}
@@ -583,6 +599,9 @@ func run(args []string) error {
 	// Compose the cell name: it is the Pulumi stack name and the resource prefix.
 	cellName := strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-")
 	ctx := context.Background()
+	if cmd == "state-check" {
+		return runStateCheck(ctx, os.Stdout, r2Settings, r2Secrets, cellName)
+	}
 	if cmd == "destroy" {
 		if err := runDestroySafety(ctx, cellName, destroySafetyOptions{
 			ConfigPath:        *configPath,
@@ -667,6 +686,17 @@ func run(args []string) error {
 		}
 		env["PULUMI_BACKEND_URL"] = "file://" + *stateDir
 		env["PULUMI_CONFIG_PASSPHRASE"] = passphrase
+	case "r2":
+		r2Env, command, err := prepareR2Workspace(ctx, cmd, r2Settings, r2Secrets, cellName, os.Stderr)
+		if err != nil {
+			return err
+		}
+		for key, value := range r2Env {
+			env[key] = value
+		}
+		if command != nil {
+			wsOpts = append(wsOpts, auto.Pulumi(command))
+		}
 	case "s3":
 		// Shared S3 backend + KMS secrets provider (no passphrase). The backend is
 		// created out-of-band by `bootstrap`; up uses it, or creates it only when
@@ -756,7 +786,7 @@ func run(args []string) error {
 		secretsProvider = info.SecretsProvider
 		wsOpts = append(wsOpts, auto.SecretsProvider(secretsProvider))
 	default:
-		return fmt.Errorf("unknown -backend %q (want local|s3|gcs|azblob)", *backendFlag)
+		return fmt.Errorf("unknown -backend %q (want local|s3|gcs|azblob|r2)", *backendFlag)
 	}
 	if *cloud == "gcp" && cmd != "outputs" && cmd != "cell-health" {
 		if err := backend.EnsureGCPServices(ctx, *gcpProject, func(m string) {
@@ -798,9 +828,9 @@ func run(args []string) error {
 	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))
-	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program, wsOpts...)
+	stack, err := openCellStack(ctx, *backendFlag, cmd, cellName, *r2Bucket, wsOpts...)
 	if err != nil {
-		return fmt.Errorf("create/select cell %q: %w", cellName, err)
+		return err
 	}
 
 	// On the s3 backend, persist the KMS secrets provider into the (ephemeral)
