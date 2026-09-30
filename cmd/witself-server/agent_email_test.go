@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -447,6 +448,17 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 	}
 	if mapAgentEmailError(store.ErrAgentEmailReceiveCohortDeferred) != store.ErrAgentEmailReceiveCohortDeferred {
 		t.Fatal("owner surface acquired an ingest-only error class")
+	}
+	for _, lockErr := range []error{
+		fmt.Errorf("lock live message agent: %w", context.Canceled),
+		fmt.Errorf("lock live message agent: %w", context.DeadlineExceeded),
+	} {
+		mapped := mapAgentEmailIngestError(lockErr)
+		if mapped != lockErr ||
+			errors.Is(mapped, server.ErrAgentEmailUnknownRecipient) ||
+			errors.Is(mapped, server.ErrAgentEmailCohortDeferred) {
+			t.Fatal("a transient agent-lock failure did not stay an unmapped temporary ingest error")
+		}
 	}
 	rateLimit := &store.AgentEmailRateLimitError{
 		Dimension:  "email_received_bytes",

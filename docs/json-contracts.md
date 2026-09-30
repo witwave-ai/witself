@@ -2739,8 +2739,9 @@ The response is deliberately content-free and has exactly one string field,
   the same sanitized transient-exception path so Cloudflare controls retry.
 
 From `v0.0.318` a cell also answers HTTP 503 `temporary` when the recipient's
-account is resident in the cell and missing from its receive cohort. The
-verdict set is unchanged.
+account is resident in the cell and missing from its receive cohort, unless a
+route check refuses the recipient; such a recipient keeps HTTP 404
+`unknown_recipient`. The verdict set is unchanged.
 
 ## Agent Activity Touch
 

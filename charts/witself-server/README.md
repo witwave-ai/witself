@@ -192,7 +192,8 @@ a resident cohort account. Unknown accounts and absent canaries are not validate
 cohort and canary Secret byte equality with the source before enablement.
 Pre-list moving accounts on the destination and leave them on the source.
 From `v0.0.318`, ingest defers mail for a resident account that is missing
-from the cohort; every other ingest cohort miss remains a permanent rejection.
+from the cohort, unless a route check refuses the recipient; every other ingest
+cohort miss remains a permanent rejection.
 Strict operator preflight, backfill, and canary manifest operations require
 every account to be resident.
 Before rolling below `v0.0.317`, or below `v0.0.319` while a listed account is `closed`, disable receive or use a new immutable

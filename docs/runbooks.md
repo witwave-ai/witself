@@ -561,8 +561,9 @@ These are operator prerequisites, not actions performed by the move command.
 The lifecycle suspends email projections before removing the source route,
 imports email tables with the account archive, and republishes projections
 after committing the destination route. Frozen accounts tempfail. From
-`v0.0.318` a resident account that is missing from the ingest cohort is
-deferred instead of rejected. Destination pre-listing is still required:
+`v0.0.318` mail for a resident account that is missing from the ingest cohort is
+deferred instead of rejected, unless a route check refuses the recipient.
+Destination pre-listing is still required:
 deferred mail is not delivered until the cohort is corrected, and sending
 servers give up after some days. Evacuation refuses while an outbound row is
 `provider_started`; wait and retry.
@@ -1722,8 +1723,9 @@ pod and confirm `resident` equals the number of cohort accounts that live on
 that cell and, from `v0.0.319`, that `closed` is `0`. An `unknown` count on a
 cell that holds the account means a wrong
 ID: roll the Secret back. From `v0.0.318` mail for the resident account that a
-wrong cohort leaves out is deferred while the cohort is wrong; on an older
-release it bounces permanently. Byte equality with the source covers a copy,
+wrong cohort leaves out is deferred while the cohort is wrong, unless a route
+check refuses the recipient; on an older release it bounces permanently. Byte
+equality with the source covers a copy,
 not a rotation that changes content.
 A `closed` count above `0` means that a listed account was closed on this
 cell. Its mail is rejected permanently, and the strict operations below fail
@@ -1743,8 +1745,9 @@ cell's, comparing in memory and printing only match/mismatch, never values or
 digests. Repeat after any Secret re-creation. For a planned move, list the
 account on the destination before arrival and leave it on the source. From
 `v0.0.318` a cohort miss at ingest is deferred when the recipient's account is
-resident in the cell with status `active` or `suspended`; every other cohort
-miss remains a permanent rejection. After any cohort change also read the
+resident in the cell with status `active` or `suspended` and no route check
+refuses the recipient; every other cohort miss remains a permanent rejection.
+After any cohort change also read the
 [receive cohort deferral signals](observability-and-operations.md#receive-cohort-deferral-signals).
 
 Explicit backfill, preflight, and canary-manifest operations remain strict:
