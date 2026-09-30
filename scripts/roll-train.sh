@@ -15,7 +15,7 @@ usage: scripts/roll-train.sh VERSION [options]
   --ci-timeout SECONDS     Deadline per PR checks / post-merge CI phase (3600)
   --argo-timeout SECONDS   Deadline per cell convergence phase (1200)
   --poll-interval SECONDS  Poll interval (15)
-  --resume                Verify an already merged wave 1 instead of rolling it
+  --resume                Verify an already merged wave 1 instead of rolling it (default pair only)
   --dry-run               Print the plan; no writes or network calls
   --help                  Show this help
 
@@ -632,7 +632,7 @@ roll_wave() {
 # main's last change of the cell's values must raise both pins to VERSION, and
 # its post-merge CI and the cell's Argo convergence must pass.
 resume_wave() {
-  local cell=$1 wave=$2 base values dir roll field pin namespace
+  local cell=$1 wave=$2 base values dir roll field pin namespace digest parent_digest
   PHASE="wave $wave ($cell): resume checks"
   cd "$REPO_ROOT"
   git fetch origin main
@@ -655,6 +655,12 @@ resume_wave() {
     version_lower "$pin" "$VERSION" ||
       die "--resume cannot verify $cell: commit $roll last changed its values but did not raise $field from a lower release (parent pins '$pin'); inspect the cell manually"
   done
+  digest=$(cell_image_digest "$dir/$values")
+  if [ -n "$digest" ]; then
+    parent_digest=$(cell_image_digest "$dir/parent-values.yaml")
+    [ "$digest" != "$parent_digest" ] ||
+      die "--resume cannot verify $cell: commit $roll raised the pins to $VERSION but kept the previous imageDigest; inspect the cell manually"
+  fi
   namespace=$(yq -er '.apps.witselfServer.namespace' "$dir/$values")
   [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "invalid server namespace for $cell"
   log "Resuming wave $wave: $cell already pins $VERSION on origin/main (roll commit $roll); verifying instead of rolling"

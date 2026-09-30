@@ -1357,10 +1357,11 @@ Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
 post-merge CI wait, any failed step stops the train and preserves the current
 wave's worktree for inspection (a cleanup failure may leave it detached after
 branch deletion). There is no automatic resume or rollback; inspect the PR,
-GitOps pins, CI, and live state before continuing. If the train stopped after
-wave 1 merged, run it again with the same arguments plus `--resume`. Wave 1 is
-then verified, not rolled: both backup-cell pins on `origin/main` must equal
-`VERSION`, and the last commit that changed that cell's values must have raised
+GitOps pins, CI, and live state before continuing. If a train of the default
+pair stopped after wave 1 merged, run it again with the same arguments plus
+`--resume`. `--resume` refuses any other pair. Wave 1 is then verified, not
+rolled: both backup-cell pins on `origin/main` must equal `VERSION`, and the
+last commit that changed that cell's values must have raised
 both pins from a lower release. The train waits for that commit's post-merge CI
 and the cell's Argo convergence as a wave does, then rolls wave 2. The stopped
 run's worktree and branch, and any open wave-2 pull request it left, stay for
@@ -1390,12 +1391,11 @@ Wave 1 is still `civo-sandbox-use1-backup`. Wave 2 is `civo-prod-use1-serving`,
 read through the kube context `witself-civo-prod-use1-serving`, and the serving
 URL defaults to that cell's `apiHost`. The version guards compare each cell
 with `VERSION`, never with the other cell. A serving cell that pins an older
-release than the backup cell is rolled straight to `VERSION`. Without
-`--resume`, a train cannot target the release that the backup cell already pins:
-wave 1 refuses it with `must be strictly lower` before any pin is edited, and
-keeps its worktree and branch for inspection. Otherwise, raising a lagging cell
-to exactly that release is
-outside the train. Roll only that cell with `scripts/roll-cell.sh CELL
+release than the backup cell is rolled straight to `VERSION`. A train cannot
+target the release that the backup cell already pins: wave 1 refuses it with
+`must be strictly lower` before any pin is edited, and keeps its worktree and
+branch for inspection. Raising a lagging cell to exactly that release is outside
+the train. Roll only that cell with `scripts/roll-cell.sh CELL
 "$VERSION"`, passing `--no-schema-change` or one evidence directory for each
 cell of its pair, both targeting `VERSION`. With `--no-schema-change` the
 attestation must hold for every release between that cell's pin and `VERSION`.

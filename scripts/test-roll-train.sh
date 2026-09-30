@@ -145,11 +145,26 @@ case "$1" in
       # parent pins the older release unless the scenario says otherwise.
       pins='s/1\.2\.2/1.2.3/g'
       [ "$SCENARIO" != resume_main_partial ] || pins='s/chartVersion: 1\.2\.2/chartVersion: 1.2.3/'
-      sed "$pins" "$FIXTURE_ROOT/$path"
+      case "$SCENARIO" in
+        resume_success|resume_digest_kept|resume_first_digest|resume_first_digest_empty)
+          sed "$pins" "$FIXTURE_ROOT/$path" | "$ROLL_TRAIN_REAL_YQ" '.apps.witselfServer.imageDigest = strenv(BACKUP_DIGEST)'
+          ;;
+        *) sed "$pins" "$FIXTURE_ROOT/$path" ;;
+      esac
+    elif [ "$SCENARIO" = resume_parent_above ] &&
+      [ "$path" = .gitops/cells/civo-sandbox-use1-backup/values.yaml ]; then
+      sed 's/1\.2\.2/1.2.4/g' "$FIXTURE_ROOT/$path"
     elif [ "$SCENARIO" = resume_parent_partial ] &&
       [ "$path" = .gitops/cells/civo-sandbox-use1-backup/values.yaml ]; then
       # Before the roll commit, only the image tag was already at the target.
       sed 's/imageTag: 1\.2\.2/imageTag: 1.2.3/' "$FIXTURE_ROOT/$path"
+    elif [ "$path" = .gitops/cells/civo-sandbox-use1-backup/values.yaml ] &&
+      [[ "$SCENARIO" = resume_success || "$SCENARIO" = resume_digest_kept || "$SCENARIO" = resume_first_digest_empty ]]; then
+      # A real roll changes its digest; gaining a first digest also qualifies.
+      digest=$OLD_DIGEST
+      [ "$SCENARIO" != resume_digest_kept ] || digest=$BACKUP_DIGEST
+      [ "$SCENARIO" != resume_first_digest_empty ] || digest=''
+      DIGEST=$digest "$ROLL_TRAIN_REAL_YQ" '.apps.witselfServer.imageDigest = strenv(DIGEST)' "$FIXTURE_ROOT/$path"
     else
       cat "$FIXTURE_ROOT/$path"
     fi
@@ -284,6 +299,10 @@ case "$1 $2" in
             elif $scenario == "postmerge_cancelled_missing" then [] else . end'
           exit
         fi
+        [[ " $* " = *' --json headSha,status,conclusion,databaseId,attempt '* ]] || {
+          printf 'own-run gh stub requires --json headSha,status,conclusion,databaseId,attempt\n' >&2
+          exit 64
+        }
         status=completed conclusion=success attempt=1
         oid=cccccccccccccccccccccccccccccccccccccccc
         [[ "$SCENARIO" != postmerge_cancelled* ]] || conclusion=cancelled
@@ -291,22 +310,23 @@ case "$1 $2" in
         [ "$SCENARIO" != postmerge_timed_out ] || conclusion=timed_out
         [ "$SCENARIO" != postmerge_wrong_sha ] || oid=dddddddddddddddddddddddddddddddddddddddd
         if [ "$SCENARIO" = postmerge_failure_rerun ]; then
-          # Attempt 1 fails, the operator re-runs it, and attempt 2 passes.
+          # Both failures are polled twice; attempt 2 runs before failing,
+          # and attempt 3 finally succeeds after the second operator re-run.
           polls="$STATE_DIR/own_polls-$(cat "$STATE_DIR/cell")"
           printf 'poll\n' >>"$polls"
           case "$(wc -l <"$polls" | tr -d ' ')" in
-            1) ;;
-            2) status=in_progress conclusion='' attempt=2 ;;
-            *) conclusion=success attempt=2 ;;
+            1|2) ;;
+            3) status=in_progress conclusion='' attempt=2 ;;
+            4|5) attempt=2 ;;
+            *) conclusion=success attempt=3 ;;
           esac
         fi
-        if [ "$SCENARIO" = postmerge_failure_unidentified ]; then
-          printf '[{"status":"completed","conclusion":"failure","headSha":"%s","event":"push"}]\n' "$oid"
-          exit
-        fi
         jq -n --arg status "$status" --arg conclusion "$conclusion" --arg oid "$oid" \
-          --argjson id "$CI_RUN_ID" --argjson attempt "$attempt" \
-          '[{status: $status, conclusion: $conclusion, headSha: $oid, event: "push", databaseId: $id, attempt: $attempt}]'
+          --argjson id "$CI_RUN_ID" --argjson attempt "$attempt" --arg scenario "$SCENARIO" \
+          '[{status: $status, conclusion: $conclusion, headSha: $oid, event: "push", databaseId: $id, attempt: $attempt}] |
+          if $scenario == "postmerge_failure_missing_id" then map(del(.databaseId))
+          elif $scenario == "postmerge_failure_missing_attempt" then map(del(.attempt))
+          else . end'
         ;;
       *) exit 64 ;;
     esac
@@ -383,6 +403,11 @@ if [[ "$SCENARIO" = digest_* ]] && { [ "$SCENARIO" != digest_from_tag ] || [ -f 
   fi
   image="ghcr.io/witwave-ai/witself-server@$digest"
 fi
+case "$SCENARIO:$cell" in
+  resume_success:civo-sandbox-use1-backup|resume_digest_kept:civo-sandbox-use1-backup|resume_first_digest*:civo-sandbox-use1-backup)
+    image="ghcr.io/witwave-ai/witself-server@$BACKUP_DIGEST"
+    ;;
+esac
 case "$*" in
   *'get ns argocd'*) printf '{"metadata":{"name":"argocd"}}\n' ;;
   *'get application'*|*'get applications'*|*'get app '*)
@@ -424,6 +449,11 @@ case "$*" in
       running_image=$CONFIG_DIGEST
       image_id=$image
     fi
+    case "$SCENARIO:$cell" in
+      resume_success:civo-sandbox-use1-backup|resume_digest_kept:civo-sandbox-use1-backup|resume_first_digest*:civo-sandbox-use1-backup)
+        spec_image=$image; running_image=$image
+        ;;
+    esac
     jq -n --arg spec_image "$spec_image" --arg running_image "$running_image" --arg image_id "$image_id" \
       --arg scenario "$SCENARIO" --arg unknown_digest "$CONFIG_DIGEST" '{items: [
       ("witself-server", "witself-worker") as $name | {
@@ -704,7 +734,7 @@ grep -Fq 'gh exit 1' "$TEST_ROOT/output" || fail 'checks transport failure lost 
 [ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 1 ] || fail 'checks transport failure was retried'
 printf 'roll train test: checks transport failure stops immediately\n'
 
-for scenario in postmerge_wrong_sha postmerge_timed_out postmerge_failure_unidentified argo_timeout; do
+for scenario in postmerge_wrong_sha postmerge_timed_out postmerge_failure_missing_id postmerge_failure_missing_attempt argo_timeout; do
   reset_case
   SCENARIO=$scenario
   # The CI deadline only bounds a regression that waits on a run it must refuse.
@@ -792,15 +822,36 @@ action="roll-train: ACTION REQUIRED: post-merge CI run $CI_RUN_ID attempt 1 fail
 failed_wait="roll-train: Waiting for post-merge CI: $ROLL_OID (run $CI_RUN_ID attempt 1 failed; waiting for a re-run)"
 reset_case
 SCENARIO=postmerge_failure_rerun
-bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 30 --poll-interval 1 \
+rerun_polls_per_wave=6
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout "$((5 * rerun_polls_per_wave * ci_poll_interval))" --poll-interval "$ci_poll_interval" \
   >"$TEST_ROOT/output" 2>&1 || fail 'postmerge_failure_rerun did not continue after a successful re-run'
-[ "$(grep -Fxc "$action" "$TEST_ROOT/output")" -eq 2 ] || fail 'failed own run was not announced exactly once per wave'
-[ "$(grep -Fxc "$failed_wait" "$TEST_ROOT/output")" -eq 2 ] || fail 'failed own run did not wait once per wave'
+for wave in 1 2; do
+  for attempt in 1 2; do
+    expected_action=${action/attempt 1/attempt $attempt}
+    [ "$(awk -v wave="$wave" -v expected="$expected_action" '
+      /^roll-train: Wave [12] PR: / { active = ($3 == wave) }
+      active && $0 == expected { count++ }
+      END { print count + 0 }
+    ' "$TEST_ROOT/output")" -eq 1 ] || fail "attempt $attempt was not announced exactly once in wave $wave"
+  done
+done
+[ "$(grep -Fc 'ACTION REQUIRED' "$TEST_ROOT/output")" -eq 4 ] || fail 'failed attempts produced unexpected action notices'
+for attempt in 1 2; do
+  expected_wait=${failed_wait/attempt 1/attempt $attempt}
+  [ "$(grep -Fxc "$expected_wait" "$TEST_ROOT/output")" -eq 4 ] \
+    || fail "failed attempt $attempt was not polled twice per wave"
+done
 [ "$(grep -Fxc "roll-train: Waiting for post-merge CI: $ROLL_OID" "$TEST_ROOT/output")" -eq 2 ] \
   || fail 'running re-run was not awaited once per wave'
-[ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID (run $CI_RUN_ID attempt 2)" "$TEST_ROOT/output")" -eq 2 ] \
+[ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID (run $CI_RUN_ID attempt 3)" "$TEST_ROOT/output")" -eq 2 ] \
   || fail 'successful re-run did not verify both waves by run and attempt'
-[ "$(grep -Fc "<--commit> <$ROLL_OID>" "$TEST_LOG")" -eq 6 ] || fail 'own run was not polled three times per wave'
+[ "$(grep -Fc "<--commit> <$ROLL_OID>" "$TEST_LOG")" -eq "$((2 * rerun_polls_per_wave))" ] \
+  || fail 'own run was not polled six times per wave'
+for cell in "$BACKUP" "$SERVING"; do
+  [ "$(wc -l <"$STATE_DIR/own_polls-$cell" | tr -d ' ')" -eq "$rerun_polls_per_wave" ] \
+    || fail "$cell did not exercise all failed and successful attempts"
+done
 if grep -Fq 'createdAt' "$TEST_LOG"; then fail 'failed own run looked for covering runs'; fi
 [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'postmerge_failure_rerun did not complete both waves'
 grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'postmerge_failure_rerun did not finish serving verification'
@@ -1156,33 +1207,35 @@ printf 'roll train test: production pair guards are per cell: backup on target r
 # A stopped train whose wave 1 merged continues with --resume: wave 1 is
 # verified, not rolled, and only when main's last change of the backup cell's
 # values raised both pins to the target.
-reset_case
-SCENARIO=resume_success
-bash "$TRAIN" "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1 \
-  >"$TEST_ROOT/output" 2>&1 || fail 'resume_success did not finish the train'
-grep -Fxq "roll-train: Resuming wave 1: $BACKUP already pins $VERSION on origin/main (roll commit $ROLL_OID); verifying instead of rolling" \
-  "$TEST_ROOT/output" || fail 'resume did not announce the verified roll commit'
-grep -Fxq "git <log> <-1> <--format=%H> <eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee> <--> <.gitops/cells/$BACKUP/values.yaml>" "$TEST_LOG" \
-  || fail 'resume did not find the last change of the backup values'
-grep -Fxq "git <show> <$ROLL_OID^:.gitops/cells/$BACKUP/values.yaml>" "$TEST_LOG" \
-  || fail 'resume did not read the pins before the roll commit'
-assert_roll_cell_calls 'resume rolled wave 1 again or lost wave 2' "roll-cell <$SERVING> <$VERSION> <--no-schema-change>"
-[ "$(grep -Fc 'gh <pr> <create>' "$TEST_LOG")" -eq 1 ] || fail 'resume did not open exactly one pull request'
-[ "$(grep -Fc "<--title> <Roll $SERVING to v$VERSION (wave 2)>" "$TEST_LOG")" -eq 1 ] || fail 'resume did not open the wave 2 pull request'
-[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'resume did not merge exactly one wave'
-[ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID" "$TEST_ROOT/output")" -eq 2 ] \
-  || fail 'resume did not verify post-merge CI of both waves'
-grep -Fq "roll-train: CELL $BACKUP VERIFIED: Synced Healthy revision $VERSION" "$TEST_ROOT/output" \
-  || fail 'resume did not verify the backup cell in Argo'
-awk -v backup="<witself-$BACKUP>" -v serving="<$SERVING>" '
-  /^kubectl/ && index($0, backup) && /<get> <deployments>/ { verified++ }
-  /^roll-cell/ && index($0, serving) { if (verified < 1) exit 1; serving_seen=1 }
-  END { if (!serving_seen) exit 1 }
-' "$TEST_LOG" || fail 'resumed serving wave preceded backup verification'
-if grep -Fq "wave-1-$BACKUP" "$STATE_DIR/worktrees"; then fail 'resume created a wave 1 worktree'; fi
-grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'resume did not finish serving verification'
+for scenario in resume_success resume_success_tag resume_first_digest resume_first_digest_empty; do
+  reset_case
+  SCENARIO=$scenario
+  bash "$TRAIN" "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1 \
+    >"$TEST_ROOT/output" 2>&1 || fail "$scenario did not finish the train"
+  grep -Fxq "roll-train: Resuming wave 1: $BACKUP already pins $VERSION on origin/main (roll commit $ROLL_OID); verifying instead of rolling" \
+    "$TEST_ROOT/output" || fail 'resume did not announce the verified roll commit'
+  grep -Fxq "git <log> <-1> <--format=%H> <eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee> <--> <.gitops/cells/$BACKUP/values.yaml>" "$TEST_LOG" \
+    || fail 'resume did not find the last change of the backup values'
+  grep -Fxq "git <show> <$ROLL_OID^:.gitops/cells/$BACKUP/values.yaml>" "$TEST_LOG" \
+    || fail 'resume did not read the pins before the roll commit'
+  assert_roll_cell_calls 'resume rolled wave 1 again or lost wave 2' "roll-cell <$SERVING> <$VERSION> <--no-schema-change>"
+  [ "$(grep -Fc 'gh <pr> <create>' "$TEST_LOG")" -eq 1 ] || fail 'resume did not open exactly one pull request'
+  [ "$(grep -Fc "<--title> <Roll $SERVING to v$VERSION (wave 2)>" "$TEST_LOG")" -eq 1 ] || fail 'resume did not open the wave 2 pull request'
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'resume did not merge exactly one wave'
+  [ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID" "$TEST_ROOT/output")" -eq 2 ] \
+    || fail 'resume did not verify post-merge CI of both waves'
+  grep -Fq "roll-train: CELL $BACKUP VERIFIED: Synced Healthy revision $VERSION" "$TEST_ROOT/output" \
+    || fail 'resume did not verify the backup cell in Argo'
+  awk -v backup="<witself-$BACKUP>" -v serving="<$SERVING>" '
+    /^kubectl/ && index($0, backup) && /<get> <deployments>/ { verified++ }
+    /^roll-cell/ && index($0, serving) { if (verified < 1) exit 1; serving_seen=1 }
+    END { if (!serving_seen) exit 1 }
+  ' "$TEST_LOG" || fail 'resumed serving wave preceded backup verification'
+  if grep -Fq "wave-1-$BACKUP" "$STATE_DIR/worktrees"; then fail 'resume created a wave 1 worktree'; fi
+  grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'resume did not finish serving verification'
+done
 
-for scenario in resume_not_pinned resume_main_partial resume_parent_at_target resume_parent_partial; do
+for scenario in resume_not_pinned resume_main_partial resume_parent_at_target resume_parent_partial resume_parent_above; do
   reset_case
   SCENARIO=$scenario
   expect_failure "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work"
@@ -1191,6 +1244,7 @@ for scenario in resume_not_pinned resume_main_partial resume_parent_at_target re
     resume_main_partial) field=imageTag pin=1.2.2 ;;
     resume_parent_at_target) field=chartVersion pin=1.2.3 ;;
     resume_parent_partial) field=imageTag pin=1.2.3 ;;
+    resume_parent_above) field=chartVersion pin=1.2.4 ;;
   esac
   refusal="roll-train: ERROR: --resume requires $BACKUP to pin $VERSION on origin/main; its $field is '$pin'"
   [[ "$scenario" != resume_parent_* ]] ||
@@ -1199,6 +1253,17 @@ for scenario in resume_not_pinned resume_main_partial resume_parent_at_target re
   assert_no_wave
   if grep -Fq '<ci.yml>' "$TEST_LOG"; then fail "$scenario verified CI for a roll it refused"; fi
 done
+
+reset_case
+SCENARIO=resume_digest_kept
+expect_failure "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work"
+grep -Fxq "roll-train: ERROR: --resume cannot verify $BACKUP: commit $ROLL_OID raised the pins to $VERSION but kept the previous imageDigest; inspect the cell manually" \
+  "$TEST_ROOT/output" || fail 'resume_digest_kept missed the digest refusal'
+assert_no_wave
+if grep -Fq '<ci.yml>' "$TEST_LOG"; then fail 'resume_digest_kept queried post-merge CI'; fi
+if grep -Eq '^kubectl .*<get> <(application|applications(\.argoproj\.io)?|app|pods|deployments)>' "$TEST_LOG"; then
+  fail 'resume_digest_kept queried Argo or workloads'
+fi
 
 reset_case
 expect_failure "$VERSION" --no-schema-change --resume --cells "$BACKUP,$PRODUCTION" --workdir "$TEST_ROOT/work"
@@ -1215,7 +1280,7 @@ if grep -Eq '^(gh|kubectl|curl|roll-cell|witself-infra)|git.*<(fetch|worktree|co
   fail 'resume dry run invoked an operational command'
 fi
 bash "$TRAIN" --help >"$TEST_ROOT/output" 2>&1 || fail 'usage failed'
-grep -Fxq '  --resume                Verify an already merged wave 1 instead of rolling it' "$TEST_ROOT/output" \
+grep -Fxq '  --resume                Verify an already merged wave 1 instead of rolling it (default pair only)' "$TEST_ROOT/output" \
   || fail 'usage does not document --resume'
 printf 'roll train test: --resume verifies an already merged wave 1 and rolls wave 2, refuses an unpinned, partly pinned or unproven roll, and is planned and documented\n'
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-evidence.sh"
