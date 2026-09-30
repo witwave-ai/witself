@@ -2283,9 +2283,10 @@ also a closed count) and canary readiness, absence or closed state. Unknown
 account and absent canary IDs are not validated; operator
 Secret byte equality replaces that guard. Pre-list accounts before arrival and
 leave them on the source. Explicit operations remain strict. From `v0.0.318`,
-ingest defers mail for a resident account that is missing from the cohort and
-still rejects every other cohort miss permanently; see
-[Receive cohort deferral](#receive-cohort-deferral). Follow [Agent email across a move](runbooks.md#agent-email-across-a-move)
+ingest defers mail for a resident account that is missing from the cohort,
+unless a route check refuses the recipient, and still rejects every other cohort
+miss permanently; see [Receive cohort deferral](#receive-cohort-deferral).
+Follow [Agent email across a move](runbooks.md#agent-email-across-a-move)
 for the event-target repoint between evacuation and restore, strict post-restore
 verification, version floor, and rollback. New production cells start with
 receive/outbound and provider-event wiring dark until operator Secrets exist.
@@ -2297,9 +2298,10 @@ value-free counts have been reviewed.
 
 From `v0.0.318`, production receive answers one case of a cohort miss with a
 deferral instead of a permanent rejection. When a signed relay names a
-recipient whose address resolves in this cell, whose account row is in this
-cell with status `active` or `suspended`, and whose account is absent from the
-cell's receive cohort, the cell answers HTTP 503 `{"verdict":"temporary"}`.
+recipient whose address resolves in this cell and that no route check refuses,
+whose account row is in this cell with status `active` or `suspended`, and whose
+account is absent from the cell's receive cohort, the cell answers HTTP 503
+`{"verdict":"temporary"}`.
 The receive Worker turns that answer into its one sanitized temporary failure,
 so the sending server keeps the message and retries.
 
@@ -2312,16 +2314,20 @@ an agent segment or realm label that does not match the address). The retired
 legacy pilot mode still rejects an unenrolled agent permanently. DMARC
 rejection, the 25 MiB transport ceiling and every edge gate are decided before
 the cell is asked. For an account that is in the cohort, every answer is as
-before, except that
-from `v0.0.319` mail for a `closed` account is rejected permanently; see
-[Closed accounts in the receive cohort](#closed-accounts-in-the-receive-cohort).
+before, with two exceptions: from `v0.0.319` mail for a `closed` account is
+rejected permanently (see [Closed accounts in the receive
+cohort](#closed-accounts-in-the-receive-cohort)), and from `v0.0.321` a database
+error while the cell locks the recipient's agent (for example a lost connection,
+a deadlock or a database restart) is answered with HTTP 503
+`{"verdict":"temporary"}` instead of a permanent rejection; mail for a deleted
+agent is still rejected permanently.
 
 The deferral is decided before the account's plan, size limit, rate limits and
 receive switches and the cell's storage preflight are read. It stores nothing
 and debits no rate bucket. Those checks run on the retry that arrives after
 the cohort is corrected. If the cell cannot read the account's status, it
-answers with the same temporary failure, as it does for any other database
-failure during ingest.
+answers with the same temporary failure; that answer is counted as `error`, not
+`cohort_deferred`, and writes no deferral log line.
 
 Cost. A deferral that nobody corrects never succeeds. Each sending server
 retries on its own schedule and tells the sender only when it gives up, which

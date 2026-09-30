@@ -1409,7 +1409,12 @@ func (s *Store) IngestAgentEmailPilot(
 		return AgentEmailMessage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID); err != nil {
-		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
+		// Only a missing or deleted agent is a permanent refusal. Any other
+		// lock failure is returned unchanged; the relay answers it as temporary.
+		if errors.Is(err, ErrAgentNotFound) {
+			return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
+		}
+		return AgentEmailMessage{}, err
 	}
 	recipientRoute, err := agentEmailRouteByRecipientTx(ctx, tx, parts, true)
 	if err != nil {

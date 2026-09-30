@@ -465,7 +465,9 @@ surface from any per-cell `/v1` route).
 
 A rising `cohort_deferred` count means that a cell's receive cohort leaves out
 an account that lives in that cell. Mail for that account is deferred and is
-not delivered until the cohort is corrected.
+not delivered until the cohort is corrected. Mail to a recipient that a route
+check refuses is still rejected permanently, as it is for an account in the
+cohort.
 
 - Prometheus, on a cell whose server ServiceMonitor is enabled:
 
