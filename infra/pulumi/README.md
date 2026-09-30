@@ -117,6 +117,10 @@ and delegated-domain settings used by the hyperscalers. Its Health tab probes
 the K3s API, node readiness, Argo applications, public endpoint, control-plane
 registration, and Civo token authentication.
 
+For a cell recorded with `civo_ingress: loadbalancer` the overview shows the
+load balancer, who manages the DNS record and the parent domain instead of the
+native Civo DNS row.
+
 `-progress-json` on `up`/`preview`/`destroy` additionally emits NDJSON
 phase events on stderr (`{"ts","phase","state","cell","note"}`) for
 machine consumers.
@@ -165,6 +169,10 @@ free and no managed load balancer is created. A token is read from a per-cell
 mode-0600 file (recommended for multi-account operation) or from the
 `CIVO_TOKEN` environment fallback. Its value is never written to `infra.yaml`
 or Pulumi config.
+
+That is the default shape. A cell can opt in to one Civo load balancer, a
+custom host name and a DNS record; see
+[Civo load balancer and custom host name](#civo-load-balancer-and-custom-host-name-opt-in).
 
 The managed production fleet currently uses two Civo cells in NYC1:
 `civo-sandbox-use1-serving` is the serving cell and runs the fixed two-node
@@ -243,6 +251,182 @@ name. Credentials are a name, not a secret — `-aws-profile` (or the ambient
 State is stored in **S3 by default**; `up` errors with "run bootstrap first" if
 the backend is missing. Pass `-backend local` for a zero-setup local file backend
 (dev/experiments), which uses a tool-managed passphrase under `~/.witself-infra/state`.
+
+### Civo load balancer and custom host name (opt-in)
+
+By default a Civo cell is reached under Civo's own name,
+`api.<cluster-id>.k8s.civo.com`, which points at a node. Three per-cell
+settings change that. A cell that sets none of them keeps the default shape.
+
+| Inventory key | Flag | Values | Effect |
+|---|---|---|---|
+| `civo_ingress` | `-civo-ingress` | `nodeport` (default), `loadbalancer` | `loadbalancer` adds one Civo load balancer in front of Traefik and names the cell `api.<cell>.<domain>` |
+| `civo_dns` | `-civo-dns` | `none` (default), `cloudflare` | `cloudflare` adds one Cloudflare `A` record for that name; needs `civo_ingress: loadbalancer` |
+| `register_draining` | `-register-draining` | `false` (default), `true` | `up` registers the cell with `accepting=false`; needs a control plane |
+
+`<domain>` is the inventory key `domain` (flag `-domain`, built-in default
+`cells.witself.witwave.ai`). For a Civo cell `-domain` is accepted only
+together with `-civo-ingress loadbalancer`. The three keys are per-cell only:
+the `defaults:` block must not set them. `-civo-node-size` accepts
+`g4s.kube.medium` and `g4s.kube.large`. The node count still comes from the
+profile: one node for `minimal`, two for `prod`.
+
+A `witself-infra` older than the release that introduced these keys rejects an
+inventory that contains them, for every cell. Install the new binary before
+you record the first cell that uses them.
+
+#### What `loadbalancer` creates
+
+- One Kubernetes Service, `kube-system/witself-lb`, of type `LoadBalancer`,
+  with the ports 80 and 443. It selects the Traefik pods that the Civo
+  application `traefik2-nodeport` installs, by the labels
+  `app.kubernetes.io/name=traefik` and
+  `app.kubernetes.io/instance=traefik-kube-system`. Civo's cloud controller
+  turns that Service into one load balancer.
+- The Service carries the annotation `kubernetes.civo.com/firewall-id` with
+  the cell's own firewall from its first manifest on. Without it Civo creates
+  a second firewall named `default-<network>` with every port open, and that
+  firewall outlives the load balancer. No firewall rule is added: the cell
+  firewall already allows 80 and 443.
+- The cluster's applications, its node pool and its firewall are the same as
+  in the default shape.
+- The stack exports `loadBalancerIP`, `civoIngress` and `civoDNS`. `apiHost`
+  is `api.<cell>.<domain>`; `civoDNSEntry` still shows Civo's own name.
+
+The address is read from the status of the Service. The name
+`<id>.lb.civo.com` in the same status is never used. No reserved address is
+used, so the address changes when the Service is recreated. If that happens
+outside of `up`, run `refresh` and then `up`, so that the record follows the
+new address. Do not set the proxy protocol annotation on the Service: Civo
+then publishes no address.
+
+With `civo_dns: none` nobody creates the record for you. Create an `A` record
+for `apiHost` that points at `loadBalancerIP` yourself. Until it resolves,
+certificate issuance and the HTTPS check of `up` cannot succeed.
+
+Changing `civo_ingress` on an existing cell changes its public host name. That
+is not supported for a cell that holds accounts, and the tool does not refuse
+it: the next `up` with a control plane registers the new host. Changing
+`civo_dns` adds or removes the record only.
+
+`destroy` deletes the Service before the cluster, the firewall and the
+network. Civo removes the load balancer about 2.5 minutes after the Service is
+gone. If `destroy` stops because the cell's firewall or network is still in
+use, wait until the Civo account lists no load balancer for the cell, then run
+the same `destroy` again.
+
+#### What `cloudflare` creates
+
+One `A` record in the Cloudflare zone that holds `<domain>`: name `apiHost`,
+content `loadBalancerIP`, TTL 300, not proxied. Argo CD's root application is
+created only after the Service and the record exist, so certificate issuance
+starts with a name that resolves. The record is explicit configuration. A
+token in the environment never creates a record on its own, and a Civo cell
+with `civo_dns: none` ignores the token.
+
+The token comes only from the environment variable `CLOUDFLARE_API_TOKEN` of
+the shell that runs `witself-infra`. It is never read from `infra.yaml`, a
+flag or a file. Create a custom token with these settings. The zone is looked
+up by its name, and that lookup is what needs the read permission:
+
+| Setting | Value |
+|---|---|
+| Permissions | Zone, Zone, Read; and Zone, DNS, Edit |
+| Zone Resources | Include, Specific zone, the zone that holds `<domain>` |
+| TTL | an end date on the day you stop needing the token |
+
+`preview`, `up`, `refresh` and `destroy` of such a cell refuse without the
+token and name the variable. They also refuse while `CLOUDFLARE_API_KEY`,
+`CLOUDFLARE_EMAIL`, `CLOUDFLARE_API_USER_SERVICE_KEY` or `CLOUDFLARE_BASE_URL`
+is set, because the Cloudflare provider would read those as well. `outputs`
+and `cell-health` need no token. Every later `preview`, `up`, `refresh` and
+`destroy` of the cell needs a valid token again.
+
+Export the token in a terminal that runs only this cell's commands, and close
+that terminal afterwards. Other tools read the same variable name:
+
+- For an AWS, GCP or Azure cell, the presence of the token switches on
+  Cloudflare DNS delegation. Do not run `preview` or `up` of such a cell
+  while the variable is exported.
+- The dashboard starts `preview` and `up` with its own environment. Do not
+  start the dashboard from that terminal.
+- `wrangler` uses the variable as its own credential.
+
+#### Provision a cell with a load balancer
+
+Record the cell once. For a cell with a load balancer use the command below
+instead of the one in the R2 section: `config add-cell` refuses a second
+record of the same name, and the ingress shape of a cell that holds accounts
+cannot be changed later.
+
+The example keeps the state in Cloudflare R2; see
+[Cloudflare R2 state backend](#cloudflare-r2-state-backend-civo-cells) for the
+bucket, its token and the passphrase.
+
+```sh
+# 1. Record the cell. The Civo token file is read to validate it; no secret
+#    is printed.
+witself-infra config add-cell \
+  -cloud civo -account-alias prod -region nyc1 -role serving -profile prod \
+  -backend r2 \
+  -r2-bucket <bucket> \
+  -r2-endpoint https://<account-id>.r2.cloudflarestorage.com \
+  -civo-token-file "$HOME/.witself/tokens/civo-sandbox.token" \
+  -civo-expected-account-id 00000000-0000-0000-0000-000000000000 \
+  -civo-node-size g4s.kube.large \
+  -civo-admin-cidr 203.0.113.7/32 \
+  -k8s-version 1.35.0-k3s1 \
+  -civo-ingress loadbalancer \
+  -civo-dns cloudflare \
+  -domain cells.witself.witwave.ai \
+  -register-draining \
+  -argocd \
+  -control-plane https://self.witwave.ai
+
+# 2. Export the secrets in this terminal, which runs only this cell's
+#    commands. Nothing is echoed.
+printf 'R2 access key id: ';     read -rs WITSELF_INFRA_R2_ACCESS_KEY_ID;     echo
+printf 'R2 secret access key: '; read -rs WITSELF_INFRA_R2_SECRET_ACCESS_KEY; echo
+printf 'State passphrase: ';     read -rs WITSELF_INFRA_STATE_PASSPHRASE;     echo
+printf 'Cloudflare API token: '; read -rs CLOUDFLARE_API_TOKEN;               echo
+export WITSELF_INFRA_R2_ACCESS_KEY_ID WITSELF_INFRA_R2_SECRET_ACCESS_KEY \
+  WITSELF_INFRA_STATE_PASSPHRASE CLOUDFLARE_API_TOKEN
+unset CLOUDFLARE_API_KEY CLOUDFLARE_EMAIL CLOUDFLARE_API_USER_SERVICE_KEY CLOUDFLARE_BASE_URL
+
+# 3. Check, preview, apply, read back.
+witself-infra whoami      -cell civo-prod-use1-serving
+witself-infra state-check -cell civo-prod-use1-serving
+witself-infra preview     -cell civo-prod-use1-serving
+witself-infra up          -cell civo-prod-use1-serving
+witself-infra outputs     -cell civo-prod-use1-serving
+witself-infra preview     -cell civo-prod-use1-serving   # must show no change
+
+# 4. Drop the Cloudflare token from the shell. Revoke it in Cloudflare once
+#    no further run of this cell needs it.
+unset CLOUDFLARE_API_TOKEN
+```
+
+`-civo-admin-cidr` must contain the public address of the machine that runs
+`up`, because the Kubernetes API is open to that range only.
+
+`up` waits up to 20 minutes for HTTPS on `apiHost`. Do not look the name up
+before the record exists (`dig`, `curl`, a browser): a resolver may keep the
+negative answer for up to 30 minutes. If the wait ends for that reason, run
+the same `up` again.
+
+After the first `up`, list the firewalls of the Civo account: no firewall
+named `default-<network>` may exist, and the account shows exactly one load
+balancer for the cell.
+
+#### Registration in a drained state
+
+With `register_draining: true`, `up` registers the cell with
+`accepting=false`, so no signup is placed on it. Registration runs on every
+`up` that has a control plane, and the control plane stores the value each
+time. While the key is set, every `up` closes the cell again; without the
+key, every `up` opens it. Open the cell with
+`witself-admin cells undrain <cell>` and remove `register_draining` from the
+cell record in the same step, before the next `up`.
 
 ## State backend
 
@@ -462,6 +646,12 @@ witself-infra config add-cell \
   -argocd \
   -control-plane https://self.witwave.ai
 ```
+
+For `civo-prod-use1-serving` and every other cell with a Civo load balancer,
+use the complete command in
+[Provision a cell with a load balancer](#provision-a-cell-with-a-load-balancer)
+instead: `config add-cell` refuses a second record of the same name, and the
+ingress shape of a cell that holds accounts cannot be changed later.
 
 The inventory stores the bucket name and the endpoint as `r2_bucket` and
 `r2_endpoint`. Both are per-cell only and neither is a secret. A bucket created

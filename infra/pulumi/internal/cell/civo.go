@@ -24,6 +24,10 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		return fmt.Errorf("witself:civoAdminCIDR %q is not a valid CIDR: %w", c.adminCIDR, err)
 	}
 
+	if err := validateCivoIngress(c); err != nil {
+		return err
+	}
+
 	network, err := civo.NewNetwork(ctx, "cell-network", &civo.NetworkArgs{
 		Label:  pulumi.String(c.name + "-network"),
 		Region: pulumi.String(c.region),
@@ -123,21 +127,48 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 	ctx.Export("firewall", firewall.ID())
 	ctx.Export("status", pulumi.String("Civo development substrate provisioned"))
 
+	loadBalancer := c.ingress == civoIngressLoadBalancer
 	apiHost := pulumi.String("").ToStringOutput()
 	cellDomain := pulumi.String("").ToStringOutput()
-	if c.argocd {
-		cellDomain = cluster.DnsEntry.ApplyT(func(entry string) string {
+	civoDNSEntry := cellDomain
+	if c.argocd || loadBalancer {
+		civoDNSEntry = cluster.DnsEntry.ApplyT(func(entry string) string {
 			return strings.TrimSuffix(entry, ".")
 		}).(pulumi.StringOutput)
+	}
+	if c.argocd {
+		cellDomain = civoDNSEntry
 		apiHost = cellDomain.ApplyT(func(domain string) string {
 			return "api." + domain
 		}).(pulumi.StringOutput)
 	}
+	customHost := ""
+	if loadBalancer {
+		customDomain := c.name + "." + normalizeZoneName(c.domain)
+		customHost = "api." + customDomain
+		cellDomain = pulumi.String(customDomain).ToStringOutput()
+		apiHost = pulumi.String(customHost).ToStringOutput()
+	}
 	ctx.Export("apiHost", apiHost)
-	ctx.Export("civoDNSEntry", cellDomain)
+	ctx.Export("civoDNSEntry", civoDNSEntry)
 
+	if !c.argocd && !loadBalancer {
+		return nil
+	}
+	k8s, err := newCivoKubernetesProvider(ctx, cluster)
+	if err != nil {
+		return err
+	}
+	rootDependencies := []pulumi.Resource{cluster}
+	if loadBalancer {
+		ingressResources, err := provisionCivoLoadBalancer(ctx, c, k8s, cluster, firewall, customHost)
+		if err != nil {
+			return err
+		}
+		rootDependencies = append(rootDependencies, ingressResources...)
+	}
 	if c.argocd {
-		return provisionCivoArgoCD(ctx, c, cluster, cellDomain, apiHost, cluster)
+		return provisionCivoArgoCD(ctx, c, k8s, cellDomain, apiHost, rootDependencies...)
 	}
 	return nil
 }

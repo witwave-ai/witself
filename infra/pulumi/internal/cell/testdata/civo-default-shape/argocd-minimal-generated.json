@@ -1,0 +1,1135 @@
+{
+  "exports": [
+    "apiHost",
+    "argocdNamespace",
+    "backupToken",
+    "cell",
+    "civoDNSEntry",
+    "civoNodeSize",
+    "civoRegion",
+    "cloud",
+    "clusterEndpoint",
+    "clusterName",
+    "clusterReady",
+    "dbInstance",
+    "deletionProtection",
+    "firewall",
+    "gitops",
+    "kubeconfig",
+    "kubernetesVersion",
+    "network",
+    "profile",
+    "provisionToken",
+    "status"
+  ],
+  "resources": [
+    {
+      "type": "civo:index/firewall:Firewall",
+      "name": "cell-firewall",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+      ],
+      "propertyDependencies": {
+        "createDefaultRules": [],
+        "egressRules": [],
+        "ingressRules": [],
+        "name": [],
+        "networkId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+        ],
+        "region": []
+      },
+      "inputs": {
+        "createDefaultRules": false,
+        "egressRules": [
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "outbound-tcp",
+            "portRange": "1-65535",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "outbound-udp",
+            "portRange": "1-65535",
+            "protocol": "udp"
+          }
+        ],
+        "ingressRules": [
+          {
+            "action": "allow",
+            "cidrs": [
+              "203.0.113.7/32"
+            ],
+            "label": "kubernetes-api",
+            "portRange": "6443",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "http-acme",
+            "portRange": "80",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "https-api",
+            "portRange": "443",
+            "protocol": "tcp"
+          }
+        ],
+        "name": "civo-fixture-use1-serving-firewall",
+        "networkId": "cell-network-id",
+        "region": "nyc1"
+      }
+    },
+    {
+      "type": "civo:index/kubernetesCluster:KubernetesCluster",
+      "name": "civo-cluster",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [
+        "tags"
+      ],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "kubeconfig"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/firewall:Firewall::cell-firewall",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+      ],
+      "propertyDependencies": {
+        "applications": [],
+        "clusterType": [],
+        "cni": [],
+        "firewallId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/firewall:Firewall::cell-firewall"
+        ],
+        "name": [],
+        "networkId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+        ],
+        "pools": [],
+        "region": [],
+        "tags": [],
+        "writeKubeconfig": []
+      },
+      "inputs": {
+        "applications": "traefik2-nodeport",
+        "clusterType": "k3s",
+        "cni": "cilium",
+        "firewallId": "cell-firewall-id",
+        "name": "witself-civo-fixture-use1-serving",
+        "networkId": "cell-network-id",
+        "pools": {
+          "label": "development",
+          "nodeCount": 1,
+          "size": "g4s.kube.medium"
+        },
+        "region": "nyc1",
+        "tags": "witself civo-fixture-use1-serving development",
+        "writeKubeconfig": true
+      }
+    },
+    {
+      "type": "civo:index/network:Network",
+      "name": "cell-network",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "label": [],
+        "region": []
+      },
+      "inputs": {
+        "label": "civo-fixture-use1-serving-network",
+        "region": "nyc1"
+      }
+    },
+    {
+      "type": "kubernetes:argoproj.io/v1alpha1:Application",
+      "name": "argocd-root",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Secret::civo-postgres-auth",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Secret::witself-backup",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Secret::witself-bootstrap",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Secret::witself-db",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Secret::witself-provision",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:helm.sh/v3:Release::argocd"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "spec": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster"
+        ]
+      },
+      "inputs": {
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Application",
+        "metadata": {
+          "finalizers": [
+            "resources-finalizer.argocd.argoproj.io"
+          ],
+          "name": "bootstrap",
+          "namespace": "argocd"
+        },
+        "spec": {
+          "destination": {
+            "namespace": "argocd",
+            "server": "https://kubernetes.default.svc"
+          },
+          "project": "default",
+          "sources": [
+            {
+              "helm": {
+                "valueFiles": [
+                  "$values/.gitops/cells/civo-fixture-use1-serving/values.yaml"
+                ],
+                "values": "gitops:\n  repoURL: \"https://github.com/witwave-ai/witself\"\n  targetRevision: \"main\"\n  valuesPath: \".gitops/cells/civo-fixture-use1-serving/values.yaml\"\ncell:\n  cloud: civo\n  domain: \"fixture-cluster.k8s.civo.test\"\n  apiHost: \"api.fixture-cluster.k8s.civo.test\"\nplatform:\n  externalDNS:\n    enabled: false\n"
+              },
+              "path": ".gitops/charts/bootstrap",
+              "repoURL": "https://github.com/witwave-ai/witself",
+              "targetRevision": "main"
+            },
+            {
+              "ref": "values",
+              "repoURL": "https://github.com/witwave-ai/witself",
+              "targetRevision": "main"
+            }
+          ],
+          "syncPolicy": {
+            "automated": {
+              "prune": true,
+              "selfHeal": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Namespace",
+      "name": "witself-namespace",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+          "name": "witself"
+        }
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Secret",
+      "name": "civo-postgres-auth",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "data",
+        "stringData",
+        "data",
+        "stringData"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Namespace::witself-namespace",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomPassword:RandomPassword::civo-postgres-password"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "stringData": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomPassword:RandomPassword::civo-postgres-password"
+        ],
+        "type": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "witself-postgresql-auth",
+          "namespace": "witself"
+        },
+        "stringData": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": {
+            "password": "test-database-password",
+            "postgres-password": "test-database-password"
+          }
+        },
+        "type": "Opaque"
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Secret",
+      "name": "witself-backup",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "data",
+        "stringData",
+        "data",
+        "stringData"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Namespace::witself-namespace",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-backup-token"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "stringData": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-backup-token"
+        ],
+        "type": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "witself-backup",
+          "namespace": "witself"
+        },
+        "stringData": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": {
+            "backup_token": "witself_bak_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+          }
+        },
+        "type": "Opaque"
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Secret",
+      "name": "witself-bootstrap",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "data",
+        "stringData",
+        "data",
+        "stringData"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Namespace::witself-namespace",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-bootstrap-token"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "stringData": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-bootstrap-token"
+        ],
+        "type": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "witself-bootstrap",
+          "namespace": "witself"
+        },
+        "stringData": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": {
+            "token": "witself_boot_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+            "ttl": "24h"
+          }
+        },
+        "type": "Opaque"
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Secret",
+      "name": "witself-db",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "data",
+        "stringData",
+        "data",
+        "stringData"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Namespace::witself-namespace",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomPassword:RandomPassword::civo-postgres-password"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "stringData": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomPassword:RandomPassword::civo-postgres-password"
+        ],
+        "type": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "witself-db",
+          "namespace": "witself"
+        },
+        "stringData": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": {
+            "dsn": "postgres://witself:test-database-password@witself-postgresql.witself.svc.cluster.local:5432/witself?sslmode=disable"
+          }
+        },
+        "type": "Opaque"
+      }
+    },
+    {
+      "type": "kubernetes:core/v1:Secret",
+      "name": "witself-provision",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "data",
+        "stringData",
+        "data",
+        "stringData"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::kubernetes:core/v1:Namespace::witself-namespace",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-provision-token"
+      ],
+      "propertyDependencies": {
+        "apiVersion": [],
+        "kind": [],
+        "metadata": [],
+        "stringData": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::random:index/randomString:RandomString::witself-provision-token"
+        ],
+        "type": []
+      },
+      "inputs": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "witself-provision",
+          "namespace": "witself"
+        },
+        "stringData": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": {
+            "token": "witself_prv_PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+          }
+        },
+        "type": "Opaque"
+      }
+    },
+    {
+      "type": "kubernetes:helm.sh/v3:Release",
+      "name": "argocd",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:providers:kubernetes::cell-k8s::cell-k8s-id",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": true,
+      "deleteBeforeReplaceDefined": true,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "chart": [],
+        "compat": [],
+        "createNamespace": [],
+        "name": [],
+        "namespace": [],
+        "repositoryOpts": [],
+        "timeout": [],
+        "values": [],
+        "version": []
+      },
+      "inputs": {
+        "chart": "argo-cd",
+        "compat": "true",
+        "createNamespace": true,
+        "name": "argocd",
+        "namespace": "argocd",
+        "repositoryOpts": {
+          "repo": "https://argoproj.github.io/argo-helm"
+        },
+        "timeout": 900,
+        "values": {
+          "configs": {
+            "cm": {
+              "resource.customizations.health.argoproj.io_Application": "hs = {}\nhs.status = \"Progressing\"\nhs.message = \"\"\nif obj.status ~= nil then\n  if obj.status.health ~= nil then\n    hs.status = obj.status.health.status\n    if obj.status.health.message ~= nil then\n      hs.message = obj.status.health.message\n    end\n  end\nend\nreturn hs\n",
+              "resource.ignoreResourceUpdatesEnabled": "false"
+            }
+          },
+          "server": {
+            "service": {
+              "type": "ClusterIP"
+            }
+          }
+        },
+        "version": "10.0.1"
+      }
+    },
+    {
+      "type": "pulumi:providers:kubernetes",
+      "name": "cell-k8s",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster"
+      ],
+      "propertyDependencies": {
+        "kubeconfig": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster"
+        ]
+      },
+      "inputs": {
+        "kubeconfig": {
+          "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+          "value": "apiVersion: v1\nclusters: []\ncontexts: []\n"
+        }
+      }
+    },
+    {
+      "type": "random:index/randomPassword:RandomPassword",
+      "name": "civo-postgres-password",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "bcryptHash",
+        "result"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "length": [],
+        "special": []
+      },
+      "inputs": {
+        "length": 32,
+        "special": false
+      }
+    },
+    {
+      "type": "random:index/randomString:RandomString",
+      "name": "witself-backup-token",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "result"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "length": [],
+        "lower": [],
+        "numeric": [],
+        "special": [],
+        "upper": []
+      },
+      "inputs": {
+        "length": 43,
+        "lower": true,
+        "numeric": true,
+        "special": false,
+        "upper": true
+      }
+    },
+    {
+      "type": "random:index/randomString:RandomString",
+      "name": "witself-bootstrap-token",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "length": [],
+        "lower": [],
+        "numeric": [],
+        "special": [],
+        "upper": []
+      },
+      "inputs": {
+        "length": 43,
+        "lower": true,
+        "numeric": true,
+        "special": false,
+        "upper": true
+      }
+    },
+    {
+      "type": "random:index/randomString:RandomString",
+      "name": "witself-provision-token",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "result"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "length": [],
+        "lower": [],
+        "numeric": [],
+        "special": [],
+        "upper": []
+      },
+      "inputs": {
+        "length": 43,
+        "lower": true,
+        "numeric": true,
+        "special": false,
+        "upper": true
+      }
+    }
+  ]
+}

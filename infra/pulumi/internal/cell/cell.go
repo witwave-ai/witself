@@ -110,6 +110,9 @@ type civoCell struct {
 	nodeSize          string
 	nodeCount         int
 	adminCIDR         string
+	ingress           string // nodeport | loadbalancer; empty means nodeport
+	dns               string // none | cloudflare; empty means none
+	domain            string // parent domain of the custom host; load balancer mode only
 	argocd            bool
 	gitopsRepo        string
 	gitopsPath        string
@@ -256,6 +259,9 @@ func Program(ctx *pulumi.Context) error {
 			nodeSize:          nodeSize,
 			nodeCount:         civoNodeProfileFor(profile),
 			adminCIDR:         w.Get("civoAdminCIDR"),
+			ingress:           w.Get("civoIngress"),
+			dns:               w.Get("civoDNS"),
+			domain:            domain,
 			argocd:            argocd,
 			gitopsRepo:        gitopsRepo,
 			gitopsPath:        gitopsPath,
