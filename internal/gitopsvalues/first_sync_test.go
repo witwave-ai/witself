@@ -17,6 +17,9 @@ func TestFirstSyncCheck(t *testing.T) {
 		cell      string
 		version   string
 		values    string
+		marked    bool
+		apiHost   string
+		wantHost  string
 		unmarked  bool
 		equal     bool
 		remove    bool
@@ -24,6 +27,14 @@ func TestFirstSyncCheck(t *testing.T) {
 		contains  bool
 	}{
 		{name: "marked production", version: "99.0.0"},
+		{
+			name: "marked AWS", cell: "aws-sandbox-use1-dev", version: "99.0.0", marked: true,
+			wantHost: "api.aws-sandbox-use1-dev.cells.witself.witwave.ai",
+		},
+		{
+			name: "marked AWS custom host", cell: "aws-sandbox-use1-dev", version: "99.0.0", marked: true,
+			apiHost: "first-sync-probe.example.invalid", wantHost: "first-sync-probe.example.invalid",
+		},
 		{name: "equal to higher fixture pin", equal: true},
 		{name: "older than chart", version: "0.0.1", wantError: "first sync: target 0.0.1 is lower than the pinned chartVersion", contains: true},
 		{
@@ -88,6 +99,9 @@ func TestFirstSyncCheck(t *testing.T) {
 			if cell == "" {
 				cell = production
 			}
+			if tc.marked {
+				setFirstSyncMarker(t, root, cell, true, tc.apiHost)
+			}
 			path := filepath.Join(root, filepath.FromSlash(valuesRel(cell)))
 			if tc.values != "" {
 				if err := os.WriteFile(path, []byte(tc.values), 0o600); err != nil {
@@ -144,8 +158,12 @@ func TestFirstSyncCheck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != host {
-				t.Fatalf("FirstSyncCheck host = %q, want %q", got, host)
+			wantHost := tc.wantHost
+			if wantHost == "" {
+				wantHost = host
+			}
+			if got != wantHost {
+				t.Fatalf("FirstSyncCheck host = %q, want %q", got, wantHost)
 			}
 		})
 	}
@@ -182,8 +200,12 @@ func TestUnprovisionedMarkerIsNotRendered(t *testing.T) {
 	}
 }
 
-func setFirstSyncMarker(t *testing.T, root, cell string, marked bool) {
+func setFirstSyncMarker(t *testing.T, root, cell string, marked bool, apiHost ...string) {
 	t.Helper()
+	host := ""
+	if len(apiHost) > 0 {
+		host = apiHost[0]
+	}
 	path := filepath.Join(root, catalogRelPath)
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -201,9 +223,15 @@ func setFirstSyncMarker(t *testing.T, root, cell string, marked bool) {
 		if inside && strings.HasPrefix(line, "    unprovisioned:") {
 			continue
 		}
+		if inside && host != "" && strings.HasPrefix(line, "    api_host:") {
+			continue
+		}
 		output = append(output, line)
 		if inside && line == "  "+cell+":" && marked {
 			output = append(output, "    unprovisioned: true")
+		}
+		if inside && line == "  "+cell+":" && host != "" {
+			output = append(output, "    api_host: "+host)
 		}
 	}
 	if !found {

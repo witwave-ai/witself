@@ -160,7 +160,7 @@ fi
 # registry request, corroborate it: no kube context through which a train
 # would reach the cell's Argo CD, and an API host this machine cannot resolve.
 first_sync_gate() {
-  local status=0 contexts
+  local status=0 contexts context
   if ! API_HOST=$(bash "$REPO_ROOT/scripts/gitops-cell-values.sh" --root "$REPO_ROOT" \
       --first-sync-check "$CELL" --version "$VERSION"); then
     die "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release $VERSION"
@@ -169,9 +169,10 @@ first_sync_gate() {
   # Only names are read, never printed. Any failure (including exit 127) refuses.
   contexts=$(kubectl config get-contexts -o name 2>/dev/null) || status=$?
   [ "$status" -eq 0 ] || die "first sync refused: could not list kube contexts (kubectl exit $status)"
-  if grep -Fxq -- "witself-$CELL" <<<"$contexts"; then
-    die "first sync refused: kube context witself-$CELL exists; the cell may be provisioned"
-  fi
+  while IFS= read -r context; do
+    [ "$context" != "witself-$CELL" ] ||
+      die "first sync refused: kube context witself-$CELL exists; the cell may be provisioned"
+  done <<<"$contexts"
   # -q must be first. The cell's DNS record is written by its first up, so only
   # a name this machine cannot resolve (curl exit 6) corroborates the marker.
   # A refused connection, any response, a TLS failure or a timeout refuses.

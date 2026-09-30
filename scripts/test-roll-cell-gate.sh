@@ -175,13 +175,12 @@ import sys
 args = sys.argv[1:]
 assert args[0] == '-q', 'curl must ignore user configuration'
 url = args[-1]
-if url.startswith('https://api.'):
+if url.endswith('/v1/version') and not url.startswith('https://ghcr.io/'):
     # First-sync probe of the cell's API host; never a registry request.
-    assert url == 'https://api.' + os.environ['WITSELF_POSTGRES_CELL'] + '.cells.witself.witwave.ai/v1/version'
-    assert args[args.index('--proto') + 1] == '=https'
-    assert args[args.index('--noproxy') + 1] == '*'
-    assert '--connect-timeout' in args and '--max-time' in args
-    assert '--fail' not in args and '--location' not in args
+    assert url == 'https://' + os.environ['WITSELF_EXPECTED_API_HOST'] + '/v1/version'
+    assert args == ['-q', '--silent', '--output', '/dev/null', '--noproxy', '*', '--proto', '=https',
+                    '--connect-timeout', '10', '--max-time', '20',
+                    'https://' + os.environ['WITSELF_EXPECTED_API_HOST'] + '/v1/version'], args
     with open(os.environ['WITSELF_PROBE_LOG'], 'a') as log:
         log.write('probe ' + url + '\n')
     sys.exit(int(os.environ['WITSELF_PROBE_EXIT']))
@@ -316,6 +315,7 @@ reset_case() {
   KUBE_CONTEXTS=
   KUBECTL_EXIT=0
   PROBE_EXIT=6
+  unset WITSELF_EXPECTED_API_HOST
 }
 
 run_roll() {
@@ -977,26 +977,32 @@ for serving_cell in civo-sandbox-use1-serving civo-prod-use1-serving; do (
 # All kube and API operations remain offline, with their order visible in logs.
 cp "$REPO_ROOT/.gitops/cells/catalog.yaml" "$TEST_ROOT/catalog.baseline.yaml"
 set_first_sync_marker() {
-  python3 - "$REPO_ROOT/.gitops/cells/catalog.yaml" "$1" <<'EOF_FIRST_SYNC_MARKER'
+  python3 - "$REPO_ROOT/.gitops/cells/catalog.yaml" "$1" "$2" "${3:-}" <<'EOF_FIRST_SYNC_MARKER'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 mode = sys.argv[2]
+cell = sys.argv[3]
+host = sys.argv[4]
 assert mode in ('marked', 'unmarked')
 lines = []
 in_cell = False
 found = False
 for line in path.read_text().splitlines(keepends=True):
     if line.startswith('  ') and not line.startswith('   ') and line.rstrip().endswith(':'):
-        in_cell = line == '  civo-prod-use1-serving:\n'
+        in_cell = line == '  ' + cell + ':\n'
         if in_cell:
             found = True
             lines.append(line)
             if mode == 'marked':
                 lines.append('    unprovisioned: true\n')
+            if host:
+                lines.append('    api_host: ' + host + '\n')
             continue
     if in_cell and line.startswith('    unprovisioned:'):
+        continue
+    if in_cell and host and line.startswith('    api_host:'):
         continue
     lines.append(line)
 assert found
@@ -1009,14 +1015,14 @@ EOF_FIRST_SYNC_MARKER
   VALUES="$REPO_ROOT/.gitops/cells/$CELL/values.yaml"
   BASELINE="$TEST_ROOT/first-sync-values.baseline.yaml"
   cp "$VALUES" "$BASELINE"
-  set_first_sync_marker marked
+  set_first_sync_marker marked "$CELL"
   "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 || fail 'first-sync fixture has generation drift'
 
   first_sync_checks_logged() {
     local label=$1
     [ -e "$KUBECTL_LOG" ] && [ "$(cat "$KUBECTL_LOG")" = 'config get-contexts -o name' ] ||
       fail "$label did not list only kube context names exactly once"
-    [ -e "$PROBE_LOG" ] && [ "$(cat "$PROBE_LOG")" = "probe https://api.$CELL.cells.witself.witwave.ai/v1/version" ] ||
+    [ -e "$PROBE_LOG" ] && [ "$(cat "$PROBE_LOG")" = "probe https://$WITSELF_EXPECTED_API_HOST/v1/version" ] ||
       fail "$label did not probe the exact API host exactly once"
   }
 
@@ -1049,11 +1055,17 @@ EOF_FIRST_SYNC_MARKER
 
   # S1: only an exact context match refuses; the default roll pins the server.
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   KUBE_CONTEXTS="witself-civo-sandbox-use1-serving witself-$CELL-old"
   PROBE_EXIT=6
   run_roll "$CELL" "$VERSION" --first-sync >"$CASE_OUTPUT" 2>&1 ||
     fail 'S1 first sync did not proceed'
   expect_output "$first_sync_warning" 'S1 first sync'
+  for context in witself-civo-sandbox-use1-serving "witself-$CELL-old"; do
+    if grep -Fq -- "$context" "$CASE_OUTPUT"; then
+      fail 'S1 first sync printed another kube context name'
+    fi
+  done
   [ ! -e "$ADMIN_LOG" ] || fail 'S1 first sync invoked the verifier'
   first_sync_checks_logged 'S1 first sync'
   assert_values "$ROLLED" 'S1 first sync'
@@ -1064,6 +1076,7 @@ EOF_FIRST_SYNC_MARKER
 
   # S2: all three image pins remain generated, and an equal-version repeat is inert.
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   PROBE_EXIT=6
   POSTGRES_REGISTRY_CASE=single
   run_roll "$CELL" "$VERSION" --first-sync --backup-image --postgres-image >"$CASE_OUTPUT" 2>&1 ||
@@ -1084,31 +1097,82 @@ EOF_FIRST_SYNC_MARKER
   [ ! -e "$ADMIN_LOG" ] || fail 'S2 repeated first sync invoked the verifier'
   first_sync_checks_logged 'S2 repeated first sync'
 
+  # S3: another eligible cell uses its catalog host, without a Civo evidence pair.
+  first_sync_other_cell() {
+    local CELL="$CELL" VALUES="$VALUES" BASELINE="$BASELINE" WITSELF_EXPECTED_API_HOST
+    reset_case
+    cp "$REPO_ROOT/.gitops/cells/catalog.yaml" "$TEST_ROOT/s3-catalog.baseline.yaml"
+    CELL=aws-sandbox-use1-dev
+    VALUES="$REPO_ROOT/.gitops/cells/$CELL/values.yaml"
+    cp "$VALUES" "$TEST_ROOT/s3-values.original.yaml"
+    set_first_sync_marker marked "$CELL" first-sync-probe.example.invalid
+    "$TEST_ROOT/generator" --write --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+      fail 'S3 fixture could not be regenerated'
+    BASELINE="$TEST_ROOT/s3-values.baseline.yaml"
+    cp "$VALUES" "$BASELINE"
+    reset_case
+    export WITSELF_EXPECTED_API_HOST=first-sync-probe.example.invalid
+    run_roll "$CELL" "$VERSION" --first-sync >"$CASE_OUTPUT" 2>&1 || {
+      sed -E 's/[[:xdigit:]]{64}/[REDACTED_DIGEST]/g' "$CASE_OUTPUT" >&2
+      fail 'S3 first sync of another eligible cell did not proceed'
+    }
+    [ ! -e "$ADMIN_LOG" ] || fail 'S3 first sync invoked the verifier'
+    first_sync_checks_logged 'S3 first sync'
+    assert_values "$ROLLED" 'S3 first sync'
+    "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+      fail 'S3 first sync did not survive generation'
+    cp "$TEST_ROOT/s3-catalog.baseline.yaml" "$REPO_ROOT/.gitops/cells/catalog.yaml"
+    cp "$TEST_ROOT/s3-values.original.yaml" "$VALUES"
+  }
+  first_sync_other_cell
+
   # R1-R3: gate selection conflicts refuse before inspecting local contexts.
   first_sync_conflict='--first-sync cannot be combined with --no-schema-change, --backup-evidence, or --evidence-cells'
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R1 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --no-schema-change
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R2 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --backup-evidence "$EVIDENCE_A"
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R3 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --evidence-cells "civo-sandbox-use1-backup,$CELL"
 
   # R4-R5: the catalog marker and version checks precede both live checks.
   reset_case
-  set_first_sync_marker unmarked
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
+  set_first_sync_marker unmarked "$CELL"
   first_sync_refused R4 "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release $VERSION" before-kubectl "$VERSION" --first-sync
   expect_output 'first sync: cell is not recorded as unprovisioned in .gitops/cells/catalog.yaml' R4
-  set_first_sync_marker marked
+  set_first_sync_marker marked "$CELL"
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R5 "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release 0.0.1" before-kubectl 0.0.1 --first-sync
   expect_output 'first sync: target 0.0.1 is lower than the pinned chartVersion' R5
 
   # R6-R7: a context or an unsuccessful names-only listing fails closed.
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   KUBE_CONTEXTS="witself-civo-sandbox-use1-backup witself-$CELL"
   first_sync_refused R6 "first sync refused: kube context witself-$CELL exists; the cell may be provisioned" before-probe "$VERSION" --first-sync
+  if grep -Fq -- 'witself-civo-sandbox-use1-backup' "$CASE_OUTPUT"; then
+    fail 'R6 first sync printed another kube context name'
+  fi
+
+  # R6b: context comparison must not depend on an external grep succeeding.
+  reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
+  KUBE_CONTEXTS="witself-civo-sandbox-use1-backup witself-$CELL"
+  cat >"$STUB_BIN/grep" <<'EOF_GREP_FAILURE'
+#!/usr/bin/env bash
+exit 2
+EOF_GREP_FAILURE
+  chmod +x "$STUB_BIN/grep"
+  first_sync_refused R6b "first sync refused: kube context witself-$CELL exists; the cell may be provisioned" before-probe "$VERSION" --first-sync
+  rm "$STUB_BIN/grep"
   for kube_exit in 1 127; do
     reset_case
+    export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
     KUBECTL_EXIT=$kube_exit
     first_sync_refused "R7 exit $kube_exit" "first sync refused: could not list kube contexts (kubectl exit $kube_exit)" before-probe "$VERSION" --first-sync
   done
@@ -1116,17 +1180,31 @@ EOF_FIRST_SYNC_MARKER
   # R8: only curl exit 6 corroborates the marker, even with both image opt-ins.
   for probe_exit in 0 7 28 35 60; do
     reset_case
+    export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
     PROBE_EXIT=$probe_exit
     first_sync_refused "R8 exit $probe_exit" "first sync refused: https://api.$CELL.cells.witself.witwave.ai/v1/version did not fail name resolution (curl exit $probe_exit); the cell may be provisioned" after-probe "$VERSION" --first-sync --backup-image --postgres-image
   done
 
   # R9-R10: passing first-sync eligibility does not bypass release checks.
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R9 'release tag v1.2.2 is not available locally' after-probe 1.2.2 --first-sync
   reset_case
+  export WITSELF_EXPECTED_API_HOST=api.civo-prod-use1-serving.cells.witself.witwave.ai
   first_sync_refused R10 'release v1.2.6 has no PostgreSQL mirror descriptor' after-probe 1.2.6 --first-sync --postgres-image
+
+  # R11: reject an invalid catalog host before listing contexts or probing.
+  reset_case
+  export WITSELF_EXPECTED_API_HOST=-bad.example.invalid
+  set_first_sync_marker marked "$CELL" "$WITSELF_EXPECTED_API_HOST"
+  "$TEST_ROOT/generator" --write --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 ||
+    fail 'R11 fixture could not be regenerated'
+  BASELINE="$TEST_ROOT/r11-values.baseline.yaml"
+  cp "$VALUES" "$BASELINE"
+  first_sync_refused R11 "first sync refused: invalid API host for $CELL" before-kubectl "$VERSION" --first-sync
 )
 cp "$TEST_ROOT/catalog.baseline.yaml" "$REPO_ROOT/.gitops/cells/catalog.yaml"
+cp "$TEST_ROOT/first-sync-values.baseline.yaml" "$REPO_ROOT/.gitops/cells/civo-prod-use1-serving/values.yaml"
 
 # Explicit registry tag validation rejects paths, options, and duplicates
 # before curl; the PostgreSQL success cases prove valid suffixed tags work.
