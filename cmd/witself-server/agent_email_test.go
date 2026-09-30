@@ -854,9 +854,9 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 }
 
 func TestAgentEmailProductionCohortStartupLine(t *testing.T) {
-	for _, state := range []string{store.AgentEmailRetryCanaryNone, store.AgentEmailRetryCanaryReady, store.AgentEmailRetryCanaryAbsent} {
-		got := agentEmailProductionCohortStartupLine(store.AgentEmailProductionCohortResidency{ConfiguredAccountCount: 6, ResidentAccountCount: 1, DepartedAccountCount: 2, UnknownAccountCount: 3, RetryCanary: state})
-		want := "witself-server: agent-email production receive cohort configured=6 resident=1 departed=2 unknown=3 retry_canary=" + state
+	for _, state := range []string{store.AgentEmailRetryCanaryNone, store.AgentEmailRetryCanaryReady, store.AgentEmailRetryCanaryAbsent, store.AgentEmailRetryCanaryClosed} {
+		got := agentEmailProductionCohortStartupLine(store.AgentEmailProductionCohortResidency{ConfiguredAccountCount: 10, ResidentAccountCount: 1, DepartedAccountCount: 2, UnknownAccountCount: 3, ClosedAccountCount: 4, RetryCanary: state})
+		want := "witself-server: agent-email production receive cohort configured=10 resident=1 departed=2 unknown=3 retry_canary=" + state + " closed=4"
 		if got != want {
 			t.Fatalf("startup line = %q; want %q", got, want)
 		}

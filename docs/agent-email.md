@@ -2270,8 +2270,9 @@ secrets, not source-code cell lists. Carry every unexpired historical signer
 when repointing an account, including its source-cell signer.
 
 From `v0.0.317`, serving startup treats the receive cohort as a fleet allowlist
-and reports value-free resident/departed/unknown counts and canary readiness
-or absence. Unknown account and absent canary IDs are not validated; operator
+and reports value-free resident/departed/unknown counts (from `v0.0.319`
+also a closed count) and canary readiness, absence or closed state. Unknown
+account and absent canary IDs are not validated; operator
 Secret byte equality replaces that guard. Pre-list accounts before arrival and
 leave them on the source. Explicit operations remain strict. From `v0.0.318`,
 ingest defers mail for a resident account that is missing from the cohort and
@@ -2303,7 +2304,9 @@ an agent segment or realm label that does not match the address). The retired
 legacy pilot mode still rejects an unenrolled agent permanently. DMARC
 rejection, the 25 MiB transport ceiling and every edge gate are decided before
 the cell is asked. For an account that is in the cohort, every answer is as
-before.
+before, except that
+from `v0.0.319` mail for a `closed` account is rejected permanently; see
+[Closed accounts in the receive cohort](#closed-accounts-in-the-receive-cohort).
 
 The deferral is decided before the account's plan, size limit, rate limits and
 receive switches and the cell's storage preflight are read. It stores nothing
@@ -2330,3 +2333,29 @@ The receive Worker is unchanged and needs no deployment: `temporary` is part
 of its closed verdict set, and the retry canary uses the same answer. A cell
 older than `v0.0.318` keeps rejecting every cohort miss permanently, so during
 a roll each cell answers by its own version.
+
+### Closed accounts in the receive cohort
+
+From `v0.0.319`, a listed account whose row on this cell has status `closed`
+no longer stops serving startup. Startup skips it and reports it in the
+value-free `closed=N` count at the end of the cohort startup line, and it
+reports the retry canary as `closed` when the canary agent belongs to such an
+account. Every other startup refusal is unchanged: a listed account in any
+status other than `active`, `suspended` or `closed`, a canary outside the
+cohort, a database that cannot be read and a malformed cohort still stop the
+server. The strict backfill, preflight and canary-manifest operations still
+fail with `account_not_active` while a closed account is listed.
+
+Mail for a closed account is rejected permanently, whether or not the account
+is listed, in both receive modes: the cell answers HTTP 404
+`{"verdict":"unknown_recipient"}` and the ingest counter records
+`unknown_recipient`. Before `v0.0.319` a listed closed account was answered
+with a temporary failure. The answer is decided before the account's plan,
+size limit, receive switches and rate limits are checked; it stores nothing
+and debits no rate bucket. A listed `pending` or `suspended` account keeps its
+temporary answer.
+
+A closed account is terminal. Remove it from the cohort with the next
+immutable cohort Secret; if it is the only cohort account, disable receive
+instead, because an empty cohort is rejected. If the retry canary belongs to
+it, change or remove the canary in the same change.

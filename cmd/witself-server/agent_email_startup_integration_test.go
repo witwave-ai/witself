@@ -184,3 +184,78 @@ func TestAgentEmailStartupFleetCohortPostgres(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentEmailStartupClosedCohortAccountPostgres(t *testing.T) {
+	st := startupCohortStore(t)
+	t.Setenv(agentEmailProviderEventTokenEnv, strings.Repeat("x", 32))
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	ctx := context.Background()
+	a, err := st.ProvisionAccount(ctx, "closed-startup@example.test", "closed fixture", time.Hour)
+	if err != nil {
+		t.Fatal("provision fixture")
+	}
+	if ok, err := st.ActivateAccount(ctx, a.AccountID); err != nil || !ok {
+		t.Fatal("activate fixture")
+	}
+	r, err := st.CreateRealm(ctx, a.AccountID, "closed realm")
+	if err != nil {
+		t.Fatal("create fixture realm")
+	}
+	g, err := st.CreateAgent(ctx, a.AccountID, r.ID, "closed agent")
+	if err != nil {
+		t.Fatal("create fixture agent")
+	}
+	receive := server.AgentEmailReceiveConfig{Enabled: true, Mode: server.AgentEmailReceiveModeProduction, Domain: "witmail.net", Audience: "test-cell", AccountIDs: map[string]bool{a.AccountID: true}}
+	address, err := st.EnsureAgentEmailMailbox(ctx, toStoreAgentEmailReceiveScope(receive), a.AccountID, r.ID, g.ID, "")
+	if err != nil {
+		t.Fatal("create fixture mailbox")
+	}
+	if err := st.CloseAccount(ctx, a.AccountID, a.OperatorID, "closed cohort fixture"); err != nil {
+		t.Fatal("close fixture")
+	}
+	receive.RetryCanaryAgentID = g.ID
+	var cfg server.Config
+	var log bytes.Buffer
+	if err := configureAgentEmailWithLog(ctx, &cfg, st, receive, &log); err != nil {
+		t.Fatal("a closed cohort account stopped startup")
+	}
+	const want = "witself-server: agent-email production receive cohort configured=1 resident=0 departed=0 unknown=0 retry_canary=closed closed=1\n"
+	if cfg.IngestAgentEmailPilot == nil || log.String() != want {
+		t.Fatal("startup did not wire ingest with exactly the closed-count line")
+	}
+	const sender = "sender@example.test"
+	raw := []byte("From: " + sender + "\r\nTo: " + address.Address + "\r\nSubject: closed\r\n\r\nhello\r\n")
+	digest := sha256.Sum256(raw)
+	relay := agentemail.RelayMetadata{Timestamp: time.Now().Unix(), KeyID: "test-relay", Audience: receive.Audience, EnvelopeSender: sender, EnvelopeRecipient: address.Address, RawSize: int64(len(raw)), RawSHA256: hex.EncodeToString(digest[:])}
+	err = cfg.IngestAgentEmailPilot(ctx, relay, raw)
+	if !errors.Is(err, server.ErrAgentEmailUnknownRecipient) || errors.Is(err, server.ErrAgentEmailCohortDeferred) {
+		t.Fatal("a closed cohort account was not rejected permanently")
+	}
+	if log.String() != want {
+		t.Fatal("the permanent rejection wrote a log line")
+	}
+	for _, value := range []string{a.AccountID, a.OperatorID, r.ID, g.ID, address.Address, sender} {
+		if strings.Contains(err.Error(), value) || strings.Contains(log.String(), value) {
+			t.Fatal("closed startup or ingest exposed a fixture value")
+		}
+	}
+
+	// Every other status refusal stays fail-closed.
+	p, err := st.ProvisionAccount(ctx, "pending-startup@example.test", "pending fixture", time.Hour)
+	if err != nil {
+		t.Fatal("provision pending fixture")
+	}
+	receive = server.AgentEmailReceiveConfig{Enabled: true, Mode: server.AgentEmailReceiveModeProduction, Domain: "witmail.net", Audience: "test-cell", AccountIDs: map[string]bool{p.AccountID: true}}
+	cfg = server.Config{}
+	log.Reset()
+	err = configureAgentEmailWithLog(ctx, &cfg, st, receive, &log)
+	if !errors.Is(err, store.ErrAccountNotActive) || cfg.IngestAgentEmailPilot != nil || log.Len() != 0 {
+		t.Fatal("a pending cohort account did not stop startup")
+	}
+	if err.Error() != "agent-email production startup preflight failed (reason=account_not_active)" {
+		t.Fatal("the pending refusal is not the log-safe account_not_active error")
+	}
+	if strings.Contains(err.Error(), p.AccountID) {
+		t.Fatal("the pending refusal exposed a fixture value")
+	}
+}

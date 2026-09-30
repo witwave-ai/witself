@@ -64,7 +64,7 @@ func TestAgentEmailCohortAbsentAccountsPostgres(t *testing.T) {
 	const absent = "acc_zzzzzzzzzzzzzzzz"
 	scope := cohortScope(account, "", "source-cell")
 	scope.AccountIDs[absent] = true
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{2, 1, 0, 1, AgentEmailRetryCanaryNone})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{2, 1, 0, 1, 0, AgentEmailRetryCanaryNone})
 	if _, err := st.PreflightAgentEmailProductionCohort(ctx, scope); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
 		t.Fatalf("strict preflight: %v", err)
 	}
@@ -83,18 +83,18 @@ func TestAgentEmailCohortAbsentAccountsPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		if status == "suspended" {
-			requireResidency(t, st, scope, AgentEmailProductionCohortResidency{2, 1, 0, 1, AgentEmailRetryCanaryNone})
-		} else if _, err := st.ValidateAgentEmailProductionCohort(ctx, scope); !errors.Is(err, ErrAccountNotActive) {
-			t.Fatalf("closed account: %v", err)
+			requireResidency(t, st, scope, AgentEmailProductionCohortResidency{2, 1, 0, 1, 0, AgentEmailRetryCanaryNone})
+		} else {
+			requireResidency(t, st, scope, AgentEmailProductionCohortResidency{2, 0, 0, 1, 1, AgentEmailRetryCanaryNone})
 		}
 	}
 	scope = cohortScope(absent, "", "source-cell")
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 0, 0, 1, AgentEmailRetryCanaryNone})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 0, 0, 1, 0, AgentEmailRetryCanaryNone})
 	// Historical schemas without the receipts table must classify absence as unknown.
 	if _, err := st.pool.Exec(ctx, `DROP TABLE account_evacuation_finalizations`); err != nil {
 		t.Fatal(err)
 	}
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 0, 0, 1, AgentEmailRetryCanaryNone})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 0, 0, 1, 0, AgentEmailRetryCanaryNone})
 }
 
 func TestAgentEmailCohortCanaryPostgres(t *testing.T) {
@@ -102,11 +102,11 @@ func TestAgentEmailCohortCanaryPostgres(t *testing.T) {
 	ctx := context.Background()
 	account, realm, agent := cohortAccount(t, st)
 	scope := cohortScope(account, agent, "source-cell")
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryReady})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryReady})
 	scope.RetryCanaryAgentID = ""
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryNone})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryNone})
 	scope.RetryCanaryAgentID = "agent_zzzzzzzzzzzzzzzz"
-	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryAbsent})
+	requireResidency(t, st, scope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryAbsent})
 	if _, err := st.PreflightAgentEmailProductionCohort(ctx, scope); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
 		t.Fatalf("strict absent canary: %v", err)
 	}
@@ -157,8 +157,8 @@ func TestAgentEmailCohortMovePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryReady})
-	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 0, 0, 1, AgentEmailRetryCanaryAbsent})
+	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryReady})
+	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 0, 0, 1, 0, AgentEmailRetryCanaryAbsent})
 	move := func(from, to *Store, epoch string) {
 		archive := cohortArchive(t, from, account, epoch)
 		if _, _, err := to.ImportAccountEvacuation(ctx, account, epoch, bytes.NewReader(archive)); err != nil {
@@ -172,8 +172,8 @@ func TestAgentEmailCohortMovePostgres(t *testing.T) {
 		}
 	}
 	move(source, destination, "cohort-forward")
-	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 0, 1, 0, AgentEmailRetryCanaryAbsent})
-	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryReady})
+	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 0, 1, 0, 0, AgentEmailRetryCanaryAbsent})
+	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryReady})
 	raw := []byte("From: sender@example.test\r\nTo: " + address.Address + "\r\nSubject: cohort move\r\n\r\nhello\r\n")
 	digest := sha256.Sum256(raw)
 	in := AgentEmailIngestInput{Raw: raw, Relay: agentemail.RelayMetadata{Timestamp: time.Now().Unix(), KeyID: "test-relay", Audience: dstScope.Audience, EnvelopeSender: "sender@example.test", EnvelopeRecipient: address.Address, RawSize: int64(len(raw)), RawSHA256: hex.EncodeToString(digest[:])}}
@@ -189,8 +189,8 @@ func TestAgentEmailCohortMovePostgres(t *testing.T) {
 		t.Fatalf("source audience: %v", err)
 	}
 	move(destination, source, "cohort-reverse")
-	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 0, 1, 0, AgentEmailRetryCanaryAbsent})
-	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, AgentEmailRetryCanaryReady})
+	requireResidency(t, destination, dstScope, AgentEmailProductionCohortResidency{1, 0, 1, 0, 0, AgentEmailRetryCanaryAbsent})
+	requireResidency(t, source, srcScope, AgentEmailProductionCohortResidency{1, 1, 0, 0, 0, AgentEmailRetryCanaryReady})
 }
 
 type cohortImportQueryer struct {
@@ -261,7 +261,7 @@ func TestAgentEmailCohortSnapshotPostgres(t *testing.T) {
 			}
 		}
 		if snapshot {
-			want := AgentEmailProductionCohortResidency{1, 0, 0, 1, AgentEmailRetryCanaryAbsent}
+			want := AgentEmailProductionCohortResidency{1, 0, 0, 1, 0, AgentEmailRetryCanaryAbsent}
 			if err != nil || got != want {
 				t.Fatalf("snapshot = %+v / %v", got, err)
 			}

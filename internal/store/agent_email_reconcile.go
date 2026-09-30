@@ -205,25 +205,31 @@ type agentEmailProductionQueryer interface {
 }
 
 // AgentEmailProductionCohortResidency is a value-free fleet allowlist summary.
-// ConfiguredAccountCount equals resident + departed + unknown. Unknown IDs and
-// absent canaries are not validated as real accounts or agents.
+// ConfiguredAccountCount equals resident + departed + unknown + closed, where
+// closed counts cohort accounts whose row on this cell has status closed.
+// Unknown IDs and absent canaries are not validated as real accounts or agents.
 type AgentEmailProductionCohortResidency struct {
 	ConfiguredAccountCount int
 	ResidentAccountCount   int
 	DepartedAccountCount   int
 	UnknownAccountCount    int
+	ClosedAccountCount     int
 	RetryCanary            string
 }
 
 // Production retry-canary states report serving-startup readiness without IDs.
+// Closed means that the canary agent belongs to a closed cohort account.
 const (
 	AgentEmailRetryCanaryNone   = "none"
 	AgentEmailRetryCanaryReady  = "ready"
 	AgentEmailRetryCanaryAbsent = "absent"
+	AgentEmailRetryCanaryClosed = "closed"
 )
 
 // ValidateAgentEmailProductionCohort checks the fleet allowlist at serving
 // startup. It does not validate unknown account IDs or absent canary IDs.
+// A listed account whose row has status closed is counted and skipped; any
+// other status except active or suspended still fails.
 // At most 2*len(cohort)+3 single-row reads share one read-only snapshot;
 // there are no row locks, writes, or scans of cohort agents or mailboxes.
 func (s *Store) ValidateAgentEmailProductionCohort(ctx context.Context, scope AgentEmailReceiveScope) (AgentEmailProductionCohortResidency, error) {
@@ -252,6 +258,7 @@ func validateAgentEmailProductionCohortQuery(ctx context.Context, queryer agentE
 	}
 	accountIDs := enabledAgentEmailPilotIDs(scope.AccountIDs)
 	residentIDs := make([]string, 0, len(accountIDs))
+	var closedIDs []string
 	result := AgentEmailProductionCohortResidency{ConfiguredAccountCount: len(accountIDs), RetryCanary: AgentEmailRetryCanaryNone}
 	var finalizationsExist bool
 	if err := queryer.QueryRow(ctx, `SELECT to_regclass(format('%I.%I', current_schema(), 'account_evacuation_finalizations')) IS NOT NULL`).Scan(&finalizationsExist); err != nil {
@@ -276,6 +283,11 @@ func validateAgentEmailProductionCohortQuery(ctx context.Context, queryer agentE
 		}
 		if err != nil {
 			return zero, fmt.Errorf("resolve production agent-email account: %w", err)
+		}
+		if status == "closed" {
+			closedIDs = append(closedIDs, accountID)
+			result.ClosedAccountCount++
+			continue
 		}
 		if status != "active" && status != "suspended" {
 			return zero, ErrAccountNotActive
@@ -303,6 +315,22 @@ func validateAgentEmailProductionCohortQuery(ctx context.Context, queryer agentE
 				return zero, fmt.Errorf("preflight production retry canary: %w", err)
 			}
 			if exists {
+				var closed bool
+				if len(closedIDs) > 0 {
+					if err := queryer.QueryRow(ctx, `
+						SELECT EXISTS (
+						  SELECT 1
+						  FROM agents a
+						  JOIN realms r ON r.id=a.realm_id
+						  WHERE a.id=$1 AND r.account_id=ANY($2::text[])
+						)`, scope.RetryCanaryAgentID, closedIDs).Scan(&closed); err != nil {
+						return zero, fmt.Errorf("preflight production retry canary: %w", err)
+					}
+				}
+				if closed {
+					result.RetryCanary = AgentEmailRetryCanaryClosed
+					return result, nil
+				}
 				return zero, fmt.Errorf("%w: production retry canary agent is not live in the exact account cohort", ErrAgentEmailPilotNotEnrolled)
 			}
 			result.RetryCanary = AgentEmailRetryCanaryAbsent

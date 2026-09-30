@@ -750,7 +750,7 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 }
 
 func agentEmailProductionCohortStartupLine(r store.AgentEmailProductionCohortResidency) string {
-	return fmt.Sprintf("witself-server: agent-email production receive cohort configured=%d resident=%d departed=%d unknown=%d retry_canary=%s", r.ConfiguredAccountCount, r.ResidentAccountCount, r.DepartedAccountCount, r.UnknownAccountCount, r.RetryCanary)
+	return fmt.Sprintf("witself-server: agent-email production receive cohort configured=%d resident=%d departed=%d unknown=%d retry_canary=%s closed=%d", r.ConfiguredAccountCount, r.ResidentAccountCount, r.DepartedAccountCount, r.UnknownAccountCount, r.RetryCanary, r.ClosedAccountCount)
 }
 
 func configureAgentEmailWithLog(ctx context.Context, cfg *server.Config, st *store.Store, receive server.AgentEmailReceiveConfig, log io.Writer) error {

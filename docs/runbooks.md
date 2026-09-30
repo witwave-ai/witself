@@ -1589,33 +1589,48 @@ Starting with `v0.0.317`, serving startup treats the production cohort as a
 fleet allowlist. Each pod uses one bounded read-only snapshot and emits:
 
 ```text
-witself-server: agent-email production receive cohort configured=N resident=N departed=N unknown=N retry_canary=STATE
+witself-server: agent-email production receive cohort configured=N resident=N departed=N unknown=N retry_canary=STATE closed=N
 ```
 
 Absent accounts are skipped: `departed` means this cell finalized their
-evacuation; otherwise they are `unknown`. Configured equals resident plus
-departed plus unknown. The canary state is `none`, `ready`, or `absent`.
-A resident account must still be `active` or `suspended`; a `closed` account
-stops startup. An existing canary must be live in a resident cohort account;
-an absent canary is reported instead of failing startup.
+evacuation; otherwise they are `unknown`. From `v0.0.319` a listed account
+whose row on this cell has status `closed` is skipped as well and counted as
+`closed`; configured equals resident plus departed plus unknown plus closed.
+The canary state is `none`, `ready`, `absent`, or `closed` (from `v0.0.319`:
+the canary agent belongs to a `closed` cohort account). A resident account
+must still be `active` or `suspended`; any other status except `closed`, for
+example `pending`, stops startup. An existing canary must be live in a
+resident cohort account or belong to a `closed` one; an absent canary is
+reported instead of failing startup. A pod older than `v0.0.319` prints the
+line without `closed=N` and stops at a `closed` cohort account.
 
 
-Expected line per state (one cohort account, the Founder):
+Expected line per state from `v0.0.319` (one cohort account, the Founder); an older pod prints the same line without its last token:
 
 | Cell and moment | Line |
 |---|---|
-| Source before any move | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
-| Destination pre-listing, account not arrived | `configured=1 resident=0 departed=0 unknown=1 retry_canary=absent` |
-| Destination after arrival, on the next pod start | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready` |
-| Source after the account left, on the next pod start | `configured=1 resident=0 departed=1 unknown=0 retry_canary=absent` |
+| Source before any move | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready closed=0` |
+| Destination pre-listing, account not arrived | `configured=1 resident=0 departed=0 unknown=1 retry_canary=absent closed=0` |
+| Destination after arrival, on the next pod start | `configured=1 resident=1 departed=0 unknown=0 retry_canary=ready closed=0` |
+| Source after the account left, on the next pod start | `configured=1 resident=0 departed=1 unknown=0 retry_canary=absent closed=0` |
 
 After ANY change of a cohort or canary Secret, read this line on every server
 pod and confirm `resident` equals the number of cohort accounts that live on
-that cell. An `unknown` count on a cell that holds the account means a wrong
+that cell and, from `v0.0.319`, that `closed` is `0`. An `unknown` count on a
+cell that holds the account means a wrong
 ID: roll the Secret back. From `v0.0.318` mail for the resident account that a
 wrong cohort leaves out is deferred while the cohort is wrong; on an older
 release it bounces permanently. Byte equality with the source covers a copy,
 not a rotation that changes content.
+A `closed` count above `0` means that a listed account was closed on this
+cell. Its mail is rejected permanently, and the strict operations below fail
+with `account_not_active`, until a new immutable cohort Secret leaves it out,
+or receive is disabled when it is the only cohort account. If the canary state
+is `closed`, change the canary in the same change: point it at an agent in a
+resident cohort account through a new immutable canary Secret, or remove the
+canary reference from the cell's values. A canary outside the cohort still
+stops startup. An owner close changes no Secret, so also read this line after
+every roll and before any strict operation or account move.
 
 This line does not validate IDs. `unknown` is expected only on a destination
 pre-listing an account before its first arrival; a mistyped ID looks identical.
@@ -1635,8 +1650,10 @@ in the cohort. A cohort spanning cells fails these operations on every cell;
 this move procedure is acceptable only while the cohort is one account.
 Run the strict read-only canary-manifest operation on the destination
 immediately after restore. Pods older than `v0.0.317` exit at startup when a
-cohort lists a non-resident account. Before rolling below that floor, install
-a resident-only cohort using a new immutable Secret name, or disable receive.
+cohort lists a non-resident account, and pods older than `v0.0.319` exit when
+it lists a `closed` account. Before rolling below the floor that applies,
+install a resident-only cohort using a new immutable Secret name, or disable
+receive.
 When no cohort account is resident on the cell (the source after the Founder
 left), a resident-only cohort would be empty and the parser rejects an empty
 cohort, so disabling receive is the only option.
@@ -1664,8 +1681,8 @@ cohort, so disabling receive is the only option.
    API pod. Verify the new cohort before changing edge state.
 3. Enable only `agentEmail.receiveProduction` in the cell. Its startup is
    read-only and O(cohort): each API pod reports fleet cohort residency and,
-   after the second rollout below, retry-canary readiness or absence. It
-   never scans or mutates all agents.
+   after the second rollout below, retry-canary readiness, absence or closed
+   state. It never scans or mutates all agents.
    Missing existing mailboxes therefore do not block readiness. From this point,
    every successful new-agent create in the cohort includes its mailbox in the
    same transaction.
