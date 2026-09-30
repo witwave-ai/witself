@@ -83,7 +83,7 @@ this is mandatory even when a scheduled backup appears recent. The helper
 refuses to edit any pin until `witself-admin backup-evidence verify` accepts
 the Civo artifact directories passed with `--backup-evidence`, or the operator
 explicitly attests `--no-schema-change` for a release that cannot advance the
-schema; omitting both fails closed.
+schema; omitting both fails closed. A cell that the catalog records as `unprovisioned: true`, and that therefore has no database, takes its first pins with `--first-sync` instead (see [`docs/runbooks.md`](../docs/runbooks.md)).
 
 ```sh
 VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"

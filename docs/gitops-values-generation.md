@@ -29,6 +29,7 @@ the same composed name as `witself-infra`
 | `gitops.valuesPath` | Civo only: `.gitops/cells/<cell>/values.yaml` |
 | Cloud-family ingress, secrets, ExternalDNS/ESO, and platform add-on enablement | AWS / Azure / GCP family templates. Chart versions for cert-manager, external-dns, external-secrets, KEDA, and metrics-server come from [`.gitops/charts/platform/values.yaml`](../.gitops/charts/platform/values.yaml) and are **not** per-cell: every overlay emits those fleet defaults. A future per-cell platform chart pin needs a catalog field; it is not expressible in `values.yaml` by hand. Civo Postgres chart version comes from [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml) |
 | Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-use1-serving` overlay; the checked-in switches enable the recovered serving-cell monitoring) |
+| `unprovisioned` (catalog only, not rendered) | `true` records an onboarded cell that has never been provisioned, the only kind of cell `scripts/roll-cell.sh --first-sync` accepts; absent means provisioned. The generator rejects it together with `domain_documentation_only`, because the first-sync probe needs the cell's real API host. Remove it before the cell's first `witself-infra` preview |
 
 ### Pinned scalars that `scripts/roll-cell.sh` owns
 
@@ -54,7 +55,7 @@ The apps chart forwards a non-empty `imageDigest` as the server chart's
 When `--write` bootstraps a catalog cell that has no `values.yaml` yet, it
 creates the file using `apps.witselfServer.chartVersion` / `imageTag` from
 [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml). The
-first `scripts/roll-cell.sh` for that cell then owns the pins. `--check`
+first `scripts/roll-cell.sh` for that cell then owns the pins; for a cell that has never been provisioned, that first roll uses `--first-sync` ([runbook](runbooks.md)). `--check`
 reports that cell as missing until the file exists.
 
 ### Per-cell hand-maintained blocks (carried verbatim)
@@ -107,6 +108,8 @@ missing. It does not write `.gitops/cells/*/values.yaml`.
 catalog cells whose directory is missing or empty. Matching files are left
 untouched so `git diff --stat -- .gitops/cells` stays empty when the tree is
 already in sync.
+
+`--first-sync-check CELL --version VERSION` is a read-only query for `scripts/roll-cell.sh --first-sync`: it prints the cell's API host and exits 0 when the catalog records the cell as unprovisioned, its values file exists and neither server pin is newer than `VERSION`; otherwise it exits 1 with the reason.
 
 `make check-infra` and the CI helm job run `--check` plus
 `scripts/test-gitops-cell-values.sh`.

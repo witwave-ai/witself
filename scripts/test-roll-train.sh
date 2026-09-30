@@ -54,8 +54,8 @@ mkdir -p "$FIXTURE_ROOT/.gitops/charts/apps"
 cp "$SOURCE_ROOT/.gitops/charts/apps/values.yaml" "$FIXTURE_ROOT/.gitops/charts/apps/values.yaml"
 cp "$SOURCE_ROOT/scripts/roll-train.sh" "$TRAIN"
 for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
-  # The production fixture pins an older release than the sandbox pair, as the
-  # committed production cell does, so the per-cell guards see different pins.
+  # The production fixture pins an older release than the sandbox pair, as a
+  # production cell that lags the sandbox pair does, so the per-cell guards see different pins.
   pin=1.2.2
   [ "$cell" != "$PRODUCTION" ] || pin=1.2.1
   mkdir -p "$FIXTURE_ROOT/.gitops/cells/$cell"

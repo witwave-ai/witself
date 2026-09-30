@@ -1151,6 +1151,31 @@ that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
 
+A cell that the catalog records as onboarded and never provisioned
+(`unprovisioned: true` in `.gitops/cells/catalog.yaml`) has no database, so
+neither backup evidence nor a schema attestation describes it. Write its first
+pins with `--first-sync` instead, for example:
+
+```sh
+scripts/roll-cell.sh civo-prod-use1-serving "$RELEASE_VERSION" --first-sync --backup-image --postgres-image
+```
+
+`--first-sync` cannot be combined with `--no-schema-change`,
+`--backup-evidence` or `--evidence-cells` and never runs the verifier. Before
+any registry request or values edit it requires, in order: the catalog marker
+and a generated values file; a target release no lower than the cell's
+`chartVersion` and `imageTag`; no kube context named `witself-<cell>` in the
+active kube configuration; and an API host that this machine cannot resolve
+(curl exit 6). A resolved name, a refused connection, any HTTP answer, a TLS
+failure, a timeout or a failed context listing refuses. The marker is read from
+the checkout, so run from a clean checkout of `main`. The two live checks only
+corroborate the marker, because a resolver failure also reads as an
+unresolvable name. The other checks are unchanged: `--postgres-image` still
+requires the mirror to carry the digest the cell already pins. Commit the
+result as its own pins commit. Remove the marker in its own change once the
+cell's first-sync pins have merged and before its first `witself-infra`
+preview; from then on the cell rolls like any other.
+
 ### Cell identity after a same-name re-endpoint
 
 The serving cell created on 2026-09-19 is the Kubernetes cluster
@@ -1353,7 +1378,7 @@ outside the train. Roll only that cell with `scripts/roll-cell.sh CELL
 cell of its pair, both targeting `VERSION`. With `--no-schema-change` the
 attestation must hold for every release between that cell's pin and `VERSION`.
 Then follow the per-cell steps of the manual rollout below and skip its
-backup-cell steps. `roll-cell.sh` has no version guard, so compare the cell's
+backup-cell steps. `roll-cell.sh` has no version guard outside `--first-sync`, so compare the cell's
 pins with `VERSION` by hand first.
 
 The manual rollout remains the fallback: use `scripts/roll-cell.sh` with the

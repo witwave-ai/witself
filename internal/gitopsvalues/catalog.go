@@ -42,16 +42,20 @@ type CatalogDefaults struct {
 
 // CellConfig is one cell's generation input.
 type CellConfig struct {
-	Cloud        string   `yaml:"cloud"`
-	AccountAlias string   `yaml:"account_alias,omitempty"`
-	Region       string   `yaml:"region"`
-	Role         string   `yaml:"role,omitempty"`
-	Domain       string   `yaml:"domain,omitempty"`
-	APIHost      string   `yaml:"api_host,omitempty"`
-	GCPProject   string   `yaml:"gcp_project,omitempty"`
-	ACMEEmail    string   `yaml:"acme_email,omitempty"`
-	Overlay      string   `yaml:"overlay,omitempty"`
-	Switches     Switches `yaml:"switches"`
+	Cloud        string `yaml:"cloud"`
+	AccountAlias string `yaml:"account_alias,omitempty"`
+	Region       string `yaml:"region"`
+	Role         string `yaml:"role,omitempty"`
+	Domain       string `yaml:"domain,omitempty"`
+	APIHost      string `yaml:"api_host,omitempty"`
+	GCPProject   string `yaml:"gcp_project,omitempty"`
+	ACMEEmail    string `yaml:"acme_email,omitempty"`
+	Overlay      string `yaml:"overlay,omitempty"`
+	// Unprovisioned records an onboarded cell that has never been provisioned.
+	// Only such a cell may take scripts/roll-cell.sh --first-sync. It is not
+	// rendered into values; absent means provisioned.
+	Unprovisioned bool     `yaml:"unprovisioned,omitempty"`
+	Switches      Switches `yaml:"switches"`
 }
 
 // Switches are per-cell enablement flags that select generated blocks.
@@ -94,6 +98,17 @@ func loadCatalog(root string) (*Catalog, error) {
 	}
 	if len(cfg.Cells) == 0 {
 		return nil, fmt.Errorf("%s: cells is empty", path)
+	}
+	names := make([]string, 0, len(cfg.Cells))
+	for name := range cfg.Cells {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cell := cfg.Cells[name]
+		if cell.Unprovisioned && cell.Switches.DomainDocumentationOnly {
+			return nil, fmt.Errorf("%s: cell %q sets unprovisioned with domain_documentation_only; an unprovisioned cell needs an authoritative API host", path, name)
+		}
 	}
 	return &cfg, nil
 }

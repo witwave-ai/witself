@@ -8,13 +8,16 @@
 # without it, the PostgreSQL image pin is preserved. Upstream chart
 # versions (cert-manager, external-dns, external-secrets, keda,
 # metrics-server) are OFF-LIMITS to this script by design.
+# --first-sync writes the first pins of a cell the catalog records as
+# onboarded and never provisioned (unprovisioned: true). It replaces the
+# backup gate only after finding no kube context and no resolvable API host.
 #
 # Usage: scripts/roll-cell.sh <cell-name> <version> [gate options]
 # Example shape: scripts/roll-cell.sh CELL_NAME RELEASED_VERSION --no-schema-change
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] [--evidence-cells BACKUP,SERVING] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
+  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] [--evidence-cells BACKUP,SERVING] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change | --first-sync)" >&2
 }
 
 die() {
@@ -25,6 +28,7 @@ die() {
 BACKUP_EVIDENCE=()
 EVIDENCE_CELLS=""
 NO_SCHEMA_CHANGE=false
+FIRST_SYNC=false
 PIN_BACKUP_IMAGE=false
 PIN_POSTGRES_IMAGE=false
 POSITIONAL=()
@@ -68,6 +72,10 @@ while [ "$#" -gt 0 ]; do
       NO_SCHEMA_CHANGE=true
       shift
       ;;
+    --first-sync)
+      FIRST_SYNC=true
+      shift
+      ;;
     --)
       shift
       while [ "$#" -gt 0 ]; do
@@ -93,6 +101,12 @@ fi
 CELL="${POSITIONAL[0]}"
 VERSION="${POSITIONAL[1]}"
 
+if [ "$FIRST_SYNC" = true ] &&
+   { [ "$NO_SCHEMA_CHANGE" = true ] || [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ] || [ -n "$EVIDENCE_CELLS" ]; }; then
+  usage
+  die "--first-sync cannot be combined with --no-schema-change, --backup-evidence, or --evidence-cells"
+fi
+
 # Standalone rolls default to the existing pair, or the production pair when
 # rolling the production serving cell. Trains always pass their selected pair.
 if [ -z "$EVIDENCE_CELLS" ]; then
@@ -101,7 +115,7 @@ if [ -z "$EVIDENCE_CELLS" ]; then
     EVIDENCE_CELLS=civo-sandbox-use1-backup,civo-prod-use1-serving
   fi
 fi
-if [ "$NO_SCHEMA_CHANGE" = false ]; then
+if [ "$NO_SCHEMA_CHANGE" = false ] && [ "$FIRST_SYNC" = false ]; then
   case "$EVIDENCE_CELLS" in
     civo-sandbox-use1-backup,civo-sandbox-use1-serving|civo-sandbox-use1-backup,civo-prod-use1-serving) ;;
     *) die "--evidence-cells requires a reviewed BACKUP,SERVING pair" ;;
@@ -119,7 +133,7 @@ fi
 if [ "$PIN_POSTGRES_IMAGE" = true ] && [ "$NO_SCHEMA_CHANGE" = true ]; then
   die "PostgreSQL image switch requires fresh --backup-evidence; --no-schema-change cannot cover the StatefulSet restart"
 fi
-if [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
+if [ "$NO_SCHEMA_CHANGE" = false ] && [ "$FIRST_SYNC" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
   die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for the selected pair ($EVIDENCE_CELLS), or attest --no-schema-change"
 fi
 
@@ -140,9 +154,41 @@ if [ ! -f "$VALUES" ]; then
   exit 2
 fi
 
+# A never-provisioned cell has no database, so neither backup evidence nor a
+# schema attestation describes it. The catalog marker is the operator's
+# statement and is removed before the cell's first preview. Before any
+# registry request, corroborate it: no kube context through which a train
+# would reach the cell's Argo CD, and an API host this machine cannot resolve.
+first_sync_gate() {
+  local status=0 contexts context
+  if ! API_HOST=$(bash "$REPO_ROOT/scripts/gitops-cell-values.sh" --root "$REPO_ROOT" \
+      --first-sync-check "$CELL" --version "$VERSION"); then
+    die "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release $VERSION"
+  fi
+  [[ "$API_HOST" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "first sync refused: invalid API host for $CELL"
+  # Only names are read, never printed. Any failure (including exit 127) refuses.
+  contexts=$(kubectl config get-contexts -o name 2>/dev/null) || status=$?
+  [ "$status" -eq 0 ] || die "first sync refused: could not list kube contexts (kubectl exit $status)"
+  while IFS= read -r context; do
+    [ "$context" != "witself-$CELL" ] ||
+      die "first sync refused: kube context witself-$CELL exists; the cell may be provisioned"
+  done <<<"$contexts"
+  # -q must be first. The cell's DNS record is written by its first up, so only
+  # a name this machine cannot resolve (curl exit 6) corroborates the marker.
+  # A refused connection, any response, a TLS failure or a timeout refuses.
+  status=0
+  curl -q --silent --output /dev/null --noproxy '*' --proto '=https' \
+    --connect-timeout 10 --max-time 20 "https://$API_HOST/v1/version" || status=$?
+  [ "$status" -eq 6 ] ||
+    die "first sync refused: https://$API_HOST/v1/version did not fail name resolution (curl exit $status); the cell may be provisioned"
+  echo "warning: first sync of $CELL: recorded unprovisioned in the catalog, no kube context witself-$CELL, and $API_HOST could not be resolved from this host (curl exit 6); backup evidence skipped because a cell that was never provisioned has no database" >&2
+}
+
 # This gate must complete before registry access or any values pin is edited. The verifier is
 # deliberately resolved only from the operator's override or normal PATH.
-if [ "$NO_SCHEMA_CHANGE" = true ]; then
+if [ "$FIRST_SYNC" = true ]; then
+  first_sync_gate
+elif [ "$NO_SCHEMA_CHANGE" = true ]; then
   echo "warning: operator attests release $VERSION cannot advance the database schema; backup evidence verification skipped" >&2
 else
   ADMIN="${WITSELF_ADMIN_BIN:-witself-admin}"

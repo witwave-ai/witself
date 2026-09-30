@@ -14,6 +14,7 @@
 # Usage: scripts/gitops-cell-values.sh --check|--write [--root PATH]
 #        scripts/gitops-cell-values.sh --roll-cell CELL --version VERSION --image-digest DIGEST
 #          [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST] [--root PATH]
+#        scripts/gitops-cell-values.sh --first-sync-check CELL --version VERSION [--root PATH]
 set -euo pipefail
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
