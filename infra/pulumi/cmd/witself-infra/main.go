@@ -999,7 +999,11 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel, *backupValidationTarget, *registerDraining)
+			registryName, nameErr := upRegistryName(cellName, *cellSelector, *configPath)
+			if nameErr != nil {
+				return nameErr
+			}
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, registryName, *cloud, *region, placementRegionCode, *channel, *backupValidationTarget, *registerDraining)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
@@ -1011,8 +1015,8 @@ func run(args []string) error {
 				var cl *fleet.Client
 				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
 				if err == nil {
-					if err = waitForCellHealthy(ctx, cl, cellName, 20*time.Minute, 20*time.Second, *probeTimeout); err == nil {
-						err = restoreCell(ctx, cl, cellName, *restoreAnyRegion)
+					if err = waitForCellHealthy(ctx, cl, registryName, 20*time.Minute, 20*time.Second, *probeTimeout); err == nil {
+						err = restoreCell(ctx, cl, registryName, *restoreAnyRegion)
 					}
 				}
 			}
@@ -1114,11 +1118,24 @@ func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery, pr
 	}
 }
 
+// upRegistryName keeps bare-flag runs independent of inventory fleet aliases.
+// The inventory name remains the Pulumi stack name in either mode.
+func upRegistryName(cellName, cellSelector, configPath string) (string, error) {
+	if cellSelector == "" {
+		return cellName, nil
+	}
+	cfg, _, err := loadInfraConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	return cfg.Cells[cellName].registryName(cellName), nil
+}
+
 // registerCell reports the freshly provisioned cell to the control plane. The
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
 // hostname is returned so callers can chain a readiness poll before the
 // next post-provision step (restore-archives).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string, backupValidationTarget, registerDraining bool) (string, error) {
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, registryName, cloud, region, regionCode, channel string, backupValidationTarget, registerDraining bool) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return "", err
@@ -1138,15 +1155,19 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 		return "", err
 	}
 	if err := cl.Register(ctx, fleetRegistration(
-		cellName, host, cloud, region, regionCode, channel,
+		registryName, host, cloud, region, regionCode, channel,
 		provisionToken, backupToken, backupValidationTarget, registerDraining,
 	)); err != nil {
 		return "", err
 	}
+	identity := cellName
+	if registryName != cellName {
+		identity = destroyCellIdentity(cellName, registryName)
+	}
 	if registerDraining {
-		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s, accepting=false (register_draining). Open it with: witself-admin cells undrain %s; then remove register_draining from the cell record before the next up\n", cellName, controlPlane, cellName)
+		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s, accepting=false (register_draining). Open it with: witself-admin cells undrain %s; then remove register_draining from the cell record before the next up\n", identity, controlPlane, registryName)
 	} else {
-		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
+		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", identity, controlPlane)
 	}
 	return host, nil
 }

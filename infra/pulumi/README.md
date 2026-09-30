@@ -52,6 +52,11 @@ witself-infra config show -cell aws-sandbox-usw2-dev   # effective merged config
 ```
 
 Precedence: explicit flag > cell entry > `defaults:` block > built-in.
+
+The optional per-cell `registry_name` identifies the fleet registry entry while
+the inventory key remains the Pulumi stack name. `up` registers and probes the
+cell under its registry name.
+
 The inventory-only `deletion_protection` boolean uses cell entry >
 `defaults.deletion_protection` > **true** when absent, for both `minimal` and
 `prod` profiles. There is no flag override. For example:
