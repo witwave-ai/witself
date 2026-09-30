@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -15,9 +16,14 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   createControlPlaneReleaseSnapshot,
+  MAX_SOURCE_BYTES,
+  MAX_SOURCE_FILES,
+  parseTaggedTree,
+  safeGitEnvironment,
 } from "../scripts/control-plane-release-snapshot.mjs";
 import { runProductionWranglerDeploy } from
   "../scripts/deploy-release.mjs";
@@ -29,6 +35,93 @@ import { PRODUCTION_CLOUDFLARE_ACCOUNT_ID } from
 
 const REVIEWED_ENV =
   "# Intentionally empty: production Wrangler commands must not load local dotenv files.\n";
+
+function taggedTreeInventory(fileCount) {
+  const paths = [
+    ".dockerignore",
+    "images/witself-control-plane/Dockerfile",
+    "infra/cloudflare/control-plane/src/index.js",
+  ];
+  while (paths.length < fileCount) {
+    paths.push(`source/file-${paths.length}.txt`);
+  }
+  return Buffer.from(paths.map((path) =>
+    `100644 blob ${"a".repeat(40)} 1\t${path}\0`).join(""));
+}
+
+test("tagged control-plane inventory accepts 2,100 files above the old cap", () => {
+  const inventory = parseTaggedTree(taggedTreeInventory(2100));
+  assert.equal(inventory.entries.length, 2100);
+  assert.equal(inventory.byteCount, 2100);
+});
+
+test("tagged control-plane inventory accepts exactly 8,192 files", () => {
+  const inventory = parseTaggedTree(taggedTreeInventory(8192));
+  assert.equal(inventory.entries.length, 8192);
+});
+
+test("tagged control-plane inventory refuses 8,193 files", () => {
+  assert.throws(() => parseTaggedTree(taggedTreeInventory(8193)), {
+    message: "tagged control-plane repository inventory was outside its file limit",
+  });
+});
+
+test("tracked repository stays within 75 percent of the snapshot caps", async (t) => {
+  const repositoryRoot = await realpath(fileURLToPath(
+    new URL("../../../../", import.meta.url),
+  ));
+  const run = (args, input) => spawnSync("git", args, {
+    cwd: repositoryRoot,
+    env: safeGitEnvironment(),
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+    input,
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 60_000,
+  });
+  const workTree = run(["rev-parse", "--show-toplevel"]);
+  if (workTree.error?.code === "ENOENT" ||
+      (workTree.status !== 0 && /not a git repository/i.test(workTree.stderr))) {
+    t.skip("snapshot headroom requires a Git work tree; Git or repository metadata is unavailable (for example, a tarball checkout)");
+    return;
+  }
+  assert.equal(workTree.status, 0, "could not locate the snapshot Git work tree");
+  if (await realpath(workTree.stdout.trim()) !== repositoryRoot) {
+    t.skip("snapshot headroom requires this repository's Git work tree; only an enclosing work tree was found");
+    return;
+  }
+  const output = (args, input) => {
+    const result = run(args, input);
+    assert.equal(result.status, 0, `could not read snapshot headroom with git ${args[0]}`);
+    return result.stdout;
+  };
+  const files = output(["ls-files", "-z"]).split("\0").filter(Boolean);
+  const stagedFiles = output(["ls-files", "-z", "-s"]).split("\0").filter(Boolean);
+  assert.equal(stagedFiles.length, files.length, "tracked snapshot inventory count changed");
+  const objectIDs = stagedFiles.map((record) => {
+    const match = /^\d{6} ([0-9a-f]{40}|[0-9a-f]{64}) 0\t/.exec(record);
+    assert.ok(match, "snapshot headroom requires a resolved Git index");
+    return match[1];
+  });
+  const sizes = output(
+    ["cat-file", "--batch-check=%(objecttype) %(objectsize)"],
+    `${objectIDs.join("\n")}\n`,
+  ).trim().split("\n");
+  assert.equal(sizes.length, files.length, "tracked snapshot blob count changed");
+  const byteCount = sizes.reduce((total, record) => {
+    const match = /^blob ([0-9]+)$/.exec(record);
+    assert.ok(match, "snapshot headroom requires tracked Git blobs");
+    const size = Number(match[1]);
+    assert.ok(Number.isSafeInteger(size), "tracked snapshot blob size was invalid");
+    return total + size;
+  }, 0);
+  const guidance = "raise the snapshot cap in control-plane-release-snapshot.mjs in a reviewed change before the next release";
+  t.diagnostic(`tracked snapshot inventory: ${files.length} files, ${byteCount} bytes`);
+  assert.ok(files.length <= MAX_SOURCE_FILES * 0.75,
+    `tracked file count ${files.length} exceeds 75 percent of file cap ${MAX_SOURCE_FILES}; ${guidance}`);
+  assert.ok(byteCount <= MAX_SOURCE_BYTES * 0.75,
+    `tracked bytes ${byteCount} exceeds 75 percent of byte cap ${MAX_SOURCE_BYTES}; ${guidance}`);
+});
 
 function git(repositoryRoot, args, environment = {}) {
   const result = spawnSync("git", args, {

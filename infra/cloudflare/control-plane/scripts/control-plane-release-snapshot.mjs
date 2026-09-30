@@ -41,8 +41,8 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const FROZEN_DIRECTORY_MODE = 0o555;
 const FROZEN_FILE_MODE = 0o444;
 const FROZEN_EXECUTABLE_MODE = 0o555;
-const MAX_SOURCE_FILES = 2048;
-const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
+export const MAX_SOURCE_FILES = 8192;
+export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_DEPENDENCY_FILES = 64;
 const MAX_DEPENDENCY_BYTES = 2 * 1024 * 1024;
@@ -73,7 +73,7 @@ function safeInventoryPath(path) {
     /^[A-Za-z0-9_@+.-]{1,128}$/.test(part));
 }
 
-function safeGitEnvironment(source = process.env) {
+export function safeGitEnvironment(source = process.env) {
   const environment = { ...source };
   for (const name of Object.keys(environment)) {
     if (name.startsWith("GIT_") || name === "SSH_ASKPASS" ||
@@ -108,7 +108,7 @@ function requiredOutput(result, operation) {
   return result.stdout;
 }
 
-function parseTaggedTree(bytes) {
+export function parseTaggedTree(bytes) {
   const records = bytes.subarray(0, bytes.length - (bytes.at(-1) === 0 ? 1 : 0))
     .toString("utf8")
     .split("\0")
