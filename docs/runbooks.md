@@ -1264,7 +1264,7 @@ scripts/roll-train.sh VERSION
   [--no-schema-change | --backup-evidence DIR [--backup-evidence DIR]]
   [--cells BACKUP,SERVING] [--serving-url URL] [--workdir DIR]
   [--ci-timeout SECONDS] [--argo-timeout SECONDS]
-  [--poll-interval SECONDS] [--dry-run]
+  [--poll-interval SECONDS] [--resume] [--dry-run]
 scripts/roll-train.sh --help
 ```
 
@@ -1326,8 +1326,20 @@ verifies the head OID and `main` base, re-fetches the selected cell's values to
 reject concurrent changes, and repeats the live version checks before
 squash-merging with `--match-head-commit`. Both pin lines must change under
 standard text-merge semantics, so a newer pin arriving after the final read
-conflicts at merge. It then requires successful `ci.yml` on that exact
-merge commit. Argo Application `witself-server` in namespace `argocd` must
+conflicts at merge. It then requires a successful `ci.yml` push run on that
+exact merge commit. If a newer push to `main` cancelled that run, the newest
+`ci.yml` push run whose head contains the merge commit decides instead: a failed
+one stops the train, and a cancelled one makes it wait for a newer run. If the
+merge commit's own run fails, the train prints `ACTION REQUIRED` with the run id
+and waits, until the post-merge CI deadline, for a successful attempt of the
+same run. It never re-runs jobs itself and never accepts a failed run. Re-run a
+failure that the change did not cause with `gh run rerun RUN_ID --failed`; after
+a failed provider integration job, re-run the whole run with
+`gh run rerun RUN_ID`, because provider evidence is collected per attempt. All
+`main` runs share one `ci.yml` concurrency group that cancels runs in progress,
+so a re-run may cancel a newer `main` run that is still running: check
+`gh run list --workflow ci.yml --branch main` and let such a run finish first.
+Argo Application `witself-server` in namespace `argocd` must
 report `Synced`, `Healthy`, and sync revision `VERSION`; the selected
 server/worker pod list must be nonempty, with Running, Ready, nonterminating
 pods and ready running containers whose desired and reported images end in
@@ -1341,11 +1353,20 @@ The default cells are
 `--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
 with a unique directory per run; the primary checkout need not be clean.
 Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
-1,200 seconds for Argo convergence, polling every 15 seconds. Any failed
-step stops the train and preserves the current wave's worktree for inspection
-(a cleanup failure may leave it detached after branch deletion). There is no
-automatic resume or rollback; inspect the PR,
-GitOps pins, CI, and live state before continuing manually. The script never
+1,200 seconds for Argo convergence, polling every 15 seconds. Apart from that
+post-merge CI wait, any failed step stops the train and preserves the current
+wave's worktree for inspection (a cleanup failure may leave it detached after
+branch deletion). There is no automatic resume or rollback; inspect the PR,
+GitOps pins, CI, and live state before continuing. If the train stopped after
+wave 1 merged, run it again with the same arguments plus `--resume`. Wave 1 is
+then verified, not rolled: both backup-cell pins on `origin/main` must equal
+`VERSION`, and the last commit that changed that cell's values must have raised
+both pins from a lower release. The train waits for that commit's post-merge CI
+and the cell's Argo convergence as a wave does, then rolls wave 2. The stopped
+run's worktree and branch, and any open wave-2 pull request it left, stay for
+the operator to remove. A train that stopped after wave 2 merged is finished by
+hand: verify post-merge CI, Argo convergence, and the serving `/v1/version`. The
+script never
 force-pushes. After the serving wave, it prints and verifies the serving
 `/v1/version`, then prints `witself-infra health --json` if that binary is
 available.
@@ -1369,10 +1390,11 @@ Wave 1 is still `civo-sandbox-use1-backup`. Wave 2 is `civo-prod-use1-serving`,
 read through the kube context `witself-civo-prod-use1-serving`, and the serving
 URL defaults to that cell's `apiHost`. The version guards compare each cell
 with `VERSION`, never with the other cell. A serving cell that pins an older
-release than the backup cell is rolled straight to `VERSION`. A train cannot
-target the release that the backup cell already pins: wave 1 refuses it with
-`must be strictly lower` before any pin is edited, and keeps its worktree and
-branch for inspection. Raising a lagging cell to exactly that release is
+release than the backup cell is rolled straight to `VERSION`. Without
+`--resume`, a train cannot target the release that the backup cell already pins:
+wave 1 refuses it with `must be strictly lower` before any pin is edited, and
+keeps its worktree and branch for inspection. Otherwise, raising a lagging cell
+to exactly that release is
 outside the train. Roll only that cell with `scripts/roll-cell.sh CELL
 "$VERSION"`, passing `--no-schema-change` or one evidence directory for each
 cell of its pair, both targeting `VERSION`. With `--no-schema-change` the
