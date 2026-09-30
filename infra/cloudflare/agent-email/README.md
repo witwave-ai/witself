@@ -1113,6 +1113,23 @@ provider submission can leave one obvious synthetic message with the fixed
 inspect that mailbox without reading the attachment, settle its lifecycle if
 needed, and let the configured retention policy remove it.
 
+## New-cell reachability probe
+
+`npm run probe:cell-reachability` runs `scripts/cell-reachability-probe.mjs`,
+an operator probe of one cell's public host. It imports only Node built-ins,
+`src/relay.mjs`, `src/directory.mjs`, and
+`scripts/production-cell-endpoint.mjs`, needs no dependency install, never
+calls Cloudflare, and opens no file. Public mode needs no credential. Signed
+mode reads the fleet relay key from standard input only and signs through
+`src/relay.mjs` with the Worker's exact relay header set, for a random
+canonical `@witmail.net` address that no agent owns. It sends no email and
+changes no route, allowlist, cohort, or Secret.
+`test/cell-reachability-contract.json` holds the cell answers it expects, and
+the Go test `TestAgentEmailCellReachabilityContract` holds the cell to the
+same file. The procedure, its expected answers, and what it does not prove are
+in `docs/runbooks.md`, section "Probe a new cell's agent-email boundary before
+its first account".
+
 ## Rollback
 
 The email-edge Worker has a separate, guarded code-version rollback. First

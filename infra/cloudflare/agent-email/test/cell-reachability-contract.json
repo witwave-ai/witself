@@ -1,0 +1,14 @@
+{
+  "schema": "witself.agent-email.cell-reachability-contract.v1",
+  "audience": "civo-prod-use1-serving",
+  "control_audience": "witself-reachability-control",
+  "example_recipient": "reachability-probe.aaaaaaaaaaaaaaaa@witmail.net",
+  "cases": [
+    { "name": "ingest_unsigned_on", "method": "POST", "path": "/v1/internal/agent-email:ingest", "route": "on", "relay": "none", "status": 401, "verdict": "invalid_relay", "code": null, "cache_control": "no-store" },
+    { "name": "ingest_unsigned_off", "method": "POST", "path": "/v1/internal/agent-email:ingest", "route": "off", "relay": "none", "status": 404, "verdict": null, "code": null, "cache_control": "private, no-store" },
+    { "name": "provider_event_unauthenticated_on", "method": "POST", "path": "/v1/internal/agent-email-send:provider-event", "route": "on", "relay": "none", "status": 401, "verdict": null, "code": "auth_failed", "cache_control": "private, no-store" },
+    { "name": "provider_event_unauthenticated_off", "method": "POST", "path": "/v1/internal/agent-email-send:provider-event", "route": "off", "relay": "none", "status": 404, "verdict": null, "code": null, "cache_control": "private, no-store" },
+    { "name": "ingest_control_audience", "method": "POST", "path": "/v1/internal/agent-email:ingest", "route": "on", "relay": "control_audience", "status": 401, "verdict": "invalid_relay", "code": null, "cache_control": "no-store" },
+    { "name": "ingest_unknown_recipient", "method": "POST", "path": "/v1/internal/agent-email:ingest", "route": "on", "relay": "audience", "status": 404, "verdict": "unknown_recipient", "code": null, "cache_control": "no-store" }
+  ]
+}
