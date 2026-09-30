@@ -176,7 +176,7 @@ pod from starting, and API startup applies the same canonical-ID, ordering,
 uniqueness, and 1-100 bounds to its value. There is no wildcard or implicit
 all-accounts mode. Literal/private installs may set one canonical `agent_*`
 ID in `retryCanaryAgentID`, which the cell verifies belongs to the exact
-resident cohort when that agent exists. Managed installs keep that literal empty. Starting in
+resident cohort when that agent exists; from `v0.0.319`, serving startup reports an agent in a listed account that is `closed` on the cell as `closed` instead of failing. Managed installs keep that literal empty. Starting in
 `v0.0.245`, they may instead set
 `retryCanaryAgentIDExistingSecret.name` and `.key`. Its value must be exactly
 one canonical `agent_*` ID with no leading or trailing whitespace and no
@@ -184,16 +184,18 @@ trailing newline. The referenced Secret must be distinct, immutable, and
 versioned; the API Deployment reads it through the non-optional
 `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` `secretKeyRef`, while the ID remains
 absent from Helm values and the ConfigMap. From `v0.0.317`, serving startup treats the cohort as a fleet allowlist and
-reports value-free resident/departed/unknown counts. It reports an absent
-canary instead of failing; an existing agent must be live in a resident cohort
-account. Unknown accounts and absent canaries are not validated IDs: prove
+reports value-free resident/departed/unknown counts; from `v0.0.319` it also
+counts, instead of refusing, a listed account that is `closed` on the cell. It
+reports an absent canary instead of failing, and from `v0.0.319` a canary that
+belongs to a `closed` cohort account; any other existing agent must be live in
+a resident cohort account. Unknown accounts and absent canaries are not validated IDs: prove
 cohort and canary Secret byte equality with the source before enablement.
 Pre-list moving accounts on the destination and leave them on the source.
 From `v0.0.318`, ingest defers mail for a resident account that is missing
 from the cohort; every other ingest cohort miss remains a permanent rejection.
 Strict operator preflight, backfill, and canary manifest operations require
 every account to be resident.
-Before rolling below `v0.0.317`, disable receive or use a new immutable
+Before rolling below `v0.0.317`, or below `v0.0.319` while a listed account is `closed`, disable receive or use a new immutable
 resident-only cohort Secret; with no resident cohort account only disabling
 receive works, because an empty cohort is rejected.
 Enabling the gate renders

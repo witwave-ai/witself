@@ -113,7 +113,7 @@ func TestAgentEmailCohortDeferralPostgres(t *testing.T) {
 		{name: "deleted_omitted", status: "active", recipient: "deleted", want: ErrAgentEmailUnknownRecipient},
 		{name: "active_listed", status: "active", listed: true},
 		{name: "suspended_listed", status: "suspended", listed: true, want: ErrAccountNotActive},
-		{name: "closed_listed", status: "closed", listed: true, want: ErrAccountNotActive},
+		{name: "closed_listed", status: "closed", listed: true, noWrites: true, want: ErrAgentEmailUnknownRecipient},
 		{name: "unknown_listed", status: "active", listed: true, recipient: "unknown", want: ErrAgentEmailUnknownRecipient},
 		{name: "deleted_listed", status: "active", listed: true, recipient: "deleted", want: ErrAgentEmailUnknownRecipient},
 		{name: "disabled_listed", status: "active", listed: true, disabled: true, want: ErrAgentEmailReceiveDisabled},

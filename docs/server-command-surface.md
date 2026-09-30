@@ -120,14 +120,14 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS` | Cell-local inbound-plus-outbound root-row admission limit. Default: `25000`. The default leaves 75,000 counted rows below the hard limit for three lifecycle children per admitted root on average. |
 | `WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES` | Maximum logical retained-email charge across roots and lifecycle rows. Default: `4294967296` (4 GiB). Positive writes beyond it fail with the schema-91 capacity SQLSTATE; deletes, charge reductions, and bounded claim or terminal-state updates remain available. Must exceed the byte admission value. |
 | `WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS` | Maximum total counted email rows across inbound messages, deliveries, outbound messages, provider events, and suppressions. Default: `100000`; must exceed the root-row admission value. |
-| `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED` | Enable exact-account production receive. Default: `false`; mutually exclusive with `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`. From `v0.0.317`, serving startup reports value-free fleet cohort residency and optional canary readiness or absence; it performs no mailbox backfill and does not validate unknown IDs. |
+| `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED` | Enable exact-account production receive. Default: `false`; mutually exclusive with `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`. From `v0.0.317`, serving startup reports value-free fleet cohort residency and optional canary readiness, absence or closed state; it performs no mailbox backfill and does not validate unknown IDs. |
 | `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN` | Canonical production receive domain. The primary edge-canary command requires exact `witmail.net`. |
 | `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE` | Exact signed relay audience for the destination cell. |
 | `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` | Strictly sorted CSV containing 1-100 unique canonical generated `acc_*` IDs. Whitespace, duplicates, wildcards, unsorted input, and invalid IDs fail startup. |
 | `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` | Optional single canonical compatibility domain. It accepts only routes already issued there and never mints a new address. |
 | `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON` | JSON object of relay key IDs to public Ed25519 verification keys. Relay private keys never enter cell configuration. |
 | `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` | Signed relay-envelope replay window. Default: `5m`; maximum `15m`. |
-| `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. The raw value must be exactly one canonical `agent_*` ID with no surrounding whitespace or trailing newline. From `v0.0.317`, production startup reports an absent agent; an existing agent must be live in a resident cohort account. Canary-manifest generation remains strict and additionally requires its mailbox and effective receive state to be enabled. Managed chart/image `v0.0.245` or newer injects it from a distinct immutable, versioned Secret rather than the non-secret ConfigMap. |
+| `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. The raw value must be exactly one canonical `agent_*` ID with no surrounding whitespace or trailing newline. From `v0.0.317`, production startup reports an absent agent, and from `v0.0.319` an agent that belongs to a `closed` cohort account; any other existing agent must be live in a resident cohort account. Canary-manifest generation remains strict and additionally requires its mailbox and effective receive state to be enabled. Managed chart/image `v0.0.245` or newer injects it from a distinct immutable, versioned Secret rather than the non-secret ConfigMap. |
 | `WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN` | Dedicated 32-4096-byte bearer for content-free outbound provider events at `POST /v1/internal/agent-email-send:provider-event`; the managed adapter's target-map contract enforces the same bound. It is not an agent, operator, provision, backup, relay, or provider credential and must be supplied from a secret. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation job in `witself-worker`. API deployments set it false. PostgreSQL job fencing prevents duplicate progress across worker replicas. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
@@ -481,10 +481,13 @@ one canonical `agent_*` ID with no leading or trailing whitespace and no
 trailing newline. In the retired pilot mode it must be present in
 `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`; in production, an existing agent must be
 live and belong
-to a resident account in the exact fleet cohort. From `v0.0.317`, serving
-startup reports an absent canary instead of failing; this does not validate
-that the ID names a real agent. The value-free startup line also reports
-resident, departed, and unknown account counts; prove cohort/canary Secret
+to a resident account in the exact fleet cohort. Serving startup makes two
+exceptions: from `v0.0.317` it reports an absent canary instead of failing,
+which does not validate that the ID names a real agent, and from `v0.0.319`
+it reports a canary that belongs to a listed account that is `closed` on the
+cell as `closed`. The value-free startup line also reports resident, departed,
+and unknown account counts, and from `v0.0.319` a closed count;
+prove cohort/canary Secret
 byte equality with the source before cross-cell enablement. Strict operator
 preflight, backfill, and canary
 manifest operations still require a live canary and all cohort accounts to be

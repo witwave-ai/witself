@@ -32,6 +32,9 @@ type agentEmailIngestAccountPolicy struct {
 // account lock from the outset. This avoids a share-lock upgrade deadlock and
 // serializes the account-wide attachment admission decision across replicas.
 // Plan snapshot transitions and retention already lock the same account row.
+// A closed account is terminal: its mail is answered as an unknown recipient,
+// a permanent rejection, in every receive mode. Any other status except active
+// returns ErrAccountNotActive, which the relay answers as temporary.
 func lockAgentEmailIngestAccountPolicy(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -66,6 +69,9 @@ func lockAgentEmailIngestAccountPolicy(
 	if err != nil {
 		return agentEmailIngestAccountPolicy{},
 			fmt.Errorf("lock account for agent-email ingestion: %w", err)
+	}
+	if status == "closed" {
+		return agentEmailIngestAccountPolicy{}, ErrAgentEmailUnknownRecipient
 	}
 	if status != "active" {
 		return agentEmailIngestAccountPolicy{}, ErrAccountNotActive
