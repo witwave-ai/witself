@@ -16,6 +16,7 @@
     "large-payload-probe": "node scripts/near-limit-probe.mjs",
     "metrics": "node scripts/metrics.mjs",
     "near-limit-probe": "node scripts/near-limit-probe.mjs",
+    "probe:cell-reachability": "node scripts/cell-reachability-probe.mjs",
     "provision:relay-signing-key": "node scripts/provision-relay-signing-key.mjs",
     "provision:route-signing-secrets": "node scripts/provision-route-signing-secrets.mjs",
     "rollback": "node scripts/rollback.mjs",

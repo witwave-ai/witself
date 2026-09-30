@@ -2269,6 +2269,14 @@ accepted historical signer IDs, and account-to-cell targets. These are Worker
 secrets, not source-code cell lists. Carry every unexpired historical signer
 when repointing an account, including its source-cell signer.
 
+Before a new cell's first cohort account arrives, the reachability probe in
+[Probe a new cell's agent-email boundary before its first account](runbooks.md#probe-a-new-cells-agent-email-boundary-before-its-first-account)
+checks the cell's public ingest and provider-event routes and, with the fleet
+relay key, that the running cell verifies a relay for its own audience,
+refuses any other audience, and answers an unknown recipient from its
+database. It changes no route, allowlist, cohort, or Secret and does not
+replace the post-restore checks of a real delivery.
+
 From `v0.0.317`, serving startup treats the receive cohort as a fleet allowlist
 and reports value-free resident/departed/unknown counts (from `v0.0.319`
 also a closed count) and canary readiness, absence or closed state. Unknown

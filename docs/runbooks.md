@@ -584,15 +584,20 @@ manifest. That operation requires every cohort account to be resident and the
 canary to be live. Update canary and near-limit endpoint variables and any
 explicit operator `--endpoint` to DST when their recipients moved.
 
-Before the first move, prove only public `/v1/version`, the control plane's
-cell probe, Secret byte equality, the startup line, and the send Worker's
-version and gates. These do not prove edge-to-cell ingest for a real recipient,
-send-Worker-to-cell provider-event callbacks, or an `applied` republish with
-the new audience and URL. The receive smoke relay forwards only to loopback
-and needs a resident mailbox. `witself-server agent-email provider-event-canary`
-binds a loopback listener and needs a recent accepted send for a resident
-account. Under the Founder-only cohort contract, the first end-to-end proof
-is the Founder move itself; an edge transport failure tempfails and provider
+Before the first move, prove public `/v1/version`, the control plane's cell
+probe, Secret byte equality, the startup line, the send Worker's version and
+gates, and the destination's receive boundary with
+[the reachability probe](#probe-a-new-cells-agent-email-boundary-before-its-first-account).
+The probe needs no account, cohort entry, allowlist change, routing rule, or
+Worker deployment. It does not prove Email Routing, the receive Worker's route
+resolution, allowlist, or own fetch, the cohort, storage, owner read-back, the
+dispatch signer, a provider-event callback with its token, or an `applied`
+republish with the new audience and URL. The receive smoke relay forwards only
+to loopback and needs a resident mailbox.
+`witself-server agent-email provider-event-canary` binds a loopback listener
+and needs a recent accepted send for a resident account. Under the
+Founder-only cohort contract, the first delivery end to end on a new cell is
+still the Founder move; an edge transport failure tempfails and provider
 events have the bounded retry budget above.
 
 While the account is archived, rollback to SRC also requires pointing its
@@ -603,6 +608,104 @@ immutable resident-only cohort Secret (disable receive when no cohort account
 is resident, because an empty cohort is rejected). Keep historical signer provenance until
 all its routes pass their 400-day expiry; keep the source cell's configuration
 until retirement so the reverse move remains possible.
+
+### Probe a new cell's agent-email boundary before its first account
+
+Run this against a new cell after it answers on its public host, and again
+after its config-only email enablement has rolled, before the first cohort
+account moves. The probe needs no account, cohort entry, allowlist change,
+Email Routing rule, Worker deployment, or Secret. It sends no email and writes
+nothing on the cell. It uses only Node built-ins and this repository's
+receive-edge modules, so it runs from a checkout of `main` without a
+dependency install. Calibrate it once against a serving cell that already
+receives mail, so that a later failure belongs to the new cell and not to the
+probe.
+
+`ENDPOINT` is the cell's registry endpoint, `.cell.endpoint` in
+`witself-admin cells show CELL --json`; the control plane appends
+`/v1/internal/agent-email:ingest` to it when it projects routes. `CELL` is the
+registry name, which the control plane projects as the receive audience.
+
+Public mode needs no credential:
+
+```sh
+node infra/cloudflare/agent-email/scripts/cell-reachability-probe.mjs \
+  --mode public --endpoint "$ENDPOINT" \
+  --expect-receive on --expect-provider-event on
+```
+
+It reads `/v1/version`, fails when the cell's `Date` header and the local
+clock differ by more than 60 seconds, and POSTs without credentials to the
+ingest route and to the provider-event route. With `--expect-receive on` the
+ingest route must answer 401 `invalid_relay`; with `off` it must answer the
+server's own 404, which proves that receive is not wired. With
+`--expect-provider-event on` the provider-event route must answer 401
+`auth_failed`; with `off`, the server's 404. Use `off` right after the first
+sync to prove that a dark cell is dark, and `on` for each route after its
+enablement has rolled.
+
+Signed mode also proves that the running cell trusts the fleet relay key for
+its own audience and for no other. It reads the fleet relay private key, as
+base64 or PEM PKCS8, from standard input only. Pipe it from approved escrow in
+the same command, never from a pod or provider log, and never write it to a
+file. The committed public key comes from the cell's generated values
+(`CATALOG_NAME` is the cell's directory under `.gitops/cells`). Run the whole
+block in one shell; `READ_RELAY_KEY` stands for the escrow's read command,
+which must print only the key:
+
+```sh
+set -euo pipefail
+RELAY_PUBLIC_KEY=$(sed -n "s/^ *relayPublicKeysJSON: '\(.*\)'$/\1/p" \
+  ".gitops/cells/CATALOG_NAME/values.yaml" | jq -r '."relay-2026-08"')
+READ_RELAY_KEY | node infra/cloudflare/agent-email/scripts/cell-reachability-probe.mjs \
+  --mode signed --endpoint "$ENDPOINT" --audience CELL \
+  --expect-receive on --expect-provider-event on \
+  --key-id relay-2026-08 --relay-public-key "$RELAY_PUBLIC_KEY" \
+  --relay-private-key-stdin --large-body
+```
+
+Before its first request, signed mode refuses unless standard input is not a
+terminal and holds at most 4096 bytes, and the key's public key equals
+`--relay-public-key`. On a `cells.witself.witwave.ai` host, `--audience` must
+be the cell name in the host. It then signs, with the receive Worker's own
+signing code and header set, two relays for one random canonical
+`@witmail.net` address that no agent owns. The first names the control
+audience `witself-reachability-control`, which is no cell's audience, and must
+be refused with 401 `invalid_relay`. The second names `--audience` and must
+come back 404 `unknown_recipient`: the cell verified the key, signature,
+audience, timestamp, and body, looked the address up in its database, and
+stored nothing. `--large-body` repeats the second relay with a 4 MiB body,
+which the cell must read within 30 seconds, so run it from a host with enough
+upload bandwidth. While it uploads it holds one of the two relay body-read
+slots of the API pod that answers it, so a real delivery arriving at that moment
+may tempfail once and be retried by the edge. The default envelope is `witself-email-relay-v2`;
+pass `--relay-version witself-email-relay-pilot-v1` only if the deployed
+receive Worker still sends v1.
+
+The probe prints one JSON document and exits 0 only when every check passed.
+It stops at the first failed check, sends nothing further, and reports the
+remaining checks as `not_run`. The document names the host, the cell version,
+the store schema, the clock difference, and one result per check. It never
+contains a key, signature, digest, recipient, or token. Each check reaches
+only the pods that answered it.
+
+| First failed check | Look at |
+| --- | --- |
+| `version` | DNS, certificate, load balancer, ingress, or no ready API pod |
+| `clock` | the node clock of the cell or of the operator host; relays fail beyond the replay window |
+| `ingest_unsigned` | 404 with `on`: the pods that answered run without receive; an invalid receive configuration stops new pods at startup, so check the rollout and pod status; 401 with `off`: receive is wired; `unexpected_body` on a 404: the answer did not come from the server |
+| `provider_event_unauthenticated` | 404 with `on`: the pods that answered have no provider-event token; a token outside 32 to 4096 bytes stops new pods at startup, so check the rollout; 401 with `off`: the route is wired |
+| `ingest_control_audience` | the cell accepted an audience that is not its own; stop and inspect its receive audience |
+| `ingest_unknown_recipient` | 401: the running audience or relay public key differs from the committed values; 503: database or ingest failure, or both body-read slots of the answering pod busy; re-run once |
+| `ingest_unknown_recipient_large` | as above; a 503 while the small relay passed usually means the upload took longer than 30 seconds or a slot was busy; re-run once from the same host |
+
+The probe does not exercise MX, Email Routing, the receive Worker's route
+resolution, allowlist, gates, DMARC handling, or its own fetch from
+Cloudflare; the receive cohort, entitlement, rate limits, storage, or owner
+read-back; the `applied` republish with the new audience and URL; the
+dispatch signer; or a provider-event callback with its token. The checks after
+restore in [Agent email across a move](#agent-email-across-a-move) remain the
+proof of a real delivery.
 
 ## Decommission a cell and preserve its accounts
 
