@@ -142,7 +142,10 @@ type cellEntry struct {
 	FleetTokenFile         *string          `yaml:"fleet_token_file,omitempty"`
 	CivoNodeSize           *string          `yaml:"civo_node_size,omitempty"`
 	CivoAdminCIDR          *string          `yaml:"civo_admin_cidr,omitempty"`
+	CivoIngress            *string          `yaml:"civo_ingress,omitempty"`
+	CivoDNS                *string          `yaml:"civo_dns,omitempty"`
 	BackupValidationTarget *bool            `yaml:"backup_validation_target,omitempty"`
+	RegisterDraining       *bool            `yaml:"register_draining,omitempty"`
 	SecurityContext        *securityContext `yaml:"security_context,omitempty"`
 }
 
@@ -233,11 +236,16 @@ func (e *cellEntry) flagValues() map[string]string {
 	set("fleet-token-file", e.FleetTokenFile)
 	set("civo-node-size", e.CivoNodeSize)
 	set("civo-admin-cidr", e.CivoAdminCIDR)
+	set("civo-ingress", e.CivoIngress)
+	set("civo-dns", e.CivoDNS)
 	if e.ArgoCD != nil {
 		out["argocd"] = strconv.FormatBool(*e.ArgoCD)
 	}
 	if e.BackupValidationTarget != nil {
 		out["backup-validation-target"] = strconv.FormatBool(*e.BackupValidationTarget)
+	}
+	if e.RegisterDraining != nil {
+		out["register-draining"] = strconv.FormatBool(*e.RegisterDraining)
 	}
 	if g := e.Gitops; g != nil {
 		set("gitops-repo", g.Repo)
@@ -335,6 +343,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		if d.BackupValidationTarget != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set backup_validation_target — restore-test isolation is per-cell only", path)
 		}
+		if d.CivoIngress != nil || d.CivoDNS != nil || d.RegisterDraining != nil {
+			return nil, path, fmt.Errorf("%s: defaults must not set civo_ingress/civo_dns/register_draining — ingress shape and registration state are per-cell only", path)
+		}
 	}
 	// Sort for deterministic collision diagnostics, independent of map iteration.
 	names := make([]string, 0, len(cfg.Cells))
@@ -382,6 +393,21 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 			}
 		} else if e.R2Bucket != nil || e.R2Endpoint != nil {
 			return nil, path, fmt.Errorf("%s: cell %q: r2_bucket/r2_endpoint apply only to backend r2", path, name)
+		}
+	}
+	for _, name := range names {
+		e := cfg.Cells[name]
+		if (e.CivoIngress != nil || e.CivoDNS != nil) && (e.Cloud == nil || *e.Cloud != "civo") {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_ingress and civo_dns apply only to cloud civo", path, name)
+		}
+		if e.CivoIngress != nil && *e.CivoIngress != "nodeport" && *e.CivoIngress != "loadbalancer" {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_ingress must be nodeport or loadbalancer", path, name)
+		}
+		if e.CivoDNS != nil && *e.CivoDNS != "none" && *e.CivoDNS != "cloudflare" {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_dns must be none or cloudflare", path, name)
+		}
+		if e.CivoDNS != nil && *e.CivoDNS == "cloudflare" && (e.CivoIngress == nil || *e.CivoIngress != "loadbalancer") {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_dns cloudflare requires civo_ingress loadbalancer", path, name)
 		}
 	}
 	return &cfg, path, nil

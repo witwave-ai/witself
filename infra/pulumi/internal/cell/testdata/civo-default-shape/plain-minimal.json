@@ -1,0 +1,259 @@
+{
+  "exports": [
+    "apiHost",
+    "cell",
+    "civoDNSEntry",
+    "civoNodeSize",
+    "civoRegion",
+    "cloud",
+    "clusterEndpoint",
+    "clusterName",
+    "clusterReady",
+    "deletionProtection",
+    "firewall",
+    "kubeconfig",
+    "kubernetesVersion",
+    "network",
+    "profile",
+    "status"
+  ],
+  "resources": [
+    {
+      "type": "civo:index/firewall:Firewall",
+      "name": "cell-firewall",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+      ],
+      "propertyDependencies": {
+        "createDefaultRules": [],
+        "egressRules": [],
+        "ingressRules": [],
+        "name": [],
+        "networkId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+        ],
+        "region": []
+      },
+      "inputs": {
+        "createDefaultRules": false,
+        "egressRules": [
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "outbound-tcp",
+            "portRange": "1-65535",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "outbound-udp",
+            "portRange": "1-65535",
+            "protocol": "udp"
+          }
+        ],
+        "ingressRules": [
+          {
+            "action": "allow",
+            "cidrs": [
+              "203.0.113.7/32"
+            ],
+            "label": "kubernetes-api",
+            "portRange": "6443",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "http-acme",
+            "portRange": "80",
+            "protocol": "tcp"
+          },
+          {
+            "action": "allow",
+            "cidrs": [
+              "0.0.0.0/0"
+            ],
+            "label": "https-api",
+            "portRange": "443",
+            "protocol": "tcp"
+          }
+        ],
+        "name": "civo-fixture-use1-serving-firewall",
+        "networkId": "cell-network-id",
+        "region": "nyc1"
+      }
+    },
+    {
+      "type": "civo:index/kubernetesCluster:KubernetesCluster",
+      "name": "civo-cluster",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [
+        "tags"
+      ],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [
+        "kubeconfig"
+      ],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/firewall:Firewall::cell-firewall",
+        "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+      ],
+      "propertyDependencies": {
+        "applications": [],
+        "clusterType": [],
+        "cni": [],
+        "firewallId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/firewall:Firewall::cell-firewall"
+        ],
+        "name": [],
+        "networkId": [
+          "urn:pulumi:civo-fixture-use1-serving::witself-infra::civo:index/network:Network::cell-network"
+        ],
+        "pools": [],
+        "region": [],
+        "tags": [],
+        "writeKubeconfig": []
+      },
+      "inputs": {
+        "applications": "traefik2-nodeport",
+        "clusterType": "k3s",
+        "cni": "cilium",
+        "firewallId": "cell-firewall-id",
+        "name": "witself-civo-fixture-use1-serving",
+        "networkId": "cell-network-id",
+        "pools": {
+          "label": "development",
+          "nodeCount": 1,
+          "size": "g4s.kube.medium"
+        },
+        "region": "nyc1",
+        "tags": "witself civo-fixture-use1-serving development",
+        "writeKubeconfig": true
+      }
+    },
+    {
+      "type": "civo:index/network:Network",
+      "name": "cell-network",
+      "custom": true,
+      "parent": "urn:pulumi:civo-fixture-use1-serving::witself-infra::pulumi:pulumi:Stack::witself-infra-civo-fixture-use1-serving",
+      "provider": "",
+      "providers": {},
+      "importId": "",
+      "deletedWith": "",
+      "packageRef": "",
+      "protect": null,
+      "retainOnDelete": null,
+      "deleteBeforeReplace": false,
+      "deleteBeforeReplaceDefined": false,
+      "ignoreChanges": [],
+      "replaceOnChanges": [],
+      "additionalSecretOutputs": [],
+      "hideDiffs": [],
+      "replaceWith": [],
+      "aliasURNs": [],
+      "aliasCount": 0,
+      "aliasSpecs": false,
+      "transformCount": 0,
+      "replacementTriggerSet": false,
+      "envVarMappings": {},
+      "hooks": {
+        "afterCreate": [],
+        "afterDelete": [],
+        "afterUpdate": [],
+        "beforeCreate": [],
+        "beforeDelete": [],
+        "beforeUpdate": [],
+        "onError": []
+      },
+      "customTimeouts": {
+        "create": "",
+        "delete": "",
+        "update": ""
+      },
+      "dependencies": [],
+      "propertyDependencies": {
+        "label": [],
+        "region": []
+      },
+      "inputs": {
+        "label": "civo-fixture-use1-serving-network",
+        "region": "nyc1"
+      }
+    }
+  ]
+}

@@ -174,6 +174,7 @@ func TestFleetRegistrationPinsRestoreTargetIsolation(t *testing.T) {
 				"witself_prv_provision-only",
 				"witself_bak_backup-only",
 				test.target,
+				false,
 			)
 			if got.BackupValidationTarget != test.target {
 				t.Fatalf("backup validation target = %v, want %v", got.BackupValidationTarget, test.target)

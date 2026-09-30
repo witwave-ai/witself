@@ -163,11 +163,26 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 			return err
 		}
 	}
+	if get("cloud") != "civo" && (effective("civo-ingress") != "nodeport" || effective("civo-dns") != "none") {
+		return fmt.Errorf("-civo-ingress and -civo-dns apply only to -cloud civo")
+	}
 	if get("cloud") == "civo" {
 		for _, ignored := range []string{"cidr", "db-version", "domain"} {
+			if ignored == "domain" && effective("civo-ingress") == "loadbalancer" {
+				continue
+			}
 			if explicit[ignored] {
 				return fmt.Errorf("-%s does not apply to -cloud civo", ignored)
 			}
+		}
+		if err := validateCivoIngress("add-cell", civoIngressOptions{
+			Ingress:  effective("civo-ingress"),
+			DNS:      effective("civo-dns"),
+			Domain:   effective("domain"),
+			NodeSize: effective("civo-node-size"),
+			CellName: strings.Join([]string{get("cloud"), get("account-alias"), regionCode, get("role")}, "-"),
+		}); err != nil {
+			return err
 		}
 		if effective("backend") != "local" && effective("backend") != "r2" {
 			return fmt.Errorf("-cloud civo requires -backend local or r2")
@@ -196,6 +211,9 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	if effective("backup-validation-target") == "true" &&
 		strings.TrimSpace(effective("control-plane")) == "" {
 		return fmt.Errorf("-backup-validation-target requires -control-plane so isolation is enforced by the fleet registry")
+	}
+	if effective("register-draining") == "true" && strings.TrimSpace(effective("control-plane")) == "" {
+		return fmt.Errorf("-register-draining requires -control-plane")
 	}
 	cellName := strings.Join([]string{get("cloud"), get("account-alias"), regionCode, get("role")}, "-")
 
@@ -226,6 +244,8 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	str("bootstrap-token-file", &entry.BootstrapTokenFile)
 	str("civo-node-size", &entry.CivoNodeSize)
 	str("civo-admin-cidr", &entry.CivoAdminCIDR)
+	str("civo-ingress", &entry.CivoIngress)
+	str("civo-dns", &entry.CivoDNS)
 	// Backend is ALWAYS recorded, explicit or not: it addresses WHICH
 	// stack state operations target, so an entry must be self-contained
 	// — an implicit s3 falling back to some ambient default later could
@@ -244,6 +264,10 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	if explicit["backup-validation-target"] {
 		v := get("backup-validation-target") == "true"
 		entry.BackupValidationTarget = &v
+	}
+	if explicit["register-draining"] {
+		v := get("register-draining") == "true"
+		entry.RegisterDraining = &v
 	}
 	if explicit["gitops-repo"] || explicit["gitops-path"] || explicit["gitops-values-path"] || explicit["gitops-revision"] {
 		g := &gitopsEntry{}

@@ -13,13 +13,16 @@ import (
 
 const civoWorkloadNamespace = "witself"
 
-func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.KubernetesCluster, cellDomain, apiHost pulumi.StringInput, rootDependencies ...pulumi.Resource) error {
-	k8s, err := kubernetes.NewProvider(ctx, "cell-k8s", &kubernetes.ProviderArgs{
+// newCivoKubernetesProvider is the one Kubernetes provider of a Civo cell. Its
+// name, its single argument and its dependency are part of every existing Civo
+// stack: changing any of them is a diff on a live cell.
+func newCivoKubernetesProvider(ctx *pulumi.Context, cluster *civo.KubernetesCluster) (*kubernetes.Provider, error) {
+	return kubernetes.NewProvider(ctx, "cell-k8s", &kubernetes.ProviderArgs{
 		Kubeconfig: cluster.Kubeconfig,
 	}, pulumi.DependsOn([]pulumi.Resource{cluster}))
-	if err != nil {
-		return err
-	}
+}
+
+func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, k8s *kubernetes.Provider, cellDomain, apiHost pulumi.StringInput, rootDependencies ...pulumi.Resource) error {
 
 	workloadNamespace, err := corev1.NewNamespace(ctx, "witself-namespace", &corev1.NamespaceArgs{
 		Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(civoWorkloadNamespace)},

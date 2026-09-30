@@ -136,6 +136,10 @@ func TestCivoProvisionSecretContainsIndependentBackupCredential(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		k8s, err := newCivoKubernetesProvider(ctx, cluster)
+		if err != nil {
+			return err
+		}
 		return provisionCivoArgoCD(
 			ctx,
 			civoCell{
@@ -146,7 +150,7 @@ func TestCivoProvisionSecretContainsIndependentBackupCredential(t *testing.T) {
 				gitopsValuesPath: ".gitops/cells/civo-sandbox-use1-serving/values.yaml",
 				gitopsRevision:   "main",
 			},
-			cluster,
+			k8s,
 			pulumi.String("civo-sandbox-use1-serving.civo.com"),
 			pulumi.String("civo-sandbox-use1-serving.civo.com"),
 		)

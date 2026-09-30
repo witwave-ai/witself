@@ -265,6 +265,9 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	boolean("restore target", false, e.BackupValidationTarget, func(x *cellEntry) *bool {
 		return x.BackupValidationTarget
 	})
+	if e.RegisterDraining != nil && *e.RegisterDraining {
+		out = append(out, settingRow{key: "registration", value: "draining (accepting=false)", fromEntry: true})
+	}
 	if argocdOn {
 		str("gitops repo", "https://github.com/witwave-ai/witself",
 			gitField(e.Gitops, gitRepo), func(x *cellEntry) *string { return gitField(x.Gitops, gitRepo) })
@@ -274,7 +277,17 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	str("channel", "experimental", e.Channel, func(x *cellEntry) *string { return x.Channel })
 	str("backend", "s3", e.Backend, func(x *cellEntry) *string { return x.Backend })
 	if cloud == "civo" {
-		out = append(out, settingRow{key: "ingress", value: "Civo DNS · Traefik NodePort", fromEntry: false})
+		if e.CivoIngress != nil && *e.CivoIngress == "loadbalancer" {
+			out = append(out, settingRow{key: "ingress", value: "Civo load balancer · Traefik", fromEntry: true})
+			dns := "operator-managed"
+			if e.CivoDNS != nil && *e.CivoDNS == "cloudflare" {
+				dns = "Cloudflare · managed by Pulumi"
+			}
+			out = append(out, settingRow{key: "dns record", value: dns, fromEntry: e.CivoDNS != nil})
+			str("domain", "cells.witself.witwave.ai", e.Domain, func(x *cellEntry) *string { return x.Domain })
+		} else {
+			out = append(out, settingRow{key: "ingress", value: "Civo DNS · Traefik NodePort", fromEntry: false})
+		}
 		out = append(out, settingRow{key: "database", value: "in-cluster PostgreSQL · persistent volume", fromEntry: false})
 		str("node size", "g4s.kube.medium", e.CivoNodeSize, func(x *cellEntry) *string { return x.CivoNodeSize })
 		str("admin cidr", "required", e.CivoAdminCIDR, func(x *cellEntry) *string { return x.CivoAdminCIDR })

@@ -181,12 +181,20 @@ flags:
   -k8s-version    Kubernetes version (default: 1.36 on AWS/Azure;
                   Civo's latest stable when omitted)
   -db-version     PostgreSQL major version                     (default "18")
-  -civo-node-size Civo Kubernetes node size                    (default "g4s.kube.medium")
+  -civo-node-size Civo node size: g4s.kube.medium|g4s.kube.large (default "g4s.kube.medium")
   -civo-admin-cidr CIDR allowed to reach Civo's Kubernetes API (required for Civo)
+  -civo-ingress   Civo ingress: nodeport|loadbalancer          (default "nodeport")
+                  loadbalancer adds one Civo load balancer and the host
+                  api.<cell>.<domain>; -domain then applies to Civo
+  -civo-dns       record of that host: none|cloudflare         (default "none")
+                  cloudflare reads CLOUDFLARE_API_TOKEN from the environment
   -argocd         install Argo CD (GitOps control plane)        (default false)
   -backup-validation-target
                   isolate this cell for rollback-only backup restore drills;
                   registers accepting=false and requires -control-plane
+  -register-draining
+                  with up and -control-plane: register the cell with
+                  accepting=false
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
@@ -328,6 +336,7 @@ func run(args []string) error {
 	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
 	backupValidationTarget := fs.Bool("backup-validation-target", false, "isolate this cell for rollback-only backup restore validation")
+	registerDraining := fs.Bool("register-draining", false, "with up and -control-plane: register the cell with accepting=false")
 	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
 	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path to the root bootstrap chart")
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
@@ -339,8 +348,10 @@ func run(args []string) error {
 	azureSubscription := fs.String("azure-subscription", "", "Azure subscription name or ID for Azure cells/state backend (default: az CLI current subscription)")
 	civoTokenFile := fs.String("civo-token-file", "", "Civo API token file (default: CIVO_TOKEN environment)")
 	civoExpectedAccountID := fs.String("civo-expected-account-id", "", "expected Civo account UUID safety pin")
-	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size (development default: 2 vCPU / 4 GB)")
+	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size: g4s.kube.medium|g4s.kube.large")
 	civoAdminCIDR := fs.String("civo-admin-cidr", "", "CIDR allowed to reach the Civo Kubernetes API, normally your public IP /32")
+	civoIngress := fs.String("civo-ingress", "nodeport", "Civo ingress: nodeport|loadbalancer (loadbalancer adds one Civo load balancer and the host api.<cell>.<domain>)")
+	civoDNS := fs.String("civo-dns", "none", "record of a Civo load balancer host: none|cloudflare (cloudflare reads CLOUDFLARE_API_TOKEN)")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|r2|local (local is a dev opt-out; r2 is for -cloud civo)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs/azblob: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
@@ -427,6 +438,9 @@ func run(args []string) error {
 			return fmt.Errorf("-yes-cell is only valid with `destroy`")
 		}
 	}
+	if err := requireCivoCloudflareEnv(cmd, *cloud, *civoDNS, os.LookupEnv); err != nil {
+		return err
+	}
 	// Identity pre-flight: any command that will TOUCH cloud state
 	// runs whoami first when the cell has expected_account_id / tenant
 	// pins in its security_context. A wrong profile that resolves to a
@@ -504,6 +518,9 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *cloud != "civo" && (*civoIngress != "nodeport" || *civoDNS != "none") {
+		return fmt.Errorf("-civo-ingress and -civo-dns apply only to -cloud civo")
+	}
 	if *cloud == "civo" {
 		if *backendFlag != "local" && *backendFlag != "r2" {
 			return fmt.Errorf("-cloud civo requires -backend local or r2")
@@ -518,9 +535,21 @@ func run(args []string) error {
 			return fmt.Errorf("-cloud civo with -control-plane requires -argocd so the cell has a public registrable endpoint")
 		}
 		for _, ignored := range []string{"cidr", "db-version", "domain"} {
+			if ignored == "domain" && *civoIngress == "loadbalancer" {
+				continue
+			}
 			if operatorExplicit[ignored] {
 				return fmt.Errorf("-%s does not apply to -cloud civo; Civo uses provider networking, native DNS, and in-cluster PostgreSQL", ignored)
 			}
+		}
+		if err := validateCivoIngress(cmd, civoIngressOptions{
+			Ingress:  *civoIngress,
+			DNS:      *civoDNS,
+			Domain:   *domain,
+			NodeSize: *civoNodeSize,
+			CellName: strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-"),
+		}); err != nil {
+			return err
 		}
 		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" && cmd != "bootstrap" && cmd != "state-check" {
 			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo")
@@ -567,6 +596,12 @@ func run(args []string) error {
 	}
 	if *backupValidationTarget && *restoreArchives {
 		return fmt.Errorf("-backup-validation-target cannot be combined with -restore-archives")
+	}
+	if *registerDraining && *controlPlane == "" {
+		return fmt.Errorf("-register-draining requires -control-plane")
+	}
+	if *registerDraining && *restoreArchives {
+		return fmt.Errorf("-register-draining cannot be combined with -restore-archives")
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
@@ -873,8 +908,9 @@ func run(args []string) error {
 			return fmt.Errorf("set config %s: %w", k, err)
 		}
 	}
+	civoConfig, civoClearKeys := civoStackConfig(*region, *civoNodeSize, *civoAdminCIDR, *civoIngress, *civoDNS, *domain)
 	if *cloud == "civo" && (cmd == "up" || cmd == "preview") {
-		for _, key := range []string{"witself:cidr", "witself:dbVersion", "witself:domain", "witself:cloudflareDNS"} {
+		for _, key := range civoClearKeys {
 			if err := stack.RemoveConfig(ctx, key); err != nil {
 				return fmt.Errorf("clear inapplicable Civo config %s: %w", key, err)
 			}
@@ -905,11 +941,7 @@ func run(args []string) error {
 			}
 		}
 	case "civo":
-		for k, v := range map[string]string{
-			"civo:region":           *region,
-			"witself:civoNodeSize":  *civoNodeSize,
-			"witself:civoAdminCIDR": *civoAdminCIDR,
-		} {
+		for k, v := range civoConfig {
 			if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
 				return fmt.Errorf("set config %s: %w", k, err)
 			}
@@ -967,7 +999,7 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel, *backupValidationTarget)
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel, *backupValidationTarget, *registerDraining)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
@@ -1086,7 +1118,7 @@ func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery, pr
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
 // hostname is returned so callers can chain a readiness poll before the
 // next post-provision step (restore-archives).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string, backupValidationTarget bool) (string, error) {
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string, backupValidationTarget, registerDraining bool) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return "", err
@@ -1107,18 +1139,22 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 	}
 	if err := cl.Register(ctx, fleetRegistration(
 		cellName, host, cloud, region, regionCode, channel,
-		provisionToken, backupToken, backupValidationTarget,
+		provisionToken, backupToken, backupValidationTarget, registerDraining,
 	)); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
+	if registerDraining {
+		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s, accepting=false (register_draining). Open it with: witself-admin cells undrain %s; then remove register_draining from the cell record before the next up\n", cellName, controlPlane, cellName)
+	} else {
+		fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
+	}
 	return host, nil
 }
 
 func fleetRegistration(
 	cellName, host, cloud, region, regionCode, channel,
 	provisionToken, backupToken string,
-	backupValidationTarget bool,
+	backupValidationTarget, registerDraining bool,
 ) fleet.Cell {
 	return fleet.Cell{
 		Name:                   cellName,
@@ -1127,7 +1163,7 @@ func fleetRegistration(
 		Region:                 region,
 		RegionCode:             regionCode,
 		Channel:                channel,
-		Accepting:              boolPointer(!backupValidationTarget),
+		Accepting:              boolPointer(!backupValidationTarget && !registerDraining),
 		BackupValidationTarget: backupValidationTarget,
 		ProvisionToken:         provisionToken,
 		BackupToken:            backupToken,
