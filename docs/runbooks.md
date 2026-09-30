@@ -784,6 +784,66 @@ cluster state. The private identity is read from the 1Password item
 is "identity (AGE-SECRET-KEY, private)"); the item also carries the public
 `recipient`, which must equal the pin in `.gitops/secrets/.sops.yaml`.
 
+### Copy the agent-email cohort and canary Secrets to another cell
+
+`scripts/copy-cell-secrets.sh` copies the receive-cohort and retry-canary
+Secrets from one cell to another byte for byte, and proves a copy with a
+match-only comparison. It accepts only
+`witself/witself-agent-email-receive-cohort-vN` and
+`witself/witself-agent-email-retry-canary-vN`. Every other operator Secret
+of a new cell holds a new value and is never copied. It refuses
+`civo-sandbox-use1-backup`, which runs no agent email.
+
+```sh
+scripts/copy-cell-secrets.sh copy civo-sandbox-use1-serving civo-prod-use1-serving \
+  witself/witself-agent-email-receive-cohort-v1 witself/witself-agent-email-retry-canary-v1
+scripts/copy-cell-secrets.sh compare civo-sandbox-use1-serving civo-prod-use1-serving \
+  witself/witself-agent-email-receive-cohort-v1 witself/witself-agent-email-retry-canary-v1
+```
+
+The tool uses only the `witself-<cell>` kubectl contexts, from the
+kubeconfig that kubectl itself would use (`KUBECONFIG`, else
+`~/.kube/config`). Before it reads a Secret it refuses when both contexts
+reach the same cluster (equal `kube-system` namespace UID), or when the
+Argo CD Application `witself-server` reached through a context does not
+carry that cell's `witself.io/cell` label. Secret data stays in the tool's
+memory and reaches the target only through the standard input of
+`kubectl create`. It is never printed, logged, written to a file, placed in
+an argument, or reduced to a length or a digest, and kubectl's error output
+is discarded unread.
+
+Standard output is one line per Secret, `<namespace>/<name> match` or
+`<namespace>/<name> mismatch`, and nothing else. Exit status 0 means every
+line is `match`, 3 means at least one `mismatch`, and 1 means a refusal,
+explained by one value-free line on standard error. `match` requires both
+Secrets to be immutable, of the same type, with the same data keys and
+identical bytes. An absent target is a `mismatch`.
+
+`copy` never writes through the source context. It creates each absent
+target Secret as an immutable copy that carries only its name, namespace,
+type, data and the `witself.io/cell` annotation of the target, reads it back
+and compares it. A target that already matches is left alone. If any target
+exists with different content, `copy` writes nothing and reports
+`mismatch`. `--replace` deletes and re-creates such a target, and is refused
+while a Deployment, StatefulSet, DaemonSet, Job or CronJob in the target
+namespace references the Secret: a referenced Secret changes only through a
+new `-vN` name, as described above.
+
+Run `compare` after the copy, before the change that enables receive on the
+target cell, after any re-creation, and at a move's go/no-go. Then export
+each copied Secret with `scripts/cell-secrets.sh export` as above, and
+confirm the envelopes with `decrypt-apply` in `--diff-names` mode. Name the
+copied Secrets so that no other envelope of the cell is decrypted; each must
+report `identical`:
+
+```sh
+scripts/cell-secrets.sh decrypt-apply civo-prod-use1-serving \
+  witself/witself-agent-email-receive-cohort-v1 \
+  witself/witself-agent-email-retry-canary-v1 --diff-names
+```
+
+Both `export` and `decrypt-apply` read the private age identity.
+
 ## PostgreSQL image pin: how to re-pin
 
 Read the running PostgreSQL container's image ID using the reviewed cell's
