@@ -38,6 +38,11 @@ BACKUP=civo-sandbox-use1-backup
 SERVING=civo-sandbox-use1-serving
 PRODUCTION=civo-prod-use1-serving
 VERSION=1.2.3
+ROLL_OID=cccccccccccccccccccccccccccccccccccccccc
+DESCENDANT_OID=dddddddddddddddddddddddddddddddddddddddd
+OLDER_DESCENDANT_OID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+UNRELATED_OID=ffffffffffffffffffffffffffffffffffffffff
+export ROLL_OID DESCENDANT_OID OLDER_DESCENDANT_OID UNRELATED_OID
 OLD_DIGEST="sha256:$(printf 'a%.0s' {1..64})"
 BACKUP_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
 SERVING_DIGEST="sha256:$(printf 'c%.0s' {1..64})"
@@ -95,7 +100,21 @@ case "$1" in
       *) exit 64 ;;
     esac
     ;;
-  fetch|add|commit|push|branch|merge-base|switch) ;;
+  fetch)
+    if [ "$*" = 'fetch origin main' ] && [ -f "$STATE_DIR/descendant_listed" ]; then
+      touch "$STATE_DIR/descendant_fetched"
+    fi
+    ;;
+  merge-base)
+    [ "$2" = --is-ancestor ] && [ "$3" = "$ROLL_OID" ] || exit 64
+    [ -f "$STATE_DIR/descendant_fetched" ] || exit 64
+    # Equality is an ancestor in Git, but is not a later covering run.
+    case "$4" in
+      "$ROLL_OID"|"$DESCENDANT_OID"|"$OLDER_DESCENDANT_OID") ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  add|commit|push|branch|switch) ;;
   check-attr)
     attr=unspecified
     [ "$SCENARIO" != unsafe_merge_driver ] || attr=union
@@ -192,10 +211,52 @@ case "$1 $2" in
         printf '[{"status":"completed","conclusion":"%s","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"push"}]\n' "$conclusion"
         ;;
       *ci.yml*)
+        [[ " $* " = *' --branch main '* ]] && [[ " $* " = *' --event push '* ]] || exit 64
         if [ "$SCENARIO" = slow_ci ]; then /bin/sleep 3; fi
+        if [[ " $* " != *' --commit '* ]]; then
+          [[ "$SCENARIO" = postmerge_cancelled* ]] || exit 64
+          [[ " $* " = *' --json headSha,status,conclusion,createdAt '* ]] || exit 64
+          touch "$STATE_DIR/descendant_listed"
+          rm -f "$STATE_DIR/descendant_fetched"
+          if [ "$SCENARIO" = postmerge_cancelled_history ] && [[ " $* " = *' --limit 100 '* ]]; then
+            # Recent reruns of the cancelled own head can fill a result window;
+            # equality must not count and older coverage must still be searched.
+            jq -n --arg roll "$ROLL_OID" '[range(100) | {
+              headSha: $roll, status: "completed", conclusion: "cancelled", createdAt: "2026-09-29T00:04:00Z"
+            }]'
+            exit
+          fi
+          status=completed conclusion=success
+          case "$SCENARIO" in
+            postmerge_cancelled_failure) conclusion=failure ;;
+            postmerge_cancelled_again) conclusion=cancelled ;;
+            postmerge_cancelled_wait)
+              polled="$STATE_DIR/descendant_polled-$(cat "$STATE_DIR/cell")"
+              if [ ! -f "$polled" ]; then
+                touch "$polled"
+                status=in_progress conclusion=''
+              fi
+              ;;
+          esac
+          # Deliberately out of creation order: an older green descendant must
+          # not hide the newest descendant's pending or failed state. A newer
+          # unrelated green run must be rejected by the ancestry check.
+          jq -n --arg roll "$ROLL_OID" --arg head "$DESCENDANT_OID" \
+            --arg older "$OLDER_DESCENDANT_OID" --arg unrelated "$UNRELATED_OID" \
+            --arg status "$status" --arg conclusion "$conclusion" --arg scenario "$SCENARIO" '[
+              {headSha: $older, status: "completed", conclusion: "success", createdAt: "2026-09-29T00:01:00Z"},
+              {headSha: $roll, status: "completed", conclusion: "cancelled", createdAt: "2026-09-29T00:00:00Z"},
+              {headSha: $head, status: $status, conclusion: $conclusion, createdAt: "2026-09-29T00:02:00Z"},
+              {headSha: $unrelated, status: "completed", conclusion: "success", createdAt: "2026-09-29T00:03:00Z"}
+            ] | if $scenario == "postmerge_cancelled_unrelated" then
+              map(select(.headSha == $roll or .headSha == $unrelated))
+            elif $scenario == "postmerge_cancelled_missing" then [] else . end'
+          exit
+        fi
         conclusion=success
         oid=cccccccccccccccccccccccccccccccccccccccc
-        [ "$SCENARIO" != postmerge_cancelled ] || conclusion=cancelled
+        [[ "$SCENARIO" != postmerge_cancelled* ]] || conclusion=cancelled
+        [ "$SCENARIO" != postmerge_failure ] || conclusion=failure
         [ "$SCENARIO" != postmerge_wrong_sha ] || oid=dddddddddddddddddddddddddddddddddddddddd
         printf '[{"status":"completed","conclusion":"%s","headSha":"%s","event":"push"}]\n' "$conclusion" "$oid"
         ;;
@@ -594,7 +655,7 @@ grep -Fq 'gh exit 1' "$TEST_ROOT/output" || fail 'checks transport failure lost 
 [ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 1 ] || fail 'checks transport failure was retried'
 printf 'roll train test: checks transport failure stops immediately\n'
 
-for scenario in postmerge_cancelled postmerge_wrong_sha argo_timeout; do
+for scenario in postmerge_failure postmerge_wrong_sha argo_timeout; do
   reset_case
   SCENARIO=$scenario
   expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --argo-timeout 1 --poll-interval 1
@@ -605,10 +666,63 @@ for scenario in postmerge_cancelled postmerge_wrong_sha argo_timeout; do
     grep -Fq 'Argo convergence' "$TEST_ROOT/output" || fail 'Argo timeout lacks convergence context'
     grep -Fq 'timed out' "$TEST_ROOT/output" || fail 'Argo did not honor convergence deadline'
   else
-    grep -Fq 'post-merge CI failed' "$TEST_ROOT/output" || fail "$scenario lacks a post-merge failure message"
+    grep -Fxq "roll-train: ERROR: post-merge CI failed or returned an unexpected run for $ROLL_OID" "$TEST_ROOT/output" \
+      || fail "$scenario changed the own-run failure message"
+    if grep -Fq 'createdAt' "$TEST_LOG"; then fail "$scenario looked for a covering run"; fi
   fi
 done
-printf 'roll train test: cancelled or unrelated merge CI and Argo timeout block serving wave\n'
+printf 'roll train test: failed or unrelated merge CI and Argo timeout block serving wave\n'
+
+for scenario in postmerge_cancelled_success postmerge_cancelled_wait postmerge_cancelled_history; do
+  reset_case
+  SCENARIO=$scenario
+  bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 30 --poll-interval 1 \
+    >"$TEST_ROOT/output" 2>&1 || fail "$scenario did not continue after covering CI"
+  [ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID (own run cancelled; covered by $DESCENDANT_OID)" "$TEST_ROOT/output")" -eq 2 ] \
+    || fail "$scenario did not certify both waves with the newest descendant"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail "$scenario did not complete both waves"
+  grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail "$scenario did not finish serving verification"
+  if [ "$scenario" = postmerge_cancelled_wait ]; then
+    [ "$(grep -Fxc "roll-train: Waiting for post-merge CI: $ROLL_OID (own run cancelled; waiting on $DESCENDANT_OID)" "$TEST_ROOT/output")" -eq 2 ] \
+      || fail 'pending descendant did not wait once per wave before success'
+    [ "$(grep -Fc 'createdAt' "$TEST_LOG")" -eq 4 ] || fail 'pending descendant was not polled again for both waves'
+  fi
+  if [ "$scenario" = postmerge_cancelled_history ]; then
+    [ "$(grep -Fc '<--limit> <200>' "$TEST_LOG")" -eq 2 ] || fail 'full CI history window was not widened for both waves'
+  fi
+done
+printf 'roll train test: cancelled own CI accepts newest green coverage, waits for running CI, and searches beyond a full window\n'
+
+for scenario in postmerge_cancelled_failure postmerge_cancelled_again; do
+  reset_case
+  SCENARIO=$scenario
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+  grep -Fxq "roll-train: ERROR: post-merge CI failed for $DESCENDANT_OID, which contains $ROLL_OID" "$TEST_ROOT/output" \
+    || fail "$scenario did not refuse the newest descendant with the exact message"
+  [ "$(grep -Fc 'createdAt' "$TEST_LOG")" -eq 1 ] || fail "$scenario retried a completed descendant"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail "$scenario did not stop after the first merge"
+  if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail "$scenario started serving wave"; fi
+done
+printf 'roll train test: failed or cancelled newest descendant blocks serving despite older green coverage\n'
+
+ci_poll_interval=1
+for scenario in postmerge_cancelled_unrelated postmerge_cancelled_missing; do
+  reset_case
+  SCENARIO=$scenario
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+    --ci-timeout "$((4 * ci_poll_interval))" --poll-interval "$ci_poll_interval"
+  grep -Fq "post-merge CI ($ROLL_OID) timed out" "$TEST_ROOT/output" \
+    || fail "$scenario did not retain the original post-merge deadline"
+  [ "$(grep -Fc 'createdAt' "$TEST_LOG")" -ge 2 ] || fail "$scenario did not repoll for descendant coverage"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail "$scenario did not stop after the first merge"
+  if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail "$scenario started serving wave"; fi
+  if grep -Fq 'covered by' "$TEST_ROOT/output"; then fail "$scenario certified without a descendant"; fi
+  if [ "$scenario" = postmerge_cancelled_unrelated ]; then
+    grep -Fxq "git <merge-base> <--is-ancestor> <$ROLL_OID> <$UNRELATED_OID>" "$TEST_LOG" \
+      || fail 'unrelated green CI never reached the ancestry check'
+  fi
+done
+printf 'roll train test: unrelated green runs and missing descendants time out after cancelled own CI\n'
 
 # A provider returning success after the deadline must still fail. Real sleep
 # also exercises the watchdog for a read-only provider call that is hung.
