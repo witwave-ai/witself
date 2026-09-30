@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/fleet"
 )
 
@@ -549,6 +552,182 @@ func TestCivoIngressSettingsRows(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Errorf("ingress settings rows = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func m1(cell, cmd, recorded, target string) string {
+	return fmt.Sprintf("cell %s has the recorded apiHost %q, and this %s would change it to %s. A cell that may be registered with a control plane keeps its host: restore this cell's previous civo_ingress, domain and argocd settings, or provision a new cell with the new settings, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cell, recorded, cmd, target)
+}
+
+func m2(cell, cmd, recorded string) string {
+	return fmt.Sprintf("cell %s has the recorded apiHost %q but no recorded civoDNSEntry, so this %s cannot show that the host stays the same. A cell that may be registered with a control plane keeps its host: provision a new cell, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cell, recorded, cmd)
+}
+
+func m3(cell, cmd string) string {
+	return fmt.Sprintf("cell %s has a recorded apiHost that is not a string, so this %s cannot show that the host stays the same. A cell that may be registered with a control plane keeps its host: provision a new cell, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cell, cmd)
+}
+
+func TestCheckCivoAPIHost(t *testing.T) {
+	const cell = "civo-example-use1-dev"
+	const domain = "cells.example.test"
+	const npHost = "api.test-cluster-id.k8s.civo.com"
+	const lbHost = "api.civo-example-use1-dev.cells.example.test"
+	const provisionToken = "test-provision-token-not-real"
+	np := auto.OutputMap{
+		"apiHost":      {Value: npHost},
+		"civoDNSEntry": {Value: "test-cluster-id.k8s.civo.com"},
+	}
+	lb := auto.OutputMap{
+		"apiHost":      {Value: lbHost},
+		"civoDNSEntry": {Value: "test-cluster-id.k8s.civo.com"},
+	}
+	for _, test := range []struct {
+		name, cmd, ingress, domain string
+		argocd                     bool
+		outs                       auto.OutputMap
+		want                       string
+	}{
+		{"1", "preview", "loadbalancer", domain, false, nil, ""},
+		{"2", "up", "nodeport", "", true, nil, ""},
+		{"3", "up", "nodeport", "", true, auto.OutputMap{"apiHost": {Value: ""}}, ""},
+		{"4", "up", "nodeport", "", true, auto.OutputMap{"apiHost": {Value: 42.0}}, m3(cell, "up")},
+		{"5", "up", "nodeport", "", true, np, ""},
+		{"6", "preview", "loadbalancer", domain, true, np, m1(cell, "preview", npHost, "\""+lbHost+"\"")},
+		{"7", "up", "loadbalancer", domain, true, np, m1(cell, "up", npHost, "\""+lbHost+"\"")},
+		{"8", "up", "loadbalancer", domain, true, lb, ""},
+		{"9", "preview", "loadbalancer", domain, false, lb, ""},
+		{"10", "up", "loadbalancer", " Cells.Example.Test. ", false, lb, ""},
+		{"11", "up", "loadbalancer", "cells.other.test", false, lb, m1(cell, "up", lbHost, "\"api.civo-example-use1-dev.cells.other.test\"")},
+		{"12", "up", "nodeport", "", true, lb, m1(cell, "up", lbHost, "\""+npHost+"\"")},
+		{"13", "up", "nodeport", "", false, lb, m1(cell, "up", lbHost, "no host")},
+		{"14", "preview", "nodeport", "", false, np, m1(cell, "preview", npHost, "no host")},
+		{"15", "up", "nodeport", "", true, auto.OutputMap{"apiHost": {Value: npHost}}, m2(cell, "up", npHost)},
+		{"16", "preview", "nodeport", "", true, auto.OutputMap{"apiHost": {Value: npHost}, "civoDNSEntry": {Value: ""}}, m2(cell, "preview", npHost)},
+		{"17", "up", "loadbalancer", domain, false, auto.OutputMap{"apiHost": {Value: npHost}}, m1(cell, "up", npHost, "\""+lbHost+"\"")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outs := auto.OutputMap{"provisionToken": {Value: provisionToken, Secret: true}}
+			for name, output := range test.outs {
+				outs[name] = output
+			}
+			err := checkCivoAPIHost(test.cmd, cell, test.ingress, test.domain, test.argocd, outs)
+			if err != nil && strings.Contains(err.Error(), provisionToken) {
+				t.Fatal("row disclosed a secret output")
+			}
+			if test.want == "" {
+				if err != nil {
+					t.Fatal("row unexpectedly refused")
+				}
+			} else if err == nil || err.Error() != test.want {
+				t.Fatal("row refusal message differs")
+			}
+		})
+	}
+}
+
+func TestRefuseCivoAPIHostChangeReadFailure(t *testing.T) {
+	cause := errors.New("fake read failure")
+	calls := 0
+	reader := func(context.Context) (auto.OutputMap, error) {
+		calls++
+		return nil, cause
+	}
+	err := refuseCivoAPIHostChange(context.Background(), reader, "up", "civo-example-use1-dev", "loadbalancer", "cells.example.test", false)
+	if err == nil || err.Error() != "read the recorded outputs of cell civo-example-use1-dev before up: fake read failure" {
+		t.Fatal("read failure message differs")
+	}
+	if !errors.Is(err, cause) || calls != 1 {
+		t.Fatal("read failure cause or reader call count differs")
+	}
+	calls = 0
+	reader = func(context.Context) (auto.OutputMap, error) {
+		calls++
+		return auto.OutputMap{
+			"apiHost":      {Value: "api.civo-example-use1-dev.cells.example.test"},
+			"civoDNSEntry": {Value: "test-cluster-id.k8s.civo.com"},
+		}, nil
+	}
+	err = refuseCivoAPIHostChange(context.Background(), reader, "up", "civo-example-use1-dev", "loadbalancer", "cells.example.test", false)
+	if err != nil || calls != 1 {
+		t.Fatal("unchanged host result or reader call count differs")
+	}
+}
+
+func TestCivoAPIHostGuardRunsBeforeAnyStackChange(t *testing.T) {
+	const npJSON = `{"apiHost":"api.test-cluster-id.k8s.civo.com","civoDNSEntry":"test-cluster-id.k8s.civo.com"}`
+	const lbJSON = `{"apiHost":"api.civo-spike-use1-dev.cells.example.test","civoDNSEntry":"test-cluster-id.k8s.civo.com"}`
+	for _, test := range []struct {
+		name, cmd, outputJSON string
+		args                  []string
+		missing, stop         bool
+		want                  string
+	}{
+		{
+			name: "G1", cmd: "preview", outputJSON: npJSON,
+			args: []string{"-civo-ingress", "loadbalancer", "-domain", "cells.example.test"},
+			want: m1("civo-spike-use1-dev", "preview", "api.test-cluster-id.k8s.civo.com", "\"api.civo-spike-use1-dev.cells.example.test\""),
+		},
+		{
+			name: "G2", cmd: "up", outputJSON: npJSON,
+			args: []string{"-civo-ingress", "loadbalancer", "-domain", "cells.example.test"},
+			want: m1("civo-spike-use1-dev", "up", "api.test-cluster-id.k8s.civo.com", "\"api.civo-spike-use1-dev.cells.example.test\""),
+		},
+		{
+			name: "G3", cmd: "preview", outputJSON: npJSON,
+			args: []string{"-argocd"}, stop: true,
+		},
+		{
+			name: "G4", cmd: "up", outputJSON: lbJSON,
+			args: []string{"-civo-ingress", "loadbalancer", "-domain", "Cells.Example.Test."}, stop: true,
+		},
+		{
+			name: "G5", cmd: "preview", outputJSON: "{}",
+			args: []string{"-civo-ingress", "loadbalancer", "-domain", "cells.example.test"}, missing: true, stop: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r2TestHome(t)
+			for name, value := range r2TestValues() {
+				t.Setenv(name, value)
+			}
+			t.Setenv("CIVO_TOKEN", "test-civo-token-not-real")
+			t.Setenv("TMPDIR", t.TempDir())
+			r2StubCheck(t, func(context.Context, backend.R2Settings, backend.R2Secrets, backend.R2CheckOptions) (backend.R2CheckReport, error) {
+				return backend.R2CheckReport{}, nil
+			})
+			stopErr := errors.New("fake config stop")
+			f := &r2FakePulumi{t: t, missing: test.missing, outputJSON: test.outputJSON}
+			if test.stop {
+				f.stopErr = stopErr
+			}
+			r2StubCLICommand(t, f)
+			args := []string{test.cmd, "-cloud", "civo", "-account-alias", "spike", "-region", "nyc1", "-role", "dev", "-backend", "r2", "-r2-bucket", r2TestSettings.Bucket, "-r2-endpoint", r2TestEndpoint, "-civo-admin-cidr", "203.0.113.7/32"}
+			err := run(append(args, test.args...))
+			wantCalls := [][]string{{"stack", "select", "--stack", "civo-spike-use1-dev"}}
+			if test.missing {
+				wantCalls = append(wantCalls, []string{"stack", "init", "civo-spike-use1-dev"})
+			}
+			wantCalls = append(wantCalls,
+				[]string{"stack", "output", "--json", "--stack", "civo-spike-use1-dev"},
+				[]string{"stack", "output", "--json", "--show-secrets", "--stack", "civo-spike-use1-dev"})
+			if !test.stop {
+				r2TestError(t, err, test.want)
+				if !reflect.DeepEqual(f.calls, wantCalls) {
+					t.Fatal("row refusal command sequence differs")
+				}
+				return
+			}
+			if !errors.Is(err, stopErr) || !strings.HasPrefix(err.Error(), "set config ") {
+				t.Fatal("row did not reach the config stop")
+			}
+			if len(f.calls) != len(wantCalls)+1 || !reflect.DeepEqual(f.calls[:len(wantCalls)], wantCalls) {
+				t.Fatal("row accepted command sequence differs")
+			}
+			last := f.calls[len(wantCalls)]
+			if len(last) < 2 || last[0] != "config" || last[1] != "set" {
+				t.Fatal("row first setting command differs")
 			}
 		})
 	}

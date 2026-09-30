@@ -309,10 +309,22 @@ With `civo_dns: none` nobody creates the record for you. Create an `A` record
 for `apiHost` that points at `loadBalancerIP` yourself. Until it resolves,
 certificate issuance and the HTTPS check of `up` cannot succeed.
 
-Changing `civo_ingress` on an existing cell changes its public host name. That
-is not supported for a cell that holds accounts, and the tool does not refuse
-it: the next `up` with a control plane registers the new host. Changing
-`civo_dns` adds or removes the record only.
+`preview` and `up` refuse to change the public host name of a cell that already
+has one. Before they write any stack setting, they read the stack's recorded
+`apiHost` and compare it with the host this run would serve:
+`api.<cell>.<domain>` with `civo_ingress: loadbalancer`, otherwise
+`api.<civoDNSEntry>` with `argocd`, otherwise none. A changed `civo_ingress`, a
+changed `domain` on a cell with a load balancer, or `argocd` turned off on a
+cell without one therefore stops the run with an error that names both hosts.
+The check reads only the stack and applies whether or not the run names a
+control plane: the apply itself moves the host, in Argo CD's root application
+and, with `civo_dns: cloudflare`, in the DNS record, and the control plane
+refuses a registration under a new host while the cell holds accounts. To give
+a cell a new host, provision a new cell, move the accounts to it
+(`witself-admin cells evacuate`, then `cells restore`) and destroy the old
+cell once it is empty. A cell that was never registered can be destroyed and
+provisioned again. A new stack has no recorded `apiHost` and is never refused.
+Changing `civo_dns` adds or removes the record only.
 
 `destroy` deletes the Service before the cluster, the firewall and the
 network. Civo removes the load balancer about 2.5 minutes after the Service is
@@ -346,6 +358,13 @@ token and name the variable. They also refuse while `CLOUDFLARE_API_KEY`,
 is set, because the Cloudflare provider would read those as well. `outputs`
 and `cell-health` need no token. Every later `preview`, `up`, `refresh` and
 `destroy` of the cell needs a valid token again.
+
+`witself-infra` replaces the token's value, and any text shaped like a
+Cloudflare token, in its final error line, in progress events and in the
+`cell-health` report (see [Variables to export](#variables-to-export)). The
+Pulumi CLI's own progress output is not filtered, and it can show in the clear
+the provider text that the final error line shows redacted. When you share the
+output of a failed run, share only the final `witself-infra:` line.
 
 Export the token in a terminal that runs only this cell's commands, and close
 that terminal afterwards. Other tools read the same variable name:
@@ -687,8 +706,12 @@ export WITSELF_INFRA_R2_ACCESS_KEY_ID WITSELF_INFRA_R2_SECRET_ACCESS_KEY WITSELF
 If a variable is absent, the command refuses and names it. The values are
 never written to `infra.yaml`. `witself-infra` replaces the three values in its
 final error line, in progress events and in the stack-output error of the
-`cell-health` report. Other output is not filtered: the Pulumi CLI writes its
-own progress to the terminal and into the dashboard's log files.
+`cell-health` report. In the same three places it also replaces the values of
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_API_KEY` and
+`CLOUDFLARE_API_USER_SERVICE_KEY`, and any text shaped like a prefixed
+Cloudflare credential (`cfut_`, `cfat_` or `cfk_` followed by at least eight
+letters, digits, `-` or `_`). Other output is not filtered: the Pulumi CLI
+writes its own progress to the terminal and into the dashboard's log files.
 
 Do not export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or
 `PULUMI_CONFIG_PASSPHRASE` for this purpose. Those names also reach the AWS

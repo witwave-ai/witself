@@ -42,6 +42,7 @@ func r2TestHome(t *testing.T) string {
 	t.Setenv("WITSELF_HOME", home)
 	t.Setenv("DSH_HOME", home)
 	t.Setenv("CIVO_TOKEN", "")
+	t.Setenv("CLOUDFLARE_API_TOKEN", "")
 	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "")
 	for n := range r2TestValues() {
 		t.Setenv(n, "")
@@ -74,6 +75,12 @@ func r2StubCLI(t *testing.T, minor, patch uint64, seamErr error) {
 	old := r2PulumiCLI
 	t.Cleanup(func() { r2PulumiCLI = old })
 	r2PulumiCLI = func() (auto.PulumiCommand, uint64, uint64, uint64, error) { return nil, 3, minor, patch, seamErr }
+}
+func r2StubCLICommand(t *testing.T, command auto.PulumiCommand) {
+	t.Helper()
+	old := r2PulumiCLI
+	t.Cleanup(func() { r2PulumiCLI = old })
+	r2PulumiCLI = func() (auto.PulumiCommand, uint64, uint64, uint64, error) { return command, 3, 265, 0, nil }
 }
 func r2StubCheck(t *testing.T, fn func(context.Context, backend.R2Settings, backend.R2Secrets, backend.R2CheckOptions) (backend.R2CheckReport, error)) {
 	t.Helper()
@@ -328,6 +335,9 @@ type r2FakePulumi struct {
 	auto.PulumiCommand
 	t                      *testing.T
 	missing, outputFailure bool
+	outputStderr           string
+	outputJSON             string
+	stopErr                error
 	selectErr              error
 	calls                  [][]string
 	env                    []string
@@ -352,7 +362,14 @@ func (f *r2FakePulumi) Run(_ context.Context, _ string, _ io.Reader, _, _ []io.W
 		for _, v := range r2TestValues() {
 			values = append(values, v)
 		}
+		if f.outputStderr != "" {
+			values = append(values, f.outputStderr)
+		}
 		return "", strings.Join(values, " "), 1, errors.New("fake output failed")
+	case len(args) > 1 && args[0] == "stack" && args[1] == "output" && f.outputJSON != "":
+		return f.outputJSON, "", 0, nil
+	case len(args) > 0 && args[0] == "config" && f.stopErr != nil:
+		return "", "fake stop", 1, f.stopErr
 	default:
 		f.t.Fatal("unexpected fake Pulumi command")
 		return "", "", 1, errors.New("unexpected command")
@@ -651,5 +668,234 @@ func TestOpenCellStackWrapsOtherErrors(t *testing.T) {
 	}
 	if len(f.calls) != 1 {
 		t.Fatal("generic select failure created stack")
+	}
+}
+
+const cloudflareTestToken = "test-cloudflare-token-not-real"
+
+// cloudflareShapeFake builds a fake prefixed Cloudflare credential at runtime,
+// so that no literal in the source has the shape of a real one.
+func cloudflareShapeFake(kind string) string {
+	return "cf" + kind + "_" + strings.Repeat("TestOnly", 5) + "c0ffee"
+}
+
+var cloudflareShapeTestToken = cloudflareShapeFake("ut")
+
+func TestRedactDiagnostic(t *testing.T) {
+	r2AndToken := r2TestValues()
+	r2AndToken["CLOUDFLARE_API_TOKEN"] = cloudflareTestToken
+	allValues := r2TestValues()
+	allValues["CLOUDFLARE_API_TOKEN"] = cloudflareTestToken
+	allValues["CLOUDFLARE_API_KEY"] = "test-cloudflare-key-not-real"
+	allValues["CLOUDFLARE_API_USER_SERVICE_KEY"] = "test-cloudflare-service-key-not-real"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		text string
+		want string
+	}{
+		{
+			name: "unset",
+			text: "x " + cloudflareTestToken + " y",
+			want: "x " + cloudflareTestToken + " y",
+		},
+		{
+			name: "value",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": cloudflareTestToken},
+			text: cloudflareTestToken + " and " + cloudflareTestToken,
+			want: "[redacted CLOUDFLARE_API_TOKEN] and [redacted CLOUDFLARE_API_TOKEN]",
+		},
+		{
+			name: "bearer",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": cloudflareTestToken},
+			text: "Authorization: Bearer " + cloudflareTestToken,
+			want: "Authorization: Bearer [redacted CLOUDFLARE_API_TOKEN]",
+		},
+		{
+			name: "padded export, bare echo",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": " " + cloudflareTestToken + "\n"},
+			text: "token " + cloudflareTestToken + " rejected",
+			want: "token [redacted CLOUDFLARE_API_TOKEN] rejected",
+		},
+		{
+			name: "padded export, padded echo",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": " " + cloudflareTestToken + "\n"},
+			text: "<" + " " + cloudflareTestToken + "\n" + ">",
+			want: "<[redacted CLOUDFLARE_API_TOKEN]>",
+		},
+		{
+			name: "short value",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": "abc1234"},
+			text: "abc1234 stays",
+			want: "abc1234 stays",
+		},
+		{
+			name: "empty value",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": ""},
+			text: "plain text",
+			want: "plain text",
+		},
+		{
+			name: "global key value",
+			env:  map[string]string{"CLOUDFLARE_API_KEY": "test-cloudflare-key-not-real"},
+			text: "key test-cloudflare-key-not-real",
+			want: "key [redacted CLOUDFLARE_API_KEY]",
+		},
+		{
+			name: "service key value",
+			env:  map[string]string{"CLOUDFLARE_API_USER_SERVICE_KEY": "test-cloudflare-service-key-not-real"},
+			text: "svc test-cloudflare-service-key-not-real",
+			want: "svc [redacted CLOUDFLARE_API_USER_SERVICE_KEY]",
+		},
+		{
+			name: "user token shape",
+			text: "token=" + cloudflareShapeTestToken + ";",
+			want: "token=[redacted Cloudflare token];",
+		},
+		{
+			name: "account token shape",
+			text: cloudflareShapeFake("at"),
+			want: "[redacted Cloudflare token]",
+		},
+		{
+			name: "global key shape",
+			text: cloudflareShapeFake("k"),
+			want: "[redacted Cloudflare token]",
+		},
+		{
+			name: "short shape",
+			text: "cf" + "ut_short",
+			want: "cf" + "ut_short",
+		},
+		{
+			name: "value before shape",
+			env:  map[string]string{"CLOUDFLARE_API_TOKEN": cloudflareShapeTestToken},
+			text: "t " + cloudflareShapeTestToken,
+			want: "t [redacted CLOUDFLARE_API_TOKEN]",
+		},
+		{
+			name: "R2 kept",
+			env:  r2AndToken,
+			text: r2AndToken["WITSELF_INFRA_R2_ACCESS_KEY_ID"] + " " + r2AndToken["WITSELF_INFRA_R2_SECRET_ACCESS_KEY"] + " " + r2AndToken["WITSELF_INFRA_STATE_PASSPHRASE"] + " " + cloudflareTestToken,
+			want: "[redacted WITSELF_INFRA_R2_ACCESS_KEY_ID] [redacted WITSELF_INFRA_R2_SECRET_ACCESS_KEY] [redacted WITSELF_INFRA_STATE_PASSPHRASE] [redacted CLOUDFLARE_API_TOKEN]",
+		},
+		{
+			name: "names never redacted",
+			env:  allValues,
+			text: civoMissingCloudflareMessage,
+			want: civoMissingCloudflareMessage,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if redactDiagnostic(tc.text, func(name string) string { return tc.env[name] }) != tc.want {
+				t.Fatal(tc.name)
+			}
+		})
+	}
+}
+
+func TestExitsRedactCloudflareCredentials(t *testing.T) {
+	for _, set := range []bool{false, true} {
+		t.Run(fmt.Sprint(set), func(t *testing.T) {
+			r2TestHome(t)
+			want := "Authorization: Bearer " + cloudflareTestToken + " [redacted Cloudflare token]"
+			if set {
+				t.Setenv("CLOUDFLARE_API_TOKEN", cloudflareTestToken)
+				want = "Authorization: Bearer [redacted CLOUDFLARE_API_TOKEN] [redacted Cloudflare token]"
+			}
+			text := "Authorization: Bearer " + cloudflareTestToken + " " + cloudflareShapeTestToken
+			if fatalMessage(errors.New(text), os.Getenv) != "witself-infra: "+want {
+				t.Fatal("fatal")
+			}
+			var buf bytes.Buffer
+			p := progressSink{w: &buf}
+			p.errPhase(r2TestCell, "test", errors.New(text))
+			var event progressEvent
+			if bytes.Count(buf.Bytes(), []byte("\n")) != 1 || json.Unmarshal(buf.Bytes(), &event) != nil || event.Note != want {
+				t.Fatal("progress")
+			}
+		})
+	}
+}
+
+func TestCellHealthReportRedactsCloudflareCredentials(t *testing.T) {
+	r2TestHome(t)
+	for n, v := range r2TestValues() {
+		t.Setenv(n, v)
+	}
+	t.Setenv("CLOUDFLARE_API_TOKEN", cloudflareTestToken)
+	f := &r2FakePulumi{t: t, outputFailure: true, outputStderr: "Authorization: Bearer " + cloudflareTestToken + " " + cloudflareShapeTestToken}
+	stack, err := openCellStack(context.Background(), "r2", "cell-health", r2TestCell, r2TestSettings.Bucket, auto.WorkDir(t.TempDir()), auto.Pulumi(f))
+	if err != nil {
+		t.Fatal("fake stack select failed")
+	}
+	capture, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal("capture creation failed")
+	}
+	defer func() { _ = capture.Close() }()
+	old := os.Stdout
+	os.Stdout = capture
+	defer func() { os.Stdout = old }()
+	_ = printCellHealth(context.Background(), stack, "civo", "nyc1", "", false, time.Second)
+	os.Stdout = old
+	if _, err := capture.Seek(0, 0); err != nil {
+		t.Fatal("capture seek failed")
+	}
+	var report struct {
+		Kubernetes struct {
+			Detail string `json:"detail"`
+		} `json:"kubernetes"`
+	}
+	if json.NewDecoder(capture).Decode(&report) != nil {
+		t.Fatal("health JSON invalid")
+	}
+	detail := report.Kubernetes.Detail
+	if !strings.HasPrefix(detail, "read stack outputs: ") {
+		t.Fatal("missing output error prefix")
+	}
+	for n, v := range r2TestValues() {
+		if strings.Contains(detail, v) || !strings.Contains(detail, "[redacted "+n+"]") {
+			t.Fatal("R2")
+		}
+	}
+	if strings.Contains(detail, cloudflareTestToken) || strings.Contains(detail, cloudflareShapeTestToken) || !strings.Contains(detail, "[redacted CLOUDFLARE_API_TOKEN]") || !strings.Contains(detail, "[redacted Cloudflare token]") {
+		t.Fatal("Cloudflare")
+	}
+}
+
+func TestDiagnosticRedactionEntryPoints(t *testing.T) {
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal("source glob failed")
+	}
+	backendCalls := 0
+	fatalPrints := 0
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("source read failed")
+		}
+		source := string(data)
+		calls := strings.Count(source, "backend.RedactR2Secrets(")
+		backendCalls += calls
+		if calls != 0 && path != "state_r2.go" {
+			t.Fatal("backend redaction location")
+		}
+		if strings.Contains(source, "redactR2(") {
+			t.Fatal("legacy redaction")
+		}
+		if path == "main.go" {
+			fatalPrints = strings.Count(source, "fmt.Fprintln(os.Stderr, fatalMessage(err, os.Getenv))")
+		}
+	}
+	if backendCalls != 1 {
+		t.Fatal("backend redaction count")
+	}
+	if fatalPrints != 1 {
+		t.Fatal("fatal print count")
 	}
 }
