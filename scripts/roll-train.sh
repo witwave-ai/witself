@@ -274,7 +274,7 @@ wait_pr_checks() {
 }
 
 wait_merge_ci() {
-  local oid=$1 deadline=$((SECONDS + CI_TIMEOUT)) runs
+  local oid=$1 deadline=$((SECONDS + CI_TIMEOUT)) runs candidates head status conclusion waiting limit
   while :; do
     runs=$(run_before "$deadline" "post-merge CI ($oid)" gh run list \
       --workflow ci.yml --branch main --event push --commit "$oid" \
@@ -283,7 +283,8 @@ wait_merge_ci() {
       type == "array" and all(.[]; .headSha == $oid and
         (.status == "queued" or .status == "in_progress" or
          .status == "waiting" or .status == "pending" or .status == "requested" or
-         (.status == "completed" and .conclusion == "success")))
+         (.status == "completed" and
+           (.conclusion == "success" or .conclusion == "cancelled"))))
       ' >/dev/null || die "post-merge CI failed or returned an unexpected run for $oid"
     if printf '%s\n' "$runs" | jq -e \
       'length == 1 and .[0].status == "completed" and .[0].conclusion == "success"' >/dev/null; then
@@ -291,7 +292,51 @@ wait_merge_ci() {
       log "Post-merge CI verified: $oid"
       return
     fi
-    log "Waiting for post-merge CI: $oid"
+    waiting="Waiting for post-merge CI: $oid"
+    if printf '%s\n' "$runs" | jq -e \
+      'length == 1 and .[0].status == "completed" and .[0].conclusion == "cancelled"' >/dev/null; then
+      limit=100
+      while :; do
+        runs=$(run_before "$deadline" "post-merge CI ($oid)" gh run list \
+          --workflow ci.yml --branch main --event push --limit "$limit" \
+          --json headSha,status,conclusion,createdAt)
+        printf '%s\n' "$runs" | jq -e '
+          type == "array" and all(.[];
+            (.headSha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.createdAt | type == "string" and length > 0))
+          ' >/dev/null || die "post-merge CI failed or returned an unexpected run for $oid"
+        # Fetch after listing so the returned heads are available for ancestry
+        # checks. Both operations share the own run's original deadline.
+        run_before "$deadline" "post-merge CI ($oid)" git fetch origin main >/dev/null
+        candidates=$(printf '%s\n' "$runs" | jq -r --arg oid "$oid" '
+          sort_by(.createdAt) | reverse | .[] | select(.headSha != $oid) |
+          [.headSha, .status, .conclusion] | @tsv')
+        while IFS=$'\t' read -r head status conclusion; do
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || continue
+          if run_before "$deadline" "post-merge CI ($oid)" \
+            git merge-base --is-ancestor "$oid" "$head" >/dev/null; then
+            case "$status/$conclusion" in
+              completed/success)
+                [ "$SECONDS" -lt "$deadline" ] || die "post-merge CI ($oid) timed out"
+                log "Post-merge CI verified: $oid (own run cancelled; covered by $head)"
+                return
+                ;;
+              queued/*|in_progress/*|waiting/*|pending/*|requested/*)
+                waiting="Waiting for post-merge CI: $oid (own run cancelled; waiting on $head)"
+                ;;
+              *) die "post-merge CI failed for $head, which contains $oid" ;;
+            esac
+            # Only the newest descendant run can certify this wave.
+            break 2
+          fi
+        done <<<"$candidates"
+        # gh lists newest runs first. Widen a full result window rather than
+        # treating a fixed lookback with no descendants as complete history.
+        [ "$(printf '%s\n' "$runs" | jq 'length')" -eq "$limit" ] || break
+        limit=$((limit * 2))
+      done
+    fi
+    log "$waiting"
     pause_until "$deadline" "post-merge CI ($oid)"
   done
 }
