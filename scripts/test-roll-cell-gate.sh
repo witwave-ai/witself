@@ -43,6 +43,11 @@ REGISTRY_CASE=index
 BACKUP_REGISTRY_CASE=index
 POSTGRES_REGISTRY_CASE=index
 REGISTRY_LOG="$TEST_ROOT/registry.log"
+KUBECTL_LOG="$TEST_ROOT/kubectl.log"
+PROBE_LOG="$TEST_ROOT/probe.log"
+KUBE_CONTEXTS=
+KUBECTL_EXIT=0
+PROBE_EXIT=6
 
 mkdir -p \
   "$REPO_ROOT/.gitops/cells/$CELL" \
@@ -170,6 +175,16 @@ import sys
 args = sys.argv[1:]
 assert args[0] == '-q', 'curl must ignore user configuration'
 url = args[-1]
+if url.startswith('https://api.'):
+    # First-sync probe of the cell's API host; never a registry request.
+    assert url == 'https://api.' + os.environ['WITSELF_POSTGRES_CELL'] + '.cells.witself.witwave.ai/v1/version'
+    assert args[args.index('--proto') + 1] == '=https'
+    assert args[args.index('--noproxy') + 1] == '*'
+    assert '--connect-timeout' in args and '--max-time' in args
+    assert '--fail' not in args and '--location' not in args
+    with open(os.environ['WITSELF_PROBE_LOG'], 'a') as log:
+        log.write('probe ' + url + '\n')
+    sys.exit(int(os.environ['WITSELF_PROBE_EXIT']))
 if url == 'https://ghcr.io/token':
     scope = next(arg for arg in args if arg.startswith('scope=repository:'))
     repository = scope.removeprefix('scope=repository:').removesuffix(':pull')
@@ -258,6 +273,21 @@ exit "${WITSELF_ADMIN_STUB_EXIT:-0}"
 EOF_ADMIN
 chmod +x "$STUB_BIN/witself-admin"
 
+cat >"$STUB_BIN/kubectl" <<'EOF_KUBECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"$WITSELF_KUBECTL_LOG"
+[ "$*" = 'config get-contexts -o name' ] || exit 97
+if [ "$WITSELF_KUBECTL_EXIT" -ne 0 ]; then
+  exit "$WITSELF_KUBECTL_EXIT"
+fi
+for context in $WITSELF_KUBE_CONTEXTS; do
+  printf '%s\n' "$context"
+done
+EOF_KUBECTL
+chmod +x "$STUB_BIN/kubectl"
+
 # A differently named override stub, outside PATH, proves WITSELF_ADMIN_BIN is
 # the binary actually invoked and not merely the one checked for existence.
 cat >"$OVERRIDE_ADMIN" <<'EOF_OVERRIDE'
@@ -276,13 +306,16 @@ chmod +x "$OVERRIDE_ADMIN"
 reset_case() {
   cp "$BASELINE" "$VALUES"
   cp "$TEST_ROOT/postgres-mirror.baseline.json" "$REPO_ROOT/images/postgresql/mirror.json"
-  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$TEST_ROOT/expected-digest" "$TEST_ROOT/expected-digest.backup" "$TEST_ROOT/expected-digest.postgres"
+  rm -f "$ADMIN_LOG" "$CASE_OUTPUT" "$REGISTRY_LOG" "$KUBECTL_LOG" "$PROBE_LOG" "$TEST_ROOT/expected-digest" "$TEST_ROOT/expected-digest.backup" "$TEST_ROOT/expected-digest.postgres"
   ROLL_PATH="$DEFAULT_ROLL_PATH"
   ADMIN_BIN=
   ADMIN_EXIT=0
   REGISTRY_CASE=index
   BACKUP_REGISTRY_CASE=index
   POSTGRES_REGISTRY_CASE=index
+  KUBE_CONTEXTS=
+  KUBECTL_EXIT=0
+  PROBE_EXIT=6
 }
 
 run_roll() {
@@ -297,6 +330,11 @@ run_roll() {
     export WITSELF_EXPECTED_DIGEST="$TEST_ROOT/expected-digest"
     export WITSELF_ADMIN_LOG="$ADMIN_LOG"
     export WITSELF_ADMIN_STUB_EXIT="$ADMIN_EXIT"
+    export WITSELF_KUBECTL_LOG="$KUBECTL_LOG"
+    export WITSELF_KUBE_CONTEXTS="$KUBE_CONTEXTS"
+    export WITSELF_KUBECTL_EXIT="$KUBECTL_EXIT"
+    export WITSELF_PROBE_LOG="$PROBE_LOG"
+    export WITSELF_PROBE_EXIT="$PROBE_EXIT"
     if [ -n "$ADMIN_BIN" ]; then
       export WITSELF_ADMIN_BIN="$ADMIN_BIN"
     else
@@ -483,6 +521,7 @@ expect_output "warning: operator attests release $VERSION cannot advance the dat
   "--no-schema-change"
 [ ! -e "$ADMIN_LOG" ] || fail "--no-schema-change invoked the verifier"
 assert_values "$ROLLED" "--no-schema-change"
+[ ! -e "$KUBECTL_LOG" ] && [ ! -e "$PROBE_LOG" ] || fail 'an ordinary roll ran a first-sync check'
 expect_output "rolled $CELL to $VERSION (apps.witselfServer.chartVersion + imageTag + imageDigest)" \
   "server-only roll summary"
 if grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG"; then
@@ -516,6 +555,7 @@ cmp -s "$TEST_ROOT/admin.expected" "$ADMIN_LOG" ||
   fail "verifier argv or invocation count was incorrect"
 expect_output "backup evidence verified for release $VERSION" "verified backup evidence"
 assert_values "$ROLLED" "verified backup evidence"
+[ ! -e "$KUBECTL_LOG" ] && [ ! -e "$PROBE_LOG" ] || fail 'an ordinary roll ran a first-sync check'
 
 # A train always forwards its selected pair. The explicit default pair must
 # reach the verifier exactly as the standalone default does.
@@ -932,6 +972,161 @@ for serving_cell in civo-sandbox-use1-serving civo-prod-use1-serving; do (
   [ ! -e "$REGISTRY_LOG" ] || fail 'uncovered target contacted registry'
   assert_values "$BASELINE" 'uncovered target'
 ); done
+
+# First-sync eligibility is established independently of the committed marker.
+# All kube and API operations remain offline, with their order visible in logs.
+cp "$REPO_ROOT/.gitops/cells/catalog.yaml" "$TEST_ROOT/catalog.baseline.yaml"
+set_first_sync_marker() {
+  python3 - "$REPO_ROOT/.gitops/cells/catalog.yaml" "$1" <<'EOF_FIRST_SYNC_MARKER'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+mode = sys.argv[2]
+assert mode in ('marked', 'unmarked')
+lines = []
+in_cell = False
+found = False
+for line in path.read_text().splitlines(keepends=True):
+    if line.startswith('  ') and not line.startswith('   ') and line.rstrip().endswith(':'):
+        in_cell = line == '  civo-prod-use1-serving:\n'
+        if in_cell:
+            found = True
+            lines.append(line)
+            if mode == 'marked':
+                lines.append('    unprovisioned: true\n')
+            continue
+    if in_cell and line.startswith('    unprovisioned:'):
+        continue
+    lines.append(line)
+assert found
+path.write_text(''.join(lines))
+EOF_FIRST_SYNC_MARKER
+}
+(
+  reset_case
+  CELL=civo-prod-use1-serving
+  VALUES="$REPO_ROOT/.gitops/cells/$CELL/values.yaml"
+  BASELINE="$TEST_ROOT/first-sync-values.baseline.yaml"
+  cp "$VALUES" "$BASELINE"
+  set_first_sync_marker marked
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 || fail 'first-sync fixture has generation drift'
+
+  first_sync_checks_logged() {
+    local label=$1
+    [ -e "$KUBECTL_LOG" ] && [ "$(cat "$KUBECTL_LOG")" = 'config get-contexts -o name' ] ||
+      fail "$label did not list only kube context names exactly once"
+    [ -e "$PROBE_LOG" ] && [ "$(cat "$PROBE_LOG")" = "probe https://api.$CELL.cells.witself.witwave.ai/v1/version" ] ||
+      fail "$label did not probe the exact API host exactly once"
+  }
+
+  first_sync_refused() {
+    local label=$1 expected=$2 stage=$3 version=$4
+    shift 4
+    if run_roll "$CELL" "$version" "$@" >"$CASE_OUTPUT" 2>&1; then
+      fail "$label unexpectedly succeeded"
+    fi
+    expect_output "$expected" "$label"
+    [ ! -e "$REGISTRY_LOG" ] || fail "$label contacted registry"
+    [ ! -e "$ADMIN_LOG" ] || fail "$label invoked the verifier"
+    assert_values "$BASELINE" "$label"
+    case "$stage" in
+      before-kubectl)
+        [ ! -e "$KUBECTL_LOG" ] && [ ! -e "$PROBE_LOG" ] ||
+          fail "$label ran a live check before eligibility"
+        ;;
+      before-probe)
+        [ -e "$KUBECTL_LOG" ] && [ "$(cat "$KUBECTL_LOG")" = 'config get-contexts -o name' ] ||
+          fail "$label did not list only kube context names exactly once"
+        [ ! -e "$PROBE_LOG" ] || fail "$label probed before the context check passed"
+        ;;
+      after-probe) first_sync_checks_logged "$label" ;;
+      *) fail "$label used an unknown refusal stage" ;;
+    esac
+  }
+
+  first_sync_warning="warning: first sync of $CELL: recorded unprovisioned in the catalog, no kube context witself-$CELL, and api.$CELL.cells.witself.witwave.ai could not be resolved from this host (curl exit 6); backup evidence skipped because a cell that was never provisioned has no database"
+
+  # S1: only an exact context match refuses; the default roll pins the server.
+  reset_case
+  KUBE_CONTEXTS="witself-civo-sandbox-use1-serving witself-$CELL-old"
+  PROBE_EXIT=6
+  run_roll "$CELL" "$VERSION" --first-sync >"$CASE_OUTPUT" 2>&1 ||
+    fail 'S1 first sync did not proceed'
+  expect_output "$first_sync_warning" 'S1 first sync'
+  [ ! -e "$ADMIN_LOG" ] || fail 'S1 first sync invoked the verifier'
+  first_sync_checks_logged 'S1 first sync'
+  assert_values "$ROLLED" 'S1 first sync'
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 || fail 'first-sync fixture has generation drift'
+  if grep -Fq 'witself-postgres-backup' "$REGISTRY_LOG" || grep -Fq 'witwave-ai/images/postgresql' "$REGISTRY_LOG"; then
+    fail 'S1 first sync contacted an image registry without opt-in'
+  fi
+
+  # S2: all three image pins remain generated, and an equal-version repeat is inert.
+  reset_case
+  PROBE_EXIT=6
+  POSTGRES_REGISTRY_CASE=single
+  run_roll "$CELL" "$VERSION" --first-sync --backup-image --postgres-image >"$CASE_OUTPUT" 2>&1 ||
+    fail 'S2 first sync with all image pins did not proceed'
+  expect_output "$first_sync_warning" 'S2 first sync'
+  [ ! -e "$ADMIN_LOG" ] || fail 'S2 first sync invoked the verifier'
+  first_sync_checks_logged 'S2 first sync'
+  assert_values "$ROLLED" 'S2 first sync' true true
+  expect_output "backup image pinned to ghcr.io/witwave-ai/images/witself-postgres-backup:$VERSION by digest" 'S2 first sync'
+  expect_output "PostgreSQL image mirrored to ghcr.io/witwave-ai/images/postgresql:$VERSION-$CELL at its existing digest" 'S2 first sync'
+  "$TEST_ROOT/generator" --check --root "$REPO_ROOT" >"$TEST_ROOT/check.output" 2>&1 || fail 'first-sync fixture has generation drift'
+  cp "$VALUES" "$TEST_ROOT/first-sync-repeat.values.yaml"
+  rm -f "$REGISTRY_LOG" "$KUBECTL_LOG" "$PROBE_LOG"
+  run_roll "$CELL" "$VERSION" --first-sync --backup-image --postgres-image >"$CASE_OUTPUT" 2>&1 ||
+    fail 'S2 repeated first sync did not proceed'
+  cmp -s "$VALUES" "$TEST_ROOT/first-sync-repeat.values.yaml" || fail 'S2 repeated first sync changed values'
+  expect_output "$first_sync_warning" 'S2 repeated first sync'
+  [ ! -e "$ADMIN_LOG" ] || fail 'S2 repeated first sync invoked the verifier'
+  first_sync_checks_logged 'S2 repeated first sync'
+
+  # R1-R3: gate selection conflicts refuse before inspecting local contexts.
+  first_sync_conflict='--first-sync cannot be combined with --no-schema-change, --backup-evidence, or --evidence-cells'
+  reset_case
+  first_sync_refused R1 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --no-schema-change
+  reset_case
+  first_sync_refused R2 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --backup-evidence "$EVIDENCE_A"
+  reset_case
+  first_sync_refused R3 "$first_sync_conflict" before-kubectl "$VERSION" --first-sync --evidence-cells "civo-sandbox-use1-backup,$CELL"
+
+  # R4-R5: the catalog marker and version checks precede both live checks.
+  reset_case
+  set_first_sync_marker unmarked
+  first_sync_refused R4 "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release $VERSION" before-kubectl "$VERSION" --first-sync
+  expect_output 'first sync: cell is not recorded as unprovisioned in .gitops/cells/catalog.yaml' R4
+  set_first_sync_marker marked
+  reset_case
+  first_sync_refused R5 "first sync refused: $CELL is not recorded as an unprovisioned catalog cell eligible for release 0.0.1" before-kubectl 0.0.1 --first-sync
+  expect_output 'first sync: target 0.0.1 is lower than the pinned chartVersion' R5
+
+  # R6-R7: a context or an unsuccessful names-only listing fails closed.
+  reset_case
+  KUBE_CONTEXTS="witself-civo-sandbox-use1-backup witself-$CELL"
+  first_sync_refused R6 "first sync refused: kube context witself-$CELL exists; the cell may be provisioned" before-probe "$VERSION" --first-sync
+  for kube_exit in 1 127; do
+    reset_case
+    KUBECTL_EXIT=$kube_exit
+    first_sync_refused "R7 exit $kube_exit" "first sync refused: could not list kube contexts (kubectl exit $kube_exit)" before-probe "$VERSION" --first-sync
+  done
+
+  # R8: only curl exit 6 corroborates the marker, even with both image opt-ins.
+  for probe_exit in 0 7 28 35 60; do
+    reset_case
+    PROBE_EXIT=$probe_exit
+    first_sync_refused "R8 exit $probe_exit" "first sync refused: https://api.$CELL.cells.witself.witwave.ai/v1/version did not fail name resolution (curl exit $probe_exit); the cell may be provisioned" after-probe "$VERSION" --first-sync --backup-image --postgres-image
+  done
+
+  # R9-R10: passing first-sync eligibility does not bypass release checks.
+  reset_case
+  first_sync_refused R9 'release tag v1.2.2 is not available locally' after-probe 1.2.2 --first-sync
+  reset_case
+  first_sync_refused R10 'release v1.2.6 has no PostgreSQL mirror descriptor' after-probe 1.2.6 --first-sync --postgres-image
+)
+cp "$TEST_ROOT/catalog.baseline.yaml" "$REPO_ROOT/.gitops/cells/catalog.yaml"
 
 # Explicit registry tag validation rejects paths, options, and duplicates
 # before curl; the PostgreSQL success cases prove valid suffixed tags work.

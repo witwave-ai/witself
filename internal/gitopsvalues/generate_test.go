@@ -370,6 +370,16 @@ func TestProductionServingOnboarding(t *testing.T) {
 	if cell.Switches.Monitoring || cell.Switches.SealedPlaneAlerts || cell.Switches.PostgresBackup || cell.Switches.MemoryAlerts {
 		t.Fatal("production operational switches must remain dark")
 	}
+	var unprovisioned []string
+	for name, entry := range cfg.Cells {
+		if entry.Unprovisioned {
+			unprovisioned = append(unprovisioned, name)
+		}
+	}
+	sort.Strings(unprovisioned)
+	if !reflect.DeepEqual(unprovisioned, []string{"civo-prod-use1-serving"}) {
+		t.Fatal("civo-prod-use1-serving must be the only unprovisioned cell; remove its catalog marker and this expectation together before its first witself-infra preview")
+	}
 	charts, err := loadChartPins(root)
 	if err != nil {
 		t.Fatal(err)

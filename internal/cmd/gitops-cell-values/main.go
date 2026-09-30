@@ -20,6 +20,7 @@ func run(args []string) int {
 	check := fs.Bool("check", false, "exit non-zero with a unified diff when generated files differ")
 	write := fs.Bool("write", false, "rewrite generated files that differ")
 	rollCell := fs.String("roll-cell", "", "roll exactly one existing catalog cell; sanctioned only via scripts/roll-cell.sh, which guarantees the digest matches the tag")
+	firstSyncCheck := fs.String("first-sync-check", "", "read-only: print the API host of CELL when the catalog records it unprovisioned and its pins are not newer than --version; used by scripts/roll-cell.sh --first-sync")
 	version := fs.String("version", "", "release chart version and image tag for --roll-cell")
 	imageDigest := fs.String("image-digest", "", "required sha256 image digest for --roll-cell")
 	backupRepository := fs.String("backup-image-repository", "", "optional backup image repository for --roll-cell; requires tag and digest")
@@ -31,7 +32,7 @@ func run(args []string) int {
 	postgresDigest := fs.String("postgres-image-digest", "", "PostgreSQL mirror sha256 digest for --roll-cell; must preserve the existing image content")
 	root := fs.String("root", ".", "repository root containing .gitops/cells")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST\n         [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST]\n         [--postgres-image-registry REGISTRY --postgres-image-repository REPOSITORY --postgres-image-tag TAG --postgres-image-digest DIGEST] [--root PATH]\n")
+		_, _ = fmt.Fprintf(fs.Output(), "usage: gitops-cell-values --check|--write [--root PATH]\n       gitops-cell-values --roll-cell CELL --version VERSION --image-digest DIGEST\n         [--backup-image-repository REPOSITORY --backup-image-tag TAG --backup-image-digest DIGEST]\n         [--postgres-image-registry REGISTRY --postgres-image-repository REPOSITORY --postgres-image-tag TAG --postgres-image-digest DIGEST] [--root PATH]\n       gitops-cell-values --first-sync-check CELL --version VERSION [--root PATH]\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -42,18 +43,26 @@ func run(args []string) int {
 		return 2
 	}
 	modeCount := 0
-	for _, selected := range []bool{*check, *write, *rollCell != ""} {
+	for _, selected := range []bool{*check, *write, *rollCell != "", *firstSyncCheck != ""} {
 		if selected {
 			modeCount++
 		}
 	}
 	if modeCount != 1 {
 		fs.Usage()
-		_, _ = fmt.Fprintln(os.Stderr, "error: exactly one of --check, --write, or --roll-cell is required")
+		_, _ = fmt.Fprintln(os.Stderr, "error: exactly one of --check, --write, --roll-cell, or --first-sync-check is required")
 		return 2
 	}
-	if *rollCell == "" && (*version != "" || *imageDigest != "") {
-		_, _ = fmt.Fprintln(os.Stderr, "error: --version and --image-digest require --roll-cell")
+	if *rollCell == "" && *imageDigest != "" {
+		_, _ = fmt.Fprintln(os.Stderr, "error: --image-digest requires --roll-cell")
+		return 2
+	}
+	if *rollCell == "" && *firstSyncCheck == "" && *version != "" {
+		_, _ = fmt.Fprintln(os.Stderr, "error: --version requires --roll-cell or --first-sync-check")
+		return 2
+	}
+	if *firstSyncCheck != "" && *version == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "error: --first-sync-check requires --version")
 		return 2
 	}
 	if *rollCell != "" && (*version == "" || *imageDigest == "") {
@@ -75,6 +84,15 @@ func run(args []string) int {
 			return 2
 		}
 		postgres = &gitopsvalues.PostgresImagePins{Registry: *postgresRegistry, Repository: *postgresRepository, Tag: *postgresTag, Digest: *postgresDigest}
+	}
+	if *firstSyncCheck != "" {
+		host, err := gitopsvalues.FirstSyncCheck(*root, *firstSyncCheck, *version)
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_, _ = fmt.Fprintln(os.Stdout, host)
+		return 0
 	}
 	var err error
 	if *check {

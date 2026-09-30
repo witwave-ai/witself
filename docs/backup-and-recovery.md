@@ -847,6 +847,8 @@ switch, following the
 target release. Always pass that evidence with `--backup-evidence`; never use
 `--no-schema-change` for this restart operation.
 
+A cell that has never been provisioned has no database and no StatefulSet to restart. Its first PostgreSQL pin is written with `scripts/roll-cell.sh CELL VERSION --first-sync --postgres-image` (see [the runbook](runbooks.md)), which refuses unless the catalog records the cell as unprovisioned, no kube context for it exists and its API host cannot be resolved.
+
 After the first release containing the mirror:
 
 1. Open the `witwave-ai` organization's GitHub Packages page, select
