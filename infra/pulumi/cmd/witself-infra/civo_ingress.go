@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
 
 var civoNodeSizes = map[string]bool{"g4s.kube.medium": true, "g4s.kube.large": true}
@@ -81,4 +84,50 @@ func civoStackConfig(region, nodeSize, adminCIDR, ingress, dns, domain string) (
 	set["witself:civoDNS"] = dns
 	set["witself:domain"] = domain
 	return set, []string{"witself:cidr", "witself:dbVersion", "witself:cloudflareDNS"}
+}
+
+// refuseCivoAPIHostChange reads the stack's recorded outputs once and refuses
+// a preview or up whose program would serve a different apiHost. It runs
+// before any stack setting is written, so a refused run changes nothing. It
+// reads no control plane: a cell with a recorded host may be registered.
+func refuseCivoAPIHostChange(ctx context.Context, outputs stackOutputsReader, cmd, cellName, ingress, domain string, argocd bool) error {
+	outs, err := outputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read the recorded outputs of cell %s before %s: %w", cellName, cmd, err)
+	}
+	return checkCivoAPIHost(cmd, cellName, ingress, domain, argocd, outs)
+}
+
+// checkCivoAPIHost predicts the host the Civo program serves (see
+// internal/cell/civo.go) and compares it with the recorded apiHost. A missing
+// or empty recorded apiHost means the cell was never registered; a recorded
+// apiHost that is not a string is refused.
+func checkCivoAPIHost(cmd, cellName, ingress, domain string, argocd bool, outs auto.OutputMap) error {
+	raw, present := outs["apiHost"]
+	recorded, isString := raw.Value.(string)
+	if present && !isString {
+		return fmt.Errorf("cell %s has a recorded apiHost that is not a string, so this %s cannot show that the host stays the same. A cell that may be registered with a control plane keeps its host: provision a new cell, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cellName, cmd)
+	}
+	if recorded == "" {
+		return nil
+	}
+	next := ""
+	switch {
+	case ingress == "loadbalancer":
+		next = "api." + cellName + "." + strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	case argocd:
+		entry, _ := outs["civoDNSEntry"].Value.(string)
+		if entry == "" {
+			return fmt.Errorf("cell %s has the recorded apiHost %q but no recorded civoDNSEntry, so this %s cannot show that the host stays the same. A cell that may be registered with a control plane keeps its host: provision a new cell, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cellName, recorded, cmd)
+		}
+		next = "api." + entry
+	}
+	if next == recorded {
+		return nil
+	}
+	target := "no host"
+	if next != "" {
+		target = fmt.Sprintf("%q", next)
+	}
+	return fmt.Errorf("cell %s has the recorded apiHost %q, and this %s would change it to %s. A cell that may be registered with a control plane keeps its host: restore this cell's previous civo_ingress, domain and argocd settings, or provision a new cell with the new settings, move its accounts there (witself-admin cells evacuate, then cells restore) and destroy this cell once it is empty", cellName, recorded, cmd, target)
 }

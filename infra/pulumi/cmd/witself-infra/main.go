@@ -867,6 +867,13 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// A registered cell keeps its host: refuse before any stack setting or
+	// apply would move it.
+	if *cloud == "civo" && (cmd == "up" || cmd == "preview") {
+		if err := refuseCivoAPIHostChange(ctx, stack.Outputs, cmd, cellName, *civoIngress, *domain, *argocd); err != nil {
+			return err
+		}
+	}
 
 	// On the s3 backend, persist the KMS secrets provider into the (ephemeral)
 	// workspace's stack settings. auto.SecretsProvider only applies on stack

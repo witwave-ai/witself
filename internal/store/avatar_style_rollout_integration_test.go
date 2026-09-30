@@ -623,8 +623,12 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 		_ = profileLock.Rollback(ctx)
 		t.Fatal(err)
 	}
-	callCtx, cancelCall := context.WithTimeout(ctx, 150*time.Millisecond)
-	result, err := st.processAvatarStyleRolloutBatch(callCtx, 1, time.Second)
+	// The caller's deadline must expire while the batch waits on the held
+	// profile lock, after candidate discovery has found the job. Leave
+	// discovery ample time on a loaded host, and keep the batch's own timeout
+	// well above the caller's so the caller cancels first.
+	callCtx, cancelCall := context.WithTimeout(ctx, 3*time.Second)
+	result, err := st.processAvatarStyleRolloutBatch(callCtx, 1, 30*time.Second)
 	cancelCall()
 	if !errors.Is(err, context.DeadlineExceeded) || !result.Found {
 		_ = profileLock.Rollback(ctx)

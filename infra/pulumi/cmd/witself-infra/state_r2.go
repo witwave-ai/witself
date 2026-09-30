@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
+	"regexp"
+	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
@@ -146,7 +147,31 @@ func runStateCheck(ctx context.Context, out io.Writer, s backend.R2Settings, sec
 	return nil
 }
 
-func redactR2(text string) string { return backend.RedactR2Secrets(text, os.Getenv) }
+// cloudflareSecretEnv lists the Cloudflare credentials that the Cloudflare
+// provider reads from the environment of the Pulumi process.
+var cloudflareSecretEnv = []string{"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CLOUDFLARE_API_USER_SERVICE_KEY"}
+
+// cloudflareTokenShape matches the prefixed Cloudflare credential formats:
+// user API tokens, account API tokens and global API keys.
+var cloudflareTokenShape = regexp.MustCompile(`cf(?:ut|at|k)_[A-Za-z0-9_-]{8,}`)
+
+// redactDiagnostic replaces credential values in diagnostic text: the three
+// R2 values, each Cloudflare credential of cloudflareSecretEnv as exported and
+// without surrounding whitespace, and any text shaped like a prefixed
+// Cloudflare credential. A value shorter than 8 characters is never replaced.
+func redactDiagnostic(text string, getenv func(string) string) string {
+	text = backend.RedactR2Secrets(text, getenv)
+	for _, name := range cloudflareSecretEnv {
+		value := getenv(name)
+		for _, v := range []string{value, strings.TrimSpace(value)} {
+			if len(v) >= 8 {
+				text = strings.ReplaceAll(text, v, "[redacted "+name+"]")
+			}
+		}
+	}
+	return cloudflareTokenShape.ReplaceAllString(text, "[redacted Cloudflare token]")
+}
+
 func fatalMessage(err error, getenv func(string) string) string {
-	return "witself-infra: " + backend.RedactR2Secrets(err.Error(), getenv)
+	return "witself-infra: " + redactDiagnostic(err.Error(), getenv)
 }
