@@ -2713,3 +2713,101 @@ test("dmarc rejection still fires from the shared extraction on v2", async () =>
   assert.equal(fetched, false);
   assert.equal(mail.rejected.length, 1);
 });
+
+const cellVerdictContract = JSON.parse(
+  await readFile(new URL("./cell-verdict-contract.json", import.meta.url), "utf8"),
+);
+
+test("every cell answer in the shared verdict contract keeps its edge disposition", async () => {
+  assert.equal(cellVerdictContract.schema, "witself.agent-email.cell-verdict-contract.v1");
+  assert.equal(cellVerdictContract.cases.length, 17);
+  const deferral = cellVerdictContract.cases.find((row) => row.name === "cohort_deferred");
+  assert.deepEqual(
+    [deferral.status, deferral.verdict, deferral.edge, deferral.edge_outcome],
+    [503, "temporary", "defer", "tempfail_cell_response"],
+  );
+  for (const row of cellVerdictContract.cases) {
+    const points = [];
+    const mail = message();
+    const run = () => handleEmail(
+      mail,
+      legacyEnv({ writeDataPoint(point) { points.push(point); } }),
+      {
+        fetch: async () => new Response(
+          JSON.stringify({ verdict: row.verdict }),
+          { status: row.status },
+        ),
+      },
+    );
+    if (row.edge === "defer") {
+      await assert.rejects(
+        run,
+        { message: "agent email relay temporarily unavailable" },
+        row.name,
+      );
+    } else {
+      await run();
+    }
+    const rejections = {
+      accept: [],
+      defer: [],
+      reject: ["recipient unavailable"],
+      reject_too_large: ["message too large"],
+    }[row.edge];
+    assert.ok(rejections, row.name);
+    assert.deepEqual(mail.rejected, rejections, row.name);
+    const verdicts = verdictPoints(points);
+    assert.equal(verdicts.length, 1, row.name);
+    assert.deepEqual(verdicts[0].indexes, [row.edge_outcome], row.name);
+    assert.deepEqual(
+      verdicts[0].blobs,
+      [EDGE_METRICS_SCHEMA, row.edge_outcome, "response"],
+      row.name,
+    );
+    assert.equal(verdicts[0].doubles[3], row.edge_status, row.name);
+    assert.doesNotMatch(JSON.stringify(points), /@|address|account|realm_|agent_/i, row.name);
+  }
+});
+
+test("temporary and unrecognised cell verdicts defer at any status and log no value", async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => { warnings.push(String(line)); };
+  const attempts = [
+    ["temporary", 503],
+    ["temporary", 200],
+    ["temporary", 404],
+    ["temporary", 409],
+    ["cohort_deferred", 503],
+    ["cohort_deferred", 404],
+  ];
+  try {
+    for (const [verdict, status] of attempts) {
+      const mail = message();
+      await assert.rejects(
+        () => handleEmail(mail, legacyEnv(), {
+          fetch: async () => new Response(JSON.stringify({ verdict }), { status }),
+        }),
+        { message: "agent email relay temporarily unavailable" },
+        `${verdict}:${status}`,
+      );
+      assert.deepEqual(mail.rejected, [], `${verdict}:${status}`);
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+  const failures = warnings.flatMap((line) => {
+    try {
+      const entry = JSON.parse(line);
+      return entry?.event === "agent_email_relay_failure" ? [entry] : [];
+    } catch {
+      return [];
+    }
+  });
+  assert.deepEqual(failures, attempts.map(([verdict, status]) => ({
+    event: "agent_email_relay_failure",
+    phase: "response",
+    status,
+    verdict: verdict === "temporary" ? "temporary" : "invalid",
+  })));
+});

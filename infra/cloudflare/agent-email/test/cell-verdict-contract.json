@@ -1,0 +1,158 @@
+{
+  "schema": "witself.agent-email.cell-verdict-contract.v1",
+  "cases": [
+    {
+      "name": "accepted",
+      "status": 200,
+      "verdict": "accepted",
+      "cell_outcome": "retained",
+      "edge": "accept",
+      "edge_outcome": "accepted",
+      "edge_status": 200
+    },
+    {
+      "name": "accepted_attachment_omitted",
+      "status": 200,
+      "verdict": "accepted",
+      "cell_outcome": "omitted_capacity",
+      "edge": "accept",
+      "edge_outcome": "accepted",
+      "edge_status": 200
+    },
+    {
+      "name": "feature_disabled",
+      "status": 200,
+      "verdict": "feature_disabled",
+      "cell_outcome": "feature_disabled",
+      "edge": "accept",
+      "edge_outcome": "discarded_feature_disabled",
+      "edge_status": 200
+    },
+    {
+      "name": "over_size",
+      "status": 413,
+      "verdict": "over_size",
+      "cell_outcome": "over_size",
+      "edge": "reject_too_large",
+      "edge_outcome": "rejected_over_size",
+      "edge_status": 552
+    },
+    {
+      "name": "storage_full",
+      "status": 507,
+      "verdict": "storage_full",
+      "cell_outcome": "storage_full",
+      "edge": "reject",
+      "edge_outcome": "rejected_cell_capacity",
+      "edge_status": 552
+    },
+    {
+      "name": "unknown_recipient",
+      "status": 404,
+      "verdict": "unknown_recipient",
+      "cell_outcome": "unknown_recipient",
+      "edge": "reject",
+      "edge_outcome": "rejected_cell_permanent",
+      "edge_status": 404
+    },
+    {
+      "name": "not_found",
+      "status": 404,
+      "verdict": "unknown_recipient",
+      "cell_outcome": "unknown_recipient",
+      "edge": "reject",
+      "edge_outcome": "rejected_cell_permanent",
+      "edge_status": 404
+    },
+    {
+      "name": "rate_limit_impossible",
+      "status": 410,
+      "verdict": "permanent",
+      "cell_outcome": "rate_limited",
+      "edge": "reject",
+      "edge_outcome": "rejected_cell_permanent",
+      "edge_status": 410
+    },
+    {
+      "name": "retry_canary_rejected",
+      "status": 410,
+      "verdict": "retry_canary_rejected",
+      "cell_outcome": "retry_canary_rejected",
+      "edge": "reject",
+      "edge_outcome": "rejected_retry_canary",
+      "edge_status": 410
+    },
+    {
+      "name": "rate_limited",
+      "status": 429,
+      "verdict": "rate_limited",
+      "cell_outcome": "rate_limited",
+      "edge": "defer",
+      "edge_outcome": "tempfail_rate_limited",
+      "edge_status": 429
+    },
+    {
+      "name": "rate_limited_untyped",
+      "status": 429,
+      "verdict": "rate_limited",
+      "cell_outcome": "rate_limited",
+      "edge": "defer",
+      "edge_outcome": "tempfail_rate_limited",
+      "edge_status": 429
+    },
+    {
+      "name": "receive_disabled",
+      "status": 503,
+      "verdict": "receive_disabled",
+      "cell_outcome": "receive_disabled",
+      "edge": "defer",
+      "edge_outcome": "tempfail_disabled",
+      "edge_status": 503
+    },
+    {
+      "name": "retry_canary_temporary",
+      "status": 503,
+      "verdict": "temporary",
+      "cell_outcome": "retry_canary_temporary",
+      "edge": "defer",
+      "edge_outcome": "tempfail_cell_response",
+      "edge_status": 503
+    },
+    {
+      "name": "receive_unavailable",
+      "status": 503,
+      "verdict": "temporary",
+      "cell_outcome": "error",
+      "edge": "defer",
+      "edge_outcome": "tempfail_cell_response",
+      "edge_status": 503
+    },
+    {
+      "name": "forbidden",
+      "status": 503,
+      "verdict": "temporary",
+      "cell_outcome": "error",
+      "edge": "defer",
+      "edge_outcome": "tempfail_cell_response",
+      "edge_status": 503
+    },
+    {
+      "name": "unmapped_error",
+      "status": 503,
+      "verdict": "temporary",
+      "cell_outcome": "error",
+      "edge": "defer",
+      "edge_outcome": "tempfail_cell_response",
+      "edge_status": 503
+    },
+    {
+      "name": "cohort_deferred",
+      "status": 503,
+      "verdict": "temporary",
+      "cell_outcome": "cohort_deferred",
+      "edge": "defer",
+      "edge_outcome": "tempfail_cell_response",
+      "edge_status": 503
+    }
+  ]
+}

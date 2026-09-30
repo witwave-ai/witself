@@ -72,6 +72,11 @@ var (
 	// ErrAgentEmailPilotUnavailable is the compatibility name for a transient
 	// receive-service-wide ingestion failure.
 	ErrAgentEmailPilotUnavailable = errors.New("agent-email receive is unavailable")
+	// ErrAgentEmailCohortDeferred reports a verified relay for a recipient
+	// whose account is resident in this cell and absent from its receive
+	// cohort. The cell answers the existing temporary verdict so the edge
+	// defers; the sender learns nothing about the account or the cohort.
+	ErrAgentEmailCohortDeferred = errors.New("agent-email receive cohort deferral")
 	// ErrAgentEmailRetryCanaryTemporary reports the deliberate first-attempt
 	// temporary result for the synthetic provider retry proof.
 	ErrAgentEmailRetryCanaryTemporary = errors.New("agent-email retry canary temporary failure")
@@ -737,6 +742,8 @@ func agentEmailIngestHandlerWithLimits(
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		case errors.Is(err, ErrAgentEmailRetryCanaryPermanent):
 			writeAgentEmailVerdict(w, http.StatusGone, "retry_canary_rejected")
+		case errors.Is(err, ErrAgentEmailCohortDeferred):
+			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		case errors.Is(err, ErrAgentEmailPilotUnavailable), errors.Is(err, ErrForbidden):
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		default:

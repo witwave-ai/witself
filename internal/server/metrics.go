@@ -286,6 +286,11 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 	cfg.metrics = m
 	if operation := cfg.IngestAgentEmailPilot; operation != nil {
+		m.mu.Lock()
+		if _, exists := m.agentEmailIngests["cohort_deferred"]; !exists {
+			m.agentEmailIngests["cohort_deferred"] = 0
+		}
+		m.mu.Unlock()
 		cfg.IngestAgentEmailPilot = func(
 			ctx context.Context,
 			metadata agentemail.RelayMetadata,
@@ -819,6 +824,8 @@ func agentEmailIngestMetricOutcome(err error) string {
 		return "retry_canary_temporary"
 	case errors.Is(err, ErrAgentEmailRetryCanaryPermanent):
 		return "retry_canary_rejected"
+	case errors.Is(err, ErrAgentEmailCohortDeferred):
+		return "cohort_deferred"
 	default:
 		return "error"
 	}

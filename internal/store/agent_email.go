@@ -119,6 +119,11 @@ var (
 	// ErrAgentEmailPilotNotEnrolled is the compatibility name for a principal
 	// outside the configured receive scope.
 	ErrAgentEmailPilotNotEnrolled = errors.New("agent email is not enabled for this agent")
+	// ErrAgentEmailReceiveCohortDeferred reports a signed production delivery
+	// whose recipient address and account are resident in this cell while the
+	// account is absent from the configured receive cohort. The relay must
+	// defer such mail and never bounce it. Only signed ingest returns it.
+	ErrAgentEmailReceiveCohortDeferred = errors.New("agent-email recipient account is resident but outside the receive cohort")
 	// ErrAgentEmailBusy reports an email protected by another live processing claim.
 	ErrAgentEmailBusy = errors.New("agent email is claimed for processing")
 	// ErrAgentEmailClaimLost reports a stale or expired processing fence.
@@ -1390,7 +1395,7 @@ func (s *Store) IngestAgentEmailPilot(
 	if !agentEmailReceiveScopeAllows(
 		scope, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID,
 	) {
-		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
+		return AgentEmailMessage{}, agentEmailReceiveScopeMissTx(ctx, tx, scope, candidateRoute, parts, primaryDomain)
 	}
 	accountPolicy, err := lockAgentEmailIngestAccountPolicy(
 		ctx, tx, candidate.AccountID,
@@ -1427,7 +1432,7 @@ func (s *Store) IngestAgentEmailPilot(
 	if !agentEmailReceiveScopeAllows(
 		scope, address.AccountID, address.RealmID, address.OwnerAgentID,
 	) {
-		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
+		return AgentEmailMessage{}, agentEmailReceiveScopeMissTx(ctx, tx, scope, recipientRoute, parts, primaryDomain)
 	}
 	if address.ReceiveState != AgentEmailReceiveEnabled {
 		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
@@ -3407,6 +3412,65 @@ func agentEmailReceiveScopeAllows(
 		return scope.AccountIDs[accountID]
 	}
 	return scope.RealmIDs[realmID] && scope.AgentIDs[agentID]
+}
+
+// agentEmailRecipientRouteRefusedPermanently reports whether a resolved route
+// fails one of the three permanent route refusals that IngestAgentEmailPilot
+// applies after its receive-scope check: a managed realm alias on a
+// compatibility domain, a plan-driven inactive custom-domain route whose alias
+// revision matches, and an agent segment or canonical realm label that differs
+// from the recipient. It copies those checks for the scope-miss path; change
+// both together.
+func agentEmailRecipientRouteRefusedPermanently(
+	route agentEmailRecipientRoute,
+	parts agentemail.AddressParts,
+	primaryDomain string,
+) bool {
+	if route.Kind == AgentEmailRecipientRouteRealmAlias && parts.Domain != primaryDomain {
+		return true
+	}
+	if route.CustomState == AgentEmailCustomDomainRouteSuspended &&
+		route.CustomSuspensionDisposition == AgentEmailCustomDomainSuspensionInactive &&
+		route.AliasRevisionMatches {
+		return true
+	}
+	return route.Address.AgentSegment != parts.AgentSegment ||
+		(route.Kind == AgentEmailRecipientRouteCanonical &&
+			route.Address.RealmLabel != parts.RealmLabel)
+}
+
+// agentEmailReceiveScopeMissTx returns the ingest result for a recipient whose
+// account the receive scope does not allow. In production mode it defers a
+// resident account, one whose accounts row has status active or suspended as
+// in validateAgentEmailProductionCohortQuery, unless a permanent route refusal
+// applies. Legacy pilot mode and every case that is not deferred return
+// ErrAgentEmailPilotNotEnrolled, the result from before deferral existed. The
+// status read takes no lock: the caller returns at once and its transaction
+// rolls back.
+func agentEmailReceiveScopeMissTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	route agentEmailRecipientRoute,
+	parts agentemail.AddressParts,
+	primaryDomain string,
+) error {
+	if agentEmailReceiveMode(scope) != AgentEmailReceiveModeProduction ||
+		agentEmailRecipientRouteRefusedPermanently(route, parts, primaryDomain) {
+		return ErrAgentEmailPilotNotEnrolled
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM accounts WHERE id=$1`, route.Address.AccountID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAgentEmailPilotNotEnrolled
+	}
+	if err != nil {
+		return fmt.Errorf("classify agent-email receive cohort miss: %w", err)
+	}
+	if status == "active" || status == "suspended" {
+		return ErrAgentEmailReceiveCohortDeferred
+	}
+	return ErrAgentEmailPilotNotEnrolled
 }
 
 func requireAgentEmailPilotPrincipal(scope AgentEmailPilotScope, p Principal) error {

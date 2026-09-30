@@ -433,9 +433,10 @@ Expected line per state (one cohort account, the Founder):
 After ANY change of a cohort or canary Secret, read this line on every server
 pod and confirm `resident` equals the number of cohort accounts that live on
 that cell. An `unknown` count on a cell that holds the account means a wrong
-ID: roll the Secret back before mail for that account bounces permanently.
-Byte equality with the source covers a copy, not a rotation that changes
-content.
+ID: roll the Secret back. From `v0.0.318` mail for the resident account that a
+wrong cohort leaves out is deferred while the cohort is wrong; on an older
+release it bounces permanently. Byte equality with the source covers a copy,
+not a rotation that changes content.
 
 This line does not validate IDs. `unknown` is expected only on a destination
 pre-listing an account before its first arrival; a mistyped ID looks identical.
@@ -443,8 +444,11 @@ An `absent` canary likewise does not prove its ID is right. Before enablement,
 the operator must prove the cohort and canary Secret bytes equal the source
 cell's, comparing in memory and printing only match/mismatch, never values or
 digests. Repeat after any Secret re-creation. For a planned move, list the
-account on the destination before arrival and leave it on the source. A cohort
-miss at ingest remains a permanent rejection.
+account on the destination before arrival and leave it on the source. From
+`v0.0.318` a cohort miss at ingest is deferred when the recipient's account is
+resident in the cell with status `active` or `suspended`; every other cohort
+miss remains a permanent rejection. After any cohort change also read the
+[receive cohort deferral signals](observability-and-operations.md#receive-cohort-deferral-signals).
 
 Explicit backfill, preflight, and canary-manifest operations remain strict:
 every listed account must be resident, and the configured canary must be live

@@ -189,8 +189,10 @@ canary instead of failing; an existing agent must be live in a resident cohort
 account. Unknown accounts and absent canaries are not validated IDs: prove
 cohort and canary Secret byte equality with the source before enablement.
 Pre-list moving accounts on the destination and leave them on the source.
-Ingest cohort misses remain permanent rejections. Strict operator preflight,
-backfill, and canary manifest operations require every account to be resident.
+From `v0.0.318`, ingest defers mail for a resident account that is missing
+from the cohort; every other ingest cohort miss remains a permanent rejection.
+Strict operator preflight, backfill, and canary manifest operations require
+every account to be resident.
 Before rolling below `v0.0.317`, disable receive or use a new immutable
 resident-only cohort Secret; with no resident cohort account only disabling
 receive works, because an empty cohort is rejected.
