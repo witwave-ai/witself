@@ -16,12 +16,18 @@ apps:
     authSecretName: witself-postgresql-auth
     backup:
       enabled: false
+      image:
+        repository: "ghcr.io/witwave-ai/images/witself-postgres-backup"
+        tag: "0.0.321"
+        digest: sha256:688009e1c9a691d49db18e6f3ff47d0d16724e3c5472c278cdb651871bdfc714
     storage: 8Gi
     # Production sizing; retain the serving cell's PostgreSQL image content.
     resourcesPreset: medium
+    allowInsecureImages: true
     image:
-      registry: registry-1.docker.io
-      repository: bitnami/postgresql
+      registry: "ghcr.io"
+      repository: "witwave-ai/images/postgresql"
+      tag: "0.0.321-civo-prod-use1-serving"
       digest: sha256:db2312d9b243afa8c3b3f5496e478d17d0dff9791d06f3b93b9567abd86ae92f
     networkPolicy:
       enabled: true
@@ -40,9 +46,9 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.313
-    imageTag: 0.0.313
-    imageDigest: sha256:d846b7b998b2a7c2ed4685c54f6d08913744d343c411c7b70dc41809fbff5d76
+    chartVersion: 0.0.321
+    imageTag: 0.0.321
+    imageDigest: sha256:15762e4bd558cb7eba1889edc833554e0aeff805b2dc88eb135bfeaa8aa6ddbe
     backendKind: managed
     # Schema-28's compatibility hold expired long ago;
     # in-product permanent fact deletion backs the published privacy policy.
