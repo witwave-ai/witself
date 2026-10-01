@@ -47,9 +47,6 @@ cells:
     region: nyc1
     role: serving
     overlay: civo-prod-use1-serving.yaml.tmpl
-    # Onboarded, never provisioned: scripts/roll-cell.sh --first-sync may write
-    # its first pins. Remove these three lines before its first witself-infra preview.
-    unprovisioned: true
     switches:
       monitoring: false
       sealed_plane_alerts: false
