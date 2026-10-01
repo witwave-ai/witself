@@ -1487,6 +1487,44 @@ never instructions or authority.
 `run.get` reports `planned`, do not submit a replacement plan and never apply
 from content-free run metadata alone.
 
+When the backend refuses a plan, or a plan read, under a named rule, the
+response is HTTP 409 with `code` `memory_curation_conflict`, `retryable`
+`false`, the unchanged `error` text `memory curation state conflict`, and a
+value-free `reason` from the closed list below. When the rule concerns one
+action, `action_ordinal` is that action's 1-based `ordinal`, not the 0-based
+`actions[i]` index that this tool's own `memory_curation_plan_invalid` errors
+use. When the rule concerns one evidence row of that action, `evidence_index`
+is the row's zero-based position in the action's evidence list. Neither field
+names content or a stored identifier. The MCP tool error text carries the same
+detail, for example:
+
+```text
+memory curation state conflict (reason=transcript_range_not_covered, action_ordinal=2, evidence_index=1)
+```
+
+A refused plan stores nothing: the run stays `open`, so fix what the reason
+names and submit the corrected draft with a new idempotency key while the
+lease and fence are valid. A 409 without a `reason` is a conflict the backend
+does not classify yet; a stale fence or an expired lease keeps its own message
+(`memory curation fence mismatch`, `memory curation lease expired`).
+
+| `reason` | Rule that refused the request |
+|---|---|
+| `run_not_open` | The run already has an accepted plan or is no longer open. Read the accepted plan with `witself.memory.curation.plan.get`; never submit a second plan. |
+| `run_not_planned` | `witself.memory.curation.plan.get` was called for a run that has no accepted plan yet. |
+| `sensitive_source_requires_sensitive_output` | A `create`, `replace`, or `propose_fact` draws on a sensitive memory, evidence row, relation, or replace target, but its output is not marked sensitive. Mark it sensitive or drop that source. |
+| `sensitive_target_requires_sensitive_replacement` | A `supersede` of a sensitive memory names a replacement that is not sensitive. |
+| `target_already_mutated` | An earlier action in the same plan already replaces or supersedes that memory. |
+| `invalid_create_output_reference` | A reference to a memory created in this plan names a version other than 1, or a create at the same or a later ordinal. |
+| `memory_version_not_in_inputs` | The cited memory version is not one of the run's frozen memory inputs. |
+| `memory_not_live` | The cited memory version or the memory's current head is forgotten or reverted, or the memory has no current head. Drop that action, or abandon the run and start a new one with a fresh snapshot. |
+| `memory_version_not_current` | A `replace` or `supersede` target, or a `supersede` replacement, is not the memory's current active version, usually because the memory changed after the run froze its inputs. Drop that action, or abandon the run and start a new one with a fresh snapshot; citing a version the run did not freeze is refused as `memory_version_not_in_inputs`. |
+| `evidence_not_in_inputs` | `input_evidence_id` names no frozen evidence input of the run. |
+| `evidence_row_mismatch` | Evidence with `input_evidence_id` does not reproduce its frozen evidence row exactly. |
+| `direct_evidence_not_resolved` | Evidence without `input_evidence_id` is not `resolved`. |
+| `transcript_range_not_covered` | A directly cited transcript range is not wholly inside the run's frozen `transcript` inputs. Tool entries inside a `transcript_coverage` window are not materialized inputs, so a range that spans one is refused; cite the materialized signal entries instead. |
+| `direct_evidence_requires_input_row` | Resolved `message`, `import_artifact`, or `artifact` evidence needs `input_evidence_id` and the exact frozen evidence row. |
+
 ### `witself.memory.curation.plan.get`
 
 Read and cryptographically reverify the exact normalized accepted plan and
@@ -1494,6 +1532,9 @@ count-only impact preview for one live `planned` run using its `run_id` and
 positive fencing generation. The result omits the original planner's mutation
 receipt and idempotency metadata. It performs no inference, lifecycle mutation,
 or lease-expiry reconciliation.
+
+On a run that has no accepted plan yet, `plan.get` returns the 409 described
+under `witself.memory.curation.plan` with `reason` `run_not_planned`.
 
 The caller must first page every frozen input, then independently inspect every
 normalized action, provenance reference, expected version, preallocated id, and

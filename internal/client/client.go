@@ -512,6 +512,11 @@ func responseError(resp *http.Response, fallback string) error {
 		RetryAfter int64                `json:"retry_after"`
 		Details    responseErrorDetails `json:"details"`
 		Limit      MemoryLimitStatus    `json:"limit"`
+		// Raw, so a body whose reason or positions have another type
+		// still decodes for every other error code.
+		Reason        json.RawMessage `json:"reason"`
+		ActionOrdinal json.RawMessage `json:"action_ordinal"`
+		EvidenceIndex json.RawMessage `json:"evidence_index"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil {
 		message := ""
@@ -594,6 +599,9 @@ func responseError(resp *http.Response, fallback string) error {
 		if resp.StatusCode == http.StatusConflict &&
 			out.Code == "agent_email_address_conflict" {
 			return fmt.Errorf("%w", ErrAgentEmailAddressConflict)
+		}
+		if resp.StatusCode == http.StatusConflict && out.Code == "memory_curation_conflict" {
+			return newMemoryCurationConflictError(out.Reason, out.ActionOrdinal, out.EvidenceIndex)
 		}
 		if message == "" {
 			return fmt.Errorf("%s", fallback)

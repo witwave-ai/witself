@@ -164,7 +164,15 @@ ordinary memory-status route.
    references, preallocates ids, checks every provenance reference against the
    frozen input set, canonicalizes the accepted plan, and returns its immutable
    revision, SHA-256 hash, and count-only impact preview, including
-   `active_memory_delta` and `projected_active_memories`.
+   `active_memory_delta` and `projected_active_memories`. A refused plan
+   stores nothing and the run stays `open`. Its 409 names the rule in a
+   value-free `reason` (the list is under `witself.memory.curation.plan` in
+   [mcp-tools.md](mcp-tools.md)); fix only what it names and resubmit with a
+   new idempotency key, or, when a cited memory changed after the freeze,
+   drop that action or follow step 10. Directly cited transcript evidence
+   must lie wholly inside materialized `transcript` inputs: a range that
+   spans a tool entry of a `transcript_coverage` window is refused with
+   `transcript_range_not_covered`.
 8. For every planned run, including one staged by the current client, call
    `witself.memory.curation.plan.get` with the exact fence. Independently review
    every normalized action, provenance reference, expected version,

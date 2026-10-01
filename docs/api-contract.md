@@ -190,6 +190,7 @@ HTTP status codes should align with the structured error:
 | `403` | `stored_secret_limit_reached` | Implemented non-retryable refusal when a new top-level secret would exceed the authenticated owner agent's retained cap. |
 | `404` | `not_found` | Resource not found or not visible to the caller. |
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
+| `409` | `memory_curation_conflict` | A memory curation plan or plan read refused under a named rule; the value-free `reason` comes from the closed list under `witself.memory.curation.plan` in [mcp-tools.md](mcp-tools.md), and the `error` text stays `memory curation state conflict`. |
 | `422` | `usage_error` | Valid JSON with semantically invalid input. |
 | `422` | `usage_query_too_large` | Agent usage exceeds the 10,000-row cap without explicit truncation opt-in. |
 | `429` | `rate_limited` | Transient service-protection or throttle limit; `retryable: true`. |

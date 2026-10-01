@@ -216,6 +216,17 @@ func mapMemoryCurationError(err error) error {
 		}
 		return out
 	}
+	var conflict *store.MemoryCurationConflictError
+	if errors.As(err, &conflict) {
+		mapped := &server.MemoryCurationConflictError{
+			Reason: conflict.Reason, ActionOrdinal: conflict.ActionOrdinal,
+		}
+		if conflict.EvidenceIndex != nil {
+			index := *conflict.EvidenceIndex
+			mapped.EvidenceIndex = &index
+		}
+		return mapped
+	}
 	switch {
 	case errors.Is(err, store.ErrMemoryCurationInputInvalid):
 		return wrapAsSentinel(server.ErrBadInput, store.ErrMemoryCurationInputInvalid, err)
