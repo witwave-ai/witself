@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -27,6 +28,16 @@ const (
 	memoryCurationFollowUpTrigger      = "generation_follow_up"
 	memoryCurationSourceBacklogTrigger = "source_backlog"
 )
+
+// memoryCurationAutomaticQuietPeriod is the least time between applying a run
+// for the reserved automatic lane and that agent's next automatic request
+// becoming due. An agent that captures its own session appends transcript
+// entries on every turn, so without it every apply leaves automatic work due
+// at once and the foreground checkpoint stays pending on every turn. Thirty
+// minutes allows at most about two automatic passes an hour in a continuously
+// active session; checkpoint timing is eventual by design. Requests a client
+// creates explicitly, and their follow-ups, are never delayed.
+const memoryCurationAutomaticQuietPeriod = 30 * time.Minute
 
 // lockMemoryCurationSourceLaneTx establishes the global owner mutation order
 // used by source writers and curation apply: account -> curation lane -> source
@@ -50,6 +61,33 @@ func lockMemoryCurationSourceLaneTx(
 		return MemoryCurationLane{}, fmt.Errorf("lock source curation lane: %w", err)
 	}
 	return lane, nil
+}
+
+// automaticMemoryCurationNotBeforeTx returns the end of the quiet period that
+// follows this owner's most recently applied automatic run, or nil when no
+// automatic run has been applied. A lane holds at most one active run, so the
+// newest applied run by creation is also the most recently applied one.
+func automaticMemoryCurationNotBeforeTx(ctx context.Context, tx pgx.Tx, p Principal) (*time.Time, error) {
+	var appliedAt time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT r.applied_at
+		FROM memory_curation_runs r
+		WHERE r.account_id=$1 AND r.realm_id=$2 AND r.owner_kind='agent' AND r.owner_id=$3
+		  AND r.state='applied' AND r.applied_at IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1 FROM memory_curation_requests q
+		    WHERE q.id=r.request_id AND q.account_id=r.account_id AND q.coalescing_key=$4
+		  )
+		ORDER BY r.created_at DESC,r.id DESC
+		LIMIT 1`, p.AccountID, p.RealmID, p.ID, automaticMemoryCurationCoalescingKey).Scan(&appliedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read automatic curation quiet period: %w", err)
+	}
+	notBefore := appliedAt.Add(memoryCurationAutomaticQuietPeriod)
+	return &notBefore, nil
 }
 
 // markMemoryCurationDueTx records source work in the same transaction as the
@@ -122,6 +160,10 @@ func (s *Store) markMemoryCurationDueTx(
 		return err
 	}
 
+	notBefore, err := automaticMemoryCurationNotBeforeTx(ctx, tx, p)
+	if err != nil {
+		return err
+	}
 	var requestID, requestState string
 	err = tx.QueryRow(ctx, `
 		SELECT id FROM memory_curation_requests
@@ -131,13 +173,16 @@ func (s *Store) markMemoryCurationDueTx(
 		automaticMemoryCurationCoalescingKey).Scan(&requestID)
 	switch {
 	case err == nil:
+		// A source commit may make waiting work due sooner, but never inside
+		// the quiet period after this owner's last automatic apply.
 		err = tx.QueryRow(ctx, `
 			UPDATE memory_curation_requests
-			SET request_generation=$2,due_at=LEAST(due_at,clock_timestamp()),
+			SET request_generation=$2,
+			    due_at=LEAST(due_at,GREATEST(clock_timestamp(),$3::timestamptz)),
 			    state=CASE WHEN state='retry_wait' THEN 'queued' ELSE state END,
 			    updated_at=clock_timestamp()
 			WHERE id=$1
-			RETURNING state`, requestID, nextGeneration).Scan(&requestState)
+			RETURNING state`, requestID, nextGeneration, notBefore).Scan(&requestState)
 		if err != nil {
 			return fmt.Errorf("coalesce automatic curation request: %w", err)
 		}
@@ -153,10 +198,11 @@ func (s *Store) markMemoryCurationDueTx(
 			   max_attempts,fulfilled_generation,read_only_replay,actor_kind,actor_id,
 			   idempotency_key,request_hash)
 			VALUES ($1,$2,$3,'agent',$4,$5::jsonb,$6,$7,$8,0,
-			        clock_timestamp(),'queued',0,$9,0,false,'agent',$4,$10,$11)`,
+			        GREATEST(clock_timestamp(),$12::timestamptz),'queued',0,$9,0,false,
+			        'agent',$4,$10,$11)`,
 			requestID, p.AccountID, p.RealmID, p.ID, scopeJSON,
 			automaticMemoryCurationCoalescingKey, triggerReason, nextGeneration,
-			defaultMemoryCurationAttempts, idempotencyKey, requestHash)
+			defaultMemoryCurationAttempts, idempotencyKey, requestHash, notBefore)
 		if err != nil {
 			return fmt.Errorf("insert automatic curation request: %w", err)
 		}
