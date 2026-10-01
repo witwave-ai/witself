@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
@@ -155,10 +157,38 @@ var cloudflareSecretEnv = []string{"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY",
 // user API tokens, account API tokens and global API keys.
 var cloudflareTokenShape = regexp.MustCompile(`cf(?:ut|at|k)_[A-Za-z0-9_-]{8,}`)
 
+// resolvedCivoTokens records each Civo API token that resolveCivoToken has
+// returned in this process, from a token file or from CIVO_TOKEN, so that
+// redactDiagnostic can replace a token that is not in the environment.
+var resolvedCivoTokens struct {
+	sync.Mutex
+	values []string
+}
+
+// rememberCivoToken adds token to resolvedCivoTokens unless it is already there.
+func rememberCivoToken(token string) {
+	resolvedCivoTokens.Lock()
+	defer resolvedCivoTokens.Unlock()
+	if slices.Contains(resolvedCivoTokens.values, token) {
+		return
+	}
+	resolvedCivoTokens.values = append(resolvedCivoTokens.values, token)
+}
+
+// civoTokenValues returns CIVO_TOKEN as exported, its trimmed form and every
+// token in resolvedCivoTokens.
+func civoTokenValues(getenv func(string) string) []string {
+	value := getenv("CIVO_TOKEN")
+	resolvedCivoTokens.Lock()
+	defer resolvedCivoTokens.Unlock()
+	return append([]string{value, strings.TrimSpace(value)}, resolvedCivoTokens.values...)
+}
+
 // redactDiagnostic replaces credential values in diagnostic text: the three
 // R2 values, each Cloudflare credential of cloudflareSecretEnv as exported and
-// without surrounding whitespace, and any text shaped like a prefixed
-// Cloudflare credential. A value shorter than 8 characters is never replaced.
+// without surrounding whitespace, the Civo API token of civoTokenValues, and
+// any text shaped like a prefixed Cloudflare credential. A value shorter than
+// 8 characters is never replaced.
 func redactDiagnostic(text string, getenv func(string) string) string {
 	text = backend.RedactR2Secrets(text, getenv)
 	for _, name := range cloudflareSecretEnv {
@@ -167,6 +197,11 @@ func redactDiagnostic(text string, getenv func(string) string) string {
 			if len(v) >= 8 {
 				text = strings.ReplaceAll(text, v, "[redacted "+name+"]")
 			}
+		}
+	}
+	for _, v := range civoTokenValues(getenv) {
+		if len(v) >= 8 {
+			text = strings.ReplaceAll(text, v, "[redacted CIVO_TOKEN]")
 		}
 	}
 	return cloudflareTokenShape.ReplaceAllString(text, "[redacted Cloudflare token]")

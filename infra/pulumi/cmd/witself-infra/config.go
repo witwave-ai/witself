@@ -284,7 +284,8 @@ var secretShapes = regexp.MustCompile(
 		`|-----BEGIN( [A-Z]+)? PRIVATE KEY` +
 		`|AKIA[0-9A-Z]{16}` +
 		`|gh[posu]_[A-Za-z0-9]{20}` +
-		`|github_pat_[A-Za-z0-9_]{20}`)
+		`|github_pat_[A-Za-z0-9_]{20}` +
+		`|cf(?:ut|at|k)_[A-Za-z0-9_-]{20}`)
 
 // loadInfraConfig reads + validates the config. Unknown YAML keys are
 // errors (a typo like k8s_verion must not silently fall back to a

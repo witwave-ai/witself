@@ -82,9 +82,23 @@ Azure purge protection remains irreversible. See
 [Deletion protection and break-glass](../../docs/runbooks.md#deletion-protection-and-break-glass)
 for provider primitives, the resource inventory, and the operator procedure.
 
-The file holds references only — profile names, subscription/project
-IDs, token file *paths*. Both the load and write paths reject anything
-shaped like a credential.
+The file holds references only — profile names, subscription/project IDs, token
+file *paths*. Both the load and write paths reject anything shaped like a
+credential, including a prefixed Cloudflare token (`cfut_`, `cfat_` or `cfk_`
+followed by at least 20 letters, digits, `-` or `_`).
+
+`config add-cell -dry-run` runs every check of `config add-cell`, prints the
+entry it would add and writes nothing: no file and no directory. `-dry-run`
+is valid only with `rebalance` and `config add-cell`; every other command
+refuses it, except `version` and `help`, which ignore every flag.
+
+There is no `config remove-cell`. Remove an entry by hand, and only for a
+cell that has no cloud resources and no fleet registry entry: after a
+completed `destroy`, or for a cell that no `up` has run for. Copy the file
+first (`cp -p ~/.witself/infra.yaml ~/.witself/infra.yaml.bak`). Until the
+entry is removed, `witself-infra health` reports the cell `down` and exits
+nonzero. Never remove the entry of a live cell: `health` would stop probing
+it, and `destroy` refuses a cell that is not in the inventory.
 
 Each cell can pin a **security context** — the identity its operations
 must run as:
@@ -135,10 +149,15 @@ machine consumers.
 `witself-infra health --json` probes configured cells and their control planes
 concurrently. Each target has its own `-timeout` deadline (default `5s`), so a
 hung endpoint is emitted as `timeout` without blocking sibling probes. The
-command writes one NDJSON object per target with exactly `name`, `state`
-(`ok`, `degraded`, `timeout`, or `down`), `latency_ms`, and `checked_at`. It
-exits zero only when every target is `ok`, and exits nonzero after emitting all
-records otherwise. Piping this command into cron or a monitoring agent and
+command writes one NDJSON object per target with exactly `name`, `state` (`ok`,
+`degraded`, `timeout`, or `down`), `latency_ms`, and `checked_at`, plus
+`registry_name` for a cell whose inventory entry sets one. It exits zero only
+when every target is `ok`, and exits nonzero after emitting all records
+otherwise. It probes cells only through the control plane and reads no Pulumi
+state and no kubeconfig. A cell with no control plane in its entry or in
+`defaults`, or that the control plane does not know (no `up` has registered it
+yet, or `destroy` removed it), is reported `down`, so such an entry makes the
+command exit nonzero. Piping this command into cron or a monitoring agent and
 alerting on its exit status or records is the intended hook; `witself-infra`
 does not integrate directly with PagerDuty or any other external alerting
 service.
@@ -173,7 +192,10 @@ ingress, cert-manager, and an in-cluster PostgreSQL volume. The control plane is
 free and no managed load balancer is created. A token is read from a per-cell
 mode-0600 file (recommended for multi-account operation) or from the
 `CIVO_TOKEN` environment fallback. Its value is never written to `infra.yaml`
-or Pulumi config.
+or Pulumi config. `witself-infra` replaces the value of `CIVO_TOKEN`, and a
+token that it read from a token file, with `[redacted CIVO_TOKEN]` in its
+final error line, in progress events and in the stack-output error of the
+`cell-health` report. `cell-health` never reads the token file.
 
 That is the default shape. A cell can opt in to one Civo load balancer, a
 custom host name and a DNS record; see

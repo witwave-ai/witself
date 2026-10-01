@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // newTestFlagSet mirrors the per-cell subset of run()'s flag universe —
@@ -574,5 +579,206 @@ func TestRegistryNamePreservesStackIdentity(t *testing.T) {
 	}
 	if cfg.Cells[destroyTestCell].registryName(destroyTestCell) != "retained-cell" {
 		t.Fatal("config save lost registry mapping")
+	}
+}
+
+func runCapturingStdout(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	capture, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal("create stdout capture failed")
+	}
+	defer func() { _ = capture.Close() }()
+	oldOut := os.Stdout
+	os.Stdout = capture
+	defer func() { os.Stdout = oldOut }()
+	runErr := run(args)
+	os.Stdout = oldOut
+	if _, err := capture.Seek(0, 0); err != nil {
+		t.Fatal("rewind stdout capture failed")
+	}
+	printed, err := io.ReadAll(capture)
+	if err != nil {
+		t.Fatal("read stdout capture failed")
+	}
+	return string(printed), runErr
+}
+
+const dryRunRefusal = "-dry-run is only valid with `rebalance` and `config add-cell`"
+
+func TestSecretShapesCoverCloudflareTokens(t *testing.T) {
+	home := r2TestHome(t)
+	for _, row := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "user token", text: cloudflareShapeFake("ut"), want: true},
+		{name: "account token", text: cloudflareShapeFake("at"), want: true},
+		{name: "key", text: cloudflareShapeFake("k"), want: true},
+		{name: "exact minimum", text: "fleet_token_file: " + "cf" + "at_" + strings.Repeat("Ab1-", 5), want: true},
+		{name: "below minimum", text: "cf" + "ut_" + strings.Repeat("a", 19)},
+		{name: "short prefixed path", text: "fleet_token_file: /secure/tokens/cfut_token"},
+		{name: "Civo token path", text: "token_file: /Users/operator/.witself/tokens/civo-sandbox.token"},
+		{name: "R2 endpoint", text: "r2_endpoint: " + r2TestEndpoint},
+	} {
+		if got := secretShapes.MatchString(row.text); got != row.want {
+			t.Errorf("credential shape match differs for row %s", row.name)
+		}
+	}
+
+	fake := cloudflareShapeFake("ut")
+	path := writeConfig(t, "version: 1\ncells:\n  cell-a:\n    fleet_token_file: "+fake+"\n")
+	_, _, err := loadInfraConfig(path)
+	want := path + ":4 looks like a credential — infra.yaml holds names, IDs, and token file PATHS, never secret values"
+	if err == nil || err.Error() != want {
+		t.Error("load credential refusal differs")
+	}
+	if err != nil && strings.Contains(err.Error(), fake) {
+		t.Error("load credential refusal exposed the supplied value")
+	}
+
+	path = filepath.Join(home, "infra.yaml")
+	_, err = runCapturingStdout(t, []string{"config", "add-cell", "-config", path, "-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "dev", "-fleet-token-file", fake})
+	if err == nil || !strings.HasPrefix(err.Error(), "refusing to write ") || !strings.Contains(err.Error(), "looks like a credential — pass a token file PATH, never a token value") {
+		t.Error("write credential refusal differs")
+	}
+	if err != nil && strings.Contains(err.Error(), fake) {
+		t.Error("write credential refusal exposed the supplied value")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("refused credential reached the inventory file")
+	}
+}
+
+func TestConfigAddCellDryRun(t *testing.T) {
+	t.Run("new file", func(t *testing.T) {
+		home := r2TestHome(t)
+		path := filepath.Join(home, "sub", "infra.yaml")
+		args := []string{"config", "add-cell", "-config", path, "-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "dev", "-argocd"}
+		out, err := runCapturingStdout(t, append(args, "-dry-run"))
+		if err != nil {
+			t.Fatal("new-file dry run failed")
+		}
+		if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+			t.Error("new-file dry run created the parent directory")
+		}
+		header, entryYAML, ok := strings.Cut(out, "\n")
+		if !ok || header != "dry run: would add cell aws-sandbox-usw2-dev to "+path+"; nothing was written" {
+			t.Fatal("new-file dry-run header differs")
+		}
+		if strings.Contains(out, "note:") {
+			t.Error("new-file dry run printed a rewrite note")
+		}
+		var printed map[string]cellEntry
+		if err := yaml.Unmarshal([]byte(entryYAML), &printed); err != nil {
+			t.Fatal("dry-run entry is not valid YAML")
+		}
+		entry, ok := printed["aws-sandbox-usw2-dev"]
+		if len(printed) != 1 || !ok {
+			t.Fatal("dry run did not print exactly the new entry")
+		}
+		if _, err := runCapturingStdout(t, args); err != nil {
+			t.Fatal("real add after the dry run failed")
+		}
+		cfg, _, err := loadInfraConfig(path)
+		if err != nil {
+			t.Fatal("load of written entry failed")
+		}
+		if !reflect.DeepEqual(entry, cfg.Cells["aws-sandbox-usw2-dev"]) {
+			t.Error("dry-run entry differs from the written entry")
+		}
+	})
+	t.Run("existing file", func(t *testing.T) {
+		r2TestHome(t)
+		path := writeConfig(t, sampleConfig)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("read existing inventory failed")
+		}
+		out, err := runCapturingStdout(t, []string{"config", "add-cell", "-config", path, "-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "new", "-dry-run"})
+		if err != nil {
+			t.Fatal("existing-file dry run failed")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("read inventory after dry run failed")
+		}
+		if !bytes.Equal(before, after) {
+			t.Error("existing-file dry run changed inventory bytes")
+		}
+		lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		if lines[0] != "dry run: would add cell aws-sandbox-usw2-new to "+path+"; nothing was written" {
+			t.Error("existing-file dry-run header differs")
+		}
+		if lines[len(lines)-1] != "note: without -dry-run, add-cell rewrites the file — YAML comments are not preserved" {
+			t.Error("existing-file dry-run rewrite note differs")
+		}
+	})
+	t.Run("credential refused", func(t *testing.T) {
+		home := r2TestHome(t)
+		path := filepath.Join(home, "sub", "infra.yaml")
+		out, err := runCapturingStdout(t, []string{"config", "add-cell", "-config", path, "-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "dev", "-fleet-token-file", "witself_flt_pasteMistake123", "-dry-run"})
+		if err == nil || !strings.Contains(err.Error(), "looks like a credential") {
+			t.Error("dry run did not refuse a credential")
+		}
+		if out != "" {
+			t.Error("refused dry run printed output")
+		}
+		if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+			t.Error("refused dry run created the parent directory")
+		}
+	})
+	t.Run("existing entry refused", func(t *testing.T) {
+		r2TestHome(t)
+		path := writeConfig(t, sampleConfig)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("read existing inventory failed")
+		}
+		out, err := runCapturingStdout(t, []string{"config", "add-cell", "-config", path, "-cloud", "aws", "-account-alias", "sandbox", "-region", "us-west-2", "-role", "dev", "-dry-run"})
+		want := "cell \"aws-sandbox-usw2-dev\" already in " + path + " — edit the file to change it"
+		if err == nil || err.Error() != want {
+			t.Error("duplicate-entry dry-run refusal differs")
+		}
+		if out != "" {
+			t.Error("duplicate-entry dry run printed output")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("read inventory after refusal failed")
+		}
+		if !bytes.Equal(before, after) {
+			t.Error("duplicate-entry dry run changed inventory bytes")
+		}
+	})
+}
+
+func TestDryRunOnlyWithRebalanceAndAddCell(t *testing.T) {
+	for _, command := range []string{"up", "config init", "health", "rebalance"} {
+		t.Run(command, func(t *testing.T) {
+			home := r2TestHome(t)
+			path := filepath.Join(home, "absent.yaml")
+			args := []string{command, "-config", path, "-dry-run"}
+			want := dryRunRefusal
+			switch command {
+			case "up":
+				args = []string{"up", "-config", path, "-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "203.0.113.7/32", "-dry-run"}
+			case "config init":
+				path = filepath.Join(home, "init.yaml")
+				args = []string{"config", "init", "-config", path, "-dry-run"}
+			case "rebalance":
+				want = "rebalance requires -control-plane"
+			}
+			_, err := runCapturingStdout(t, args)
+			if err == nil || err.Error() != want {
+				t.Error("command dry-run refusal differs")
+			}
+			if command == "config init" {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Error("refused config init wrote an inventory")
+				}
+			}
+		})
 	}
 }

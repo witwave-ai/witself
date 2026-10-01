@@ -899,3 +899,141 @@ func TestDiagnosticRedactionEntryPoints(t *testing.T) {
 		t.Fatal("fatal print count")
 	}
 }
+
+const civoTestToken = "test-civo-token-value-not-real"
+const civoFileTestToken = "test-civo-from-disk-not-real"
+
+// isolateResolvedCivoTokens empties the process-wide record of resolved Civo
+// tokens for one test and restores it afterwards.
+func isolateResolvedCivoTokens(t *testing.T) {
+	t.Helper()
+	resolvedCivoTokens.Lock()
+	saved := resolvedCivoTokens.values
+	resolvedCivoTokens.values = nil
+	resolvedCivoTokens.Unlock()
+	t.Cleanup(func() {
+		resolvedCivoTokens.Lock()
+		resolvedCivoTokens.values = saved
+		resolvedCivoTokens.Unlock()
+	})
+}
+
+func TestRedactDiagnosticCivoToken(t *testing.T) {
+	allValues := r2TestValues()
+	allValues["CLOUDFLARE_API_TOKEN"] = cloudflareTestToken
+	allValues["CIVO_TOKEN"] = civoTestToken
+	for _, tc := range []struct {
+		name     string
+		env      map[string]string
+		recorded []string
+		text     string
+		want     string
+	}{
+		{
+			name: "env value",
+			env:  map[string]string{"CIVO_TOKEN": civoTestToken},
+			text: "Authorization: Bearer " + civoTestToken,
+			want: "Authorization: Bearer [redacted CIVO_TOKEN]",
+		},
+		{
+			name: "padded export",
+			env:  map[string]string{"CIVO_TOKEN": " " + civoTestToken + "\n"},
+			text: "token " + civoTestToken + " rejected",
+			want: "token [redacted CIVO_TOKEN] rejected",
+		},
+		{
+			name: "short value",
+			env:  map[string]string{"CIVO_TOKEN": "abc1234"},
+			text: "abc1234 stays",
+			want: "abc1234 stays",
+		},
+		{
+			name:     "resolved from a file",
+			recorded: []string{civoFileTestToken},
+			text:     "x " + civoFileTestToken + " y",
+			want:     "x [redacted CIVO_TOKEN] y",
+		},
+		{
+			name: "not resolved",
+			text: "x " + civoFileTestToken + " y",
+			want: "x " + civoFileTestToken + " y",
+		},
+		{
+			name:     "short resolved",
+			recorded: []string{"abc1234"},
+			text:     "abc1234 stays",
+			want:     "abc1234 stays",
+		},
+		{
+			name:     "all kinds",
+			env:      allValues,
+			recorded: []string{civoFileTestToken},
+			text: strings.Join([]string{
+				allValues[backend.R2AccessKeyIDEnv],
+				allValues[backend.R2SecretAccessKeyEnv],
+				allValues[backend.R2StatePassphraseEnv],
+				cloudflareTestToken,
+				civoTestToken,
+				civoFileTestToken,
+				cloudflareShapeTestToken,
+			}, " "),
+			want: "[redacted WITSELF_INFRA_R2_ACCESS_KEY_ID] [redacted WITSELF_INFRA_R2_SECRET_ACCESS_KEY] [redacted WITSELF_INFRA_STATE_PASSPHRASE] [redacted CLOUDFLARE_API_TOKEN] [redacted CIVO_TOKEN] [redacted CIVO_TOKEN] [redacted Cloudflare token]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateResolvedCivoTokens(t)
+			for _, value := range tc.recorded {
+				rememberCivoToken(value)
+			}
+			if redactDiagnostic(tc.text, func(name string) string { return tc.env[name] }) != tc.want {
+				t.Fatal(tc.name)
+			}
+		})
+	}
+}
+
+func TestExitsRedactCivoTokenFromFile(t *testing.T) {
+	r2TestHome(t)
+	isolateResolvedCivoTokens(t)
+	dir := t.TempDir()
+	text := "Authorization: Bearer " + civoFileTestToken
+	broad := filepath.Join(dir, "broad.token")
+	if err := os.WriteFile(broad, []byte(civoFileTestToken+"\n"), 0o600); err != nil {
+		t.Fatal("broad file creation failed")
+	}
+	if err := os.Chmod(broad, 0o644); err != nil {
+		t.Fatal("broad file permissions failed")
+	}
+	if _, err := resolveCivoToken(broad); err == nil {
+		t.Fatal("broad file was accepted")
+	}
+	if fatalMessage(errors.New(text), os.Getenv) != "witself-infra: "+text {
+		t.Fatal("failed resolution recorded a token")
+	}
+	secure := filepath.Join(dir, "civo.token")
+	if err := os.WriteFile(secure, []byte(civoFileTestToken+"\n"), 0o600); err != nil {
+		t.Fatal("secure file creation failed")
+	}
+	for range 2 {
+		token, err := resolveCivoToken(secure)
+		if err != nil || token != civoFileTestToken {
+			t.Fatal("secure file resolution failed")
+		}
+	}
+	resolvedCivoTokens.Lock()
+	count := len(resolvedCivoTokens.values)
+	resolvedCivoTokens.Unlock()
+	if count != 1 {
+		t.Fatal("resolved token record count differs")
+	}
+	if fatalMessage(errors.New(text), os.Getenv) != "witself-infra: Authorization: Bearer [redacted CIVO_TOKEN]" {
+		t.Fatal("fatal")
+	}
+	var buf bytes.Buffer
+	p := progressSink{w: &buf}
+	p.errPhase(r2TestCell, "test", errors.New(text))
+	var event progressEvent
+	if bytes.Count(buf.Bytes(), []byte("\n")) != 1 || json.Unmarshal(buf.Bytes(), &event) != nil || event.Note != "Authorization: Bearer [redacted CIVO_TOKEN]" {
+		t.Fatal("progress")
+	}
+}

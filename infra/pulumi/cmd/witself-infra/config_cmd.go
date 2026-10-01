@@ -101,10 +101,16 @@ func configInit(configPath string) error {
 // backend, which must be self-contained per entry. Round-tripping
 // through the struct drops YAML comments; a note says so whenever an
 // existing file is rewritten.
+// With -dry-run it runs every check, prints the entry it would add and
+// writes nothing.
 func configAddCell(fs *flag.FlagSet, configPath string) error {
 	get := func(name string) string { return fs.Lookup(name).Value.String() }
 	explicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	dryRun := false
+	if f := fs.Lookup("dry-run"); f != nil {
+		dryRun = f.Value.String() == "true"
+	}
 
 	path, err := resolveConfigPath(configPath)
 	if err != nil {
@@ -324,6 +330,18 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		if secretShapes.MatchString(line) {
 			return fmt.Errorf("refusing to write %s: line %d looks like a credential — pass a token file PATH, never a token value", path, i+1)
 		}
+	}
+	if dryRun {
+		entryYAML, err := yaml.Marshal(map[string]cellEntry{cellName: entry})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dry run: would add cell %s to %s; nothing was written\n", cellName, path)
+		fmt.Print(string(entryYAML))
+		if existed {
+			fmt.Println("note: without -dry-run, add-cell rewrites the file — YAML comments are not preserved")
+		}
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
