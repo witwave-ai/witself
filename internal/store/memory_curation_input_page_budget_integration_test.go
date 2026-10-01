@@ -221,3 +221,98 @@ func TestMemoryCurationInputPageBudgetPostgres(t *testing.T) {
 		t.Fatalf("transcript cursor = %d, want %d", position, entryCount)
 	}
 }
+
+func TestMemoryCurationInputPageBudgetPostgresToolPrefixDoesNotGrow(t *testing.T) {
+	ctx, st, p := newMemoryCurationAccessProfileStore(t, testenv.RequirePostgres(t))
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: "tool-prefix-fidelity-thread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const toolCount = 15
+	for i := range toolCount + 1 {
+		entry := AppendTranscriptEntryInput{
+			ExternalID: fmt.Sprintf("tool-prefix-fidelity-%d", i+1),
+			Role:       TranscriptRoleTool,
+			Body:       strings.Repeat("t", 2050),
+			Payload:    json.RawMessage(`{"kind":"tool.result"}`),
+		}
+		if i == toolCount {
+			entry.Role = TranscriptRoleUser
+			entry.Body = strings.Repeat("u", 1500)
+			entry.Payload = json.RawMessage(`{"kind":"message.user"}`)
+		}
+		if _, err := st.AppendTranscriptEntry(ctx, p.AccountID, p.RealmID, p.ID,
+			transcript.ID, entry); err != nil {
+			t.Fatalf("append entry %d: %v", i+1, err)
+		}
+	}
+	_, stored, err := st.GetTranscript(ctx, p, transcript.ID)
+	if err != nil || len(stored) != toolCount+1 {
+		t.Fatalf("stored entries = %d, want %d: %v", len(stored), toolCount+1, err)
+	}
+	requested, err := st.RequestCuration(ctx, p, RequestMemoryCurationInput{
+		Scope:         MemoryCurationScope{Sources: []string{MemoryCurationSourceTranscript}},
+		CoalescingKey: "tool_prefix_fidelity", TriggerReason: "manual_refine",
+		IdempotencyKey: "tool-prefix-fidelity-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.StartCuration(ctx, p, StartMemoryCurationInput{
+		RequestID: requested.Request.ID, LeaseDuration: time.Minute,
+		IdempotencyKey: "tool-prefix-fidelity-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.GetCurationRunInputs(ctx, p, started.Run.ID,
+		started.Run.FencingGeneration, "", maxMemoryCurationPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextCursor != "" || len(page.Inputs) != started.Run.InputCount {
+		t.Fatalf("got %d of %d inputs with next cursor present=%t, want one complete page",
+			len(page.Inputs), started.Run.InputCount, page.NextCursor != "")
+	}
+	var transcriptInputs []MemoryCurationRunInput
+	for _, input := range page.Inputs {
+		if input.Kind == MemoryCurationInputTranscript {
+			transcriptInputs = append(transcriptInputs, input)
+		}
+	}
+	if len(transcriptInputs) != 1 {
+		t.Fatalf("transcript froze into %d inputs, want one", len(transcriptInputs))
+	}
+	input := transcriptInputs[0]
+	if input.TranscriptID != transcript.ID || input.SequenceFrom != 1 ||
+		input.SequenceUntil != toolCount+1 || len(input.TranscriptEntries) != toolCount+1 {
+		t.Fatalf("frozen membership = %d..%d with %d entries, want 1..%d in one input",
+			input.SequenceFrom, input.SequenceUntil, len(input.TranscriptEntries), toolCount+1)
+	}
+	// Check signal fidelity first so M8 fails on the user body lost to growing
+	// tool entries, rather than stopping at the first tool that grew.
+	user := input.TranscriptEntries[toolCount]
+	if user.Role != TranscriptRoleUser || user.Body != stored[toolCount].Body ||
+		strings.Contains(user.Body, "witself:elided") {
+		t.Fatalf("user body changed after tool-prefix hydration: got %d bytes, want %d intact bytes",
+			len(user.Body), len(stored[toolCount].Body))
+	}
+	for i, entry := range input.TranscriptEntries {
+		original := stored[i]
+		if entry.Sequence != int64(i+1) || entry.ID != original.ID {
+			t.Fatalf("transcript membership differs at entry %d: sequence = %d", i+1, entry.Sequence)
+		}
+		if i == toolCount {
+			continue
+		}
+		intact := entry.Body == original.Body && string(entry.Payload) == string(original.Payload) &&
+			string(entry.Artifacts) == string(original.Artifacts)
+		retained := len(entry.Body) + len(entry.Payload) + len(entry.Artifacts)
+		storedBytes := len(original.Body) + len(original.Payload) + len(original.Artifacts)
+		if !intact && retained >= storedBytes {
+			t.Fatalf("tool entry %d changed without shrinking: retained %d bytes, stored %d",
+				entry.Sequence, retained, storedBytes)
+		}
+	}
+}

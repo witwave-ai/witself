@@ -2266,14 +2266,24 @@ func hydrateMemoryCurationRunInput(ctx context.Context, q memoryQuerier, p Princ
 // every frozen sequence remains present with its role and metadata, and an
 // in-band note documents each elision so the curator can read the full entry
 // through the transcript tools. Windows frozen before byte-budget chunking
-// existed hydrate within the same bound as newly frozen ones. A tool call or
-// tool result keeps at most maxMemoryCurationToolEntryBytes.
+// existed hydrate within the same bound as newly frozen ones. A tool entry is
+// shortened to its prefix only when that makes it smaller.
 func boundMemoryCurationTranscriptEntries(entries []TranscriptEntry) {
 	remaining := maxMemoryCurationInputBytes
 	for i := range entries {
 		limit := remaining
 		if memoryCurationObservationalEntry(entries[i].Payload) {
 			limit = min(limit, maxMemoryCurationToolEntryBytes)
+			bounded := entries[i]
+			retained := boundMemoryCurationTranscriptEntry(&bounded, limit)
+			stored := len(entries[i].Body) + len(entries[i].Payload) + len(entries[i].Artifacts)
+			if retained < stored {
+				entries[i] = bounded
+			} else {
+				retained = stored
+			}
+			remaining -= retained
+			continue
 		}
 		remaining -= boundMemoryCurationTranscriptEntry(&entries[i], limit)
 	}
