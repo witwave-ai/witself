@@ -226,7 +226,7 @@ read_checks() {
   local deadline=$1 status=0 error_file="$RUN_DIR/checks-last.stderr" error
   shift
   run_before "$deadline" "PR checks ($CURRENT_PR)" gh pr checks "$CURRENT_PR" "$@" \
-    --json name,bucket,state 2>"$error_file" || status=$?
+    --json name,bucket,state,link 2>"$error_file" || status=$?
   error=$(cat "$error_file")
   # GitHub needs time to register checks on a new PR. gh returns 1 before
   # JSON export for these two specific empty-result errors. Match the exact
@@ -244,17 +244,58 @@ read_checks() {
   [ "$status" -eq 0 ] || [ "$status" -eq 8 ] || die "PR checks failed for $CURRENT_PR (gh exit $status)"
 }
 
+# Succeed when every check in the JSON list on standard input passed, is
+# pending, or was skipped when $2 is true, or failed in a way an operator can
+# re-run: state FAILURE with a details link to a GitHub Actions job of the pull
+# request's repository $1 ($1/actions/runs/RUN_ID/job/JOB_ID).
+pr_checks_acceptable() {
+  jq -e --arg repo "$1" --argjson skipping "$2" '
+    type == "array" and all(.[];
+      .bucket == "pass" or .bucket == "pending" or ($skipping and .bucket == "skipping") or
+      (.bucket == "fail" and .state == "FAILURE" and (.name | type == "string" and length > 0) and
+        (.link | type == "string" and startswith($repo + "/actions/runs/") and
+          (ltrimstr($repo + "/actions/runs/") | test("^[1-9][0-9]*/job/[1-9][0-9]*\\z")))))
+  ' >/dev/null
+}
+
 wait_pr_checks() {
-  local deadline=$((SECONDS + CI_TIMEOUT)) checks required
+  local deadline=$((SECONDS + CI_TIMEOUT)) checks required repo names failed run_id run_checks announced=''
+  repo=${CURRENT_PR%/pull/*}
   while :; do
     checks=$(read_checks "$deadline")
     required=$(read_checks "$deadline" --required)
-    printf '%s\n' "$checks" | jq -e 'type == "array" and all(.[];
-      .bucket == "pass" or .bucket == "pending" or .bucket == "skipping")' >/dev/null ||
+    # A failed check is never accepted. Only a failure that names its GitHub
+    # Actions run may wait for an operator to re-run that run.
+    printf '%s\n' "$checks" | pr_checks_acceptable "$repo" true ||
       die "PR checks failed, cancelled, or returned an unknown state: $CURRENT_PR"
-    printf '%s\n' "$required" | jq -e 'type == "array" and all(.[];
-      .bucket == "pass" or .bucket == "pending")' >/dev/null ||
+    printf '%s\n' "$required" | pr_checks_acceptable "$repo" false ||
       die "required PR check failed, skipped, or cancelled: $CURRENT_PR"
+    names=$(printf '%s\n%s\n' "$checks" "$required" | jq -rs \
+      '[.[][] | select(.bucket == "fail") | .name] | unique | join(", ")')
+    if [ -n "$names" ]; then
+      # One line per failed run that shows a failed job link not announced yet:
+      # the run id, then each failed check and its link. A needed job and the
+      # go aggregator can fail at different polls, and a failed re-run has new
+      # job ids. gh keeps showing a check's old failure until its re-run job
+      # starts; that link was announced already.
+      failed=$(printf '%s\n%s\n' "$checks" "$required" | jq -rs --arg repo "$repo" --arg announced "$announced" '
+        ($announced | split("\n")) as $seen |
+        [.[][] | select(.bucket == "fail")] | unique_by(.link) |
+        map(. + {run: (.link | ltrimstr($repo + "/actions/runs/") | split("/")[0])}) |
+        group_by(.run | tonumber) | .[] | select(any(.[]; .link | IN($seen[]) | not)) |
+        [.[0].run, (map(.name + " (" + .link + ")") | join(", "))] | @tsv')
+      if [ -n "$failed" ]; then
+        while IFS=$'\t' read -r run_id run_checks; do
+          log "ACTION REQUIRED: PR check run $run_id failed for $CURRENT_PR: $run_checks. When that run has completed, if the failure is unrelated to the change, re-run it: gh run rerun $run_id --failed (after a provider integration failure, the whole run: gh run rerun $run_id). The train waits for the checks to pass until the PR checks deadline."
+        done <<<"$failed"
+      fi
+      announced=$(printf '%s\n%s\n' "$checks" "$required" | jq -rs --arg announced "$announced" '
+        ($announced | split("\n")) + [.[][] | select(.bucket == "fail") | .link] |
+        map(select(. != "")) | unique | join("\n")')
+      log "Waiting for required PR checks: $CURRENT_PR (failed: $names; waiting for a re-run)"
+      pause_until "$deadline" "PR checks ($CURRENT_PR)"
+      continue
+    fi
     # Do not accept an empty/partial list while GitHub is registering jobs.
     # Preserve the known required-check floor as well as any new ruleset checks.
     if printf '%s\n' "$checks" | jq -e '
@@ -690,6 +731,25 @@ cleanup_wave() {
   CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD=''
 }
 
+# Print witself-infra's health records of one train cell and its control
+# plane. A cell that the local inventory lacks is reported and skipped; any
+# other failure, including a target that is not ok, stops the train.
+fleet_health() {
+  local cell=$1 status=0 report error
+  report="$RUN_DIR/health-$cell.ndjson"
+  error="$RUN_DIR/health-$cell.stderr"
+  witself-infra health --json -cell "$cell" >"$report" 2>"$error" || status=$?
+  if [ "$status" -ne 0 ] && [ ! -s "$report" ] &&
+    [ "$(cat "$error")" = "witself-infra: cell \"$cell\" is not in the infra inventory" ]; then
+    log "Fleet health not checked for $cell: the local witself-infra inventory has no entry for it"
+    HEALTH_UNCHECKED=${HEALTH_UNCHECKED:+$HEALTH_UNCHECKED, }$cell
+    return 0
+  fi
+  cat "$report"
+  cat "$error" >&2
+  [ "$status" -eq 0 ] || die "witself-infra health failed for $cell (exit $status)"
+}
+
 main() {
   set -euo pipefail
   export LC_ALL=C
@@ -784,14 +844,14 @@ ready, nonterminating Running server pods and ready containers with images match
 the cell's written digest pin, or ending :$VERSION for tag-only cells;
 observed deployment generation and all replicas updated/ready/available (${ARGO_TIMEOUT}s);
 remove verified worktree/branch. Poll interval: ${POLL_INTERVAL}s.
-Finally: print serving /v1/version; witself-infra health --json if available.
+Finally: print serving /v1/version; witself-infra health --json -cell for both cells if available.
 Any failure stops the train and retains the current worktree for inspection.
 EOF
     [ "$RESUME" = false ] ||
       printf 'Resume: wave 1 is verified, not rolled: the last commit that changed its values on origin/main must raise both pins to %s, pass post-merge CI, and converge in Argo.\n' "$VERSION"
     return
   fi
-  PHASE=preconditions CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD='' RUN_DIR=''
+  PHASE=preconditions CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD='' RUN_DIR='' HEALTH_UNCHECKED=''
   trap on_exit EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -847,12 +907,19 @@ EOF
   printf '%s\n' "$live" | jq -e --arg version "$VERSION" '.version == $version' >/dev/null ||
     die "serving /v1/version does not report $VERSION"
   if command -v witself-infra >/dev/null 2>&1; then
-    witself-infra health --json
+    # Probe only this train's cells. Another inventory entry, such as a cell
+    # that no up has registered yet, must not stop a train whose waves merged.
+    fleet_health "$BACKUP_CELL"
+    fleet_health "$SERVING_CELL"
   else
     log "witself-infra absent; optional health report skipped"
   fi
   cleanup_wave
-  log "Both waves verified at $VERSION. Run record: $RUN_DIR"
+  if [ -n "$HEALTH_UNCHECKED" ]; then
+    log "Both waves verified at $VERSION. Fleet health was not checked for $HEALTH_UNCHECKED. Run record: $RUN_DIR"
+  else
+    log "Both waves verified at $VERSION. Run record: $RUN_DIR"
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

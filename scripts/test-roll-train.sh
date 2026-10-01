@@ -340,6 +340,10 @@ case "$1 $2" in
     ;;
   'pr checks')
     touch "$STATE_DIR/checks_seen"
+    [[ " $* " = *' --json name,bucket,state,link '* ]] || {
+      printf 'PR checks gh stub requires --json name,bucket,state,link\n' >&2
+      exit 64
+    }
     if [ "$SCENARIO" = checks_transport_failure ]; then
       printf 'HTTP 503: fixture GitHub service unavailable\n' >&2
       exit 1
@@ -357,6 +361,66 @@ case "$1 $2" in
     checks='[{"name":"go","bucket":"pass","state":"SUCCESS"},{"name":"release-config","bucket":"pass","state":"SUCCESS"},{"name":"homebrew-formula","bucket":"pass","state":"SUCCESS"},{"name":"helm","bucket":"pass","state":"SUCCESS"},{"name":"avatar-renderer-portability (ubuntu-latest)","bucket":"pass","state":"SUCCESS"},{"name":"avatar-renderer-portability (ubuntu-24.04-arm)","bucket":"pass","state":"SUCCESS"}]'
     case "$SCENARIO" in
       check_failure) printf '%s\n' "$checks" | jq '.[0].bucket = "fail" | .[0].state = "FAILURE"' ;;
+      check_failure_rerun)
+        # Run CI_RUN_ID fails, is re-run, fails again and passes on the second
+        # re-run. A poll is one read of all checks, then one of the required.
+        polls="$STATE_DIR/pr_polls-$(cat "$STATE_DIR/cell")"
+        [[ " $* " = *' --required '* ]] || printf 'poll\n' >>"$polls"
+        bucket=pass state=SUCCESS job=1003
+        case "$(wc -l <"$polls" | tr -d ' ')" in
+          1|2) bucket=fail state=FAILURE job=1001 ;;
+          3) bucket=pending state=IN_PROGRESS job=1002 ;;
+          4) bucket=fail state=FAILURE job=1002 ;;
+        esac
+        printf '%s\n' "$checks" | jq --arg bucket "$bucket" --arg state "$state" \
+          --arg link "https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/$job" \
+          '.[0] += {bucket: $bucket, state: $state, link: $link}'
+        [ "$bucket" != pending ] || exit 8
+        ;;
+      check_failure_partial_rerun)
+        # go-rest fails first; the go aggregator that needs it fails when the
+        # run ends. While go-rest runs again, gh still shows go's old failure:
+        # go's new job has not started. go-rest is not a required check.
+        polls="$STATE_DIR/pr_polls-$(cat "$STATE_DIR/cell")"
+        only_required=false
+        if [[ " $* " = *' --required '* ]]; then only_required=true; else printf 'poll\n' >>"$polls"; fi
+        printf '%s\n' "$checks" | jq --argjson poll "$(wc -l <"$polls" | tr -d ' ')" \
+          --argjson only_required "$only_required" --arg runs "https://github.com/fixture/repo/actions/runs/$CI_RUN_ID" '
+          if $poll >= 4 then . else
+            (if $poll == 1 then del(.[0])
+              else .[0] += {bucket: "fail", state: "FAILURE", link: ($runs + "/job/3002")} end) |
+            if $only_required then . else
+              . + [{name: "go-rest"} + (if $poll == 3
+                then {bucket: "pending", state: "IN_PROGRESS", link: ($runs + "/job/3003")}
+                else {bucket: "fail", state: "FAILURE", link: ($runs + "/job/3001")} end)]
+            end
+          end'
+        ;;
+      check_failure_wait)
+        # A check outside the required floor fails and is never re-run.
+        if [[ " $* " = *' --required '* ]]; then
+          printf '%s\n' "$checks"
+        else
+          printf '%s\n' "$checks" | jq --arg link "https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/2001" \
+            '. + [{name: "static-analysis", bucket: "fail", state: "FAILURE", link: $link}]'
+        fi
+        ;;
+      check_failure_foreign_link|check_timed_out|check_cancelled)
+        bucket=fail state=FAILURE repo=https://github.com/fixture/repo
+        [ "$SCENARIO" != check_failure_foreign_link ] || repo=https://github.com/fixture/other
+        [ "$SCENARIO" != check_timed_out ] || state=TIMED_OUT
+        [ "$SCENARIO" != check_cancelled ] || { bucket=cancel; state=CANCELLED; }
+        printf '%s\n' "$checks" | jq --arg bucket "$bucket" --arg state "$state" \
+          --arg link "$repo/actions/runs/$CI_RUN_ID/job/1001" \
+          '.[0] += {bucket: $bucket, state: $state, link: $link}'
+        ;;
+      required_skipped)
+        if [[ " $* " = *' --required '* ]]; then
+          printf '%s\n' "$checks" | jq '.[0] += {bucket: "skipping", state: "SKIPPED"}'
+        else
+          printf '%s\n' "$checks"
+        fi
+        ;;
       missing_matrix) printf '%s\n' "$checks" | jq '.[0:5]' ;;
       required_pending)
         printf '%s\n' "$checks" | jq '.[0].bucket = "pending" | .[0].state = "PENDING"'
@@ -544,8 +608,38 @@ EOF_YQ
 cat >"$STUB_BIN/witself-infra" <<'EOF_INFRA'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'witself-infra <%s> <%s>\n' "$1" "$2" >>"$TEST_LOG"
-printf '{"healthy":true}\n'
+printf 'witself-infra' >>"$TEST_LOG"
+printf ' <%s>' "$@" >>"$TEST_LOG"
+printf '\n' >>"$TEST_LOG"
+record() { printf '{"name":"%s","state":"%s","latency_ms":1,"checked_at":"2026-10-01T00:00:00Z"}\n' "$1" "$2"; }
+if [ "$#" -ne 4 ] || [ "$1 $2 $3" != 'health --json -cell' ]; then
+  # The whole operator inventory also holds an entry that no up has registered
+  # yet, as on provisioning day: a report over every entry fails.
+  record cell-not-yet-registered down
+  record control-plane:cp.invalid ok
+  printf 'witself-infra: one or more health targets are not ok: 1 of 2 targets\n' >&2
+  exit 1
+fi
+case "$SCENARIO:$4" in
+  health_cell_absent:civo-sandbox-use1-serving)
+    printf 'witself-infra: cell "%s" is not in the infra inventory\n' "$4" >&2
+    exit 1
+    ;;
+  health_cell_down:civo-sandbox-use1-serving)
+    record "$4" down
+    record control-plane:cp.invalid ok
+    printf 'witself-infra: one or more health targets are not ok: 1 of 2 targets\n' >&2
+    exit 1
+    ;;
+  health_inventory_missing:*)
+    # The start of the real message; the train must stop on any text but the
+    # exact refusal, so the rest of it does not matter here.
+    printf 'witself-infra: no config file at /nonexistent/infra.yaml\n' >&2
+    exit 1
+    ;;
+esac
+record "$4" ok
+record control-plane:cp.invalid ok
 EOF_INFRA
 
 cat >"$STUB_BIN/sleep" <<'EOF_SLEEP'
@@ -679,6 +773,8 @@ if grep -Eq '^(gh|kubectl|curl|roll-cell|witself-infra)|git.*<(fetch|worktree|co
   fail 'dry run invoked an operational command'
 fi
 if grep -q '^Resume:' "$TEST_ROOT/output"; then fail 'dry run without --resume printed the resume plan'; fi
+grep -Fxq 'Finally: print serving /v1/version; witself-infra health --json -cell for both cells if available.' "$TEST_ROOT/output" \
+  || fail 'dry run does not plan the per-cell health report'
 printf 'roll train test: dry run is read-only and prints both waves\n'
 
 reset_case
@@ -704,12 +800,22 @@ while IFS= read -r path; do [ -d "$path" ] || fail 'failed wave worktree was rem
 if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail 'moved backup head started serving wave'; fi
 printf 'roll train test: moved head stops before merge and retains worktree\n'
 
-reset_case
-SCENARIO=check_failure
-expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
-if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail 'failed required check reached merge'; fi
-grep -Eiq '(check|CI).*(fail|success|green)|fail.*check' "$TEST_ROOT/output" || fail 'check refusal lacks clear message'
-printf 'roll train test: failed required check stops before merge\n'
+# A failed check waits for a re-run only when it is a FAILURE that names a
+# GitHub Actions job of this repository. Every other failed state stops at once.
+for scenario in check_failure check_failure_foreign_link check_timed_out check_cancelled required_skipped; do
+  reset_case
+  SCENARIO=$scenario
+  # The CI deadline only bounds a regression that waits on a check it must refuse.
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 30 --poll-interval 1
+  refusal='roll-train: ERROR: PR checks failed, cancelled, or returned an unknown state: https://github.com/fixture/repo/pull/42'
+  [ "$scenario" != required_skipped ] ||
+    refusal='roll-train: ERROR: required PR check failed, skipped, or cancelled: https://github.com/fixture/repo/pull/42'
+  grep -Fxq "$refusal" "$TEST_ROOT/output" || fail "$scenario did not stop at once with the existing message"
+  [ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 2 ] || fail "$scenario polled a check it must refuse"
+  if grep -Fq 'ACTION REQUIRED' "$TEST_ROOT/output"; then fail "$scenario asked for a re-run"; fi
+  if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail "$scenario reached merge"; fi
+done
+printf 'roll train test: failed, foreign, timed-out, cancelled and skipped required checks stop before merge\n'
 
 for scenario in required_pending missing_matrix; do
   reset_case
@@ -733,6 +839,84 @@ grep -Fq 'gh exit 1' "$TEST_ROOT/output" || fail 'checks transport failure lost 
 # must stop on the first failed read.
 [ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 1 ] || fail 'checks transport failure was retried'
 printf 'roll train test: checks transport failure stops immediately\n'
+
+# A failed check is never accepted. The train names the failed run, asks for a
+# re-run once for each newly failed job, and merges only after every check
+# passes.
+checks_poll_interval=1
+pr=https://github.com/fixture/repo/pull/42
+check_action() {
+  printf 'roll-train: ACTION REQUIRED: PR check run %s failed for %s: %s. When that run has completed, if the failure is unrelated to the change, re-run it: gh run rerun %s --failed (after a provider integration failure, the whole run: gh run rerun %s). The train waits for the checks to pass until the PR checks deadline.' \
+    "$CI_RUN_ID" "$pr" "$1" "$CI_RUN_ID" "$CI_RUN_ID"
+}
+reset_case
+SCENARIO=check_failure_wait
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout "$((4 * checks_poll_interval))" --poll-interval "$checks_poll_interval"
+grep -Fq "PR checks ($pr) timed out" "$TEST_ROOT/output" || fail 'check_failure_wait did not wait until the PR checks deadline'
+[ "$(grep -Fxc "$(check_action "static-analysis (https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/2001)")" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'a failed check outside the floor was not announced exactly once'
+[ "$(grep -Fc 'ACTION REQUIRED' "$TEST_ROOT/output")" -eq 1 ] || fail 'one failed attempt was announced more than once'
+[ "$(grep -Fxc "roll-train: Waiting for required PR checks: $pr (failed: static-analysis; waiting for a re-run)" "$TEST_ROOT/output")" -ge 2 ] \
+  || fail 'failed check was not repolled'
+if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail 'a failed check outside the required floor was accepted'; fi
+if grep -Fq 'gh <run> <rerun>' "$TEST_LOG"; then fail 'the train re-ran a check itself'; fi
+while IFS= read -r path; do [ -d "$path" ] || fail 'check_failure_wait removed its failed worktree'; done <"$STATE_DIR/worktrees"
+
+reset_case
+SCENARIO=check_failure_rerun
+rerun_checks_polls_per_wave=5
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout "$((5 * rerun_checks_polls_per_wave * checks_poll_interval))" --poll-interval "$checks_poll_interval" \
+  >"$TEST_ROOT/output" 2>&1 || fail 'check_failure_rerun did not continue after a successful re-run'
+for wave in 1 2; do
+  for job in 1001 1002; do
+    expected=$(check_action "go (https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/$job)")
+    [ "$(awk -v wave="$wave" -v expected="$expected" '
+      /^roll-train: Wave [12] PR: / { active = ($3 == wave) }
+      active && $0 == expected { count++ }
+      END { print count + 0 }
+    ' "$TEST_ROOT/output")" -eq 1 ] || fail "PR check job $job was not announced exactly once in wave $wave"
+  done
+done
+[ "$(grep -Fc 'ACTION REQUIRED' "$TEST_ROOT/output")" -eq 4 ] || fail 'failed checks produced unexpected action notices'
+[ "$(grep -Fxc "roll-train: Waiting for required PR checks: $pr (failed: go; waiting for a re-run)" "$TEST_ROOT/output")" -eq 6 ] \
+  || fail 'failed checks were not polled three times per wave'
+[ "$(grep -Fxc "roll-train: Waiting for required PR checks: $pr" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'running re-run was not awaited once per wave'
+[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq "$((4 * rerun_checks_polls_per_wave))" ] \
+  || fail 'PR checks were not read twice per poll, five polls per wave'
+for cell in "$BACKUP" "$SERVING"; do
+  [ "$(wc -l <"$STATE_DIR/pr_polls-$cell" | tr -d ' ')" -eq "$rerun_checks_polls_per_wave" ] \
+    || fail "$cell did not exercise every failed and passing check state"
+done
+if grep -Fq 'gh <run> <rerun>' "$TEST_LOG"; then fail 'the train re-ran a check itself'; fi
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'check_failure_rerun did not complete both waves'
+grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'check_failure_rerun did not finish serving verification'
+printf 'roll train test: a failed PR check waits for a passing re-run, announced once per newly failed job, and is never accepted\n'
+
+reset_case
+SCENARIO=check_failure_partial_rerun
+partial_checks_polls_per_wave=4
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout "$((5 * partial_checks_polls_per_wave * checks_poll_interval))" --poll-interval "$checks_poll_interval" \
+  >"$TEST_ROOT/output" 2>&1 || fail 'check_failure_partial_rerun did not continue after a successful re-run'
+rest_link="https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/3001"
+go_link="https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/3002"
+[ "$(grep -Fxc "$(check_action "go-rest ($rest_link)")" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'a failed needed job was not announced once per wave'
+[ "$(grep -Fxc "$(check_action "go-rest ($rest_link), go ($go_link)")" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'a job that failed later in the same run was not announced once per wave'
+[ "$(grep -Fc 'ACTION REQUIRED' "$TEST_ROOT/output")" -eq 4 ] \
+  || fail 'an old failure shown while its re-run started was announced again'
+[ "$(grep -Fxc "roll-train: Waiting for required PR checks: $pr (failed: go; waiting for a re-run)" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'an old failure shown while its re-run started was not awaited once per wave'
+for cell in "$BACKUP" "$SERVING"; do
+  [ "$(wc -l <"$STATE_DIR/pr_polls-$cell" | tr -d ' ')" -eq "$partial_checks_polls_per_wave" ] \
+    || fail "$cell did not exercise every partial re-run state"
+done
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'check_failure_partial_rerun did not complete both waves'
+printf 'roll train test: a job that fails later in a run is announced; an old failure during its re-run is not\n'
 
 for scenario in postmerge_wrong_sha postmerge_timed_out postmerge_failure_missing_id postmerge_failure_missing_attempt argo_timeout; do
   reset_case
@@ -1040,9 +1224,47 @@ awk -v serving="$SERVING" '
 ' "$TEST_LOG" || fail 'serving wave preceded backup pod verification'
 while IFS= read -r path; do [ ! -d "$path" ] || fail 'successful wave retained its worktree'; done <"$STATE_DIR/worktrees"
 grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'train omitted final serving version'
-grep -Fq 'witself-infra <health> <--json>' "$TEST_LOG" || fail 'available infra health binary was not invoked'
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING")" ] \
+  || fail 'infra health did not probe exactly the two train cells, in wave order'
+grep -Fxq "{\"name\":\"$SERVING\",\"state\":\"ok\",\"latency_ms\":1,\"checked_at\":\"2026-10-01T00:00:00Z\"}" "$TEST_ROOT/output" \
+  || fail 'serving health record was not printed'
+grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output" \
+  || fail 'checked train changed its success line'
 if grep -Eq '<(--force|--force-with-lease|-f)>' "$TEST_LOG"; then fail 'train used force'; fi
 printf 'roll train test: offline two-wave success, merge fences, CI, order, cleanup, and health passed\n'
+
+# The health step judges only the train's cells. A train cell that the local
+# inventory lacks is reported and named in the summary; any other health
+# failure stops the train after both waves merged.
+reset_case
+SCENARIO=health_cell_absent
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 >"$TEST_ROOT/output" 2>&1 \
+  || fail 'a train cell missing from the inventory stopped the train'
+grep -Fxq "roll-train: Fleet health not checked for $SERVING: the local witself-infra inventory has no entry for it" "$TEST_ROOT/output" \
+  || fail 'missing inventory entry was not reported'
+grep -Eq "^roll-train: Both waves verified at $VERSION\. Fleet health was not checked for $SERVING\. Run record: /" "$TEST_ROOT/output" \
+  || fail 'final summary did not name the unchecked cell'
+if grep -Fq 'is not in the infra inventory' "$TEST_ROOT/output"; then fail 'the inventory refusal was printed as an error'; fi
+grep -Fq "{\"name\":\"$BACKUP\",\"state\":\"ok\"" "$TEST_ROOT/output" || fail 'backup health record was not printed'
+while IFS= read -r path; do [ ! -d "$path" ] || fail 'health_cell_absent retained a verified worktree'; done <"$STATE_DIR/worktrees"
+
+for scenario in health_cell_down health_inventory_missing; do
+  reset_case
+  SCENARIO=$scenario
+  expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+  cell=$SERVING calls=2
+  [ "$scenario" != health_inventory_missing ] || { cell=$BACKUP calls=1; }
+  grep -Fxq "roll-train: ERROR: witself-infra health failed for $cell (exit 1)" "$TEST_ROOT/output" \
+    || fail "$scenario did not stop on the failed health of $cell"
+  grep -Fxq 'roll-train: stopped during final serving verification (exit 1).' "$TEST_ROOT/output" \
+    || fail "$scenario stopped in another phase"
+  [ "$(grep -c '^witself-infra ' "$TEST_LOG")" -eq "$calls" ] || fail "$scenario probed the wrong cells"
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail "$scenario did not merge both waves first"
+  if grep -Fq 'Both waves verified' "$TEST_ROOT/output"; then fail "$scenario reported success"; fi
+done
+grep -Fxq 'witself-infra: no config file at /nonexistent/infra.yaml' "$TEST_ROOT/output" \
+  || fail 'the health error was not shown'
+printf 'roll train test: fleet health covers only the train cells: a missing inventory entry is reported and skipped, other failures stop\n'
 
 for scenario in digest_success digest_from_tag digest_bare_success; do
   reset_case
@@ -1178,7 +1400,8 @@ grep -Fxq "roll-train: Preconditions verified; serving version 1.2.1 -> $VERSION
 [ "$(grep -Fxc "ghcr.io/witwave-ai/witself-server@$SERVING_DIGEST" "$TEST_ROOT/output")" -eq 1 ] \
   || fail 'production pair train omitted or duplicated the certified production image'
 grep -Fq '"version":"1.2.3"' "$TEST_ROOT/output" || fail 'production pair train omitted final serving version'
-grep -Fq 'witself-infra <health> <--json>' "$TEST_LOG" || fail 'production pair train did not invoke the available infra health binary'
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$PRODUCTION")" ] \
+  || fail 'production pair train did not probe exactly its two cells'
 while IFS= read -r path; do [ ! -d "$path" ] || fail 'production pair train retained a verified worktree'; done <"$STATE_DIR/worktrees"
 printf 'roll train test: production pair train forwards its pair, reads only its contexts and host, and rolls backup first\n'
 

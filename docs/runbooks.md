@@ -1321,10 +1321,22 @@ deployment, and the version guard refuses a downgrade of either.
 Digest-pinned cells can report bare config digests in container status; the train uses the validated `imageID` manifest reference to check the recorded release pin and convergence.
 It then runs `roll-cell.sh`,
 commits and pushes a branch, and creates a PR recording the wave and schema
-attestation or evidence gate. It waits for all required PR checks to pass,
-verifies the head OID and `main` base, re-fetches the selected cell's values to
-reject concurrent changes, and repeats the live version checks before
-squash-merging with `--match-head-commit`. Both pin lines must change under
+attestation or evidence gate. It waits for all required PR checks to pass. If
+a check fails, the train prints `ACTION REQUIRED` with the GitHub Actions run id
+of that check and waits, until the PR checks deadline, for a re-run to pass. It
+never re-runs jobs itself and never accepts a failed check. Only a check in
+state `FAILURE` whose details link names a GitHub Actions job of the repository
+waits. A cancelled, timed-out or otherwise failed check, and a skipped required
+check, still stop the train at once. A job that fails later in the same run
+prints another line. The line can appear before its run has completed, so wait
+with `gh run watch RUN_ID` first. Genuine defects of a roll fail here, so judge
+each failure: re-run one that the change did not cause with
+`gh run rerun RUN_ID --failed` (the whole run, `gh run rerun RUN_ID`, after a
+failed provider integration job), and stop the train with `Ctrl-C` when it is
+real. Once every check passes, the train verifies the head OID and `main` base,
+re-fetches the selected cell's values to reject concurrent changes, and repeats
+the live version checks before squash-merging with `--match-head-commit`. Both
+pin lines must change under
 standard text-merge semantics, so a newer pin arriving after the final read
 conflicts at merge. It then requires a successful `ci.yml` push run on that
 exact merge commit. If a newer push to `main` cancelled that run, the newest
@@ -1353,8 +1365,8 @@ The default cells are
 `--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
 with a unique directory per run; the primary checkout need not be clean.
 Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
-1,200 seconds for Argo convergence, polling every 15 seconds. Apart from that
-post-merge CI wait, any failed step stops the train and preserves the current
+1,200 seconds for Argo convergence, polling every 15 seconds. Apart from those
+two CI waits, any failed step stops the train and preserves the current
 wave's worktree for inspection (a cleanup failure may leave it detached after
 branch deletion). There is no automatic resume or rollback; inspect the PR,
 GitOps pins, CI, and live state before continuing. If a train of the default
@@ -1369,8 +1381,13 @@ the operator to remove. A train that stopped after wave 2 merged is finished by
 hand: verify post-merge CI, Argo convergence, and the serving `/v1/version`. The
 script never
 force-pushes. After the serving wave, it prints and verifies the serving
-`/v1/version`, then prints `witself-infra health --json` if that binary is
-available.
+`/v1/version`. If `witself-infra` is installed, it then runs
+`witself-infra health --json -cell CELL` for each of the two train cells and
+prints the records, so an inventory entry for another cell, such as one that
+no `up` has registered yet, cannot stop the train. A train cell that the local
+inventory lacks is reported, and the final summary names it as not checked.
+Any other health failure, including a target that is not `ok`, stops the train
+after both waves have merged and keeps wave 2's worktree for inspection.
 
 To roll the production serving cell, select its pair explicitly; the default
 stays the sandbox pair:
