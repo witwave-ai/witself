@@ -147,6 +147,8 @@ func whoamiCivoWithToken(ctx context.Context, entry cellEntry, token string) (id
 // at a mode-0600 token file for multi-account operation, or use the ambient
 // CIVO_TOKEN fallback for a single account. The value is returned only to the
 // caller for direct API/provider injection and must never be logged.
+// It is also kept in memory by rememberCivoToken, never written or logged,
+// so that the diagnostic exits can replace it.
 func resolveCivoToken(tokenFile string) (string, error) {
 	tokenFile = strings.TrimSpace(tokenFile)
 	if tokenFile == "" {
@@ -154,6 +156,7 @@ func resolveCivoToken(tokenFile string) (string, error) {
 		if token == "" {
 			return "", fmt.Errorf("CIVO_TOKEN is not set and no -civo-token-file was configured")
 		}
+		rememberCivoToken(token)
 		return token, nil
 	}
 	info, err := os.Stat(tokenFile)
@@ -177,6 +180,7 @@ func resolveCivoToken(tokenFile string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("civo token file %s is empty", tokenFile)
 	}
+	rememberCivoToken(token)
 	return token, nil
 }
 

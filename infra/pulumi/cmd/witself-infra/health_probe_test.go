@@ -241,3 +241,70 @@ func writeHealthProbeConfig(t *testing.T, controlPlane string) string {
 	}
 	return configPath
 }
+
+func TestHealthReportsUnregisteredAndUnconnectedCellsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cells":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"cells": []map[string]string{{"name": "cell-live"}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/cells/cell-live:probe":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/cells/cell-new:probe":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"schema_version": "witself.v0",
+				"error":          "unknown cell",
+			})
+		default:
+			t.Error("unexpected health request")
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "fleet.token")
+	if err := os.WriteFile(tokenPath, []byte("health-probe-test-only"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "infra.yaml")
+	config := fmt.Sprintf("version: 1\ncells:\n  cell-bare: {}\n  cell-live:\n    control_plane: %s\n    fleet_token_file: %s\n  cell-new:\n    control_plane: %s\n    fleet_token_file: %s\n", srv.URL, tokenPath, srv.URL, tokenPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runHealthCommand(context.Background(), configPath, "", time.Second, true, &out)
+	if !errors.Is(err, errHealthNotOK) {
+		t.Fatal("health error does not wrap errHealthNotOK")
+	}
+	if err.Error() != "one or more health targets are not ok: 2 of 4 targets" {
+		t.Fatal("health error does not report two non-ok targets out of four")
+	}
+	want := map[string]automationHealthState{
+		"cell-bare":                           automationHealthDown,
+		"cell-live":                           automationHealthOK,
+		"cell-new":                            automationHealthDown,
+		controlPlaneHealthTargetName(srv.URL): automationHealthOK,
+	}
+	lines := bytes.Split(bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), []byte{'\n'})
+	if len(lines) != 4 {
+		t.Fatalf("NDJSON record count = %d, want 4", len(lines))
+	}
+	for _, line := range lines {
+		var result automationHealthResult
+		if err := json.Unmarshal(line, &result); err != nil {
+			t.Fatal("invalid health NDJSON record")
+		}
+		state, exists := want[result.Name]
+		if !exists {
+			t.Fatal("unexpected or duplicate health target")
+		}
+		if result.State != state {
+			t.Fatalf("health target %s has state %s, want %s", result.Name, result.State, state)
+		}
+		delete(want, result.Name)
+	}
+}
