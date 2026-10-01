@@ -377,8 +377,8 @@ func TestProductionServingOnboarding(t *testing.T) {
 		}
 	}
 	sort.Strings(unprovisioned)
-	if !reflect.DeepEqual(unprovisioned, []string{"civo-prod-use1-serving"}) {
-		t.Fatal("civo-prod-use1-serving must be the only unprovisioned cell; remove its catalog marker and this expectation together before its first witself-infra preview")
+	if len(unprovisioned) != 0 {
+		t.Fatalf("no catalog cell may be recorded unprovisioned once its first-sync pins have merged; found %v", unprovisioned)
 	}
 	charts, err := loadChartPins(root)
 	if err != nil {
