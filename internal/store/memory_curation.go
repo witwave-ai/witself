@@ -72,13 +72,23 @@ const (
 	maxMemoryCurationGeneration          = int64(1<<62 - 1)
 
 	// Byte budgets keep one materialized input and one input page small enough
-	// for MCP transports that reject oversized frames. Freeze chunks a large
-	// transcript window into multiple contiguous inputs; hydration elides
-	// oversized bodies from windows frozen before chunking existed. Elided
-	// content stays retrievable in full through the transcript tools.
-	maxMemoryCurationInputBytes     = 256 * 1024
+	// for the tool results that MCP clients show a model (commonly about 100 KB
+	// of text; a typed MCP frame carries the page about twice). Freeze chunks a
+	// transcript window into contiguous inputs of at most
+	// maxMemoryCurationInputBytes of stored body, payload and artifact bytes,
+	// and hydration elides content beyond the same budget from inputs frozen
+	// with an older, larger one. Neither counts per-entry metadata or JSON
+	// escaping, so an input of many small entries can hydrate well past it. A
+	// tool.call or tool.result entry keeps only a prefix of at most
+	// maxMemoryCurationToolEntryBytes, enough to show which tool ran and how its
+	// input or output began. A page stops before the input that would take it
+	// past maxMemoryCurationPageBytes, so only a first input that is larger on
+	// its own exceeds it. Elided content stays retrievable in full through the
+	// transcript tools.
+	maxMemoryCurationInputBytes     = 32 * 1024
 	maxMemoryCurationEntryBodyBytes = 16 * 1024
-	maxMemoryCurationPageBytes      = 1 << 20
+	maxMemoryCurationPageBytes      = 64 * 1024
+	maxMemoryCurationToolEntryBytes = 2 * 1024
 
 	// Fast-forward observational coverage: a transcript stream more than the
 	// threshold behind materializes only signal entries at full fidelity plus
@@ -2131,9 +2141,10 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 	if hasMore {
 		inputs = inputs[:limit]
 	}
-	// A page stops early once its hydrated inputs exceed the page byte budget
-	// so one response never outgrows the transport, regardless of the
-	// requested limit. The cursor resumes from the last returned ordinal.
+	// A page always carries its first input. A later input that would take
+	// the page past its byte budget starts the next page instead, so one
+	// response stays transport-sized regardless of the requested limit. The
+	// cursor resumes after the last returned ordinal.
 	pageBytes := 0
 	for i := range inputs {
 		if err := hydrateMemoryCurationRunInput(ctx, tx, p, &inputs[i]); err != nil {
@@ -2143,12 +2154,12 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 		if err != nil {
 			return MemoryCurationRunInputPage{}, err
 		}
-		pageBytes += len(encoded)
-		if pageBytes >= maxMemoryCurationPageBytes && i+1 < len(inputs) {
-			inputs = inputs[:i+1]
+		if i > 0 && pageBytes+len(encoded) > maxMemoryCurationPageBytes {
+			inputs = inputs[:i]
 			hasMore = true
 			break
 		}
+		pageBytes += len(encoded)
 	}
 	nextCursor := ""
 	if hasMore {
@@ -2255,12 +2266,33 @@ func hydrateMemoryCurationRunInput(ctx context.Context, q memoryQuerier, p Princ
 // every frozen sequence remains present with its role and metadata, and an
 // in-band note documents each elision so the curator can read the full entry
 // through the transcript tools. Windows frozen before byte-budget chunking
-// existed hydrate within the same bound as newly frozen ones.
+// existed hydrate within the same bound as newly frozen ones. A tool call or
+// tool result keeps at most maxMemoryCurationToolEntryBytes.
 func boundMemoryCurationTranscriptEntries(entries []TranscriptEntry) {
 	remaining := maxMemoryCurationInputBytes
 	for i := range entries {
-		remaining -= boundMemoryCurationTranscriptEntry(&entries[i], remaining)
+		limit := remaining
+		if memoryCurationObservationalEntry(entries[i].Payload) {
+			limit = min(limit, maxMemoryCurationToolEntryBytes)
+		}
+		remaining -= boundMemoryCurationTranscriptEntry(&entries[i], limit)
 	}
+}
+
+// memoryCurationObservationalEntry is the Go form of
+// memoryCurationObservationalKindsSQL for one stored payload: true only when
+// its exact "kind" member is the string tool.call or tool.result. Classify an
+// entry before bounding it, because bounding may replace the payload.
+func memoryCurationObservationalEntry(payload json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if len(payload) == 0 || json.Unmarshal(payload, &fields) != nil {
+		return false
+	}
+	var kind string
+	if json.Unmarshal(fields["kind"], &kind) != nil {
+		return false
+	}
+	return kind == "tool.call" || kind == "tool.result"
 }
 
 // boundMemoryCurationTranscriptEntry rewrites oversized fields in place and

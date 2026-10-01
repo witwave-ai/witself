@@ -1143,6 +1143,18 @@ func fulfillMemoryCurationGenerationTx(
 	if backlog {
 		triggerReason = memoryCurationSourceBacklogTrigger
 	}
+	// Automatic work waits out the quiet period that starts with this apply,
+	// so an agent whose own session keeps growing is not asked to curate again
+	// on its next turn. An explicit request's follow-up is due at once.
+	var followUpDueAt *time.Time
+	if request.CoalescingKey == automaticMemoryCurationCoalescingKey {
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			return MemoryCurationRequest{}, nil, err
+		}
+		quietUntil := now.Add(memoryCurationAutomaticQuietPeriod)
+		followUpDueAt = &quietUntil
+	}
 	followUp, err := scanMemoryCurationRequest(tx.QueryRow(ctx, `
 		INSERT INTO memory_curation_requests
 		  (id,account_id,realm_id,owner_kind,owner_id,scope,coalescing_key,
@@ -1150,7 +1162,8 @@ func fulfillMemoryCurationGenerationTx(
 		   max_attempts,fulfilled_generation,read_only_replay,actor_kind,actor_id,
 		   idempotency_key,request_hash)
 		VALUES ($1,$2,$3,'agent',$4,$5::jsonb,$6,$7,$8,$9,
-		        clock_timestamp(),'queued',0,$10,0,false,'agent',$4,$11,$12)
+		        COALESCE($13::timestamptz,clock_timestamp()),'queued',0,$10,0,false,
+		        'agent',$4,$11,$12)
 		RETURNING id,account_id,realm_id,owner_kind,owner_id,scope,coalescing_key,
 		          trigger_reason,request_generation,priority,due_at,state,attempt_count,
 		          max_attempts,COALESCE(claimed_run_id,''),fulfilled_generation,
@@ -1159,7 +1172,7 @@ func fulfillMemoryCurationGenerationTx(
 		          dead_lettered_at,created_at,updated_at`, followUpID, p.AccountID,
 		p.RealmID, p.ID, string(scope), request.CoalescingKey, triggerReason,
 		followUpGeneration, request.Priority, request.MaxAttempts, followUpKey,
-		followUpHash))
+		followUpHash, followUpDueAt))
 	if err != nil {
 		return MemoryCurationRequest{}, nil, fmt.Errorf("queue curation generation follow-up: %w", err)
 	}

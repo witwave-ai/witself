@@ -325,6 +325,15 @@ assistant response cannot be because it does not yet exist. Both may be reviewed
 on a later interaction. A checkpoint delivered at prompt start represents the
 work durable at that instant, not guaranteed same-turn synthesis.
 
+Automatic work also has a quiet period. Once a run for the server's automatic
+request is applied, the agent's next automatic request becomes due no earlier
+than 30 minutes after that apply, even though the agent's own session keeps
+appending transcript entries. A source commit inside that window coalesces into
+the waiting request without making it due sooner; after the window it makes
+waiting work due at once, as before. Without the quiet period, a session that
+captures its own transcript would find a pending checkpoint on every turn.
+Requests a client creates explicitly, and their follow-ups, are due as before.
+
 MCP exposes the capture and curation operations, but it cannot call its own tools
 or wake a model. Runtime hooks likewise never wait for an LLM or launch another
 curator. The explicit legacy/manual `memory curate auto` path can still be

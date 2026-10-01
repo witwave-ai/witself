@@ -741,23 +741,32 @@ func seedMemoryArchiveLoadRelations(
 		if startErr != nil {
 			return fmt.Errorf("start archive relation curation batch %d: %w", batch, startErr)
 		}
-		page, pageErr := st.GetCurationRunInputs(
-			ctx, p, started.Run.ID, started.Run.FencingGeneration,
-			started.FirstInputCursor, maxMemoryCurationPageSize,
-		)
-		if pageErr != nil {
-			return fmt.Errorf("read archive relation inputs batch %d: %w", batch, pageErr)
-		}
-		if page.NextCursor != "" {
-			return errors.New("archive relation input batch unexpectedly required a second page")
-		}
+		// The server bounds an input page by bytes as well as by count, so one
+		// batch of up to groupCap memories may span several pages.
 		refs := make([]MemoryCurationVersionReference, 0, groupCap)
-		for _, input := range page.Inputs {
-			if input.Kind == MemoryCurationSourceMemory {
-				refs = append(refs, MemoryCurationVersionReference{
-					MemoryID: input.MemoryID, Version: input.MemoryVersion,
-				})
+		cursor := started.FirstInputCursor
+		for pages := 1; ; pages++ {
+			if pages > started.Run.InputCount {
+				return fmt.Errorf("archive relation batch %d did not page to exhaustion", batch)
 			}
+			page, pageErr := st.GetCurationRunInputs(
+				ctx, p, started.Run.ID, started.Run.FencingGeneration,
+				cursor, maxMemoryCurationPageSize,
+			)
+			if pageErr != nil {
+				return fmt.Errorf("read archive relation inputs batch %d: %w", batch, pageErr)
+			}
+			for _, input := range page.Inputs {
+				if input.Kind == MemoryCurationSourceMemory {
+					refs = append(refs, MemoryCurationVersionReference{
+						MemoryID: input.MemoryID, Version: input.MemoryVersion,
+					})
+				}
+			}
+			if page.NextCursor == "" {
+				break
+			}
+			cursor = page.NextCursor
 		}
 		if len(refs) <= opts.RelationsPerMemory {
 			return fmt.Errorf("archive relation batch has %d memory inputs", len(refs))
