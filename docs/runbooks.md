@@ -1365,8 +1365,13 @@ The default cells are
 `--workdir` defaults to `$(git rev-parse --git-common-dir)/../.roll-train`,
 with a unique directory per run; the primary checkout need not be clean.
 Timeouts default to 3,600 seconds for each PR and post-merge CI phase and
-1,200 seconds for Argo convergence, polling every 15 seconds. Apart from those
-two CI waits, any failed step stops the train and preserves the current
+1,200 seconds for Argo convergence, polling every 15 seconds. In those three
+waits, a `gh` or `kubectl` read that fails, for example on a network error or
+a GitHub 5xx, prints a `read failed` line and is tried again after one poll
+interval: at most five failed reads in a row, and never past the wait's
+deadline. A failed read is never taken as an answer, and an interrupted read
+or any write is never retried. Apart from the two CI waits and these retries,
+any failed step stops the train and preserves the current
 wave's worktree for inspection (a cleanup failure may leave it detached after
 branch deletion). There is no automatic resume or rollback; inspect the PR,
 GitOps pins, CI, and live state before continuing. If a train of the default

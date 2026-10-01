@@ -222,26 +222,76 @@ run_before() (
   exit "$status"
 )
 
-read_checks() {
-  local deadline=$1 status=0 error_file="$RUN_DIR/checks-last.stderr" error
-  shift
-  run_before "$deadline" "PR checks ($CURRENT_PR)" gh pr checks "$CURRENT_PR" "$@" \
-    --json name,bucket,state,link 2>"$error_file" || status=$?
-  error=$(cat "$error_file")
-  # GitHub needs time to register checks on a new PR. gh returns 1 before
-  # JSON export for these two specific empty-result errors. Match the exact
-  # branch and message; authentication/transport errors still fail immediately.
-  if [ "$status" -eq 1 ] && {
-    [ "$error" = "no checks reported on the '$CURRENT_BRANCH' branch" ] ||
-    [ "$error" = "no required checks reported on the '$CURRENT_BRANCH' branch" ];
-  }; then
-    printf '[]\n'
-    return
+# A read-only poll command failed with exit $3, and $4 reads in a row have
+# failed. Succeed after one poll interval when the read may be tried again: it
+# exited 125 or lower (not an interrupt, a signal or a command that cannot
+# run), the deadline $1 has not passed, and fewer than five reads in a row have
+# failed. What a failed read printed is never judged: kubectl prints an empty
+# List when a selector read fails. Only read-only polls call this; a write is
+# never retried. Log to standard error: callers capture standard output.
+retry_read() {
+  local deadline=$1 label=$2 status=$3 failures=$4 limit=5
+  if [ "$status" -gt 125 ] || [ "$SECONDS" -ge "$deadline" ]; then
+    return 1
   fi
-  [ -z "$error" ] || printf '%s\n' "$error" >&2
-  # gh uses 8 for pending; other nonzero results (including transport errors)
-  # stop the train. Never turn a failed request into an empty/successful list.
-  [ "$status" -eq 0 ] || [ "$status" -eq 8 ] || die "PR checks failed for $CURRENT_PR (gh exit $status)"
+  if [ "$failures" -ge "$limit" ]; then
+    log "$label: read failed with exit $status (failure $failures of $limit in a row); stopping" >&2
+    return 1
+  fi
+  log "$label: read failed with exit $status (failure $failures of $limit in a row); retrying within the same deadline" >&2
+  pause_until "$deadline" "$label"
+}
+
+# Run a read-only poll command under run_before and print its standard output.
+# A failed read is retried as retry_read allows. Otherwise the last result is
+# returned unchanged, so a failure stops the train as before. Call it only in a
+# command substitution, and never for a command that writes.
+poll_read() {
+  local deadline=$1 label=$2 output status failures=0
+  shift 2
+  while :; do
+    status=0
+    output=$(run_before "$deadline" "$label" "$@") || status=$?
+    if [ "$status" -ne 0 ]; then
+      failures=$((failures + 1))
+      if retry_read "$deadline" "$label" "$status" "$failures"; then continue; fi
+    fi
+    printf '%s\n' "$output"
+    return "$status"
+  done
+}
+
+read_checks() {
+  local deadline=$1 status error_file="$RUN_DIR/checks-last.stderr" error output failures=0
+  shift
+  while :; do
+    status=0
+    output=$(run_before "$deadline" "PR checks ($CURRENT_PR)" gh pr checks "$CURRENT_PR" "$@" \
+      --json name,bucket,state,link 2>"$error_file") || status=$?
+    error=$(cat "$error_file")
+    # GitHub needs time to register checks on a new PR. gh returns 1 before
+    # JSON export for these two specific empty-result errors. Match the exact
+    # branch and message; any other failure is judged below.
+    if [ "$status" -eq 1 ] && {
+      [ "$error" = "no checks reported on the '$CURRENT_BRANCH' branch" ] ||
+      [ "$error" = "no required checks reported on the '$CURRENT_BRANCH' branch" ];
+    }; then
+      printf '[]\n'
+      return
+    fi
+    [ -z "$error" ] || printf '%s\n' "$error" >&2
+    # Under --json gh exits 0 whether checks passed, failed or are pending; 8
+    # (pending) is still accepted. Any other failure is retried as retry_read
+    # allows, then stops the train. Never turn a failed request into an
+    # empty/successful list.
+    if [ "$status" -eq 0 ] || [ "$status" -eq 8 ]; then
+      printf '%s\n' "$output"
+      return
+    fi
+    failures=$((failures + 1))
+    retry_read "$deadline" "PR checks ($CURRENT_PR)" "$status" "$failures" ||
+      die "PR checks failed for $CURRENT_PR (gh exit $status)"
+  done
 }
 
 # Succeed when every check in the JSON list on standard input passed, is
@@ -319,7 +369,7 @@ wait_merge_ci() {
   local oid=$1 deadline=$((SECONDS + CI_TIMEOUT)) runs candidates head status conclusion waiting limit
   local run_id attempt announced=''
   while :; do
-    runs=$(run_before "$deadline" "post-merge CI ($oid)" gh run list \
+    runs=$(poll_read "$deadline" "post-merge CI ($oid)" gh run list \
       --workflow ci.yml --branch main --event push --commit "$oid" \
       --limit 1 --json headSha,status,conclusion,databaseId,attempt)
     # A failed run is never accepted. Re-running it keeps its run id and adds an
@@ -358,7 +408,7 @@ wait_merge_ci() {
       'length == 1 and .[0].status == "completed" and .[0].conclusion == "cancelled"' >/dev/null; then
       limit=100
       while :; do
-        runs=$(run_before "$deadline" "post-merge CI ($oid)" gh run list \
+        runs=$(poll_read "$deadline" "post-merge CI ($oid)" gh run list \
           --workflow ci.yml --branch main --event push --limit "$limit" \
           --json headSha,status,conclusion,createdAt)
         printf '%s\n' "$runs" | jq -e '
@@ -470,13 +520,13 @@ wait_argo() {
     [ "$release_version" = "$VERSION" ] || die "$cell digest pin does not record target release $VERSION"
   fi
   while :; do
-    app=$(run_before "$deadline" "Argo convergence ($cell)" \
+    app=$(poll_read "$deadline" "Argo convergence ($cell)" \
       kubectl --context "witself-$cell" --request-timeout=20s -n argocd \
       get applications.argoproj.io witself-server -o json)
-    pods=$(run_before "$deadline" "Argo convergence ($cell)" \
+    pods=$(poll_read "$deadline" "Argo convergence ($cell)" \
       kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
       get pods -l 'app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server' -o json)
-    deployments=$(run_before "$deadline" "Argo convergence ($cell)" \
+    deployments=$(poll_read "$deadline" "Argo convergence ($cell)" \
       kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
       get deployments -l 'app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server' -o json)
     # Malformed responses are failures, not convergence delays.
