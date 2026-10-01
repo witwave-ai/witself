@@ -2513,6 +2513,12 @@ func agentEmailRouteByRecipientTx(
 		locked, lockErr := agentEmailCustomDomainRouteByIdentityTx(
 			ctx, tx, custom.DomainRequestID, custom.RealmAliasClaimID, true,
 		)
+		// Only a missing route or one that no longer matches the recipient is
+		// a permanent refusal. Any other read failure is returned unchanged;
+		// the relay answers it as temporary.
+		if lockErr != nil && !errors.Is(lockErr, ErrAgentEmailCustomDomainRouteNotFound) {
+			return agentEmailRecipientRoute{}, lockErr
+		}
 		if lockErr != nil || locked.Domain != parts.Domain ||
 			locked.RealmLabel != parts.RealmLabel {
 			return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
