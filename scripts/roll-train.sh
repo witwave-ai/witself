@@ -15,6 +15,7 @@ usage: scripts/roll-train.sh VERSION [options]
   --ci-timeout SECONDS     Deadline per PR checks / post-merge CI phase (3600)
   --argo-timeout SECONDS   Deadline per cell convergence phase (1200)
   --poll-interval SECONDS  Poll interval (15)
+  --resume                Verify an already merged wave 1 instead of rolling it (default pair only)
   --dry-run               Print the plan; no writes or network calls
   --help                  Show this help
 
@@ -275,24 +276,43 @@ wait_pr_checks() {
 
 wait_merge_ci() {
   local oid=$1 deadline=$((SECONDS + CI_TIMEOUT)) runs candidates head status conclusion waiting limit
+  local run_id attempt announced=''
   while :; do
     runs=$(run_before "$deadline" "post-merge CI ($oid)" gh run list \
       --workflow ci.yml --branch main --event push --commit "$oid" \
-      --limit 1 --json headSha,status,conclusion)
+      --limit 1 --json headSha,status,conclusion,databaseId,attempt)
+    # A failed run is never accepted. Re-running it keeps its run id and adds an
+    # attempt, so only a failure that names both may wait for a later attempt.
     printf '%s\n' "$runs" | jq -e --arg oid "$oid" '
+      def counter: type == "number" and . >= 1 and . == floor;
       type == "array" and all(.[]; .headSha == $oid and
         (.status == "queued" or .status == "in_progress" or
          .status == "waiting" or .status == "pending" or .status == "requested" or
          (.status == "completed" and
-           (.conclusion == "success" or .conclusion == "cancelled"))))
+           (.conclusion == "success" or .conclusion == "cancelled" or
+             (.conclusion == "failure" and (.databaseId | counter) and (.attempt | counter))))))
       ' >/dev/null || die "post-merge CI failed or returned an unexpected run for $oid"
+    run_id=$(printf '%s\n' "$runs" | jq -r '.[0].databaseId // "" | tostring')
+    attempt=$(printf '%s\n' "$runs" | jq -r '.[0].attempt // "" | tostring')
     if printf '%s\n' "$runs" | jq -e \
       'length == 1 and .[0].status == "completed" and .[0].conclusion == "success"' >/dev/null; then
       [ "$SECONDS" -lt "$deadline" ] || die "post-merge CI ($oid) timed out"
-      log "Post-merge CI verified: $oid"
+      if [[ "$run_id" =~ ^[1-9][0-9]*$ && "$attempt" =~ ^[1-9][0-9]*$ ]] && [ "$attempt" != 1 ]; then
+        log "Post-merge CI verified: $oid (run $run_id attempt $attempt)"
+      else
+        log "Post-merge CI verified: $oid"
+      fi
       return
     fi
     waiting="Waiting for post-merge CI: $oid"
+    if printf '%s\n' "$runs" | jq -e \
+      'length == 1 and .[0].status == "completed" and .[0].conclusion == "failure"' >/dev/null; then
+      if [ "$announced" != "$run_id/$attempt" ]; then
+        log "ACTION REQUIRED: post-merge CI run $run_id attempt $attempt failed for $oid. If the failure is unrelated to the change, re-run it: gh run rerun $run_id --failed (after a provider integration failure, the whole run: gh run rerun $run_id). The train waits for a successful attempt until the post-merge CI deadline."
+        announced="$run_id/$attempt"
+      fi
+      waiting="Waiting for post-merge CI: $oid (run $run_id attempt $attempt failed; waiting for a re-run)"
+    fi
     if printf '%s\n' "$runs" | jq -e \
       'length == 1 and .[0].status == "completed" and .[0].conclusion == "cancelled"' >/dev/null; then
       limit=100
@@ -323,6 +343,9 @@ wait_merge_ci() {
                 ;;
               queued/*|in_progress/*|waiting/*|pending/*|requested/*)
                 waiting="Waiting for post-merge CI: $oid (own run cancelled; waiting on $head)"
+                ;;
+              completed/cancelled)
+                waiting="Waiting for post-merge CI: $oid (own run cancelled; run on $head cancelled; waiting for a newer run)"
                 ;;
               *) die "post-merge CI failed for $head, which contains $oid" ;;
             esac
@@ -604,6 +627,49 @@ roll_wave() {
   wait_argo "$cell" "$namespace" "$values"
 }
 
+# A stopped train can leave wave 1 merged, and wave 1 then refuses to roll the
+# same release again. With --resume, verify that merge as the wave would have:
+# main's last change of the cell's values must raise both pins to VERSION, and
+# its post-merge CI and the cell's Argo convergence must pass.
+resume_wave() {
+  local cell=$1 wave=$2 base values dir roll field pin namespace digest parent_digest
+  PHASE="wave $wave ($cell): resume checks"
+  cd "$REPO_ROOT"
+  git fetch origin main
+  base=$(git rev-parse origin/main)
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || die "invalid base OID"
+  values=".gitops/cells/$cell/values.yaml"
+  dir="$RUN_DIR/wave-$wave-resume"
+  mkdir -p "$dir/.gitops/cells/$cell" "$dir/.gitops/charts/apps"
+  git show "$base:$values" >"$dir/$values"
+  git show "$base:.gitops/charts/apps/values.yaml" >"$dir/.gitops/charts/apps/values.yaml"
+  for field in chartVersion imageTag; do
+    pin=$(yq -er ".apps.witselfServer.$field" "$dir/$values")
+    [ "$pin" = "$VERSION" ] || die "--resume requires $cell to pin $VERSION on origin/main; its $field is '$pin'"
+  done
+  roll=$(git log -1 --format=%H "$base" -- "$values")
+  [[ "$roll" =~ ^[0-9a-f]{40}$ ]] || die "--resume cannot find the commit that last changed $values on origin/main"
+  git show "$roll^:$values" >"$dir/parent-values.yaml"
+  for field in chartVersion imageTag; do
+    pin=$(yq -er ".apps.witselfServer.$field" "$dir/parent-values.yaml")
+    version_lower "$pin" "$VERSION" ||
+      die "--resume cannot verify $cell: commit $roll last changed its values but did not raise $field from a lower release (parent pins '$pin'); inspect the cell manually"
+  done
+  digest=$(cell_image_digest "$dir/$values")
+  if [ -n "$digest" ]; then
+    parent_digest=$(cell_image_digest "$dir/parent-values.yaml")
+    [ "$digest" != "$parent_digest" ] ||
+      die "--resume cannot verify $cell: commit $roll raised the pins to $VERSION but kept the previous imageDigest; inspect the cell manually"
+  fi
+  namespace=$(yq -er '.apps.witselfServer.namespace' "$dir/$values")
+  [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "invalid server namespace for $cell"
+  log "Resuming wave $wave: $cell already pins $VERSION on origin/main (roll commit $roll); verifying instead of rolling"
+  PHASE="wave $wave ($cell): post-merge CI"
+  wait_merge_ci "$roll"
+  PHASE="wave $wave ($cell): Argo convergence"
+  wait_argo "$cell" "$namespace" "$dir/$values"
+}
+
 cleanup_wave() {
   local remote_head
   PHASE="verified wave cleanup"
@@ -627,7 +693,7 @@ cleanup_wave() {
 main() {
   set -euo pipefail
   export LC_ALL=C
-  VERSION='' NO_SCHEMA_CHANGE=false DRY_RUN=false SERVING_URL='' WORKDIR=''
+  VERSION='' NO_SCHEMA_CHANGE=false DRY_RUN=false RESUME=false SERVING_URL='' WORKDIR=''
   CI_TIMEOUT=3600 ARGO_TIMEOUT=1200 POLL_INTERVAL=15
   local cells=civo-sandbox-use1-backup,civo-sandbox-use1-serving option value evidence
   local common release runs host live current tool cell values
@@ -638,6 +704,7 @@ main() {
       --help) usage; return ;;
       --dry-run) DRY_RUN=true; shift ;;
       --no-schema-change) NO_SCHEMA_CHANGE=true; shift ;;
+      --resume) RESUME=true; shift ;;
       --cells|--serving-url|--workdir|--ci-timeout|--argo-timeout|--poll-interval|--backup-evidence)
         option=$1
         [ "$#" -ge 2 ] || usage_error "$option requires a value"
@@ -666,6 +733,9 @@ main() {
   valid_version "$VERSION" || usage_error "VERSION must be MAJOR.MINOR.PATCH without v or leading zeroes"
   [[ "$cells" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?,[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
     usage_error "--cells requires two full cell directory names: BACKUP,SERVING"
+  if [ "$RESUME" = true ]; then
+    [ "$cells" = civo-sandbox-use1-backup,civo-sandbox-use1-serving ] || usage_error "--resume requires the default cell pair"
+  fi
   BACKUP_CELL=${cells%,*}; SERVING_CELL=${cells#*,}
   [ "$BACKUP_CELL" != "$SERVING_CELL" ] || usage_error "backup and serving cells must differ"
   if [ "$NO_SCHEMA_CHANGE" = true ]; then
@@ -717,6 +787,8 @@ remove verified worktree/branch. Poll interval: ${POLL_INTERVAL}s.
 Finally: print serving /v1/version; witself-infra health --json if available.
 Any failure stops the train and retains the current worktree for inspection.
 EOF
+    [ "$RESUME" = false ] ||
+      printf 'Resume: wave 1 is verified, not rolled: the last commit that changed its values on origin/main must raise both pins to %s, pass post-merge CI, and converge in Argo.\n' "$VERSION"
     return
   fi
   PHASE=preconditions CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD='' RUN_DIR=''
@@ -762,8 +834,12 @@ EOF
   RUN_DIR=$(mktemp -d "$WORKDIR/train-$VERSION.XXXXXX")
   RUN_DIR=$(cd "$RUN_DIR" && pwd -P)
   RUN_ID=${RUN_DIR##*/}
-  roll_wave "$BACKUP_CELL" 1
-  cleanup_wave
+  if [ "$RESUME" = true ]; then
+    resume_wave "$BACKUP_CELL" 1
+  else
+    roll_wave "$BACKUP_CELL" 1
+    cleanup_wave
+  fi
   roll_wave "$SERVING_CELL" 2
   PHASE="final serving verification"
   live=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
