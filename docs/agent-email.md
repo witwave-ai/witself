@@ -2316,9 +2316,10 @@ rejection, the 25 MiB transport ceiling and every edge gate are decided before
 the cell is asked. For an account that is in the cohort, every answer is as
 before, with two exceptions: from `v0.0.319` mail for a `closed` account is
 rejected permanently (see [Closed accounts in the receive
-cohort](#closed-accounts-in-the-receive-cohort)), and from `v0.0.321` a database
-error while the cell locks the recipient's agent (for example a lost connection,
-a deadlock or a database restart) is answered with HTTP 503
+cohort](#closed-accounts-in-the-receive-cohort)), and a database error while
+the cell locks the recipient's agent (from `v0.0.321`) or re-reads the
+recipient's custom-domain route under lock (from `v0.0.322`), for example a
+lost connection, a deadlock or a database restart, is answered with HTTP 503
 `{"verdict":"temporary"}` instead of a permanent rejection; mail for a deleted
 agent is still rejected permanently.
 
