@@ -227,7 +227,7 @@ func (s *Store) GetCurationPlan(
 		return GetMemoryCurationPlanResult{}, ErrMemoryCurationFenceMismatch
 	}
 	if run.State != MemoryCurationRunPlanned || run.PlanRevision < 1 || run.PlanHash == "" {
-		return GetMemoryCurationPlanResult{}, ErrMemoryCurationConflict
+		return GetMemoryCurationPlanResult{}, memoryCurationConflict(memoryCurationReasonRunNotPlanned, 0)
 	}
 	stored, err := loadMemoryCurationStoredPlan(ctx, tx, p, run)
 	if err != nil {
@@ -357,7 +357,7 @@ func (s *Store) PlanCuration(
 		return PlanMemoryCurationResult{}, ErrMemoryCurationFenceMismatch
 	}
 	if run.State != MemoryCurationRunOpen || run.PlanRevision != 0 || run.PlanHash != "" {
-		return PlanMemoryCurationResult{}, ErrMemoryCurationConflict
+		return PlanMemoryCurationResult{}, memoryCurationConflict(memoryCurationReasonRunNotOpen, 0)
 	}
 	request, err := loadMemoryCurationRequest(ctx, tx, p, run.RequestID, false)
 	if err != nil {
@@ -784,14 +784,14 @@ func authorizeMemoryCurationPlan(
 				tainted = tainted || sensitive
 			}
 			if tainted && !action.Create.Snapshot.Sensitive {
-				return nil, ErrMemoryCurationConflict
+				return nil, builder.conflict(memoryCurationReasonSensitiveSource)
 			}
 		case MemoryCurationOperationReplace:
 			if action.Replace == nil {
 				return nil, ErrMemoryCurationConflict
 			}
 			if _, duplicate := mutableTargets[action.Replace.Target.MemoryID]; duplicate {
-				return nil, ErrMemoryCurationConflict
+				return nil, builder.conflict(memoryCurationReasonTargetAlreadyMutated)
 			}
 			tainted, err := builder.authorizeTarget(action.Replace.Target)
 			if err != nil {
@@ -802,7 +802,7 @@ func authorizeMemoryCurationPlan(
 				return nil, err
 			}
 			if (tainted || evidenceTainted) && !action.Replace.Snapshot.Sensitive {
-				return nil, ErrMemoryCurationConflict
+				return nil, builder.conflict(memoryCurationReasonSensitiveSource)
 			}
 			mutatedMemoryID = action.Replace.Target.MemoryID
 		case MemoryCurationOperationSupersede:
@@ -810,7 +810,7 @@ func authorizeMemoryCurationPlan(
 				return nil, ErrMemoryCurationConflict
 			}
 			if _, duplicate := mutableTargets[action.Supersede.Target.MemoryID]; duplicate {
-				return nil, ErrMemoryCurationConflict
+				return nil, builder.conflict(memoryCurationReasonTargetAlreadyMutated)
 			}
 			targetSensitive, err := builder.authorizeTarget(action.Supersede.Target)
 			if err != nil {
@@ -822,7 +822,7 @@ func authorizeMemoryCurationPlan(
 					return nil, err
 				}
 				if targetSensitive && !replacementSensitive {
-					return nil, ErrMemoryCurationConflict
+					return nil, builder.conflict(memoryCurationReasonSensitiveReplacement)
 				}
 			}
 			mutatedMemoryID = action.Supersede.Target.MemoryID
@@ -845,7 +845,7 @@ func authorizeMemoryCurationPlan(
 				return nil, err
 			}
 			if tainted && !action.ProposeFact.Sensitive {
-				return nil, ErrMemoryCurationConflict
+				return nil, builder.conflict(memoryCurationReasonSensitiveSource)
 			}
 		default:
 			return nil, ErrMemoryCurationConflict
@@ -900,12 +900,12 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeVersion(
 	}
 	if requireCurrent {
 		if _, alreadyMutated := b.previouslyMutated[reference.MemoryID]; alreadyMutated {
-			return false, ErrMemoryCurationConflict
+			return false, b.conflict(memoryCurationReasonTargetAlreadyMutated)
 		}
 	}
 	if output, ok := b.auth.outputs[reference.MemoryID]; ok {
 		if reference.Version != 1 || output.Ordinal >= b.ordinal {
-			return false, ErrMemoryCurationConflict
+			return false, b.conflict(memoryCurationReasonInvalidOutputReference)
 		}
 		b.inputRefs = append(b.inputRefs, MemoryCurationActionInputRef{
 			Kind:     MemoryCurationInputRefCreateOutput,
@@ -919,13 +919,16 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeVersion(
 		return output.Sensitive, nil
 	}
 	input, ok := b.auth.memories[memoryCurationPlanVersionKey(reference.MemoryID, reference.Version)]
-	if !ok || !input.CurrentVersion.Valid || !input.CurrentState.Valid ||
+	if !ok {
+		return false, b.conflict(memoryCurationReasonMemoryNotInInputs)
+	}
+	if !input.CurrentVersion.Valid || !input.CurrentState.Valid ||
 		input.CurrentState.String == MemoryStateForgotten || input.CurrentState.String == MemoryStateReverted ||
 		input.State == MemoryStateForgotten || input.State == MemoryStateReverted {
-		return false, ErrMemoryCurationConflict
+		return false, b.conflict(memoryCurationReasonMemoryNotLive)
 	}
 	if requireCurrent && (input.State != MemoryStateActive || input.CurrentVersion.Int64 != reference.Version) {
-		return false, ErrMemoryCurationConflict
+		return false, b.conflict(memoryCurationReasonMemoryNotCurrent)
 	}
 	b.inputRefs = append(b.inputRefs, MemoryCurationActionInputRef{
 		Kind:     MemoryCurationInputRefMemory,
@@ -946,7 +949,7 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeEvidenceList(
 	for index := range evidence {
 		sensitive, err := b.authorizeEvidence(evidence[index])
 		if err != nil {
-			return false, err
+			return false, withMemoryCurationEvidenceIndex(err, index)
 		}
 		tainted = tainted || sensitive
 	}
@@ -958,8 +961,11 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeEvidence(
 ) (bool, error) {
 	if evidence.InputEvidenceID != "" {
 		input, ok := b.auth.evidence[evidence.InputEvidenceID]
-		if !ok || !sameMemoryCurationInputEvidence(evidence, input.Evidence) {
-			return false, ErrMemoryCurationConflict
+		if !ok {
+			return false, b.conflict(memoryCurationReasonEvidenceNotInInputs)
+		}
+		if !sameMemoryCurationInputEvidence(evidence, input.Evidence) {
+			return false, b.conflict(memoryCurationReasonEvidenceRowMismatch)
 		}
 		b.inputRefs = append(b.inputRefs, MemoryCurationActionInputRef{
 			Kind: MemoryCurationInputRefEvidence, EvidenceID: evidence.InputEvidenceID,
@@ -995,13 +1001,13 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeEvidence(
 	}
 
 	if evidence.ResolutionState != MemoryEvidenceResolved {
-		return false, ErrMemoryCurationConflict
+		return false, b.conflict(memoryCurationReasonEvidenceNotResolved)
 	}
 	switch evidence.ResolvedKind {
 	case "transcript":
 		if !memoryCurationTranscriptRangeCovered(b.auth.transcripts, evidence.SourceTranscriptID,
 			evidence.SourceSequenceFrom, evidence.SourceSequenceUntil) {
-			return false, ErrMemoryCurationConflict
+			return false, b.conflict(memoryCurationReasonTranscriptNotCovered)
 		}
 		b.inputRefs = append(b.inputRefs, MemoryCurationActionInputRef{
 			Kind:         MemoryCurationInputRefTranscript,
@@ -1017,7 +1023,7 @@ func (b *memoryCurationPlanAuthorizationBuilder) authorizeEvidence(
 	default:
 		// Message, import, external, and artifact provenance is authoritative
 		// only through an exact materialized evidence row.
-		return false, ErrMemoryCurationConflict
+		return false, b.conflict(memoryCurationReasonEvidenceNeedsInputRow)
 	}
 }
 

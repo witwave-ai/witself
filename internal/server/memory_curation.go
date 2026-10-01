@@ -163,6 +163,22 @@ func (e *MemoryCurationRollbackBlockedError) Error() string {
 
 func (e *MemoryCurationRollbackBlockedError) Unwrap() error { return ErrConflict }
 
+// MemoryCurationConflictError is a memory curation state conflict that names
+// the rule which refused the request. Reason is one value from a closed,
+// value-free vocabulary. ActionOrdinal (0 when absent) and EvidenceIndex (nil
+// when absent) are positions in the caller's own plan.
+type MemoryCurationConflictError struct {
+	Reason        string
+	ActionOrdinal int64
+	EvidenceIndex *int
+}
+
+// Error returns the same text as an unclassified memory curation conflict.
+func (e *MemoryCurationConflictError) Error() string { return "memory curation state conflict" }
+
+// Unwrap keeps errors.Is(err, ErrConflict) true.
+func (e *MemoryCurationConflictError) Unwrap() error { return ErrConflict }
+
 // MemoryCurationPreflight is an authenticated, effective authorization
 // document for a client-side curator. Unlike /v1/capabilities it describes the
 // presented bearer token, not merely which deployment features exist.
@@ -763,6 +779,7 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	var blocked *MemoryCurationRollbackBlockedError
+	var conflict *MemoryCurationConflictError
 	switch {
 	case errors.Is(err, ErrFeatureNotEnabled):
 		writeFeatureNotEnabledError(w, err)
@@ -774,6 +791,8 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0", "error": blocked.Error(), "blockers": blocked.Blockers,
 		})
+	case errors.As(err, &conflict) && conflict.Reason != "":
+		writeMemoryCurationConflict(w, conflict)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, badInputMessage("invalid memory curation request", err))
 	case errors.Is(err, ErrForbidden):
@@ -796,6 +815,28 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 		writeJSONError(w, http.StatusInternalServerError, "could not complete memory curation request")
 	}
 	return true
+}
+
+// writeMemoryCurationConflict writes the 409 for a conflict whose rule is known.
+// The error text is the same as for an unclassified conflict; code, retryable,
+// reason and the two plan positions are value-free additions.
+func writeMemoryCurationConflict(w http.ResponseWriter, conflict *MemoryCurationConflictError) {
+	body := map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "memory_curation_conflict",
+		"error":          "memory curation state conflict",
+		"retryable":      false,
+		"reason":         conflict.Reason,
+	}
+	if conflict.ActionOrdinal > 0 {
+		body["action_ordinal"] = conflict.ActionOrdinal
+	}
+	if conflict.EvidenceIndex != nil && *conflict.EvidenceIndex >= 0 {
+		body["evidence_index"] = *conflict.EvidenceIndex
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func writeMemoryCurationResult(w http.ResponseWriter, status int, result any) {
