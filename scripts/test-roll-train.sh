@@ -303,6 +303,15 @@ case "$1 $2" in
           printf 'own-run gh stub requires --json headSha,status,conclusion,databaseId,attempt\n' >&2
           exit 64
         }
+        if [ "$SCENARIO" = transient_reads ] || [ "$SCENARIO" = ci_read_down ]; then
+          # transient_reads: the train's first two own-run reads fail as a
+          # GitHub outage does; later reads answer. ci_read_down: every one fails.
+          printf 'read\n' >>"$STATE_DIR/ci-reads"
+          if [ "$SCENARIO" = ci_read_down ] || [ "$(wc -l <"$STATE_DIR/ci-reads" | tr -d ' ')" -le 2 ]; then
+            printf 'HTTP 502: fixture bad gateway\n' >&2
+            exit 1
+          fi
+        fi
         status=completed conclusion=success attempt=1
         oid=cccccccccccccccccccccccccccccccccccccccc
         [[ "$SCENARIO" != postmerge_cancelled* ]] || conclusion=cancelled
@@ -344,6 +353,13 @@ case "$1 $2" in
       printf 'PR checks gh stub requires --json name,bucket,state,link\n' >&2
       exit 64
     }
+    if [ "$SCENARIO" = transient_reads ] && [ ! -f "$STATE_DIR/checks_failed_once" ]; then
+      # The train's first checks read fails as a GitHub outage does: an error
+      # on standard error, nothing on standard output, exit 1.
+      touch "$STATE_DIR/checks_failed_once"
+      printf 'HTTP 502: fixture bad gateway\n' >&2
+      exit 1
+    fi
     if [ "$SCENARIO" = checks_transport_failure ]; then
       printf 'HTTP 503: fixture GitHub service unavailable\n' >&2
       exit 1
@@ -455,6 +471,35 @@ case "$SCENARIO:$*" in
   concurrent_live:*) [ ! -f "$STATE_DIR/checks_seen" ] || version=1.2.4 ;;
 esac
 cell=$(printf '%s\n' "$*" | sed -nE 's/.*--context witself-([a-z0-9-]+).*/\1/p')
+# After the backup cell's merge, its only reads are its Argo wait's. Each
+# branch counts the reads it intercepts in argo-reads.
+# transient_reads: the first two Application reads fail as an unreachable API
+# server does (an error on standard error, nothing on standard output, exit 1).
+# argo_read_down: every pod list read fails as a kubectl list read does when
+# its request fails: the error, an empty List on standard output, exit 1.
+# argo_read_interrupted: every Application read exits 130, as run_before does
+# when the operator presses Ctrl-C.
+if [ "$cell" = civo-sandbox-use1-backup ] && [ -f "$STATE_DIR/merged-$cell" ]; then
+  case "$SCENARIO:$*" in
+    transient_reads:*'get applications.argoproj.io witself-server '*)
+      printf 'read\n' >>"$STATE_DIR/argo-reads"
+      if [ "$(wc -l <"$STATE_DIR/argo-reads" | tr -d ' ')" -le 2 ]; then
+        printf 'Unable to connect to the server: dial tcp: i/o timeout\n' >&2
+        exit 1
+      fi
+      ;;
+    argo_read_down:*'get pods -l '*)
+      printf 'read\n' >>"$STATE_DIR/argo-reads"
+      printf '{"apiVersion":"v1","items":[],"kind":"List","metadata":{"resourceVersion":""}}\n'
+      printf 'Unable to connect to the server: dial tcp: i/o timeout\n' >&2
+      exit 1
+      ;;
+    argo_read_interrupted:*'get applications.argoproj.io witself-server '*)
+      printf 'read\n' >>"$STATE_DIR/argo-reads"
+      exit 130
+      ;;
+  esac
+fi
 image="ghcr.io/witwave-ai/witself-server:$version"
 if [[ "$SCENARIO" = digest_* ]] && { [ "$SCENARIO" != digest_from_tag ] || [ -f "$STATE_DIR/merged-$cell" ]; }; then
   digest=$OLD_DIGEST
@@ -828,17 +873,112 @@ printf 'roll train test: pending and missing matrix checks time out before merge
 
 reset_case
 SCENARIO=checks_transport_failure
-# This deadline only bounds a regression that retries the failure as pending.
-# It must not expire during the first read: SECONDS has one-second resolution,
-# so a one-second deadline can pass inside a single stub call.
+# A transport failure that never clears is retried after each poll interval
+# and stops at the fifth failed read in a row. The deadline is long enough that
+# only that cap can stop it; SECONDS has one-second resolution, so a one-second
+# deadline could pass inside a single stub call.
+pr=https://github.com/fixture/repo/pull/42
 expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --ci-timeout 30 --poll-interval 1
 if grep -Fq 'gh <pr> <merge>' "$TEST_LOG"; then fail 'checks transport failure reached merge'; fi
-if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'checks transport failure was retried as pending'; fi
-grep -Fq 'gh exit 1' "$TEST_ROOT/output" || fail 'checks transport failure lost the CLI error'
-# The deadline above no longer bounds a retry, so count the reads: the train
-# must stop on the first failed read.
-[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 1 ] || fail 'checks transport failure was retried'
-printf 'roll train test: checks transport failure stops immediately\n'
+if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'checks transport failure was retried past its cap'; fi
+[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 5 ] || fail 'checks transport failure was not read exactly five times'
+for failure in 1 2 3 4; do
+  grep -Fxq "roll-train: PR checks ($pr): read failed with exit 1 (failure $failure of 5 in a row); retrying within the same deadline" "$TEST_ROOT/output" \
+    || fail "checks transport failure $failure was not retried"
+done
+grep -Fxq "roll-train: PR checks ($pr): read failed with exit 1 (failure 5 of 5 in a row); stopping" "$TEST_ROOT/output" \
+  || fail 'checks transport failure did not stop at the fifth failed read'
+grep -Fxq "roll-train: ERROR: PR checks failed for $pr (gh exit 1)" "$TEST_ROOT/output" \
+  || fail 'checks transport failure lost the CLI error'
+[ "$(grep -Fxc 'HTTP 503: fixture GitHub service unavailable' "$TEST_ROOT/output")" -eq 5 ] \
+  || fail 'a failed checks read hid the CLI error'
+printf 'roll train test: a checks transport failure is retried four times within the deadline, then stops\n'
+
+# A read-only poll that fails is retried within the same deadline. In wave 1
+# the first PR checks read fails once, and the first two post-merge CI reads
+# and the first two Argo Application reads fail; the train completes, and no
+# write is repeated.
+read_poll_interval=1
+retried='; retrying within the same deadline'
+reset_case
+SCENARIO=transient_reads
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout 30 --argo-timeout 30 --poll-interval "$read_poll_interval" \
+  >"$TEST_ROOT/output" 2>&1 || fail 'transient_reads did not continue after reads that failed and then succeeded'
+for line in \
+  "roll-train: PR checks ($pr): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: post-merge CI ($ROLL_OID): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: post-merge CI ($ROLL_OID): read failed with exit 1 (failure 2 of 5 in a row)$retried" \
+  "roll-train: Argo convergence ($BACKUP): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: Argo convergence ($BACKUP): read failed with exit 1 (failure 2 of 5 in a row)$retried"; do
+  [ "$(grep -Fxc "$line" "$TEST_ROOT/output")" -eq 1 ] || fail "transient_reads did not log exactly once: $line"
+done
+[ "$(grep -Fc 'read failed with exit' "$TEST_ROOT/output")" -eq 5 ] || fail 'transient_reads logged an unexpected retry'
+[ "$(grep -Fxc 'HTTP 502: fixture bad gateway' "$TEST_ROOT/output")" -eq 3 ] || fail 'a failed GitHub read hid the CLI error'
+[ "$(grep -Fxc 'Unable to connect to the server: dial tcp: i/o timeout' "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'a failed Argo read hid the kubectl error'
+[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 5 ] || fail 'transient_reads did not read PR checks five times'
+[ "$(grep -Fc "<--commit> <$ROLL_OID>" "$TEST_LOG")" -eq 4 ] || fail 'transient_reads did not read post-merge CI four times'
+[ "$(wc -l <"$STATE_DIR/argo-reads" | tr -d ' ')" -eq 3 ] || fail 'transient_reads did not read the backup Application three times'
+[ "$(grep -Fc 'gh <pr> <create>' "$TEST_LOG")" -eq 2 ] || fail 'transient_reads repeated a pull request creation'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'transient_reads did not merge exactly two waves'
+grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output" \
+  || fail 'transient_reads changed the success line'
+printf 'roll train test: PR checks, post-merge CI and Argo reads that fail once or twice are retried, and the train completes\n'
+
+# A read that keeps failing stops the train at the fifth failed read in a row,
+# or at the phase deadline when that comes first. The deadline never moves.
+# argo_read_down fails every pod list read the way kubectl does: an error and
+# an empty List. The List is not an answer, so the read is retried as well.
+reset_case
+SCENARIO=argo_read_down
+# The Argo deadline only bounds a regression that retries without a cap.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --argo-timeout 30 --poll-interval "$read_poll_interval"
+for failure in 1 2 3 4; do
+  grep -Fxq "roll-train: Argo convergence ($BACKUP): read failed with exit 1 (failure $failure of 5 in a row)$retried" "$TEST_ROOT/output" \
+    || fail "argo_read_down did not retry failed pod list read $failure"
+done
+grep -Fxq "roll-train: Argo convergence ($BACKUP): read failed with exit 1 (failure 5 of 5 in a row); stopping" "$TEST_ROOT/output" \
+  || fail 'argo_read_down did not stop at the fifth failed read'
+grep -Fxq "roll-train: stopped during wave 1 ($BACKUP): Argo convergence (exit 1)." "$TEST_ROOT/output" \
+  || fail 'argo_read_down stopped in another phase or with another status'
+if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'argo_read_down waited for its deadline instead of stopping at the cap'; fi
+[ "$(wc -l <"$STATE_DIR/argo-reads" | tr -d ' ')" -eq 5 ] || fail 'argo_read_down did not read the pod list exactly five times'
+[ "$(grep -Fxc 'Unable to connect to the server: dial tcp: i/o timeout' "$TEST_ROOT/output")" -eq 5 ] \
+  || fail 'a failed pod list read hid the kubectl error'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'argo_read_down did not stop after the first merge'
+if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail 'argo_read_down started the serving wave'; fi
+while IFS= read -r path; do [ -d "$path" ] || fail 'argo_read_down removed its failed worktree'; done <"$STATE_DIR/worktrees"
+
+reset_case
+SCENARIO=ci_read_down
+# Five failed reads need four poll intervals; this deadline is three, so the
+# deadline stops the train first. A read that fails just before the deadline
+# is neither retried nor reported as timed out, so no assertion depends on
+# which of the two stops it is.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  --ci-timeout "$((3 * read_poll_interval))" --poll-interval "$read_poll_interval"
+grep -Fxq "roll-train: post-merge CI ($ROLL_OID): read failed with exit 1 (failure 1 of 5 in a row)$retried" "$TEST_ROOT/output" \
+  || fail 'ci_read_down did not retry the failed read'
+if grep -Fq '; stopping' "$TEST_ROOT/output"; then fail 'ci_read_down reached the cap before its deadline'; fi
+ci_reads=$(grep -Fc "<--commit> <$ROLL_OID>" "$TEST_LOG")
+if [ "$ci_reads" -lt 1 ] || [ "$ci_reads" -gt 4 ]; then fail "ci_read_down read post-merge CI $ci_reads times, not 1 to 4"; fi
+grep -Fxq "roll-train: stopped during wave 1 ($BACKUP): post-merge CI (exit 1)." "$TEST_ROOT/output" \
+  || fail 'ci_read_down stopped in another phase'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'ci_read_down did not stop after the first merge'
+printf 'roll train test: a read that keeps failing, including a pod list read that prints an empty List, stops at the fifth failed read or at the deadline, whichever comes first\n'
+
+# An interrupted read (exit 130, as run_before exits after Ctrl-C) is the
+# operator's: it is not retried, and the train stops at once with its status.
+reset_case
+SCENARIO=argo_read_interrupted
+# The Argo deadline only bounds a regression that retries the read.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --argo-timeout 30 --poll-interval "$read_poll_interval"
+if grep -Fq 'read failed with exit' "$TEST_ROOT/output"; then fail 'argo_read_interrupted retried an interrupted read'; fi
+grep -Fxq "roll-train: stopped during wave 1 ($BACKUP): Argo convergence (exit 130)." "$TEST_ROOT/output" \
+  || fail 'argo_read_interrupted did not stop at once with status 130'
+[ "$(wc -l <"$STATE_DIR/argo-reads" | tr -d ' ')" -eq 1 ] || fail 'argo_read_interrupted read the Application more than once'
+printf 'roll train test: an interrupted read stops at once with its status\n'
 
 # A failed check is never accepted. The train names the failed run, asks for a
 # re-run once for each newly failed job, and merges only after every check
@@ -1064,6 +1204,7 @@ for scenario in slow_ci slow_argo; do
   expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
     --ci-timeout 2 --argo-timeout 1 --poll-interval 1
   grep -Fq 'timed out' "$TEST_ROOT/output" || fail "$scenario accepted a success after its deadline"
+  if grep -Fq 'read failed with exit' "$TEST_ROOT/output"; then fail "$scenario retried a read that timed out"; fi
   [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail "$scenario did not reach the intended post-merge deadline"
   if grep -Fq "roll-cell <$SERVING>" "$TEST_LOG"; then fail "$scenario started serving wave"; fi
   while IFS= read -r path; do [ -d "$path" ] || fail "$scenario removed its failed worktree"; done <"$STATE_DIR/worktrees"
