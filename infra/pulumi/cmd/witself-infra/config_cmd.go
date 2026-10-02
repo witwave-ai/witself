@@ -1,6 +1,6 @@
 package main
 
-// witself-infra config init|add-cell|show — manage infra.yaml without
+// witself-infra config init|add-cell|remove-cell|show — manage infra.yaml without
 // hand-editing YAML. add-cell translates the exact flags an operator
 // already knows into a config entry, so migrating a cell is: rerun
 // your usual `up` flags once with `config add-cell` in front.
@@ -70,10 +70,12 @@ func runConfigCmd(sub string, fs *flag.FlagSet, configPath string) error {
 		return configInit(configPath)
 	case "add-cell":
 		return configAddCell(fs, configPath)
+	case "remove-cell":
+		return configRemoveCell(fs, configPath, os.Stdout, os.Stderr)
 	case "show":
 		return configShow(fs, configPath)
 	default:
-		return fmt.Errorf("unknown config subcommand %q (want init|add-cell|show)", sub)
+		return fmt.Errorf("unknown config subcommand %q (want init|add-cell|remove-cell|show)", sub)
 	}
 }
 
@@ -326,10 +328,8 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	// path: refusing here keeps the credential off disk entirely and
 	// the existing inventory loadable — persisting it would both leak
 	// the secret and brick every config-touching command.
-	for i, line := range strings.Split(string(out), "\n") {
-		if secretShapes.MatchString(line) {
-			return fmt.Errorf("refusing to write %s: line %d looks like a credential — pass a token file PATH, never a token value", path, i+1)
-		}
+	if err := refuseCredentialLines(path, out); err != nil {
+		return err
 	}
 	if dryRun {
 		entryYAML, err := yaml.Marshal(map[string]cellEntry{cellName: entry})
@@ -422,6 +422,17 @@ func configShow(fs *flag.FlagSet, configPath string) error {
 			continue
 		}
 		fmt.Printf("  -%s %s\n", n, f.Value.String())
+	}
+	return nil
+}
+
+// refuseCredentialLines is the paste guard of the write path: it refuses to
+// write out to path when any line has the shape of a credential.
+func refuseCredentialLines(path string, out []byte) error {
+	for i, line := range strings.Split(string(out), "\n") {
+		if secretShapes.MatchString(line) {
+			return fmt.Errorf("refusing to write %s: line %d looks like a credential — pass a token file PATH, never a token value", path, i+1)
+		}
 	}
 	return nil
 }

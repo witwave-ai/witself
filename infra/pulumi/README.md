@@ -89,16 +89,35 @@ followed by at least 20 letters, digits, `-` or `_`).
 
 `config add-cell -dry-run` runs every check of `config add-cell`, prints the
 entry it would add and writes nothing: no file and no directory. `-dry-run`
-is valid only with `rebalance` and `config add-cell`; every other command
-refuses it, except `version` and `help`, which ignore every flag.
+is valid only with `rebalance`, `config add-cell` and `config remove-cell`;
+every other command refuses it, except `version` and `help`, which ignore
+every flag.
 
-There is no `config remove-cell`. Remove an entry by hand, and only for a
-cell that has no cloud resources and no fleet registry entry: after a
-completed `destroy`, or for a cell that no `up` has run for. Copy the file
-first (`cp -p ~/.witself/infra.yaml ~/.witself/infra.yaml.bak`). Until the
-entry is removed, `witself-infra health` reports the cell `down` and exits
-nonzero. Never remove the entry of a live cell: `health` would stop probing
-it, and `destroy` refuses a cell that is not in the inventory.
+`config remove-cell -cell NAME` removes one entry: after a completed
+`destroy`, for a cell that no `up` has applied, or to record such a cell
+again with corrected flags (`config add-cell` refuses a second record). It
+refuses while the cell's control plane, taken from the entry or `defaults`
+as `health` does, lists the cell under its `registry_name` or its inventory
+name, and while the cell's stack holds any resource or pending operation.
+The listing can lag: a cell that `destroy` removed moments ago can stay
+listed briefly, so wait a minute and run the command again. It reads only
+the backend that the entry names, and only a `local` or `r2` stack; it
+creates no stack, state directory or passphrase and changes no stack or
+kube context. An absent stack, or one that `destroy` emptied, passes.
+Neither check sees an `up`, `preview` or `destroy` that has not written
+state yet: do not run the command while one may be running for the cell.
+An `r2` cell needs the three variables of
+[Variables to export](#variables-to-export); without them the command
+refuses. Before it rewrites the file it copies it byte for byte to
+`<file>.bak-<UTC time>` with mode 0600 and prints the copy's path. If the
+file changed while the checks ran, it writes nothing: run it again. The
+rewrite drops YAML comments and any YAML document after the first; the
+copy keeps them. `-dry-run` runs every check and writes neither the
+inventory nor a backup. `-force` skips the registry and stack checks and
+prints a warning: use it only after confirming by other means that the
+cell has no cloud resources and no fleet registry entry. Once the entry is
+gone, `health` no longer probes the cell and `destroy` refuses it. An
+inventory that no longer loads must be repaired by hand from a copy.
 
 Each cell can pin a **security context** — the identity its operations
 must run as:
