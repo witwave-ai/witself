@@ -625,14 +625,39 @@ func GetMemoryCurationRun(ctx context.Context, endpoint, token, runID string) (*
 	return &out.Run, nil
 }
 
-// GetMemoryCurationRunInputs retrieves one fenced page of frozen run inputs.
+// MemoryCurationRunInputOptions selects one fenced page of frozen run inputs.
+// MaxBytes, when positive, asks the server for pages of at most that many
+// hydrated input bytes (8192 to 65536); zero leaves the server page budget
+// in force and sends no parameter, so a server without the bound accepts the
+// call. A smaller value only raises the number of pages that cover the same
+// frozen inputs.
+type MemoryCurationRunInputOptions struct {
+	FencingGeneration int64
+	Cursor            string
+	Limit             int
+	MaxBytes          int
+}
+
+// GetMemoryCurationRunInputs retrieves one fenced page of frozen run inputs
+// under the server page budget.
 func GetMemoryCurationRunInputs(ctx context.Context, endpoint, token, runID string, fencingGeneration int64, cursor string, limit int) (*MemoryCurationRunInputPage, error) {
-	q := url.Values{"fencing_generation": {strconv.FormatInt(fencingGeneration, 10)}}
-	if cursor != "" {
-		q.Set("cursor", cursor)
+	return GetMemoryCurationRunInputPage(ctx, endpoint, token, runID, MemoryCurationRunInputOptions{
+		FencingGeneration: fencingGeneration, Cursor: cursor, Limit: limit,
+	})
+}
+
+// GetMemoryCurationRunInputPage retrieves one fenced page of frozen run
+// inputs, bounded to opts.MaxBytes of inputs when that is positive.
+func GetMemoryCurationRunInputPage(ctx context.Context, endpoint, token, runID string, opts MemoryCurationRunInputOptions) (*MemoryCurationRunInputPage, error) {
+	q := url.Values{"fencing_generation": {strconv.FormatInt(opts.FencingGeneration, 10)}}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
-	if limit != 0 {
-		q.Set("limit", strconv.Itoa(limit))
+	if opts.Limit != 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.MaxBytes != 0 {
+		q.Set("max_bytes", strconv.Itoa(opts.MaxBytes))
 	}
 	var out MemoryCurationRunInputPage
 	requestURL := memoryCurationRunURL(endpoint, runID) + "/inputs?" + q.Encode()

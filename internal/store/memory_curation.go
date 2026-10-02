@@ -84,10 +84,15 @@ const (
 	// input or output began. A page stops before the input that would take it
 	// past maxMemoryCurationPageBytes, so only a first input that is larger on
 	// its own exceeds it. Elided content stays retrievable in full through the
-	// transcript tools.
+	// transcript tools. A client may ask for smaller pages through
+	// MemoryCurationRunInputOptions.MaxBytes, no smaller than
+	// minMemoryCurationPageBytes: a page always carries its first input, so
+	// below that nearly every page is one input and a lower value would add
+	// reads without shrinking anything.
 	maxMemoryCurationInputBytes     = 32 * 1024
 	maxMemoryCurationEntryBodyBytes = 16 * 1024
 	maxMemoryCurationPageBytes      = 64 * 1024
+	minMemoryCurationPageBytes      = 8 * 1024
 	maxMemoryCurationToolEntryBytes = 2 * 1024
 
 	// Fast-forward observational coverage: a transcript stream more than the
@@ -2035,10 +2040,33 @@ func (s *Store) finishCuration(ctx context.Context, p Principal, runID string, i
 	return FinishMemoryCurationResult{Run: run, Receipt: receipt}, nil
 }
 
-// GetCurationRunInputs reads only the membership frozen by StartCuration. A
+// MemoryCurationRunInputOptions selects one fenced page of a run's frozen
+// inputs. MaxBytes is the most hydrated input bytes one page carries, from
+// minMemoryCurationPageBytes to maxMemoryCurationPageBytes; zero means the
+// server budget. It is a per-request transport choice: it is never stored on
+// the run, it changes neither which inputs are frozen nor how an input is
+// materialized, and a smaller value only raises the number of pages that
+// cover the same inputs.
+type MemoryCurationRunInputOptions struct {
+	FencingGeneration int64
+	Cursor            string
+	Limit             int
+	MaxBytes          int
+}
+
+// GetCurationRunInputs reads one page under the server page budget; it is
+// GetCurationRunInputPage with MaxBytes zero.
+func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID string, fencingGeneration int64, cursor string, limit int) (MemoryCurationRunInputPage, error) {
+	return s.GetCurationRunInputPage(ctx, p, runID, MemoryCurationRunInputOptions{
+		FencingGeneration: fencingGeneration, Cursor: cursor, Limit: limit,
+	})
+}
+
+// GetCurationRunInputPage reads only the membership frozen by StartCuration. A
 // matching live fence is mandatory; status reads use the separate methods
 // below and intentionally do not require a lease.
-func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID string, fencingGeneration int64, cursor string, limit int) (MemoryCurationRunInputPage, error) {
+func (s *Store) GetCurationRunInputPage(ctx context.Context, p Principal, runID string, opts MemoryCurationRunInputOptions) (MemoryCurationRunInputPage, error) {
+	fencingGeneration, cursor, limit := opts.FencingGeneration, opts.Cursor, opts.Limit
 	if p.Kind != PrincipalAgent {
 		return MemoryCurationRunInputPage{}, ErrMemoryCurationForbidden
 	}
@@ -2054,6 +2082,13 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 		limit = defaultMemoryCurationPageSize
 	}
 	if limit < 1 || limit > maxMemoryCurationPageSize {
+		return MemoryCurationRunInputPage{}, ErrMemoryCurationInputInvalid
+	}
+	pageBudget := opts.MaxBytes
+	if pageBudget == 0 {
+		pageBudget = maxMemoryCurationPageBytes
+	}
+	if pageBudget < minMemoryCurationPageBytes || pageBudget > maxMemoryCurationPageBytes {
 		return MemoryCurationRunInputPage{}, ErrMemoryCurationInputInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -2142,9 +2177,10 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 		inputs = inputs[:limit]
 	}
 	// A page always carries its first input. A later input that would take
-	// the page past its byte budget starts the next page instead, so one
-	// response stays transport-sized regardless of the requested limit. The
-	// cursor resumes after the last returned ordinal.
+	// the page past its byte budget, the server's or the smaller one the
+	// caller chose, starts the next page instead, so one response stays
+	// transport-sized regardless of the requested limit. The cursor resumes
+	// after the last returned ordinal.
 	pageBytes := 0
 	for i := range inputs {
 		if err := hydrateMemoryCurationRunInput(ctx, tx, p, &inputs[i]); err != nil {
@@ -2154,7 +2190,7 @@ func (s *Store) GetCurationRunInputs(ctx context.Context, p Principal, runID str
 		if err != nil {
 			return MemoryCurationRunInputPage{}, err
 		}
-		if i > 0 && pageBytes+len(encoded) > maxMemoryCurationPageBytes {
+		if i > 0 && pageBytes+len(encoded) > pageBudget {
 			inputs = inputs[:i]
 			hasMore = true
 			break

@@ -15,6 +15,8 @@ import (
 )
 
 func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
 	tokenFile := filepath.Join(t.TempDir(), "agent.token")
 	if err := os.WriteFile(tokenFile, []byte("witself_agt_curation\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -40,6 +42,7 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		key := r.Method + " " + r.URL.Path
 		mu.Lock()
 		seen[key]++
+		callCount := seen[key]
 		mu.Unlock()
 		switch key {
 		case "POST /v1/memory-curation-requests":
@@ -64,6 +67,13 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		case "GET /v1/memory-curation-runs/" + run.ID + "/inputs":
 			if r.URL.Query().Get("fencing_generation") != "4" || r.URL.Query().Get("limit") != "1" {
 				t.Errorf("input query = %s", r.URL.RawQuery)
+			}
+			if callCount == 1 {
+				if r.URL.Query().Get("max_bytes") != "16384" {
+					t.Errorf("bounded input query = %s, want max_bytes=16384", r.URL.RawQuery)
+				}
+			} else if r.URL.Query().Has("max_bytes") {
+				t.Errorf("unbounded input query = %s, want max_bytes absent", r.URL.RawQuery)
 			}
 			_ = json.NewEncoder(w).Encode(client.MemoryCurationRunInputPage{Run: run, Inputs: []client.MemoryCurationRunInput{{RunID: run.ID, Ordinal: 1, Kind: "memory", MemoryID: "mem_source", MemoryVersion: 1}}})
 		case "POST /v1/memory-curation-runs/" + run.ID + "/renew":
@@ -138,7 +148,7 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		append([]string{"request", "--idempotency-key", "request-key"}, conn...),
 		append([]string{"requests", "--state", "queued", "--limit", "10"}, conn...),
 		append([]string{"start", "--request", request.ID, "--lease-seconds", "90", "--idempotency-key", "start-key"}, conn...),
-		append([]string{"show", run.ID, "--fence", "4", "--limit", "1"}, conn...),
+		append([]string{"show", run.ID, "--fence", "4", "--limit", "1", "--max-bytes", "16384"}, conn...),
 		append([]string{"renew", run.ID, "--fence", "4", "--extension-seconds", "120", "--idempotency-key", "renew-key"}, conn...),
 		append([]string{"plan", run.ID, "--fence", "4", "--file", planFile, "--idempotency-key", "plan-key"}, conn...),
 		append([]string{"plan-get", run.ID, "--fence", "4"}, conn...),
@@ -170,6 +180,9 @@ func TestMemoryCurationCommandsCoverGuardedWorkflow(t *testing.T) {
 		if seen[key] != 1 {
 			t.Errorf("%s calls = %d", key, seen[key])
 		}
+	}
+	if code := memoryCurate(append([]string{"show", run.ID, "--fence", "4", "--limit", "1"}, conn...)); code != 0 {
+		t.Fatalf("memory curate show without max-bytes = %d", code)
 	}
 }
 

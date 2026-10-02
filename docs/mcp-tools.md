@@ -1458,8 +1458,16 @@ makes a semantic memory decision.
 ### `witself.memory.curation.get`
 
 Read one page of the immutable inputs frozen for an active run. Input is
-`run_id`, the current positive fence, optional opaque `cursor`, and `limit`
-(1-200, default 50). This tool is available in read-only mode and performs no
+`run_id`, the current positive fence, optional opaque `cursor`, `limit`
+(1-200, default 50), and optional `max_bytes` (8192-65536; default 65536,
+the server page budget): the most hydrated input bytes one page carries,
+applied by the same byte budget that already bounds every page. A smaller
+value only raises the number of pages that cover the same frozen inputs; a
+first input larger than it is still delivered alone, with oversized entries
+elided as always, so the cursor always advances. A value outside the range
+is refused with `max_bytes must be between 8192 and 65536`. Pass a smaller
+value when your runtime truncates or spills large tool results. This tool is
+available in read-only mode and performs no
 inference, lease reconciliation, or lifecycle mutation. An expired lease
 returns an error without changing the run; call `curation.renew` once with the
 exact fence and a fresh idempotency key to persist retry/dead-letter
