@@ -224,14 +224,16 @@ run_before() (
 
 # A read-only poll command failed with exit $3, and $4 reads in a row have
 # failed. Succeed after one poll interval when the read may be tried again: it
-# exited 125 or lower (not an interrupt, a signal or a command that cannot
-# run), the deadline $1 has not passed, and fewer than five reads in a row have
-# failed. What a failed read printed is never judged: kubectl prints an empty
-# List when a selector read fails. Only read-only polls call this; a write is
-# never retried. Log to standard error: callers capture standard output.
+# exited 125 or lower, or 128, git's status for any fatal error including an
+# unreachable remote (not 126 or 127, a command that cannot run, nor above 128,
+# an interrupt or a signal), the deadline $1 has not passed, and fewer than
+# five reads in a row have failed. What a failed read printed is never judged:
+# kubectl prints an empty List when a selector read fails. Only read-only
+# commands call this; a write is never retried. Log to standard error: callers
+# capture standard output.
 retry_read() {
   local deadline=$1 label=$2 status=$3 failures=$4 limit=5
-  if [ "$status" -gt 125 ] || [ "$SECONDS" -ge "$deadline" ]; then
+  if { [ "$status" -gt 125 ] && [ "$status" -ne 128 ]; } || [ "$SECONDS" -ge "$deadline" ]; then
     return 1
   fi
   if [ "$failures" -ge "$limit" ]; then
@@ -244,8 +246,9 @@ retry_read() {
 
 # Run a read-only poll command under run_before and print its standard output.
 # A failed read is retried as retry_read allows. Otherwise the last result is
-# returned unchanged, so a failure stops the train as before. Call it only in a
-# command substitution, and never for a command that writes.
+# returned unchanged, so a failure stops the train as before. Call it in a
+# command substitution or with its standard output redirected, and never for a
+# command that writes.
 poll_read() {
   local deadline=$1 label=$2 output status failures=0
   shift 2
@@ -258,6 +261,39 @@ poll_read() {
     fi
     printf '%s\n' "$output"
     return "$status"
+  done
+}
+
+# Run a one-shot read-only network command as a poll read with a deadline of
+# eight poll intervals (two minutes at the default 15 seconds): a failed read is
+# tried again as retry_read allows, and a read that hangs is stopped. Call it in
+# a command substitution or with its standard output redirected, and never for
+# a command that writes.
+one_shot_read() {
+  local label=$1
+  shift
+  poll_read "$((SECONDS + 8 * POLL_INTERVAL))" "$label" "$@"
+}
+
+# Like one_shot_read, for an answer that can lag behind a change GitHub has
+# already made. While jq filter $2 holds for the answer, log line $3 and read
+# again after one poll interval, but only while the pause and one more interval
+# for that read still fit before the eight-interval deadline (at most six
+# waits). Then the last answer is printed and the caller judges it with its own
+# message. Call it only in a command substitution.
+settled_read() {
+  local label=$1 pending=$2 waiting=$3 deadline=$((SECONDS + 8 * POLL_INTERVAL)) output
+  shift 3
+  while :; do
+    output=$(poll_read "$deadline" "$label" "$@") || return
+    if [ "$((SECONDS + 2 * POLL_INTERVAL))" -lt "$deadline" ] &&
+      printf '%s\n' "$output" | jq -e "$pending" >/dev/null 2>&1; then
+      log "$waiting" >&2
+      sleep "$POLL_INTERVAL"
+      continue
+    fi
+    printf '%s\n' "$output"
+    return
   done
 }
 
@@ -418,7 +454,7 @@ wait_merge_ci() {
           ' >/dev/null || die "post-merge CI failed or returned an unexpected run for $oid"
         # Fetch after listing so the returned heads are available for ancestry
         # checks. Both operations share the own run's original deadline.
-        run_before "$deadline" "post-merge CI ($oid)" git fetch origin main >/dev/null
+        poll_read "$deadline" "post-merge CI ($oid)" git fetch origin main >/dev/null
         candidates=$(printf '%s\n' "$runs" | jq -r --arg oid "$oid" '
           sort_by(.createdAt) | reverse | .[] | select(.headSha != $oid) |
           [.headSha, .status, .conclusion] | @tsv')
@@ -641,7 +677,7 @@ roll_wave() {
   CURRENT_BRANCH="roll-train/$RUN_ID/wave-$wave-$cell"
   CURRENT_WT="$RUN_DIR/wave-$wave-$cell"
   CURRENT_PR=
-  git fetch origin main
+  one_shot_read "origin/main fetch" git fetch origin main >/dev/null
   base=$(git rev-parse origin/main)
   [[ "$base" =~ ^[0-9a-f]{40}$ ]] || die "invalid base OID"
   git worktree add -b "$CURRENT_BRANCH" "$CURRENT_WT" "$base"
@@ -695,10 +731,10 @@ roll_wave() {
   log "Wave $wave PR: $CURRENT_PR"
   PHASE="wave $wave ($cell): PR checks"
   wait_pr_checks
-  view=$(gh pr view "$CURRENT_PR" --json headRefOid,baseRefName)
+  view=$(one_shot_read "PR head ($CURRENT_PR)" gh pr view "$CURRENT_PR" --json headRefOid,baseRefName)
   [ "$(printf '%s\n' "$view" | jq -er '.headRefOid')" = "$head" ] || die "PR head moved before merge: $CURRENT_PR"
   [ "$(printf '%s\n' "$view" | jq -er '.baseRefName')" = main ] || die "PR base moved before merge: $CURRENT_PR"
-  git fetch origin main
+  one_shot_read "origin/main fetch" git fetch origin main >/dev/null
   latest=$(git show "origin/main:$values")
   [ "$latest" = "$baseline" ] || die "$cell desired values changed before merge; inspect $CURRENT_PR"
   require_live_not_newer "$cell" "$namespace" "$values" "$baseline_values"
@@ -707,7 +743,10 @@ roll_wave() {
   git log -1 --format=%b >"$RUN_DIR/wave-$wave-merge.txt"
   gh pr merge "$CURRENT_PR" --squash --match-head-commit "$head" \
     --subject "$title" --body-file "$RUN_DIR/wave-$wave-merge.txt"
-  view=$(gh pr view "$CURRENT_PR" --json state,mergeCommit,headRefOid)
+  # The merge has happened; GitHub can still show the pull request open for a
+  # moment. Any other state is judged at once.
+  view=$(settled_read "merged PR ($CURRENT_PR)" '.state == "OPEN"' "Waiting for merged PR state: $CURRENT_PR" \
+    gh pr view "$CURRENT_PR" --json state,mergeCommit,headRefOid)
   printf '%s\n' "$view" | jq -e --arg head "$head" \
     '.state == "MERGED" and .headRefOid == $head' >/dev/null || die "PR is not merged at the checked head"
   merge_oid=$(printf '%s\n' "$view" | jq -er '.mergeCommit.oid')
@@ -726,7 +765,7 @@ resume_wave() {
   local cell=$1 wave=$2 base values dir roll field pin namespace digest parent_digest
   PHASE="wave $wave ($cell): resume checks"
   cd "$REPO_ROOT"
-  git fetch origin main
+  one_shot_read "origin/main fetch" git fetch origin main >/dev/null
   base=$(git rev-parse origin/main)
   [[ "$base" =~ ^[0-9a-f]{40}$ ]] || die "invalid base OID"
   values=".gitops/cells/$cell/values.yaml"
@@ -765,7 +804,7 @@ cleanup_wave() {
   local remote_head
   PHASE="verified wave cleanup"
   cd "$REPO_ROOT"
-  remote_head=$(git ls-remote --heads origin "refs/heads/$CURRENT_BRANCH")
+  remote_head=$(one_shot_read "remote branch ($CURRENT_BRANCH)" git ls-remote --heads origin "refs/heads/$CURRENT_BRANCH")
   # GitHub may already have removed the merged branch by repository policy.
   if [ -n "$remote_head" ]; then
     [ "$remote_head" = "$(printf '%s\trefs/heads/%s' "$CURRENT_HEAD" "$CURRENT_BRANCH")" ] ||
@@ -915,18 +954,30 @@ EOF
     done
   fi
   cd "$REPO_ROOT"
+  # The run directory exists before the first network read: run_before keeps
+  # its output there, and a stop from here on retains it.
+  umask 077
+  mkdir -p "$WORKDIR"
+  RUN_DIR=$(mktemp -d "$WORKDIR/train-$VERSION.XXXXXX")
+  RUN_DIR=$(cd "$RUN_DIR" && pwd -P)
+  RUN_ID=${RUN_DIR##*/}
   gh auth status
-  release=$(gh release view "v$VERSION" --json tagName,isDraft)
+  release=$(one_shot_read "published release (v$VERSION)" gh release view "v$VERSION" --json tagName,isDraft)
   printf '%s\n' "$release" | jq -e --arg tag "v$VERSION" \
     '.tagName == $tag and .isDraft == false' >/dev/null || die "published release v$VERSION does not exist"
-  runs=$(gh run list --workflow release.yml --branch "v$VERSION" --limit 1 --json status,conclusion,headSha,event)
+  # GitHub can list the release run late, or still running for a moment after
+  # it completed. A completed run with any other result is judged at once.
+  runs=$(settled_read "release run (v$VERSION)" \
+    'type == "array" and (length == 0 or (.[0].event == "push" and .[0].status != "completed"))' \
+    "Waiting for release run: v$VERSION" \
+    gh run list --workflow release.yml --branch "v$VERSION" --limit 1 --json status,conclusion,headSha,event)
   printf '%s\n' "$runs" | jq -e \
     'length == 1 and .[0].status == "completed" and .[0].conclusion == "success" and .[0].event == "push"' \
     >/dev/null || die "release run is not green for v$VERSION (latest release.yml push run must be completed success)"
   for cell in "$BACKUP_CELL" "$SERVING_CELL"; do
-    kubectl --context "witself-$cell" --request-timeout=20s get ns argocd >/dev/null
+    one_shot_read "argocd access ($cell)" kubectl --context "witself-$cell" --request-timeout=20s get ns argocd >/dev/null
   done
-  git fetch origin main
+  one_shot_read "origin/main fetch" git fetch origin main >/dev/null
   for cell in "$BACKUP_CELL" "$SERVING_CELL"; do
     values=$(git show "origin/main:.gitops/cells/$cell/values.yaml")
     if [ "$cell" = "$SERVING_CELL" ] && [ -z "$SERVING_URL" ]; then
@@ -935,15 +986,11 @@ EOF
       SERVING_URL="https://$host"
     fi
   done
-  live=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
+  live=$(one_shot_read "serving /v1/version" \
+    curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
   current=$(printf '%s\n' "$live" | jq -er '.version | select(type == "string")')
   version_lower "$current" "$VERSION" || die "serving version '$current' must be strictly lower than $VERSION"
   log "Preconditions verified; serving version $current -> $VERSION"
-  umask 077
-  mkdir -p "$WORKDIR"
-  RUN_DIR=$(mktemp -d "$WORKDIR/train-$VERSION.XXXXXX")
-  RUN_DIR=$(cd "$RUN_DIR" && pwd -P)
-  RUN_ID=${RUN_DIR##*/}
   if [ "$RESUME" = true ]; then
     resume_wave "$BACKUP_CELL" 1
   else
@@ -952,7 +999,8 @@ EOF
   fi
   roll_wave "$SERVING_CELL" 2
   PHASE="final serving verification"
-  live=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
+  live=$(one_shot_read "serving /v1/version" \
+    curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
   log "Serving /v1/version: $live"
   printf '%s\n' "$live" | jq -e --arg version "$VERSION" '.version == $version' >/dev/null ||
     die "serving /v1/version does not report $VERSION"
