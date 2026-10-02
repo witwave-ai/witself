@@ -604,7 +604,7 @@ func runCapturingStdout(t *testing.T, args []string) (string, error) {
 	return string(printed), runErr
 }
 
-const dryRunRefusal = "-dry-run is only valid with `rebalance` and `config add-cell`"
+const dryRunRefusal = "-dry-run is only valid with `rebalance`, `config add-cell` and `config remove-cell`"
 
 func TestSecretShapesCoverCloudflareTokens(t *testing.T) {
 	home := r2TestHome(t)

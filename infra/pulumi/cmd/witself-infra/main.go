@@ -150,6 +150,9 @@ commands:
   config    manage the local cell inventory (~/.witself/infra.yaml):
               config init                 write a skeleton file
               config add-cell [flags]     record a cell from the usual flags
+              config remove-cell -cell NAME
+                                          remove a cell's entry once the fleet
+                                          registry and its stack hold nothing
               config show [-cell NAME]    list cells, or print one cell's
                                           effective merged configuration
 
@@ -241,7 +244,10 @@ flags:
                   explicit cross-cloud/cross-region evacuation tests only.
   -batch          with rebalance: accounts to move per control-plane call (default 1)
   -dry-run        with rebalance: print selected moves without changing accounts;
-                  with config add-cell: print the entry without writing the file
+                  with config add-cell: print the entry without writing the file;
+                  with config remove-cell: run every check and write nothing
+  -force          with config remove-cell: skip the fleet registry and stack
+                  checks (prints a warning)
   -enable         with placement-runner: enable scheduled restore/rebalance
   -disable        with placement-runner: disable scheduled restore/rebalance
   -run            with placement-runner: trigger one manual restore/rebalance pass
@@ -315,7 +321,7 @@ func run(args []string) error {
 	configSub := ""
 	if cmd == "config" {
 		if len(args) < 2 {
-			return fmt.Errorf("config needs a subcommand: init|add-cell|show")
+			return fmt.Errorf("config needs a subcommand: init|add-cell|remove-cell|show")
 		}
 		configSub = args[1]
 		fsArgs = args[2:]
@@ -368,7 +374,8 @@ func run(args []string) error {
 	restoreArchives := fs.Bool("restore-archives", false, "with up: pull every archived account in this cell's region from R2 after registration")
 	restoreAnyRegion := fs.Bool("restore-any-region", false, "with -restore-archives: pull every archived account from R2, ignoring stored region")
 	rebalanceBatch := fs.Int("batch", 1, "with rebalance: accounts to move per control-plane call")
-	rebalanceDryRun := fs.Bool("dry-run", false, "with rebalance: print selected moves without changing accounts; with config add-cell: print the entry without writing the file")
+	rebalanceDryRun := fs.Bool("dry-run", false, "with rebalance: print selected moves without changing accounts; with config add-cell: print the entry without writing the file; with config remove-cell: run every check and write nothing")
+	removeCellForce := fs.Bool("force", false, "with config remove-cell: skip the fleet registry and stack checks (prints a warning)")
 	placementRunnerEnable := fs.Bool("enable", false, "with placement-runner: enable scheduled restore/rebalance")
 	placementRunnerDisable := fs.Bool("disable", false, "with placement-runner: disable scheduled restore/rebalance")
 	placementRunnerRun := fs.Bool("run", false, "with placement-runner: trigger one manual restore/rebalance pass")
@@ -387,10 +394,13 @@ func run(args []string) error {
 	operatorExplicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { operatorExplicit[f.Name] = true })
 
-	// -dry-run changes only rebalance and config add-cell; every other
-	// command would ignore it and act for real.
-	if *rebalanceDryRun && cmd != "rebalance" && (cmd != "config" || configSub != "add-cell") {
-		return fmt.Errorf("-dry-run is only valid with `rebalance` and `config add-cell`")
+	// -dry-run changes only rebalance, config add-cell and config
+	// remove-cell; every other command would ignore it and act for real.
+	if *rebalanceDryRun && cmd != "rebalance" && (cmd != "config" || (configSub != "add-cell" && configSub != "remove-cell")) {
+		return fmt.Errorf("-dry-run is only valid with `rebalance`, `config add-cell` and `config remove-cell`")
+	}
+	if *removeCellForce && (cmd != "config" || configSub != "remove-cell") {
+		return fmt.Errorf("-force is only valid with `config remove-cell`")
 	}
 	if cmd == "config" {
 		return runConfigCmd(configSub, fs, *configPath)
