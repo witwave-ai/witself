@@ -21,6 +21,7 @@ const BACKUP_OBJECT_MAX_LENGTH = 1024;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const R2_ETAG_MAX_LENGTH = 256;
 const STATE_KEY = "account-backups";
+const RESTORE_DRILL_KEY = "restore-drill";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const DEFAULT_PAGE_SIZE = 4;
 const DEFAULT_CONCURRENCY = 2;
@@ -29,6 +30,8 @@ const DEFAULT_CATALOG_LIMIT = 64;
 export const IDLE_TIMEOUT_MS = 120_000;
 export const OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
 const VALIDATION_TIMEOUT_MS = 20 * 60 * 1000;
+export const RESTORE_DRILL_DEADLINE_MS = VALIDATION_TIMEOUT_MS + 10 * 60 * 1000;
+export const RESTORE_DRILL_HEARTBEAT_MS = 10_000;
 const ARCHIVE_CAPABILITY = /^cap_[0-9a-f]{64}$/;
 const CAPABILITY_PREFIX = "archive-capability:";
 
@@ -431,6 +434,61 @@ function boundedReason(error) {
   return (message || "backup failed").slice(0, 300);
 }
 
+function effectiveRestoreDrill(record, nowMs) {
+  if (record === undefined || record === null) return null;
+  if (!(isObject(record) &&
+    typeof record.drill_id === "string" && record.drill_id.length >= 1 && record.drill_id.length <= 64 &&
+    typeof record.account_id === "string" && ACCOUNT_ID.test(record.account_id) &&
+    typeof record.backup_id === "string" && BACKUP_ID.test(record.backup_id) &&
+    typeof record.target_cell === "string" && CELL_NAME.test(record.target_cell) &&
+    ["running", "validated", "failed"].includes(record.state) &&
+    validDate(record.started_at) && validDate(record.deadline_at) &&
+    (record.finished_at === null || validDate(record.finished_at)) &&
+    (record.validated_at === null || validDate(record.validated_at)) &&
+    (record.error === null || (typeof record.error === "string" && record.error.length <= 300 && !/[^\x20-\x7e]/.test(record.error))))) {
+    console.log("account-backup: restore drill record is invalid");
+    return null;
+  }
+  if (record.state !== "running" || nowMs < Date.parse(record.deadline_at)) return record;
+  return { ...record, state: "failed", error: "restore drill did not report before its deadline" };
+}
+
+export class BackupValidationBusyError extends Error {
+  constructor(restoreDrill) {
+    super("restore drill already running");
+    this.restore_drill = restoreDrill;
+  }
+}
+
+export function heartbeatJSONResponse(terminal, { interval_ms = RESTORE_DRILL_HEARTBEAT_MS, headers = {} } = {}) {
+  const encode = (value) => new TextEncoder().encode(value);
+  const NEWLINE = encode("\n");
+  let timer;
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) {
+      timer = setInterval(() => {
+        if (!cancelled) controller.enqueue(NEWLINE);
+      }, interval_ms);
+      const write = (object) => {
+        clearInterval(timer);
+        if (cancelled) return;
+        controller.enqueue(encode(JSON.stringify(object) + "\n"));
+        controller.close();
+      };
+      terminal.then(write, (error) => write({ schema_version: "witself.v0", error: boundedReason(error) }));
+    },
+    cancel() {
+      cancelled = true;
+      clearInterval(timer);
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store, no-transform", ...headers },
+  });
+}
+
 // Only body bytes constitute progress. Keep at most the stream's normal
 // backpressure buffer; never tee or accumulate the archive in this watchdog.
 export class ExportWatchdog {
@@ -550,6 +608,8 @@ export class DurableAccountBackup {
     this.fence = new AccountLifecycleFence();
     // Capability operations serialize independently of long-running exports.
     this.capabilityQueue = Promise.resolve();
+    // A separate key and queue keep drill records independent of the export fence.
+    this.restoreDrillQueue = Promise.resolve();
     this.fetchImpl =
       dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.streamArchive =
@@ -602,6 +662,65 @@ export class DurableAccountBackup {
         return json({ error: "backup archive is not available" }, 404);
       }
     }
+    if (request.method === "POST" && ["/restore-drill:start", "/restore-drill:finish"].includes(url.pathname)) {
+      const starting = url.pathname === "/restore-drill:start";
+      const operation = this.restoreDrillQueue.then(async () => {
+        let input;
+        try {
+          input = await request.json();
+        } catch {
+          return errorResponse(starting ? "invalid restore drill start" : "invalid restore drill finish", 400);
+        }
+        if (starting) {
+          if (typeof input?.backup_id !== "string" || !BACKUP_ID.test(input.backup_id) ||
+              typeof input?.target_cell !== "string" || !CELL_NAME.test(input.target_cell)) {
+            return errorResponse("invalid restore drill start", 400);
+          }
+          const state = await this.loadState();
+          if (!state.catalog.some((entry) => entry.backup_id === input.backup_id && validCatalogRecord(entry, this.accountId))) {
+            return errorResponse("backup validation is not in the committed catalog", 400);
+          }
+          const now = this.now();
+          const current = effectiveRestoreDrill(await this.storage.get(RESTORE_DRILL_KEY), now.getTime());
+          if (current?.state === "running") {
+            return json({ schema_version: "witself.v0", error: "restore drill already running", restore_drill: current }, 409);
+          }
+          const record = {
+            drill_id: crypto.randomUUID(),
+            account_id: this.accountId, backup_id: input.backup_id, target_cell: input.target_cell,
+            state: "running", started_at: now.toISOString(),
+            deadline_at: new Date(now.getTime() + RESTORE_DRILL_DEADLINE_MS).toISOString(),
+            finished_at: null, validated_at: null, error: null,
+          };
+          await this.storage.put(RESTORE_DRILL_KEY, record);
+          return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
+        }
+        if (!(typeof input?.drill_id === "string" && input.drill_id.length >= 1 && input.drill_id.length <= 64 &&
+          ["validated", "failed"].includes(input.state) &&
+          (input.validated_at === undefined || validDate(input.validated_at)) &&
+          (input.error === undefined || typeof input.error === "string"))) {
+          return errorResponse("invalid restore drill finish", 400);
+        }
+        const current = await this.storage.get(RESTORE_DRILL_KEY);
+        // The stored owner can report even after the read-time deadline expired.
+        if (!current || current.drill_id !== input.drill_id || current.state !== "running") {
+          return errorResponse("restore drill record is not this drill", 409);
+        }
+        const record = {
+          ...current, state: input.state, finished_at: this.now().toISOString(),
+          validated_at: input.state === "validated" ? input.validated_at ?? null : null,
+          error: input.state === "failed" ? boundedReason(input.error).replace(/[^\x20-\x7e]/g, "") : null,
+        };
+        await this.storage.put(RESTORE_DRILL_KEY, record);
+        return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
+      });
+      this.restoreDrillQueue = operation.catch(() => {});
+      try {
+        return await operation;
+      } catch (error) {
+        return errorResponse(boundedReason(error), 500);
+      }
+    }
     if (request.method === "GET" && url.pathname === "/status") {
       try {
         const backups = await this.loadState();
@@ -610,6 +729,7 @@ export class DurableAccountBackup {
           account_id: this.accountId,
           last_committed_at: lastCommittedAt(backups),
           backups,
+          restore_drill: effectiveRestoreDrill(await this.storage.get(RESTORE_DRILL_KEY), this.now().getTime()),
         });
       } catch (error) {
         return errorResponse(boundedReason(error), 500);
@@ -1770,7 +1890,7 @@ function exactValidationAck(body, record) {
     body.archive_schema_version === record.archive_schema_version;
 }
 
-export async function runAccountBackupValidation(
+export async function beginAccountBackupValidation(
   env,
   input,
   dependencies = {},
@@ -1815,126 +1935,163 @@ export async function runAccountBackupValidation(
     record.size,
     record.r2_etag,
   );
-  const verification = await validate(
-    env.BACKUPS,
-    record.object,
-    input.account_id,
-  );
-  if (
-    verification?.manifest?.account_id !== input.account_id ||
-    verification?.manifest?.backup_id !== input.backup_id ||
-    verification?.manifest?.purpose !== "backup" ||
-    verification?.manifest?.cell !== record.source_cell ||
-    verification?.manifest?.status !== record.status ||
-    verification?.manifest?.schema_version !==
-      record.archive_schema_version ||
-    (
-      verification?.manifest?.evacuation_id !== undefined &&
-      verification.manifest.evacuation_id !== null &&
-      verification.manifest.evacuation_id !== ""
-    ) ||
-    verification?.entries !== record.entries ||
-    verification?.chunks !== record.chunks ||
-    verification?.trailer_sha256 !== record.trailer_sha256
-  ) {
-    throw new ArchiveIntegrityError(
-      "backup validation reread does not match the committed catalog",
-    );
+  const stub = await backupStub(env, input.account_id);
+  const response = await stub.fetch(new Request("http://account-backup.internal/restore-drill:start", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ backup_id: input.backup_id, target_cell: input.target_cell }),
+  }));
+  const started = await response.json().catch(() => null);
+  if (response.status === 409) throw new BackupValidationBusyError(started?.restore_drill);
+  if (response.status !== 200 || typeof started?.restore_drill?.drill_id !== "string") {
+    throw new Error("restore drill could not be recorded");
   }
-  assertR2ObjectIdentity(
-    record,
-    await env.BACKUPS.head(record.object),
-    before.size,
-    before.etag,
-  );
-  const origin = new URL(dependencies.origin);
-  if (origin.protocol !== "https:" || origin.origin !== dependencies.origin) {
-    throw new Error("backup validation requires the public request origin");
-  }
-  const capabilityResponse = await (await backupStub(env, input.account_id)).fetch(
-    new Request("http://account-backup.internal/archive-capability", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ backup_id: input.backup_id, target_cell: input.target_cell, ttl_seconds: 1800 }),
-    }),
-  );
-  const capability = capabilityResponse.ok ? await capabilityResponse.json() : null;
-  if (!ARCHIVE_CAPABILITY.test(capability?.token ?? "")) {
-    throw new Error("backup archive capability is not available");
-  }
-  const archiveURL = new URL("/v1/backups:archive", origin);
-  archiveURL.searchParams.set("account_id", input.account_id);
-  archiveURL.searchParams.set("backup_id", input.backup_id);
-
-  const fetchImpl =
-    dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
-  const response = await fetchImpl(
-    `${target.endpoint}/v1/accounts/${input.account_id}:validate-backup`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${target.backup_token}`,
-        "Content-Type": "application/octet-stream",
-        "X-Witself-Backup-ID": input.backup_id,
-        "X-Witself-Backup-Validation": "true",
-        "X-Witself-Backup-Archive-URL": archiveURL.toString(),
-        "X-Witself-Backup-Archive-Token": capability.token,
-        "X-Witself-Backup-Archive-Size": String(record.size),
-      },
-      signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
-    },
-  );
-  const text = await response.text().catch(() => "");
-  let acknowledgement = null;
-  try {
-    acknowledgement = JSON.parse(text);
-  } catch {
-    // A generic 2xx is never accepted as proof of rollback-only validation.
-  }
-  if (!response.ok || !exactValidationAck(acknowledgement, record)) {
-    // Only the cell's fixed error field may cross this diagnostic boundary.
-    const detail = isObject(acknowledgement) && typeof acknowledgement.error === "string"
-      ? acknowledgement.error.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 120)
-      : "";
-    throw new Error(
-      `backup validation ${response.status}: ${detail || "missing exact acknowledgement"}`,
-    );
-  }
-
-  // The remote validation may take long enough for the target cell to be
-  // re-registered, undrained, or receive a live account. Never attach the
-  // receipt to the catalog unless the isolated target fence is still exact.
-  await validationTargetSnapshot(env, input, target);
-
-  const receipt = {
-    account_id: input.account_id,
-    backup_id: input.backup_id,
-    target_cell: input.target_cell,
-    validated_at: (
-      dependencies.now ?? (() => new Date())
-    )().toISOString(),
-    status: acknowledgement.status,
-    archive_schema_version: acknowledgement.archive_schema_version,
+  const { drill_id } = started.restore_drill;
+  const finish = async (outcome) => {
+    try {
+      const response = await stub.fetch(new Request("http://account-backup.internal/restore-drill:finish", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drill_id, ...outcome }),
+      }));
+      if (response.status === 200) return;
+    } catch {
+      // The catalog receipt remains authoritative even if this update fails.
+    }
+    console.log("account-backup: restore drill record was not finished");
   };
-  const receiptResponse = await (await backupStub(
-    env,
-    input.account_id,
-  )).fetch(
-    new Request("http://account-backup.internal/validation-verified", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(receipt),
-    }),
-  );
-  if (!receiptResponse.ok) {
-    throw new Error(
-      "backup validation completed but its receipt was not persisted",
-    );
+  async function complete() {
+    try {
+      const verification = await validate(
+        env.BACKUPS,
+        record.object,
+        input.account_id,
+      );
+      if (
+        verification?.manifest?.account_id !== input.account_id ||
+        verification?.manifest?.backup_id !== input.backup_id ||
+        verification?.manifest?.purpose !== "backup" ||
+        verification?.manifest?.cell !== record.source_cell ||
+        verification?.manifest?.status !== record.status ||
+        verification?.manifest?.schema_version !==
+          record.archive_schema_version ||
+        (
+          verification?.manifest?.evacuation_id !== undefined &&
+          verification.manifest.evacuation_id !== null &&
+          verification.manifest.evacuation_id !== ""
+        ) ||
+        verification?.entries !== record.entries ||
+        verification?.chunks !== record.chunks ||
+        verification?.trailer_sha256 !== record.trailer_sha256
+      ) {
+        throw new ArchiveIntegrityError(
+          "backup validation reread does not match the committed catalog",
+        );
+      }
+      assertR2ObjectIdentity(
+        record,
+        await env.BACKUPS.head(record.object),
+        before.size,
+        before.etag,
+      );
+      const origin = new URL(dependencies.origin);
+      if (origin.protocol !== "https:" || origin.origin !== dependencies.origin) {
+        throw new Error("backup validation requires the public request origin");
+      }
+      const capabilityResponse = await (await backupStub(env, input.account_id)).fetch(
+        new Request("http://account-backup.internal/archive-capability", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ backup_id: input.backup_id, target_cell: input.target_cell, ttl_seconds: 1800 }),
+        }),
+      );
+      const capability = capabilityResponse.ok ? await capabilityResponse.json() : null;
+      if (!ARCHIVE_CAPABILITY.test(capability?.token ?? "")) {
+        throw new Error("backup archive capability is not available");
+      }
+      const archiveURL = new URL("/v1/backups:archive", origin);
+      archiveURL.searchParams.set("account_id", input.account_id);
+      archiveURL.searchParams.set("backup_id", input.backup_id);
+
+      const fetchImpl =
+        dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
+      const response = await fetchImpl(
+        `${target.endpoint}/v1/accounts/${input.account_id}:validate-backup`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${target.backup_token}`,
+            "Content-Type": "application/octet-stream",
+            "X-Witself-Backup-ID": input.backup_id,
+            "X-Witself-Backup-Validation": "true",
+            "X-Witself-Backup-Archive-URL": archiveURL.toString(),
+            "X-Witself-Backup-Archive-Token": capability.token,
+            "X-Witself-Backup-Archive-Size": String(record.size),
+          },
+          signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
+        },
+      );
+      const text = await response.text().catch(() => "");
+      let acknowledgement = null;
+      try {
+        acknowledgement = JSON.parse(text);
+      } catch {
+        // A generic 2xx is never accepted as proof of rollback-only validation.
+      }
+      if (!response.ok || !exactValidationAck(acknowledgement, record)) {
+        // Only the cell's fixed error field may cross this diagnostic boundary.
+        const detail = isObject(acknowledgement) && typeof acknowledgement.error === "string"
+          ? acknowledgement.error.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 120)
+          : "";
+        throw new Error(
+          `backup validation ${response.status}: ${detail || "missing exact acknowledgement"}`,
+        );
+      }
+
+      // The remote validation may take long enough for the target cell to be
+      // re-registered, undrained, or receive a live account. Never attach the
+      // receipt to the catalog unless the isolated target fence is still exact.
+      await validationTargetSnapshot(env, input, target);
+
+      const receipt = {
+        account_id: input.account_id,
+        backup_id: input.backup_id,
+        target_cell: input.target_cell,
+        validated_at: (
+          dependencies.now ?? (() => new Date())
+        )().toISOString(),
+        status: acknowledgement.status,
+        archive_schema_version: acknowledgement.archive_schema_version,
+      };
+      const receiptResponse = await (await backupStub(
+        env,
+        input.account_id,
+      )).fetch(
+        new Request("http://account-backup.internal/validation-verified", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(receipt),
+        }),
+      );
+      if (!receiptResponse.ok) {
+        throw new Error(
+          "backup validation completed but its receipt was not persisted",
+        );
+      }
+      await finish({ state: "validated", validated_at: receipt.validated_at });
+      return {
+        schema_version: "witself.v0",
+        validated: true,
+        ...receipt,
+        drill_id,
+      };
+    } catch (error) {
+      await finish({ state: "failed", error: boundedReason(error) });
+      throw error;
+    }
   }
-  return {
-    schema_version: "witself.v0",
-    validated: true,
-    ...receipt,
-  };
+  return { drill_id, restore_drill: started.restore_drill, complete };
+}
+
+export async function runAccountBackupValidation(env, input, dependencies = {}) {
+  return (await beginAccountBackupValidation(env, input, dependencies)).complete();
 }
 
 /**

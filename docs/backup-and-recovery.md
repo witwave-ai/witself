@@ -752,6 +752,29 @@ Only an exact rollback-validation acknowledgement is recorded in the backup
 catalog. The drill never changes `acct:` or `archived:` routing and there is no
 routine HTTP endpoint that commits a backup restore.
 
+The control plane keeps a durable record of the latest drill per account,
+available as `account.restore_drill` on the per-account backup status read.
+One drill may run per account at a time; a concurrent POST returns HTTP 409
+with that record. The default answer waits for completion; opt-in
+`heartbeat: true` sends HTTP 200 after pre-flight and a newline every ten
+seconds before one terminal JSON object, so inspect `validated: true` rather
+than the status alone. Send no `Accept-Encoding` header to avoid buffering
+heartbeat bytes through edge compression. Both framings return a `drill_id`
+on success and an `X-Witself-Restore-Drill-ID` header after recording the drill.
+The control plane never cancels a drill because the client went away, and in
+the two observed drops (2026-09-30, 2026-10-01) the drill completed minutes
+after the disconnect; completion after a disconnect is not a platform
+guarantee in either framing. Read the record and the catalog `validations`
+entry: a validation for that backup and target cell with
+`validated_at >= restore_drill.started_at` proves success regardless of the
+record's state. An unreported drill becomes deadline-failed after 30 minutes;
+`state: "failed"` with `finished_at: null` identifies that projection, and a
+late completion can still report its outcome until a new drill supersedes it.
+The drill is still driven by one connected request. It cannot run under the
+Durable Object alarm because cell validation is one synchronous request with
+no status route and no database receipt: the rollback-only import commits
+nothing. A step-driven cell-side drill remains the follow-up.
+
 A full disaster-recovery exercise that commits data must therefore use a
 disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine

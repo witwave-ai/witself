@@ -13,6 +13,7 @@ and the persisted `scan` (or null). Additive fields:
 | Fleet | `never_committed_accounts` | All live accounts without a commit, including overdue ones also counted as stale. Null when live health is unavailable. |
 | Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
 | Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
+| Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null). Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 30 minutes after start; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
 | Scan | `previous_slot` | Immediately preceding scheduled interval's timestamp. |
 | Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot; deduplicated between current job and failure history. |
 | Scan | `previous_slot_status_unavailable` | Accounts whose previous-slot state could not be read; never interpreted as success. |
@@ -85,6 +86,36 @@ Before capability storage access, the route uses the shared `PUBLIC_IP_LIMITER`
 bucket keyed by `CF-Connecting-IP` (300 requests per 60 seconds per IP).
 Over-limit requests return 429 with `Retry-After: 60` and do not consume a
 capability. A missing or failed limiter fails closed with the same uniform 404.
+
+**`POST /v1/backups:restore-drill`** uses the fleet bearer and a JSON body
+`{ account_id, backup_id, target_cell, heartbeat? }`. The selected backup must
+be committed, and the target must be an isolated validation cell. Only one
+drill may run per account at a time, even for different backups or target
+cells. A concurrent request returns HTTP 409
+`{ schema_version: "witself.v0", error: "restore drill already running", restore_drill }`
+with the current record. Every answer after the drill is recorded carries
+`X-Witself-Restore-Drill-ID`; pre-flight failures carry no drill-id header.
+
+| Case | Default framing (`heartbeat` absent or false) | `heartbeat: true` |
+| --- | --- | --- |
+| Success | HTTP 200 after completion with `{ schema_version, validated: true, account_id, backup_id, target_cell, validated_at, status, archive_schema_version, drill_id }`. | HTTP 200 after pre-flight, a newline every 10 seconds, then the same success object and a final newline. |
+| Pre-flight failure | `{ schema_version: "witself.v0", error }` with HTTP 400 for invalid input (including a non-boolean `heartbeat`), 401 for authentication, 405 for method, 409 for the target fence, or 502 for other failures including an uncommitted backup. No drill is recorded. | Identical status and body; no stream. |
+| Concurrent drill | HTTP 409 with the busy body and current `restore_drill` above. | Identical status and body; no stream. |
+| Failure after recording the drill | HTTP 409 or 502 with `{ schema_version: "witself.v0", error }` and the drill-id header. | HTTP 200 stream ending in the same error object and a final newline, with the drill-id header. |
+
+Heartbeat responses use `Content-Type: application/json` and
+`Cache-Control: no-store, no-transform`. The complete body is one JSON document
+with leading whitespace; clients must inspect `validated: true`, not just the
+HTTP status. Send the drill request without `Accept-Encoding` so the heartbeat
+bytes are not held by edge compression.
+
+The control plane never cancels a drill because the client went away, and in
+the two observed drops (2026-09-30, 2026-10-01) the drill completed minutes after
+the disconnect. Completion after a disconnect is not a platform guarantee in
+either framing, so read `account.restore_drill` and the catalog `validations`
+entry through the per-account status route. A `validations` entry for that
+backup and target cell with `validated_at >= restore_drill.started_at` means
+the drill succeeded regardless of the record's state.
 
 `POST /v1/accounts/{id}:validate-backup` keeps the dedicated cell backup bearer,
 `X-Witself-Backup-ID`, and `X-Witself-Backup-Validation: true`. New control planes
