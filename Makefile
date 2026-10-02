@@ -364,6 +364,7 @@ check: ## Run CI's exact local gate set — run before every push
 		echo "gofmt needs to run on:"; echo "$$unformatted"; exit 1; \
 	fi
 	go vet ./...
+	go vet -tags signup_b2_acceptance ./cmd/witself/
 	go build ./...
 	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
@@ -403,6 +404,9 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-provider-contract-workflow.sh
 	bash scripts/test-workflow-runner-labels.sh
 	bash scripts/test-billing-transition-rollout-preflight.sh
+	bash scripts/test-capture-billing-rollout-inventory.sh
 	bash scripts/test-monitoring-rollout.sh
+	bash scripts/test-monitoring-alert-canary.sh
 	bash scripts/test-avatar-acceptance.sh
+	bash scripts/test-collaboration-canary.sh
 	@echo "check-infra: infra gates green"
