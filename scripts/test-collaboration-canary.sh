@@ -450,6 +450,12 @@ fail() {
   exit 1
 }
 pass() { printf 'PASS: %s\n' "$1"; }
+# No gate ran this suite before it was wired. These two checks prove only
+# that each wiring line is present as a whole line somewhere in its file.
+grep -Fxq $'\tbash scripts/test-collaboration-canary.sh' "$repo_root/Makefile" \
+  || fail 'the collaboration canary wiring line is not present as a whole line in Makefile'
+grep -Fxq '        run: bash scripts/test-collaboration-canary.sh' "$repo_root/.github/workflows/ci.yml" \
+  || fail 'the collaboration canary wiring line is not present as a whole line in .github/workflows/ci.yml'
 init_case() {
   local scenario="$1"
   export FAKE_COLLABORATION_SCENARIO="$scenario"

@@ -85,6 +85,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go vet signup acceptance driver
+        run: go vet -tags signup_b2_acceptance ./cmd/witself/
+
       - name: build
         run: go build ./...
 
@@ -654,6 +657,10 @@ jobs:
 
       - name: avatar acceptance offline contract checks
         run: bash scripts/test-avatar-acceptance.sh
+
+      - name: collaboration canary offline contract checks
+        timeout-minutes: 10
+        run: bash scripts/test-collaboration-canary.sh
 
       - name: billing transition rollout preflight checks
         run: bash scripts/test-billing-transition-rollout-preflight.sh

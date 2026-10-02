@@ -92,6 +92,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go vet signup acceptance driver
+        run: go vet -tags signup_b2_acceptance ./cmd/witself/
+
       - name: build
         run: go build ./...
 

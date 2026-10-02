@@ -484,6 +484,7 @@ real bindings. The offline test is
 `bash scripts/test-collaboration-canary.sh`; its `PATH`-shimmed CLI exercises
 success, timeout/cancellation, retry/escalation failures, redaction, and usage
 without contacting a server. An offline pass does not close the live gate.
+Both `make check-infra` and the CI `helm` job run the offline test.
 
 ## 10. Export A Whole Account
 
