@@ -102,6 +102,18 @@ case "$1" in
     esac
     ;;
   fetch)
+    if [ "$SCENARIO" = one_shot_reads ]; then
+      # The first fetch at each of the three sites before the backup cell's
+      # merge (preconditions, worktree, pre-merge) fails as git does when
+      # GitHub cannot be reached: a fatal error, exit 128.
+      printf 'fetch\n' >>"$STATE_DIR/fetches"
+      case "$(wc -l <"$STATE_DIR/fetches" | tr -d ' ')" in
+        1|3|5)
+          printf 'fatal: Could not read from remote repository.\n' >&2
+          exit 128
+          ;;
+      esac
+    fi
     if [ "$*" = 'fetch origin main' ] && [ -f "$STATE_DIR/descendant_listed" ]; then
       touch "$STATE_DIR/descendant_fetched"
     fi
@@ -133,7 +145,15 @@ case "$1" in
       *) printf 'Signed-off-by: Fixture Operator <operator@example.invalid>\n' ;;
     esac
     ;;
-  ls-remote) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t%s\n' "$4" ;;
+  ls-remote)
+    if [ "$SCENARIO" = one_shot_reads ] && [ ! -f "$STATE_DIR/ls_remote_failed" ]; then
+      # The backup wave's cleanup reads the remote branch once in vain.
+      touch "$STATE_DIR/ls_remote_failed"
+      printf 'fatal: Could not read from remote repository.\n' >&2
+      exit 128
+    fi
+    printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t%s\n' "$4"
+    ;;
   show)
     path=${2#*:}
     if [ "$SCENARIO" = concurrent_pins ] && [ -f "$STATE_DIR/checks_seen" ]; then
@@ -234,15 +254,35 @@ set -euo pipefail
 printf 'gh' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
+# one_shot_reads: the first read that reaches each key fails as a GitHub outage
+# does: an error on standard error, nothing on standard output, exit 1.
+fail_once() {
+  if [ "$SCENARIO" = one_shot_reads ] && [ ! -f "$STATE_DIR/failed-$1" ]; then
+    touch "$STATE_DIR/failed-$1"
+    printf 'HTTP 502: fixture bad gateway\n' >&2
+    exit 1
+  fi
+}
 case "$1 $2" in
   'auth status') ;;
   'release view')
+    fail_once release-view
     printf '{"tagName":"v1.2.3","isDraft":false}\n'
     ;;
   'run list')
     case "$*" in
       *release.yml*)
         if [ "$SCENARIO" = release_missing ]; then printf '[]\n'; exit 0; fi
+        if [ "$SCENARIO" = one_shot_reads ]; then
+          # After the failed first read, GitHub lists no run, then the run
+          # still in progress, and only then the completed run.
+          fail_once release-run
+          printf 'read\n' >>"$STATE_DIR/release-reads"
+          case "$(wc -l <"$STATE_DIR/release-reads" | tr -d ' ')" in
+            1) printf '[]\n'; exit 0 ;;
+            2) printf '[{"status":"in_progress","conclusion":"","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"push"}]\n'; exit 0 ;;
+          esac
+        fi
         conclusion=success
         [ "$SCENARIO" != release_failure ] || conclusion=failure
         printf '[{"status":"completed","conclusion":"%s","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"push"}]\n' "$conclusion"
@@ -450,7 +490,26 @@ case "$1 $2" in
     if [ "$SCENARIO" = moved_head ] && [ -f "$STATE_DIR/checks_seen" ]; then
       oid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     fi
-    printf '{"baseRefName":"main","headRefOid":"%s","state":"MERGED","mergeCommit":{"oid":"cccccccccccccccccccccccccccccccccccccccc"}}\n' "$oid"
+    state=MERGED
+    if [ "$(cat "$STATE_DIR/cell")" = civo-sandbox-use1-backup ]; then
+      if [ ! -f "$STATE_DIR/merged-civo-sandbox-use1-backup" ]; then
+        fail_once pr-view-head
+      else
+        # After the backup cell's merge. one_shot_reads: the first read fails,
+        # and the next still shows the pull request open, as GitHub can for a
+        # moment. merged_pr_read_down: every read fails.
+        fail_once pr-view-merged
+        if [ "$SCENARIO" = merged_pr_read_down ]; then
+          printf 'HTTP 502: fixture bad gateway\n' >&2
+          exit 1
+        fi
+        if [ "$SCENARIO" = one_shot_reads ] && [ ! -f "$STATE_DIR/pr_shown_open" ]; then
+          touch "$STATE_DIR/pr_shown_open"
+          state=OPEN
+        fi
+      fi
+    fi
+    printf '{"baseRefName":"main","headRefOid":"%s","state":"%s","mergeCommit":{"oid":"cccccccccccccccccccccccccccccccccccccccc"}}\n' "$oid" "$state"
     ;;
   'pr merge') touch "$STATE_DIR/merged" "$STATE_DIR/merged-$(cat "$STATE_DIR/cell")"; printf 'merged\n' ;;
   *) printf 'unhandled gh: %s\n' "$*" >&2; exit 64 ;;
@@ -518,7 +577,15 @@ case "$SCENARIO:$cell" in
     ;;
 esac
 case "$*" in
-  *'get ns argocd'*) printf '{"metadata":{"name":"argocd"}}\n' ;;
+  *'get ns argocd'*)
+    if [ "$SCENARIO" = one_shot_reads ] && [ ! -f "$STATE_DIR/ns_failed" ]; then
+      # The first cell's API server cannot be reached once.
+      touch "$STATE_DIR/ns_failed"
+      printf 'Unable to connect to the server: dial tcp: i/o timeout\n' >&2
+      exit 1
+    fi
+    printf '{"metadata":{"name":"argocd"}}\n'
+    ;;
   *'get application'*|*'get applications'*|*'get app '*)
     if [ "$SCENARIO" = slow_argo ] && [ -f "$STATE_DIR/merged" ]; then /bin/sleep 3; fi
     revision=$version
@@ -615,6 +682,17 @@ printf 'curl' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 case "${!#}" in */v1/version) ;; *) printf 'unexpected curl URL\n' >&2; exit 97 ;; esac
+if [ "$SCENARIO" = one_shot_reads ]; then
+  # The first read before the train and the first after both merges fail as
+  # curl does when the connection is refused: exit 7.
+  moment=before
+  [ ! -f "$STATE_DIR/merged-civo-sandbox-use1-serving" ] || moment=after
+  if [ ! -f "$STATE_DIR/curl_failed-$moment" ]; then
+    touch "$STATE_DIR/curl_failed-$moment"
+    printf 'curl: (7) Failed to connect to fixture port 443: Connection refused\n' >&2
+    exit 7
+  fi
+fi
 # Fixture hosts are api.<cell>.invalid. Answer for the cell that the requested
 # host names: its own older release until that cell has been rolled. A URL taken
 # from another cell's values can then never certify the serving wave.
@@ -822,18 +900,38 @@ grep -Fxq 'Finally: print serving /v1/version; witself-infra health --json -cell
   || fail 'dry run does not plan the per-cell health report'
 printf 'roll train test: dry run is read-only and prints both waves\n'
 
+release_refusal="roll-train: ERROR: release run is not green for v$VERSION (latest release.yml push run must be completed success)"
+release_wait="roll-train: Waiting for release run: v$VERSION"
 reset_case
 SCENARIO=release_failure
-expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work"
+# The poll interval only bounds a regression that waits on a completed failure.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
 grep -Eiq 'release.*(success|green|fail)|release.yml' "$TEST_ROOT/output" || fail 'release refusal lacks clear message'
 assert_no_wave
+grep -Fxq "$release_refusal" "$TEST_ROOT/output" || fail 'a failed release run changed the existing message'
+[ "$(grep -Fc '<--workflow> <release.yml>' "$TEST_LOG")" -eq 1 ] || fail 'a completed failed release run was read again'
+if grep -Fq "$release_wait" "$TEST_ROOT/output"; then fail 'a completed failed release run was awaited'; fi
 printf 'roll train test: failed release run stops before wave mutations\n'
 
 reset_case
 SCENARIO=release_missing
-expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work"
+# GitHub never lists the run: the train reads it again once per poll interval
+# while a pause and one more read fit in eight intervals (at most six waits),
+# then stops with the existing message.
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
 assert_no_wave
+grep -Fxq "$release_refusal" "$TEST_ROOT/output" || fail 'release_missing did not stop with the existing message'
+if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'release_missing ran into a read deadline'; fi
+release_waits=$(grep -Fxc "$release_wait" "$TEST_ROOT/output" || true)
+if [ "$release_waits" -lt 2 ] || [ "$release_waits" -gt 6 ]; then
+  fail "release_missing waited $release_waits poll intervals, not 2 to 6"
+fi
+[ "$(grep -Fc '<--workflow> <release.yml>' "$TEST_LOG")" -eq "$((release_waits + 1))" ] \
+  || fail 'release_missing did not read the release run once more than it waited'
+grep -Fq "Run artifacts retained: $TEST_ROOT/work/train-$VERSION." "$TEST_ROOT/output" \
+  || fail 'a stop in the preconditions did not name its run directory'
 printf 'roll train test: missing release run fails closed\n'
+printf 'roll train test: a release run that is not listed is awaited within eight poll intervals; a failed one stops at once\n'
 
 reset_case
 SCENARIO=moved_head
@@ -979,6 +1077,63 @@ grep -Fxq "roll-train: stopped during wave 1 ($BACKUP): Argo convergence (exit 1
   || fail 'argo_read_interrupted did not stop at once with status 130'
 [ "$(wc -l <"$STATE_DIR/argo-reads" | tr -d ' ')" -eq 1 ] || fail 'argo_read_interrupted read the Application more than once'
 printf 'roll train test: an interrupted read stops at once with its status\n'
+
+# Every one-shot read that the train retries fails once before the backup
+# cell's merge or after both merges, and GitHub lists the release run late and
+# shows the merged backup pull request open once. The train completes, and no
+# write is repeated.
+reset_case
+SCENARIO=one_shot_reads
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval "$read_poll_interval" \
+  >"$TEST_ROOT/output" 2>&1 || fail 'one_shot_reads did not continue after one-shot reads that failed and then succeeded'
+for line in \
+  "roll-train: published release (v$VERSION): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: release run (v$VERSION): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: argocd access ($BACKUP): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: PR head ($pr): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: merged PR ($pr): read failed with exit 1 (failure 1 of 5 in a row)$retried" \
+  "roll-train: Waiting for merged PR state: $pr"; do
+  [ "$(grep -Fxc "$line" "$TEST_ROOT/output")" -eq 1 ] || fail "one_shot_reads did not log exactly once: $line"
+done
+[ "$(grep -Fxc "roll-train: origin/main fetch: read failed with exit 128 (failure 1 of 5 in a row)$retried" "$TEST_ROOT/output")" -eq 3 ] \
+  || fail 'one_shot_reads did not retry each of the three fetches once'
+[ "$(grep -Fxc "roll-train: serving /v1/version: read failed with exit 7 (failure 1 of 5 in a row)$retried" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'one_shot_reads did not retry both serving version reads once'
+[ "$(grep -Ec "^roll-train: remote branch \(roll-train/train-$VERSION\.[^/]+/wave-1-$BACKUP\): read failed with exit 128 \(failure 1 of 5 in a row\)$retried\$" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'one_shot_reads did not retry the remote branch read once'
+[ "$(grep -Fxc "roll-train: Waiting for release run: v$VERSION" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'one_shot_reads did not wait for the release run twice'
+[ "$(grep -Fc 'read failed with exit' "$TEST_ROOT/output")" -eq 11 ] || fail 'one_shot_reads logged an unexpected retry'
+[ "$(grep -Fc '<release> <view>' "$TEST_LOG")" -eq 2 ] || fail 'one_shot_reads did not read the release twice'
+[ "$(grep -Fc '<--workflow> <release.yml>' "$TEST_LOG")" -eq 4 ] || fail 'one_shot_reads did not read the release run four times'
+[ "$(grep -Fc '<get> <ns> <argocd>' "$TEST_LOG")" -eq 3 ] || fail 'one_shot_reads did not read the argocd namespaces three times'
+[ "$(grep -c '^git <fetch>' "$TEST_LOG")" -eq 8 ] || fail 'one_shot_reads did not fetch origin/main eight times'
+[ "$(grep -c '^curl ' "$TEST_LOG")" -eq 4 ] || fail 'one_shot_reads did not read the serving version four times'
+[ "$(grep -Fc 'gh <pr> <view>' "$TEST_LOG")" -eq 7 ] || fail 'one_shot_reads did not read the pull requests seven times'
+[ "$(grep -c '^git <ls-remote>' "$TEST_LOG")" -eq 3 ] || fail 'one_shot_reads did not read the remote branches three times'
+[ "$(grep -Fc 'gh <pr> <create>' "$TEST_LOG")" -eq 2 ] || fail 'one_shot_reads repeated a pull request creation'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] || fail 'one_shot_reads repeated a merge'
+[ "$(grep -c '^git <push>' "$TEST_LOG")" -eq 4 ] || fail 'one_shot_reads repeated a push or a branch deletion'
+grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output" \
+  || fail 'one_shot_reads changed the success line'
+printf 'roll train test: one-shot reads that fail once are retried, a late release run and a merged pull request shown open are awaited, and the train completes\n'
+
+# A merged pull request that cannot be read stops the train at the fifth failed
+# read, in the merge phase, before post-merge CI.
+reset_case
+SCENARIO=merged_pr_read_down
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval "$read_poll_interval"
+grep -Fxq "roll-train: merged PR ($pr): read failed with exit 1 (failure 5 of 5 in a row); stopping" "$TEST_ROOT/output" \
+  || fail 'merged_pr_read_down did not stop at the fifth failed read'
+grep -Fxq "roll-train: stopped during wave 1 ($BACKUP): squash merge (exit 1)." "$TEST_ROOT/output" \
+  || fail 'merged_pr_read_down stopped in another phase or with another status'
+if grep -Fq 'PR is not merged at the checked head' "$TEST_ROOT/output"; then fail 'merged_pr_read_down judged a failed read'; fi
+if grep -Fq 'timed out' "$TEST_ROOT/output"; then fail 'merged_pr_read_down waited for its deadline instead of stopping at the cap'; fi
+[ "$(grep -Fc 'gh <pr> <view>' "$TEST_LOG")" -eq 6 ] || fail 'merged_pr_read_down did not read the merged pull request exactly five times'
+if grep -Fq '<--workflow> <ci.yml>' "$TEST_LOG"; then fail 'merged_pr_read_down read post-merge CI'; fi
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'merged_pr_read_down merged again'
+while IFS= read -r path; do [ -d "$path" ] || fail 'merged_pr_read_down removed its worktree'; done <"$STATE_DIR/worktrees"
+printf 'roll train test: a merged pull request that cannot be read stops at the fifth failed read, before post-merge CI\n'
 
 # A failed check is never accepted. The train names the failed run, asks for a
 # re-run once for each newly failed job, and merges only after every check
