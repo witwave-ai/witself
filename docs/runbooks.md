@@ -3878,6 +3878,51 @@ idempotent, so retry it instead of probing with new generations. Then run
 the isolated rollback-only restore drill only after the selected id is
 committed:
 
+If no answer arrives within a minute, leave the command running: an older
+control plane is running the drill inside this request.
+
+```sh
+BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
+SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+curl --fail-with-body -i -m 1800 -X POST \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\",\"wait\":false}" \
+  "${CONTROL_PLANE}/v1/backups:restore-drill"
+```
+
+An HTTP 202 carries `restore_drill.drill_id`, `restore_drill.driver: "alarm"`
+and the `X-Witself-Restore-Drill-Driver` header. Copy the drill id: the drill
+continues to a recorded outcome whatever the client does. Poll
+`GET /v1/backups/status?account_id=${ACCOUNT_ID}` until
+`account.restore_drill.state` is not `running`, at most 90 minutes from
+`started_at`. A `failed` record with `finished_at: null` can still be followed
+by the driver's own report within two more minutes. Confirm the record's
+`drill_id` equals the 202's, then apply the precedence rule: a catalog
+`validations` entry for this backup and target cell with
+`validated_at >= restore_drill.started_at` means success regardless of the
+record's state. Do not re-POST while the drill runs.
+
+An HTTP 502 `restore drill could not be recorded` that carries
+`X-Witself-Restore-Drill-ID` may still have been recorded: wait one minute,
+then read the record. If its `drill_id` equals that header, follow it as above;
+otherwise no drill was recorded for this attempt, so run the block again.
+An HTTP 409
+`asynchronous restore drill requires a target cell with backup validation protocol 2`
+means the control plane did not confirm protocol 2 on the drill cell: the cell
+does not run it, or its `/v1/version` did not answer while it was rolling or
+slow. No drill was recorded. Run the block once more after a minute; if the
+answer repeats, use the connected procedure below.
+
+A completed drill answer without the `X-Witself-Restore-Drill-Driver` header
+comes from a control plane older than this release: it ignored `wait`, ran
+the drill inside this request and answered as the connected procedure does.
+This is why the block also uses `-m 1800`. Pre-flight errors, including the
+protocol refusal above, carry no driver header on the current control plane.
+
+For the connected procedure, use the default framing:
+
 ```sh
 BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
 SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -3894,48 +3939,47 @@ cell in that exact backup's catalog entry. Confirm the account still has no row
 in the drill database and that its live directory route is unchanged. A generic
 2xx from the cell is not accepted as proof.
 
-The drill runs inside this request, so keep it connected until the answer
-arrives: run it from a shell and host that stay up for 30 minutes, keep `-m`
-at 1800 (the record's 30-minute deadline), and do not interrupt it. An active
-client disconnect (Ctrl-C, a closed terminal, or a shorter `-m`) cancels the
-drill in either framing, as proven on 2026-10-03 with the client cut at 60
-seconds: any import already running on the drill cell is cancelled and rolled
+A drill whose record has no `driver` field runs inside the request that started
+it, so keep it connected until the answer arrives: run it from a shell and
+host that stay up for 30 minutes, keep `-m` at 1800 (the record's 30-minute
+deadline), and do not interrupt it. An active client disconnect (Ctrl-C, a
+closed terminal, or a shorter `-m`) cancels a request-driven drill in either
+framing: any import already running on the drill cell is cancelled and rolled
 back, and the record stays `running` until its 30-minute deadline and then
 reads `failed` with `finished_at: null`. A longer `-m` can keep a drill running
-after its record reads `failed`. The two earlier drops after which the drill
-still completed (2026-09-30, 2026-10-01) were most likely connections lost
-where the control plane did not see the disconnect; do not rely on that.
+after its record reads `failed`. Do not rely on a lost connection going
+unnoticed by the control plane.
 
 If the answer is lost or is not `validated: true`, do not re-POST while the
 drill may still be running: poll
 `GET /v1/backups/status?account_id=${ACCOUNT_ID}` until
 `account.restore_drill.state` is not `running` (at most 30 minutes from the
-record's `started_at`); a POST meanwhile returns HTTP 409 with the current
-record. Then confirm that the record is this attempt's: its `drill_id` equals
-the `X-Witself-Restore-Drill-ID` header when the answer carried one (`-i`
-prints it); otherwise its `backup_id` and `target_cell` match the request and
-its `started_at` is not earlier than `SENT_AT` (compare to the second). An
-error answer without that header, or a record that fails both tests, means
-this attempt recorded no drill: fix the cause and run the block again. For
-this attempt's record, read its `state` and `error`, then check the selected
-backup's catalog `validations` entry for the target cell. An entry with
-`validated_at >= restore_drill.started_at` means the drill succeeded
-regardless of the record's state. A failed record with `finished_at: null`
-means the deadline rule applied (the drill never reported, as after an active
-disconnect), not that the driver reported a failure. Start a new drill only
-after the record is no longer `running` and the earlier `curl` has exited.
+record's `started_at` for a request-driven drill, or 90 minutes plus two
+minutes for an alarm drill's final report); a POST meanwhile returns HTTP
+409 with the current record. Then confirm that the record is this attempt's:
+its `drill_id` equals the `X-Witself-Restore-Drill-ID` header when the answer
+carried one (`-i` prints it); otherwise its `backup_id` and `target_cell` match
+the request and its `started_at` is not earlier than `SENT_AT` (compare to the
+second). An error answer without that header, or a record that fails both
+tests, means this attempt recorded no drill: fix the cause and run the block
+again. For a 502 with the drill-id header, wait one minute before checking the
+record as described above. For this attempt's record, read its `state` and
+`error`, then check the selected backup's catalog `validations` entry for the
+target cell. An entry with `validated_at >= restore_drill.started_at` means
+the drill succeeded regardless of the record's state. A failed record with
+`finished_at: null` means the deadline rule applied, not that the driver
+reported a failure. Start a new drill only after the record is no longer
+`running` and the earlier `curl` has exited.
 
-This block uses the default framing on purpose: the silent request survived
-both observed lost connections, and a failure after the drill is recorded
-still returns a real HTTP 409 or 502 that `--fail-with-body` reports. The
+This connected block uses the default framing: a failure after the drill is
+recorded returns a real HTTP 409 or 502 that `--fail-with-body` reports. The
 opt-in `heartbeat: true` answers HTTP 200 after pre-flight, a newline every ten
-seconds, then one terminal JSON object, so HTTP 200 alone proves nothing. It
-keeps an intermediary that drops idle connections from closing a silent
-request, but it does not make a disconnect safe, and its writes may let the
-edge notice a lost connection that a silent request survives. Use it only
-behind such an intermediary, with no `Accept-Encoding` header. A fix that takes
-the client connection out of the drill is tracked in
-[#648](https://github.com/witwave-ai/witself/issues/648).
+seconds, then one terminal JSON object, so HTTP 200 alone proves nothing.
+Request-driven drills (no `driver` field, or
+`X-Witself-Restore-Drill-Driver: request`) need the client connected for the
+whole drill. For them, the heartbeat keeps an intermediary that drops idle
+connections from closing a silent request but does not make a disconnect safe.
+Use it only behind such an intermediary, with no `Accept-Encoding` header.
 
 After the manual path is healthy, activate the operator-controlled Worker
 secret:

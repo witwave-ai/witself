@@ -13,6 +13,23 @@ import {
   OVERALL_TIMEOUT_MS,
   RESTORE_DRILL_DEADLINE_MS,
   RESTORE_DRILL_HEARTBEAT_MS,
+  RESTORE_DRILL_ALARM_DEADLINE_MS,
+  RESTORE_DRILL_TICK_MS,
+  RESTORE_DRILL_MAX_DELAY_MS,
+  RESTORE_DRILL_CLAIM_WINDOW_MS,
+  RESTORE_DRILL_START_WAIT_SECONDS,
+  RESTORE_DRILL_START_TIMEOUT_MS,
+  RESTORE_DRILL_POLL_TIMEOUT_MS,
+  RESTORE_DRILL_PROBE_TIMEOUT_MS,
+  RESTORE_DRILL_MAX_STARTS,
+  RESTORE_DRILL_FENCE_RETRIES,
+  RESTORE_DRILL_WAIT_POLL_MS,
+  RESTORE_DRILL_FINAL_GRACE_MS,
+  RESTORE_DRILL_DRIVER_PREFIX,
+  RESTORE_DRILL_CELL_JOB_BOUND_MS,
+  RestoreDrillProtocolError,
+  RestoreDrillUnconfirmedError,
+  awaitRestoreDrill,
   BackupValidationBusyError,
   accountBackupHealth,
   accountBackupStatus,
@@ -2256,7 +2273,10 @@ function deferred() {
 
 function countDrillFetches(t) {
   let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => { calls += 1; return Response.json({}); });
+  t.mock.method(globalThis, "fetch", async (url) => {
+    if (String(url).endsWith("/v1/version")) return Response.json({ schema_version: "witself.v0" });
+    calls += 1; return Response.json({});
+  });
   return () => calls;
 }
 
@@ -2617,6 +2637,7 @@ test("restore drill Worker heartbeat sends immediate bytes then the terminal fai
   assert.equal(response.headers.get("Content-Type"), "application/json");
   assert.equal(response.headers.get("Cache-Control"), "no-store, no-transform");
   assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), running.drill_id);
+  assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "request");
   assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
   const reader = response.body.getReader();
   t.mock.timers.tick(10_000);
@@ -2636,7 +2657,8 @@ test("restore drill Worker heartbeat sends immediate bytes then the terminal fai
   assert.equal(fetches(), 0);
 });
 
-test("restore drill Worker dropped client keeps one running drill and finishes through waitUntil", { timeout: 10_000 }, async (t) => {
+// Node does not model Worker cancellation; an active disconnect cancels a request-driven drill in production (proven 2026-10-03). The alarm driver is the fix.
+test("restore drill Worker request driver: cancelling the heartbeat body does not abort the completion promise (Node model; production bounds waitUntil to 30 s)", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const errors = unhandledRejections(t);
   const fetches = countDrillFetches(t);
@@ -2648,6 +2670,7 @@ test("restore drill Worker dropped client keeps one running drill and finishes t
     assert.equal(response.status, 200);
     const running = structuredClone(f.storage.values.get("restore-drill"));
     assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), running.drill_id);
+    assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "request");
     const reader = response.body.getReader();
     t.mock.timers.tick(10_000);
     assert.equal(new TextDecoder().decode((await reader.read()).value), "\n");
@@ -2672,4 +2695,1499 @@ test("restore drill Worker dropped client keeps one running drill and finishes t
   }
   assert.deepEqual(errors, []);
   assert.equal(fetches(), 0);
+});
+
+// Separate objects and a shared clock model only local ordering, not Worker lifetime.
+function alarmDrillEnv(t) {
+  const f = drillEnv();
+  let clock = NOW.getTime();
+  f.now = () => new Date(clock);
+  f.setTime = (value) => { clock = Number(value); };
+  f.advance = (ms) => { clock += ms; };
+  f.durable.now = f.now;
+  f.driverStorage = new Storage();
+  f.rereads = 0;
+  f.validateArchive = () => validVerification(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1));
+  f.driver = new DurableAccountBackup({ storage: f.driverStorage, id: { name: RESTORE_DRILL_DRIVER_PREFIX + ACCOUNT } }, f.env, {
+    now: f.now, validateArchive: (...args) => { f.rereads += 1; return f.validateArchive(...args); },
+  });
+  f.log = [];
+  f.intercept = null;
+  f.env.ACCOUNT_BACKUP = {
+    idFromName: (name) => ({ name }),
+    get: ({ name }) => ({ fetch: async (request) => {
+      const path = new URL(request.url).pathname;
+      const input = request.method === "POST" ? await request.clone().json().catch(() => null) : null;
+      const instance = name === ACCOUNT ? "account"
+        : name === RESTORE_DRILL_DRIVER_PREFIX + ACCOUNT ? "driver" : "unknown";
+      const entry = { name, instance, path, input };
+      f.log.push(entry);
+      const forward = () => name === ACCOUNT ? f.durable.fetch(request)
+        : name === RESTORE_DRILL_DRIVER_PREFIX + ACCOUNT ? f.driver.fetch(request)
+        : new Response(null, { status: 404 });
+      return f.intercept ? f.intercept(entry, forward) : forward();
+    } }),
+  };
+  f.key = (id = f.storage.values.get("restore-drill")?.drill_id) => f.driverStorage.values.get("restore-drill-driver:" + id);
+  f.prepareBody = async (overrides = {}) => {
+    const target = f.binding.value(`cell:${TARGET}`);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(target.backup_token));
+    return {
+      drill_id: crypto.randomUUID(), backup_id: f.record.backup_id, target_cell: TARGET,
+      archive_origin: "https://cp.test.invalid", target: {
+        endpoint: target.endpoint, registration_id: target.registration_id, registered_at: target.registered_at,
+        backup_token_sha256: [...new Uint8Array(digest)].map((n) => n.toString(16).padStart(2, "0")).join(""),
+      }, catalog: structuredClone(f.record), ...overrides,
+    };
+  };
+  f.prepare = async (overrides = {}) => f.driver.fetch(new Request("http://account-backup.internal/restore-drill-driver:start", {
+    method: "POST", body: JSON.stringify(await f.prepareBody(overrides)),
+  }));
+  f.next = async () => { assert.notEqual(f.driverStorage.alarm, null); f.setTime(f.driverStorage.alarm); await fireAlarm(f.driverStorage, f.driver); };
+  f.archiveRoute = (token) => worker.fetch(new Request(
+    `https://cp.test.invalid/v1/backups:archive?account_id=${ACCOUNT}&backup_id=${f.record.backup_id}`,
+    { headers: { Authorization: `Bearer ${token}`, "CF-Connecting-IP": "192.0.2.47" } },
+  ), f.env, {});
+  return f;
+}
+
+function cellAck(record) {
+  return { schema_version: "witself.v0", account_id: ACCOUNT, status: record.status,
+    archive_schema_version: record.archive_schema_version, purpose: "backup", backup_id: record.backup_id, validated: true };
+}
+
+function cellJob(f, state, started) {
+  return { schema_version: "witself.v0", account_id: ACCOUNT, backup_id: f.record.backup_id,
+    validation_id: f.storage.values.get("restore-drill")?.drill_id,
+    validation_job: { state, ...(started === undefined ? {} : { started }) } };
+}
+
+function fakeCell(t, script = {}) {
+  const calls = [];
+  const actions = { ...script };
+  const fetch = t.mock.method(globalThis, "fetch", async (url, options = {}) => {
+    const path = String(url);
+    const action = path.endsWith("/v1/version") ? "version"
+      : path.endsWith(":start-validate-backup") ? "start"
+      : path.endsWith(":validate-backup-status") ? "poll"
+      : path.endsWith(":validate-backup") ? "sync" : "unknown";
+    const call = { action, url: path, options, headers: new Headers(options.headers) };
+    calls.push(call);
+    let value = actions[action];
+    if (Array.isArray(value)) value = value.shift();
+    if (typeof value === "function") value = await value(call);
+    if (value instanceof Response) return value;
+    if (value !== undefined) return Response.json(value);
+    if (action === "version") return Response.json({ schema_version: "witself.v0", backup_validation_protocol: 2 });
+    if (action === "start" || action === "poll") return Response.json({ schema_version: "witself.v0", account_id: ACCOUNT,
+      backup_id: call.headers.get("X-Witself-Backup-ID"), validation_id: call.headers.get("X-Witself-Validation-ID"),
+      validation_job: { state: "running", ...(action === "start" ? { started: true } : {}) } });
+    if (action === "sync") return Response.json(cellAck(committedRecord(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1))));
+    assert.fail("unexpected cell request path");
+  });
+  return { calls, fetch, set: (action, value) => { actions[action] = value; }, count: (action) => calls.filter((call) => call.action === action).length };
+}
+
+const pendingDriverAlarms = new WeakMap();
+function fireAlarm(storage, durable) {
+  if (pendingDriverAlarms.has(durable)) throw new Error("an alarm invocation is already running");
+  storage.alarm = null; // The platform consumes its one alarm before delivery.
+  const invocation = {};
+  pendingDriverAlarms.set(durable, invocation);
+  return Promise.resolve().then(() => durable.alarm()).finally(() => {
+    if (pendingDriverAlarms.get(durable) === invocation) pendingDriverAlarms.delete(durable);
+  });
+}
+function abandonAlarm(durable) {
+  assert.ok(pendingDriverAlarms.has(durable), "only a pending invocation can be killed");
+  pendingDriverAlarms.delete(durable);
+}
+
+const alarmRecordFields = ["drill_id", "account_id", "backup_id", "target_cell", "state", "started_at", "deadline_at", "finished_at", "validated_at", "error", "driver"];
+const driverKeys = (f) => [...f.driverStorage.values.keys()].filter((name) => name.startsWith("restore-drill-driver:"));
+const callsTo = (f, path) => f.log.filter((entry) => entry.path === path);
+const samePrivateState = (actual, expected, message) => assert.ok(JSON.stringify(actual) === JSON.stringify(expected), message);
+async function startedAlarm(f) {
+  const response = await f.route({ wait: false });
+  assert.equal(response.status, 202);
+  return (await response.json()).restore_drill;
+}
+async function preparedAlarm(f) {
+  // Enter at the driver so the log contains no Worker's preflight /status read.
+  const response = await f.prepare();
+  assert.equal(response.status, 200);
+  return (await response.json()).restore_drill;
+}
+function assertAccountBackupIsolation(f, originalAlarm) {
+  const allowed = new Set(["/restore-drill:start", "/restore-drill:finish", "/archive-capability", "/validation-verified"]);
+  const accountCalls = f.log.filter((entry) => entry.instance === "account");
+  assert.ok(accountCalls.length > 0, "the driver reached the account instance");
+  for (const { path } of accountCalls) assert.ok(allowed.has(path), `unexpected account-bound route: ${path}`);
+  assert.notEqual(originalAlarm, null, "the account backup alarm was armed at setup");
+  assert.equal(f.storage.alarm, originalAlarm, "the account backup alarm stays unchanged across driver ticks");
+}
+function setTarget(f, fields) {
+  f.binding.values.set(`cell:${TARGET}`, JSON.stringify({ ...f.binding.value(`cell:${TARGET}`), ...fields }));
+}
+
+// 1. Account-side claims never manipulate the account's backup schedule.
+test("alarm restore drill claim replays before expiry and preserves account backup state", async (t) => {
+  const f = alarmDrillEnv(t);
+  const put = t.mock.method(f.storage, "put");
+  f.storage.alarm = NOW.getTime() + 500_000;
+  const originalAlarm = f.storage.alarm;
+  const backups = JSON.stringify(f.storage.values.get("account-backups"));
+  const claim = { driver: "alarm", drill_id: crypto.randomUUID(), claim_by: new Date(f.now().getTime() + RESTORE_DRILL_CLAIM_WINDOW_MS).toISOString() };
+  const response = await f.start(claim);
+  assert.equal(response.status, 200);
+  const record = (await response.json()).restore_drill;
+  assert.deepEqual(Object.keys(record), alarmRecordFields);
+  assert.equal(record.driver, "alarm");
+  assert.equal(record.drill_id, claim.drill_id);
+  assert.equal(Date.parse(record.deadline_at) - Date.parse(record.started_at), RESTORE_DRILL_ALARM_DEADLINE_MS);
+  assert.equal(RESTORE_DRILL_ALARM_DEADLINE_MS, 90 * 60_000);
+  for (const time of [f.now().getTime(), Date.parse(claim.claim_by) + 1, Date.parse(record.deadline_at) + 1]) {
+    f.setTime(time);
+    const before = put.mock.callCount();
+    assert.deepEqual((await (await f.start(claim)).json()).restore_drill, record);
+    assert.equal(put.mock.callCount(), before);
+  }
+  assert.equal(put.mock.callCount(), 1);
+  for (const [overrides, error] of [
+    [{ drill_id: crypto.randomUUID() }, "restore drill claim expired"],
+    [{ drill_id: crypto.randomUUID(), claim_by: new Date(f.now().getTime() + 60_001).toISOString() }, "invalid restore drill start"],
+    [{ drill_id: "not-uuid" }, "invalid restore drill start"], [{ driver: "x" }, "invalid restore drill start"],
+    [{ claim_by: "bad" }, "invalid restore drill start"],
+  ]) {
+    const answer = await f.start({ ...claim, ...overrides });
+    assert.equal(answer.status, 400);
+    assert.equal((await answer.json()).error, error);
+    assert.equal(put.mock.callCount(), 1);
+  }
+  assert.equal(JSON.stringify(f.storage.values.get("account-backups")), backups);
+  assert.ok(put.mock.calls.every((call) => call.arguments[0] === "restore-drill"), "claims only put the restore-drill key");
+  assert.equal(f.storage.alarm, originalAlarm);
+  assert.deepEqual([...f.storage.values.keys()].sort(), ["account-backups", "restore-drill"]);
+  const removed = alarmDrillEnv(t);
+  const removedPut = t.mock.method(removed.storage, "put");
+  const removedResponse = await removed.start(claim);
+  assert.equal(removedResponse.status, 200);
+  const removedRecord = (await removedResponse.json()).restore_drill;
+  removed.setTime(Date.parse(removedRecord.deadline_at) + 1);
+  removed.storage.values.get("account-backups").catalog = [];
+  const removedBackups = JSON.stringify(removed.storage.values.get("account-backups"));
+  assert.deepEqual((await (await removed.start(claim)).json()).restore_drill, removedRecord);
+  assert.equal(removedPut.mock.callCount(), 1);
+  assert.ok(removedPut.mock.calls.every((call) => call.arguments[0] === "restore-drill"), "catalog-removal claims only put the restore-drill key");
+  assert.equal(JSON.stringify(removed.storage.values.get("account-backups")), removedBackups);
+  const g = alarmDrillEnv(t);
+  const busyPut = t.mock.method(g.storage, "put");
+  const busyBackups = JSON.stringify(g.storage.values.get("account-backups"));
+  const fresh = { ...claim, drill_id: crypto.randomUUID(), claim_by: new Date(g.now().getTime() + RESTORE_DRILL_CLAIM_WINDOW_MS).toISOString() };
+  assert.equal((await g.start(fresh)).status, 200);
+  const busy = await g.start({ ...fresh, drill_id: crypto.randomUUID() });
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).restore_drill.drill_id, fresh.drill_id);
+  const missing = await g.start({ ...fresh, drill_id: crypto.randomUUID(), backup_id: "backup_20260725T123500Z" });
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).error, "backup validation is not in the committed catalog");
+  assert.equal(JSON.stringify(g.storage.values.get("account-backups")), busyBackups);
+  assert.ok(busyPut.mock.calls.every((call) => call.arguments[0] === "restore-drill"), "busy and refused claims only put the restore-drill key");
+});
+
+// 2. The private key and recovery alarm exist before the first cross-object claim.
+test("alarm restore drill prepare orders storage before claim and validates every pinned field", async (t) => {
+  const f = alarmDrillEnv(t);
+  const order = [];
+  const put = f.driverStorage.put.bind(f.driverStorage);
+  f.driverStorage.put = async (...args) => { order.push("put"); return put(...args); };
+  const arm = f.driverStorage.setAlarm.bind(f.driverStorage);
+  f.driverStorage.setAlarm = async (...args) => { order.push("alarm"); return arm(...args); };
+  f.intercept = (entry, forward) => { order.push(entry.path); return forward(); };
+  const body = await f.prepareBody();
+  const response = await f.prepare(body);
+  assert.equal(response.status, 200);
+  const answer = await response.json();
+  assert.deepEqual(order.slice(0, 3), ["put", "alarm", "/restore-drill:start"]);
+  assert.deepEqual(answer, { schema_version: "witself.v0", account_id: ACCOUNT, restore_drill: f.storage.values.get("restore-drill") });
+  assert.equal(answer.restore_drill.drill_id, body.drill_id);
+  assert.equal(f.key().phase, "start");
+  assert.equal(f.key().deadline_at, answer.restore_drill.deadline_at);
+  assert.equal(f.key().next_at, f.now().getTime());
+  assert.equal(f.key().rev, 1);
+  assert.equal(f.driverStorage.alarm, f.now().getTime());
+  assert.deepEqual([...f.storage.values.keys()].sort(), ["account-backups", "restore-drill"]);
+  const invalid = [
+    { drill_id: "bad" }, { drill_id: body.drill_id }, { backup_id: "bad" }, { target_cell: "Bad" },
+    { archive_origin: "http://cp.test.invalid" }, { archive_origin: "https://cp.test.invalid/path" }, { archive_origin: null },
+    { target: null }, { target: { ...body.target, endpoint: "https://validation.example/" } },
+    { target: { ...body.target, registration_id: "" } }, { target: { ...body.target, registration_id: "x".repeat(129) } },
+    { target: { ...body.target, registered_at: "bad" } }, { target: { ...body.target, backup_token_sha256: "bad" } },
+    { catalog: null }, { catalog: { ...body.catalog, account_id: "different" } },
+    { catalog: { ...body.catalog, backup_id: "backup_20260725T123500Z" } },
+  ];
+  for (const fields of invalid) {
+    const before = JSON.stringify([...f.driverStorage.values]);
+    const accountBefore = JSON.stringify([...f.storage.values]);
+    const answer = await f.prepare(fields);
+    assert.equal(answer.status, 400);
+    assert.equal((await answer.json()).error, "invalid restore drill start");
+    assert.ok(JSON.stringify([...f.driverStorage.values]) === before, "invalid prepare leaves driver keys unchanged");
+    assert.ok(JSON.stringify([...f.storage.values]) === accountBefore, "invalid prepare leaves account unchanged");
+  }
+});
+
+// 3. Every refused prepare releases only its own key.
+test("alarm restore drill refused second prepare leaves the running drill and alarm untouched", async (t) => {
+  const f = alarmDrillEnv(t);
+  const cell = fakeCell(t);
+  const first = await startedAlarm(f);
+  const key = structuredClone(f.key());
+  const duplicate = await f.route({ wait: false });
+  assert.equal(duplicate.status, 409);
+  assert.deepEqual((await duplicate.json()).restore_drill, first);
+  samePrivateState(f.key(), key, "duplicate preserves first driver key");
+  assert.equal(driverKeys(f).length, 1);
+  assert.equal(f.driverStorage.alarm, key.next_at);
+  cell.set("version", { schema_version: "witself.v0" });
+  const driverCalls = f.log.filter((entry) => entry.name.startsWith(RESTORE_DRILL_DRIVER_PREFIX)).length;
+  const fallback = await f.route();
+  assert.equal(fallback.status, 409);
+  assert.deepEqual((await fallback.json()).restore_drill, first);
+  assert.equal(f.log.filter((entry) => entry.name.startsWith(RESTORE_DRILL_DRIVER_PREFIX)).length, driverCalls);
+  const missing = committedRecord(backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1));
+  const refused = await f.prepare({ backup_id: missing.backup_id, catalog: missing });
+  assert.equal(refused.status, 400);
+  samePrivateState(f.key(), key, "catalog refusal preserves first key");
+  assert.equal(driverKeys(f).length, 1);
+  cell.set("version", { schema_version: "witself.v0", backup_validation_protocol: 2 });
+  await f.next();
+  assert.equal(cell.count("start"), 1);
+  assert.equal(f.key().phase, "poll");
+});
+
+// 4. Unknown claim outcomes retain the key until the account's deadline makes the answer final.
+test("alarm restore drill never strands claims with lost answers, late delivery, or foreign ids", async (t) => {
+  await t.test("first claim stored but answer lost is replayed exactly once", async (t) => {
+    const f = alarmDrillEnv(t);
+    const put = t.mock.method(f.storage, "put");
+    let attempts = 0;
+    f.intercept = async (entry, forward) => {
+      const response = await forward();
+      if (entry.path === "/restore-drill:start" && ++attempts === 1) throw new Error("answer lost");
+      return response;
+    };
+    const answer = await f.prepare();
+    assert.equal(answer.status, 200);
+    assert.equal(attempts, 2);
+    assert.equal(f.key().phase, "start");
+    assert.equal(put.mock.calls.filter((call) => call.arguments[0] === "restore-drill").length, 1);
+  });
+  await t.test("both claims dropped yield recoverable headers and a late claim is refused", async (t) => {
+    const f = alarmDrillEnv(t);
+    fakeCell(t);
+    const held = [];
+    f.intercept = (entry, forward) => {
+      if (entry.path === "/restore-drill:start") { held.push(forward); throw new Error("claim dropped"); }
+      return forward();
+    };
+    const response = await f.route({ wait: false });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { schema_version: "witself.v0", error: "restore drill could not be recorded" });
+    const id = response.headers.get("X-Witself-Restore-Drill-ID");
+    assert.ok(id);
+    assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "alarm");
+    const key = f.key(id);
+    assert.equal(key.phase, "claim");
+    assert.equal(f.driverStorage.alarm, Date.parse(key.claim_by) + RESTORE_DRILL_CLAIM_WINDOW_MS);
+    assert.equal(f.storage.values.get("restore-drill"), undefined);
+    assert.equal(held.length, 2);
+    f.intercept = null;
+    await f.next();
+    assert.equal(f.key(id), undefined);
+    assert.equal(f.driverStorage.alarm, null);
+    const late = await held[0]();
+    assert.equal(late.status, 400);
+    assert.equal((await late.json()).error, "restore drill claim expired");
+    assert.equal(f.storage.values.get("restore-drill"), undefined);
+  });
+  await t.test("direct prepare reports its id when both claims are dropped", async (t) => {
+    const f = alarmDrillEnv(t);
+    f.intercept = () => { throw new Error("claim dropped"); };
+    const body = await f.prepareBody();
+    const response = await f.prepare(body);
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { schema_version: "witself.v0", error: "restore drill could not be recorded", drill_id: body.drill_id });
+    assert.equal(f.key(body.drill_id).phase, "claim");
+  });
+  await t.test("a refusal after an unknown first claim stays unconfirmed until reconcile", async (t) => {
+    const f = alarmDrillEnv(t);
+    fakeCell(t);
+    const running = (await (await f.start()).json()).restore_drill;
+    let attempts = 0;
+    f.intercept = (entry, forward) => {
+      if (entry.path === "/restore-drill:start" && ++attempts === 1) throw new Error("first claim dropped");
+      return forward();
+    };
+    const response = await f.route({ wait: false });
+    assert.equal(response.status, 502);
+    const id = response.headers.get("X-Witself-Restore-Drill-ID");
+    assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "alarm");
+    assert.equal(f.key(id).phase, "claim");
+    assert.equal(f.storage.values.get("restore-drill").drill_id, running.drill_id);
+    await f.next();
+    assert.equal(f.key(id), undefined);
+    assert.equal(f.driverStorage.alarm, null);
+    assert.equal(f.storage.values.get("restore-drill").drill_id, running.drill_id);
+  });
+  await t.test("definitive first-claim catalog refusal has no drill headers", async (t) => {
+    const f = alarmDrillEnv(t);
+    fakeCell(t);
+    f.intercept = (entry, forward) => {
+      if (entry.path === "/restore-drill:start") f.storage.values.get("account-backups").catalog = [];
+      return forward();
+    };
+    const response = await f.route({ wait: false });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { schema_version: "witself.v0", error: "restore drill could not be recorded" });
+    assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), null);
+    assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), null);
+    assert.equal(driverKeys(f).length, 0);
+    assert.equal(f.storage.values.get("restore-drill"), undefined);
+  });
+  for (const mode of ["both claim answers", "Worker prepare answer"]) {
+    await t.test(`${mode} lost after recording still completes under the returned id`, async (t) => {
+      const f = alarmDrillEnv(t);
+      fakeCell(t, { start: () => cellAck(f.record) });
+      f.intercept = async (entry, forward) => {
+        const response = await forward();
+        if (entry.path === (mode === "both claim answers" ? "/restore-drill:start" : "/restore-drill-driver:start")) throw new Error("stored answer lost");
+        return response;
+      };
+      const response = await f.route({ wait: false });
+      assert.equal(response.status, 502);
+      const id = response.headers.get("X-Witself-Restore-Drill-ID");
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "alarm");
+      assert.equal(f.storage.values.get("restore-drill").drill_id, id);
+      assert.equal(f.storage.values.get("restore-drill").state, "running");
+      assert.equal(f.key(id).phase, mode === "both claim answers" ? "claim" : "start");
+      f.intercept = null;
+      if (mode === "both claim answers") {
+        await f.next();
+        assert.equal(f.key(id).phase, "start");
+      }
+      await f.next();
+      assert.equal(f.storage.values.get("restore-drill").drill_id, id);
+      assert.equal(f.storage.values.get("restore-drill").state, "validated");
+      assert.equal(f.key(id), undefined);
+      assert.equal(f.driverStorage.alarm, null);
+    });
+  }
+  await t.test("unreachable account advances reconcile then releases at the outer claim bound", async (t) => {
+    const f = alarmDrillEnv(t);
+    let claims = 0;
+    f.intercept = () => { claims += 1; throw new Error("account unavailable"); };
+    const body = await f.prepareBody();
+    assert.equal((await f.prepare(body)).status, 502);
+    const claimBy = Date.parse(f.key(body.drill_id).claim_by);
+    await f.next();
+    assert.equal(f.key(body.drill_id).next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+    assert.equal(f.key(body.drill_id).phase, "claim");
+    const before = claims;
+    f.setTime(claimBy + RESTORE_DRILL_ALARM_DEADLINE_MS);
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(claims, before);
+    assert.equal(f.key(body.drill_id), undefined);
+    assert.equal(f.driverStorage.alarm, null);
+  });
+  await t.test("reconcile replays an existing record after expiry and catalog removal", async (t) => {
+    const f = alarmDrillEnv(t);
+    f.intercept = async (_entry, forward) => { await forward(); throw new Error("answer lost"); };
+    const body = await f.prepareBody();
+    assert.equal((await f.prepare(body)).status, 502);
+    f.storage.values.get("account-backups").catalog = [];
+    f.intercept = null;
+    await f.next();
+    assert.equal(f.key(body.drill_id).phase, "start");
+    assert.equal(f.storage.values.get("restore-drill").drill_id, body.drill_id);
+  });
+  await t.test("foreign drill ids never bind or release an unknown claim", async (t) => {
+    const f = alarmDrillEnv(t);
+    const foreign = drillRecord(f.record, { driver: "alarm" });
+    f.intercept = () => Response.json({ schema_version: "witself.v0", restore_drill: foreign });
+    const body = await f.prepareBody();
+    assert.notEqual(body.drill_id, foreign.drill_id);
+    const answer = await f.prepare(body);
+    assert.equal(answer.status, 502);
+    assert.equal((await answer.json()).drill_id, body.drill_id);
+    assert.equal(f.key(body.drill_id).phase, "claim");
+    assert.equal(callsTo(f, "/restore-drill:start").length, 2);
+    await f.next();
+    assert.equal(f.key(body.drill_id).phase, "claim");
+    assert.equal(f.key(body.drill_id).next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+    assert.equal(f.storage.values.get("restore-drill"), undefined);
+  });
+});
+
+// 5. A short validation can finish in the first alarm, with the existing receipt contract.
+test("alarm restore drill one-tick success mints on the account and records the exact receipt", async (t) => {
+  const f = alarmDrillEnv(t);
+  const cell = fakeCell(t, { start: () => cellAck(f.record) });
+  const record = await startedAlarm(f);
+  const baseRevision = f.storage.values.get("account-backups").revision;
+  await f.next();
+  assert.deepEqual(cell.calls.map((call) => call.action), ["version", "version", "start"]);
+  const call = cell.calls.at(-1);
+  assert.equal(call.options.method, "POST");
+  assert.equal(call.options.body, undefined);
+  assert.ok(call.options.signal instanceof AbortSignal);
+  assert.equal(call.url, `https://validation.example/v1/accounts/${ACCOUNT}:start-validate-backup`);
+  assert.deepEqual([...call.headers.keys()].sort(), ["authorization", "x-witself-backup-id", "x-witself-validation-id",
+    "x-witself-backup-archive-url", "x-witself-backup-archive-token", "x-witself-backup-archive-size", "x-witself-validation-wait"].sort());
+  assert.ok(call.headers.get("Authorization") === "Bearer target-backup-token", "backup authority is exact");
+  assert.equal(call.headers.get("X-Witself-Backup-ID"), record.backup_id);
+  assert.equal(call.headers.get("X-Witself-Validation-ID"), record.drill_id);
+  assert.equal(call.headers.get("X-Witself-Validation-Wait"), String(RESTORE_DRILL_START_WAIT_SECONDS));
+  assert.equal(call.headers.get("X-Witself-Backup-Archive-Size"), String(f.record.size));
+  assert.equal(call.headers.get("X-Witself-Backup-Archive-URL"), `https://cp.test.invalid/v1/backups:archive?account_id=${ACCOUNT}&backup_id=${record.backup_id}`);
+  const token = call.headers.get("X-Witself-Backup-Archive-Token");
+  assert.ok(token?.startsWith("cap_"), "START receives a minted capability");
+  assert.equal((await f.archiveRoute(token)).status, 200);
+  assert.equal((await f.archiveRoute(token)).status, 404);
+  assert.equal(f.rereads, 1);
+  assert.equal(callsTo(f, "/archive-capability").length, 1);
+  assert.equal(callsTo(f, "/archive-capability")[0].name, ACCOUNT);
+  const receipt = { ...f.input, validated_at: f.now().toISOString(), status: "active", archive_schema_version: 73 };
+  assert.deepEqual(callsTo(f, "/validation-verified").map((entry) => entry.input), [receipt]);
+  assert.deepEqual(callsTo(f, "/restore-drill:finish").map((entry) => entry.input), [{ drill_id: record.drill_id, state: "validated", validated_at: receipt.validated_at }]);
+  assert.equal(f.storage.values.get("restore-drill").state, "validated");
+  assert.equal(f.storage.values.get("restore-drill").validated_at, receipt.validated_at);
+  assert.equal(f.storage.values.get("account-backups").revision, baseRevision + 1);
+  assert.equal(driverKeys(f).length, 0);
+  assert.equal(f.driverStorage.alarm, null);
+});
+
+// 6. POLL is read-only at the cell and never needs an archive capability.
+test("alarm restore drill start then poll respects due times and carries only identity headers", async (t) => {
+  const f = alarmDrillEnv(t);
+  const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+  const cell = fakeCell(t);
+  const record = await preparedAlarm(f);
+  await f.next();
+  assert.equal(f.key().phase, "poll");
+  assert.equal(f.key().starts, 1);
+  assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+  const due = f.key().next_at;
+  const before = cell.calls.length;
+  f.setTime(due - 1);
+  await fireAlarm(f.driverStorage, f.driver);
+  assert.equal(cell.calls.length, before);
+  await f.next();
+  assert.equal(cell.count("poll"), 1);
+  assert.equal(f.key().last_polled_at, f.now().getTime());
+  const poll = cell.calls.at(-1);
+  assert.equal(poll.url, `https://validation.example/v1/accounts/${ACCOUNT}:validate-backup-status`);
+  assert.deepEqual([...poll.headers.keys()].sort(), ["authorization", "x-witself-backup-id", "x-witself-validation-id"]);
+  assert.equal(poll.headers.get("X-Witself-Validation-ID"), record.drill_id);
+  assert.equal(poll.options.body, undefined);
+  assert.equal(poll.options.method, "POST");
+  assert.equal(callsTo(f, "/archive-capability").length, 1);
+  cell.set("poll", () => cellAck(f.record));
+  await f.next();
+  assert.equal(f.storage.values.get("restore-drill").state, "validated");
+  assert.equal(cell.count("start"), 1);
+  assert.equal(callsTo(f, "/archive-capability").length, 1);
+  assert.equal(f.driverStorage.alarm, null);
+  assertAccountBackupIsolation(f, originalAlarm);
+});
+
+// 7. Only a definitive absent answer permits a fresh START.
+test("alarm restore drill absent results restart with fresh capabilities within both bounds", async (t) => {
+  await t.test("three STARTs consume three capabilities but reread once", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    const cell = fakeCell(t, { poll: () => cellJob(f, "absent") });
+    await preparedAlarm(f);
+    for (let starts = 1; starts <= RESTORE_DRILL_MAX_STARTS; starts += 1) {
+      await f.next();
+      assert.equal(f.key().starts, starts);
+      assert.equal(f.key().phase, "poll");
+      await f.next();
+      if (starts < RESTORE_DRILL_MAX_STARTS) assert.equal(f.key().phase, "start");
+    }
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.equal(f.storage.values.get("restore-drill").error, "restore drill validation job ended without a result");
+    assert.equal(cell.count("start"), RESTORE_DRILL_MAX_STARTS);
+    const tokens = cell.calls.filter((call) => call.action === "start").map((call) => call.headers.get("X-Witself-Backup-Archive-Token"));
+    assert.equal(new Set(tokens).size, RESTORE_DRILL_MAX_STARTS);
+    assert.equal(f.rereads, 1);
+    assert.equal(callsTo(f, "/archive-capability").length, RESTORE_DRILL_MAX_STARTS);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+  await t.test("absent cannot restart when less than the cell job bound remains", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    const cell = fakeCell(t, { poll: () => cellJob(f, "absent") });
+    const record = await preparedAlarm(f);
+    await f.next();
+    assert.equal(RESTORE_DRILL_CELL_JOB_BOUND_MS, 60 * 60 * 1000);
+    f.setTime(Date.parse(record.deadline_at) - RESTORE_DRILL_CELL_JOB_BOUND_MS + 1);
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.equal(f.storage.values.get("restore-drill").error, "restore drill cannot restart: less than the cell validation bound remains before the deadline");
+    assert.equal(cell.count("start"), 1);
+    assert.equal(driverKeys(f).length, 0);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+  await t.test("restart rechecks the bound after the delay following absent", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    const cell = fakeCell(t, { poll: () => cellJob(f, "absent") });
+    const record = await preparedAlarm(f);
+    await f.next();
+    f.setTime(Date.parse(record.deadline_at) - RESTORE_DRILL_CELL_JOB_BOUND_MS - 30_000);
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(f.key().phase, "start");
+    assert.equal(f.storage.values.get("restore-drill").state, "running");
+    await f.next();
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.equal(f.storage.values.get("restore-drill").error, "restore drill cannot restart: less than the cell validation bound remains before the deadline");
+    assert.equal(cell.count("start"), 1);
+    assert.equal(callsTo(f, "/archive-capability").length, 1);
+    assert.equal(driverKeys(f).length, 0);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+
+});
+
+// 8. A decline does not consume one of the three potentially started jobs.
+test("alarm restore drill declines preserve the START budget and clamp Retry-After", async (t) => {
+  for (const [label, retryAfter, delay] of [["integer", "120", 120_000], ["cap", "3600", RESTORE_DRILL_MAX_DELAY_MS],
+    ["minimum", "0", RESTORE_DRILL_TICK_MS], ["missing", null, RESTORE_DRILL_TICK_MS],
+    ["junk", "soon", RESTORE_DRILL_TICK_MS], ["date", "Wed, 21 Oct 2026 07:28:00 GMT", RESTORE_DRILL_TICK_MS],
+    ["started false", false, RESTORE_DRILL_TICK_MS]]) {
+    await t.test(label, async (t) => {
+      const f = alarmDrillEnv(t);
+      fakeCell(t, { start: () => retryAfter === false ? cellJob(f, "running", false)
+        : new Response("", { status: 503, headers: retryAfter === null ? {} : { "Retry-After": retryAfter } }) });
+      await startedAlarm(f);
+      await f.next();
+      assert.equal(f.key().phase, "start");
+      assert.equal(f.key().starts, 0);
+      assert.equal(f.key().next_at, f.now().getTime() + delay);
+      assert.equal(f.driverStorage.alarm, f.key().next_at);
+      assert.equal(f.key().reread, true);
+    });
+  }
+});
+
+// 9. A cell-declared failure is terminal; a gateway response can hide a running job.
+test("alarm restore drill distinguishes terminal cell failures from ambiguous START and POLL answers", async (t) => {
+  const rows = [
+    ["START error", "start", () => Response.json({ schema_version: "witself.v0", error: "invalid or mismatched backup archive" }), "backup validation 200: invalid or mismatched backup archive"],
+    ["START cell 500", "start", () => Response.json({ schema_version: "witself.v0", error: "could not validate backup" }, { status: 500 }), "backup validation 500: could not validate backup"],
+    ["START 404", "start", () => Response.json({ schema_version: "witself.v0", error: "unknown backup action" }, { status: 404 }), "backup validation 404: unknown backup action"],
+    ["START old pod 401", "start", () => Response.json({ schema_version: "witself.v0", error: "invalid provision token" }, { status: 401 }), "backup validation 401: invalid provision token"],
+    ["START gateway 502", "start", () => new Response("<html>gateway</html>", { status: 502 }), null],
+    ["START empty 504", "start", () => new Response(null, { status: 504 }), null],
+    ["START empty 200", "start", () => new Response(null), null],
+    ["START throw", "start", () => { throw new Error("connection reset"); }, null],
+    ["START cut body", "start", () => { const response = new Response(); response.text = async () => { throw new Error("body cut"); }; return response; }, null],
+    ["POLL 404", "poll", () => new Response(null, { status: 404 }), "backup validation status 404"],
+    ["POLL 401", "poll", () => new Response(null, { status: 401 }), "backup validation status 401"],
+    ["POLL 502", "poll", () => new Response(null, { status: 502 }), null],
+    ["POLL throw", "poll", () => { throw new Error("connection reset"); }, null],
+    ["POLL cut JSON", "poll", () => new Response('{"schema_version":'), null],
+    ...["start", "poll"].flatMap((action) => [
+      ["wrong backup id", (f) => ({ ...cellAck(f.record), backup_id: "backup_20260725T123500Z" })],
+      ["wrong purpose", (f) => ({ ...cellAck(f.record), purpose: "restore" })],
+      ["missing schema version", (f) => ({ ...cellAck(f.record), schema_version: undefined })],
+      ["unknown job state", () => ({ schema_version: "witself.v0", validation_job: { state: "unknown" } })],
+    ].map(([label, body]) => [
+      `${action.toUpperCase()} ${label}`, action, (f) => Response.json(body(f)),
+      "backup validation 200: missing exact acknowledgement",
+    ])),
+  ];
+  for (const [label, action, response, error] of rows) {
+    await t.test(label, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t, { [action]: () => response(f) });
+      await startedAlarm(f);
+      await f.next();
+      if (action === "poll") await f.next();
+      const record = f.storage.values.get("restore-drill");
+      if (error) {
+        assert.equal(record.state, "failed");
+        assert.equal(record.error, error);
+        assert.equal(driverKeys(f).length, 0);
+      } else {
+        assert.equal(record.state, "running");
+        assert.equal(f.key().phase, "poll");
+        assert.equal(f.key().starts, 1);
+        assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+        cell.set("poll", undefined);
+        const before = cell.count("poll");
+        await f.next();
+        assert.equal(cell.count("poll"), before + 1);
+      }
+      assert.equal(callsTo(f, "/validation-verified").length, 0);
+    });
+  }
+});
+
+// 10. Pin every target field and retry only bounded transient fence failures.
+test("alarm restore drill fences every pinned target field and retries transient coordinator failures", async (t) => {
+  for (const [field, value] of [["endpoint", "https://replacement.example"], ["registration_id", "reg-replacement"],
+    ["registered_at", "2026-07-25T00:00:01.000Z"], ["backup_token", "replacement-backup-token"], ["accepting", true]]) {
+    await t.test(field, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t);
+      await startedAlarm(f);
+      await f.next();
+      setTarget(f, { [field]: value });
+      const before = cell.calls.length;
+      await f.next();
+      assert.equal(cell.calls.length, before);
+      const record = f.storage.values.get("restore-drill");
+      assert.equal(record.state, "failed");
+      assert.equal(record.error, field === "accepting"
+        ? "backup validation target must be a registered backup_validation_target=true, accepting=false cell with a distinct backup token"
+        : "backup validation target registration changed before receipt");
+    });
+  }
+  await t.test("one coordinator failure recovers and resets the consecutive count", async (t) => {
+    const f = alarmDrillEnv(t);
+    const cell = fakeCell(t);
+    await startedAlarm(f);
+    await f.next();
+    const coordinator = f.env.CELL_COORDINATOR;
+    f.env.CELL_COORDINATOR = { idFromName: coordinator.idFromName, get: () => ({ fetch: () => { throw new Error("coordinator down"); } }) };
+    const before = cell.calls.length;
+    await f.next();
+    assert.equal(f.storage.values.get("restore-drill").state, "running");
+    assert.equal(f.key().fence_failures, 1);
+    assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+    assert.equal(cell.calls.length, before);
+    f.env.CELL_COORDINATOR = coordinator;
+    await f.next();
+    assert.equal(f.key().fence_failures, 0);
+    assert.equal(cell.count("poll"), 1);
+  });
+  await t.test("three consecutive coordinator failures fail with the coordinator reason", async (t) => {
+    const f = alarmDrillEnv(t);
+    const cell = fakeCell(t);
+    await startedAlarm(f);
+    await f.next();
+    f.env.CELL_COORDINATOR = { idFromName: (name) => ({ name }), get: () => ({ fetch: () => { throw new Error("coordinator down"); } }) };
+    for (let attempt = 1; attempt <= RESTORE_DRILL_FENCE_RETRIES; attempt += 1) {
+      await f.next();
+      if (attempt < RESTORE_DRILL_FENCE_RETRIES) assert.equal(f.key().fence_failures, attempt);
+    }
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.match(f.storage.values.get("restore-drill").error, /backup validation target coordinator is unavailable/);
+    assert.equal(cell.count("poll"), 0);
+    assert.equal(driverKeys(f).length, 0);
+  });
+});
+
+// 11. Unknown receipt outcomes replay the same validation identity.
+test("alarm restore drill receipt retries preserve acknowledgement time and one entry per forwarded post", async (t) => {
+  for (const mode of ["busy", "dropped", "lost", "503"]) {
+    await t.test(mode, async (t) => {
+      const f = alarmDrillEnv(t);
+      const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+      const cell = fakeCell(t, { start: () => cellAck(f.record) });
+      const record = await preparedAlarm(f);
+      const initialRevision = f.storage.values.get("account-backups").revision;
+      let failing = true, forwarded = 0;
+      f.intercept = async (entry, forward) => {
+        if (entry.path !== "/validation-verified") return forward();
+        if (failing && mode === "dropped") throw new Error("receipt dropped");
+        if (failing && mode === "503") return new Response(null, { status: 503 });
+        if (failing && mode === "busy") f.durable.fence.busy = true;
+        const answer = await forward();
+        if (answer.status === 200) forwarded += 1;
+        if (failing && mode === "lost") throw new Error("receipt answer lost");
+        return answer;
+      };
+      await f.next();
+      assert.equal(f.key().phase, "receipt");
+      const validatedAt = f.key().ack.validated_at;
+      assert.equal(f.storage.values.get("restore-drill").state, "running");
+      assert.equal(callsTo(f, "/restore-drill:finish").length, 0);
+      assert.equal(f.storage.values.get("account-backups").revision, initialRevision + forwarded);
+      if (mode === "busy") {
+        await f.next();
+        assert.equal(f.driverStorage.alarm, f.now().getTime() + RESTORE_DRILL_TICK_MS, "later busy receipt re-arms from commit time");
+        assert.equal(f.key().ack.validated_at, validatedAt);
+        assert.equal(f.storage.values.get("account-backups").revision, initialRevision);
+      }
+      const before = cell.calls.length;
+      failing = false;
+      f.durable.fence.busy = false;
+      await f.next();
+      assert.equal(cell.calls.length, before);
+      assert.equal(f.storage.values.get("restore-drill").state, "validated");
+      assert.equal(f.storage.values.get("restore-drill").validated_at, validatedAt);
+      assert.ok(callsTo(f, "/validation-verified").every((entry) => entry.input.validated_at === validatedAt), "every receipt uses the first acknowledgement time");
+      assert.equal(f.storage.values.get("account-backups").revision, initialRevision + forwarded, "one revision per successful forwarded post, including replay after a lost answer");
+      assert.equal(forwarded, mode === "lost" ? 2 : 1);
+      const validations = f.storage.values.get("account-backups").catalog[0].validations;
+      assert.equal(validations.length, 1);
+      assert.equal(validations[0].target_cell, record.target_cell);
+      assert.equal(validations[0].validated_at, validatedAt);
+      assert.equal(driverKeys(f).length, 0);
+      assertAccountBackupIsolation(f, originalAlarm);
+    });
+  }
+  await t.test("a thrown final receipt fails and releases the driver", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    fakeCell(t, { start: () => cellAck(f.record) });
+    const record = await preparedAlarm(f);
+    f.intercept = (entry, forward) => { if (entry.path === "/validation-verified") throw new Error("receipt dropped"); return forward(); };
+    await f.next();
+    f.setTime(Date.parse(record.deadline_at));
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.equal(f.storage.values.get("restore-drill").error, "backup validation completed but its receipt was not persisted");
+    assert.equal(driverKeys(f).length, 0);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+  await t.test("a removed catalog backup refuses the receipt immediately", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    fakeCell(t, { start: () => { f.storage.values.get("account-backups").catalog = []; return cellAck(f.record); } });
+    await preparedAlarm(f);
+    await f.next();
+    assert.equal(f.storage.values.get("restore-drill").state, "failed");
+    assert.equal(f.storage.values.get("restore-drill").error, "backup validation completed but its receipt was not persisted");
+    assert.equal(callsTo(f, "/validation-verified").length, 1);
+    assert.equal(driverKeys(f).length, 0);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+});
+
+// 12. Once the receipt is accepted no later fence, receipt, or cell request can change success.
+test("alarm restore drill finish retries cannot fail a validated receipt or hold the backup fence again", async (t) => {
+  for (const finalFailure of [false, true]) {
+    await t.test(finalFailure ? "finish unavailable through deadline" : "only finish after target changes", async (t) => {
+      const f = alarmDrillEnv(t);
+      const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+      const logs = t.mock.method(console, "log", () => {});
+      const cell = fakeCell(t, { start: () => cellAck(f.record) });
+      const record = await preparedAlarm(f);
+      let dropFinish = true;
+      f.intercept = (entry, forward) => { if (dropFinish && entry.path === "/restore-drill:finish") throw new Error("finish dropped"); return forward(); };
+      await f.next();
+      assert.equal(f.key().finishing.state, "validated");
+      const validatedAt = f.key().ack.validated_at;
+      assert.equal(f.driverStorage.alarm, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+      setTarget(f, { registration_id: "changed-after-receipt" });
+      let fenceReads = 0;
+      f.env.CELL_COORDINATOR = { idFromName: (name) => ({ name }), get: () => ({ fetch: () => { fenceReads += 1; throw new Error("must not recheck fence"); } }) };
+      const cellCalls = cell.calls.length;
+      const revision = f.storage.values.get("account-backups").revision;
+      if (finalFailure) {
+        await f.next();
+        assert.equal(f.key().finishing.state, "validated");
+        f.setTime(Date.parse(record.deadline_at));
+        const attempts = callsTo(f, "/restore-drill:finish").length;
+        await fireAlarm(f.driverStorage, f.driver);
+        assert.equal(callsTo(f, "/restore-drill:finish").length, attempts + 1);
+      } else {
+        dropFinish = false;
+        await f.next();
+        assert.equal(f.storage.values.get("restore-drill").state, "validated");
+        assert.equal(f.storage.values.get("restore-drill").validated_at, validatedAt);
+      }
+      assert.equal(fenceReads, 0);
+      assert.equal(cell.calls.length, cellCalls);
+      assert.equal(callsTo(f, "/validation-verified").length, 1);
+      assert.equal(f.storage.values.get("account-backups").revision, revision);
+      assert.equal(f.storage.values.get("account-backups").catalog[0].validations.length, 1);
+      assert.equal(driverKeys(f).length, 0);
+      assert.equal(f.driverStorage.alarm, null);
+      assert.ok(logs.mock.calls.every((call) => call.arguments[0] === "account-backup: restore drill record was not finished"));
+      assertAccountBackupIsolation(f, originalAlarm);
+    });
+  }
+  await t.test("failed finishing storage write cannot turn an accepted receipt into failure", async (t) => {
+    const f = alarmDrillEnv(t);
+    const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+    fakeCell(t, { start: () => cellAck(f.record) });
+    await preparedAlarm(f);
+    const put = f.driverStorage.put.bind(f.driverStorage);
+    let failed = false;
+    f.driverStorage.put = async (name, value) => {
+      if (!failed && value.finishing?.state === "validated") { failed = true; throw new Error("storage unavailable"); }
+      return put(name, value);
+    };
+    await f.next();
+    assert.equal(failed, true);
+    assert.equal(f.storage.values.get("restore-drill").state, "running");
+    assert.equal(f.storage.values.get("account-backups").catalog[0].validations.length, 1);
+    assert.equal(callsTo(f, "/restore-drill:finish").length, 0, "storage failure must never report validation failure");
+    assert.equal(f.key().phase, "receipt");
+    const validatedAt = f.key().ack.validated_at;
+    await f.next();
+    assert.equal(f.storage.values.get("restore-drill").state, "validated");
+    assert.equal(f.storage.values.get("restore-drill").validated_at, validatedAt);
+    assert.equal(f.storage.values.get("account-backups").catalog[0].validations.length, 1);
+    assert.equal(callsTo(f, "/validation-verified").length, 2);
+    assert.ok(callsTo(f, "/validation-verified").every((entry) => entry.input.validated_at === validatedAt));
+    assert.equal(driverKeys(f).length, 0);
+    assertAccountBackupIsolation(f, originalAlarm);
+  });
+
+});
+
+// 13. Final ticks do not start or poll jobs and make at most one last receipt attempt.
+test("alarm restore drill deadlines terminate START and POLL and settle final receipt attempts", async (t) => {
+  for (const phase of ["start", "poll", "receipt busy", "receipt success"]) {
+    await t.test(phase, async (t) => {
+      const f = alarmDrillEnv(t);
+      const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+      const cell = fakeCell(t, { start: () => phase.startsWith("receipt") ? cellAck(f.record) : cellJob(f, "running", true) });
+      const record = await preparedAlarm(f);
+      if (phase.startsWith("receipt")) f.durable.fence.busy = true;
+      if (phase !== "start") await f.next();
+      if (phase === "receipt success") f.durable.fence.busy = false;
+      f.setTime(Date.parse(record.deadline_at));
+      const before = cell.calls.length;
+      const receipts = callsTo(f, "/validation-verified").length;
+      await fireAlarm(f.driverStorage, f.driver);
+      assert.equal(cell.calls.length, before);
+      const terminal = f.storage.values.get("restore-drill");
+      assert.equal(terminal.state, phase === "receipt success" ? "validated" : "failed");
+      assert.equal(terminal.finished_at, f.now().toISOString());
+      if (phase === "start" || phase === "poll") assert.equal(terminal.error, "restore drill validation did not finish before its deadline");
+      if (phase === "receipt busy") assert.equal(terminal.error, "backup validation completed but its receipt was not persisted");
+      assert.equal(callsTo(f, "/validation-verified").length, receipts + Number(phase.startsWith("receipt")));
+      assert.equal(driverKeys(f).length, 0);
+      assert.equal(f.driverStorage.alarm, null);
+      assertAccountBackupIsolation(f, originalAlarm);
+    });
+  }
+  for (const reachable of [false, true]) {
+    await t.test(reachable ? "protocol downgrade is terminal" : "unreachable probe retries", async (t) => {
+      const f = alarmDrillEnv(t);
+      const originalAlarm = f.storage.alarm = NOW.getTime() + 500_000;
+      const cell = fakeCell(t);
+      await preparedAlarm(f);
+      cell.set("version", () => reachable ? Response.json({ schema_version: "witself.v0" }) : new Response(null, { status: 503 }));
+      await f.next();
+      assert.equal(cell.count("start"), 0);
+      if (reachable) {
+        assert.equal(f.storage.values.get("restore-drill").state, "failed");
+        assert.equal(f.storage.values.get("restore-drill").error, "restore drill target cell no longer attests backup validation protocol 2");
+      } else {
+        assert.equal(f.storage.values.get("restore-drill").state, "running");
+        assert.equal(f.key().phase, "start");
+        assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+      }
+      assertAccountBackupIsolation(f, originalAlarm);
+    });
+  }
+});
+
+// 14. R2 identity is pinned and a transient account reset during mint retries safely.
+test("alarm restore drill verifies archive identity once and retries a dropped capability mint", async (t) => {
+  for (const mode of ["reread", "etag", "mint dropped", "mint refused"]) {
+    await t.test(mode, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t);
+      await startedAlarm(f);
+      if (mode === "reread") f.validateArchive = () => validVerification(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1), { chunks: 99 });
+      if (mode === "etag") f.bucket.write(f.record.object, "valid-backup-object", objectMetadata(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1)), "changed-etag");
+      let mintAttempts = 0;
+      f.intercept = (entry, forward) => {
+        if (entry.path === "/archive-capability") {
+          mintAttempts += 1;
+          if (mode === "mint dropped" && mintAttempts === 1) throw new Error("mint dropped");
+          if (mode === "mint refused") return new Response(null, { status: 404 });
+        }
+        return forward();
+      };
+      await f.next();
+      assert.equal(cell.count("start"), 0);
+      if (mode === "mint dropped") {
+        assert.equal(f.storage.values.get("restore-drill").state, "running");
+        assert.equal(f.key().phase, "start");
+        assert.equal(f.key().starts, 0);
+        assert.equal(f.key().reread, true);
+        assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+        assert.equal(f.rereads, 1);
+        await f.next();
+        assert.equal(cell.count("start"), 1);
+        assert.equal(f.rereads, 1);
+        assert.equal(mintAttempts, 2);
+      } else {
+        assert.equal(f.storage.values.get("restore-drill").state, "failed");
+        assert.equal(f.storage.values.get("restore-drill").error, mode === "reread"
+          ? "backup validation reread does not match the committed catalog" : mode === "etag"
+            ? "backup R2 object identity does not match its durable authority" : "backup archive capability is not available");
+        assert.equal(mintAttempts, mode === "mint refused" ? 1 : 0);
+      }
+    });
+  }
+});
+
+// 15. A slow old drill and a delayed prepare response cannot rewrite a newer owner.
+test("alarm restore drill stale tick and stale prepare bind preserve current driver ownership", async (t) => {
+  await t.test("old START failure cannot mutate the drill that superseded it", async (t) => {
+    const f = alarmDrillEnv(t);
+    const entered = deferred();
+    const held = deferred();
+    const cell = fakeCell(t, { start: () => { entered.resolve(); return held.promise; } });
+    const first = await startedAlarm(f);
+    const ticking = f.next();
+    await entered.promise;
+    f.setTime(Date.parse(first.deadline_at) + 1);
+    const second = await startedAlarm(f);
+    assert.notEqual(second.drill_id, first.drill_id);
+    const secondKey = structuredClone(f.key(second.drill_id));
+    const secondRecord = structuredClone(f.storage.values.get("restore-drill"));
+    held.resolve({ schema_version: "witself.v0", error: "invalid or mismatched backup archive" });
+    await ticking;
+    assert.equal(f.key(first.drill_id), undefined);
+    samePrivateState(f.key(second.drill_id), secondKey, "old tick leaves newer key byte-identical");
+    assert.deepEqual(f.storage.values.get("restore-drill"), secondRecord);
+    assert.equal(callsTo(f, "/validation-verified").length, 0);
+    assert.deepEqual(callsTo(f, "/restore-drill:finish").map((entry) => entry.input.drill_id), [first.drill_id]);
+    assert.equal(cell.count("start"), 1);
+  });
+  await t.test("a held first claim answer cannot bind over the reconciled START", async (t) => {
+    const f = alarmDrillEnv(t);
+    const cell = fakeCell(t);
+    const entered = deferred();
+    const held = deferred();
+    let firstClaim = true;
+    f.intercept = async (entry, forward) => {
+      const response = await forward();
+      if (entry.path === "/restore-drill:start" && firstClaim) {
+        firstClaim = false;
+        entered.resolve();
+        await held.promise;
+      }
+      return response;
+    };
+    const body = await f.prepareBody();
+    const preparing = f.prepare(body);
+    await entered.promise;
+    assert.equal(f.key(body.drill_id).phase, "claim");
+    await f.next();
+    assert.equal(f.key(body.drill_id).phase, "start");
+    await f.next();
+    assert.equal(f.key(body.drill_id).phase, "poll");
+    assert.equal(f.key(body.drill_id).starts, 1);
+    const expected = structuredClone(f.key(body.drill_id));
+    const put = t.mock.method(f.driverStorage, "put");
+    const before = put.mock.callCount();
+    held.resolve();
+    assert.equal((await preparing).status, 200);
+    assert.equal(put.mock.callCount(), before);
+    samePrivateState(f.key(body.drill_id), expected, "stale bind preserves poll progress byte-identically");
+    await f.next();
+    assert.equal(cell.count("start"), 1);
+    assert.equal(cell.count("poll"), 1);
+  });
+});
+
+// 16. Recovery is armed before I/O, and retry times use the clock after long work.
+test("alarm restore drill arms crash recovery and schedules from commit time", async (t) => {
+  await t.test("a killed held probe resumes through the driver's recovery alarm", async (t) => {
+    const f = alarmDrillEnv(t);
+    const cell = fakeCell(t);
+    await startedAlarm(f);
+    const entered = deferred();
+    const held = deferred();
+    cell.set("version", () => { entered.resolve(); return held.promise; });
+    const invokedAt = f.now().getTime();
+    const abandoned = fireAlarm(f.driverStorage, f.driver);
+    await entered.promise;
+    assert.equal(f.driverStorage.alarm, invokedAt + RESTORE_DRILL_TICK_MS);
+    assert.throws(() => fireAlarm(f.driverStorage, f.driver), /an alarm invocation is already running/);
+    abandonAlarm(f.driver);
+    // Never resolve this promise: a killed platform invocation executes no catch or tail.
+    void abandoned;
+    cell.set("version", { schema_version: "witself.v0", backup_validation_protocol: 2 });
+    cell.set("start", () => cellAck(f.record));
+    f.setTime(invokedAt + RESTORE_DRILL_TICK_MS + 1);
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(f.storage.values.get("restore-drill").state, "validated");
+    assert.equal(cell.count("start"), 1);
+    assert.equal(f.driverStorage.alarm, null);
+  });
+  await t.test("a three-minute reread schedules a future tick from its completion", async (t) => {
+    const f = alarmDrillEnv(t);
+    fakeCell(t);
+    f.validateArchive = () => {
+      f.advance(3 * 60_000);
+      return validVerification(backupJobIdentity(ACCOUNT, SCHEDULED_AT, 1));
+    };
+    await startedAlarm(f);
+    await f.next();
+    assert.equal(f.key().phase, "poll");
+    assert.equal(f.key().next_at, f.now().getTime() + RESTORE_DRILL_TICK_MS);
+    assert.equal(f.driverStorage.alarm, f.key().next_at);
+    assert.ok(f.driverStorage.alarm > f.now().getTime());
+    assert.equal(f.rereads, 1);
+  });
+  await t.test("an idle driver deletes its consumed alarm and makes no request", async (t) => {
+    const f = alarmDrillEnv(t);
+    const cell = fakeCell(t);
+    f.driverStorage.alarm = f.now().getTime();
+    await fireAlarm(f.driverStorage, f.driver);
+    assert.equal(f.driverStorage.alarm, null);
+    assert.equal(cell.calls.length, 0);
+    assert.equal(f.log.length, 0);
+  });
+  for (const [label, value] of [["object", { phase: "invalid" }], ["null", null], ["false", false]]) {
+    await t.test(`invalid private state ${label} is removed without external requests`, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t);
+      const log = t.mock.method(console, "log", () => {});
+      f.driverStorage.values.set("restore-drill-driver:" + crypto.randomUUID(), value);
+      f.driverStorage.alarm = f.now().getTime();
+      await fireAlarm(f.driverStorage, f.driver);
+      assert.equal(driverKeys(f).length, 0);
+      assert.equal(f.driverStorage.alarm, null);
+      assert.equal(cell.calls.length, 0);
+      assert.equal(f.log.length, 0);
+      assert.deepEqual(log.mock.calls.map((call) => call.arguments), [["account-backup: restore drill driver state is invalid"]]);
+    });
+  }
+});
+
+// 17. The separate named object cannot operate the account's backup executor.
+test("alarm restore drill leaves backup recovery alarms untouched and rejects backup routes", async (t) => {
+  const f = alarmDrillEnv(t);
+  const preparingBackup = runtime();
+  const nextBackup = backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1);
+  assert.equal((await preparingBackup.instance.fetch(preparingBackup.request("/start", nextBackup))).status, 202);
+  const pending = structuredClone(preparingBackup.storage.values.get("account-backups").current_job);
+  pending.status = "retrying";
+  pending.attempts = 1;
+  pending.retry_at = new Date(f.now().getTime() + 5 * 60_000).toISOString();
+  const state = f.storage.values.get("account-backups");
+  state.current_job = pending;
+  f.storage.alarm = Date.parse(pending.retry_at);
+  const originalAlarm = f.storage.alarm;
+  const originalJob = structuredClone(pending);
+  const originalRevision = state.revision;
+  const arm = t.mock.method(f.storage, "setAlarm");
+  const disarm = t.mock.method(f.storage, "deleteAlarm");
+  const writes = t.mock.method(f.storage, "put");
+  fakeCell(t, { start: () => cellAck(f.record) });
+  await startedAlarm(f);
+  await f.next();
+  assert.equal(f.storage.values.get("restore-drill").state, "validated");
+  assert.equal(arm.mock.callCount(), 0);
+  assert.equal(disarm.mock.callCount(), 0);
+  assert.equal(f.storage.alarm, originalAlarm);
+  assert.equal(f.storage.values.get("account-backups").revision, originalRevision + 1);
+  samePrivateState(f.storage.values.get("account-backups").current_job, originalJob, "receipt leaves retrying backup job untouched");
+  assert.equal(writes.mock.calls.filter((call) => call.arguments[0] === "account-backups").length, 1);
+  assert.equal(callsTo(f, "/validation-verified").length, 1);
+  const driverWrites = t.mock.method(f.driverStorage, "put");
+  const driverArm = t.mock.method(f.driverStorage, "setAlarm");
+  const driverDisarm = t.mock.method(f.driverStorage, "deleteAlarm");
+  for (const path of ["/run", "/start", "/status", "/archive-capability", "/validation-verified", "/restore-drill:start", "/restore-drill:finish"]) {
+    const request = path === "/status" ? new Request("http://account-backup.internal/status")
+      : preparingBackup.request(path, nextBackup);
+    const response = await f.driver.fetch(request);
+    assert.equal(response.status, 404, path);
+    assert.equal((await response.json()).error, "account backup endpoint not found", path);
+  }
+  assert.equal(driverWrites.mock.callCount(), 0);
+  assert.equal(driverArm.mock.callCount(), 0);
+  assert.equal(driverDisarm.mock.callCount(), 0);
+  assert.equal(driverKeys(f).length, 0);
+  for (const suffix of ["", "invalid:account"]) {
+    const invalidStorage = new Storage();
+    const invalidDriver = new DurableAccountBackup({ storage: invalidStorage,
+      id: { name: RESTORE_DRILL_DRIVER_PREFIX + suffix } }, f.env, { now: f.now });
+    const response = await invalidDriver.fetch(new Request("http://account-backup.internal/restore-drill-driver:start", {
+      method: "POST", body: "{}",
+    }));
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error, "account backup endpoint not found");
+    await fireAlarm(invalidStorage, invalidDriver);
+    assert.equal(invalidStorage.alarm, null);
+    assert.equal(invalidStorage.values.size, 0);
+  }
+  const backup = runtime();
+  const exports = t.mock.method(backup.instance, "fetchImpl");
+  assert.equal((await backup.instance.fetch(backup.request("/start"))).status, 202);
+  await fireAlarm(backup.storage, backup.instance);
+  assert.equal(exports.mock.callCount(), 1);
+  assert.equal(backup.storage.values.get("account-backups").current_job.status, "committed");
+});
+
+// 18. Status publishes only the existing record and its one additive driver field.
+test("alarm restore drill status retains eleven ordered public fields and no driver secrets", async (t) => {
+  for (const outcome of ["validated", "failed"]) {
+    await t.test(outcome, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t);
+      const record = await startedAlarm(f);
+      const digest = f.key(record.drill_id).target.backup_token_sha256;
+      const check = async (state) => {
+        for (const [response, publicRoute] of [[await f.status(), false], [await f.publicStatus(), true]]) {
+          assert.equal(response.status, 200);
+          const body = await response.json();
+          const drill = publicRoute ? body.account.restore_drill : body.restore_drill;
+          assert.deepEqual(Object.keys(drill), alarmRecordFields);
+          assert.equal(drill.drill_id, record.drill_id);
+          assert.equal(drill.driver, "alarm");
+          assert.equal(drill.state, state);
+          const serialized = JSON.stringify(drill);
+          for (const privateField of ["archive_origin", "target", "catalog", "backup_token_sha256", "next_at", "fence_failures", "reread", "ack", "finishing", "rev", "claim_by"]) {
+            assert.ok(!Object.hasOwn(drill, privateField), `record excludes ${privateField}`);
+          }
+          assert.ok(!/[0-9a-f]{64}/.test(serialized), "record contains no hash-shaped value");
+          assert.ok(!serialized.includes("validation.example"), "record contains no private endpoint");
+          const all = JSON.stringify(body);
+          assert.ok(!all.includes(digest), "status contains no pinned token hash");
+          assert.ok(!all.includes("validation.example"), "status contains no private endpoint");
+        }
+      };
+      await check("running");
+      cell.set("start", outcome === "validated" ? () => cellAck(f.record)
+        : { schema_version: "witself.v0", error: "could not validate backup" });
+      await f.next();
+      await check(outcome);
+    });
+  }
+});
+
+
+// Waiting clients only observe the record; driver execution is explicit in tests.
+async function waitForAlarmDrillRecord(f) {
+  for (let i = 0; i < 100 && !f.storage.values.has("restore-drill"); i += 1) await flush();
+  assert.ok(f.storage.values.has("restore-drill"), "Worker must record a drill");
+  // The record write precedes the driver's bind and the Worker's first status read.
+  for (let i = 0; i < 10; i += 1) await flush();
+  return structuredClone(f.storage.values.get("restore-drill"));
+}
+
+function assertAlarmAnswer(response, drill) {
+  assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), drill.drill_id);
+  assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), "alarm");
+}
+
+function assertDrillSuccess(body, f, drill) {
+  assert.deepEqual(Object.keys(body), ["schema_version", "validated", "account_id", "backup_id", "target_cell", "validated_at", "status", "archive_schema_version", "drill_id"]);
+  assert.deepEqual(body, {
+    schema_version: "witself.v0", validated: true, ...f.input,
+    validated_at: f.storage.values.get("restore-drill").validated_at,
+    status: f.record.status, archive_schema_version: f.record.archive_schema_version,
+    drill_id: drill.drill_id,
+  });
+}
+
+test("restore drill Worker selection, driver headers, and wait grammar", async (t) => {
+  for (const mode of ["protocol2", "missing", "unavailable", "thrown"]) {
+    await t.test(mode, async (t) => {
+      const f = alarmDrillEnv(t);
+      const versions = {
+        protocol2: () => Response.json({ schema_version: "witself.v0", backup_validation_protocol: 2 }),
+        missing: () => Response.json({ schema_version: "witself.v0" }),
+        unavailable: () => new Response(null, { status: 503 }),
+        thrown: () => { throw new Error("version unavailable"); },
+      };
+      const cell = fakeCell(t, { version: versions[mode] });
+      // The synchronous path's real reread deliberately fails, as in the existing Worker tests.
+      f.bucket.get = async () => null;
+      const response = await f.route(mode === "protocol2" ? { wait: false } : {});
+      const drill = f.storage.values.get("restore-drill");
+      assert.equal(response.status, mode === "protocol2" ? 202 : 502);
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), drill.drill_id);
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), mode === "protocol2" ? "alarm" : "request");
+      assert.equal(drill.driver, mode === "protocol2" ? "alarm" : undefined);
+      assert.equal(cell.count("start"), 0);
+      if (mode !== "protocol2") {
+        assert.equal(f.log.some(({ name }) => name.startsWith(RESTORE_DRILL_DRIVER_PREFIX)), false);
+        assert.equal(f.driverStorage.values.size, 0);
+      }
+    });
+  }
+  for (const [body, error] of [
+    [{ wait: "no" }, "wait must be a boolean"],
+    [{ wait: false, heartbeat: true }, "heartbeat requires a waiting request"],
+  ]) {
+    await t.test(error, async (t) => {
+      const f = alarmDrillEnv(t);
+      const cell = fakeCell(t);
+      const response = await f.route(body);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { schema_version: "witself.v0", error });
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), null);
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), null);
+      assert.equal(f.storage.values.has("restore-drill"), false);
+      assert.equal(f.driverStorage.values.size, 0);
+      assert.equal(cell.calls.length, 0);
+    });
+  }
+  for (const version of [
+    () => Response.json({ schema_version: "witself.v0" }),
+    () => { throw new Error("version unavailable"); },
+  ]) {
+    await t.test("wait false refuses unconfirmed protocol before recording", async (t) => {
+      const f = alarmDrillEnv(t);
+      fakeCell(t, { version });
+      const response = await f.route({ wait: false });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { schema_version: "witself.v0", error: "asynchronous restore drill requires a target cell with backup validation protocol 2" });
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-ID"), null);
+      assert.equal(response.headers.get("X-Witself-Restore-Drill-Driver"), null);
+      assert.equal(f.storage.values.has("restore-drill"), false);
+      assert.equal(f.driverStorage.values.size, 0);
+      assert.equal(f.driverStorage.alarm, null);
+      assert.equal(f.log.some(({ path }) => path === "/restore-drill:start"), false);
+    });
+  }
+});
+
+test("restore drill Worker wait false returns 202 without starting a waiter", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = alarmDrillEnv(t);
+  fakeCell(t, { start: () => Response.json(cellAck(f.record)) });
+  const response = await f.route({ wait: false });
+  const drill = structuredClone(f.storage.values.get("restore-drill"));
+  assert.equal(response.status, 202);
+  assertAlarmAnswer(response, drill);
+  assert.deepEqual(await response.json(), { schema_version: "witself.v0", account_id: ACCOUNT, restore_drill: drill });
+  assert.equal(drill.driver, "alarm");
+  assert.equal(drill.state, "running");
+  assert.equal(f.driverStorage.alarm, f.now().getTime());
+  const reads = f.log.filter(({ path }) => path === "/status").length;
+  assert.equal(reads, 1, "only the catalog preflight may read status before the 202");
+  t.mock.timers.tick(3 * RESTORE_DRILL_WAIT_POLL_MS);
+  await flush();
+  assert.equal(f.log.filter(({ path }) => path === "/status").length, reads, "202 must not start a waiter");
+  await fireAlarm(f.driverStorage, f.driver);
+  assert.equal(f.storage.values.get("restore-drill").state, "validated");
+  assert.equal(f.storage.values.get("account-backups").catalog[0].validations.length, 1);
+});
+
+test("restore drill Worker default framing waits for the durable outcome with existing statuses", async (t) => {
+  for (const mode of ["validated", "cell-error", "fence-error"]) {
+    await t.test(mode, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const f = alarmDrillEnv(t);
+      fakeCell(t, { start: () => Response.json(mode === "cell-error"
+        ? { schema_version: "witself.v0", error: "invalid or mismatched backup archive" }
+        : cellAck(f.record)) });
+      let settled = false;
+      const pending = f.route().then((response) => { settled = true; return response; });
+      const drill = await waitForAlarmDrillRecord(f);
+      assert.equal(drill.state, "running");
+      assert.equal(settled, false);
+      if (mode === "fence-error") {
+        f.binding.values.set(`cell:${TARGET}`, JSON.stringify({ ...f.binding.value(`cell:${TARGET}`), accepting: true }));
+      }
+      await fireAlarm(f.driverStorage, f.driver);
+      assert.equal(settled, false, "the waiting request resumes on its next status poll");
+      t.mock.timers.tick(RESTORE_DRILL_WAIT_POLL_MS);
+      await flush();
+      const response = await pending;
+      assertAlarmAnswer(response, drill);
+      assert.equal(response.status, mode === "validated" ? 200 : mode === "fence-error" ? 409 : 502);
+      const body = await response.json();
+      if (mode === "validated") assertDrillSuccess(body, f, drill);
+      else assert.deepEqual(body, { schema_version: "witself.v0", error: f.storage.values.get("restore-drill").error });
+    });
+  }
+});
+
+test("restore drill Worker alarm driver completes with no client and never uses waitUntil", async (t) => {
+  for (const heartbeat of [true, false]) {
+    for (const withWaitUntil of [false, true]) {
+      await t.test(`${heartbeat ? "cancelled heartbeat" : "unawaited default"}, waitUntil ${withWaitUntil}`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+        const errors = unhandledRejections(t);
+        const f = alarmDrillEnv(t);
+        const cell = fakeCell(t, { start: () => Response.json(cellAck(f.record)) });
+        let waitUntilCalls = 0;
+        const ctx = withWaitUntil ? { waitUntil() { waitUntilCalls += 1; } } : {};
+        const pending = f.route(heartbeat ? { heartbeat: true } : {}, ctx);
+        const drill = await waitForAlarmDrillRecord(f);
+        assert.equal(drill.state, "running");
+        assert.equal(drill.driver, "alarm");
+        assert.equal(cell.count("version"), 1);
+        assert.equal(cell.count("start"), 0);
+        assert.equal(cell.count("poll"), 0);
+        assert.equal(cell.count("sync"), 0);
+        if (heartbeat) {
+          const response = await pending;
+          assertAlarmAnswer(response, drill);
+          assert.equal(response.status, 200);
+          const reader = response.body.getReader();
+          t.mock.timers.tick(RESTORE_DRILL_HEARTBEAT_MS);
+          assert.equal(new TextDecoder().decode((await reader.read()).value), "\n");
+          await reader.cancel();
+          await flush();
+        }
+        const duplicate = await f.route({ wait: false });
+        assert.equal(duplicate.status, 409);
+        assert.deepEqual(await duplicate.json(), { schema_version: "witself.v0", error: "restore drill already running", restore_drill: drill });
+        await fireAlarm(f.driverStorage, f.driver);
+        const finished = f.storage.values.get("restore-drill");
+        assert.equal(finished.state, "validated");
+        assert.equal(finished.drill_id, drill.drill_id);
+        assert.equal(finished.driver, "alarm");
+        assert.equal(f.storage.values.get("account-backups").catalog[0].validations.length, 1);
+        assert.equal(waitUntilCalls, 0);
+        assert.equal(cell.count("sync"), 0);
+        t.mock.timers.tick(RESTORE_DRILL_WAIT_POLL_MS);
+        await flush();
+        await flush();
+        if (!heartbeat) {
+          const response = await pending;
+          assert.equal(response.status, 200);
+          assertAlarmAnswer(response, drill);
+          assertDrillSuccess(await response.json(), f, drill);
+        }
+        assert.deepEqual(errors, []);
+      });
+    }
+  }
+});
+
+function alarmWaiterFixture() {
+  const f = drillEnv();
+  let clock = NOW.getTime();
+  f.durable.now = () => new Date(clock);
+  const drill = drillRecord(f.record, {
+    driver: "alarm", deadline_at: new Date(clock + RESTORE_DRILL_ALARM_DEADLINE_MS).toISOString(),
+  });
+  f.storage.values.set("restore-drill", drill);
+  const dependencies = { now: () => new Date(clock), sleep: async () => { assert.fail("unexpected waiter sleep"); } };
+  const wait = () => awaitRestoreDrill(f.env, f.input, f.record, drill.drill_id, dependencies);
+  const succeed = (validatedAt = new Date(clock).toISOString()) => {
+    f.storage.values.set("restore-drill", { ...drill, state: "validated", validated_at: validatedAt, finished_at: new Date(clock).toISOString() });
+  };
+  return { ...f, drill, dependencies, wait, succeed, setTime: (ms) => { clock = ms; } };
+}
+
+test("restore drill waiter handles supersession, bounded read failures, deadline grace and catalog precedence", async (t) => {
+  await t.test("superseded record", async () => {
+    const f = alarmWaiterFixture();
+    f.storage.values.set("restore-drill", { ...f.drill, drill_id: crypto.randomUUID() });
+    await assert.rejects(f.wait(), { message: "restore drill outcome is no longer readable; read the catalog validations" });
+  });
+  for (const failureCount of [1, 6]) {
+    await t.test(`${failureCount} status read failures`, async () => {
+      const f = alarmWaiterFixture();
+      const original = f.env.ACCOUNT_BACKUP;
+      let reads = 0, sleeps = 0;
+      f.env.ACCOUNT_BACKUP = {
+        idFromName: original.idFromName,
+        get: (id) => ({ fetch: (request) => {
+          assert.equal(new URL(request.url).pathname, "/status");
+          reads += 1;
+          if (reads <= failureCount) throw new Error("status temporarily unavailable");
+          return original.get(id).fetch(request);
+        } }),
+      };
+      f.dependencies.sleep = async (ms) => { assert.equal(ms, RESTORE_DRILL_WAIT_POLL_MS); sleeps += 1; };
+      f.succeed();
+      if (failureCount === 6) {
+        await assert.rejects(f.wait(), { message: "restore drill status is unavailable" });
+        assert.equal(reads, 6);
+        assert.equal(sleeps, 5);
+      } else {
+        const result = await f.wait();
+        assert.equal(result.validated, true);
+        assert.equal(reads, 2);
+        assert.equal(sleeps, 1);
+      }
+    });
+  }
+  await t.test("final report inside grace", async () => {
+    const f = alarmWaiterFixture();
+    const deadline = Date.parse(f.drill.deadline_at);
+    f.setTime(deadline);
+    assert.equal((await (await f.status()).json()).restore_drill.state, "failed");
+    let sleeps = 0;
+    f.dependencies.sleep = async (ms) => {
+      assert.equal(ms, RESTORE_DRILL_WAIT_POLL_MS);
+      sleeps += 1;
+      f.setTime(deadline + RESTORE_DRILL_FINAL_GRACE_MS / 2);
+      f.succeed();
+    };
+    const result = await f.wait();
+    assert.equal(result.validated, true);
+    assert.equal(result.validated_at, new Date(deadline + RESTORE_DRILL_FINAL_GRACE_MS / 2).toISOString());
+    assert.equal(sleeps, 1);
+  });
+  await t.test("unreported after grace", async () => {
+    const f = alarmWaiterFixture();
+    f.setTime(Date.parse(f.drill.deadline_at) + RESTORE_DRILL_FINAL_GRACE_MS);
+    await assert.rejects(f.wait(), { message: "restore drill did not report before its deadline" });
+  });
+  for (const offset of [-1, 0, 1]) {
+    await t.test(`catalog validation timestamp offset ${offset}`, async () => {
+      const f = alarmWaiterFixture();
+      f.storage.values.set("restore-drill", { ...f.drill, state: "failed", finished_at: NOW.toISOString(), error: "recorded drill failure" });
+      const validatedAt = new Date(Date.parse(f.drill.started_at) + offset).toISOString();
+      f.storage.values.get("account-backups").catalog[0].validations = [{
+        target_cell: TARGET, validated_at: validatedAt,
+        status: f.record.status, archive_schema_version: f.record.archive_schema_version,
+      }];
+      if (offset < 0) await assert.rejects(f.wait(), { message: "recorded drill failure" });
+      else {
+        const result = await f.wait();
+        assert.deepEqual(Object.keys(result), ["schema_version", "validated", "account_id", "backup_id", "target_cell", "validated_at", "status", "archive_schema_version", "drill_id"]);
+        assert.deepEqual(result, { schema_version: "witself.v0", validated: true, ...f.input,
+          validated_at: validatedAt, status: f.record.status, archive_schema_version: f.record.archive_schema_version, drill_id: f.drill.drill_id });
+      }
+    });
+  }
+  await t.test("another cell's newer catalog validation cannot override a failed drill", async () => {
+    const f = alarmWaiterFixture();
+    f.storage.values.set("restore-drill", {
+      ...f.drill, state: "failed", finished_at: NOW.toISOString(), error: "recorded drill failure",
+    });
+    f.storage.values.get("account-backups").catalog[0].validations = [{
+      target_cell: "civo-fixture-other-target",
+      validated_at: new Date(Date.parse(f.drill.started_at) + 1).toISOString(),
+      status: f.record.status, archive_schema_version: f.record.archive_schema_version,
+    }];
+    await assert.rejects(f.wait(), { message: "recorded drill failure" });
+  });
+});
+
+test("restore drill docs describe the alarm driver and the request-driver fallback", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const required = [
+    "continues to a recorded outcome whatever the client does",
+    "A drill whose record has no `driver` field runs inside the request that started it",
+    "validated_at >= restore_drill.started_at",
+    "asynchronous restore drill requires a target cell with backup validation protocol 2",
+    "may still have been recorded",
+  ];
+  const forbidden = [
+    "A fix that takes the client connection out of the drill is tracked in",
+    "issues/648", "cannot run under the Durable Object alarm",
+    "The drill still depends on one connected request", "never cancels a drill because the client went away",
+    "The drill runs inside the request that started it", "The drill runs inside this request",
+    "A step-driven cell-side drill remains the follow-up",
+  ];
+  for (const file of ["api-routes.md", "backup-and-recovery.md", "runbooks.md"]) {
+    const text = (await readFile(new URL(`../../../../docs/${file}`, import.meta.url), "utf8")).replace(/\s+/g, " ");
+    const needs = [...required];
+    const rejects = [...forbidden];
+    if (file === "api-routes.md") needs.push("`wait?`", "HTTP 202", "X-Witself-Restore-Drill-Driver");
+    if (file === "backup-and-recovery.md") needs.push("`wait: false`", "from a Durable Object alarm of its own");
+    if (file === "runbooks.md") {
+      needs.push('\\"wait\\":false}', "curl --fail-with-body -i -m 1800 -X POST", "X-Witself-Restore-Drill-Driver", "comes from a control plane older than this release", "If no answer arrives within a minute, leave the command running");
+      rejects.push("curl --fail-with-body -i -m 120");
+      assert.ok(text.indexOf("If no answer arrives within a minute, leave the command running") < text.indexOf('\\"wait\\":false}'), `${file}: older-control-plane warning must precede the asynchronous curl`);
+    }
+    for (const fragment of needs) assert.ok(text.includes(fragment), `${file}: missing ${fragment}`);
+    for (const fragment of rejects) assert.equal(text.includes(fragment), false, `${file}: forbidden ${fragment}`);
+  }
 });

@@ -760,42 +760,52 @@ with that record. The default answer waits for completion; opt-in
 seconds before one terminal JSON object, so inspect `validated: true` rather
 than the status alone. Send no `Accept-Encoding` header to avoid buffering
 heartbeat bytes through edge compression. Both framings return a `drill_id`
-on success and an `X-Witself-Restore-Drill-ID` header after recording the drill.
+on success and the `X-Witself-Restore-Drill-ID` and
+`X-Witself-Restore-Drill-Driver` headers after recording the drill. With
+`wait: false`, an alarm drill returns HTTP 202 with its record immediately.
 
-The drill runs inside the request that started it, so the client must stay
-connected until the answer arrives. An active client disconnect (closing the
-connection, an interrupt, or the client's own timeout) cancels the drill in
-either framing, as proven on 2026-10-03 with the client cut at 60 seconds:
-Cloudflare ends the request's remaining work, any import already running on
-the drill cell is cancelled and rolled back, and the record stays `running`
+A drill whose record carries `driver: "alarm"` continues to a recorded outcome
+whatever the client does. Its request only waits on the record. A drill whose
+record has no `driver` field runs inside the request that started it, so the
+client must stay connected until the answer arrives. An active client
+disconnect (closing the connection, an interrupt, or the client's own timeout)
+cancels a request-driven drill in either framing: any import already running
+on the drill cell is cancelled and rolled back, and the record stays `running`
 until its 30-minute deadline and then reads `failed` with `finished_at: null`.
-The two earlier drops after which the drill still completed (2026-09-30,
-2026-10-01) were most likely connections lost where the control plane did not
-see the disconnect; do not rely on that. Use a client timeout of 30 minutes,
-the record's deadline: a client that waits longer can keep a drill running
-after its record reads `failed`. The heartbeat keeps an intermediary that drops
-idle connections from closing a silent request, but it does not make a
-disconnect safe.
+Use a client timeout of 30 minutes for that path. A client that waits longer
+can keep a drill running after its record reads `failed`. The heartbeat keeps
+an intermediary that drops idle connections from closing a silent request,
+but it does not make a request-driven drill safe to disconnect.
+Do not rely on an undetected connection loss for a request-driven drill.
 
 After a lost answer, do not start another drill while the record is `running`
-or the earlier request is still open. Confirm that the record belongs to that
-request: its `drill_id` equals the `X-Witself-Restore-Drill-ID` header if one
-arrived; otherwise its `backup_id` and `target_cell` match the request and its
-`started_at` is not earlier than the time the request was sent. An error answer
-without the drill-id header means no drill was recorded. For the request's own
+or an earlier request-driven drill's request is still open. Confirm that the
+record belongs to that request: its `drill_id` equals the
+`X-Witself-Restore-Drill-ID` header if one arrived; otherwise its `backup_id`
+and `target_cell` match the request and its `started_at` is not earlier than
+the time the request was sent. An error answer without the drill-id header
+means no drill was recorded. A 502 `restore drill could not be recorded` with
+the drill-id header may still have been recorded: wait one minute, then read
+the record and compare its `drill_id` to that header. For the request's own
 record, a catalog `validations` entry for that backup and target cell with
 `validated_at >= restore_drill.started_at` proves success regardless of the
-record's state. An unreported drill becomes deadline-failed after 30 minutes;
+record's state. Poll for at most 90 minutes from `started_at` for an alarm
+drill, plus two minutes for its driver's final report, or 30 minutes for a
+request-driven drill. An unreported drill becomes deadline-failed;
 `state: "failed"` with `finished_at: null` identifies that projection, and a
 late completion can still report its outcome until a new drill supersedes it.
 
-The drill still depends on one connected request. It cannot run under the
-Durable Object alarm today because cell validation is one synchronous request
-with no status route and no database receipt: the rollback-only import commits
-nothing. A fix that takes the client connection out of the drill is tracked in
-[#648](https://github.com/witwave-ai/witself/issues/648).
+The control plane drives an alarm drill from a Durable Object alarm of its own,
+separate from the account's backup schedule, in short steps. The drill cell
+runs rollback-only validation as a background job, one per account per cell,
+and keeps a finished result for up to 30 minutes. The receipt waits for a
+running export instead of failing. A drill cell that does not attest backup
+validation protocol 2, including when its `/v1/version` cannot be reached,
+gets a request-driven drill. `wait: false` refuses that path with HTTP 409
+`asynchronous restore drill requires a target cell with backup validation protocol 2`
+and records no drill.
 
-A full disaster-recovery exercise that commits data must therefore use a
+A full disaster-recovery exercise that commits data must use a
 disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine
 drill endpoint into an account-import escape hatch.

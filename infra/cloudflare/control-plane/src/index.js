@@ -136,6 +136,8 @@ import {
   DurableAccountBackup,
   beginAccountBackupValidation,
   BackupValidationBusyError,
+  RestoreDrillProtocolError,
+  RestoreDrillUnconfirmedError,
   heartbeatJSONResponse,
   accountBackupArchive,
   runManualAccountBackup,
@@ -263,10 +265,11 @@ export class AccountSignup extends DurableAccountSignup {
   }
 }
 
-// One Durable Object instance exists per account id. It serializes periodic
+// One Durable Object instance per account id serializes periodic
 // backup attempts and owns a bounded catalog of fully reread-verified immutable
 // objects in the dedicated backup bucket. It never mutates account routing or
-// participates in evacuation.
+// participates in evacuation. The namespace also holds one separate restore-drill
+// driver instance per drilled account, with its own storage and alarm.
 export class AccountBackup extends DurableAccountBackup {
   constructor(ctx, env) {
     super(ctx, env);
@@ -4739,14 +4742,30 @@ async function handleAccountBackups(request, env, url, ctx) {
     if (body.heartbeat !== undefined && typeof body.heartbeat !== "boolean") {
       return err("heartbeat must be a boolean", 400);
     }
+    if (body.wait !== undefined && typeof body.wait !== "boolean") {
+      return err("wait must be a boolean", 400);
+    }
+    if (body.wait === false && body.heartbeat === true) {
+      return err("heartbeat requires a waiting request", 400);
+    }
     const started = await beginAccountBackupValidation(env, {
       account_id: body.account_id,
       backup_id: body.backup_id,
       target_cell: body.target_cell,
-    }, { origin: url.origin });
-    const extra = { "X-Witself-Restore-Drill-ID": started.drill_id };
+    }, { origin: url.origin, driver: "auto", requireAlarm: body.wait === false });
+    const extra = {
+      "X-Witself-Restore-Drill-ID": started.drill_id,
+      "X-Witself-Restore-Drill-Driver": started.driver,
+    };
+    if (started.driver === "alarm" && body.wait === false) {
+      return json({
+        schema_version: "witself.v0",
+        account_id: body.account_id,
+        restore_drill: started.restore_drill,
+      }, 202, extra);
+    }
     const completion = started.complete();
-    if (typeof ctx?.waitUntil === "function") ctx.waitUntil(completion.catch(() => {}));
+    if (started.driver === "request" && typeof ctx?.waitUntil === "function") ctx.waitUntil(completion.catch(() => {}));
     if (body.heartbeat === true) {
       const terminal = completion.then((result) => result, (error) => ({
         schema_version: "witself.v0", error: restoreDrillFailure(error).message,
@@ -4762,6 +4781,15 @@ async function handleAccountBackups(request, env, url, ctx) {
   } catch (error) {
     if (error instanceof BackupValidationBusyError) {
       return json({ schema_version: "witself.v0", error: error.message, restore_drill: error.restore_drill }, 409);
+    }
+    if (error instanceof RestoreDrillProtocolError) {
+      return json({ schema_version: "witself.v0", error: error.message }, 409);
+    }
+    if (error instanceof RestoreDrillUnconfirmedError) {
+      return json({ schema_version: "witself.v0", error: error.message }, 502, {
+        "X-Witself-Restore-Drill-ID": error.drill_id,
+        "X-Witself-Restore-Drill-Driver": "alarm",
+      });
     }
     const { message, status } = restoreDrillFailure(error);
     return err(message, status);
