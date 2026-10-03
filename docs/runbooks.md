@@ -3884,7 +3884,7 @@ BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
 curl --fail-with-body -m 1500 -X POST \
   -H "Authorization: Bearer ${FLEET_TOKEN}" \
   -H "Content-Type: application/json" \
-  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\"}" \
+  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\",\"heartbeat\":true}" \
   "${CONTROL_PLANE}/v1/backups:restore-drill"
 ```
 
@@ -3892,6 +3892,24 @@ Success returns `validated: true` and records `validated_at` plus the drill
 cell in that exact backup's catalog entry. Confirm the account still has no row
 in the drill database and that its live directory route is unchanged. A generic
 2xx from the cell is not accepted as proof.
+
+This opt-in heartbeat answer sends HTTP 200 after pre-flight, a newline every
+ten seconds, then one terminal JSON object. Send the request without
+`Accept-Encoding` (as above) so edge compression does not hold heartbeat bytes;
+`jq` accepts the leading newlines. HTTP 200 alone does not prove success.
+If the answer is lost or is not `validated: true`, poll
+`GET /v1/backups/status?account_id=${ACCOUNT_ID}` until
+`account.restore_drill.state` is not `running` (at most 30 minutes from the
+record's `started_at`). Do not re-POST while it is running: a concurrent drill
+returns HTTP 409 with the current record. Read its `state` and `error`, then
+check the selected backup's catalog `validations` entry for the target cell.
+An entry with `validated_at >= restore_drill.started_at` means the drill
+succeeded regardless of the record's state. A failed record with
+`finished_at: null` means the deadline rule applied, not that the driver
+reported a failure. The control plane never cancels a drill because the client
+went away; in the two observed drops (2026-09-30, 2026-10-01), the drill
+completed minutes after disconnect, but that continuation is not a platform
+guarantee in either framing.
 
 After the manual path is healthy, activate the operator-controlled Worker
 secret:

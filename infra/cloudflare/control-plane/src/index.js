@@ -134,7 +134,9 @@ import {
 import {
   accountBackupStatus,
   DurableAccountBackup,
-  runAccountBackupValidation,
+  beginAccountBackupValidation,
+  BackupValidationBusyError,
+  heartbeatJSONResponse,
   accountBackupArchive,
   runManualAccountBackup,
   runScheduledAccountBackups,
@@ -4668,10 +4670,23 @@ async function handleProbe(request, env, cellName) {
   });
 }
 
+// Maps a thrown fleet backup operation to today's answer: the bounded message,
+// 409 for a target-fence conflict and 502 otherwise. Used by every framing of
+// the restore drill and by the outer catch of handleAccountBackups.
+function restoreDrillFailure(error) {
+  const message = String(error?.message ?? error).slice(0, 300);
+  const conflict =
+    /backup_validation_target|accepting=false|live cell|live account projections/.test(
+    message,
+  );
+  console.log(`account-backup: fleet operation failed: ${message}`);
+  return { message, status: conflict ? 409 : 502 };
+}
+
 // Fleet-only backup operations. Scheduled backups remain independently gated
 // by CP_ACCOUNT_BACKUPS_ENABLED=false, while these explicit calls make the MVP
 // observable and testable before that clock is activated.
-async function handleAccountBackups(request, env, url) {
+async function handleAccountBackups(request, env, url, ctx) {
   if (!fleetAuthorized(request, env)) {
     return err("unauthorized", 401);
   }
@@ -4721,19 +4736,35 @@ async function handleAccountBackups(request, env, url) {
     ) {
       return err("backup_id and target_cell are required", 400);
     }
-    return json(await runAccountBackupValidation(env, {
+    if (body.heartbeat !== undefined && typeof body.heartbeat !== "boolean") {
+      return err("heartbeat must be a boolean", 400);
+    }
+    const started = await beginAccountBackupValidation(env, {
       account_id: body.account_id,
       backup_id: body.backup_id,
       target_cell: body.target_cell,
-    }, { origin: url.origin }));
+    }, { origin: url.origin });
+    const extra = { "X-Witself-Restore-Drill-ID": started.drill_id };
+    const completion = started.complete();
+    if (typeof ctx?.waitUntil === "function") ctx.waitUntil(completion.catch(() => {}));
+    if (body.heartbeat === true) {
+      const terminal = completion.then((result) => result, (error) => ({
+        schema_version: "witself.v0", error: restoreDrillFailure(error).message,
+      }));
+      return heartbeatJSONResponse(terminal, { headers: extra });
+    }
+    try {
+      return json(await completion, 200, extra);
+    } catch (error) {
+      const { message, status } = restoreDrillFailure(error);
+      return json({ schema_version: "witself.v0", error: message }, status, extra);
+    }
   } catch (error) {
-    const message = String(error?.message ?? error).slice(0, 300);
-    const conflict =
-      /backup_validation_target|accepting=false|live cell|live account projections/.test(
-      message,
-    );
-    console.log(`account-backup: fleet operation failed: ${message}`);
-    return err(message, conflict ? 409 : 502);
+    if (error instanceof BackupValidationBusyError) {
+      return json({ schema_version: "witself.v0", error: error.message, restore_drill: error.restore_drill }, 409);
+    }
+    const { message, status } = restoreDrillFailure(error);
+    return err(message, status);
   }
 }
 
@@ -5149,7 +5180,7 @@ async function handleFetch(request, env, ctx) {
       url.pathname === ACCOUNT_BACKUP_RUN_PATH ||
       url.pathname === ACCOUNT_BACKUP_RESTORE_DRILL_PATH
     ) {
-      return handleAccountBackups(request, env, url);
+      return handleAccountBackups(request, env, url, ctx);
     }
 
     // Fleet-wide pending-account expiry policy (fleet-token authorized).
