@@ -13,7 +13,7 @@ and the persisted `scan` (or null). Additive fields:
 | Fleet | `never_committed_accounts` | All live accounts without a commit, including overdue ones also counted as stale. Null when live health is unavailable. |
 | Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
 | Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
-| Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null). Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 30 minutes after start; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
+| Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null), plus `driver: "alarm"` for an alarm-driven drill (absent for a request-driven one). Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 90 minutes after start for an alarm drill and 30 minutes for a request-driven one; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
 | Scan | `previous_slot` | Immediately preceding scheduled interval's timestamp. |
 | Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot; deduplicated between current job and failure history. |
 | Scan | `previous_slot_status_unavailable` | Accounts whose previous-slot state could not be read; never interpreted as success. |
@@ -88,43 +88,56 @@ Over-limit requests return 429 with `Retry-After: 60` and do not consume a
 capability. A missing or failed limiter fails closed with the same uniform 404.
 
 **`POST /v1/backups:restore-drill`** uses the fleet bearer and a JSON body
-`{ account_id, backup_id, target_cell, heartbeat? }`. The selected backup must
-be committed, and the target must be an isolated validation cell. Only one
-drill may run per account at a time, even for different backups or target
-cells. A concurrent request returns HTTP 409
-`{ schema_version: "witself.v0", error: "restore drill already running", restore_drill }`
-with the current record. Every answer after the drill is recorded carries
-`X-Witself-Restore-Drill-ID`; pre-flight failures carry no drill-id header.
+`{ account_id, backup_id, target_cell, heartbeat?, wait? }`. `heartbeat?` and
+`wait?` are optional booleans. The selected backup must be committed, and the
+target must be an isolated validation cell. Only one drill may run per account
+at a time, even for different backups or target cells. A concurrent request
+returns HTTP 409 `{ schema_version: "witself.v0",
+error: "restore drill already running", restore_drill }` with the current
+record. The control plane selects the alarm driver when the target's
+`/v1/version` attests `backup_validation_protocol >= 2`; otherwise, including
+a failed probe, it uses the request driver. Every answer after the drill is
+recorded carries `X-Witself-Restore-Drill-ID` and
+`X-Witself-Restore-Drill-Driver` (`alarm` or `request`). Pre-flight failures
+carry no drill-id header.
 
 | Case | Default framing (`heartbeat` absent or false) | `heartbeat: true` |
 | --- | --- | --- |
 | Success | HTTP 200 after completion with `{ schema_version, validated: true, account_id, backup_id, target_cell, validated_at, status, archive_schema_version, drill_id }`. | HTTP 200 after pre-flight, a newline every 10 seconds, then the same success object and a final newline. |
-| Pre-flight failure | `{ schema_version: "witself.v0", error }` with HTTP 400 for invalid input (including a non-boolean `heartbeat`), 401 for authentication, 405 for method, 409 for the target fence, or 502 for other failures including an uncommitted backup. No drill is recorded. | Identical status and body; no stream. |
+| Pre-flight failure | `{ schema_version: "witself.v0", error }` with HTTP 400 for invalid input (including a non-boolean `heartbeat` or `wait`), 401 for authentication, 405 for method, 409 for the target fence, or 502 for other failures including an uncommitted backup. No drill is recorded. | Identical status and body; no stream. |
 | Concurrent drill | HTTP 409 with the busy body and current `restore_drill` above. | Identical status and body; no stream. |
-| Failure after recording the drill | HTTP 409 or 502 with `{ schema_version: "witself.v0", error }` and the drill-id header. | HTTP 200 stream ending in the same error object and a final newline, with the drill-id header. |
+| Failure after recording the drill | HTTP 409 or 502 with `{ schema_version: "witself.v0", error }` and both drill headers. | HTTP 200 stream ending in the same error object and a final newline, with both drill headers. |
+| `wait: false` | HTTP 202 with `{ schema_version: "witself.v0", account_id, restore_drill }` and both drill headers for an alarm drill. HTTP 409 `asynchronous restore drill requires a target cell with backup validation protocol 2` with no drill recorded if the cell does not attest protocol 2 or the control plane could not reach its `/v1/version`. | HTTP 400 `heartbeat requires a waiting request`; no drill is recorded. |
+
+One recording error also carries both drill headers without a confirmed record:
+HTTP 502 `restore drill could not be recorded` with
+`X-Witself-Restore-Drill-ID` means the drill may still have been recorded under
+that id. Wait one minute, then read the record and compare its `drill_id` to
+that header before following its outcome.
 
 Heartbeat responses use `Content-Type: application/json` and
 `Cache-Control: no-store, no-transform`. The complete body is one JSON document
 with leading whitespace; clients must inspect `validated: true`, not just the
 HTTP status. Send the drill request without `Accept-Encoding` so the heartbeat
 bytes are not held by edge compression. The heartbeat keeps an intermediary
-that drops idle connections from closing a silent request; it does not make a
-disconnect safe.
+that drops idle connections from closing a silent request.
 
-The drill runs inside the request that started it. An active client
-disconnect (the client closes the connection, is interrupted, or its own
-timeout fires) cancels the drill in either framing, as proven on 2026-10-03
-with the client cut at 60 seconds: Cloudflare ends the request's remaining
-work (it allows at most 30 more seconds of `ctx.waitUntil` work after a client
-disconnects, far less than a drill), any import already running on the drill
-cell is cancelled and rolled back, and the record stays `running` until its
-30-minute deadline and then reads `failed` with `finished_at: null`. The two
-earlier drops after which the drill still completed (2026-09-30, 2026-10-01)
-were most likely connections lost where the control plane did not see the
-disconnect; do not rely on that. Keep the client connected for the whole
-drill, with a client timeout of 30 minutes, the record's deadline. A client
+A drill whose record carries `driver: "alarm"` is driven by the control plane
+in short alarm steps and continues to a recorded outcome whatever the client
+does. The request only waits on the record; a dropped client cancels only its
+wait. Use `wait: false` to receive the record immediately and poll it.
+
+A drill whose record has no `driver` field runs inside the request that started
+it. An active client disconnect (the client closes the connection, is
+interrupted, or its own timeout fires) cancels that drill in either framing.
+Cloudflare ends the request's remaining work, any import already running on
+the drill cell is cancelled and rolled back, and the record stays `running`
+until its 30-minute deadline and then reads `failed` with `finished_at: null`.
+Keep the client connected for the whole request-driven drill, with a client
+timeout of 30 minutes. A heartbeat does not make that disconnect safe. A client
 that waits longer can keep a drill running after its record reads `failed`;
 do not start another drill until the earlier request has ended.
+Do not rely on an undetected connection loss for a request-driven drill.
 
 After a lost or unclear answer, do not re-POST while
 `account.restore_drill.state` is `running` (the answer is HTTP 409 with the
@@ -137,9 +150,11 @@ sent. An error answer without the drill-id header recorded no drill, and a
 record that fails both tests is not the request's: fix the cause and send the
 request again. For the request's own record, a `validations` entry for that
 backup and target cell with `validated_at >= restore_drill.started_at` means
-the drill succeeded regardless of the record's state. A fix that takes the
-client connection out of the drill is tracked in
-[#648](https://github.com/witwave-ai/witself/issues/648).
+the drill succeeded regardless of the record's state. Poll for at most 90
+minutes from `started_at` for an alarm drill, plus two minutes for the driver's
+final report: a deadline-projected `failed` record with `finished_at: null`
+can still be followed by that report. The bound for a request-driven drill is
+30 minutes; also wait for its earlier request to end before retrying.
 
 `POST /v1/accounts/{id}:validate-backup` keeps the dedicated cell backup bearer,
 `X-Witself-Backup-ID`, and `X-Witself-Backup-Validation: true`. New control planes

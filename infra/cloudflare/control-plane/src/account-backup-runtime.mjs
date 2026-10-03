@@ -32,6 +32,23 @@ export const OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
 const VALIDATION_TIMEOUT_MS = 20 * 60 * 1000;
 export const RESTORE_DRILL_DEADLINE_MS = VALIDATION_TIMEOUT_MS + 10 * 60 * 1000;
 export const RESTORE_DRILL_HEARTBEAT_MS = 10_000;
+export const RESTORE_DRILL_ALARM_DEADLINE_MS = 90 * 60_000;
+export const RESTORE_DRILL_TICK_MS = 60_000;
+export const RESTORE_DRILL_MAX_DELAY_MS = 5 * 60_000;
+export const RESTORE_DRILL_CLAIM_WINDOW_MS = 30_000;
+export const RESTORE_DRILL_START_WAIT_SECONDS = 20;
+export const RESTORE_DRILL_START_TIMEOUT_MS = 90_000;
+export const RESTORE_DRILL_POLL_TIMEOUT_MS = 15_000;
+export const RESTORE_DRILL_PROBE_TIMEOUT_MS = 10_000;
+export const RESTORE_DRILL_MAX_STARTS = 3;
+export const RESTORE_DRILL_FENCE_RETRIES = 3;
+export const RESTORE_DRILL_WAIT_POLL_MS = 10_000;
+export const RESTORE_DRILL_FINAL_GRACE_MS = 2 * 60_000;
+export const RESTORE_DRILL_CELL_JOB_BOUND_MS = 60 * 60 * 1000;
+export const RESTORE_DRILL_DRIVER_PREFIX = "restore-drill:";
+const RESTORE_DRILL_WAIT_READ_FAILURES = 6;
+const RESTORE_DRILL_DRIVER_KEY_PREFIX = "restore-drill-driver:";
+const RESTORE_DRILL_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 const ARCHIVE_CAPABILITY = /^cap_[0-9a-f]{64}$/;
 const CAPABILITY_PREFIX = "archive-capability:";
 
@@ -460,6 +477,133 @@ export class BackupValidationBusyError extends Error {
   }
 }
 
+export class RestoreDrillProtocolError extends Error {
+  constructor() {
+    super("asynchronous restore drill requires a target cell with backup validation protocol 2");
+  }
+}
+
+export class RestoreDrillUnconfirmedError extends Error {
+  constructor(drillID) {
+    super("restore drill could not be recorded");
+    this.drill_id = drillID;
+  }
+}
+
+function isRestoreDrillDriverName(name) {
+  return typeof name === "string" && name.startsWith(RESTORE_DRILL_DRIVER_PREFIX);
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function restoreDrillDriverStub(env, accountID) {
+  if (!ACCOUNT_ID.test(accountID ?? "") || !env.ACCOUNT_BACKUP) {
+    throw new Error("account backup binding or account id is invalid");
+  }
+  return env.ACCOUNT_BACKUP.get(env.ACCOUNT_BACKUP.idFromName(RESTORE_DRILL_DRIVER_PREFIX + accountID));
+}
+
+async function probeBackupValidationProtocol(fetchImpl, endpoint) {
+  try {
+    const response = await fetchImpl(`${endpoint}/v1/version`, {
+      signal: AbortSignal.timeout(RESTORE_DRILL_PROBE_TIMEOUT_MS),
+    });
+    if (response.status !== 200) return { reachable: false };
+    const body = await response.json();
+    return { reachable: true, protocol: Number.isSafeInteger(body?.backup_validation_protocol) && body.backup_validation_protocol >= 2 ? 2 : 1 };
+  } catch {
+    return { reachable: false };
+  }
+}
+
+function validDrillPrepare(input, accountID) {
+  if (!(isObject(input) && typeof input.drill_id === "string" && RESTORE_DRILL_ID.test(input.drill_id) &&
+      typeof input.backup_id === "string" && BACKUP_ID.test(input.backup_id) &&
+      typeof input.target_cell === "string" && CELL_NAME.test(input.target_cell) &&
+      typeof input.archive_origin === "string" && isObject(input.target) &&
+      typeof input.target.endpoint === "string" && validCellEndpoint(input.target.endpoint) === input.target.endpoint &&
+      typeof input.target.registration_id === "string" && input.target.registration_id.length >= 1 && input.target.registration_id.length <= 128 &&
+      validDate(input.target.registered_at) && typeof input.target.backup_token_sha256 === "string" && SHA256_HEX.test(input.target.backup_token_sha256) &&
+      validCatalogRecord(input.catalog, accountID) && input.catalog.backup_id === input.backup_id)) return false;
+  try {
+    const origin = new URL(input.archive_origin);
+    return origin.protocol === "https:" && origin.origin === input.archive_origin;
+  } catch {
+    return false;
+  }
+}
+
+function validDrillDriverKey(key, name, accountID) {
+  return validDrillPrepare(key, accountID) && key.account_id === accountID &&
+    name === RESTORE_DRILL_DRIVER_KEY_PREFIX + key.drill_id &&
+    ["claim", "start", "poll", "receipt"].includes(key.phase) && validDate(key.claim_by) &&
+    (key.phase === "claim" ? key.deadline_at === null : validDate(key.deadline_at)) &&
+    Number.isSafeInteger(key.starts) && key.starts >= 0 && key.starts <= RESTORE_DRILL_MAX_STARTS &&
+    Number.isSafeInteger(key.next_at) &&
+    [key.started_at, key.last_polled_at].every((value) => value === null || Number.isSafeInteger(value)) &&
+    Number.isSafeInteger(key.fence_failures) && key.fence_failures >= 0 &&
+    typeof key.reread === "boolean" && Number.isSafeInteger(key.rev) && key.rev >= 0 &&
+    (key.phase === "receipt" ? isObject(key.ack) && key.ack.status === key.catalog.status &&
+      key.ack.archive_schema_version === key.catalog.archive_schema_version && validDate(key.ack.validated_at) : key.ack === null) &&
+    (key.finishing === null || isObject(key.finishing) && (
+      key.finishing.state === "validated" && validDate(key.finishing.validated_at) ||
+      key.finishing.state === "failed" && typeof key.finishing.error === "string" && key.finishing.error.length <= 300));
+}
+
+function drillDue(key, fallback) {
+  const due = key?.phase === "claim" ? key.next_at : Math.min(key?.next_at, Date.parse(key?.deadline_at));
+  return Number.isFinite(due) ? due : fallback;
+}
+
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After");
+  return /^[0-9]{1,6}$/.test(value ?? "")
+    ? Math.max(RESTORE_DRILL_TICK_MS, Math.min(Number(value) * 1000, RESTORE_DRILL_MAX_DELAY_MS))
+    : RESTORE_DRILL_TICK_MS;
+}
+
+function validationErrorDetail(body) {
+  return isObject(body) && typeof body.error === "string"
+    ? body.error.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 120) : "";
+}
+
+async function drillTarget(env, input, pinned) {
+  const target = await validationTargetSnapshot(env, input);
+  if (target.endpoint !== pinned.endpoint || target.registration_id !== pinned.registration_id ||
+      target.registered_at !== pinned.registered_at || await sha256Hex(target.backup_token) !== pinned.backup_token_sha256) {
+    throw new Error("backup validation target registration changed before receipt");
+  }
+  return target;
+}
+
+const DEFINITIVE_DRILL_FENCE_ERRORS = new Set([
+  "backup validation target has no projected registration fence",
+  "backup validation target must be a registered backup_validation_target=true, accepting=false cell with a distinct backup token",
+  "backup validation target registration changed before receipt",
+  "backup validation target is the account's live cell",
+  "backup validation target still has live account projections",
+]);
+
+class RestoreDrillStorageError extends Error {}
+
+async function rereadDrillArchive(validate, env, record, accountID) {
+  const verification = await validate(env.BACKUPS, record.object, accountID);
+  if (verification?.manifest?.account_id !== accountID ||
+      verification?.manifest?.backup_id !== record.backup_id ||
+      verification?.manifest?.purpose !== "backup" ||
+      verification?.manifest?.cell !== record.source_cell ||
+      verification?.manifest?.status !== record.status ||
+      verification?.manifest?.schema_version !== record.archive_schema_version ||
+      (verification?.manifest?.evacuation_id !== undefined && verification.manifest.evacuation_id !== null && verification.manifest.evacuation_id !== "") ||
+      verification?.entries !== record.entries || verification?.chunks !== record.chunks ||
+      verification?.trailer_sha256 !== record.trailer_sha256) {
+    throw new ArchiveIntegrityError("backup validation reread does not match the committed catalog");
+  }
+}
+
 export function heartbeatJSONResponse(terminal, { interval_ms = RESTORE_DRILL_HEARTBEAT_MS, headers = {} } = {}) {
   const encode = (value) => new TextEncoder().encode(value);
   const NEWLINE = encode("\n");
@@ -620,6 +764,7 @@ export class DurableAccountBackup {
   }
 
   async fetch(request) {
+    if (isRestoreDrillDriverName(this.accountId)) return this.restoreDrillDriverFetch(request);
     const url = new URL(request.url);
     if (request.method === "POST" && ["/archive-capability", "/archive-capability:consume"].includes(url.pathname)) {
       try {
@@ -676,6 +821,7 @@ export class DurableAccountBackup {
               typeof input?.target_cell !== "string" || !CELL_NAME.test(input.target_cell)) {
             return errorResponse("invalid restore drill start", 400);
           }
+          if (input.driver !== undefined) return this.claimAlarmRestoreDrill(input);
           const state = await this.loadState();
           if (!state.catalog.some((entry) => entry.backup_id === input.backup_id && validCatalogRecord(entry, this.accountId))) {
             return errorResponse("backup validation is not in the committed catalog", 400);
@@ -814,6 +960,397 @@ export class DurableAccountBackup {
         return errorResponse(error.message, 409);
       }
       return errorResponse(boundedReason(error), 500);
+    }
+  }
+
+  async claimAlarmRestoreDrill(input) {
+    if (input.driver !== "alarm" || typeof input.drill_id !== "string" ||
+        !RESTORE_DRILL_ID.test(input.drill_id) || !validDate(input.claim_by)) {
+      return errorResponse("invalid restore drill start", 400);
+    }
+    const stored = await this.storage.get(RESTORE_DRILL_KEY);
+    if (isObject(stored) && stored.drill_id === input.drill_id) {
+      return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: stored });
+    }
+    const now = this.now();
+    if (now.getTime() > Date.parse(input.claim_by)) return errorResponse("restore drill claim expired", 400);
+    if (Date.parse(input.claim_by) > now.getTime() + 2 * RESTORE_DRILL_CLAIM_WINDOW_MS) {
+      return errorResponse("invalid restore drill start", 400);
+    }
+    const state = await this.loadState();
+    if (!state.catalog.some((entry) => entry.backup_id === input.backup_id && validCatalogRecord(entry, this.accountId))) {
+      return errorResponse("backup validation is not in the committed catalog", 400);
+    }
+    const current = effectiveRestoreDrill(stored, now.getTime());
+    if (current?.state === "running") {
+      return json({ schema_version: "witself.v0", error: "restore drill already running", restore_drill: current }, 409);
+    }
+    const record = {
+      drill_id: input.drill_id,
+      account_id: this.accountId, backup_id: input.backup_id, target_cell: input.target_cell,
+      state: "running", started_at: now.toISOString(),
+      deadline_at: new Date(now.getTime() + RESTORE_DRILL_ALARM_DEADLINE_MS).toISOString(),
+      finished_at: null, validated_at: null, error: null,
+      driver: "alarm",
+    };
+    await this.storage.put(RESTORE_DRILL_KEY, record);
+    return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
+  }
+
+  // Only storage work belongs in this queue. Cross-object calls always follow it.
+  driverStorageOperation(action) {
+    const operation = this.restoreDrillQueue.then(async () => {
+      try {
+        try {
+          return await action();
+        } finally {
+          await this.armDriverAlarm();
+        }
+      } catch {
+        throw new RestoreDrillStorageError("restore drill driver storage is unavailable");
+      }
+    });
+    this.restoreDrillQueue = operation.catch(() => {});
+    return operation;
+  }
+
+  async armDriverAlarm() {
+    const entries = await this.storage.list({ prefix: RESTORE_DRILL_DRIVER_KEY_PREFIX });
+    if (entries.size === 0) {
+      await this.storage.deleteAlarm();
+      return;
+    }
+    const now = this.now().getTime();
+    const due = Math.min(...Array.from(entries.values(), (key) => drillDue(key, now)));
+    await this.storage.setAlarm(Math.max(due, now));
+  }
+
+  createDrillDriver(key) {
+    return this.driverStorageOperation(async () => {
+      const name = RESTORE_DRILL_DRIVER_KEY_PREFIX + key.drill_id;
+      if (await this.storage.get(name) !== undefined) return false;
+      await this.storage.put(name, { ...key, rev: 0 });
+      return true;
+    });
+  }
+
+  commitDrillDriver(name, rev, fields) {
+    return this.driverStorageOperation(async () => {
+      const stored = await this.storage.get(name);
+      if (!stored || stored.rev !== rev) return null;
+      const next = { ...stored, ...fields, rev: rev + 1 };
+      await this.storage.put(name, next);
+      return next;
+    });
+  }
+
+  releaseDrillDriver(name, rev) {
+    return this.driverStorageOperation(async () => {
+      const stored = await this.storage.get(name);
+      if (!stored || stored.rev !== rev) return false;
+      await this.storage.delete(name);
+      return true;
+    });
+  }
+
+  async drillAccountPost(accountID, path, input) {
+    return (await backupStub(this.env, accountID)).fetch(new Request("http://account-backup.internal" + path, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+    }));
+  }
+
+  drillClaim(key) {
+    return this.drillAccountPost(key.account_id, "/restore-drill:start", {
+      backup_id: key.backup_id, target_cell: key.target_cell,
+      driver: "alarm", drill_id: key.drill_id, claim_by: key.claim_by,
+    });
+  }
+
+  async restoreDrillDriverFetch(request) {
+    const accountID = this.accountId.slice(RESTORE_DRILL_DRIVER_PREFIX.length);
+    if (!ACCOUNT_ID.test(accountID) || request.method !== "POST" ||
+        new URL(request.url).pathname !== "/restore-drill-driver:start") {
+      return errorResponse("account backup endpoint not found", 404);
+    }
+    let input;
+    try { input = await request.json(); } catch { return errorResponse("invalid restore drill start", 400); }
+    if (!validDrillPrepare(input, accountID)) return errorResponse("invalid restore drill start", 400);
+    const unconfirmed = () => json({
+      schema_version: "witself.v0", error: "restore drill could not be recorded", drill_id: input.drill_id,
+    }, 502);
+    try {
+      const claimBy = this.now().getTime() + RESTORE_DRILL_CLAIM_WINDOW_MS;
+      const { validations, ...catalog } = input.catalog;
+      const key = {
+        drill_id: input.drill_id, account_id: accountID, backup_id: input.backup_id,
+        target_cell: input.target_cell, archive_origin: input.archive_origin,
+        target: {
+          endpoint: input.target.endpoint, registration_id: input.target.registration_id,
+          registered_at: input.target.registered_at, backup_token_sha256: input.target.backup_token_sha256,
+        },
+        catalog, phase: "claim", claim_by: new Date(claimBy).toISOString(), deadline_at: null,
+        starts: 0, next_at: claimBy + RESTORE_DRILL_CLAIM_WINDOW_MS,
+        started_at: null, last_polled_at: null, fence_failures: 0, reread: false,
+        ack: null, finishing: null, rev: 0,
+      };
+      if (!await this.createDrillDriver(key)) return errorResponse("invalid restore drill start", 400);
+      const name = RESTORE_DRILL_DRIVER_KEY_PREFIX + key.drill_id;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let response, body;
+        try {
+          response = await this.drillClaim(key);
+          body = await response.json();
+        } catch {
+          continue;
+        }
+        if (response.status === 200 && body?.restore_drill?.drill_id === key.drill_id &&
+            body.restore_drill.state === "running") {
+          await this.commitDrillDriver(name, 0, {
+            phase: "start", deadline_at: body.restore_drill.deadline_at, next_at: this.now().getTime(),
+          });
+          return json(body);
+        }
+        if (attempt === 0 && [400, 409].includes(response.status)) {
+          await this.releaseDrillDriver(name, 0);
+          return json(body, response.status);
+        }
+      }
+      return unconfirmed();
+    } catch {
+      return unconfirmed();
+    }
+  }
+
+  async restoreDrillDriverAlarm() {
+    await this.storage.setAlarm(this.now().getTime() + RESTORE_DRILL_TICK_MS);
+    const accountID = this.accountId.slice(RESTORE_DRILL_DRIVER_PREFIX.length);
+    if (!ACCOUNT_ID.test(accountID)) {
+      await this.storage.deleteAlarm();
+      return;
+    }
+    const now = this.now().getTime();
+    const entries = await this.storage.list({ prefix: RESTORE_DRILL_DRIVER_KEY_PREFIX });
+    const due = Array.from(entries).filter(([, key]) => drillDue(key, now) <= now);
+    due.sort((left, right) => drillDue(left[1], now) - drillDue(right[1], now));
+    for (const [name] of due) await this.restoreDrillTick(name);
+    await this.driverStorageOperation(async () => {});
+  }
+
+  async restoreDrillTick(name) {
+    // Storage failures leave the recovery alarm armed. Never expose private key data.
+    try {
+      await this.runRestoreDrillTick(name);
+    } catch {
+      console.log("account-backup: restore drill tick could not be persisted");
+    }
+  }
+
+  async runRestoreDrillTick(name) {
+    const now = this.now().getTime();
+    const accountID = this.accountId.slice(RESTORE_DRILL_DRIVER_PREFIX.length);
+    let key = await this.storage.get(name);
+    if (key === undefined) return;
+    if (!validDrillDriverKey(key, name, accountID)) {
+      await this.driverStorageOperation(() => this.storage.delete(name));
+      console.log("account-backup: restore drill driver state is invalid");
+      return;
+    }
+    const at = (ms) => this.now().getTime() + ms;
+    const commit = async (fields) => {
+      const next = await this.commitDrillDriver(name, key.rev, fields);
+      if (!next) return false;
+      key = next;
+      return true;
+    };
+    const release = () => this.releaseDrillDriver(name, key.rev);
+    if (key.phase === "claim") {
+      if (now >= Date.parse(key.claim_by) + RESTORE_DRILL_ALARM_DEADLINE_MS) { await release(); return; }
+      if (key.next_at > now) return;
+      let response, body;
+      try { response = await this.drillClaim(key); body = await response.json(); } catch {}
+      if (response?.status === 200 && body?.restore_drill?.drill_id === key.drill_id) {
+        if (body.restore_drill.state === "running") {
+          await commit({ phase: "start", deadline_at: body.restore_drill.deadline_at, next_at: at(0) });
+        } else {
+          await release();
+        }
+      } else if ([400, 409].includes(response?.status)) {
+        await release();
+      } else {
+        await commit({ next_at: at(RESTORE_DRILL_TICK_MS) });
+      }
+      return;
+    }
+    const final = now >= Date.parse(key.deadline_at);
+    if (!final && key.next_at > now) return;
+    const finish = async () => {
+      let response;
+      try {
+        response = await this.drillAccountPost(accountID, "/restore-drill:finish", { drill_id: key.drill_id, ...key.finishing });
+      } catch {}
+      if ([200, 409].includes(response?.status)) { await release(); return; }
+      console.log("account-backup: restore drill record was not finished");
+      if (final) await release();
+      else await commit({ next_at: at(RESTORE_DRILL_TICK_MS) });
+    };
+    let fenceSucceeded = false;
+    const fail = async (message) => {
+      if (!await commit({
+        finishing: { state: "failed", error: boundedReason(message) }, next_at: at(RESTORE_DRILL_TICK_MS),
+        ...(fenceSucceeded ? { fence_failures: 0 } : {}),
+      })) return;
+      await finish();
+    };
+    if (key.finishing) { await finish(); return; }
+    if (final && ["start", "poll"].includes(key.phase)) {
+      await fail("restore drill validation did not finish before its deadline");
+      return;
+    }
+    const input = { account_id: accountID, backup_id: key.backup_id, target_cell: key.target_cell };
+    const fence = async () => {
+      try {
+        const target = await drillTarget(this.env, input, key.target);
+        fenceSucceeded = true;
+        return target;
+      } catch (error) {
+        if (final || DEFINITIVE_DRILL_FENCE_ERRORS.has(error?.message) || key.fence_failures + 1 >= RESTORE_DRILL_FENCE_RETRIES) {
+          await fail(boundedReason(error));
+        } else {
+          await commit({ fence_failures: key.fence_failures + 1, next_at: at(RESTORE_DRILL_TICK_MS) });
+        }
+        return null;
+      }
+    };
+    const target = await fence();
+    if (!target) return;
+    const receipt = async (acknowledgement) => {
+      if (acknowledgement) {
+        if (!await commit({
+          phase: "receipt", ack: {
+            status: acknowledgement.status, archive_schema_version: acknowledgement.archive_schema_version,
+            validated_at: this.now().toISOString(),
+          }, next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0,
+        })) return;
+        if (!await fence()) return;
+      } else if (!await commit({ next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 })) return;
+      let response;
+      try {
+        response = await this.drillAccountPost(accountID, "/validation-verified", {
+          ...input, validated_at: key.ack.validated_at, status: key.ack.status,
+          archive_schema_version: key.ack.archive_schema_version,
+        });
+      } catch {}
+      if (response?.status === 200) {
+        if (!await commit({ finishing: { state: "validated", validated_at: key.ack.validated_at }, fence_failures: 0 })) return;
+        await finish();
+      } else if (!response || response.status === 409 || response.status >= 500) {
+        if (final) await fail("backup validation completed but its receipt was not persisted");
+      } else {
+        await fail("backup validation completed but its receipt was not persisted");
+      }
+    };
+    try {
+      const catalog = key.catalog;
+      const headers = {
+        Authorization: `Bearer ${target.backup_token}`,
+        "X-Witself-Backup-ID": key.backup_id,
+        "X-Witself-Validation-ID": key.drill_id,
+      };
+      if (key.phase === "receipt") { await receipt(); return; }
+      if (key.phase === "start") {
+        if (key.starts > 0 && Date.parse(key.deadline_at) - now < RESTORE_DRILL_CELL_JOB_BOUND_MS) {
+          throw new Error("restore drill cannot restart: less than the cell validation bound remains before the deadline");
+        }
+        const protocol = await probeBackupValidationProtocol(this.fetchImpl, target.endpoint);
+        if (!protocol.reachable) { await commit({ next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 }); return; }
+        if (protocol.protocol !== 2) throw new Error("restore drill target cell no longer attests backup validation protocol 2");
+        const before = assertR2ObjectIdentity(catalog, await this.env.BACKUPS.head(catalog.object), catalog.size, catalog.r2_etag);
+        if (!key.reread) {
+          await rereadDrillArchive(this.validateArchive, this.env, catalog, accountID);
+          assertR2ObjectIdentity(catalog, await this.env.BACKUPS.head(catalog.object), before.size, before.etag);
+        }
+        let capabilityResponse;
+        try {
+          capabilityResponse = await this.drillAccountPost(accountID, "/archive-capability", {
+            backup_id: key.backup_id, target_cell: key.target_cell, ttl_seconds: 1800,
+          });
+        } catch {
+          await commit({ next_at: at(RESTORE_DRILL_TICK_MS), reread: true, fence_failures: 0 });
+          return;
+        }
+        const capability = capabilityResponse.ok ? await capabilityResponse.json().catch(() => null) : null;
+        if (!ARCHIVE_CAPABILITY.test(capability?.token ?? "")) throw new Error("backup archive capability is not available");
+        const archiveURL = new URL("/v1/backups:archive", key.archive_origin);
+        archiveURL.searchParams.set("account_id", accountID);
+        archiveURL.searchParams.set("backup_id", key.backup_id);
+        const starts = key.starts;
+        if (!await commit({
+          phase: "poll", starts: starts + 1, started_at: now, last_polled_at: null,
+          next_at: at(RESTORE_DRILL_TICK_MS), reread: true, fence_failures: 0,
+        })) return;
+        let response, body;
+        try {
+          response = await this.fetchImpl(`${target.endpoint}/v1/accounts/${accountID}:start-validate-backup`, {
+            method: "POST", headers: {
+              ...headers, "X-Witself-Backup-Archive-URL": archiveURL.toString(),
+              "X-Witself-Backup-Archive-Token": capability.token, "X-Witself-Backup-Archive-Size": String(catalog.size),
+              "X-Witself-Validation-Wait": String(RESTORE_DRILL_START_WAIT_SECONDS),
+            }, signal: AbortSignal.timeout(RESTORE_DRILL_START_TIMEOUT_MS),
+          });
+          if (response.status === 503) {
+            await commit({ phase: "start", starts, next_at: at(retryAfterMs(response)), fence_failures: 0 });
+            return;
+          }
+          const text = await response.text();
+          try { body = JSON.parse(text); } catch {}
+        } catch { return; }
+        if (response.status !== 200) {
+          if (response.status >= 500 && !(body?.schema_version === "witself.v0" && typeof body?.error === "string")) return;
+          throw new Error(`backup validation ${response.status}: ${validationErrorDetail(body) || "missing exact acknowledgement"}`);
+        }
+        if (body === undefined) return;
+        if (exactValidationAck(body, catalog)) { await receipt(body); return; }
+        if (typeof body?.error === "string") throw new Error(`backup validation 200: ${validationErrorDetail(body) || "missing exact acknowledgement"}`);
+        if (body?.validation_job?.state === "running") {
+          if (body.validation_job.started === false) {
+            await commit({ phase: "start", starts, next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 });
+            return;
+          }
+          if (body.validation_job.started === true) return;
+        }
+        throw new Error("backup validation 200: missing exact acknowledgement");
+      }
+      let response, body;
+      try {
+        response = await this.fetchImpl(`${target.endpoint}/v1/accounts/${accountID}:validate-backup-status`, {
+          method: "POST", headers, signal: AbortSignal.timeout(RESTORE_DRILL_POLL_TIMEOUT_MS),
+        });
+        // Authentication/action refusals are terminal even when their body is not JSON.
+        if (![400, 401, 403, 404, 405, 409].includes(response.status)) {
+          body = await response.json();
+        }
+      } catch {
+        await commit({ next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 });
+        return;
+      }
+      if ([400, 401, 403, 404, 405, 409].includes(response.status)) throw new Error(`backup validation status ${response.status}`);
+      if (response.status !== 200) { await commit({ next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 }); return; }
+      if (exactValidationAck(body, catalog)) { await receipt(body); return; }
+      if (typeof body?.error === "string") throw new Error(`backup validation 200: ${validationErrorDetail(body) || "missing exact acknowledgement"}`);
+      if (body?.validation_job?.state === "running") {
+        await commit({ last_polled_at: now, next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 });
+      } else if (body?.validation_job?.state === "absent") {
+        if (key.starts >= RESTORE_DRILL_MAX_STARTS) throw new Error("restore drill validation job ended without a result");
+        if (Date.parse(key.deadline_at) - now < RESTORE_DRILL_CELL_JOB_BOUND_MS) {
+          throw new Error("restore drill cannot restart: less than the cell validation bound remains before the deadline");
+        }
+        await commit({ phase: "start", next_at: at(RESTORE_DRILL_TICK_MS), fence_failures: 0 });
+      } else {
+        throw new Error("backup validation 200: missing exact acknowledgement");
+      }
+    } catch (error) {
+      if (error instanceof RestoreDrillStorageError) throw error;
+      await fail(boundedReason(error));
     }
   }
 
@@ -1352,6 +1889,7 @@ export class DurableAccountBackup {
   }
 
   async alarm() {
+    if (isRestoreDrillDriverName(this.accountId)) return this.restoreDrillDriverAlarm();
     try {
       return await this.fence.run(async () => {
         const state = await this.loadState();
@@ -1935,6 +2473,47 @@ export async function beginAccountBackupValidation(
     record.size,
     record.r2_etag,
   );
+  if (dependencies.driver === "auto") {
+    const protocol = await probeBackupValidationProtocol(dependencies.fetch ?? globalThis.fetch, target.endpoint);
+    if (protocol.reachable && protocol.protocol === 2) {
+      const origin = new URL(dependencies.origin);
+      if (origin.protocol !== "https:" || origin.origin !== dependencies.origin) {
+        throw new Error("backup validation requires the public request origin");
+      }
+      const drill_id = crypto.randomUUID();
+      const backup_token_sha256 = await sha256Hex(target.backup_token);
+      let response, body;
+      try {
+        response = await (await restoreDrillDriverStub(env, input.account_id)).fetch(
+          new Request("http://account-backup.internal/restore-drill-driver:start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              drill_id, backup_id: input.backup_id, target_cell: input.target_cell,
+              archive_origin: origin.origin,
+              target: {
+                endpoint: target.endpoint, registration_id: target.registration_id,
+                registered_at: target.registered_at, backup_token_sha256,
+              },
+              catalog: record,
+            }),
+          }),
+        );
+        body = await response.json();
+      } catch {
+        throw new RestoreDrillUnconfirmedError(drill_id);
+      }
+      if (response.status === 409) throw new BackupValidationBusyError(body?.restore_drill);
+      if (response.status === 400) throw new Error("restore drill could not be recorded");
+      if (response.status !== 200 || body?.restore_drill?.drill_id !== drill_id || body.restore_drill.driver !== "alarm") {
+        throw new RestoreDrillUnconfirmedError(drill_id);
+      }
+      return {
+        drill_id, restore_drill: body.restore_drill, driver: "alarm",
+        complete: () => awaitRestoreDrill(env, input, record, drill_id, dependencies),
+      };
+    }
+    if (dependencies.requireAlarm === true) throw new RestoreDrillProtocolError();
+  }
   const stub = await backupStub(env, input.account_id);
   const response = await stub.fetch(new Request("http://account-backup.internal/restore-drill:start", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -2087,7 +2666,43 @@ export async function beginAccountBackupValidation(
       throw error;
     }
   }
-  return { drill_id, restore_drill: started.restore_drill, complete };
+  return { drill_id, restore_drill: started.restore_drill, complete, ...(dependencies.driver === "auto" ? { driver: "request" } : {}) };
+}
+
+export async function awaitRestoreDrill(env, input, catalogRecord, drillID, dependencies = {}) {
+  const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = dependencies.now ?? (() => new Date());
+  let failures = 0;
+  for (;;) {
+    let status;
+    try {
+      status = await readBackupStatus(env, input.account_id);
+      failures = 0;
+    } catch {
+      if (++failures >= RESTORE_DRILL_WAIT_READ_FAILURES) throw new Error("restore drill status is unavailable");
+      await sleep(RESTORE_DRILL_WAIT_POLL_MS);
+      continue;
+    }
+    const record = status.restore_drill;
+    if (record?.drill_id !== drillID) {
+      throw new Error("restore drill outcome is no longer readable; read the catalog validations");
+    }
+    const validation = status.backups.catalog.find((entry) => entry.backup_id === input.backup_id)?.validations?.find(
+      (entry) => entry.target_cell === input.target_cell && Date.parse(entry.validated_at) >= Date.parse(record.started_at),
+    );
+    if (validation || record.state === "validated") {
+      return {
+        schema_version: "witself.v0", validated: true,
+        account_id: input.account_id, backup_id: input.backup_id, target_cell: input.target_cell,
+        validated_at: validation ? validation.validated_at : record.validated_at,
+        status: catalogRecord.status, archive_schema_version: catalogRecord.archive_schema_version, drill_id: drillID,
+      };
+    }
+    const grace = record.state === "failed" && record.finished_at === null && record.driver === "alarm" &&
+      now().getTime() < Date.parse(record.deadline_at) + RESTORE_DRILL_FINAL_GRACE_MS;
+    if (record.state === "failed" && !grace) throw new Error(record.error || "restore drill failed");
+    await sleep(RESTORE_DRILL_WAIT_POLL_MS);
+  }
 }
 
 export async function runAccountBackupValidation(env, input, dependencies = {}) {
