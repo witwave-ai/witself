@@ -697,7 +697,7 @@ fresh synthetic name and private workspace.
 | L8 | Set the synthetic agent's retained-payload count limit to four; observe quota compaction and the compacted parent's retained-child continuity boundary. |
 | L9 | Walk history with `--limit 2` and exclusive `--before-version` using each `next_before_version`; prove all five versions appear once. |
 | L10 | Download and verify the shipped self archive; compare the synthetic avatar rows and active pointer with live reads, including content equality only as booleans. |
-| L11 | Fence a new backup job against the post-L10 durable job/catalog observation, wait for that exact current job's committed generation, and require a restore drill acknowledgement with `validated=true` and `validated_at`; verify unchanged routing. |
+| L11 | Fence a new backup job against the post-L10 durable job/catalog observation, wait for that exact current job's committed generation, then request `wait: false` and poll until the matching drill record or catalog proves validation; require `validated_at` and verify unchanged routing. |
 
 The built-in reference is a deterministic fixture, so acceptance needs no image
 generation. Its unlocked layer receives a bounded nonvisual addition, shared
@@ -721,10 +721,15 @@ boolean, never as a hash value.
 There is no shipped customer `witself import`. The operator account-move import
 accepts paired evacuation archives, and committed non-backup store import
 requires an account archived as suspended or closed. It cannot commit this
-active account's self export. The separate backup leg uses
-`POST /v1/backups:restore-drill` to invoke the drill cell's
-`POST /v1/accounts/{id}:validate-backup`; `ValidateAccountBackup` exercises the
-semantic import and deferred constraints, then rolls back all imported rows.
+active account's self export. The separate backup leg posts `wait: false` to
+`POST /v1/backups:restore-drill` with a 60-second request timeout, then polls
+the matching drill record every 30 seconds until its deadline plus 120 seconds
+(capped at 95 minutes after the POST), with one last read at that bound; a
+matching catalog validation at or after the drill's start also proves success.
+If the drill cell lacks backup validation protocol 2, the refusal triggers one
+connected request with a 30-minute timeout. The drill cell's
+`ValidateAccountBackup` exercises the semantic import and deferred constraints,
+then rolls back all imported rows.
 The retained claim is **validated by rollback-only restore drill**. Committed
 restore remains an operator recovery procedure and is not certified here.
 

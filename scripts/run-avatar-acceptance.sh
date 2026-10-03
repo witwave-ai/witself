@@ -390,6 +390,8 @@ rm -f "$scratch/self.tar.gz"
 pass_leg archive_verified '[1,2,3,4,5]'
 
 leg=L11_restore_drill
+instant_jq='def instant: (capture("^(?<seconds>[0-9-]+T[0-9:]+)(?<fraction>\\.[0-9]+)?Z$") // error("invalid timestamp")) |
+  ((.seconds+"Z"|fromdateiso8601) + (("0"+(.fraction//""))|tonumber));'
 # Read the account's durable backup authority only after the lifecycle/archive
 # checks. A preexisting job persists before acquiring its database snapshot, but
 # its manifest exported_at can be assigned much later. That timestamp cannot
@@ -442,9 +444,7 @@ while :; do
   backup_remaining=$((backup_deadline - backup_now))
   if [[ $backup_remaining -le 0 ]]; then failure; fi
   backup_sleep=$(jq -er --arg backup "$backup_id" --argjson now "$backup_now" \
-    --argjson remaining "$backup_remaining" --slurpfile run "$scratch/backup-run.json" '
-    def instant: capture("^(?<seconds>[0-9-]+T[0-9:]+)(?<fraction>\\.[0-9]+)?Z$") |
-      ((.seconds+"Z"|fromdateiso8601) + (("0"+(.fraction//""))|tonumber));
+    --argjson remaining "$backup_remaining" --slurpfile run "$scratch/backup-run.json" "$instant_jq"'
     (.account.backups.current_job // {}) as $job |
     (if $job.backup_id==$backup then
       (if $job.status=="retrying" then $job.retry_at else null end)
@@ -454,9 +454,115 @@ while :; do
   ' "$scratch/backup-status.json")
   sleep "$backup_sleep"
 done
-jq -n --arg account "$account_id" --arg backup "$backup_id" --arg target "$drill_cell" '{account_id:$account,backup_id:$backup,target_cell:$target}' >"$scratch/drill-request.json"
-http_post "$control_plane/v1/backups:restore-drill" "$scratch/drill-request.json" "$scratch/drill.json"
+drill_failure() { printf 'avatar acceptance: restore drill %s\n' "$1" >&3; failure; }
+# Only fixed, value-free reasons reach the operator; raw responses stay private.
+trap 'drill_failure invalid_response' ERR
+jq -n --arg account "$account_id" --arg backup "$backup_id" --arg target "$drill_cell" '{account_id:$account,backup_id:$backup,target_cell:$target,wait:false}' >"$scratch/drill-request.json"
+drill_post_started=$(date -u +%s)
+if ! drill_http_status=$(curl --silent --show-error --connect-timeout 10 --max-time 60 \
+  --header "@$scratch/fleet-header" --header 'Content-Type: application/json' \
+  --request POST --data-binary "@$scratch/drill-request.json" \
+  --output "$scratch/drill-start.json" --write-out '%{http_code}' \
+  "$control_plane/v1/backups:restore-drill"); then drill_failure request_failed; fi
+case "$drill_http_status" in
+  202)
+    must --arg account "$account_id" --arg backup "$backup_id" --arg target "$drill_cell" "$instant_jq"'
+      .schema_version=="witself.v0" and .account_id==$account and
+      (.restore_drill | .account_id==$account and .backup_id==$backup and
+        .target_cell==$target and .driver=="alarm" and .state=="running" and
+        (.drill_id|type=="string" and length>0) and
+        ((.deadline_at|instant) >= (.started_at|instant)))
+    ' "$scratch/drill-start.json"
+    drill_id=$(jq -er '.restore_drill.drill_id' "$scratch/drill-start.json")
+    # Round down conservatively; neither reads nor retries may extend the bound.
+    drill_deadline=$(jq -er --argjson posted "$drill_post_started" "$instant_jq"'
+      [(.restore_drill.deadline_at|instant|.+120|floor), ($posted+5700)] | min
+    ' "$scratch/drill-start.json")
+    drill_read_failures=0 drill_final=false
+    while :; do
+      # The driver's final report can land just before the bound: once the
+      # bound is reached, read one last time and judge that answer.
+      drill_remaining=$((drill_deadline - $(date -u +%s)))
+      if [[ $drill_remaining -le 0 ]]; then
+        drill_final=true drill_poll_timeout=30
+      else
+        drill_poll_timeout=$drill_remaining
+        if [[ $drill_poll_timeout -gt 60 ]]; then drill_poll_timeout=60; fi
+      fi
+      if drill_poll_http_status=$(curl --silent --show-error --connect-timeout 10 --max-time "$drill_poll_timeout" \
+        --header "@$scratch/fleet-header" --output "$scratch/drill-status.json" --write-out '%{http_code}' \
+        "$control_plane/v1/backups/status?account_id=$account_id") &&
+        [[ $drill_poll_http_status == 2[0-9][0-9] ]] &&
+        jq -e 'type=="object"' "$scratch/drill-status.json" >/dev/null; then
+        drill_read_failures=0
+        drill_now=$(date -u +%s)
+        # Check identity before consulting the catalog, even for validated rows.
+        if ! must --arg drill "$drill_id" '.account.restore_drill.drill_id==$drill' "$scratch/drill-status.json"; then
+          drill_failure record_replaced
+        fi
+        jq -e --arg account "$account_id" --arg backup "$backup_id" --arg target "$drill_cell" \
+          --argjson now "$drill_now" --slurpfile start "$scratch/drill-start.json" "$instant_jq"'
+          def require($valid): if $valid then . else error("invalid drill response") end;
+          .account.restore_drill as $r | $start[0].restore_drill as $initial |
+          require(.account.account_id==$account and
+            $r.account_id==$account and $r.backup_id==$backup and $r.target_cell==$target and
+            $r.driver=="alarm" and ($r.state|IN("running","validated","failed")) and
+            (($r.started_at|instant)==($initial.started_at|instant)) and
+            (($r.deadline_at|instant)==($initial.deadline_at|instant)) and
+            ($r.finished_at==null or ($r.finished_at|instant|type=="number")) and
+            ($r.validated_at==null or ($r.validated_at|instant|type=="number")) and
+            (.account.backups.catalog|type=="array")) |
+          [.account.backups.catalog[]|select(.backup_id==$backup)] |
+          require(length==1) | .[0] as $catalog |
+          require(($catalog.status|type=="string") and
+            ($catalog.archive_schema_version|type=="number") and
+            (($catalog.validations//[])|type=="array")) |
+          [($catalog.validations//[])[] | select(.target_cell==$target) |
+            select((.validated_at|instant)>=($r.started_at|instant))] |
+          sort_by(.validated_at|instant) | last as $validation |
+          if $r.state=="validated" or $validation!=null then
+            (if $r.state=="validated" then $r.validated_at else $validation.validated_at end) as $at |
+            require(($at|instant)>=($r.started_at|instant)) |
+            {outcome:"validated", answer:{schema_version:"witself.v0",validated:true,
+              account_id:$account,backup_id:$backup,target_cell:$target,validated_at:$at,
+              status:$catalog.status,archive_schema_version:$catalog.archive_schema_version,
+              drill_id:$r.drill_id}}
+          elif $r.state=="running" or ($r.state=="failed" and $r.finished_at==null and
+            $r.driver=="alarm" and $now<($r.deadline_at|instant|.+120)) then
+            {outcome:"pending"}
+          else {outcome:"failed"} end
+        ' "$scratch/drill-status.json" >"$scratch/drill-poll.json"
+        case $(jq -r '.outcome' "$scratch/drill-poll.json") in
+          validated) jq '.answer' "$scratch/drill-poll.json" >"$scratch/drill.json"; break ;;
+          failed) drill_failure record_failed ;;
+        esac
+      else
+        drill_read_failures=$((drill_read_failures + 1))
+        if [[ $drill_read_failures -gt 3 ]]; then drill_failure status_unavailable; fi
+      fi
+      if [[ $drill_final == true ]]; then drill_failure poll_bound; fi
+      drill_remaining=$((drill_deadline - $(date -u +%s)))
+      if [[ $drill_remaining -le 0 ]]; then continue; fi
+      drill_sleep=30
+      if [[ $drill_sleep -gt $drill_remaining ]]; then drill_sleep=$drill_remaining; fi
+      sleep "$drill_sleep"
+    done
+    ;;
+  409)
+    if ! must '.error=="asynchronous restore drill requires a target cell with backup validation protocol 2" and (has("restore_drill")|not)' "$scratch/drill-start.json"; then
+      drill_failure request_refused
+    fi
+    # A protocol refusal records no drill. Exactly one connected attempt is safe.
+    jq 'del(.wait)' "$scratch/drill-request.json" >"$scratch/drill-connected.json"
+    curl --silent --show-error --fail --connect-timeout 10 --max-time 1800 \
+      --header "@$scratch/fleet-header" --header 'Content-Type: application/json' \
+      --request POST --data-binary "@$scratch/drill-connected.json" \
+      "$control_plane/v1/backups:restore-drill" >"$scratch/drill.json"
+    ;;
+  *) drill_failure request_refused ;;
+esac
 must --arg account "$account_id" --arg backup "$backup_id" --arg target "$drill_cell" --slurpfile manifest "$scratch/manifest.json" '.schema_version=="witself.v0" and .validated==true and .account_id==$account and .backup_id==$backup and .target_cell==$target and .archive_schema_version==$manifest[0].schema_version and (.validated_at|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))' "$scratch/drill.json"
+trap failure ERR
 http_get "$control_plane/v1/directory/$account_id" "$scratch/directory-after.json"
 must --slurpfile before "$scratch/directory.json" '{account_id,cell,epoch,status}==($before[0]|{account_id,cell,epoch,status})' "$scratch/directory-after.json"
 record_update --slurpfile drill "$scratch/drill.json" '.backup.backup_id=$drill[0].backup_id | .backup.validated_at=$drill[0].validated_at'
