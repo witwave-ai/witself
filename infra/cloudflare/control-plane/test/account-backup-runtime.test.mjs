@@ -3864,11 +3864,16 @@ test("alarm restore drill status retains eleven ordered public fields and no dri
 
 
 // Waiting clients only observe the record; driver execution is explicit in tests.
+const RECORD_WAIT_MS = 5000;
 async function waitForAlarmDrillRecord(f) {
-  for (let i = 0; i < 100 && !f.storage.values.has("restore-drill"); i += 1) await flush();
+  const recordDeadline = performance.now() + RECORD_WAIT_MS;
+  while (!f.storage.values.has("restore-drill") && performance.now() < recordDeadline) await flush();
   assert.ok(f.storage.values.has("restore-drill"), "Worker must record a drill");
-  // The record write precedes the driver's bind and the Worker's first status read.
-  for (let i = 0; i < 10; i += 1) await flush();
+  // The first /status read is catalog preflight; the second follows the driver's bind.
+  const waiterReady = () => f.key()?.phase === "start" && callsTo(f, "/status").length >= 2;
+  const waiterDeadline = performance.now() + RECORD_WAIT_MS;
+  while (!waiterReady() && performance.now() < waiterDeadline) await flush();
+  assert.ok(waiterReady(), "Worker must bind the drill driver and read its status");
   return structuredClone(f.storage.values.get("restore-drill"));
 }
 
