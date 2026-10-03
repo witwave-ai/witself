@@ -1733,19 +1733,8 @@ func serve() int {
 				m, err := st.ValidateAccountBackup(
 					ctx, accountID, backupID, body,
 				)
-				switch {
-				case errors.Is(err, store.ErrAccountExists):
-					return server.ImportSummary{}, server.ErrConflict
-				case errors.Is(err, export.ErrArchiveTooNew):
-					return server.ImportSummary{}, server.ErrArchiveTooNew
-				case errors.Is(err, store.ErrImportAuditContradiction):
-					return server.ImportSummary{}, server.ErrBadArchive
-				case errors.Is(err, store.ErrArchiveAccountMismatch),
-					errors.Is(err, store.ErrArchiveContent),
-					errors.Is(err, export.ErrCorrupt):
-					return server.ImportSummary{}, server.ErrBadArchive
-				case err != nil:
-					return server.ImportSummary{}, err
+				if err != nil {
+					return server.ImportSummary{}, mapBackupValidationError(err)
 				}
 				return server.ImportSummary{
 					AccountID:     m.AccountID,
@@ -1753,6 +1742,17 @@ func serve() int {
 					SchemaVersion: m.SchemaVersion,
 					BackupID:      m.BackupID,
 				}, nil
+			}
+			cfg.BeginBackupValidation = func(ctx context.Context, accountID, backupID string) (server.BackupValidationLease, error) {
+				lease, err := st.AcquireBackupValidationLease(ctx, accountID, backupID)
+				if err != nil {
+					return nil, mapBackupValidationLeaseError(err)
+				}
+				return &serverBackupValidationLease{lease: lease}, nil
+			}
+			cfg.BackupValidationInProgress = st.BackupValidationInProgress
+			cfg.ReportBackupValidationJob = func(accountID, validationID, outcome string, download, total time.Duration) {
+				logBackupValidationJob(os.Stderr, accountID, cfg.CellName, validationID, outcome, download, total)
 			}
 		}
 		cfg.ResumeAccountSystem = func(
@@ -2330,7 +2330,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
 	cliout.Line(w, "  WITSELF_PROVISION_TOKEN       enables POST /v1/accounts (control-plane account provisioning)")
 	cliout.Line(w, "  WITSELF_BACKUP_TOKEN          distinct credential for account backup export and validation")
-	cliout.Line(w, "  WITSELF_BACKUP_VALIDATION_ENABLED enables rollback-only POST /v1/accounts/{id}:validate-backup (default false)")
+	cliout.Line(w, "  WITSELF_BACKUP_VALIDATION_ENABLED enables rollback-only POST /v1/accounts/{id}:validate-backup, :start-validate-backup and :validate-backup-status (default false)")
 	cliout.Line(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }
 
@@ -2946,4 +2946,59 @@ func logAccountImportJob(w io.Writer, accountID, cellName, evacuationID, outcome
 		return
 	}
 	_, _ = fmt.Fprintf(w, "witself-server: account import job account_id=%q cell=%q evacuation_id=%q outcome=%q duration=%s\n", accountID, cellName, evacuationID, outcome, duration)
+}
+
+func mapBackupValidationError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrAccountExists):
+		return server.ErrConflict
+	case errors.Is(err, export.ErrArchiveTooNew):
+		return server.ErrArchiveTooNew
+	case errors.Is(err, store.ErrImportAuditContradiction),
+		errors.Is(err, store.ErrArchiveAccountMismatch),
+		errors.Is(err, store.ErrArchiveContent),
+		errors.Is(err, export.ErrCorrupt):
+		return server.ErrBadArchive
+	default:
+		return err
+	}
+}
+
+func mapBackupValidationLeaseError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrBackupValidationLeaseHeld):
+		return server.ErrBackupValidationLeaseHeld
+	case errors.Is(err, store.ErrBackupValidationLeaseUnavailable):
+		return server.ErrBackupValidationLeaseUnavailable
+	default:
+		return mapBackupValidationError(err)
+	}
+}
+
+type serverBackupValidationLease struct {
+	lease *store.BackupValidationLease
+}
+
+func (l *serverBackupValidationLease) Validate(ctx context.Context, r io.Reader) (server.ImportSummary, error) {
+	m, err := l.lease.Validate(ctx, r)
+	if err != nil {
+		return server.ImportSummary{}, mapBackupValidationError(err)
+	}
+	return server.ImportSummary{
+		AccountID:     m.AccountID,
+		Status:        m.Status,
+		SchemaVersion: m.SchemaVersion,
+		BackupID:      m.BackupID,
+	}, nil
+}
+
+func (l *serverBackupValidationLease) Held() bool { return l.lease.Held() }
+func (l *serverBackupValidationLease) Close()     { l.lease.Close() }
+
+func logBackupValidationJob(w io.Writer, accountID, cellName, validationID, outcome string, download, total time.Duration) {
+	if outcome == "" {
+		_, _ = fmt.Fprintf(w, "witself-server: account backup validation job started account_id=%q cell=%q validation_id=%q\n", accountID, cellName, validationID)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "witself-server: account backup validation job account_id=%q cell=%q validation_id=%q outcome=%q download=%s duration=%s\n", accountID, cellName, validationID, outcome, download, total)
 }

@@ -173,6 +173,75 @@ Validation continues to ignore the cell-name header.
 Deploy cells before the control plane; see
 [periodic logical account snapshots](backup-and-recovery.md#periodic-logical-account-snapshots).
 
+**`POST /v1/accounts/{id}:start-validate-backup` and `:validate-backup-status`**
+add asynchronous rollback-only validation under backup validation protocol 2.
+Both actions require the dedicated backup token, refuse the provision token,
+and return 404 `unknown backup action` before authentication when disabled.
+Both use an empty body; status needs no archive capability headers.
+
+| Header | Rule | Refusal |
+|---|---|---|
+| `Authorization: Bearer <backup token>` | Dedicated backup-token authority | 401 `invalid backup token` |
+| `X-Witself-Backup-ID` | Valid backup id, as for synchronous validation | 400 `a valid backup id is required` |
+| `X-Witself-Validation-ID` | 1–128 characters from `[A-Za-z0-9_-]`; the control plane sends the drill id | 400 `a valid validation id is required` |
+| `X-Witself-Backup-Archive-URL`, `-Token`, `-Size` | START only: the same archive source rules as synchronous validation | 400 `a valid backup archive source is required` |
+| `X-Witself-Validation-Wait` | START only: optional, exactly one value matching `^(0\|[1-9][0-9]{0,2})$`, at most 300 seconds; default 0 | 400 `a valid validation wait is required` |
+
+A 200 response has one of four shapes (identity and status values below are examples):
+
+```json
+{"schema_version":"witself.v0","account_id":"acc_example","status":"active","archive_schema_version":98,"purpose":"backup","backup_id":"backup_example","validated":true}
+{"schema_version":"witself.v0","error":"could not validate backup"}
+{"schema_version":"witself.v0","account_id":"acc_example","backup_id":"backup_example","validation_id":"drill_example","validation_job":{"state":"running"}}
+{"schema_version":"witself.v0","account_id":"acc_example","backup_id":"backup_example","validation_id":"drill_example","validation_job":{"state":"absent"}}
+```
+
+The acknowledgement has exactly those seven keys. The error is exactly one of
+`backup archive download failed`, `backup validation target already contains the account`,
+`backup schema is newer than this cell — upgrade the cell first`,
+`invalid or mismatched backup archive`, or `could not validate backup`.
+START uses the first three shapes; its `running` object additionally has
+`started:true` when this replica started or already runs that validation id,
+or `started:false` when another session holds the account's lock or START
+superseded another running validation id. Status uses all four shapes without
+`started`, never starts, cancels or evicts work, and never downloads an archive.
+A START wait above zero for an unfinished job streams newline heartbeats every
+ten seconds until one terminal object; disconnecting the caller does not cancel the job.
+START returns 409 `validation id is bound to a different backup` on a binding
+conflict, or 503 `validation capacity exhausted` with `Retry-After: 60` for
+capacity, shutdown, undelivered retained results, or a transient lease failure.
+Other lease failures and status lock-read failures return 500 `could not validate backup`.
+
+`running` means a validation or retained result exists for the account and is
+not known to belong to a different id; another replica answers conservatively.
+`absent` definitively means that validation id is neither running nor retained
+on the cell. The owner answers the exact retained acknowledgement or error.
+The caller keeps the first such result and restarts only on `absent`, never on
+`running`. There is one validation per account per cell and one running
+validation per replica by default. The job bounds download plus validation to
+60 minutes and removes the archive spool as soon as the import ends.
+A finished result is retained in memory for at most 30 minutes, with one pinned
+database connection and the account's advisory lock per retained result.
+With the default of one running validation per replica, a replica holds at most
+one asynchronous validation database session at a time, running or retained;
+a delivered result may be dropped when another account starts; the synchronous
+`:validate-backup` is outside this bound. Another account cannot evict an
+undelivered result. A new validation id for the same account supersedes its
+running validation or evicts its retained result.
+
+A job whose database session ended (for example a PostgreSQL restart), or that
+was cancelled by server shutdown, keeps no result; after its lock is released,
+status answers `absent` and the caller may start it again. A job that reaches
+the cell's 60-minute deadline also reads `absent`; the control plane decides
+whether another START can still finish within its own deadline. An archive
+that kills PostgreSQL can therefore be retried up to three times per drill;
+if the drill ends without a result, operators should check PostgreSQL for
+restarts or `OOMKilled`. There is no cell cancel action: a validation whose
+caller has given up runs to its 60-minute bound and its result is kept as above.
+On a single-replica cell this can make other accounts' starts answer 503 for
+up to about 90 minutes; restarting the server clears it. The synchronous
+`:validate-backup` is unchanged.
+
 > **Sealed-plane implementation amendment (accepted 2026-07-23):** schema 67
 > extends the current agent-owned ciphertext API through multi-installation AVK
 > enrollment, crash-resumable AVK rotation, retained-secret status/enforcement,
@@ -2120,5 +2189,7 @@ a value-free `code` is reserved for a future table-backed protocol and is not
 emitted by this implementation.
 
 The unauthenticated `/v1/version` response adds `store_schema_version` (currently
-98) alongside `account_evacuation_protocol:3`. The control plane rejects a newer
-archive schema before minting a capability when this attestation is available.
+98) alongside `account_evacuation_protocol:3` and `backup_validation_protocol:2`.
+An absent backup validation protocol field means protocol 1 (synchronous validation only).
+The control plane rejects a newer archive schema before minting a capability
+when this attestation is available.
