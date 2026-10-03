@@ -191,8 +191,9 @@ run_before() (
       wait "$command_pid" 2>/dev/null || :
     fi
     if [ -n "$timer_pid" ]; then
-      kill -TERM "$timer_pid" 2>/dev/null || :
+      kill -KILL "$timer_pid" 2>/dev/null || :
       wait "$timer_pid" 2>/dev/null || :
+      timer_pid=''
     fi
   }
   trap stop_poll EXIT
@@ -200,20 +201,19 @@ run_before() (
   trap 'exit 143' TERM
   "$@" >"$output" &
   command_pid=$!
+  # stop_poll ends the timer with KILL, never a trapped signal: Bash 3.2 can
+  # block in wait on a trapped signal that arrives just before it, and so time
+  # out a read that already finished. The timer sleeps in short steps, so a
+  # sleep it leaves behind ends within 0.2 seconds.
   (
-    sleeper=''
-    trap 'if [ -n "$sleeper" ]; then kill "$sleeper" 2>/dev/null || :; wait "$sleeper" 2>/dev/null || :; fi; exit' TERM INT
-    sleep "$remaining" &
-    sleeper=$!
-    wait "$sleeper" || exit
-    : >"$output.timeout"
+    while [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2 || :; done
+    : >"$output.timeout" 2>/dev/null || :
     kill -KILL "$command_pid" 2>/dev/null || :
   ) >/dev/null 2>&1 &
   timer_pid=$!
   wait "$command_pid" 2>/dev/null || status=$?
   command_pid=''
   stop_poll
-  timer_pid=''
   if [ -f "$output.timeout" ] || [ "$SECONDS" -ge "$deadline" ]; then
     die "$label timed out (poll output retained at $output)"
   fi
