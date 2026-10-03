@@ -11,7 +11,7 @@ import (
 )
 
 func lockObservationFile(file *os.File) error {
-	deadline := time.Now().Add(100 * time.Millisecond)
+	deadline := time.Now().Add(observationLockBudget)
 	for {
 		err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &windows.Overlapped{})
 		if err == nil {

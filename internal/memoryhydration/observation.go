@@ -31,6 +31,9 @@ const (
 	maximumObservationBytes         = 512 * 1024
 )
 
+// observationLockBudget bounds hook contention; only serial tests may override it.
+var observationLockBudget = 100 * time.Millisecond
+
 // Observation contains only timing, sizes, flags, and a closed outcome. It must
 // never acquire prompt, query, context, identity, credentials, or error text.
 type Observation struct {

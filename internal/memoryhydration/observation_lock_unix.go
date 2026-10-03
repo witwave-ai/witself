@@ -10,7 +10,7 @@ import (
 )
 
 func lockObservationFile(file *os.File) error {
-	deadline := time.Now().Add(100 * time.Millisecond)
+	deadline := time.Now().Add(observationLockBudget)
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
