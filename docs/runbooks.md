@@ -1305,7 +1305,8 @@ cell. Each wave forwards the selected pair to `roll-cell.sh` as
 `--cells` pair requires `--no-schema-change`.
 The script checks `gh auth status`, namespace access to `argocd` in each context
 with a 20-second request timeout, a published `v<VERSION>` release, and a
-successful latest `release.yml` run on that tag. GitHub can list that run
+successful latest `release.yml` push run on that tag (a later manually
+dispatched run on the tag does not hide it). GitHub can list that run
 late, or as still running for a moment after it has completed: while no run
 is listed or the latest push run has not completed, the train reads it again
 every poll interval, at most six times (about a minute and a half at the
@@ -1378,11 +1379,12 @@ deadline. The `git fetch` of the post-merge wait does the same, and so do the
 train's one-shot network reads, each within eight poll intervals of its own
 (two minutes at the default): the release, release run and `argocd` reads of
 the preconditions, every other `git fetch`, the cleanup's `git ls-remote`,
-both pull request reads around the merge and both serving `/v1/version`
-reads. After the merge, a pull request that GitHub still shows as open is
-read again as the release run is. Not retried: `gh auth status`, the live
-version guard's `kubectl` reads and the health step. A failed read is never
-taken as an answer, and an interrupted read or any write is never retried.
+both pull request reads around the merge, both serving `/v1/version` reads
+and the live version guard's Argo application, pod and deployment reads.
+After the merge, a pull request that GitHub still shows as open is read again
+as the release run is. Not retried: `gh auth status` and the health step. A
+failed read is never taken as an answer, and an interrupted read or any write
+is never retried.
 The train creates its run directory before its first network read, so a stop
 in the preconditions names it too. Apart from the two CI waits and these
 retries, any failed step stops the train and preserves the current

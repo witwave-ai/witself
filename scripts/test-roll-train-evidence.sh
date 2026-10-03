@@ -147,6 +147,8 @@ source "$TRAIN"
 main "$VERSION" --cells "$BACKUP,civo-prod-use1-serving" --backup-evidence "$EVIDENCE_A" \
   --backup-evidence "$PRODUCTION_EVIDENCE" --dry-run >"$TEST_ROOT/output"
 [ "${GATE_ARGS[*]}" = "--evidence-cells $BACKUP,civo-prod-use1-serving" ] || fail 'train lost selected evidence pair'
+RUN_DIR="$TEST_ROOT/run"
+mkdir -p "$RUN_DIR"
 yq() { "$ROLL_TRAIN_REAL_YQ" "$@"; }
 PIN_ROOT="$TEST_ROOT/pin-repo"
 PIN_VALUES="$PIN_ROOT/.gitops/cells/$BACKUP/values.yaml"

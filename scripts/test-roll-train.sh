@@ -285,7 +285,13 @@ case "$1 $2" in
         fi
         conclusion=success
         [ "$SCENARIO" != release_failure ] || conclusion=failure
-        printf '[{"status":"completed","conclusion":"%s","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"push"}]\n' "$conclusion"
+        event=push
+        if [ "$SCENARIO" = release_dispatch_first ] && [[ " $* " != *' --event push '* ]]; then
+          # The newest tag run is a successful manual dispatch. With limit 1,
+          # the older successful push appears only when the query filters it.
+          event=workflow_dispatch
+        fi
+        printf '[{"status":"completed","conclusion":"%s","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":"%s"}]\n' "$conclusion" "$event"
         ;;
       *ci.yml*)
         [[ " $* " = *' --branch main '* ]] && [[ " $* " = *' --event push '* ]] || exit 64
@@ -839,6 +845,28 @@ assert_roll_cell_calls() {
     fail "$label"
   fi
 }
+
+# Check both query arguments and behavior independently so removing the event
+# filter proves both regressions in one mutation run.
+reset_case
+SCENARIO=release_dispatch_first
+release_dispatch_status=0
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" \
+  >"$TEST_ROOT/output" 2>&1 || release_dispatch_status=$?
+release_dispatch_failed=0
+release_query=$(grep -F '<--workflow> <release.yml>' "$TEST_LOG" || true)
+if [[ "$release_query" != *'<--event> <push>'* ]]; then
+  printf 'roll train test: FAIL: release run query did not pass --event push\n' >&2
+  release_dispatch_failed=1
+fi
+if [ "$release_dispatch_status" -ne 0 ] || \
+  [ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -ne 2 ] || \
+  ! grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output"; then
+  printf 'roll train test: FAIL: release_dispatch_first did not complete both waves (train exit %s)\n' "$release_dispatch_status" >&2
+  release_dispatch_failed=1
+fi
+[ "$release_dispatch_failed" -eq 0 ] || fail 'release push query checks failed'
+printf 'roll train test: release query passes --event push and a newer manual dispatch does not block either wave\n'
 
 for scenario in backup_chart_newer backup_image_newer partial_pin backup_live_newer \
   newer_pod_spec newer_running_image newer_deployment malformed_running_inventory unsafe_merge_driver; do
