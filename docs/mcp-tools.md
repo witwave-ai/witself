@@ -1397,11 +1397,12 @@ memory, pre-existing exports, or backups.
 
 Return the effective token-derived agent identity, credential profile, plan
 schema/primitives, permissions, hard limits, and the token-bound agent's
-value-free `memory_capacity`. Curator MCP profiles call this before serving
-stdio and require the returned credential profile to match exactly. It is a
-credential-specific authorization document, not a deployment feature
-advertisement. Restricted curator profiles use this projection because ordinary
-memory routes remain closed to them.
+value-free `memory_capacity`. The `limits` object includes `min_page_bytes`
+(8192) and `max_page_bytes` (65536); absent fields from older cells are unknown.
+Curator MCP profiles call this before serving stdio and require the returned
+credential profile to match exactly. It is a credential-specific authorization
+document, not a deployment feature advertisement. Restricted curator profiles
+use this projection because ordinary memory routes remain closed to them.
 
 ### `witself.memory.curation.requests`
 
@@ -1459,11 +1460,12 @@ makes a semantic memory decision.
 
 Read one page of the immutable inputs frozen for an active run. Input is
 `run_id`, the current positive fence, optional opaque `cursor`, `limit`
-(1-200, default 50), and optional `max_bytes` (8192-65536; default 65536,
-the server page budget): the most hydrated input bytes one page carries,
-applied by the same byte budget that already bounds every page. A smaller
-value only raises the number of pages that cover the same frozen inputs; a
-first input larger than it is still delivered alone, with oversized entries
+(1-200, default 50), and optional `max_bytes` (8192-65536; default 24576 in
+this tool; pass 65536 for the server's full page budget): the most hydrated
+input bytes one page carries, applied by the same byte budget that already
+bounds every page. A smaller value only raises the number of pages that cover
+the same frozen inputs; a first input larger than it is still delivered alone,
+with oversized entries
 elided as always, so the cursor always advances. A value outside the range
 is refused with `max_bytes must be between 8192 and 65536`. Pass a smaller
 value when your runtime truncates or spills large tool results. This tool is

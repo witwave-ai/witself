@@ -772,7 +772,7 @@ Initial route groups:
 | `/v1/memory-curation-requests` | Implemented agent-self curation work queue: create/coalesce, list, inspect, and claim due work. List accepts `exclude_sensitive=true`: full tokens omit explicitly sensitive scopes but retain separately authorized transcript scopes; restricted profiles always omit both. |
 | `/v1/memory-curation-runs` | Implemented fenced runs: inspect frozen inputs, renew, plan, apply, cancel, abandon, and guarded rollback. |
 | `/v1/memory-curation-status` | Implemented value-free owner-lane/request/run status, optionally for one run. |
-| `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, server limits, and value-free active-memory capacity for a curator. |
+| `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, server limits, and value-free active-memory capacity for a curator. The `limits` object includes `min_page_bytes` (8192) and `max_page_bytes` (65536). |
 | `/v1/facts`, `/v1/fact-candidates`, `/v1/fact-occurrences` | Agent-owned fact set/get/list/history, candidate review, upcoming lookup, capacity status, and permanent delete. Standalone `:primary` promotion remains target. |
 | `/v1/policies` | Target, not implemented: cross-agent policy create/list/show/delete/test. |
 | `/v1/groups` | Target, not implemented: security group lifecycle and membership. |

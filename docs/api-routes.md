@@ -1229,11 +1229,12 @@ audit events; read-only recall does neither:
   principal, token id/profile/expiry, exact allowed operations, plan schema,
   inference boundary, server limits, and the same value-free
   `memory_capacity` projection for the presented credential. Clients must use
-  it instead of treating deployment-wide `/v1/capabilities` as an authorization
-  decision. Plan acceptance reports count-only `active_memory_delta` and
-  `projected_active_memories`; apply recomputes the projection from locked live
-  heads and refuses a
-  net-growing over-cap plan atomically.
+  it instead of treating deployment-wide `/v1/capabilities` as an
+  authorization decision. Its `limits` object includes `min_page_bytes` (8192)
+  and `max_page_bytes` (65536). Plan acceptance reports count-only
+  `active_memory_delta` and `projected_active_memories`; apply recomputes the
+  projection from locked live heads and refuses a net-growing over-cap plan
+  atomically.
 - `POST /v1/memories/{memory_id}:forget` appends a reversible `forgotten`
   version. `DELETE /v1/memories/{memory_id}` is the guarded physical purge.
 - `POST /v1/memories/{memory_id}:restore` appends an active version from a valid

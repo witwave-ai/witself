@@ -112,8 +112,11 @@ type MemoryCurationPreflightPermissions struct {
 }
 
 // MemoryCurationPreflightLimits contains the server-enforced curation bounds.
+// Zero page-byte bounds mean unknown when an older server omits them.
 type MemoryCurationPreflightLimits struct {
 	MaxPageSize          int   `json:"max_page_size"`
+	MinPageBytes         int   `json:"min_page_bytes,omitempty"`
+	MaxPageBytes         int   `json:"max_page_bytes,omitempty"`
 	MaxMemories          int   `json:"max_memories"`
 	MaxEvidence          int   `json:"max_evidence"`
 	MaxTranscriptEntries int   `json:"max_transcript_entries"`
