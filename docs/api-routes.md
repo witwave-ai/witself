@@ -107,15 +107,39 @@ Heartbeat responses use `Content-Type: application/json` and
 `Cache-Control: no-store, no-transform`. The complete body is one JSON document
 with leading whitespace; clients must inspect `validated: true`, not just the
 HTTP status. Send the drill request without `Accept-Encoding` so the heartbeat
-bytes are not held by edge compression.
+bytes are not held by edge compression. The heartbeat keeps an intermediary
+that drops idle connections from closing a silent request; it does not make a
+disconnect safe.
 
-The control plane never cancels a drill because the client went away, and in
-the two observed drops (2026-09-30, 2026-10-01) the drill completed minutes after
-the disconnect. Completion after a disconnect is not a platform guarantee in
-either framing, so read `account.restore_drill` and the catalog `validations`
-entry through the per-account status route. A `validations` entry for that
+The drill runs inside the request that started it. An active client
+disconnect (the client closes the connection, is interrupted, or its own
+timeout fires) cancels the drill in either framing, as proven on 2026-10-03
+with the client cut at 60 seconds: Cloudflare ends the request's remaining
+work (it allows at most 30 more seconds of `ctx.waitUntil` work after a client
+disconnects, far less than a drill), any import already running on the drill
+cell is cancelled and rolled back, and the record stays `running` until its
+30-minute deadline and then reads `failed` with `finished_at: null`. The two
+earlier drops after which the drill still completed (2026-09-30, 2026-10-01)
+were most likely connections lost where the control plane did not see the
+disconnect; do not rely on that. Keep the client connected for the whole
+drill, with a client timeout of 30 minutes, the record's deadline. A client
+that waits longer can keep a drill running after its record reads `failed`;
+do not start another drill until the earlier request has ended.
+
+After a lost or unclear answer, do not re-POST while
+`account.restore_drill.state` is `running` (the answer is HTTP 409 with the
+record); read `account.restore_drill` and the catalog `validations` entry
+through the per-account status route. First confirm that the record belongs
+to the request: its `drill_id` equals the `X-Witself-Restore-Drill-ID` header
+when the answer carried one; otherwise its `backup_id` and `target_cell` match
+the request and its `started_at` is not earlier than the time the request was
+sent. An error answer without the drill-id header recorded no drill, and a
+record that fails both tests is not the request's: fix the cause and send the
+request again. For the request's own record, a `validations` entry for that
 backup and target cell with `validated_at >= restore_drill.started_at` means
-the drill succeeded regardless of the record's state.
+the drill succeeded regardless of the record's state. A fix that takes the
+client connection out of the drill is tracked in
+[#648](https://github.com/witwave-ai/witself/issues/648).
 
 `POST /v1/accounts/{id}:validate-backup` keeps the dedicated cell backup bearer,
 `X-Witself-Backup-ID`, and `X-Witself-Backup-Validation: true`. New control planes

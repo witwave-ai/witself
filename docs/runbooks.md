@@ -3880,11 +3880,12 @@ committed:
 
 ```sh
 BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
+SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-curl --fail-with-body -m 1500 -X POST \
+curl --fail-with-body -i -m 1800 -X POST \
   -H "Authorization: Bearer ${FLEET_TOKEN}" \
   -H "Content-Type: application/json" \
-  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\",\"heartbeat\":true}" \
+  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\"}" \
   "${CONTROL_PLANE}/v1/backups:restore-drill"
 ```
 
@@ -3893,23 +3894,48 @@ cell in that exact backup's catalog entry. Confirm the account still has no row
 in the drill database and that its live directory route is unchanged. A generic
 2xx from the cell is not accepted as proof.
 
-This opt-in heartbeat answer sends HTTP 200 after pre-flight, a newline every
-ten seconds, then one terminal JSON object. Send the request without
-`Accept-Encoding` (as above) so edge compression does not hold heartbeat bytes;
-`jq` accepts the leading newlines. HTTP 200 alone does not prove success.
-If the answer is lost or is not `validated: true`, poll
+The drill runs inside this request, so keep it connected until the answer
+arrives: run it from a shell and host that stay up for 30 minutes, keep `-m`
+at 1800 (the record's 30-minute deadline), and do not interrupt it. An active
+client disconnect (Ctrl-C, a closed terminal, or a shorter `-m`) cancels the
+drill in either framing, as proven on 2026-10-03 with the client cut at 60
+seconds: any import already running on the drill cell is cancelled and rolled
+back, and the record stays `running` until its 30-minute deadline and then
+reads `failed` with `finished_at: null`. A longer `-m` can keep a drill running
+after its record reads `failed`. The two earlier drops after which the drill
+still completed (2026-09-30, 2026-10-01) were most likely connections lost
+where the control plane did not see the disconnect; do not rely on that.
+
+If the answer is lost or is not `validated: true`, do not re-POST while the
+drill may still be running: poll
 `GET /v1/backups/status?account_id=${ACCOUNT_ID}` until
 `account.restore_drill.state` is not `running` (at most 30 minutes from the
-record's `started_at`). Do not re-POST while it is running: a concurrent drill
-returns HTTP 409 with the current record. Read its `state` and `error`, then
-check the selected backup's catalog `validations` entry for the target cell.
-An entry with `validated_at >= restore_drill.started_at` means the drill
-succeeded regardless of the record's state. A failed record with
-`finished_at: null` means the deadline rule applied, not that the driver
-reported a failure. The control plane never cancels a drill because the client
-went away; in the two observed drops (2026-09-30, 2026-10-01), the drill
-completed minutes after disconnect, but that continuation is not a platform
-guarantee in either framing.
+record's `started_at`); a POST meanwhile returns HTTP 409 with the current
+record. Then confirm that the record is this attempt's: its `drill_id` equals
+the `X-Witself-Restore-Drill-ID` header when the answer carried one (`-i`
+prints it); otherwise its `backup_id` and `target_cell` match the request and
+its `started_at` is not earlier than `SENT_AT` (compare to the second). An
+error answer without that header, or a record that fails both tests, means
+this attempt recorded no drill: fix the cause and run the block again. For
+this attempt's record, read its `state` and `error`, then check the selected
+backup's catalog `validations` entry for the target cell. An entry with
+`validated_at >= restore_drill.started_at` means the drill succeeded
+regardless of the record's state. A failed record with `finished_at: null`
+means the deadline rule applied (the drill never reported, as after an active
+disconnect), not that the driver reported a failure. Start a new drill only
+after the record is no longer `running` and the earlier `curl` has exited.
+
+This block uses the default framing on purpose: the silent request survived
+both observed lost connections, and a failure after the drill is recorded
+still returns a real HTTP 409 or 502 that `--fail-with-body` reports. The
+opt-in `heartbeat: true` answers HTTP 200 after pre-flight, a newline every ten
+seconds, then one terminal JSON object, so HTTP 200 alone proves nothing. It
+keeps an intermediary that drops idle connections from closing a silent
+request, but it does not make a disconnect safe, and its writes may let the
+edge notice a lost connection that a silent request survives. Use it only
+behind such an intermediary, with no `Accept-Encoding` header. A fix that takes
+the client connection out of the drill is tracked in
+[#648](https://github.com/witwave-ai/witself/issues/648).
 
 After the manual path is healthy, activate the operator-controlled Worker
 secret:
