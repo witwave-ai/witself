@@ -27,6 +27,7 @@ type fakeCurationMCPBackend struct {
 	fence           int64
 	cursor          string
 	limit           int
+	maxBytes        int
 	renew           client.RenewMemoryCurationInput
 	planCalls       int
 	plan            client.PlanMemoryCurationInput
@@ -86,8 +87,9 @@ func (b *fakeCurationMCPBackend) GetMemoryCurationRun(_ context.Context, id stri
 	return b.runOutput(id), nil
 }
 
-func (b *fakeCurationMCPBackend) GetMemoryCurationRunInputs(_ context.Context, runID string, fence int64, cursor string, limit int) (client.MemoryCurationRunInputPage, error) {
-	b.runID, b.fence, b.cursor, b.limit = runID, fence, cursor, limit
+func (b *fakeCurationMCPBackend) GetMemoryCurationRunInputs(_ context.Context, runID string, opts client.MemoryCurationRunInputOptions) (client.MemoryCurationRunInputPage, error) {
+	b.runID, b.fence, b.cursor, b.limit = runID, opts.FencingGeneration, opts.Cursor, opts.Limit
+	b.maxBytes = opts.MaxBytes
 	inputs := b.outputRunInputs
 	if inputs == nil {
 		inputs = []client.MemoryCurationRunInput{}

@@ -118,8 +118,11 @@ func configureMemoryCurationMutations(cfg *server.Config, st *store.Store) {
 		return result, mapMemoryCurationError(err)
 	}
 	cfg.GetMemoryCurationRunInputs = func(ctx context.Context, p server.DomainPrincipal, runID string, opts server.MemoryCurationRunInputOptions) (any, error) {
-		result, err := st.GetCurationRunInputs(ctx, toStorePrincipal(p), runID,
-			opts.FencingGeneration, opts.Cursor, opts.Limit)
+		result, err := st.GetCurationRunInputPage(ctx, toStorePrincipal(p), runID,
+			store.MemoryCurationRunInputOptions{
+				FencingGeneration: opts.FencingGeneration, Cursor: opts.Cursor,
+				Limit: opts.Limit, MaxBytes: opts.MaxBytes,
+			})
 		return result, mapMemoryCurationError(err)
 	}
 	cfg.GetMemoryCurationPlan = func(ctx context.Context, p server.DomainPrincipal, runID string, fencingGeneration int64) (any, error) {

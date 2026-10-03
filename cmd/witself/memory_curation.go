@@ -273,6 +273,7 @@ func memoryCurateShow(args []string) int {
 	fence := fs.Int64("fence", 0, "current fencing generation")
 	cursor := fs.String("cursor", "", "opaque input cursor returned by start or the prior page")
 	limit := fs.Int("limit", 50, "maximum materialized inputs in this page")
+	maxBytes := fs.Int("max-bytes", 0, "maximum page bytes, 8192-65536; 0 means the server page budget")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -280,11 +281,11 @@ func memoryCurateShow(args []string) int {
 	if runID == "" && fs.NArg() == 1 {
 		runID = strings.TrimSpace(fs.Arg(0))
 	} else if fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself memory curate show RUN_ID --fence N [--cursor CURSOR]")
+		fmt.Fprintln(os.Stderr, "usage: witself memory curate show RUN_ID --fence N [--cursor CURSOR] [--max-bytes N]")
 		return 2
 	}
 	if runID == "" || *fence < 1 || *limit < 1 || *limit > 200 {
-		fmt.Fprintln(os.Stderr, "usage: witself memory curate show RUN_ID --fence N [--cursor CURSOR]")
+		fmt.Fprintln(os.Stderr, "usage: witself memory curate show RUN_ID --fence N [--cursor CURSOR] [--max-bytes N]")
 		return 2
 	}
 	ctx := context.Background()
@@ -293,8 +294,11 @@ func memoryCurateShow(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	page, err := client.GetMemoryCurationRunInputs(ctx, conn.Endpoint, conn.Token, runID,
-		*fence, strings.TrimSpace(*cursor), *limit)
+	page, err := client.GetMemoryCurationRunInputPage(ctx, conn.Endpoint, conn.Token, runID,
+		client.MemoryCurationRunInputOptions{
+			FencingGeneration: *fence, Cursor: strings.TrimSpace(*cursor), Limit: *limit,
+			MaxBytes: *maxBytes,
+		})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: get memory curation inputs: %v\n", err)
 		return 1

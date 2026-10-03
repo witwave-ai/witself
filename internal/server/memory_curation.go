@@ -21,6 +21,8 @@ const (
 	maxMemoryCurationRollbackRequestBytes int64 = 1 << 20
 	maxMemoryCurationCursorBytes                = 8192
 	maxMemoryCurationPageSize                   = 200
+	minMemoryCurationPageBytes                  = 8192
+	maxMemoryCurationPageBytes                  = 65536
 	maxMemoryCurationJSONDepth                  = 64
 )
 
@@ -101,10 +103,15 @@ type StartMemoryCurationRequest struct {
 }
 
 // MemoryCurationRunInputOptions selects a fenced page of inputs for an active run.
+// MaxBytes bounds the hydrated input bytes of one page, from
+// minMemoryCurationPageBytes to maxMemoryCurationPageBytes (which mirror the
+// store's budgets); zero leaves the server page budget in force. It is a
+// per-request choice that is never stored.
 type MemoryCurationRunInputOptions struct {
 	FencingGeneration int64
 	Cursor            string
 	Limit             int
+	MaxBytes          int
 }
 
 // RenewMemoryCurationRequest extends the lease for a fenced active run.
@@ -449,7 +456,7 @@ func getMemoryCurationRunInputsHandler(
 	get func(context.Context, DomainPrincipal, string, MemoryCurationRunInputOptions) (any, error),
 ) http.HandlerFunc {
 	return requireMemoryCurationAgent(auth, memoryCurationPermissionInputs, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
-		if err := requireMemoryCurationQuery(r.URL.Query(), "fencing_generation", "cursor", "limit"); err != nil {
+		if err := requireMemoryCurationQuery(r.URL.Query(), "fencing_generation", "cursor", "limit", "max_bytes"); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -468,8 +475,13 @@ func getMemoryCurationRunInputsHandler(
 			writeJSONError(w, http.StatusBadRequest, "cursor is too long")
 			return
 		}
+		maxBytes, err := parseMemoryCurationMaxBytes(r.URL.Query().Get("max_bytes"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		result, err := get(r.Context(), p, strings.TrimSpace(r.PathValue("run")), MemoryCurationRunInputOptions{
-			FencingGeneration: fence, Cursor: cursor, Limit: limit,
+			FencingGeneration: fence, Cursor: cursor, Limit: limit, MaxBytes: maxBytes,
 		})
 		if writeMemoryCurationError(w, err) {
 			return
@@ -880,6 +892,20 @@ func parseMemoryCurationLimit(raw string) (int, error) {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 1 || value > maxMemoryCurationPageSize {
 		return 0, fmt.Errorf("limit must be between 1 and %d", maxMemoryCurationPageSize)
+	}
+	return value, nil
+}
+
+// parseMemoryCurationMaxBytes reads the optional per-page input byte bound.
+// Empty means the server page budget; the store resolves zero to it.
+func parseMemoryCurationMaxBytes(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minMemoryCurationPageBytes || value > maxMemoryCurationPageBytes {
+		return 0, fmt.Errorf("max_bytes must be between %d and %d", minMemoryCurationPageBytes, maxMemoryCurationPageBytes)
 	}
 	return value, nil
 }

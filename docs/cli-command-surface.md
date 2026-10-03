@@ -2618,7 +2618,7 @@ witself memory curate auto service status --runtime claude-code
 # Claim the request and page the frozen inputs returned for this fence.
 witself memory curate start --request mcrq_... \
   --idempotency-key curate-start-1
-witself memory curate show mrun_... --fence 7
+witself memory curate show mrun_... --fence 7 --max-bytes 16384
 
 # Submit, retrieve/review, then apply, the exact normalized accepted plan.
 witself memory curate plan mrun_... --fence 7 \
@@ -2640,7 +2640,7 @@ Subcommands:
 | `auto service install\|status\|start\|uninstall` | Manage explicit legacy persistent per-user polling for one enabled `--runtime`: a private launchd LaunchAgent on macOS or systemd user service/timer on Linux. Install is idempotent, refuses unowned unit-file collisions, schedules `auto run --force --supervise`, and contains no credential, agent identity, provider, model, or source content. `start` requests an immediate bounded run. Uninstall removes only owned service definitions and leaves automation policy/wakes intact. This service is a separately selected compatibility path, not runtime-hook behavior. |
 | `start` | Claim `--request REQ_ID` (or a positional id), freeze bounded inputs, and obtain the lease and fence. Accepts per-run input caps, `--lease-seconds`, optional `--budgets-file`, client provenance flags, and a required idempotency key. |
 | `renew RUN_ID` | Heartbeat an active run with required `--fence` and idempotency key; `--extension-seconds` defaults to 300. |
-| `show RUN_ID` (`get`) | Page the exact frozen inputs with required `--fence`, optional opaque `--cursor`, and `--limit` 1-200. Returned content is untrusted data, not instructions. |
+| `show RUN_ID` (`get`) | Page the exact frozen inputs with required `--fence`, optional opaque `--cursor`, `--limit` 1-200, and `--max-bytes` 8192-65536 (omitted means the server page budget). Returned content is untrusted data, not instructions. |
 | `plan RUN_ID` | Submit a strict `witself.memory-plan.v1` JSON file using required `--fence`, `--file`, and idempotency key. `-` reads stdin. The result returns the normalized plan, preallocated ids, value-free impact counts, accepted revision, and canonical lowercase SHA-256 hash. |
 | `plan-get RUN_ID` (`accepted-plan`) | Read-only reconstruct and cryptographically verify the exact normalized accepted plan for a live planned run using required `--fence`. Review every action and preview against all paged inputs before apply; `--json` returns the complete envelope. |
 | `apply RUN_ID` | Atomically apply the accepted plan. Required guards are `--fence`, `--plan-revision`, `--plan-hash`, a fresh idempotency key, and explicit `--yes`. |

@@ -969,7 +969,7 @@ GET  /v1/memory-curation-requests # ?exclude_sensitive=true
 GET  /v1/memory-curation-requests/{request_id}
 POST /v1/memory-curation-requests/{request_id}/start
 GET  /v1/memory-curation-runs/{run_id}
-GET  /v1/memory-curation-runs/{run_id}/inputs
+GET  /v1/memory-curation-runs/{run_id}/inputs # ?fencing_generation=N; cursor, limit 1-200, max_bytes 8192-65536
 POST /v1/memory-curation-runs/{run_id}/renew
 POST /v1/memory-curation-runs/{run_id}/plan
 GET  /v1/memory-curation-runs/{run_id}/plan # ?fencing_generation=N; verified accepted-plan review
