@@ -1807,4 +1807,5 @@ PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-readiness.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-values.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-downgrade.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-merge-fence.sh"
+PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-poll.sh"
 printf 'roll train tests passed\n'
