@@ -47,6 +47,24 @@ type Config struct {
 	ReportAccountImportJob func(accountID, evacuationID, outcome string, duration time.Duration)
 	accountImportJobs      *accountImportJobs
 
+	// BeginBackupValidation pins one database session holding the account's
+	// backup-validation advisory lock for the job and its retained result.
+	BeginBackupValidation func(ctx context.Context, accountID, backupID string) (BackupValidationLease, error)
+	// BackupValidationInProgress reports whether any session holds the account's
+	// backup-validation lock (pg_locks); it never takes the lock.
+	BackupValidationInProgress func(ctx context.Context, accountID string) (bool, error)
+	// ReportBackupValidationJob emits value-free start (outcome "") and finish diagnostics.
+	ReportBackupValidationJob func(accountID, validationID, outcome string, download, total time.Duration)
+	// BackupValidationJobTimeout bounds download plus validation; zero defaults to 60m.
+	BackupValidationJobTimeout time.Duration
+	// BackupValidationResultRetention bounds how long a finished result and its
+	// session are kept for status reads; zero defaults to 30m.
+	BackupValidationResultRetention time.Duration
+	// BackupValidationJobConcurrency bounds running validations per replica and,
+	// separately, retained results per replica; zero defaults to one.
+	BackupValidationJobConcurrency int
+	backupValidationJobs           *backupValidationJobs
+
 	CellName    string // startup cell identity used by backup and export handlers
 	APIAddr     string // public /v1 API
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
@@ -1202,12 +1220,19 @@ const (
 	// synchronous pull, and protocol 1 supports bounded legacy push.
 	AccountEvacuationProtocolVersion = 3
 
+	// BackupValidationProtocolVersion is advertised by /v1/version. Protocol 1
+	// supports synchronous :validate-backup only; protocol 2 adds
+	// :start-validate-backup and :validate-backup-status.
+	BackupValidationProtocolVersion = 2
+
 	// AccountEvacuationIDHeader carries the opaque Durable Object move epoch
 	// on streaming export/import and restore-maintenance requests.
 	AccountEvacuationIDHeader = "X-Witself-Evacuation-ID"
 	// AccountBackupIDHeader binds an export/restore request to one exact
 	// periodic backup object without overloading the evacuation epoch.
 	AccountBackupIDHeader = "X-Witself-Backup-ID"
+	// BackupValidationIDHeader binds an asynchronous validation to one drill.
+	BackupValidationIDHeader = "X-Witself-Validation-ID"
 	// AccountBackupCellHeader carries the control plane's registered source
 	// cell name for the archive manifest and its exact export acknowledgement.
 	AccountBackupCellHeader = "X-Witself-Backup-Cell"
@@ -2304,6 +2329,9 @@ func Run(ctx context.Context, cfg Config) error {
 	jobs := newAccountImportJobs(ctx, cfg.AccountImportJobConcurrency)
 	defer jobs.cancel()
 	instrumentedConfig.accountImportJobs = jobs
+	validationJobs := newBackupValidationJobs(ctx, cfg.BackupValidationJobConcurrency, cfg.BackupValidationResultRetention)
+	defer validationJobs.cancel()
+	instrumentedConfig.backupValidationJobs = validationJobs
 	defs := []struct {
 		name, addr string
 		handler    http.Handler
@@ -2355,10 +2383,12 @@ func Run(ctx context.Context, cfg Config) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	jobs.cancel()
+	validationJobs.cancel()
 	for _, r := range servers {
 		_ = r.srv.Shutdown(shutCtx)
 	}
 	jobs.wait(shutCtx)
+	validationJobs.wait(shutCtx)
 	return runErr
 }
 
@@ -2400,10 +2430,11 @@ func apiMux(cfg Config) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(
 			w,
-			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d,\"store_schema_version\":%d}\n",
+			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d,\"store_schema_version\":%d,\"backup_validation_protocol\":%d}\n",
 			version.Version, version.Commit, version.Date,
 			AccountEvacuationProtocolVersion,
 			AccountProvisionProtocolVersion, store.SchemaVersion(),
+			BackupValidationProtocolVersion,
 		)
 	})
 	agentEmailReceive := cfg.AgentEmailReceive
@@ -2505,7 +2536,13 @@ func apiMux(cfg Config) http.Handler {
 			_, restoreBackup := pathActionID(
 				r.URL.Path, "/v1/accounts/", "restore-backup",
 			)
-			if exportBackup || validateBackup || restoreBackup {
+			_, startValidation := pathActionID(
+				r.URL.Path, "/v1/accounts/", "start-validate-backup",
+			)
+			_, validationStatus := pathActionID(
+				r.URL.Path, "/v1/accounts/", "validate-backup-status",
+			)
+			if exportBackup || validateBackup || restoreBackup || startValidation || validationStatus {
 				// Always send backup-shaped paths through the backup handler.
 				// It returns 404 before authentication when a route is gated
 				// off, and never lets ProvisionToken authorize backup work.
@@ -5858,6 +5895,12 @@ func accountBackupHandler(cfg Config) http.HandlerFunc {
 }
 
 func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http.HandlerFunc {
+	if cfg.backupValidationJobs == nil {
+		cfg.backupValidationJobs = newBackupValidationJobs(context.Background(), cfg.BackupValidationJobConcurrency, cfg.BackupValidationResultRetention)
+	}
+	jobClient := newBackupArchiveClientWithTimeout(backupValidationJobTimeout(cfg))
+	// Preserve injected transport policy for handler tests and custom trust roots.
+	jobClient.Transport = client.Transport
 	return func(w http.ResponseWriter, r *http.Request) {
 		setAuthenticatedNoStoreDefault(w)
 		exportAccountID, exportBackup := pathActionID(
@@ -5866,11 +5909,21 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 		validateAccountID, validateBackup := pathActionID(
 			r.URL.Path, "/v1/accounts/", "validate-backup",
 		)
+		startAccountID, startValidation := pathActionID(
+			r.URL.Path, "/v1/accounts/", "start-validate-backup",
+		)
+		statusAccountID, validationStatus := pathActionID(
+			r.URL.Path, "/v1/accounts/", "validate-backup-status",
+		)
 		exportBackup = exportBackup && cfg.StreamAccountBackup != nil
 		validateBackup = validateBackup &&
 			cfg.BackupValidationEnabled &&
 			cfg.ValidateAccountBackup != nil
-		if !exportBackup && !validateBackup {
+		asyncValidationEnabled := cfg.BackupValidationEnabled && cfg.ValidateAccountBackup != nil &&
+			cfg.BeginBackupValidation != nil && cfg.BackupValidationInProgress != nil
+		startValidation = startValidation && asyncValidationEnabled
+		validationStatus = validationStatus && asyncValidationEnabled
+		if !exportBackup && !validateBackup && !startValidation && !validationStatus {
 			writeJSONError(w, http.StatusNotFound, "unknown backup action")
 			return
 		}
@@ -5932,6 +5985,15 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 					)
 				}
 			}
+			return
+		}
+
+		if startValidation || validationStatus {
+			accountID := statusAccountID
+			if startValidation {
+				accountID = startAccountID
+			}
+			backupValidationAction(w, r, cfg, jobClient, accountID, backupID, startValidation)
 			return
 		}
 
@@ -7418,6 +7480,10 @@ func downloadImportArchive(r *http.Request, client *http.Client, u *neturl.URL, 
 }
 
 func downloadImportArchiveContext(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64) (*os.File, error) {
+	return downloadArchiveSpool(ctx, client, u, token, size, "witself-account-import-*.tar.gz")
+}
+
+func downloadArchiveSpool(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64, pattern string) (*os.File, error) {
 	download, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, errors.New("invalid archive download request")
@@ -7431,7 +7497,7 @@ func downloadImportArchiveContext(ctx context.Context, client *http.Client, u *n
 	if response.StatusCode != http.StatusOK || response.ContentLength != size {
 		return nil, errors.New("archive download status or size mismatch")
 	}
-	spool, err := os.CreateTemp("", "witself-account-import-*.tar.gz")
+	spool, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return nil, errors.New("archive spool creation failed")
 	}

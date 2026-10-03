@@ -851,3 +851,77 @@ func TestAccountImportJobLogValueFree(t *testing.T) {
 		t.Fatal("unexpected job diagnostic shape")
 	}
 }
+
+func TestMapBackupValidationError(t *testing.T) {
+	other := errors.New("unclassified validation failure")
+	for _, tc := range []struct {
+		name     string
+		in, want error
+	}{
+		{"nil", nil, nil},
+		{"existing account", store.ErrAccountExists, server.ErrConflict},
+		{"newer archive", export.ErrArchiveTooNew, server.ErrArchiveTooNew},
+		{"audit contradiction", store.ErrImportAuditContradiction, server.ErrBadArchive},
+		{"account mismatch", store.ErrArchiveAccountMismatch, server.ErrBadArchive},
+		{"archive content", store.ErrArchiveContent, server.ErrBadArchive},
+		{"corrupt archive", export.ErrCorrupt, server.ErrBadArchive},
+		{"other", other, other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapBackupValidationError(tc.in); got != tc.want {
+				t.Fatalf("map = %v, want %v", got, tc.want)
+			}
+			if tc.in != nil {
+				wrapped := fmt.Errorf("validation: %w", tc.in)
+				want := tc.want
+				if tc.in == other {
+					want = wrapped
+				}
+				if got := mapBackupValidationError(wrapped); got != want {
+					t.Fatalf("wrapped map = %v, want %v", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestMapBackupValidationLeaseError(t *testing.T) {
+	other := errors.New("unclassified lease failure")
+	wrappedOther := fmt.Errorf("lease: %w", other)
+	for _, tc := range []struct {
+		name     string
+		in, want error
+	}{
+		{"nil", nil, nil},
+		{"held", store.ErrBackupValidationLeaseHeld, server.ErrBackupValidationLeaseHeld},
+		{"unavailable", store.ErrBackupValidationLeaseUnavailable, server.ErrBackupValidationLeaseUnavailable},
+		{"wrapped held", fmt.Errorf("lease: %w", store.ErrBackupValidationLeaseHeld), server.ErrBackupValidationLeaseHeld},
+		{"wrapped unavailable", fmt.Errorf("lease: %w", store.ErrBackupValidationLeaseUnavailable), server.ErrBackupValidationLeaseUnavailable},
+		{"other", other, other},
+		{"wrapped other", wrappedOther, wrappedOther},
+		{"existing validation mapping", store.ErrAccountExists, server.ErrConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapBackupValidationLeaseError(tc.in); got != tc.want {
+				t.Fatalf("mapBackupValidationLeaseError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLogBackupValidationJobQuotesFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, outcome, want string
+	}{
+		{"start", "", `witself-server: account backup validation job started account_id="acc\nforged" cell="cell\"forged" validation_id="validation\nforged"` + "\n"},
+		{"finish", "validated\nforged", `witself-server: account backup validation job account_id="acc\nforged" cell="cell\"forged" validation_id="validation\nforged" outcome="validated\nforged" download=1s duration=2s` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b bytes.Buffer
+			logBackupValidationJob(&b, "acc\nforged", "cell\"forged", "validation\nforged", tc.outcome, time.Second, 2*time.Second)
+			if b.String() != tc.want || strings.Count(b.String(), "\n") != 1 {
+				t.Fatal("job diagnostic must use the exact shape and quote all string fields in one record")
+			}
+		})
+	}
+}

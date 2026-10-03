@@ -1492,6 +1492,7 @@ func TestVersionEndpointIsBare(t *testing.T) {
 	for _, k := range []string{
 		"schema_version", "version", "commit", "date",
 		"account_evacuation_protocol", "account_provision_protocol", "store_schema_version",
+		"backup_validation_protocol",
 	} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("version missing %q; got %v", k, m)
@@ -1502,6 +1503,9 @@ func TestVersionEndpointIsBare(t *testing.T) {
 	}
 	if m["store_schema_version"] != float64(store.SchemaVersion()) {
 		t.Fatal("incorrect store schema version")
+	}
+	if got := m["backup_validation_protocol"]; got != float64(BackupValidationProtocolVersion) || BackupValidationProtocolVersion != 2 {
+		t.Errorf("backup_validation_protocol = %#v, want 2", got)
 	}
 	if got := m["account_provision_protocol"]; got != float64(
 		AccountProvisionProtocolVersion,
