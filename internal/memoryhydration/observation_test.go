@@ -101,6 +101,11 @@ func TestHydrationObservationOutcomesAndElision(t *testing.T) {
 }
 
 func TestHydrationLedgerPermissionsRotationAndConcurrency(t *testing.T) {
+	// Exercise serialization under load independently of the hook's lock budget.
+	previousBudget := observationLockBudget
+	observationLockBudget = 10 * time.Second
+	t.Cleanup(func() { observationLockBudget = previousBudget })
+
 	home := t.TempDir()
 	t.Setenv("WITSELF_HOME", home)
 	observation := NewObservation(Result{Attempted: true, Injected: true, Outcome: OutcomeInjected, Elapsed: time.Millisecond})
@@ -264,6 +269,10 @@ func TestHydrationLedgerRejectsNonRegularFile(t *testing.T) {
 }
 
 func TestHydrationLedgerContentionIsBounded(t *testing.T) {
+	budget := observationLockBudget
+	if budget != 100*time.Millisecond {
+		t.Fatalf("default observation lock budget = %v; want 100ms", budget)
+	}
 	home := t.TempDir()
 	t.Setenv("WITSELF_HOME", home)
 	observation := NewObservation(Result{Outcome: OutcomeInjected})
@@ -280,10 +289,26 @@ func TestHydrationLedgerContentionIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if err := AppendObservation(transcriptcapture.RuntimeCodex, observation); err == nil {
-		t.Fatal("contending writer did not fail open")
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("ledger contention blocked hook for %v", elapsed)
+	result := make(chan error, 1)
+	go func() { result <- AppendObservation(transcriptcapture.RuntimeCodex, observation) }()
+	// The watchdog must also fail promptly if the lock stops honoring its budget.
+	const budgetMultiplier = 10
+	select {
+	case err := <-result:
+		if err == nil || err.Error() != "hydration ledger is busy" {
+			t.Fatalf("contending writer error = %v; want hydration ledger is busy", err)
+		}
+		if elapsed := time.Since(started); elapsed < budget || elapsed >= budgetMultiplier*budget {
+			t.Fatalf("ledger contention took %v; want at least %v and less than %v", elapsed, budget, budgetMultiplier*budget)
+		}
+	case <-time.After(budgetMultiplier * budget):
+		t.Errorf("ledger contention exceeded %v lock budget bound", budgetMultiplier*budget)
+		// Release the holder and join the writer before restoring its temporary home.
+		_ = file.Close()
+		select {
+		case <-result:
+		case <-time.After(budgetMultiplier * budget):
+			t.Error("contending writer did not stop after the lock was released")
+		}
 	}
 }
