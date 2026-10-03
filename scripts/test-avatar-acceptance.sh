@@ -22,6 +22,8 @@ tool = pathlib.Path(sys.argv[0]).name
 clock = root / 'clock'
 now = float(clock.read_text()) if clock.exists() else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 clock.write_text(str(now))
+def instant(epoch):
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
 stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 account, realm, agent = 'acc_aaaaaaaaaaaaaaaa', 'realm_bbbbbbbbbbbbbbbb', 'agent_cccccccccccccccc'
 backup = 'backup_20990101T000000Z'
@@ -39,12 +41,20 @@ state = json.loads(path.read_text()) if path.exists() else {
 state['calls'].append({'tool':tool, 'args':args})
 p = state['profile']
 def save(): path.write_text(json.dumps(state))
-def emit(value):
+def emit(value, status=200, raw=False, exit_code=0):
     save()
+    payload=value if raw else json.dumps(value)
     dest=flag('--output', flag('-o')) if tool=='curl' else None
-    if dest: pathlib.Path(dest).write_text(json.dumps(value))
-    else: print(json.dumps(value))
-    sys.exit(0)
+    failed=tool=='curl' and status>=400 and ('--fail' in args or '--fail-with-body' in args)
+    if not failed or '--fail-with-body' in args:
+        if dest: pathlib.Path(dest).write_text(payload)
+        else: print(payload)
+    if tool=='curl':
+        write_out=flag('--write-out', flag('-w'))
+        if write_out:
+            assert write_out=='%{http_code}', 'unexpected curl write-out format'
+            print(f'{status:03d}', end='')
+    sys.exit(exit_code or (22 if failed else 0))
 def fail(message='avatar_conflict'):
     save()
     print('witself: HTTP 409: '+message, file=sys.stderr)
@@ -234,6 +244,7 @@ elif tool == 'witself':
         else: raise AssertionError('unexpected avatar command')
         receipt(op,n)
 elif tool=='curl':
+    assert not any('witself_test_fleet_token' in arg for arg in args), 'fleet token entered command line'
     url=next(a for a in args if a.startswith('https://'))
     if '/v1/directory/' in url:
         emit({'account_id':account,'cell':{'cell':'civo-sandbox-use1-serving','endpoint':'https://cell.invalid'},'status':'active','epoch':1})
@@ -289,7 +300,7 @@ elif tool=='curl':
                 if scenario=='backup_baseline_wrong_account': baseline['account_id']='acc_unrelated'
                 emit({'schema_version':'witself.v0','account':{'schema_version':'witself.v0',
                     'account_id':account,'backups':baseline}})
-            if scenario.startswith('backup_retry_'):
+            if scenario.startswith('backup_retry_') and not state.get('drill_posted'):
                 elapsed=now-state['backup_requested_at']
                 state['backup_poll_times'].append(elapsed)
                 assert float(flag('--max-time')) <= 420-elapsed, 'status request exceeds backup deadline'
@@ -306,20 +317,109 @@ elif tool=='curl':
             if scenario=='backup_current_missing': current_job=None
             if scenario=='backup_current_mismatch': current_job['backup_id']='backup_20990101T000100Z'
             if scenario=='backup_current_wrong_account': current_job['account_id']='acc_unrelated'
-            emit({'schema_version':'witself.v0','account':{'account_id':account,'backups':{
+            response={'schema_version':'witself.v0','account':{'account_id':account,'backups':{
                 'current_job':current_job, 'catalog':[
                 {'backup_id':backup,'scheduled_at':'2099-01-01T00:00:00Z','status':'active',
                  'exported_at':stamp,'verified_at':stamp,'account_id':account,
-                 'source_cell':'civo-sandbox-use1-serving','archive_schema_version':94}]}}})
+                 'source_cell':'civo-sandbox-use1-serving','archive_schema_version':94}]}}}
+            if state.get('drill_posted'):
+                elapsed=now-state['drill_posted_at']
+                polls=state.setdefault('drill_poll_times',[])
+                polls.append(elapsed)
+                # A removed harness bound must terminate offline as well. The
+                # independent verifier rejects any watchdog-triggering run.
+                cap=191 if scenario=='drill_bound_cap' else 186
+                if len(polls)>cap:
+                    state['drill_watchdog']=True
+                    emit('', status=0, raw=True, exit_code=28)
+                if scenario=='drill_status_down' or (scenario=='drill_status_flaky' and len(polls)<=2):
+                    state.setdefault('drill_read_failures',[]).append('http')
+                    emit({'schema_version':'witself.v0','error':'unavailable'}, status=503)
+                if scenario=='drill_status_redirect' and len(polls)<=2:
+                    state.setdefault('drill_read_failures',[]).append('redirect')
+                    emit({'schema_version':'witself.v0','error':'redirected'}, status=302)
+                if scenario=='drill_status_mixed' and len(polls)<=3:
+                    kind=['http','json','timeout'][len(polls)-1]
+                    state.setdefault('drill_read_failures',[]).append(kind)
+                    if kind=='http': emit({'schema_version':'witself.v0','error':'unavailable'}, status=503)
+                    if kind=='json': emit('{', raw=True)
+                    emit('', status=0, raw=True, exit_code=28)
+                record=copy.deepcopy(state['drill_record'])
+                validation_at=instant(state['drill_posted_at']+1020.561)
+                if scenario=='drill_foreign_record':
+                    record.update(drill_id='drill_replacement',state='validated',
+                        finished_at=instant(now+.561),validated_at=instant(now+.561))
+                elif scenario=='drill_deadline_projection' and 1050<=elapsed<1080:
+                    record.update(state='failed',finished_at=None,error='deadline exceeded')
+                    state['drill_projection_seen']=True
+                elif scenario=='drill_final_read':
+                    # The driver's report lands after the last periodic read and
+                    # before the bound (deadline_at + 120 s); only a final read
+                    # at the bound can see it.
+                    if elapsed >= 5520:
+                        final_at=instant(state['drill_posted_at']+5519.561)
+                        record.update(state='validated',finished_at=final_at,validated_at=final_at)
+                        response['account']['backups']['catalog'][0]['validations']=[{
+                            'target_cell':'civo-sandbox-use1-backup','validated_at':final_at,
+                            'status':'active','archive_schema_version':94}]
+                elif elapsed >= (1080 if scenario=='drill_deadline_projection' else 1020) and scenario not in ['drill_bound','drill_bound_cap']:
+                    record.update(state='validated',finished_at=validation_at,validated_at=validation_at)
+                    if scenario in ['drill_record_failed','drill_precedence','drill_precedence_stale','drill_validation_bad_timestamp']:
+                        record.update(state='failed',validated_at=None,error='validation failed')
+                    if scenario not in ['drill_record_failed','drill_validated_no_validations']:
+                        if scenario=='drill_precedence': validation_at=instant(state['drill_posted_at']+.562)
+                        if scenario=='drill_precedence_stale': validation_at=instant(state['drill_posted_at']+.560)
+                        if scenario=='drill_validation_bad_timestamp': validation_at='malformed'
+                        response['account']['backups']['catalog'][0]['validations']=[{
+                            'target_cell':'civo-sandbox-use1-backup','validated_at':validation_at,
+                            'status':'active','archive_schema_version':94}]
+                state['last_drill_record']=record
+                response['account']['restore_drill']=record
+            emit(response)
         if url.endswith(':restore-drill'):
             if scenario.startswith('backup_retry_'):
                 assert scenario=='backup_retry_committed' and now >= state['backup_retry_epoch']+299, 'cannot drill an uncommitted backup'
             data=flag('--data',flag('--data-binary',flag('-d','{}')))
             if data.startswith('@'): data=pathlib.Path(data[1:]).read_text()
             body=json.loads(data)
-            assert body=={'account_id':account,'backup_id':backup,'target_cell':'civo-sandbox-use1-backup'}
+            expected={'account_id':account,'backup_id':backup,'target_cell':'civo-sandbox-use1-backup'}
+            posts=state.setdefault('drill_posts',[])
+            posts.append({'body':body,'timeout':float(flag('--max-time')),'at':now})
+            refusal='asynchronous restore drill requires a target cell with backup validation protocol 2'
+            fallback=scenario in ['drill_protocol_1','drill_false','drill_bare_2xx'] and len(posts)==2
+            if fallback:
+                assert body==expected, 'connected fallback must omit wait'
+                assert float(flag('--max-time'))==1800, 'connected fallback deadline changed'
+            else:
+                assert body==dict(expected,wait=False), 'drill request must include wait false'
+                assert float(flag('--max-time'))<=60, 'async drill POST exceeded 60 seconds'
+                assert '--fail' not in args and '--fail-with-body' not in args, 'async POST must preserve refusal body'
+                assert flag('--write-out',flag('-w'))=='%{http_code}', 'async POST must capture HTTP status'
+                assert flag('--output',flag('-o')), 'async POST must capture response body separately'
+                if scenario in ['drill_protocol_1','drill_false','drill_bare_2xx']:
+                    emit({'schema_version':'witself.v0','error':refusal}, status=409)
+                if scenario in ['drill_busy','drill_protocol_with_record']:
+                    error='restore drill already running' if scenario=='drill_busy' else refusal
+                    emit({'schema_version':'witself.v0','error':error,'restore_drill':{'drill_id':'drill_busy'}}, status=409)
+                if scenario=='drill_protocol_lookalike':
+                    emit({'schema_version':'witself.v0','error':refusal+' elsewhere'}, status=409)
+                state['drill_posted']=True
+                state['drill_posted_at']=now
+                deadline=1020 if scenario=='drill_deadline_projection' else (7200 if scenario=='drill_bound_cap' else 5400)
+                record=dict(drill_id='drill_acceptance',account_id=account,backup_id=backup,
+                    target_cell='civo-sandbox-use1-backup',state='running',driver='alarm',
+                    started_at=instant(now+.561),deadline_at=instant(now+deadline+.561),
+                    finished_at=None,validated_at=None,error=None)
+                state['drill_record']=copy.deepcopy(record)
+                if scenario=='drill_response_wrong_account': record['account_id']='acc_unrelated'
+                if scenario=='drill_response_wrong_backup': record['backup_id']='backup_20990101T000100Z'
+                if scenario=='drill_response_wrong_target': record['target_cell']='civo-sandbox-use1-serving'
+                if scenario=='drill_response_wrong_driver': record['driver']='request'
+                if scenario=='drill_response_bad_timestamp': record['deadline_at']='malformed'
+                if scenario=='drill_post_malformed': emit('{', status=202, raw=True)
+                emit({'schema_version':'witself.v0','account_id':account,'restore_drill':record}, status=202)
             result=dict(schema_version='witself.v0',account_id=account,backup_id=backup,
-                target_cell='civo-sandbox-use1-backup',validated=True,validated_at=stamp,status='active',archive_schema_version=94)
+                target_cell='civo-sandbox-use1-backup',validated=True,validated_at=instant(now+.561),status='active',archive_schema_version=94)
             if scenario=='drill_false': result['validated']=False
             if scenario=='drill_bare_2xx': result.pop('validated_at')
             emit(result)
@@ -346,6 +446,7 @@ run_calls=[call for call in state['calls'] if any(arg.endswith('/v1/backups:run'
 drill_calls=[call for call in state['calls'] if any(arg.endswith('/v1/backups:restore-drill') for arg in call['args'])]
 assert len(run_calls)==1, 'backup retry created another billed backup'
 if scenario=='backup_retry_committed':
+    elapsed=state['drill_posted_at']-state['backup_requested_at']
     assert 360 < elapsed < 420, 'did not wait for scheduled retry and export completion'
     assert len(drill_calls)==1, 'committed backup was not drilled exactly once'
 else:
@@ -354,6 +455,60 @@ else:
         assert 60.25 <= elapsed < 70, 'terminal backup failure was not rejected promptly'
     else:
         assert elapsed==420, 'retry_at moved or bypassed the overall deadline'
+PY
+}
+
+verify_drill() {
+  python3 - "$case_dir/state" "$FAKE_AVATAR_SCENARIO" <<'PY'
+import json, pathlib, sys
+root, scenario = pathlib.Path(sys.argv[1]), sys.argv[2]
+state=json.loads((root/'state.json').read_text())
+for call in state['calls']:
+    assert not any('witself_test_fleet_token' in arg for arg in call['args']), 'fleet token entered command line'
+posts=state.get('drill_posts',[])
+if not posts: sys.exit(0)
+fallback=scenario in ['drill_protocol_1','drill_false','drill_bare_2xx']
+assert len(posts)==(2 if fallback else 1), 'unexpected restore drill POST count'
+assert posts[0]['body'].get('wait') is False, 'drill request must include wait false'
+assert posts[0]['timeout']==60, 'async drill POST must use 60-second timeout'
+if fallback:
+    assert 'wait' not in posts[1]['body'], 'connected fallback must omit wait'
+    assert posts[1]['timeout']==1800, 'connected fallback must use 1800-second timeout'
+else:
+    assert all(post['timeout']<=60 for post in posts), 'non-fallback drill POST exceeded 60 seconds'
+polls=state.get('drill_poll_times',[])
+assert all(0 < later-earlier <= 30 for earlier,later in zip(polls,polls[1:])), 'drill polling cadence changed'
+assert not state.get('drill_watchdog'), 'drill poll bound removed; offline watchdog stopped polling'
+if scenario=='happy_path':
+    assert polls and polls[-1]>=17*60, 'drill did not exercise a 17-minute validation'
+    assert state['last_drill_record']['state']=='validated', 'happy drill never validated'
+if scenario=='drill_deadline_projection':
+    assert state.get('drill_projection_seen'), 'deadline projection was not observed'
+    assert state['last_drill_record']['state']=='validated', 'deadline projection was not reconciled'
+if scenario=='drill_status_flaky':
+    assert state['drill_read_failures']==['http','http'], 'flaky status reads were not retried'
+    assert state['last_drill_record']['state']=='validated', 'flaky status reads did not recover'
+if scenario=='drill_status_mixed':
+    assert state['drill_read_failures']==['http','json','timeout'], 'mixed status failures were not retried'
+    assert state['last_drill_record']['state']=='validated', 'three failed reads did not recover'
+if scenario=='drill_status_redirect':
+    assert state['drill_read_failures']==['redirect','redirect'], 'non-2xx status reads were not retried'
+    assert state['last_drill_record']['state']=='validated', 'redirect status reads did not recover'
+if scenario=='drill_status_down':
+    assert len(polls)==4, 'fourth consecutive failed status read must fail'
+if scenario=='drill_final_read':
+    assert polls and polls[-1]>=5520, 'no final status read at the bound'
+    assert state['last_drill_record']['state']=='validated', 'validation in the final grace window was discarded'
+if scenario in ['drill_bound','drill_bound_cap']:
+    elapsed=float((root/'clock').read_text())-state['drill_posted_at']
+    limit=5700 if scenario=='drill_bound_cap' else 5520
+    cap=191 if scenario=='drill_bound_cap' else 186
+    assert polls and len(polls)<=cap, 'drill status poll count escaped bound'
+    assert limit<=elapsed<=limit+1, 'drill did not stop at deadline grace or 95-minute cap'
+if scenario in ['drill_busy','drill_protocol_with_record','drill_protocol_lookalike','drill_response_wrong_account',
+        'drill_response_wrong_backup','drill_response_wrong_target',
+        'drill_response_wrong_driver','drill_response_bad_timestamp','drill_post_malformed']:
+    assert not polls, 'invalid asynchronous answer reached record polling'
 PY
 }
 
@@ -408,11 +563,11 @@ run_harness() {
     --work "$case_dir/work" --out "$case_dir/record.json" --redact-check "$@"
 }
 
-scenarios="${AVATAR_ACCEPTANCE_TEST_SCENARIOS:-happy_path revision_conflict pending_proposal rejection_wrong_status rejection_wrong_active_version rejection_not_recorded archive_missing_version archive_hash_mismatch archive_checksum_mismatch compaction_absent drill_false drill_bare_2xx release_pair_mismatch release_full_commit release_offset_date release_positive_offset release_cp_commit_mismatch release_cp_version_mismatch release_cp_invalid_date backup_retry_committed backup_retry_deadline backup_retry_failed backup_retry_outside_deadline backup_reused_delayed_export backup_older_slot backup_recovered_object backup_current_missing backup_current_mismatch backup_current_wrong_account backup_baseline_missing_catalog backup_baseline_missing_current_job backup_baseline_wrong_account}"
+scenarios="${AVATAR_ACCEPTANCE_TEST_SCENARIOS:-happy_path revision_conflict pending_proposal rejection_wrong_status rejection_wrong_active_version rejection_not_recorded archive_missing_version archive_hash_mismatch archive_checksum_mismatch compaction_absent drill_false drill_bare_2xx drill_protocol_1 drill_record_failed drill_deadline_projection drill_foreign_record drill_precedence drill_bound drill_bound_cap drill_final_read drill_status_flaky drill_status_down drill_status_mixed drill_status_redirect drill_precedence_stale drill_validated_no_validations drill_validation_bad_timestamp drill_busy drill_protocol_with_record drill_protocol_lookalike drill_response_wrong_account drill_response_wrong_backup drill_response_wrong_target drill_response_wrong_driver drill_response_bad_timestamp drill_post_malformed release_pair_mismatch release_full_commit release_offset_date release_positive_offset release_cp_commit_mismatch release_cp_version_mismatch release_cp_invalid_date backup_retry_committed backup_retry_deadline backup_retry_failed backup_retry_outside_deadline backup_reused_delayed_export backup_older_slot backup_recovered_object backup_current_missing backup_current_mismatch backup_current_wrong_account backup_baseline_missing_catalog backup_baseline_missing_current_job backup_baseline_wrong_account}"
 for scenario in $scenarios; do
   new_case "$scenario"
   expected=1
-  case "$scenario" in happy_path|revision_conflict|release_full_commit|release_offset_date|release_positive_offset|backup_retry_committed) expected=0 ;; esac
+  case "$scenario" in happy_path|revision_conflict|release_full_commit|release_offset_date|release_positive_offset|backup_retry_committed|drill_protocol_1|drill_deadline_projection|drill_precedence|drill_status_flaky|drill_status_mixed|drill_status_redirect|drill_validated_no_validations|drill_final_read) expected=0 ;; esac
   if check "$scenario" "$expected" run_harness; then
     if [ "$expected" -eq 0 ]; then
       if ! jq -e '.status == "passed" and .certification_eligible == true and
@@ -445,6 +600,9 @@ for scenario in $scenarios; do
     fi
     if [[ $scenario == backup_* && $scenario != backup_retry_* ]] && ! verify_backup_freshness; then
       printf 'FAIL %s: backup freshness or side effects\n' "$scenario"; failures=$((failures+1))
+    fi
+    if ! verify_drill; then
+      printf 'FAIL %s: restore drill request, polling, or bound contract\n' "$scenario"; failures=$((failures+1))
     fi
     if [ -e "$case_dir/work/self.tar.gz" ] || [ -e "$case_dir/work/agent.token" ]; then
       printf 'FAIL %s: private archive or token survived\n' "$scenario"; failures=$((failures+1))
