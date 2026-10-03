@@ -461,6 +461,35 @@ func TestMemoryCurationPreflightReportsEffectiveCredential(t *testing.T) {
 	}
 }
 
+func TestMemoryCurationPreflightPageByteLimits(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1",
+			AccountStatus: "active", AccessProfile: AccessProfileCuratorPreview,
+		}, true, nil
+	}
+	cfg := completeMemoryCurationTestConfig(auth, map[string]int{})
+	srv := httptest.NewServer(apiMux(cfg))
+	defer srv.Close()
+
+	response := memoryCurationHTTPResponse(t, srv.URL, "curator", http.MethodGet, "/v1/memory-curation-preflight", "", "")
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("preflight status = %d", response.StatusCode)
+	}
+	var out struct {
+		Limits map[string]int `json:"limits"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]int{"min_page_bytes": 8192, "max_page_bytes": 65536} {
+		if got, ok := out.Limits[field]; !ok || got != want {
+			t.Errorf("preflight limits[%q] = %d (present=%t), want %d", field, got, ok, want)
+		}
+	}
+}
+
 func TestCuratorCredentialCannotReachOrdinaryDomainRoutes(t *testing.T) {
 	for _, profile := range []string{AccessProfileCuratorPreview, AccessProfileCuratorApply} {
 		t.Run(profile, func(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -11,8 +12,8 @@ import (
 
 // TestMCPMemoryCurationGetMaxBytes pins the curation.get tool's max_bytes
 // parameter (issue #649): the schema advertises it as optional and the
-// description says when to pass it; a value in range reaches the backend
-// exactly; its absence reaches the backend as zero; and a value outside
+// descriptions advertise the measured 24576-byte default; a value in range
+// reaches the backend exactly; its absence selects that default; and a value outside
 // 8192-65536 is a tool error with the exact message before any backend call.
 func TestMCPMemoryCurationGetMaxBytes(t *testing.T) {
 	ctx := context.Background()
@@ -51,7 +52,10 @@ func TestMCPMemoryCurationGetMaxBytes(t *testing.T) {
 		t.Fatalf("curation.get schema omitted max_bytes: %s", raw)
 	}
 	var schema struct {
-		Required []string `json:"required"`
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
@@ -64,6 +68,17 @@ func TestMCPMemoryCurationGetMaxBytes(t *testing.T) {
 	if !strings.Contains(getTool.Description, "max_bytes") {
 		t.Fatalf("curation.get description omitted max_bytes: %q", getTool.Description)
 	}
+	for label, description := range map[string]string{
+		"tool":             getTool.Description,
+		"max_bytes schema": schema.Properties["max_bytes"].Description,
+	} {
+		if !strings.Contains(description, "24576") || strings.Contains(description, "default 65536") {
+			t.Fatalf("%s description does not advertise the MCP default: %q", label, description)
+		}
+	}
+	if mcpDefaultCurationPageBytes != 24576 {
+		t.Fatalf("MCP default = %d, want 24576", mcpDefaultCurationPageBytes)
+	}
 
 	callCurationTool(ctx, t, clientSession, "witself.memory.curation.get", map[string]any{
 		"run_id": "mrun_1", "fencing_generation": 4, "max_bytes": 24576,
@@ -72,11 +87,25 @@ func TestMCPMemoryCurationGetMaxBytes(t *testing.T) {
 		t.Fatalf("get mapping = max_bytes %d run %q fence %d limit %d, want 24576 mrun_1 4 50",
 			backend.maxBytes, backend.runID, backend.fence, backend.limit)
 	}
-	callCurationTool(ctx, t, clientSession, "witself.memory.curation.get", map[string]any{
-		"run_id": "mrun_1", "fencing_generation": 4,
+	t.Run("omitted", func(t *testing.T) {
+		backend.maxBytes = -2
+		callCurationTool(ctx, t, clientSession, "witself.memory.curation.get", map[string]any{
+			"run_id": "mrun_1", "fencing_generation": 4,
+		})
+		if backend.maxBytes != mcpDefaultCurationPageBytes {
+			t.Fatalf("get without max_bytes reached the backend as %d, want %d", backend.maxBytes, mcpDefaultCurationPageBytes)
+		}
 	})
-	if backend.maxBytes != 0 {
-		t.Fatalf("get without max_bytes reached the backend as %d, want 0", backend.maxBytes)
+	for _, maxBytes := range []int{8192, 65536} {
+		t.Run("explicit_"+strconv.Itoa(maxBytes), func(t *testing.T) {
+			backend.maxBytes = -2
+			callCurationTool(ctx, t, clientSession, "witself.memory.curation.get", map[string]any{
+				"run_id": "mrun_1", "fencing_generation": 4, "max_bytes": maxBytes,
+			})
+			if backend.maxBytes != maxBytes {
+				t.Fatalf("get with max_bytes %d reached the backend as %d", maxBytes, backend.maxBytes)
+			}
+		})
 	}
 
 	const wantError = "max_bytes must be between 8192 and 65536"

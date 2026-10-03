@@ -11,6 +11,67 @@ import (
 	"time"
 )
 
+func TestMemoryCurationPreflightPageByteLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		body         string
+		minPageBytes int
+		maxPageBytes int
+	}{
+		{
+			name:         "published bounds",
+			body:         `{"limits":{"max_page_size":200,"min_page_bytes":8192,"max_page_bytes":65536}}`,
+			minPageBytes: 8192, maxPageBytes: 65536,
+		},
+		{
+			name: "older cell omits bounds",
+			body: `{"limits":{"max_page_size":200}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/memory-curation-preflight" {
+					t.Errorf("preflight request = %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			preflight, err := GetMemoryCurationPreflight(context.Background(), srv.URL, "token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preflight.Limits.MinPageBytes != tc.minPageBytes || preflight.Limits.MaxPageBytes != tc.maxPageBytes {
+				t.Fatalf("preflight page-byte bounds = %d..%d, want %d..%d",
+					preflight.Limits.MinPageBytes, preflight.Limits.MaxPageBytes, tc.minPageBytes, tc.maxPageBytes)
+			}
+
+			encoded, err := json.Marshal(preflight)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out struct {
+				Limits map[string]int `json:"limits"`
+			}
+			if err := json.Unmarshal(encoded, &out); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]int{"min_page_bytes": tc.minPageBytes, "max_page_bytes": tc.maxPageBytes} {
+				got, present := out.Limits[field]
+				if want == 0 {
+					if present {
+						t.Errorf("older cell's unknown %s re-marshaled as %d", field, got)
+					}
+				} else if !present || got != want {
+					t.Errorf("re-marshaled limits[%q] = %d (present=%t), want %d", field, got, present, want)
+				}
+			}
+		})
+	}
+}
+
 func TestMemoryCurationClientHTTPContract(t *testing.T) {
 	seen := map[string]int{}
 	keys := map[string]string{

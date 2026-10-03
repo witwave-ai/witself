@@ -246,6 +246,8 @@ type MemoryCurationPreflightPermissions struct {
 // MemoryCurationPreflightLimits reports server-enforced bounds for curation work.
 type MemoryCurationPreflightLimits struct {
 	MaxPageSize          int   `json:"max_page_size"`
+	MinPageBytes         int   `json:"min_page_bytes"`
+	MaxPageBytes         int   `json:"max_page_bytes"`
 	MaxMemories          int   `json:"max_memories"`
 	MaxEvidence          int   `json:"max_evidence"`
 	MaxTranscriptEntries int   `json:"max_transcript_entries"`
@@ -306,6 +308,7 @@ func getMemoryCurationPreflightHandler(
 			},
 			Limits: MemoryCurationPreflightLimits{
 				MaxPageSize: 200, MaxMemories: 500, MaxEvidence: 1000,
+				MinPageBytes: minMemoryCurationPageBytes, MaxPageBytes: maxMemoryCurationPageBytes,
 				MaxTranscriptEntries: 2000, MinLeaseSeconds: 30,
 				MaxLeaseSeconds: 1800, MaxPlanActions: 128,
 				MaxPlanBytes: 32 << 20,
