@@ -343,6 +343,7 @@ func (r Runner) executeOpen(ctx context.Context, state *LaunchState, options Opt
 		Draft: draft, IdempotencyKey: state.PlanKey,
 	})
 	if err != nil {
+		// The error keeps the backend's named refusal rule (reason=…) for the caller to print; the abandon reason stays plan_rejected.
 		return r.failAndAbandon(ctx, state, result, fmt.Errorf("validate curation plan: %w", err), "plan_rejected")
 	}
 	if planned == nil || planned.Run.ID != run.ID || planned.Run.FencingGeneration != run.FencingGeneration || planned.Run.State != "planned" ||

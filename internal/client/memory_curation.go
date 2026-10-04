@@ -629,11 +629,13 @@ func GetMemoryCurationRun(ctx context.Context, endpoint, token, runID string) (*
 }
 
 // MemoryCurationRunInputOptions selects one fenced page of frozen run inputs.
-// MaxBytes, when positive, asks the server for pages of at most that many
-// hydrated input bytes (8192 to 65536); zero leaves the server page budget
-// in force and sends no parameter, so a server without the bound accepts the
-// call. A smaller value only raises the number of pages that cover the same
-// frozen inputs.
+// MaxBytes, when nonzero, is sent as max_bytes and asks the server for pages of
+// at most that many hydrated input bytes (8192 to 65536). The client does not
+// range-check it, so a negative or out-of-range value reaches the server;
+// a server that supports max_bytes refuses it with 400. Zero leaves the server
+// page budget in force and sends no parameter, so a server without the bound
+// accepts the call. A smaller value only raises the number of pages that cover
+// the same frozen inputs.
 type MemoryCurationRunInputOptions struct {
 	FencingGeneration int64
 	Cursor            string
@@ -650,7 +652,7 @@ func GetMemoryCurationRunInputs(ctx context.Context, endpoint, token, runID stri
 }
 
 // GetMemoryCurationRunInputPage retrieves one fenced page of frozen run
-// inputs, bounded to opts.MaxBytes of inputs when that is positive.
+// inputs, bounded to opts.MaxBytes of inputs when that is nonzero.
 func GetMemoryCurationRunInputPage(ctx context.Context, endpoint, token, runID string, opts MemoryCurationRunInputOptions) (*MemoryCurationRunInputPage, error) {
 	q := url.Values{"fencing_generation": {strconv.FormatInt(opts.FencingGeneration, 10)}}
 	if opts.Cursor != "" {

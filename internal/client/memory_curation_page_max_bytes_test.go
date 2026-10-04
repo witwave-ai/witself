@@ -10,7 +10,7 @@ import (
 )
 
 // TestGetMemoryCurationRunInputPageSendsMaxBytes pins that the client sends
-// max_bytes exactly when it is set, so a server without the parameter still
+// max_bytes exactly when it is nonzero, so a server without the parameter still
 // accepts an unbounded read, and that the unbounded helper never sends it.
 func TestGetMemoryCurationRunInputPageSendsMaxBytes(t *testing.T) {
 	var queries []string
@@ -36,10 +36,16 @@ func TestGetMemoryCurationRunInputPageSendsMaxBytes(t *testing.T) {
 	if _, err := GetMemoryCurationRunInputs(ctx, srv.URL, "token", "mrun_1", 7, "", 0); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := GetMemoryCurationRunInputPage(ctx, srv.URL, "token", "mrun_1", MemoryCurationRunInputOptions{
+		FencingGeneration: 7, MaxBytes: -1,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{
 		"cursor=input+cursor&fencing_generation=7&limit=23&max_bytes=24576",
 		"fencing_generation=7",
 		"fencing_generation=7",
+		"fencing_generation=7&max_bytes=-1",
 	}
 	if !reflect.DeepEqual(queries, want) {
 		t.Fatalf("queries = %q, want %q", queries, want)

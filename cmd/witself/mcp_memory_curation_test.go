@@ -622,12 +622,24 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 		"Pending, unavailable, and resolved message/import_artifact/artifact evidence require input_evidence_id",
 		"exact reproduction of a materialized evidence input row",
 		"MCP checks deterministic shape only",
-		"frozen membership, exact equality, owner access and contiguous frozen transcript coverage remain backend checks",
+		"frozen membership, exact equality, owner access and transcript coverage remain backend checks",
+		"a transcript_coverage window does not authorize direct evidence",
+		"transcript_range_not_covered",
+		"memory curation state conflict (reason=NAME",
+		"closed list in docs/mcp-tools.md",
+		"1-based ordinal",
+		"0-based actions[i] index",
+		"A refused plan stores nothing and the run stays open",
+		"A conflict without a reason is one the backend does not classify or this client does not know",
+		"reason=run_not_open is the exception: the run already has an accepted plan or is no longer open, so read it with curation.plan.get and never submit a second plan",
 		"derived_from does not replace snapshot evidence",
 	} {
 		if !strings.Contains(planTool.Description, want) {
 			t.Errorf("plan description omitted evidence rule %q: %q", want, planTool.Description)
 		}
+	}
+	if strings.Contains(planTool.Description, "contiguous frozen "+"transcript coverage") {
+		t.Error("plan description retained the old transcript coverage rule")
 	}
 	for _, want := range []string{"Never place credentials", "private keys", "TOTP seeds", "sensitive=true is not a sealed-secret substitute", "Use an empty plan"} {
 		if !strings.Contains(planTool.Description, want) {
@@ -700,7 +712,7 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 		"input_evidence_id":    {"reproduce that row exactly after normalization", "id alone proves no authenticity", "backend membership, equality and owner access"},
 		"resolution_state":     {"pending and unavailable require input_evidence_id", "exact reproduction", "direct evidence without input_evidence_id must be resolved transcript or memory"},
 		"resolved_kind":        {"REQUIRED", "never inferred from type", "message, import_artifact and artifact require input_evidence_id"},
-		"source_transcript_id": {"contiguous frozen transcript coverage checked by the backend", "reproduce the materialized row exactly"},
+		"source_transcript_id": {"wholly inside the run's materialized transcript inputs", "a transcript_coverage window does not authorize it", "reproduce the materialized row exactly"},
 		"source_memory":        {"immutable", "local_ref at version 1", "backend checks frozen membership and owner access"},
 		"type":                 {"blank defaults to conversation", "need not equal resolved_kind"},
 	} {
@@ -710,6 +722,10 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 				t.Errorf("%s schema omitted %q", field, rule)
 			}
 		}
+	}
+
+	if description, _ := requireMCPObjectProperty(t, root, evidence, "source_transcript_id")["description"].(string); strings.Contains(description, "contiguous frozen "+"transcript coverage") {
+		t.Error("source_transcript_id schema retained the old transcript coverage rule")
 	}
 
 	callCurationTool(ctx, t, clientSession, "witself.memory.curation.plan", map[string]any{
