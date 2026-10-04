@@ -556,6 +556,57 @@ func TestRunnerPlannerFailuresAbandonWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestRunnerPlanConflictKeepsReasonAndAbandonsPlanRejected(t *testing.T) {
+	api := newFakeCurationAPI()
+	zero := 0
+	api.planErr = &client.MemoryCurationConflictError{
+		Reason: "transcript_range_not_covered", ActionOrdinal: 1, EvidenceIndex: &zero,
+	}
+	state := newMemoryStateStore()
+	runner := testRunner(api, plannerFunc(func(context.Context, PlannerEnvelope) (json.RawMessage, error) {
+		return emptyPlan, nil
+	}), state)
+
+	result, err := runner.Run(context.Background(), Options{})
+	if err == nil {
+		t.Fatal("Run() error = nil, want plan conflict")
+	}
+	var conflict *client.MemoryCurationConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("errors.As(err, &conflict) = false, want preserved plan conflict: %v", err)
+	}
+	if conflict.Reason != "transcript_range_not_covered" {
+		t.Fatalf("conflict.Reason = %q, want transcript_range_not_covered", conflict.Reason)
+	}
+	wantError := "validate curation plan: memory curation state conflict (reason=transcript_range_not_covered, action_ordinal=1, evidence_index=0)"
+	if !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("Run() error = %q, want to contain %q", err.Error(), wantError)
+	}
+	if api.planCalls != 1 || api.applyCalls != 0 || api.abandonCalls != 1 {
+		t.Fatalf("plan/apply/abandon calls = %d/%d/%d, want 1/0/1", api.planCalls, api.applyCalls, api.abandonCalls)
+	}
+	if api.lastAbandon.Reason != "plan_rejected" {
+		t.Fatalf("abandon reason = %q, want plan_rejected", api.lastAbandon.Reason)
+	}
+	if result.Abandon == nil {
+		t.Fatal("result.Abandon = nil, want completed abandonment")
+	}
+	saved, loadErr := state.Load("curl_test")
+	if loadErr != nil {
+		t.Fatalf("load saved state: %v", loadErr)
+	}
+	if saved.Phase != PhaseAbandoned || saved.AbandonReason != "plan_rejected" {
+		t.Fatalf("saved phase/reason = %q/%q, want %q/plan_rejected", saved.Phase, saved.AbandonReason, PhaseAbandoned)
+	}
+	encoded, marshalErr := json.Marshal(saved)
+	if marshalErr != nil {
+		t.Fatalf("marshal saved state: %v", marshalErr)
+	}
+	if strings.Contains(string(encoded), "transcript_range_not_covered") {
+		t.Fatal("saved launch state must not persist the backend conflict reason")
+	}
+}
+
 func TestRunnerPlannerTimeoutAbandons(t *testing.T) {
 	api := newFakeCurationAPI()
 	runner := testRunner(api, plannerFunc(func(ctx context.Context, _ PlannerEnvelope) (json.RawMessage, error) {

@@ -153,7 +153,9 @@ ordinary memory-status route.
    in the window was materialized normally. Review it by reading its window
    and counts; its cursor interval advances on apply like any transcript
    input, and the covered raw entries stay readable through the transcript
-   tools if the plan needs them. If local reasoning
+   tools for context, but the window itself authorizes no direct evidence:
+   cite only entries materialized as transcript inputs (step 7).
+   If local reasoning
    may outlive the lease, call
    `witself.memory.curation.renew` before expiry with the same run and fence and
    a new mutation idempotency key; if renewal reports expiry, stop this curation
