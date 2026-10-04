@@ -25,10 +25,10 @@ func TestProviderCLICommandsUseIsolatedWorkingDirectories(t *testing.T) {
 	for _, runtimeName := range genericProviderTestRuntimes {
 		t.Run(runtimeName, func(t *testing.T) {
 			fixture := newGenericProviderTestFixture(t, runtimeName)
-			if _, err := runGenericProviderCLI(fixture.cli, fixture.cfg, time.Second, "--version"); err != nil {
+			if _, err := runGenericProviderCLI(fixture.cli, fixture.cfg, providerCLITestTimeout, "--version"); err != nil {
 				t.Fatalf("run generic provider CLI: %v", err)
 			}
-			if _, err := runLegacyProviderCLI(fixture.cli, time.Second, "--version"); err != nil {
+			if _, err := runLegacyProviderCLI(fixture.cli, providerCLITestTimeout, "--version"); err != nil {
 				t.Fatalf("run legacy provider CLI: %v", err)
 			}
 			if version := detectRuntimeVersion(runtimeName, fixture.cli); version != "1.0.0" {
