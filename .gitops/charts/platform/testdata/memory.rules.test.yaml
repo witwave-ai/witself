@@ -7,7 +7,7 @@ tests:
     targets without target labels
   interval: 1m
   input_series:
-  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900.0",instance="server-a"}
     values: 0+8x40
   - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
     values: 0+10x40
@@ -87,7 +87,7 @@ tests:
 - name: exact thresholds stay quiet
   interval: 1m
   input_series:
-  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900.0",instance="server-a"}
     values: 0+9x40
   - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
     values: 0+10x40
@@ -114,7 +114,7 @@ tests:
 - name: low traffic does not create failure ratio alerts
   interval: 1m
   input_series:
-  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900.0",instance="server-a"}
     values: 0+10x40
   - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
     values: 0+10x40
@@ -141,7 +141,7 @@ tests:
 - name: idle counters do not alert
   interval: 1m
   input_series:
-  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900.0",instance="server-a"}
     values: 0+0x40
   - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
     values: 0+0x40
@@ -165,6 +165,29 @@ tests:
   - eval_time: 26m
     alertname: WitselfMemoryCurationRunFailureRatioHigh
     exp_alerts: []
+- name: legacy integer bucket labels still alert after the hold
+  interval: 1m
+  input_series:
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+    values: 0+8x40
+  - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
+    values: 0+10x40
+  - series: witself_memory_curation_requests_pending{instance="server-a"}
+    values: 1+0x40
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfMemoryCurationBacklogAgeHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: memory-curation
+        witself_alert: 'true'
+      exp_annotations:
+        summary: More than 10 percent of curation queue observations exceed 15 minutes.
+        runbook: docs/observability-and-operations.md#memory-and-curation-instrumentation
 - name: absent metrics do not synthesize failures
   interval: 1m
   input_series: []
@@ -181,7 +204,7 @@ tests:
 - name: cleared queue and unrelated operation errors do not alert
   interval: 1m
   input_series:
-  - series: witself_memory_curation_queue_age_seconds_bucket{le="900",instance="server-a"}
+  - series: witself_memory_curation_queue_age_seconds_bucket{le="900.0",instance="server-a"}
     values: 0+8x40
   - series: witself_memory_curation_queue_age_seconds_count{instance="server-a"}
     values: 0+10x40

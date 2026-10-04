@@ -857,6 +857,8 @@ The `witself-memory` rule group contains three provisional warnings:
 | `WitselfMemoryCurationLeaseExpiryRatioHigh` | Lease `expire` events exceed 20% of `start` events over 15 minutes, with at least five starts, sustained for 10 minutes. This compares observed events, not a matched cohort of runs. |
 | `WitselfMemoryCurationRunFailureRatioHigh` | `plan` and `apply` calls with `result="error"` exceed 20% of all `plan` and `apply` calls over 15 minutes, with at least five calls, sustained for 10 minutes. This is an operation-failure proxy, not the fraction of unique failed runs. |
 
+Classic-histogram `le` labels are normalized to float form by Prometheus 3 (`900` is stored as `900.0`), so rules match both forms.
+
 All three use `severity="warning"`, `service="memory-curation"`, and
 `witself_alert="true"`. Inspect backlog trends and foreground-client activity
 for backlog warnings; compare renewals and expiry with client completion time
