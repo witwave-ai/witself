@@ -1139,8 +1139,14 @@ request/response fields are required:
   memory-read permission.
 
 Mutation receipts are value-free and include operation, actor, idempotency key,
-canonical request hash, resource ids/versions, and timestamps. Pagination,
-limits, error codes, and `409` conflict details use the shared JSON envelope.
+canonical request hash, resource ids/versions, and timestamps. Curation routes
+answer with flat JSON objects that carry a top-level `schema_version` and no
+`ok`/`data` wrapper, and their errors are flat too. A `409` is
+`{schema_version, error}`. A conflict refused under a named rule adds `code`
+(`memory_curation_conflict`), `retryable` (`false`), a value-free `reason` and,
+when they apply, `action_ordinal` and `evidence_index` (see
+`witself.memory.curation.plan` in [mcp-tools.md](mcp-tools.md)). A blocked
+rollback returns `{schema_version, error, blockers}`.
 
 MCP and CLI expose schema-equivalent operations:
 
@@ -1687,8 +1693,11 @@ after a live, version-gated conformance test passes.
 - [x] Implement the manual, ref-gated GitHub-hosted five-slice workflow and
   sanitized 90-day run manifest in
   [memory-load-quality.md](memory-load-quality.md#protected-repeatable-workflow).
-  The first hosted artifact still needs post-merge verification; managed-cloud
-  baselines and their protected environment remain separate follow-up work.
+  The first hosted run from `main`
+  ([run 34043255196](https://github.com/witwave-ai/witself/actions/runs/34043255196),
+  `dabeff07`, 2026-09-06) succeeded and retained its sanitized artifact;
+  managed-cloud baselines and their protected environment remain separate
+  follow-up work.
 - [x] Complete issue #46 item 1's instrumentation half in source: committed
   `witself_memory_curation_run_transitions_total{from,to}` and
   `witself_memory_curation_lease_events_total{event}` counters, cell-wide
@@ -1705,10 +1714,12 @@ after a live, version-gated conformance test passes.
 - [ ] Complete issue #46 item 1's activation half: deploy the metric-producing
   server release, verify every serving replica's scrapes, confirm thresholds
   against aggregate observations, and retain firing/resolved receiver
-  evidence. `platform.monitoring.memoryAlerts.enabled` remains `false` in the
-  generated `civo-sandbox-use1-serving` and `civo-sandbox-use1-backup` values;
-  existing receiver configuration is unchanged. These source changes do not
-  prove live alert activation or close issue #46 or #47.
+  evidence. Every cell keeps `platform.monitoring.memoryAlerts.enabled` off:
+  the generated `civo-prod-use1-serving`, `civo-sandbox-use1-backup`, and
+  `civo-sandbox-use1-serving` values set it to `false`, and the other cells
+  inherit the chart default `false`; existing receiver configuration is
+  unchanged. These source changes do not prove live alert activation or close
+  issue #46 or #47.
 - [ ] Complete [issue #46](https://github.com/witwave-ai/witself/issues/46):
   load-test queue claims and fencing, bounded curation plans, lexical/vector
   indexes, archive rebuild, high-cardinality accounts, and concurrent agents.

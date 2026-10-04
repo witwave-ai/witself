@@ -1198,8 +1198,12 @@ can prevent finalization; a missing artifact is never a passing result.
 The offline contract gate,
 `bash scripts/test-memory-load-quality-workflow.sh`, runs in `make check-infra`
 and CI's Helm job. CI's static-analysis job additionally checks the workflow
-with pinned actionlint. The first dispatch from `main` and review of its retained
-five-slice artifact remain a post-merge verification step.
+with pinned actionlint. The first dispatch from `main`,
+[run 34043255196](https://github.com/witwave-ai/witself/actions/runs/34043255196)
+on `dabeff07` on 2026-09-06, succeeded and retained its sanitized five-slice
+artifact. A dispatch on tag `v0.0.328`,
+[run 37177873646](https://github.com/witwave-ai/witself/actions/runs/37177873646),
+also succeeded; artifacts expire after 90 days.
 
 Managed-cloud measurements remain a separate, Scott-keyed follow-up: they need
 a protected GitHub environment, a DSN secret, reviewed networking/private runner
@@ -1309,10 +1313,16 @@ still requires:
 
 1. Broader production instrumentation. Bounded HTTP, memory operation/recall,
    vector coverage/fallback, and curation domain-call metrics are implemented.
-   Durable run-transition and lease-event metrics, queue-age distributions,
-   broader archive/rebuild timing, remaining operation coverage, dashboards,
-   alerts, and measured defaults
-   still remain.
+   So are `witself_memory_curation_run_transitions_total`,
+   `witself_memory_curation_lease_events_total`,
+   `witself_memory_curation_queue_age_seconds`,
+   `witself_memory_curation_requests_pending`,
+   `witself_memory_curation_queue_metrics_up`, and the default-off
+   `witself-memory` warning rule group. Enabling that group still remains:
+   `platform.monitoring.memoryAlerts.enabled` is `false` for every cell.
+   Retaining firing and resolved receiver evidence also remains, along with
+   dashboards, broader archive/rebuild timing, remaining operation coverage,
+   and measured defaults.
 2. Queue and curation load beyond this bounded local slice: rollback under
    contention, production queue/backlog-age distributions, larger and more
    concurrent shapes, managed-cloud repetitions, and reviewed safe limits/SLOs.
@@ -1338,10 +1348,12 @@ still requires:
    client inference and remain outside this model-free store harness.
 8. Managed-cloud baselines on representative hardware, documented production
    SLOs/alerts/safe limits, degraded-mode drills, and measured default tuning.
-9. Hosted-tier implementation complete: the ref-gated manual workflow above
-   retains all five sanitized results and identifies release, PostgreSQL tier,
-   and runner. The first retained hosted artifact still needs post-merge
-   verification; a protected managed-cloud tier remains a follow-up.
+9. A protected managed-cloud tier remains a follow-up. The GitHub-hosted tier
+   is implemented and has run: the first dispatch from `main` on `dabeff07`
+   succeeded and retained its sanitized five-slice artifact on 2026-09-06
+   ([run 34043255196](https://github.com/witwave-ai/witself/actions/runs/34043255196)).
+   The ref-gated manual workflow identifies release, PostgreSQL tier, and
+   runner.
 
 No production default should be changed from any local or GitHub-hosted result. Production
 defaults and thresholds require repeated GCP/AWS/Azure measurements and an

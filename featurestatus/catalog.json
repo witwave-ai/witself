@@ -1661,9 +1661,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free memory, curation, worker, and quality evidence schemas exist, and the serving cell has continuous scrape plus generic server/worker alerting to a tested PagerDuty/dead-man receiver; memory/curation-specific SLO rules and retained multi-environment SLO evidence remain absent.",
+          "summary": "Value-free memory, curation, worker and quality evidence schemas exist; curation transition, lease, queue-age and pending metrics and the witself-memory rules are implemented, but memoryAlerts.enabled is false on every cell, so the rules are off; the sandbox serving cell sends generic alerts to a tested receiver.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/files/memory.rules.yaml",
             "docs/launch-readiness.md",
             "docs/memory-load-quality.md",
             "docs/observability-and-operations.md"
@@ -1716,7 +1717,7 @@
         {
           "id": "memory-production-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect value-free memory, curation, quality, backlog, and failure metrics to continuous SLOs and a tested external alert receiver.",
+          "summary": "Enable the implemented witself-memory rule group on serving cells after a measured baseline, then retain firing and resolved receiver evidence and multi-environment SLO evidence.",
           "ref": "docs/observability-and-operations.md"
         },
         {
