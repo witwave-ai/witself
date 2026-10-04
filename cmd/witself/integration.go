@@ -2596,7 +2596,7 @@ func transcriptFlush(args []string) (exitCode int) {
 		}
 		deferred := countBlockedCaptureEvents(remaining, nil, heldPaths)
 		if quarantined > 0 || deferred > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined, remaining)
+			writeTranscriptFlushSummary(runtimeName, 0, deferred, quarantined, remaining, nil)
 		}
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		if deferred > 0 {
@@ -2608,7 +2608,7 @@ func transcriptFlush(args []string) (exitCode int) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		if quarantined > 0 {
-			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined, nil)
+			writeTranscriptFlushSummary(runtimeName, 0, 0, quarantined, nil, nil)
 			writeSkippedEphemeralSessionSummary(runtimeName)
 		}
 		return 1
@@ -2837,15 +2837,16 @@ func transcriptFlush(args []string) (exitCode int) {
 		}
 	}
 	deferred := countBlockedCaptureEvents(remaining, blockedTranscripts, heldPaths)
-	if deferred > 0 {
+	heldForBinding := countHeldForBindingCaptureEvents(remaining, heldPaths)
+	if deferred > heldForBinding {
 		if deferredErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: finalize capture event: %v\n", deferredErr)
 		}
-		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined, remaining)
+		writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined, remaining, &cfg)
 		writeSkippedEphemeralSessionSummary(runtimeName)
 		return 1
 	}
-	writeTranscriptFlushSummary(runtimeName, flushed, 0, quarantined, remaining)
+	writeTranscriptFlushSummary(runtimeName, flushed, deferred, quarantined, remaining, &cfg)
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
 }
@@ -2976,11 +2977,12 @@ func writeTranscriptFlushSummary(
 	runtime string,
 	flushed, deferred, quarantined int,
 	remaining []transcriptcapture.PendingEvent,
+	cfg *transcriptcapture.Config,
 ) {
 	if deferred > 0 {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s); deferred %d incomplete or mismatched event(s)",
 			flushed, runtime, deferred)
-		writeDeferredBuckets(runtime, deferred, remaining)
+		writeDeferredBuckets(runtime, deferred, remaining, cfg)
 	} else {
 		fmt.Fprintf(os.Stderr, "flushed %d %s transcript event(s)", flushed, runtime)
 	}
@@ -2992,10 +2994,11 @@ func writeTranscriptFlushSummary(
 
 // writeDeferredBuckets shows the backlog's shape, not its content. Events the
 // upload gate holds are attributed to a missing terminal, an orphaned run, or a
-// session with no local state; anything deferred for another reason, such as a
-// server rejection, is reported as the remainder.
-func writeDeferredBuckets(runtime string, deferred int, remaining []transcriptcapture.PendingEvent) {
-	summary, err := transcriptcapture.SummarizeDeferred(runtime, remaining)
+// session with no local state. With a readable binding, identity mismatches
+// have their own bucket. Other reasons, such as a server rejection, are the
+// remainder.
+func writeDeferredBuckets(runtime string, deferred int, remaining []transcriptcapture.PendingEvent, cfg *transcriptcapture.Config) {
+	summary, err := transcriptcapture.SummarizeDeferred(runtime, remaining, cfg)
 	if err != nil {
 		return
 	}
@@ -3003,6 +3006,9 @@ func writeDeferredBuckets(runtime string, deferred int, remaining []transcriptca
 		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
 		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
 		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	if cfg != nil {
+		fmt.Fprintf(os.Stderr, ", %s %d", transcriptcapture.DeferredBucketIdentityMismatch, summary.IdentityMismatch)
+	}
 	if other := deferred - summary.Total(); other > 0 {
 		fmt.Fprintf(os.Stderr, ", other %d", other)
 	}
@@ -3031,16 +3037,28 @@ func transcriptStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: read capture outbox: %v\n", err)
 		return 1
 	}
-	summary, err := transcriptcapture.SummarizeDeferred(runtimeName, pending)
+	var binding *transcriptcapture.Config
+	if cfg, err := transcriptcapture.LoadConfig(runtimeName); err == nil {
+		binding = &cfg
+	}
+	summary, err := transcriptcapture.SummarizeDeferred(runtimeName, pending, binding)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: read capture state: %v\n", err)
 		return 1
 	}
-	fmt.Printf("%s capture: %d queued event(s); deferred %d (%s %d, %s %d, %s %d)\n",
+	fmt.Printf("%s capture: %d queued event(s); deferred %d (%s %d, %s %d, %s %d",
 		runtimeName, len(pending), summary.Total(),
 		transcriptcapture.DeferredBucketNoFence, summary.NoFence,
 		transcriptcapture.DeferredBucketRunMismatch, summary.RunMismatch,
 		transcriptcapture.DeferredBucketSessionUnbound, summary.SessionUnbound)
+	if binding != nil {
+		fmt.Printf(", %s %d", transcriptcapture.DeferredBucketIdentityMismatch, summary.IdentityMismatch)
+	}
+	fmt.Println(")")
+	// Finish the stdout line first, so a shared terminal never splits it.
+	if binding == nil && len(pending) > 0 {
+		fmt.Fprintf(os.Stderr, "witself: identity-mismatch not classified: no readable %s binding\n", runtimeName)
+	}
 	writeSkippedEphemeralSessionSummary(runtimeName)
 	return 0
 }
@@ -3116,7 +3134,8 @@ func transcriptFlushContext(detached bool) (context.Context, context.CancelFunc)
 // ephemeral Codex event whose quarantine move failed, cannot be uploaded in
 // this run. The transcript key is identity-free, so holding one path aside
 // must not block later eligible events in the same session. Held events stay
-// pending and never count as uploadable work.
+// pending and never count as uploadable work. Identity-mismatched events are
+// held for their binding and are not a flush error.
 func prepareTranscriptFlushEvents(
 	pending []transcriptcapture.PendingEvent,
 	cfg transcriptcapture.Config,
@@ -3136,7 +3155,7 @@ func prepareTranscriptFlushEvents(
 		}
 		if err := captureEventBindingError(pendingEvent.Event, cfg); err != nil {
 			held[pendingEvent.Path] = err
-			if firstErr == nil {
+			if firstErr == nil && !errors.Is(err, transcriptcapture.ErrIdentityMismatch) {
 				firstErr = err
 			}
 			continue
@@ -3192,6 +3211,18 @@ func countBlockedCaptureEvents(pending []transcriptcapture.PendingEvent, blocked
 			continue
 		}
 		if _, exists := blocked[pendingEvent.Event.TranscriptExternalID()]; exists {
+			count++
+		}
+	}
+	return count
+}
+
+// countHeldForBindingCaptureEvents exempts only the held reason recorded by
+// this flush. Another failure stays a failure even when its identity differs.
+func countHeldForBindingCaptureEvents(pending []transcriptcapture.PendingEvent, held map[string]error) int {
+	count := 0
+	for _, pendingEvent := range pending {
+		if errors.Is(held[pendingEvent.Path], transcriptcapture.ErrIdentityMismatch) {
 			count++
 		}
 	}

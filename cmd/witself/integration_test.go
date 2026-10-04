@@ -2464,6 +2464,8 @@ func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
 }
 
 func TestPrepareTranscriptFlushRejectsBindingChanges(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
 	event := transcriptcapture.Event{
 		Runtime: transcriptcapture.RuntimeGrokBuild, Account: "default", Realm: "default",
 		Agent: "old-agent", AgentID: "agent_old", AgentName: "old-agent",
@@ -2478,7 +2480,7 @@ func TestPrepareTranscriptFlushRejectsBindingChanges(t *testing.T) {
 		Agent: "new-agent", AgentID: "agent_new", AgentName: "new-agent",
 		Location: transcriptcapture.Location{ID: "loc_1", Name: "home"},
 	}, blocked, held)
-	if err == nil || !strings.Contains(err.Error(), "does not match") || len(ready) != 0 || len(blocked) != 0 || len(held) != 1 {
+	if err != nil || !errors.Is(held[pending[0].Path], transcriptcapture.ErrIdentityMismatch) || len(ready) != 0 || len(blocked) != 0 || len(held) != 1 {
 		t.Fatalf("binding-change preparation = ready %#v / blocked %#v / held %#v / err %v", ready, blocked, held, err)
 	}
 	if hasUnblockedCaptureEvent(pending, blocked, held) || countBlockedCaptureEvents(pending, blocked, held) != 1 {
@@ -2492,6 +2494,8 @@ func TestPrepareTranscriptFlushRejectsBindingChanges(t *testing.T) {
 // on the founder's machine 39 such events blocked 1,201 later events for ten
 // hours (issue #323).
 func TestPrepareTranscriptFlushHoldsMismatchedEventsWithoutBlockingTheTranscript(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_CAPTURE_NO_FLUSH", "1")
 	cfg := transcriptcapture.Config{
 		Runtime: transcriptcapture.RuntimeClaudeCode, Account: "default", Realm: "default",
 		Agent: "scott", AgentID: "agent_1", AgentName: "scott",
@@ -2512,7 +2516,7 @@ func TestPrepareTranscriptFlushHoldsMismatchedEventsWithoutBlockingTheTranscript
 	blocked := map[string]error{}
 	held := map[string]error{}
 	ready, err := prepareTranscriptFlushEvents(pending, cfg, blocked, held)
-	if err == nil || !strings.Contains(err.Error(), "does not match") {
+	if err != nil || !errors.Is(held["/unused/foreign.json"], transcriptcapture.ErrIdentityMismatch) {
 		t.Fatalf("held preparation err = %v", err)
 	}
 	if len(ready) != 1 || ready[0].Event.ID != matching.ID {

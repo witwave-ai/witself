@@ -346,6 +346,23 @@ quarantine directory by hand. A move that fails is held from upload for that
 run, and the flush exits 1. The cumulative record is the quarantine directory
 plus the skipped markers, because a hook-spawned detached flush prints nothing.
 
+A queued event whose account, realm, agent or location differs from the
+runtime's installed binding is held for its binding. It stays in the outbox,
+where sealed redaction still reaches it, and uploads only if that binding is
+installed again, once its turn is complete. Held-for-binding events are reported
+in the `identity-mismatch` bucket and alone no longer make a flush exit 1; any
+other deferral still does. This change never moves, uploads, releases or deletes
+held-for-binding events. How an operator retires that backlog remains an open
+decision on [issue #335](https://github.com/witwave-ai/witself/issues/335).
+`transcript fence` refuses a session that still holds such an event. Pathless
+Codex events follow the existing ephemeral-quarantine path first, as described
+above; status and flush summaries never count them in `identity-mismatch`.
+
+Before changing a runtime's agent, account, realm or location, run
+`witself transcript flush --runtime RUNTIME` and check
+`witself transcript status --runtime RUNTIME`: events still queued will be held
+for the old binding after the change.
+
 ### Known capture limitations
 
 - [Issue #339](https://github.com/witwave-ai/witself/issues/339): Stop and
@@ -476,6 +493,13 @@ turn's redaction, which retries one that failed at capture time.
 `witself transcript status --runtime RUNTIME` and every deferring
 `witself transcript flush` print the same value-free backlog buckets:
 
+- `identity-mismatch`: events queued under another account, realm, agent or
+  location of this runtime, held for that binding. They can upload if it is
+  installed again, once their turns are complete. This bucket requires a
+  readable local binding and excludes pathless Codex events. When the binding
+  is missing or cannot be read, status leaves the bucket out, prints
+  `witself: identity-mismatch not classified: no readable <runtime> binding`
+  on stderr, and still exits 0.
 - `no-fence`: the session's bound run is still waiting for a terminal event.
 - `run-mismatch`: the events belong to a run the session no longer binds, which
   an older build orphaned on resume. `--latest` recovers them.
@@ -487,9 +511,10 @@ turn's redaction, which retries one that failed at capture time.
   age-based release that issue #335 rejected; how an operator retires that
   backlog remains open there.
 
-The buckets are counts only. A flush that defers events for another reason,
-such as a server rejection or an upload-ready event queued behind a held turn,
-reports the remainder as `other`.
+The buckets are counts only. Held-for-binding events are reported but are not a
+flush failure. A flush that defers events for another reason, such as a server
+rejection or an upload-ready event queued behind a held turn, reports the
+remainder as `other`.
 
 Cursor's `beforeSubmitPrompt` hook wraps the visible prompt in one provider
 timestamp and `user_query` envelope. Witself removes that transport-only
