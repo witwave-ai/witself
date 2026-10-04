@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"gopkg.in/yaml.v3"
@@ -70,14 +71,21 @@ type removeCellEnv struct {
 	original                            []byte
 	requests                            *int
 	registry                            *[]string
+	registryFailure                     *removeCellRegistryFailure
 	fake                                *removeCellFakePulumi
+}
+
+type removeCellRegistryFailure struct {
+	status int
+	body   string
 }
 
 // removeCellFixture writes an inventory with a leading comment, an R2 cell and
 // a local cell with a fleet alias, starts a fake control plane that lists
 // civo-other-use1-dev and the given registry names, and installs fake as the
 // Pulumi CLI. A row may replace the listed names through env.registry; nil
-// makes the control plane answer {}.
+// makes the control plane answer {}. A nonzero env.registryFailure.status
+// instead returns the given failure status and body.
 func removeCellFixture(t *testing.T, fake *removeCellFakePulumi, registered ...string) removeCellEnv {
 	t.Helper()
 	home := r2TestHome(t)
@@ -87,10 +95,16 @@ func removeCellFixture(t *testing.T, fake *removeCellFakePulumi, registered ...s
 	r2StubCLICommand(t, fake)
 	requests := 0
 	registry := append([]string{"civo-other-use1-dev"}, registered...)
+	registryFailure := &removeCellRegistryFailure{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/cells" || r.Header.Get("Authorization") != "Bearer "+removeCellFleetToken {
 			http.Error(w, `{"error":"unexpected request"}`, http.StatusBadRequest)
+			return
+		}
+		if registryFailure.status != 0 {
+			w.WriteHeader(registryFailure.status)
+			_, _ = io.WriteString(w, registryFailure.body)
 			return
 		}
 		if registry == nil {
@@ -119,7 +133,7 @@ func removeCellFixture(t *testing.T, fake *removeCellFakePulumi, registered ...s
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return removeCellEnv{home: home, path: path, tokenPath: tokenPath, controlPlane: srv.URL, original: []byte(body), requests: &requests, registry: &registry, fake: fake}
+	return removeCellEnv{home: home, path: path, tokenPath: tokenPath, controlPlane: srv.URL, original: []byte(body), requests: &requests, registry: &registry, registryFailure: registryFailure, fake: fake}
 }
 
 func setR2TestValues(t *testing.T) {
@@ -194,6 +208,99 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func TestRemoveCellBoundRefusalDetail(t *testing.T) {
+	r2TestHome(t)
+	for _, tc := range []struct {
+		name, text, want string
+	}{
+		{name: "empty", want: "(no detail)"},
+		{name: "space only", text: " \t ", want: "(no detail)"},
+		{name: "trim space", text: " \t detail \t ", want: "detail"},
+		{name: "carriage return", text: "first\rsecond", want: "first [truncated]"},
+		{name: "line feed", text: "first\nsecond", want: "first [truncated]"},
+		{name: "empty first line", text: "\nsecond", want: "(no detail) [truncated]"},
+		{name: "vertical tab", text: "first\vsecond", want: "first [truncated]"},
+		{name: "escape sequence", text: "first\x1b[2Ksecond", want: "first [truncated]"},
+		{name: "next line", text: "first\u0085second", want: "first [truncated]"},
+		{name: "line separator", text: "first\u2028second", want: "first [truncated]"},
+		{name: "inner tab kept", text: "first\tsecond", want: "first\tsecond"},
+		{name: "exact byte limit", text: strings.Repeat("x", 512), want: strings.Repeat("x", 512)},
+		{name: "over byte limit", text: strings.Repeat("x", 513), want: strings.Repeat("x", 512) + " [truncated]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := boundRefusalDetail(tc.text)
+			if got != tc.want {
+				t.Error("bounded refusal detail differs")
+			}
+			requireNoSecretOutput(t, got)
+		})
+	}
+}
+
+func TestConfigRemoveCellRegistryRefusal(t *testing.T) {
+	const errorPrefix = "list cells: HTTP 500: "
+	const marker = " [truncated]"
+	for _, tc := range []struct {
+		name, body, wantDetail string
+		status                 int
+	}{
+		{
+			name:       "multi-line",
+			status:     http.StatusInternalServerError,
+			body:       strings.Repeat("x", 100) + "\nsecond line " + strings.Repeat("z", 10*1024),
+			wantDetail: errorPrefix + strings.Repeat("x", 100) + marker,
+		},
+		{
+			name:       "long single line",
+			status:     http.StatusInternalServerError,
+			body:       strings.Repeat("€", 666),
+			wantDetail: errorPrefix + strings.Repeat("€", (512-len(errorPrefix))/3) + marker,
+		},
+		{
+			name:   "redact before cut",
+			status: http.StatusInternalServerError,
+			body:   strings.Repeat("x", 500-len(errorPrefix)) + civoTestToken + strings.Repeat("z", 100),
+		},
+		{
+			name:       "short",
+			status:     http.StatusServiceUnavailable,
+			body:       "unavailable",
+			wantDetail: "list cells: HTTP 503: unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := removeCellFixture(t, &removeCellFakePulumi{})
+			t.Setenv("CIVO_TOKEN", civoTestToken)
+			*env.registryFailure = removeCellRegistryFailure{status: tc.status, body: tc.body}
+			stdout, stderr, err := runRemoveCell(t, "-config", env.path, "-cell", r2TestCell)
+			prefix := "remove-cell: cannot read the fleet registry of control plane " + env.controlPlane + ` for cell "` + r2TestCell + `": `
+			const suffix = "; refusing to remove the entry"
+			got := errText(err)
+			if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, suffix) {
+				t.Error("registry refusal framing differs")
+			}
+			detail := strings.TrimSuffix(strings.TrimPrefix(got, prefix), suffix)
+			if tc.wantDetail != "" && got != prefix+tc.wantDetail+suffix {
+				t.Error("registry refusal detail differs")
+			}
+			if len(detail) > 512+len(marker) || !utf8.ValidString(got) || strings.ContainsAny(got, "\r\n") {
+				t.Error("registry refusal is not one bounded UTF-8 line")
+			}
+			if tc.name == "redact before cut" && !strings.HasSuffix(detail, marker) {
+				t.Error("long redacted refusal is missing its truncation marker")
+			}
+			if strings.Contains(got, "second line") || strings.Contains(got, civoTestToken[:12]) {
+				t.Error("registry refusal disclosed a later line or part of a credential")
+			}
+			if stdout != "" || stderr != "" || *env.requests != 1 || len(env.fake.calls) != 0 {
+				t.Error("registry failure output or request counts differ")
+			}
+			requireNoSecretOutput(t, stdout, stderr, got)
+			requireUnchanged(t, env)
+		})
+	}
 }
 
 func TestConfigRemoveCell(t *testing.T) {
@@ -283,6 +390,35 @@ func TestConfigRemoveCell(t *testing.T) {
 			}
 			requireUnchanged(t, env)
 		}
+	})
+
+	t.Run("no fleet token", func(t *testing.T) {
+		env := removeCellFixture(t, &removeCellFakePulumi{})
+		body := strings.Replace(string(env.original), "  fleet_token_file: "+env.tokenPath+"\n", "", 1)
+		if strings.Contains(body, "fleet_token_file:") {
+			t.Fatal("fixture still names a fleet token file")
+		}
+		if err := os.WriteFile(env.path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		env.original = []byte(body)
+		if err := os.Remove(env.tokenPath); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{filepath.Join(env.home, "tokens", "fleet.token"), env.tokenPath, filepath.Join(env.home, ".witself-infra", "fleet.token")} {
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("a default fleet token file exists or cannot be checked")
+			}
+		}
+		stdout, stderr, err := runRemoveCell(t, "-config", env.path, "-cell", r2TestCell)
+		if err == nil || !strings.Contains(err.Error(), "set fleet_token_file in infra.yaml") {
+			t.Error("missing fleet token refusal omits the inventory setting")
+		}
+		if *env.requests != 0 || len(env.fake.calls) != 0 {
+			t.Error("missing fleet token reached the control plane or Pulumi")
+		}
+		requireNoSecretOutput(t, stdout, stderr, errText(err))
+		requireUnchanged(t, env)
 	})
 
 	t.Run("r2 credentials missing", func(t *testing.T) {
@@ -503,6 +639,7 @@ func TestConfigRemoveCell(t *testing.T) {
 	})
 
 	t.Run("local stack empty", func(t *testing.T) {
+		isolateResolvedLocalPassphrases(t)
 		env := removeCellFixture(t, &removeCellFakePulumi{export: removeCellEmptyExport})
 		stateDir := filepath.Join(env.home, "state")
 		if err := os.MkdirAll(filepath.Join(stateDir, ".pulumi"), 0o700); err != nil {
@@ -526,6 +663,11 @@ func TestConfigRemoveCell(t *testing.T) {
 		if !slices.Contains(env.fake.env, "PULUMI_CONFIG_PASSPHRASE="+removeCellLocalPassphrase) {
 			t.Error("local passphrase not passed to Pulumi")
 		}
+		redacted := redactDiagnostic("x "+removeCellLocalPassphrase, func(string) string { return "" })
+		if redacted != "x [redacted PULUMI_CONFIG_PASSPHRASE]" {
+			t.Error("local file passphrase was not recorded for redaction")
+		}
+		requireNoSecretOutput(t, redacted)
 		if got, err := os.ReadFile(passphrasePath); err != nil || !bytes.Equal(got, passphraseBytes) {
 			t.Error("passphrase file changed")
 		}

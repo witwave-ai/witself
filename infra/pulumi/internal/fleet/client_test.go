@@ -7,10 +7,27 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestNewClientMissingFleetTokenAdvice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WITSELF_HOME", home)
+	t.Setenv("WITSELF_FLEET_TOKEN", "")
+
+	client, err := NewClient("https://cp.example.invalid", "")
+	if client != nil || err == nil {
+		t.Fatal("missing fleet token must fail before constructing a client")
+	}
+	want := "no fleet token: set fleet_token_file in infra.yaml (the cell's entry or defaults) for a command run with -cell, pass -fleet-token-file where the command accepts it, set WITSELF_FLEET_TOKEN, or create " + filepath.Join(home, "tokens", "fleet.token")
+	if err.Error() != want {
+		t.Fatalf("missing fleet token advice = %q, want %q", err.Error(), want)
+	}
+}
 
 // Ordinary registration used to pass a typed-nil *registrationAck to do,
 // causing json: Unmarshal(nil *fleet.registrationAck) after a successful write.

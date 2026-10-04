@@ -902,6 +902,155 @@ func TestDiagnosticRedactionEntryPoints(t *testing.T) {
 
 const civoTestToken = "test-civo-token-value-not-real"
 const civoFileTestToken = "test-civo-from-disk-not-real"
+const localPassphraseTestValue = "test-local-state-passphrase-not-real"
+
+func isolateResolvedLocalPassphrases(t *testing.T) {
+	t.Helper()
+	resolvedLocalPassphrases.Lock()
+	saved := resolvedLocalPassphrases.values
+	resolvedLocalPassphrases.values = nil
+	resolvedLocalPassphrases.Unlock()
+	t.Cleanup(func() {
+		resolvedLocalPassphrases.Lock()
+		resolvedLocalPassphrases.values = saved
+		resolvedLocalPassphrases.Unlock()
+	})
+}
+
+func TestRedactDiagnosticLocalPassphrase(t *testing.T) {
+	allValues := r2TestValues()
+	allValues[backend.R2StatePassphraseEnv] = "test-r2-state-passphrase-not-real"
+	allValues["CLOUDFLARE_API_TOKEN"] = cloudflareTestToken
+	allValues["CIVO_TOKEN"] = civoTestToken
+	allValues["PULUMI_CONFIG_PASSPHRASE"] = localPassphraseTestValue
+	for _, tc := range []struct {
+		name     string
+		env      map[string]string
+		recorded []string
+		text     string
+		want     string
+	}{
+		{
+			name: "exported value",
+			env:  map[string]string{"PULUMI_CONFIG_PASSPHRASE": localPassphraseTestValue},
+			text: "x " + localPassphraseTestValue,
+			want: "x [redacted PULUMI_CONFIG_PASSPHRASE]",
+		},
+		{
+			name: "padded export",
+			env:  map[string]string{"PULUMI_CONFIG_PASSPHRASE": " " + localPassphraseTestValue + "\n"},
+			text: "x " + localPassphraseTestValue,
+			want: "x [redacted PULUMI_CONFIG_PASSPHRASE]",
+		},
+		{
+			name: "short export",
+			env:  map[string]string{"PULUMI_CONFIG_PASSPHRASE": "short77"},
+			text: "short77 stays",
+			want: "short77 stays",
+		},
+		{
+			name:     "recorded value",
+			recorded: []string{localPassphraseTestValue},
+			text:     "x " + localPassphraseTestValue,
+			want:     "x [redacted PULUMI_CONFIG_PASSPHRASE]",
+		},
+		{
+			name: "unrecorded value",
+			text: "x " + localPassphraseTestValue,
+			want: "x " + localPassphraseTestValue,
+		},
+		{
+			name:     "short recorded value",
+			recorded: []string{"short77"},
+			text:     "short77 stays",
+			want:     "short77 stays",
+		},
+		{
+			name: "all kinds",
+			env:  allValues,
+			text: strings.Join([]string{
+				allValues[backend.R2AccessKeyIDEnv],
+				allValues[backend.R2SecretAccessKeyEnv],
+				allValues[backend.R2StatePassphraseEnv],
+				cloudflareTestToken,
+				civoTestToken,
+				localPassphraseTestValue,
+			}, " "),
+			want: "[redacted WITSELF_INFRA_R2_ACCESS_KEY_ID] [redacted WITSELF_INFRA_R2_SECRET_ACCESS_KEY] [redacted WITSELF_INFRA_STATE_PASSPHRASE] [redacted CLOUDFLARE_API_TOKEN] [redacted CIVO_TOKEN] [redacted PULUMI_CONFIG_PASSPHRASE]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r2TestHome(t)
+			isolateResolvedCivoTokens(t)
+			isolateResolvedLocalPassphrases(t)
+			for _, value := range tc.recorded {
+				rememberLocalPassphrase(value)
+			}
+			got := redactDiagnostic(tc.text, func(name string) string { return tc.env[name] })
+			if got != tc.want {
+				t.Fatal("passphrase diagnostic mismatch")
+			}
+			requireNoSecretOutput(t, got)
+			for _, value := range allValues {
+				if !strings.Contains(tc.want, value) && strings.Contains(got, value) {
+					t.Fatal("diagnostic disclosed a fixture value")
+				}
+			}
+		})
+	}
+}
+
+func TestRememberLocalPassphrase(t *testing.T) {
+	r2TestHome(t)
+	isolateResolvedLocalPassphrases(t)
+	rememberLocalPassphrase("")
+	rememberLocalPassphrase(localPassphraseTestValue)
+	rememberLocalPassphrase(localPassphraseTestValue)
+	resolvedLocalPassphrases.Lock()
+	defer resolvedLocalPassphrases.Unlock()
+	if len(resolvedLocalPassphrases.values) != 1 || resolvedLocalPassphrases.values[0] != localPassphraseTestValue {
+		t.Fatal("passphrase record must omit empty values and duplicates")
+	}
+}
+
+func TestEnsurePassphraseRecordsSources(t *testing.T) {
+	for _, source := range []string{"environment", "file", "generated"} {
+		t.Run(source, func(t *testing.T) {
+			r2TestHome(t)
+			isolateResolvedLocalPassphrases(t)
+			stateDir := t.TempDir()
+			path := filepath.Join(stateDir, "passphrase")
+			switch source {
+			case "environment":
+				t.Setenv("PULUMI_CONFIG_PASSPHRASE", localPassphraseTestValue)
+			case "file":
+				if err := os.WriteFile(path, []byte(" "+localPassphraseTestValue+"\n"), 0o600); err != nil {
+					t.Fatal("write fixture passphrase failed")
+				}
+			}
+			value, err := ensurePassphrase(stateDir)
+			if err != nil {
+				t.Fatal("resolve local passphrase failed")
+			}
+			if source != "generated" && value != localPassphraseTestValue {
+				t.Fatal("resolved passphrase did not match fixture")
+			}
+			if source == "generated" {
+				data, readErr := os.ReadFile(path)
+				info, statErr := os.Stat(path)
+				if readErr != nil || statErr != nil || string(data) != value+"\n" || len(value) != 43 || info.Mode().Perm() != 0o600 {
+					t.Fatal("generated passphrase persistence or mode mismatch")
+				}
+			}
+			t.Setenv("PULUMI_CONFIG_PASSPHRASE", "")
+			got := redactDiagnostic("x "+value, os.Getenv)
+			if got != "x [redacted PULUMI_CONFIG_PASSPHRASE]" || strings.Contains(got, value) {
+				t.Fatal("resolved passphrase was not recorded for redaction")
+			}
+			requireNoSecretOutput(t, got)
+		})
+	}
+}
 
 // isolateResolvedCivoTokens empties the process-wide record of resolved Civo
 // tokens for one test and restores it afterwards.

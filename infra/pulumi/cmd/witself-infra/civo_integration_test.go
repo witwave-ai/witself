@@ -302,6 +302,7 @@ func TestResolveCivoTokenFileSecurity(t *testing.T) {
 }
 
 func TestConfigAddCivoRejectsTokenValueAsFileReference(t *testing.T) {
+	r2TestHome(t)
 	path := filepath.Join(t.TempDir(), "infra.yaml")
 	fs := newTestFlagSet()
 	if err := fs.Parse([]string{
@@ -311,8 +312,16 @@ func TestConfigAddCivoRejectsTokenValueAsFileReference(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := configAddCell(fs, path); err == nil {
+	err := configAddCell(fs, path)
+	if err == nil {
 		t.Fatal("token value passed as a file reference unexpectedly persisted")
+	}
+	requireNoSecretOutput(t, err.Error())
+	if strings.Contains(err.Error(), "this-is-a-token-not-a-file") {
+		t.Error("error disclosed the token value passed as a file reference")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "civo token file") || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Error("error lost the Civo token-file marker or missing-file reason")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("config file exists after rejected token value: %v", err)

@@ -2,7 +2,8 @@
 // (/v1/cells on e.g. https://self.witwave.ai). The provisioner — not the cell —
 // registers: `up -control-plane URL` registers as a post-step, and `destroy`
 // drains + removes (or purges) as a pre-step. Authorization is the fleet token,
-// read from -fleet-token-file, WITSELF_FLEET_TOKEN, or
+// read from the inventory's fleet_token_file setting, -fleet-token-file,
+// WITSELF_FLEET_TOKEN, or
 // ~/.witself/tokens/fleet.token (all Witself credentials live under
 // ~/.witself/tokens; WITSELF_HOME overrides the root).
 package fleet
@@ -158,7 +159,7 @@ func fleetToken(tokenFile string) (string, error) {
 			return t, nil
 		}
 	}
-	return "", fmt.Errorf("no fleet token: pass -fleet-token-file, set WITSELF_FLEET_TOKEN, or create %s", path)
+	return "", fmt.Errorf("no fleet token: set fleet_token_file in infra.yaml (the cell's entry or defaults) for a command run with -cell, pass -fleet-token-file where the command accepts it, set WITSELF_FLEET_TOKEN, or create %s", path)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) (int, string, error) {
