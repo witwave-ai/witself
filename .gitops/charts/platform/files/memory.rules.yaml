@@ -5,7 +5,7 @@ groups:
       - alert: WitselfMemoryCurationBacklogAgeHigh
         # Queue observations measure the oldest due, unclaimed request. Require
         # a current backlog so a cleared queue cannot sustain this alert.
-        expr: (1 - sum(rate(witself_memory_curation_queue_age_seconds_bucket{le="900"}[15m])) / sum(rate(witself_memory_curation_queue_age_seconds_count[15m]))) > 0.10 and max(witself_memory_curation_requests_pending) > 0
+        expr: (1 - sum(rate(witself_memory_curation_queue_age_seconds_bucket{le=~"900(\\.0)?"}[15m])) / sum(rate(witself_memory_curation_queue_age_seconds_count[15m]))) > 0.10 and max(witself_memory_curation_requests_pending) > 0
         for: 15m
         labels:
           severity: warning

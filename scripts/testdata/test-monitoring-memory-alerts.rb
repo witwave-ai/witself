@@ -7,6 +7,15 @@ require 'open3'
 root, tmp, child_chart, promtool = ARGV
 abort 'usage: test-monitoring-memory-alerts.rb ROOT [TMPDIR CHILD_CHART PROMTOOL]' unless root && [1, 4].include?(ARGV.length)
 chart = File.join(root, '.gitops/charts/platform')
+Dir.glob(File.join(chart, 'files/*.rules.yaml')).sort.each do |path|
+  YAML.safe_load(File.read(path)).fetch('groups').each do |group|
+    group.fetch('rules').each do |rule|
+      next unless rule.fetch('expr').match?(/(?:\{|,)\s*le\s*=~?\s*(["'`])[+-]?\d+\1/)
+
+      abort "#{path}: exact or regex integer-only le matcher is unsafe: Prometheus 3 normalizes classic-histogram le labels to float form (900 becomes 900.0); match both forms"
+    end
+  end
+end
 source_path = File.join(chart, 'files/memory.rules.yaml')
 source = YAML.safe_load(File.read(source_path))
 fixture = YAML.safe_load(File.read(File.join(chart, 'testdata/memory.rules.test.yaml')), aliases: true)
