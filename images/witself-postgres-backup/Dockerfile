@@ -7,7 +7,7 @@ FROM postgres:18-alpine@sha256:6c538e7206ea40ff740ef27883529390a690b6ead6ba96b44
 # revisions are available for both x86_64 and aarch64 in Alpine v3.24/community.
 # Resolve packages only while building; the scheduled job needs no apk/mirrors.
 RUN set -eu; \
-    apk add --no-cache age=1.3.1-r6 aws-cli=2.34.63-r0; \
+    apk add --no-cache age=1.3.2-r0 aws-cli=2.34.63-r0; \
     for tool in bash psql pg_dump gzip date age aws; do command -v "$tool" >/dev/null; done; \
     age --version; \
     aws --version; \
