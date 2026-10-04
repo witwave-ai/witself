@@ -224,6 +224,19 @@ driving the window — is captured as the subject for anything it does while
 the binding is switched. Drive a window as one uninterrupted process and
 make no other calls on that runtime until it has restored the binding.
 
+A driver on the same runtime cannot use `transcript fence` to isolate itself
+from this window. Its open turn, queued under the operator's binding, is held
+during the window and uploads after that binding is restored, once its turn is
+complete. Anything the driver does during the window is still captured as the
+subject. Drive the window from a different runtime to avoid both effects. The
+[installation rules](transcript-ledger.md#runtime-installation-and-identity)
+support one local binding per runtime and use administrator-managed hooks for
+Codex and Claude Code on macOS and Linux; changing `WITSELF_HOME` alone does not
+isolate those hooks. After the subject is retired, its leftover events appear
+as `identity-mismatch` and stay queued. How an operator retires that backlog
+remains an open decision on
+[issue #335](https://github.com/witwave-ai/witself/issues/335).
+
 After all six stages complete, verify and retain sanitized evidence:
 
 ```text

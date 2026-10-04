@@ -2,6 +2,9 @@ package transcriptcapture
 
 import "errors"
 
+// ErrIdentityMismatch identifies an event held for another binding of its runtime.
+var ErrIdentityMismatch = errors.New("queued transcript identity does not match the installed runtime binding")
+
 // EventBindingError verifies the queued event belongs to the installed binding.
 // Stable IDs survive display-name changes. Legacy account/realm names are
 // accepted only when the event's agent and location IDs pin its original scope.
@@ -13,8 +16,11 @@ func EventBindingError(event Event, cfg Config) error {
 	realmMatches := stableCaptureIdentityMatches(event.RealmID, cfg.RealmID, event.Realm, cfg.Realm, legacyEventContext)
 	agentMatches := stableCaptureIdentityMatches(event.AgentID, cfg.AgentID,
 		event.Agent+"\x00"+event.AgentName, cfg.Agent+"\x00"+cfg.AgentName, false)
-	if event.Runtime != cfg.Runtime || !accountMatches || !realmMatches || !agentMatches || event.Location.ID != cfg.Location.ID {
+	if event.Runtime != cfg.Runtime {
 		return errors.New("queued transcript identity does not match the installed runtime binding")
+	}
+	if !accountMatches || !realmMatches || !agentMatches || event.Location.ID != cfg.Location.ID {
+		return ErrIdentityMismatch
 	}
 	return nil
 }

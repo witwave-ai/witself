@@ -184,7 +184,7 @@ func TestResumedRunWithoutRolloverFenceStaysDeferredUntilFenced(t *testing.T) {
 			t.Fatalf("orphaned %s event was upload-ready without a fence", item.Event.HookEvent)
 		}
 	}
-	summary, err := SummarizeDeferred(RuntimeCursor, pending)
+	summary, err := SummarizeDeferred(RuntimeCursor, pending, nil)
 	if err != nil || summary.RunMismatch != 2 || summary.NoFence != 0 || summary.SessionUnbound != 0 {
 		t.Fatalf("deferred summary = %#v, %v", summary, err)
 	}
@@ -200,7 +200,7 @@ func TestResumedRunWithoutRolloverFenceStaysDeferredUntilFenced(t *testing.T) {
 		}
 	}
 	pending = assertAllPendingReady(t, RuntimeCursor)
-	summary, err = SummarizeDeferred(RuntimeCursor, pending)
+	summary, err = SummarizeDeferred(RuntimeCursor, pending, nil)
 	if err != nil || summary.Total() != 0 {
 		t.Fatalf("summary after fencing = %#v, %v", summary, err)
 	}
@@ -464,14 +464,14 @@ func TestSummarizeDeferredSeparatesUnboundSessionsFromOpenRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary, err := SummarizeDeferred(RuntimeCursor, pending)
+	summary, err := SummarizeDeferred(RuntimeCursor, pending, nil)
 	if err != nil || summary.NoFence != 2 || summary.RunMismatch != 0 || summary.SessionUnbound != 0 {
 		t.Fatalf("open-run summary = %#v, %v", summary, err)
 	}
 	if err := removeSessionState(RuntimeCursor, rolloverSession); err != nil {
 		t.Fatal(err)
 	}
-	summary, err = SummarizeDeferred(RuntimeCursor, pending)
+	summary, err = SummarizeDeferred(RuntimeCursor, pending, nil)
 	if err != nil || summary.SessionUnbound != 2 || summary.NoFence != 0 || summary.RunMismatch != 0 {
 		t.Fatalf("unbound summary = %#v, %v", summary, err)
 	}

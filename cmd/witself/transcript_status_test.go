@@ -77,13 +77,13 @@ func TestTranscriptFlushAndStatusReportDeferredBuckets(t *testing.T) {
 	_, stderr, code := captureFactDeleteCLI(t, func() int {
 		return transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCursor})
 	})
-	if code != 1 || stderr != "flushed 1 cursor transcript event(s); deferred 2 incomplete or mismatched event(s) (no-fence 2, run-mismatch 0, session-unbound 0)\n" {
+	if code != 1 || stderr != "flushed 1 cursor transcript event(s); deferred 2 incomplete or mismatched event(s) (no-fence 2, run-mismatch 0, session-unbound 0, identity-mismatch 0)\n" {
 		t.Fatalf("unfenced flush = code %d stderr %q", code, stderr)
 	}
 	stdout, _, code := captureFactDeleteCLI(t, func() int {
 		return transcriptStatus([]string{"--runtime", transcriptcapture.RuntimeCursor})
 	})
-	if code != 0 || stdout != "cursor capture: 2 queued event(s); deferred 2 (no-fence 2, run-mismatch 0, session-unbound 0)\n" {
+	if code != 0 || stdout != "cursor capture: 2 queued event(s); deferred 2 (no-fence 2, run-mismatch 0, session-unbound 0, identity-mismatch 0)\n" {
 		t.Fatalf("unfenced status = code %d stdout %q", code, stdout)
 	}
 
@@ -113,7 +113,7 @@ func TestTranscriptFlushAndStatusReportDeferredBuckets(t *testing.T) {
 	stdout, _, code = captureFactDeleteCLI(t, func() int {
 		return transcriptStatus([]string{"--runtime", transcriptcapture.RuntimeCursor})
 	})
-	if code != 0 || stdout != "cursor capture: 0 queued event(s); deferred 0 (no-fence 0, run-mismatch 0, session-unbound 0)\n" {
+	if code != 0 || stdout != "cursor capture: 0 queued event(s); deferred 0 (no-fence 0, run-mismatch 0, session-unbound 0, identity-mismatch 0)\n" {
 		t.Fatalf("fenced status = code %d stdout %q", code, stdout)
 	}
 }
@@ -182,7 +182,7 @@ func TestTranscriptStatusReportsRunMismatchAndRefusesUnknownRuntime(t *testing.T
 	stdout, _, code := captureFactDeleteCLI(t, func() int {
 		return transcriptStatus([]string{"--runtime", transcriptcapture.RuntimeCursor})
 	})
-	if code != 0 || stdout != "cursor capture: 3 queued event(s); deferred 2 (no-fence 0, run-mismatch 2, session-unbound 0)\n" {
+	if code != 0 || stdout != "cursor capture: 3 queued event(s); deferred 2 (no-fence 0, run-mismatch 2, session-unbound 0, identity-mismatch 0)\n" {
 		t.Fatalf("orphaned-run status = code %d stdout %q", code, stdout)
 	}
 	if code := transcriptCmd([]string{
@@ -193,7 +193,7 @@ func TestTranscriptStatusReportsRunMismatchAndRefusesUnknownRuntime(t *testing.T
 	stdout, _, code = captureFactDeleteCLI(t, func() int {
 		return transcriptStatus([]string{"--runtime", transcriptcapture.RuntimeCursor})
 	})
-	if code != 0 || stdout != "cursor capture: 5 queued event(s); deferred 0 (no-fence 0, run-mismatch 0, session-unbound 0)\n" {
+	if code != 0 || stdout != "cursor capture: 5 queued event(s); deferred 0 (no-fence 0, run-mismatch 0, session-unbound 0, identity-mismatch 0)\n" {
 		t.Fatalf("recovered status = code %d stdout %q", code, stdout)
 	}
 	for _, args := range [][]string{

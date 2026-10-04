@@ -3886,11 +3886,16 @@ after the agent process has exited. A session with no local state that still
 holds events is refused; nothing is fenced on age or inactivity.
 
 `status` reports one runtime's local backlog: how many events are queued and
-how many the upload gate holds, in the value-free buckets `no-fence`,
-`run-mismatch`, and `session-unbound`. A deferring `flush` prints the same
-buckets, plus an `other` count for events deferred by something other than the
-upload gate, such as a server rejection or an upload-ready event queued behind
-a held turn.
+how many are held, in the value-free buckets `no-fence`, `run-mismatch`,
+`session-unbound`, and `identity-mismatch`. Status omits `identity-mismatch`
+when no local binding can be read (missing or unreadable) and then prints a
+one-line notice on stderr; it still exits 0. Identity-mismatched events stay
+queued for their binding and alone leave `flush` at exit 0; other deferrals
+still make it exit 1. Pathless Codex events follow the existing
+ephemeral-quarantine path and never count in `identity-mismatch`. A deferring
+`flush` prints the same buckets, plus an `other` count for events deferred by
+another reason, such as a server rejection or an upload-ready event queued
+behind a held turn.
 
 For Grok Build, `flush` also finalizes an unresolved Stop event from the trusted
 native session file. Grok writes the final assistant response only after its
