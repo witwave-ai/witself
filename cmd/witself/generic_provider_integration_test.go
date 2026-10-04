@@ -169,10 +169,15 @@ func newGenericProviderTestFixture(t *testing.T, runtimeName string) genericProv
 	}
 }
 
+// providerCLITestTimeout only bounds a hung fake provider. The fakes finish in
+// milliseconds; a one-second bound timed out under a loaded local gate and the
+// bounded-output tests then saw no output at all.
+const providerCLITestTimeout = 30 * time.Second
+
 func TestRunGenericProviderCLIOutputIsBounded(t *testing.T) {
 	fixture := newGenericProviderTestFixture(t, transcriptcapture.RuntimeCodex)
 	t.Setenv(fakeGenericLargeErrorEnv, "131072")
-	output, err := runGenericProviderCLI(fixture.cli, fixture.cfg, time.Second, "--version")
+	output, err := runGenericProviderCLI(fixture.cli, fixture.cfg, providerCLITestTimeout, "--version")
 	if err == nil {
 		t.Fatal("large provider failure unexpectedly succeeded")
 	}
@@ -188,7 +193,7 @@ func TestRunGenericProviderCLIOutputIsBounded(t *testing.T) {
 func TestRunLegacyProviderCLIOutputIsBounded(t *testing.T) {
 	fixture := newGenericProviderTestFixture(t, transcriptcapture.RuntimeCodex)
 	t.Setenv(fakeGenericLargeErrorEnv, "131072")
-	output, err := runLegacyProviderCLI(fixture.cli, time.Second, "--version")
+	output, err := runLegacyProviderCLI(fixture.cli, providerCLITestTimeout, "--version")
 	if err == nil {
 		t.Fatal("large legacy provider failure unexpectedly succeeded")
 	}
