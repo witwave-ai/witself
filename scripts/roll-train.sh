@@ -15,7 +15,7 @@ usage: scripts/roll-train.sh VERSION [options]
   --ci-timeout SECONDS     Deadline per PR checks / post-merge CI phase (3600)
   --argo-timeout SECONDS   Deadline per cell convergence phase (1200)
   --poll-interval SECONDS  Poll interval (15)
-  --resume                Verify an already merged wave 1 instead of rolling it (default pair only)
+  --resume                Verify already merged waves instead of rolling them (default pair only)
   --dry-run               Print the plan; no writes or network calls
   --help                  Show this help
 
@@ -757,8 +757,7 @@ roll_wave() {
   wait_argo "$cell" "$namespace" "$values"
 }
 
-# A stopped train can leave wave 1 merged, and wave 1 then refuses to roll the
-# same release again. With --resume, verify that merge as the wave would have:
+# Verify an already merged wave 1 or, under --resume, a merged wave 2:
 # main's last change of the cell's values must raise both pins to VERSION, and
 # its post-merge CI and the cell's Argo convergence must pass.
 resume_wave() {
@@ -820,32 +819,49 @@ cleanup_wave() {
   CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD=''
 }
 
-# Print witself-infra's health records of one train cell and its control
-# plane. A cell that the local inventory lacks is reported and skipped; any
-# other failure, including a target that is not ok, stops the train.
+health_retryable() {
+  local report=$1 error=$2
+  local summary='^witself-infra: one or more health targets are not ok: [1-9][0-9]* of [1-9][0-9]* targets$'
+  [[ "$(cat "$error")" =~ $summary ]] || return 1
+  jq -se 'length > 0 and all(.[]; type == "object" and (.name | type == "string") and (.state == "ok" or .state == "timeout" or .state == "down")) and any(.[]; .state != "ok")' \
+    "$report" >/dev/null 2>&1
+}
+
+# Print health records and retry the exact not-ok summary only while every
+# not-ok target is timeout or down, within the existing read retry bounds.
+# Report and skip a cell absent from inventory; any other failure stops the train.
 fleet_health() {
-  local cell=$1 status=0 report error
+  local cell=$1 status report error failures=0 deadline=$((SECONDS + 8 * POLL_INTERVAL))
   report="$RUN_DIR/health-$cell.ndjson"
   error="$RUN_DIR/health-$cell.stderr"
-  witself-infra health --json -cell "$cell" >"$report" 2>"$error" || status=$?
-  if [ "$status" -ne 0 ] && [ ! -s "$report" ] &&
-    [ "$(cat "$error")" = "witself-infra: cell \"$cell\" is not in the infra inventory" ]; then
-    log "Fleet health not checked for $cell: the local witself-infra inventory has no entry for it"
-    HEALTH_UNCHECKED=${HEALTH_UNCHECKED:+$HEALTH_UNCHECKED, }$cell
-    return 0
-  fi
-  cat "$report"
-  cat "$error" >&2
-  [ "$status" -eq 0 ] || die "witself-infra health failed for $cell (exit $status)"
+  while :; do
+    status=0
+    witself-infra health --json -cell "$cell" >"$report" 2>"$error" || status=$?
+    if [ "$status" -ne 0 ] && [ ! -s "$report" ] &&
+      [ "$(cat "$error")" = "witself-infra: cell \"$cell\" is not in the infra inventory" ]; then
+      log "Fleet health not checked for $cell: the local witself-infra inventory has no entry for it"
+      HEALTH_UNCHECKED=${HEALTH_UNCHECKED:+$HEALTH_UNCHECKED, }$cell
+      return 0
+    fi
+    cat "$report"
+    cat "$error" >&2
+    [ "$status" -ne 0 ] || return 0
+    failures=$((failures + 1))
+    if health_retryable "$report" "$error" &&
+      retry_read "$deadline" "fleet health ($cell)" "$status" "$failures"; then
+      continue
+    fi
+    die "witself-infra health failed for $cell (exit $status)"
+  done
 }
 
 main() {
   set -euo pipefail
   export LC_ALL=C
-  VERSION='' NO_SCHEMA_CHANGE=false DRY_RUN=false RESUME=false SERVING_URL='' WORKDIR=''
+  VERSION='' NO_SCHEMA_CHANGE=false DRY_RUN=false RESUME=false SERVING_RESUME=false SERVING_URL='' WORKDIR=''
   CI_TIMEOUT=3600 ARGO_TIMEOUT=1200 POLL_INTERVAL=15
   local cells=civo-sandbox-use1-backup,civo-sandbox-use1-serving option value evidence
-  local common release runs host live current tool cell values
+  local common release runs host live current tool cell values field pin serving_pins_match
   local evidence_dirs=()
   GATE_ARGS=()
   while [ "$#" -gt 0 ]; do
@@ -934,10 +950,15 @@ the cell's written digest pin, or ending :$VERSION for tag-only cells;
 observed deployment generation and all replicas updated/ready/available (${ARGO_TIMEOUT}s);
 remove verified worktree/branch. Poll interval: ${POLL_INTERVAL}s.
 Finally: print serving /v1/version; witself-infra health --json -cell for both cells if available.
-Any failure stops the train and retains the current worktree for inspection.
+Retries: a failed read of GitHub, a cluster, origin or the serving /v1/version (not gh auth status)
+is tried again within its deadline, and so is a health run whose not-ok targets are timeout or down.
+A PR check or post-merge CI run that failed waits, until its deadline, for an operator re-run.
+Any other failure stops the train and retains the current worktree for inspection.
 EOF
     [ "$RESUME" = false ] ||
       printf 'Resume: wave 1 is verified, not rolled: the last commit that changed its values on origin/main must raise both pins to %s, pass post-merge CI, and converge in Argo.\n' "$VERSION"
+    [ "$RESUME" = false ] ||
+      printf 'Resume: wave 2 is verified, not rolled, only when origin/main already pins %s at %s: the last commit that changed its values must raise both pins to %s, pass post-merge CI, and converge in Argo; the serving /v1/version may then already equal %s.\n' "$SERVING_CELL" "$VERSION" "$VERSION" "$VERSION"
     return
   fi
   PHASE=preconditions CURRENT_WT='' CURRENT_BRANCH='' CURRENT_PR='' CURRENT_HEAD='' RUN_DIR='' HEALTH_UNCHECKED=''
@@ -980,6 +1001,19 @@ EOF
   one_shot_read "origin/main fetch" git fetch origin main >/dev/null
   for cell in "$BACKUP_CELL" "$SERVING_CELL"; do
     values=$(git show "origin/main:.gitops/cells/$cell/values.yaml")
+    if [ "$RESUME" = true ] && [ "$cell" = "$SERVING_CELL" ]; then
+      printf '%s\n' "$values" >"$RUN_DIR/serving-origin-main-values.yaml"
+      serving_pins_match=true
+      for field in chartVersion imageTag; do
+        pin=$(yq -er ".apps.witselfServer.$field" "$RUN_DIR/serving-origin-main-values.yaml") ||
+          die "--resume cannot read $field of $SERVING_CELL on origin/main"
+        [ "$pin" = "$VERSION" ] || serving_pins_match=false
+      done
+      if [ "$serving_pins_match" = true ]; then
+        SERVING_RESUME=true
+        log "--resume: $SERVING_CELL already pins $VERSION on origin/main; wave 2 will be verified, not rolled"
+      fi
+    fi
     if [ "$cell" = "$SERVING_CELL" ] && [ -z "$SERVING_URL" ]; then
       host=$(printf '%s\n' "$values" | yq -er '.cell.apiHost')
       [[ "$host" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid cell.apiHost; supply --serving-url"
@@ -989,7 +1023,12 @@ EOF
   live=$(one_shot_read "serving /v1/version" \
     curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
   current=$(printf '%s\n' "$live" | jq -er '.version | select(type == "string")')
-  version_lower "$current" "$VERSION" || die "serving version '$current' must be strictly lower than $VERSION"
+  if [ "$SERVING_RESUME" = true ]; then
+    [ "$current" = "$VERSION" ] || version_lower "$current" "$VERSION" ||
+      die "serving version '$current' must equal or be lower than $VERSION to verify an already merged wave 2"
+  else
+    version_lower "$current" "$VERSION" || die "serving version '$current' must be strictly lower than $VERSION"
+  fi
   log "Preconditions verified; serving version $current -> $VERSION"
   if [ "$RESUME" = true ]; then
     resume_wave "$BACKUP_CELL" 1
@@ -997,7 +1036,11 @@ EOF
     roll_wave "$BACKUP_CELL" 1
     cleanup_wave
   fi
-  roll_wave "$SERVING_CELL" 2
+  if [ "$SERVING_RESUME" = true ]; then
+    resume_wave "$SERVING_CELL" 2
+  else
+    roll_wave "$SERVING_CELL" 2
+  fi
   PHASE="final serving verification"
   live=$(one_shot_read "serving /v1/version" \
     curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "$SERVING_URL/v1/version")
@@ -1012,7 +1055,9 @@ EOF
   else
     log "witself-infra absent; optional health report skipped"
   fi
-  cleanup_wave
+  if [ "$SERVING_RESUME" = false ]; then
+    cleanup_wave
+  fi
   if [ -n "$HEALTH_UNCHECKED" ]; then
     log "Both waves verified at $VERSION. Fleet health was not checked for $HEALTH_UNCHECKED. Run record: $RUN_DIR"
   else

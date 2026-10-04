@@ -1312,7 +1312,8 @@ is listed or the latest push run has not completed, the train reads it again
 every poll interval, at most six times (about a minute and a half at the
 default), then stops. A run that completed with any other result stops it at
 once. Before starting the train,
-the serving `/v1/version` must be strictly lower than `VERSION`. Its URL
+the serving `/v1/version` must be strictly lower than `VERSION` (with `--resume`
+after wave 2 merged: lower or equal, see below). Its URL
 defaults to the serving cell values' `apiHost`; pass `--serving-url` when the
 live host differs, as it can for Civo values overridden by infrastructure.
 
@@ -1382,8 +1383,15 @@ the preconditions, every other `git fetch`, the cleanup's `git ls-remote`,
 both pull request reads around the merge, both serving `/v1/version` reads
 and the live version guard's Argo application, pod and deployment reads.
 After the merge, a pull request that GitHub still shows as open is read again
-as the release run is. Not retried: `gh auth status` and the health step. A
-failed read is never taken as an answer, and an interrupted read or any write
+as the release run is. Not retried: `gh auth status`. The health step runs
+`witself-infra health` for a cell again after one poll interval while every
+target it reports as not `ok` is `timeout` or `down`, which is how an unreachable
+or slow control plane is reported. It does so at most five failed runs in a
+row, within eight poll intervals. A `degraded` target, or any other failure,
+stops the train at once. A persistent health failure reports
+`witself-infra health failed for CELL (exit 1)`, or
+`fleet health (CELL) timed out` if the eight-interval deadline passes first.
+A failed read is never taken as an answer, and an interrupted read or any write
 is never retried.
 The train creates its run directory before its first network read, so a stop
 in the preconditions names it too. Apart from the two CI waits and these
@@ -1396,19 +1404,30 @@ pair stopped after wave 1 merged, run it again with the same arguments plus
 rolled: both backup-cell pins on `origin/main` must equal `VERSION`, and the
 last commit that changed that cell's values must have raised
 both pins from a lower release. The train waits for that commit's post-merge CI
-and the cell's Argo convergence as a wave does, then rolls wave 2. The stopped
-run's worktree and branch, and any open wave-2 pull request it left, stay for
-the operator to remove. A train that stopped after wave 2 merged is finished by
-hand: verify post-merge CI, Argo convergence, and the serving `/v1/version`. The
-script never
+and the cell's Argo convergence as a wave does, then rolls wave 2, unless wave 2
+merged too. The stopped run's worktree and branch, and any open wave-2 pull
+request it left, stay for the operator to remove. If wave 2 had also merged,
+`--resume` verifies it instead of rolling it. This applies when both
+serving-cell pins on `origin/main` equal `VERSION`. The serving `/v1/version`
+may then already equal `VERSION` but must not be newer. The same roll-commit
+checks apply to the serving cell. The train waits for that commit's post-merge
+CI and the serving cell's Argo convergence, then checks the serving
+`/v1/version` and fleet health as a full train does. Nothing is written: no
+branch, pull request or cleanup. This also finishes a train that stopped in the
+health step. The script never
 force-pushes. After the serving wave, it prints and verifies the serving
 `/v1/version`. If `witself-infra` is installed, it then runs
 `witself-infra health --json -cell CELL` for each of the two train cells and
 prints the records, so an inventory entry for another cell, such as one that
 no `up` has registered yet, cannot stop the train. A train cell that the local
 inventory lacks is reported, and the final summary names it as not checked.
-Any other health failure, including a target that is not `ok`, stops the train
-after both waves have merged and keeps wave 2's worktree for inspection.
+A health failure that is not retried, or that persists, stops the train after
+both waves have merged. If wave 2 was rolled in this run, its worktree is kept
+for inspection; a stop during a resumed wave-2 verification has no worktree to
+inspect. Once the cause is fixed, rerun the default pair with `--resume` to
+verify both waves and the health step. For any other pair, including the
+production pair, finish by hand: verify post-merge CI, Argo convergence, the
+serving `/v1/version`, and `witself-infra health`.
 
 To roll the production serving cell, select its pair explicitly; the default
 stays the sandbox pair:
@@ -1460,7 +1479,7 @@ bash scripts/test-roll-train.sh
 ```
 
 It substitutes `git`, `gh`, `kubectl`, `curl` and `roll-cell.sh` with fixtures
-and then runs the five `scripts/test-roll-train-*.sh` suites. It needs `git`,
+and then runs the six `scripts/test-roll-train-*.sh` suites. It needs `git`,
 `jq`, Mike Farah's `yq`, `go` and `shasum` on `PATH`. Both `make check-infra`
 and the CI `helm` job run it.
 
