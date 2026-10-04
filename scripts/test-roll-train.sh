@@ -185,6 +185,17 @@ case "$1" in
       [ "$SCENARIO" != resume_digest_kept ] || digest=$BACKUP_DIGEST
       [ "$SCENARIO" != resume_first_digest_empty ] || digest=''
       DIGEST=$digest "$ROLL_TRAIN_REAL_YQ" '.apps.witselfServer.imageDigest = strenv(DIGEST)' "$FIXTURE_ROOT/$path"
+    elif [[ "$SCENARIO" = resume_wave2_* || "$SCENARIO" = wave2_merged_no_resume ]] &&
+      [ "$path" = .gitops/cells/civo-sandbox-use1-serving/values.yaml ]; then
+      # Main and its resolved OID pin the merged target; only the roll parent
+      # keeps the old pins, unless this scenario makes that roll unprovable.
+      if [ "${2%%:*}" != "$ROLL_OID^" ] || [ "$SCENARIO" = resume_wave2_parent_at_target ]; then
+        pins='s/1\.2\.2/1.2.3/g'
+        [ "$SCENARIO" != resume_wave2_main_partial ] || pins='s/chartVersion: 1\.2\.2/chartVersion: 1.2.3/'
+        sed "$pins" "$FIXTURE_ROOT/$path"
+      else
+        cat "$FIXTURE_ROOT/$path"
+      fi
     else
       cat "$FIXTURE_ROOT/$path"
     fi
@@ -215,6 +226,12 @@ case "$1" in
             ;;
           serving_pins_newer:*wave-2-*)
             sed 's/1.2.2/1.2.4/g' "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml" >"$STATE_DIR/new-values"
+            cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
+            ;;
+          resume_wave2_main_partial:*wave-2-*)
+            # A checkout of main must preserve its partly pinned serving values.
+            sed 's/chartVersion: 1\.2\.2/chartVersion: 1.2.3/' \
+              "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml" >"$STATE_DIR/new-values"
             cp "$STATE_DIR/new-values" "$path/.gitops/cells/civo-sandbox-use1-serving/values.yaml"
             ;;
           production_backup_at_target:*)
@@ -437,7 +454,17 @@ case "$1 $2" in
         printf '%s\n' "$checks" | jq --arg bucket "$bucket" --arg state "$state" \
           --arg link "https://github.com/fixture/repo/actions/runs/$CI_RUN_ID/job/$job" \
           '.[0] += {bucket: $bucket, state: $state, link: $link}'
-        [ "$bucket" != pending ] || exit 8
+        # gh exits 0 under --json whatever the checks' state.
+        ;;
+      checks_pending_exit8)
+        # a gh that reports pending as 8; read_checks accepts it
+        polls="$STATE_DIR/pr_polls-$(cat "$STATE_DIR/cell")"
+        [[ " $* " = *' --required '* ]] || printf 'poll\n' >>"$polls"
+        if [ "$(wc -l <"$polls" | tr -d ' ')" -eq 1 ]; then
+          printf '%s\n' "$checks" | jq '.[0].bucket = "pending" | .[0].state = "PENDING"'
+          exit 8
+        fi
+        printf '%s\n' "$checks"
         ;;
       check_failure_partial_rerun)
         # go-rest fails first; the go aggregator that needs it fails when the
@@ -485,8 +512,9 @@ case "$1 $2" in
         ;;
       missing_matrix) printf '%s\n' "$checks" | jq '.[0:5]' ;;
       required_pending)
+        # gh exits 0 under --json whatever the checks' state.
         printf '%s\n' "$checks" | jq '.[0].bucket = "pending" | .[0].state = "PENDING"'
-        exit 8
+        exit 0
         ;;
       *) printf '%s\n' "$checks" ;;
     esac
@@ -706,6 +734,20 @@ host_cell=$(printf '%s\n' "${!#}" | sed -nE 's#^https://api\.([a-z0-9-]+)\.inval
 version=1.2.2
 [ "$host_cell" != civo-prod-use1-serving ] || version=1.2.1
 if [ -n "$host_cell" ] && [ -f "$STATE_DIR/cell" ] && [ "$(cat "$STATE_DIR/cell")" = "$host_cell" ]; then version=1.2.3; fi
+if [ "$host_cell" = civo-sandbox-use1-serving ] &&
+  [[ "$SCENARIO" = resume_wave2_* || "$SCENARIO" = wave2_merged_no_resume ]]; then
+  version=1.2.3
+  case "$SCENARIO" in
+    resume_wave2_serving_lower)
+      if [ ! -f "$STATE_DIR/serving_version_read" ]; then
+        touch "$STATE_DIR/serving_version_read"
+        version=1.2.2
+      fi
+      ;;
+    resume_wave2_serving_newer) version=1.2.4 ;;
+    resume_wave2_main_partial) version=1.2.2 ;;
+  esac
+fi
 printf '{"version":"%s"}\n' "$version"
 EOF_CURL
 
@@ -755,6 +797,35 @@ case "$SCENARIO:$4" in
     exit 1
     ;;
   health_cell_down:civo-sandbox-use1-serving)
+    # The cell is reachable but not ok, which stops at once; the scenario
+    # name predates the health re-run.
+    record "$4" degraded
+    record control-plane:cp.invalid ok
+    printf 'witself-infra: one or more health targets are not ok: 1 of 2 targets\n' >&2
+    exit 1
+    ;;
+  health_cell_flaky:civo-sandbox-use1-serving)
+    if [ ! -f "$STATE_DIR/serving_health_failed" ]; then
+      touch "$STATE_DIR/serving_health_failed"
+      record "$4" timeout
+      record control-plane:cp.invalid ok
+      printf 'witself-infra: one or more health targets are not ok: 1 of 2 targets\n' >&2
+      exit 1
+    fi
+    ;;
+  health_degraded_and_down:civo-sandbox-use1-serving)
+    record "$4" degraded
+    record control-plane:cp.invalid down
+    printf 'witself-infra: one or more health targets are not ok: 2 of 2 targets\n' >&2
+    exit 1
+    ;;
+  health_timeout_other_error:civo-sandbox-use1-serving)
+    record "$4" timeout
+    record control-plane:cp.invalid ok
+    printf 'witself-infra: health report unavailable\n' >&2
+    exit 1
+    ;;
+  health_cell_unreachable:civo-sandbox-use1-serving)
     record "$4" down
     record control-plane:cp.invalid ok
     printf 'witself-infra: one or more health targets are not ok: 1 of 2 targets\n' >&2
@@ -846,6 +917,196 @@ assert_roll_cell_calls() {
   fi
 }
 
+# When both waves merged, resume proves their roll commits and convergence
+# without creating or cleaning up a wave worktree.
+for scenario in resume_wave2_success resume_wave2_serving_lower; do
+  reset_case
+  SCENARIO=$scenario
+  bash "$TRAIN" "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1 \
+    >"$TEST_ROOT/output" 2>&1 || fail "$scenario did not finish the train"
+  grep -Fxq "roll-train: Resuming wave 1: $BACKUP already pins $VERSION on origin/main (roll commit $ROLL_OID); verifying instead of rolling" \
+    "$TEST_ROOT/output" || fail "$scenario did not announce resumed wave 1"
+  grep -Fxq "roll-train: Resuming wave 2: $SERVING already pins $VERSION on origin/main (roll commit $ROLL_OID); verifying instead of rolling" \
+    "$TEST_ROOT/output" || fail "$scenario did not announce resumed wave 2"
+  grep -Fxq "roll-train: --resume: $SERVING already pins $VERSION on origin/main; wave 2 will be verified, not rolled" \
+    "$TEST_ROOT/output" || fail "$scenario did not choose wave 2 verification during preconditions"
+  current=1.2.3
+  [ "$scenario" != resume_wave2_serving_lower ] || current=1.2.2
+  grep -Fxq "roll-train: Preconditions verified; serving version $current -> $VERSION" "$TEST_ROOT/output" \
+    || fail "$scenario did not accept the expected serving precondition"
+  grep -Fxq "git <log> <-1> <--format=%H> <eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee> <--> <.gitops/cells/$SERVING/values.yaml>" "$TEST_LOG" \
+    || fail "$scenario did not find the last change of the serving values"
+  grep -Fxq "git <show> <$ROLL_OID^:.gitops/cells/$SERVING/values.yaml>" "$TEST_LOG" \
+    || fail "$scenario did not read the serving roll parent"
+  if grep -Eq '^(roll-cell|gh <pr>)|^git .*<(worktree|commit|push|ls-remote|switch|update-ref)>' "$TEST_LOG"; then
+    fail "$scenario mutated or cleaned up an already merged wave"
+  fi
+  [ "$(grep -Fxc "roll-train: Post-merge CI verified: $ROLL_OID" "$TEST_ROOT/output")" -eq 2 ] \
+    || fail "$scenario did not verify post-merge CI twice"
+  grep -Fq "roll-train: CELL $BACKUP VERIFIED:" "$TEST_ROOT/output" \
+    || fail "$scenario did not verify the backup cell"
+  grep -Fq "roll-train: CELL $SERVING VERIFIED:" "$TEST_ROOT/output" \
+    || fail "$scenario did not verify the serving cell"
+  awk -v backup="<witself-$BACKUP>" -v serving="<witself-$SERVING>" '
+    /^kubectl/ && index($0, backup) && /<get> <deployments>/ { verified++ }
+    /^kubectl/ && index($0, serving) && /applications.argoproj.io/ {
+      if (verified < 1) exit 1
+      serving_seen=1
+    }
+    END { if (!serving_seen) exit 1 }
+  ' "$TEST_LOG" || fail "$scenario checked serving Argo before backup verification"
+  grep -Fxq 'roll-train: Serving /v1/version: {"version":"1.2.3"}' "$TEST_ROOT/output" \
+    || fail "$scenario did not verify the final serving version"
+  [ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING")" ] \
+    || fail "$scenario did not check health in wave order"
+  grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output" \
+    || fail "$scenario changed the checked success line"
+  [ ! -e "$STATE_DIR/worktrees" ] || fail "$scenario created a worktree"
+done
+printf 'roll train test: resume_wave2_success and resume_wave2_serving_lower verify both merged waves without writes or cleanup\n'
+
+reset_case
+SCENARIO=resume_wave2_main_partial
+expect_failure "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1
+if grep -Fq 'roll-train: --resume:' "$TEST_ROOT/output"; then
+  fail 'resume_wave2_main_partial selected resume with only one serving pin at the target'
+fi
+grep -Fq "roll-train: CELL $BACKUP VERIFIED:" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_main_partial did not verify wave 1 first'
+[ "$(grep -Fc 'git <worktree> <add>' "$TEST_LOG")" -eq 1 ] \
+  || fail 'resume_wave2_main_partial did not take the normal wave 2 roll path'
+grep -Fxq "roll-train: ERROR: $SERVING desired chartVersion '1.2.3' must be strictly lower than 1.2.3; inspect already or partly pinned cells manually" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_main_partial missed the existing partial-pin roll guard'
+grep -Fxq "roll-train: stopped during wave 2 ($SERVING): version guards (exit 1)." "$TEST_ROOT/output" \
+  || fail 'resume_wave2_main_partial stopped outside the normal wave 2 version guards'
+if grep -Eq '^(roll-cell|gh <pr>|witself-infra)' "$TEST_LOG"; then
+  fail 'resume_wave2_main_partial rolled pins or checked health after refusal'
+fi
+printf 'roll train test: resume_wave2_main_partial takes the normal wave 2 path and stops at the partial-pin guard\n'
+
+reset_case
+SCENARIO=resume_wave2_serving_newer
+expect_failure "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1
+grep -Fxq "roll-train: ERROR: serving version '1.2.4' must equal or be lower than 1.2.3 to verify an already merged wave 2" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_serving_newer did not refuse the newer serving version'
+grep -Fxq 'roll-train: stopped during preconditions (exit 1).' "$TEST_ROOT/output" \
+  || fail 'resume_wave2_serving_newer stopped after preconditions'
+if grep -Eq -- '--format=%H|<ci.yml>|applications.argoproj.io' "$TEST_LOG"; then
+  fail 'resume_wave2_serving_newer began roll verification'
+fi
+assert_no_wave
+printf 'roll train test: resume_wave2_serving_newer stops in preconditions before roll verification\n'
+
+reset_case
+SCENARIO=wave2_merged_no_resume
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+grep -Fxq "roll-train: ERROR: serving version '1.2.3' must be strictly lower than 1.2.3" "$TEST_ROOT/output" \
+  || fail 'wave2_merged_no_resume relaxed the strictly-lower serving precondition'
+grep -Fxq 'roll-train: stopped during preconditions (exit 1).' "$TEST_ROOT/output" \
+  || fail 'wave2_merged_no_resume stopped after preconditions'
+if grep -Fq -- '--resume:' "$TEST_ROOT/output"; then fail 'wave2_merged_no_resume detected a merged wave 2 without --resume'; fi
+assert_no_wave
+printf 'roll train test: wave2_merged_no_resume keeps the strictly-lower serving precondition\n'
+
+reset_case
+SCENARIO=resume_wave2_parent_at_target
+expect_failure "$VERSION" --no-schema-change --resume --workdir "$TEST_ROOT/work" --poll-interval 1
+grep -Fxq "roll-train: Resuming wave 1: $BACKUP already pins $VERSION on origin/main (roll commit $ROLL_OID); verifying instead of rolling" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_parent_at_target did not resume wave 1'
+grep -Fq "roll-train: CELL $BACKUP VERIFIED:" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_parent_at_target did not verify wave 1 first'
+grep -Fxq "roll-train: ERROR: --resume cannot verify $SERVING: commit $ROLL_OID last changed its values but did not raise chartVersion from a lower release (parent pins '1.2.3'); inspect the cell manually" "$TEST_ROOT/output" \
+  || fail 'resume_wave2_parent_at_target accepted a serving commit that did not raise the pins'
+grep -Fxq "roll-train: stopped during wave 2 ($SERVING): resume checks (exit 1)." "$TEST_ROOT/output" \
+  || fail 'resume_wave2_parent_at_target stopped outside wave 2 resume checks'
+if grep -Eq '^(roll-cell|gh <pr>|witself-infra)' "$TEST_LOG"; then
+  fail 'resume_wave2_parent_at_target rolled a wave or checked health after refusal'
+fi
+printf 'roll train test: resume_wave2_parent_at_target verifies backup then refuses an unproven serving roll\n'
+
+reset_case
+SCENARIO=health_degraded_and_down
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+[ "$(grep -c '^witself-infra ' "$TEST_LOG")" -eq 2 ] \
+  || fail 'health_degraded_and_down retried a report containing a degraded target'
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING")" ] \
+  || fail 'health_degraded_and_down did not probe each cell once in order'
+if grep -Fq 'read failed' "$TEST_ROOT/output"; then
+  fail 'health_degraded_and_down entered read retry handling'
+fi
+grep -Fxq "roll-train: ERROR: witself-infra health failed for $SERVING (exit 1)" "$TEST_ROOT/output" \
+  || fail 'health_degraded_and_down lost the terminal health failure'
+grep -Fxq 'roll-train: stopped during final serving verification (exit 1).' "$TEST_ROOT/output" \
+  || fail 'health_degraded_and_down stopped in another phase'
+printf 'roll train test: health_degraded_and_down stops without retrying despite a down control plane\n'
+
+reset_case
+SCENARIO=health_timeout_other_error
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+[ "$(grep -c '^witself-infra ' "$TEST_LOG")" -eq 2 ] \
+  || fail 'health_timeout_other_error retried a failure without the exact summary'
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING")" ] \
+  || fail 'health_timeout_other_error did not probe each cell once in order'
+if grep -Fq 'read failed' "$TEST_ROOT/output"; then
+  fail 'health_timeout_other_error entered read retry handling'
+fi
+grep -Fxq "roll-train: ERROR: witself-infra health failed for $SERVING (exit 1)" "$TEST_ROOT/output" \
+  || fail 'health_timeout_other_error lost the terminal health failure'
+grep -Fxq 'roll-train: stopped during final serving verification (exit 1).' "$TEST_ROOT/output" \
+  || fail 'health_timeout_other_error stopped in another phase'
+printf 'roll train test: health_timeout_other_error stops without retrying a different stderr summary\n'
+
+reset_case
+SCENARIO=health_cell_flaky
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 \
+  >"$TEST_ROOT/output" 2>&1 || fail 'health_cell_flaky did not finish after the serving health recovered'
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING" "$SERVING")" ] \
+  || fail 'health_cell_flaky did not probe backup, serving, serving in order'
+[ "$(grep -Fxc "roll-train: fleet health ($SERVING): read failed with exit 1 (failure 1 of 5 in a row); retrying within the same deadline" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'health_cell_flaky did not log exactly one retry'
+grep -Fxq "{\"name\":\"$SERVING\",\"state\":\"timeout\",\"latency_ms\":1,\"checked_at\":\"2026-10-01T00:00:00Z\"}" "$TEST_ROOT/output" \
+  || fail 'health_cell_flaky did not print the serving timeout record'
+if grep -Fq 'witself-infra health failed' "$TEST_ROOT/output"; then fail 'health_cell_flaky reported a terminal health failure'; fi
+grep -Eq "^roll-train: Both waves verified at $VERSION\. Run record: /" "$TEST_ROOT/output" \
+  || fail 'health_cell_flaky did not report fully checked success'
+printf 'roll train test: health_cell_flaky retries a serving timeout once and completes after recovery\n'
+
+reset_case
+SCENARIO=health_cell_unreachable
+expect_failure "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1
+[ "$(grep '^witself-infra ' "$TEST_LOG")" = "$(printf 'witself-infra <health> <--json> <-cell> <%s>\n' "$BACKUP" "$SERVING" "$SERVING" "$SERVING" "$SERVING" "$SERVING")" ] \
+  || fail 'health_cell_unreachable did not probe backup once then serving five times'
+for failure in 1 2 3 4; do
+  grep -Fxq "roll-train: fleet health ($SERVING): read failed with exit 1 (failure $failure of 5 in a row); retrying within the same deadline" "$TEST_ROOT/output" \
+    || fail "health_cell_unreachable failure $failure was not retried"
+done
+[ "$(grep -Fxc "roll-train: fleet health ($SERVING): read failed with exit 1 (failure 5 of 5 in a row); stopping" "$TEST_ROOT/output")" -eq 1 ] \
+  || fail 'health_cell_unreachable did not stop exactly once at the fifth failed run'
+grep -Fxq "roll-train: ERROR: witself-infra health failed for $SERVING (exit 1)" "$TEST_ROOT/output" \
+  || fail 'health_cell_unreachable lost the terminal health failure'
+grep -Fxq 'roll-train: stopped during final serving verification (exit 1).' "$TEST_ROOT/output" \
+  || fail 'health_cell_unreachable stopped in another phase'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] \
+  || fail 'health_cell_unreachable did not merge both waves first'
+if grep -Fq 'Both waves verified' "$TEST_ROOT/output"; then fail 'health_cell_unreachable reported success'; fi
+printf 'roll train test: health_cell_unreachable stops after five serving failures and both merges\n'
+
+reset_case
+SCENARIO=checks_pending_exit8
+pr=https://github.com/fixture/repo/pull/42
+bash "$TRAIN" "$VERSION" --no-schema-change --workdir "$TEST_ROOT/work" --poll-interval 1 \
+  >"$TEST_ROOT/output" 2>&1 || fail 'checks_pending_exit8 did not finish the train'
+[ "$(grep -Fxc "roll-train: Waiting for required PR checks: $pr" "$TEST_ROOT/output")" -eq 2 ] \
+  || fail 'checks_pending_exit8 did not wait for pending checks once per wave'
+if grep -Eq 'read failed with exit 8|PR checks failed' "$TEST_ROOT/output"; then
+  fail 'checks_pending_exit8 treated pending as a failed read or check'
+fi
+[ "$(grep -Fc 'gh <pr> <checks>' "$TEST_LOG")" -eq 8 ] \
+  || fail 'checks_pending_exit8 did not read checks twice per poll, two polls per wave'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 2 ] \
+  || fail 'checks_pending_exit8 did not merge both waves'
+printf 'roll train test: checks_pending_exit8 accepts pending exit 8 without transport retries and waits once per wave\n'
+
 # Check both query arguments and behavior independently so removing the event
 # filter proves both regressions in one mutation run.
 reset_case
@@ -926,6 +1187,15 @@ fi
 if grep -q '^Resume:' "$TEST_ROOT/output"; then fail 'dry run without --resume printed the resume plan'; fi
 grep -Fxq 'Finally: print serving /v1/version; witself-infra health --json -cell for both cells if available.' "$TEST_ROOT/output" \
   || fail 'dry run does not plan the per-cell health report'
+grep -Fxq 'Retries: a failed read of GitHub, a cluster, origin or the serving /v1/version (not gh auth status)' "$TEST_ROOT/output" \
+  || fail 'dry run omitted the read retry plan'
+grep -Fxq 'is tried again within its deadline, and so is a health run whose not-ok targets are timeout or down.' "$TEST_ROOT/output" \
+  || fail 'dry run omitted the bounded health retry plan'
+grep -Fxq 'A PR check or post-merge CI run that failed waits, until its deadline, for an operator re-run.' "$TEST_ROOT/output" \
+  || fail 'dry run omitted the operator re-run plan'
+grep -Fxq 'Any other failure stops the train and retains the current worktree for inspection.' "$TEST_ROOT/output" \
+  || fail 'dry run omitted the remaining failure plan'
+if grep -Fq 'Any failure stops the train' "$TEST_ROOT/output"; then fail 'dry run retained the obsolete failure plan'; fi
 printf 'roll train test: dry run is read-only and prints both waves\n'
 
 release_refusal="roll-train: ERROR: release run is not green for v$VERSION (latest release.yml push run must be completed success)"
@@ -1821,15 +2091,17 @@ assert_no_wave
 reset_case
 bash "$TRAIN" "$VERSION" --no-schema-change --resume --dry-run --workdir "$TEST_ROOT/work" >"$TEST_ROOT/output" 2>&1 \
   || fail 'resume dry run failed'
-[ "$(tail -1 "$TEST_ROOT/output")" = "Resume: wave 1 is verified, not rolled: the last commit that changed its values on origin/main must raise both pins to $VERSION, pass post-merge CI, and converge in Argo." ] \
-  || fail 'resume dry run did not end with the resume plan'
+[ "$(tail -2 "$TEST_ROOT/output" | head -1)" = "Resume: wave 1 is verified, not rolled: the last commit that changed its values on origin/main must raise both pins to $VERSION, pass post-merge CI, and converge in Argo." ] \
+  || fail 'resume dry run did not keep the wave 1 resume plan second to last'
+[ "$(tail -1 "$TEST_ROOT/output")" = "Resume: wave 2 is verified, not rolled, only when origin/main already pins $SERVING at $VERSION: the last commit that changed its values must raise both pins to $VERSION, pass post-merge CI, and converge in Argo; the serving /v1/version may then already equal $VERSION." ] \
+  || fail 'resume dry run did not end with the wave 2 resume plan'
 if grep -Eq '^(gh|kubectl|curl|roll-cell|witself-infra)|git.*<(fetch|worktree|commit|push|add|branch|log|show)>' "$TEST_LOG"; then
   fail 'resume dry run invoked an operational command'
 fi
 bash "$TRAIN" --help >"$TEST_ROOT/output" 2>&1 || fail 'usage failed'
-grep -Fxq '  --resume                Verify an already merged wave 1 instead of rolling it (default pair only)' "$TEST_ROOT/output" \
+grep -Fxq '  --resume                Verify already merged waves instead of rolling them (default pair only)' "$TEST_ROOT/output" \
   || fail 'usage does not document --resume'
-printf 'roll train test: --resume verifies an already merged wave 1 and rolls wave 2, refuses an unpinned, partly pinned or unproven roll, and is planned and documented\n'
+printf 'roll train test: --resume verifies merged waves, rolls an unmerged wave 2, refuses an unpinned, partly pinned or unproven roll, and is planned and documented\n'
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-evidence.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-readiness.sh"
 PATH="$ORIGINAL_PATH" bash "$SOURCE_ROOT/scripts/test-roll-train-values.sh"
