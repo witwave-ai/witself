@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"gopkg.in/yaml.v3"
@@ -88,7 +90,7 @@ func configRemoveCell(fs *flag.FlagSet, configPath string, out, errOut io.Writer
 	if force {
 		_, _ = fmt.Fprintf(errOut, "warning: -force skipped the fleet registry and stack checks for cell %q\n", cellName)
 	} else {
-		if err := checkRemovedCellRegistry(ctx, cfg, cellName, out); err != nil {
+		if err := checkRemovedCellRegistry(ctx, cfg, cellName, os.Getenv, out); err != nil {
 			return err
 		}
 		if err := checkRemovedCellStack(ctx, cellName, entry, os.Getenv, out); err != nil {
@@ -138,7 +140,7 @@ func configRemoveCell(fs *flag.FlagSet, configPath string, out, errOut io.Writer
 // for the cell lists it under its registry name or its inventory name, and
 // whenever that listing cannot be read or trusted. A cell with no control
 // plane in its entry or in defaults is not checked.
-func checkRemovedCellRegistry(ctx context.Context, cfg *infraConfig, cellName string, out io.Writer) error {
+func checkRemovedCellRegistry(ctx context.Context, cfg *infraConfig, cellName string, getenv func(string) string, out io.Writer) error {
 	entry := cfg.Cells[cellName]
 	controlPlane, tokenFile := effectiveHealthConnection(entry, cfg.Defaults)
 	if controlPlane == "" {
@@ -155,7 +157,7 @@ func checkRemovedCellRegistry(ctx context.Context, cfg *infraConfig, cellName st
 		cells, err = client.ListCells(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("remove-cell: cannot read the fleet registry of control plane %s for cell %q: %v; refusing to remove the entry", controlPlane, cellName, err)
+		return fmt.Errorf("remove-cell: cannot read the fleet registry of control plane %s for cell %q: %v; refusing to remove the entry", controlPlane, cellName, boundRefusalDetail(redactDiagnostic(err.Error(), getenv)))
 	}
 	// ListCells accepts any 200 answer, even one without a cell list. A
 	// registry in use lists at least one cell, and every cell has a name.
@@ -174,6 +176,39 @@ func checkRemovedCellRegistry(ctx context.Context, cfg *infraConfig, cellName st
 	}
 	_, _ = fmt.Fprintf(out, "registry: %s lists no entry named %s\n", controlPlane, strings.Join(quoted, " or "))
 	return nil
+}
+
+const maxRefusalDetailBytes = 512
+
+func refusalDetailBreak(r rune) bool {
+	return r != '\t' && (unicode.IsControl(r) || r == '\u2028' || r == '\u2029')
+}
+
+// boundRefusalDetail keeps one bounded line of already-redacted diagnostic text.
+// It cuts at the first line break or other control character (a tab excepted)
+// or Unicode line separator, so a remote body cannot add lines or move the cursor.
+func boundRefusalDetail(text string) string {
+	truncated := false
+	if end := strings.IndexFunc(text, refusalDetailBreak); end >= 0 {
+		text = text[:end]
+		truncated = true
+	}
+	text = strings.TrimSpace(text)
+	if len(text) > maxRefusalDetailBytes {
+		end := maxRefusalDetailBytes
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		text = text[:end]
+		truncated = true
+	}
+	if text == "" {
+		text = "(no detail)"
+	}
+	if truncated {
+		text += " [truncated]"
+	}
+	return text
 }
 
 // checkRemovedCellStack refuses while the cell's stack holds a resource or a
@@ -232,6 +267,7 @@ func checkRemovedCellStack(ctx context.Context, cellName string, entry cellEntry
 			}
 		}
 		if passphrase != "" {
+			rememberLocalPassphrase(passphrase)
 			env["PULUMI_CONFIG_PASSPHRASE"] = passphrase
 		}
 		// The same Pulumi CLI seam as the r2 backend, without its version floor.

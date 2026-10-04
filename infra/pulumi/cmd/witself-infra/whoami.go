@@ -15,9 +15,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -143,6 +145,18 @@ func whoamiCivoWithToken(ctx context.Context, entry cellEntry, token string) (id
 	return id, nil
 }
 
+const civoTokenFileHint = " (path not shown; it comes from -civo-token-file or the cell's security_context.civo.token_file)"
+
+func civoTokenFileReadError(err error, tokenFile string) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		err = pathErr.Err
+	} else {
+		err = errors.New(strings.ReplaceAll(err.Error(), tokenFile, "[path not shown]"))
+	}
+	return fmt.Errorf("read Civo token file: %w%s", err, civoTokenFileHint)
+}
+
 // resolveCivoToken keeps credential material out of config: a cell may point
 // at a mode-0600 token file for multi-account operation, or use the ambient
 // CIVO_TOKEN fallback for a single account. The value is returned only to the
@@ -161,24 +175,24 @@ func resolveCivoToken(tokenFile string) (string, error) {
 	}
 	info, err := os.Stat(tokenFile)
 	if err != nil {
-		return "", fmt.Errorf("read Civo token file %s: %w", tokenFile, err)
+		return "", civoTokenFileReadError(err, tokenFile)
 	}
 	if info.Size() > 4096 {
-		return "", fmt.Errorf("civo token file %s is unexpectedly large", tokenFile)
+		return "", fmt.Errorf("civo token file is unexpectedly large%s", civoTokenFileHint)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("civo token file %s is not a regular file", tokenFile)
+		return "", fmt.Errorf("civo token file is not a regular file%s", civoTokenFileHint)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("civo token file %s permissions are too broad (want 0600)", tokenFile)
+		return "", fmt.Errorf("civo token file permissions are too broad (want 0600)%s", civoTokenFileHint)
 	}
 	raw, err := os.ReadFile(tokenFile)
 	if err != nil {
-		return "", fmt.Errorf("read Civo token file %s: %w", tokenFile, err)
+		return "", civoTokenFileReadError(err, tokenFile)
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
-		return "", fmt.Errorf("civo token file %s is empty", tokenFile)
+		return "", fmt.Errorf("civo token file is empty%s", civoTokenFileHint)
 	}
 	rememberCivoToken(token)
 	return token, nil

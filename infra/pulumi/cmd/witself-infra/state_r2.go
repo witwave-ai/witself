@@ -165,6 +165,31 @@ var resolvedCivoTokens struct {
 	values []string
 }
 
+// resolvedLocalPassphrases records successfully resolved local-state
+// passphrases in memory so diagnostics can redact values read from disk.
+var resolvedLocalPassphrases struct {
+	sync.Mutex
+	values []string
+}
+
+func rememberLocalPassphrase(value string) {
+	if value == "" {
+		return
+	}
+	resolvedLocalPassphrases.Lock()
+	defer resolvedLocalPassphrases.Unlock()
+	if !slices.Contains(resolvedLocalPassphrases.values, value) {
+		resolvedLocalPassphrases.values = append(resolvedLocalPassphrases.values, value)
+	}
+}
+
+func localPassphraseValues(getenv func(string) string) []string {
+	value := getenv("PULUMI_CONFIG_PASSPHRASE")
+	resolvedLocalPassphrases.Lock()
+	defer resolvedLocalPassphrases.Unlock()
+	return append([]string{value, strings.TrimSpace(value)}, resolvedLocalPassphrases.values...)
+}
+
 // rememberCivoToken adds token to resolvedCivoTokens unless it is already there.
 func rememberCivoToken(token string) {
 	resolvedCivoTokens.Lock()
@@ -186,9 +211,10 @@ func civoTokenValues(getenv func(string) string) []string {
 
 // redactDiagnostic replaces credential values in diagnostic text: the three
 // R2 values, each Cloudflare credential of cloudflareSecretEnv as exported and
-// without surrounding whitespace, the Civo API token of civoTokenValues, and
-// any text shaped like a prefixed Cloudflare credential. A value shorter than
-// 8 characters is never replaced.
+// without surrounding whitespace, the Civo API token of civoTokenValues,
+// PULUMI_CONFIG_PASSPHRASE as exported and trimmed plus recorded local-state
+// passphrases, and any text shaped like a prefixed Cloudflare credential.
+// A value shorter than 8 characters is never replaced.
 func redactDiagnostic(text string, getenv func(string) string) string {
 	text = backend.RedactR2Secrets(text, getenv)
 	for _, name := range cloudflareSecretEnv {
@@ -202,6 +228,11 @@ func redactDiagnostic(text string, getenv func(string) string) string {
 	for _, v := range civoTokenValues(getenv) {
 		if len(v) >= 8 {
 			text = strings.ReplaceAll(text, v, "[redacted CIVO_TOKEN]")
+		}
+	}
+	for _, v := range localPassphraseValues(getenv) {
+		if len(v) >= 8 {
+			text = strings.ReplaceAll(text, v, "[redacted PULUMI_CONFIG_PASSPHRASE]")
 		}
 	}
 	return cloudflareTokenShape.ReplaceAllString(text, "[redacted Cloudflare token]")

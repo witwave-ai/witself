@@ -402,6 +402,17 @@ func run(args []string) error {
 	if *removeCellForce && (cmd != "config" || configSub != "remove-cell") {
 		return fmt.Errorf("-force is only valid with `config remove-cell`")
 	}
+	for _, flag := range []struct{ name, command string }{
+		{"batch", "rebalance"},
+		{"enable", "placement-runner"},
+		{"disable", "placement-runner"},
+		{"run", "placement-runner"},
+		{"limit", "placement-status"},
+	} {
+		if operatorExplicit[flag.name] && cmd != flag.command {
+			return fmt.Errorf("-%s is only valid with `%s`", flag.name, flag.command)
+		}
+	}
 	if cmd == "config" {
 		return runConfigCmd(configSub, fs, *configPath)
 	}
@@ -1930,11 +1941,14 @@ func readBootstrapTokenFile(path string, required bool) (token string, ok bool, 
 // alongside the state — so secret outputs work with nothing to export or type.
 func ensurePassphrase(stateDir string) (string, error) {
 	if p := os.Getenv("PULUMI_CONFIG_PASSPHRASE"); p != "" {
+		rememberLocalPassphrase(p)
 		return p, nil
 	}
 	path := filepath.Join(stateDir, "passphrase")
 	if b, err := os.ReadFile(path); err == nil {
-		return strings.TrimSpace(string(b)), nil
+		p := strings.TrimSpace(string(b))
+		rememberLocalPassphrase(p)
+		return p, nil
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -1944,5 +1958,6 @@ func ensurePassphrase(stateDir string) (string, error) {
 	if err := os.WriteFile(path, []byte(p+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("persist state passphrase: %w", err)
 	}
+	rememberLocalPassphrase(p)
 	return p, nil
 }
