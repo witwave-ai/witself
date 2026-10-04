@@ -108,8 +108,15 @@ Neither check sees an `up`, `preview` or `destroy` that has not written
 state yet: do not run the command while one may be running for the cell.
 An `r2` cell needs the three variables of
 [Variables to export](#variables-to-export); without them the command
-refuses. Before it rewrites the file it copies it byte for byte to
-`<file>.bak-<UTC time>` with mode 0600 and prints the copy's path. If the
+refuses. For an existing `local` stack, the check reads its passphrase from
+`PULUMI_CONFIG_PASSPHRASE`, or, when that is unset or empty, from
+`<state_dir>/passphrase` (`state_dir` defaults to `~/.witself-infra/state`);
+Pulumi also honours `PULUMI_CONFIG_PASSPHRASE_FILE` from your environment.
+Without a passphrase Pulumi can find, the stack export fails and the command
+refuses to remove the entry, while an absent stack (no `<state_dir>/.pulumi`,
+or a select-stack 404) needs no passphrase. Before it rewrites the file it
+copies it byte for byte to `<file>.bak-<UTC time>` with mode 0600 and prints
+the copy's path. If the
 file changed while the checks ran, it writes nothing: run it again. The
 rewrite drops YAML comments and any YAML document after the first; the
 copy keeps them. `-dry-run` runs every check and writes neither the
@@ -139,14 +146,58 @@ after twenty minutes of EKS provisioning.
 
 ## The dashboard
 
-`witself-infra dashboard` is a fullscreen TUI: the cell inventory
-merged with the fleet registry on the left (live / draining / absent /
-orphan), the selected cell's identity on the right, and a running
-operation's output below. `p` previews, `u` applies (only after a
-successful preview on that cell), `D` destroys (type the cell name
-verbatim to confirm). Ctrl+c under a running op offers keep/cancel —
-never a silent kill. Operations run as subprocesses of the same
-binary, so the dashboard drives exactly what scripts drive.
+`witself-infra dashboard` is a fullscreen TUI. The left pane merges the cell
+inventory with the default control plane's fleet registry. Active cells are
+grouped under control-plane header rows; absent cells appear below a separator.
+Status is live, draining, restore test, absent or error. Cells registered but
+not configured also appear in the list, although the header's orphan count can
+undercount them. The right pane is the context pane. A cell row has Overview,
+Kubernetes, Database, Health and Logs tabs. A control-plane header has Overview
+and Settings tabs, and a self-hosted header is untabbed.
+
+While an operation runs, a one-line strip above the footer shows its verb,
+cell, elapsed time and log path. Its output is in that cell's Logs tab. Each
+operation tees its output to
+`$WITSELF_HOME/logs/infra/<cell>-<verb>-<UTC time>.log`, with UTC time formatted
+as `YYYYMMDDTHHMMSSZ`. `WITSELF_HOME` defaults to `~/.witself`; the log
+directory is created with mode 0700 and the file with mode 0600. The Logs tab
+lists the four newest logs for the cell and shows the selected one's tail.
+A running operation, or the most recently completed operation, streams from its
+memory buffer of the latest 2,000 lines; the log file retains the full output
+when the tee succeeds.
+
+The control plane's Settings tab edits runtime settings in three sections:
+placement runner (enabled, restore archives, restore batch, restore
+any-region, rebalance, rebalance batch), reaper (enabled, ttl (minutes)) and
+placement (strategy `weighted` or `pinned`, pinned cell). Edits stay in a local
+draft until applied. Apply re-reads the control plane, shows a diff and writes
+only the changed sections after `y`. Quitting with `q` asks first when Settings
+edits are unapplied; idle `ctrl+c` quits without asking.
+
+These keys apply during normal navigation; confirmation dialogs and number
+edits capture keys. Settings edits require focus in the context pane.
+
+| Key | Where | Action |
+| --- | --- | --- |
+| `j`/`k`, `↓`/`↑` | anywhere | Move between rows (on a focused Settings tab: between fields) |
+| `tab`, `shift+tab` | anywhere | Switch focus between the cell list and the context pane |
+| `esc` | context pane | Return focus to the cell list |
+| `←`/`→`, `h`/`l` | context pane | Previous or next tab |
+| `p` | cell | Preview |
+| `u` | cell | Up, only after a successful preview of that cell against the same config within the last 60 minutes; confirm with `y` or `enter` |
+| `D` | cell | Destroy: runs inventory and account-placement checks first, then requires typing the cell name exactly and `enter` |
+| `a` | cell | Run the cloud's login in the foreground (`aws sso login`, `gcloud auth application-default login`, `az login`); Civo has no interactive login |
+| `g` | anywhere | Refresh |
+| `[`, `]` | Logs tab | Older or newer log |
+| `PgUp`, `PgDn`, `Home`, `End` | Logs tab | Scroll 10 lines, jump to the oldest line, return to the tail |
+| `enter`, `space` | Settings tab | Toggle, cycle, or start a number edit (digits, `backspace`, `enter` to keep, `esc` to cancel) |
+| `a` / `x` / `r` | Settings tab | Apply (diff, then `y`) / discard edits (`y`) / one runner pass now (`y`) |
+| `q` | anywhere | Quit; refused while an operation runs; asks first with unapplied Settings edits |
+| `ctrl+c` | anywhere | Quit without asking when idle; during an operation, `k` keeps it running and `c` cancels it with SIGKILL to its process group (detach is not supported) |
+
+Operations run as subprocesses of the same binary for installed builds, or
+rerun the same program from source for `go run` builds, so the dashboard drives
+exactly what scripts drive.
 
 Civo is a first-class dashboard provider. Its overview shows the effective
 node size, Kubernetes version policy, API firewall CIDR, native Civo DNS, and
