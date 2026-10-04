@@ -608,7 +608,7 @@ require_live_not_newer() {
   worker_enabled=$(cell_worker_enabled "$values") || die "cannot determine expected workloads for $cell"
   digest=$(cell_image_digest "$values") || die "cannot read digest pin for $cell"
   baseline_digest=$(cell_image_digest "$baseline_values") || die "cannot read baseline digest pin for $cell"
-  app=$(kubectl --context "witself-$cell" --request-timeout=20s -n argocd \
+  app=$(one_shot_read "Argo application ($cell)" kubectl --context "witself-$cell" --request-timeout=20s -n argocd \
     get applications.argoproj.io witself-server -o json)
   printf '%s\n' "$app" | jq -e 'type == "object"' >/dev/null || die "invalid Argo JSON for $cell"
   require_app_cell_identity "$cell" "$app"
@@ -616,9 +616,9 @@ require_live_not_newer() {
   if ! valid_version "$current" || version_lower "$VERSION" "$current"; then
     die "$cell live Argo revision '$current' is invalid or newer than $VERSION"
   fi
-  pods=$(kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
+  pods=$(one_shot_read "live pods ($cell)" kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
     get pods -l 'app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server' -o json)
-  deployments=$(kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
+  deployments=$(one_shot_read "live deployments ($cell)" kubectl --context "witself-$cell" --request-timeout=20s -n "$namespace" \
     get deployments -l 'app.kubernetes.io/name in (witself-server,witself-worker),app.kubernetes.io/instance=witself-server' -o json)
   expected_deployments_present "$cell" "$worker_enabled" "$deployments" ||
     die "missing expected deployment for $cell (worker.enabled=$worker_enabled)"
@@ -916,7 +916,7 @@ main() {
 Dry run: local two-wave roll to v$VERSION
 Workdir: $WORKDIR (unique run directory; primary checkout may be dirty)
 Preconditions: gh auth status; both witself-CELL contexts reach argocd (20s request timeout);
-published release v$VERSION; latest release.yml run for v$VERSION completed success;
+published release v$VERSION; latest release.yml push run for v$VERSION completed success;
 serving /v1/version strictly lower than $VERSION.
 Serving origin: ${SERVING_URL:-https://<origin/main .gitops/cells/$SERVING_CELL/values.yaml cell.apiHost>}
 $SCHEMA_STATEMENT
@@ -970,7 +970,7 @@ EOF
   runs=$(settled_read "release run (v$VERSION)" \
     'type == "array" and (length == 0 or (.[0].event == "push" and .[0].status != "completed"))' \
     "Waiting for release run: v$VERSION" \
-    gh run list --workflow release.yml --branch "v$VERSION" --limit 1 --json status,conclusion,headSha,event)
+    gh run list --workflow release.yml --branch "v$VERSION" --event push --limit 1 --json status,conclusion,headSha,event)
   printf '%s\n' "$runs" | jq -e \
     'length == 1 and .[0].status == "completed" and .[0].conclusion == "success" and .[0].event == "push"' \
     >/dev/null || die "release run is not green for v$VERSION (latest release.yml push run must be completed success)"
