@@ -424,7 +424,7 @@ type mcpMemoryCurationEvidence struct {
 	Type                string                             `json:"type" jsonschema:"supported evidence label; blank defaults to conversation; need not equal resolved_kind"`
 	Role                string                             `json:"role,omitempty" jsonschema:"supports (default), contradicts, or context"`
 	ResolutionState     string                             `json:"resolution_state" jsonschema:"resolved, pending, or unavailable; pending and unavailable require input_evidence_id and exact reproduction of a materialized evidence input row; direct evidence without input_evidence_id must be resolved transcript or memory"`
-	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator copied exactly from the materialized input_evidence_id row"`
+	ExternalLocator     string                             `json:"external_locator,omitempty" jsonschema:"pending evidence locator copied exactly from the materialized input_evidence_id row; required when resolution_state is pending"`
 	ResolvedKind        string                             `json:"resolved_kind,omitempty" jsonschema:"REQUIRED whenever resolution_state is resolved; never inferred from type: transcript, memory, message, import_artifact, or artifact; requires exactly one matching source: source_transcript_id with a sequence range, source_memory, source_message_id, source_import_locator, or artifact_excerpt; message, import_artifact and artifact require input_evidence_id and exact reproduction of a materialized evidence input row"`
 	SourceTranscriptID  string                             `json:"source_transcript_id,omitempty" jsonschema:"source transcript id; direct evidence must lie wholly inside the run's materialized transcript inputs, checked by the backend; a transcript_coverage window does not authorize it; with input_evidence_id reproduce the materialized row exactly"`
 	SourceSequenceFrom  int64                              `json:"source_sequence_from,omitempty" jsonschema:"positive first inclusive transcript sequence"`
@@ -434,7 +434,7 @@ type mcpMemoryCurationEvidence struct {
 	SourceImportLocator string                             `json:"source_import_locator,omitempty" jsonschema:"exact import source locator copied from the materialized input_evidence_id row"`
 	ArtifactExcerpt     string                             `json:"artifact_excerpt,omitempty" jsonschema:"base64 artifact excerpt copied from the materialized input_evidence_id row"`
 	ArtifactSensitive   bool                               `json:"artifact_sensitive,omitempty" jsonschema:"artifact excerpt contains sensitive material"`
-	TerminalReasonCode  string                             `json:"terminal_reason_code,omitempty" jsonschema:"bounded unavailable reason copied exactly from the materialized input_evidence_id row"`
+	TerminalReasonCode  string                             `json:"terminal_reason_code,omitempty" jsonschema:"bounded unavailable reason copied exactly from the materialized input_evidence_id row; required (1-128 bytes) when resolution_state is unavailable"`
 	SourceDigest        string                             `json:"source_digest,omitempty" jsonschema:"exact source digest when available"`
 }
 

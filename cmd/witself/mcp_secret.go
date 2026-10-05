@@ -75,12 +75,12 @@ type mcpSecretCreateInput struct {
 
 type mcpSecretCreateFieldInput struct {
 	Name             string                   `json:"name" jsonschema:"stable lowercase field name"`
-	Kind             string                   `json:"kind,omitempty" jsonschema:"text, username, password, url, api_key, token, private_key, totp, recovery_code, or note"`
+	Kind             string                   `json:"kind,omitempty" jsonschema:"text, username, password, url, api_key, token, private_key, totp, recovery_code, or note; defaults to text; must be password with generate_password and totp with otpauth_uri"`
 	Sensitive        *bool                    `json:"sensitive,omitempty" jsonschema:"defaults true; protection-required kinds cannot be false"`
 	Encoding         string                   `json:"encoding,omitempty" jsonschema:"utf8 or json; defaults to utf8"`
-	Value            *string                  `json:"value,omitempty" jsonschema:"one explicit field value; mutually exclusive with generate_password and otpauth_uri"`
+	Value            *string                  `json:"value,omitempty" jsonschema:"one explicit field value; mutually exclusive with generate_password and otpauth_uri; each field needs exactly one of value, generate_password=true, or otpauth_uri"`
 	GeneratePassword bool                     `json:"generate_password,omitempty" jsonschema:"generate and immediately seal a local password; the created-secret result remains redacted"`
-	PasswordPolicy   *mcpSecretPasswordPolicy `json:"password_policy,omitempty" jsonschema:"optional local generated-password policy"`
+	PasswordPolicy   *mcpSecretPasswordPolicy `json:"password_policy,omitempty" jsonschema:"optional local generated-password policy; requires generate_password=true"`
 	OTPAuthURI       *string                  `json:"otpauth_uri,omitempty" jsonschema:"one otpauth TOTP enrollment URI accepted only for immediate local canonicalization and sealing; never returned"`
 }
 

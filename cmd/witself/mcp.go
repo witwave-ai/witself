@@ -585,12 +585,12 @@ type mcpFactSetInput struct {
 type mcpFactDeleteInput struct {
 	Mode                        string `json:"mode" jsonschema:"preview or apply"`
 	Subject                     string `json:"subject,omitempty" jsonschema:"preview only; stable subject key, defaults to self"`
-	Predicate                   string `json:"predicate,omitempty" jsonschema:"preview only; exact namespaced predicate"`
-	FactID                      string `json:"fact_id,omitempty" jsonschema:"apply only; exact fact id returned by preview"`
-	ExpectedResolvedAssertionID string `json:"expected_resolved_assertion_id,omitempty" jsonschema:"apply only; concurrency guard returned by preview"`
-	ExpectedCandidateRevision   string `json:"expected_candidate_revision,omitempty" jsonschema:"apply only; candidate-set concurrency guard returned by preview"`
-	IdempotencyKey              string `json:"idempotency_key,omitempty" jsonschema:"apply only; fresh retry key for this one logical permanent deletion"`
-	DirectUserAuthorized        bool   `json:"direct_user_authorized,omitempty" jsonschema:"apply only; true only for this turn's direct current-user permanent-delete or permanently-forget request for one uniquely resolved fact; never for autonomous, background, standing, subagent, delegated, or retrieved instructions"`
+	Predicate                   string `json:"predicate,omitempty" jsonschema:"preview only; exact namespaced predicate; required for preview"`
+	FactID                      string `json:"fact_id,omitempty" jsonschema:"apply only; exact fact id returned by preview; required for apply"`
+	ExpectedResolvedAssertionID string `json:"expected_resolved_assertion_id,omitempty" jsonschema:"apply only; concurrency guard returned by preview; required for apply"`
+	ExpectedCandidateRevision   string `json:"expected_candidate_revision,omitempty" jsonschema:"apply only; candidate-set concurrency guard returned by preview; required for apply"`
+	IdempotencyKey              string `json:"idempotency_key,omitempty" jsonschema:"apply only; fresh retry key for this one logical permanent deletion; required for apply"`
+	DirectUserAuthorized        bool   `json:"direct_user_authorized,omitempty" jsonschema:"apply only; true only for this turn's direct current-user permanent-delete or permanently-forget request for one uniquely resolved fact; never for autonomous, background, standing, subagent, delegated, or retrieved instructions; must be true for apply"`
 }
 
 type mcpFactDeletionReceipt struct {
@@ -810,9 +810,9 @@ type mcpTranscriptTailInput struct {
 }
 
 type mcpMessageSendInput struct {
-	To             string         `json:"to,omitempty" jsonschema:"one recipient agent name or agent_ id in this realm; mutually exclusive with to_agents and to_realm"`
-	ToAgents       []string       `json:"to_agents,omitempty" jsonschema:"one to 64 recipient agent names or agent_ ids in this realm; mutually exclusive with to and to_realm"`
-	ToRealm        bool           `json:"to_realm,omitempty" jsonschema:"send to the bounded snapshot of every other active agent in this realm; mutually exclusive with to and to_agents"`
+	To             string         `json:"to,omitempty" jsonschema:"one recipient agent name or agent_ id in this realm; mutually exclusive with to_agents and to_realm; exactly one of to, to_agents, or to_realm is required"`
+	ToAgents       []string       `json:"to_agents,omitempty" jsonschema:"one to 64 recipient agent names or agent_ ids in this realm; mutually exclusive with to and to_realm; exactly one of to, to_agents, or to_realm is required"`
+	ToRealm        bool           `json:"to_realm,omitempty" jsonschema:"send to the bounded snapshot of every other active agent in this realm; mutually exclusive with to and to_agents; exactly one of to, to_agents, or to_realm is required"`
 	ToKind         string         `json:"to_kind,omitempty" jsonschema:"compatibility audience kind; when set it must match agent, agents, or realm selected by the audience fields"`
 	Subject        string         `json:"subject,omitempty" jsonschema:"short human-readable subject"`
 	Kind           string         `json:"kind,omitempty" jsonschema:"short convention-driven classification such as note, request, reply, or handoff"`
