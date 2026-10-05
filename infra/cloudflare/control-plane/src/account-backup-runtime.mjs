@@ -852,10 +852,11 @@ export class DurableAccountBackup {
         if (!current || current.drill_id !== input.drill_id || current.state !== "running") {
           return errorResponse("restore drill record is not this drill", 409);
         }
+        const reason = boundedReason(input.error).replace(/[^\x20-\x7e]/g, "").trim();
         const record = {
           ...current, state: input.state, finished_at: this.now().toISOString(),
           validated_at: input.state === "validated" ? input.validated_at ?? null : null,
-          error: input.state === "failed" ? boundedReason(input.error).replace(/[^\x20-\x7e]/g, "") : null,
+          error: input.state === "failed" ? (reason || "backup failed") : null,
         };
         await this.storage.put(RESTORE_DRILL_KEY, record);
         return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });

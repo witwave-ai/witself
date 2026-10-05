@@ -2366,7 +2366,9 @@ test("restore drill lifecycle projects deadlines without writes and accepts a la
   f.durable.now = () => new Date(finished);
   let response = await f.call("/restore-drill:finish", { drill_id: first.drill_id, state: "validated", validated_at: finished });
   assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).restore_drill, { ...first, state: "validated", finished_at: finished, validated_at: finished });
+  const validated = (await response.json()).restore_drill;
+  assert.deepEqual(validated, { ...first, state: "validated", finished_at: finished, validated_at: finished });
+  assert.deepEqual(f.storage.values.get("restore-drill"), validated);
   const second = (await (await f.start()).json()).restore_drill;
   assert.notEqual(second.drill_id, first.drill_id);
   response = await f.call("/restore-drill:finish", { drill_id: second.drill_id, state: "failed", error: " \n\u0000bad\té" + "x".repeat(400) });
@@ -2377,6 +2379,7 @@ test("restore drill lifecycle projects deadlines without writes and accepts a la
   assert.equal(failed.validated_at, null);
   assert.match(failed.error, /^[\x20-\x7e]{1,300}$/);
   assert.equal(failed.error, ("\u0000bad\té" + "x".repeat(400)).slice(0, 300).replace(/[^\x20-\x7e]/g, ""));
+  assert.deepEqual(f.storage.values.get("restore-drill"), failed);
   const third = (await (await f.start()).json()).restore_drill;
   const stored = JSON.stringify(f.storage.values.get("restore-drill"));
   f.durable.now = () => new Date(Date.parse(third.deadline_at) - 1);
@@ -2396,6 +2399,22 @@ test("restore drill lifecycle projects deadlines without writes and accepts a la
   assert.deepEqual((await response.json()).restore_drill, late);
   f.durable.now = () => new Date(Date.parse(fourth.deadline_at) + RESTORE_DRILL_DEADLINE_MS);
   assert.deepEqual((await (await f.status()).json()).restore_drill, late);
+});
+
+test("restore drill failed finish records a fallback for empty sanitized reasons", async () => {
+  const f = drillEnv();
+  for (const error of ["\u0000\u0001\u007f", " \u0000 "]) {
+    const start = await f.start();
+    assert.equal(start.status, 200);
+    const { restore_drill: running } = await start.json();
+    const response = await f.call("/restore-drill:finish", { drill_id: running.drill_id, state: "failed", error });
+    assert.equal(response.status, 200);
+    const { restore_drill: failed } = await response.json();
+    assert.equal(failed.error, "backup failed");
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.validated_at, null);
+    assert.deepEqual(f.storage.values.get("restore-drill"), failed);
+  }
 });
 
 test("restore drill operations stay independent of the export fence and leave receipts fenced", async () => {
