@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -44,6 +45,85 @@ func TestMemoryRecallOptionsAndCursor(t *testing.T) {
 	decoded.SnapshotChangeSeq = 0
 	if _, err := encodeMemoryRecallCursor(decoded); !errors.Is(err, ErrMemoryInputInvalid) {
 		t.Fatalf("missing-watermark cursor error = %v", err)
+	}
+}
+
+func TestMemoryRecallQuerySemanticsPostgres(t *testing.T) {
+	dsn := testenv.RequirePostgres(t)
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, dsn)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := st.ProvisionAccount(ctx, "memory-recall-semantics@witwave.ai", "memory recall semantics", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deleteFactTestAccount(ctx, st, provisioned.AccountID) }()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %v / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID, RealmID: realm.ID, AccountStatus: "active"}
+
+	capture := func(key, content string) Memory {
+		t.Helper()
+		result, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+			Content: content, Kind: "note", CaptureReason: "test",
+			Evidence: []MemoryEvidenceInput{{
+				ResolutionState:    MemoryEvidenceUnavailable,
+				TerminalReasonCode: "test_fixture",
+			}},
+			IdempotencyKey: key,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Memory
+	}
+	a := capture("recall-semantics-a", "Fixture alpha beta.")
+	b := capture("recall-semantics-b", "Fixture alpha gamma.")
+	t.Logf("fixture IDs: A=%s B=%s", a.ID, b.ID)
+
+	for _, tt := range []struct {
+		query string
+		want  []string
+	}{
+		{query: "alpha beta", want: []string{a.ID}},
+		{query: "alpha delta"},
+		{query: "beta OR gamma", want: []string{a.ID, b.ID}},
+		{query: "beta or gamma", want: []string{a.ID, b.ID}},
+		{query: "beta or alpha gamma", want: []string{a.ID, b.ID}},
+		{query: "alpha -gamma", want: []string{a.ID}},
+		{query: `"alpha beta"`, want: []string{a.ID}},
+		{query: `"beta alpha"`},
+		{query: "alpha AND beta"},
+	} {
+		t.Run(tt.query, func(t *testing.T) {
+			page, err := st.RecallMemories(ctx, p, MemoryRecallOptions{Query: tt.query, Limit: 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]bool, len(page.Hits))
+			for _, hit := range page.Hits {
+				got[hit.Memory.ID] = true
+			}
+			want := make(map[string]bool, len(tt.want))
+			for _, id := range tt.want {
+				want[id] = true
+			}
+			t.Logf("hit-ID set = %v", got)
+			if len(page.Hits) != len(want) || !maps.Equal(got, want) {
+				t.Fatalf("recall hit-ID set = %v (%d hits), want %v", got, len(page.Hits), want)
+			}
+		})
 	}
 }
 

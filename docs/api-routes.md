@@ -1154,6 +1154,10 @@ audit events; read-only recall does neither:
   candidate counts/limit, truncation, retrieval mode, and degradation reason.
   With no profile, or zero compatible rows, lexical recall remains the baseline.
   Cross-agent/group recall remains future work.
+  Without a vector profile, every query word must appear in the memory content
+  in exactly that form (PostgreSQL `websearch_to_tsquery`, `simple`
+  configuration); use two to four distinctive keywords or join alternatives
+  with `OR`.
 - `POST /v1/memory-vector-profiles` creates or exactly replays one immutable
   agent-owned profile declaring provider/model/recipe identity, dimensions,
   distance metric, and normalization. `GET /v1/memory-vector-profiles` returns

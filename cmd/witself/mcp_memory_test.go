@@ -676,13 +676,42 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 		t.Fatal(err)
 	}
 	found := map[string]string{}
+	var recallInputSchema any
 	for _, tool := range tools.Tools {
 		if strings.HasPrefix(tool.Name, "witself.memory.") {
 			found[tool.Name] = tool.Description
 		}
+		if tool.Name == "witself.memory.recall" {
+			recallInputSchema = tool.InputSchema
+		}
 	}
 	if len(found) != 28 {
 		t.Fatalf("memory tools = %#v", found)
+	}
+	const recallGuidance = "Without a vector profile, query words are ANDed and must all appear in the memory content in exactly that form; send two to four distinctive keywords or join alternatives with OR for partial matches, and treat zero hits for a long sentence as a query problem, not proof that no memory exists."
+	if !strings.Contains(found["witself.memory.recall"], recallGuidance) {
+		t.Errorf("recall description lacks query guidance: %q", found["witself.memory.recall"])
+	}
+	raw, err := json.Marshal(recallInputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	query := requireMCPObjectProperty(t, root, root, "query")
+	description, ok := query["description"].(string)
+	if !ok {
+		t.Fatal("recall query description is missing or not a string")
+	}
+	const existingQueryDescription = "literal full-text query; resolve natural dates into structured fields client-side"
+	const queryGuidance = ". Without vector_profile_id, words are ANDed (PostgreSQL websearch syntax): a memory matches only if its content contains every word in exactly that form (no stemming or stop-word removal), so a long natural sentence often returns zero hits, and zero hits does not mean no memory exists. For broad recall send two to four distinctive keywords or join alternatives with OR, for example restore OR drill OR drills; OR is recognized in any case and AND binds tighter, so prefer all-OR keyword lists; a typed AND is matched as an ordinary word. Double-quoted words match a phrase and a leading minus excludes a word. With vector_profile_id the query is not a strict filter: it adds lexical rank (only memories containing every ANDed word score above zero), and it still shapes which memories are considered, because candidates are preselected by lexical score when more than 256 match the other filters and recall falls back to lexical scoring when no candidate has a compatible vector."
+	// Slice 101's conditional-requirement clause sits between the existing
+	// text and this guidance; pin the whole string so neither is dropped.
+	const requiredUnlessClause = "; required unless kind, tags, links, origin, capture_reason, an occurred or captured bound, or query_vector is set"
+	if want := existingQueryDescription + requiredUnlessClause + queryGuidance; description != want {
+		t.Errorf("recall query description = %q, want %q", description, want)
 	}
 	for _, phrase := range []string{"value-free", "active-memory capacity", "consolidation"} {
 		if !strings.Contains(found["witself.memory.status"], phrase) {

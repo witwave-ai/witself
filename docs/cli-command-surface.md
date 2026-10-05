@@ -2421,6 +2421,26 @@ ranking. A text query is optional when a structured filter or query vector is
 present. Natural phrases such as relative dates must be translated into RFC3339
 filters by the client.
 
+Without a vector profile, query words are ANDed: recall uses PostgreSQL
+`websearch_to_tsquery` with the `simple` configuration over memory content only
+(not tags, kind, or links), so a memory matches only if its content contains
+every word in exactly that form, with no stemming or stop-word removal. A long
+natural sentence therefore often returns zero hits, and zero hits does not mean
+no memory exists. For broad recall use two to four distinctive keywords or join
+alternatives with `OR` (recognized in any case; AND binds tighter, so prefer
+all-`OR` lists such as `restore OR drill OR drills`); `"quoted words"` match a
+phrase, a leading `-` excludes a word, and a typed `AND` is matched as an
+ordinary word. On the command line, pass a query that starts with `-` as
+`--query "-word ..."` or after `--`, because a positional argument beginning
+with `-` is read as a flag. With a vector profile the query is not a strict
+filter: it adds lexical score (only memories containing every ANDed word score
+above zero), and it still shapes which memories are considered, because
+candidates are preselected by lexical score when more than 256 match the other
+filters and recall falls back to lexical scoring when no candidate has a
+compatible vector. Hyphenated identifiers can tokenize differently from their
+spaced form (`slice-85` indexes as `slice` and `-85`), so search the word part
+alone or join both forms with `OR`.
+
 Results show total, similarity/vector-use, lexical, salience, and recency score
 components. JSON also reports retrieval mode, profile, vector coverage and
 candidate/match counts, candidate budget/truncation, degradation reason, and an
@@ -2428,7 +2448,7 @@ opaque next cursor when another page exists. Sensitive content is redacted
 unless the exact intentional request uses `--include-sensitive`.
 
 ```sh
-witself memory recall "what do I know about the prod outage"
+witself memory recall "outage OR incident OR postmortem"
 witself memory recall "deploy preferences" --kind profile --limit 5 --json
 witself memory recall --tag architecture \
   --occurred-from 2026-01-01T00:00:00Z
@@ -2440,7 +2460,7 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--query TEXT` | Literal full-text query; mutually exclusive with positional `QUERY`. |
+| `--query TEXT` | Literal full-text query; mutually exclusive with positional `QUERY`. Without a vector profile every word must appear in the memory content in exactly that form; use two to four keywords or join alternatives with `OR`. |
 | `--kind KIND` | Exact memory-kind filter. |
 | `--tag TAG` | Require a tag; repeatable or comma-separated. |
 | `--link REF` | Require an identity link; repeatable or comma-separated. |
