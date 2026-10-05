@@ -31,6 +31,10 @@ type). Cross-agent access to memories is governed entirely by
 - Recall uses PostgreSQL literal full text plus kind, tag, link, occurrence/
   capture time, origin, capture reason, salience, and recency signals. It calls
   no model or embedding provider.
+  Without a vector profile, every query word must appear in the memory content
+  in exactly that form (PostgreSQL `websearch_to_tsquery`, `simple`
+  configuration); use two to four distinctive keywords or join alternatives
+  with `OR`.
 - Every mutation appends a complete immutable version and requires idempotency;
   adjust and lifecycle transitions also require the exact current version.
 - The account's resolved `stored_memory` policy is enforced per owner agent and

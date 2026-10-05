@@ -358,7 +358,7 @@ func memoryRecall(args []string) int {
 	fs := flag.NewFlagSet("memory recall", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
-	queryFlag := fs.String("query", "", "literal full-text query; natural date interpretation is client-side")
+	queryFlag := fs.String("query", "", "literal full-text query; natural date interpretation is client-side; without a vector profile every word of the query (flag or positional QUERY) must appear in the memory content in exactly that form, so use two to four keywords or join alternatives with OR")
 	kind := fs.String("kind", "", "exact memory kind filter")
 	var tags, links csvListFlag
 	fs.Var(&tags, "tag", "required tag (repeatable or comma-separated)")

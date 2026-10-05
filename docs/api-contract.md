@@ -924,7 +924,7 @@ With request body:
 
 ```json
 {
-  "query": "what did we decide about the migration",
+  "query": "migration OR decision OR decided",
   "kind": "episodic",
   "tags": ["migration"],
   "limit": 20
