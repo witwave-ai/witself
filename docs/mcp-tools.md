@@ -1061,8 +1061,11 @@ blocked. The tool returns no memory ids or content.
 
 Durably capture one bounded, evidence-bearing, client-authored narrative for
 the current agent. The backend performs no synthesis or inference. Every call
-requires a fresh `idempotency_key` and at least one exact, pending, or explicitly
-unavailable evidence item.
+requires a fresh `idempotency_key` and `evidence` with 1-32 exact, pending, or
+explicitly unavailable rows. With no exact source, send one `state: "pending"`
+row with an `external_locator` when a stable runtime locator exists; otherwise
+send one `state: "unavailable"` row with an `unavailable_reason`, as in the
+example below.
 
 Input:
 
@@ -1268,7 +1271,7 @@ Implemented agent-self atomic supersession. The caller supplies one exact active
 source version and 1-32 client-authored replacements. The tool is appropriate
 after the client has decided a merge, split, or refinement; the backend performs
 no synthesis or model inference. The operation and every replacement require
-distinct retry keys, and every replacement requires evidence.
+distinct retry keys, and every replacement requires 1-32 evidence rows.
 
 Input:
 

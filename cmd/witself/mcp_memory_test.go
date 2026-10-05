@@ -511,6 +511,29 @@ func TestMCPMemoryCaptureRequiresEvidenceBeforeWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = clientSession.Close() }()
+	const captureHandlerError = "content, kind, capture_reason, evidence, and idempotency_key are required"
+	const supersedeHandlerError = "replacement[0] requires content, kind, capture_reason, evidence, and idempotency_key"
+	const sdkValidationError = `validating "arguments"`
+	assertRefused := func(t *testing.T, result *mcp.CallToolResult, want []string, forbidden string) {
+		t.Helper()
+		if !result.IsError || backend.captureCalls != 0 || backend.supersedeCalls != 0 {
+			t.Fatalf("evidence-free result = %#v; capture calls = %d; supersede calls = %d", result, backend.captureCalls, backend.supersedeCalls)
+		}
+		var text strings.Builder
+		for _, content := range result.Content {
+			if message, ok := content.(*mcp.TextContent); ok {
+				text.WriteString(message.Text)
+			}
+		}
+		for _, fragment := range want {
+			if !strings.Contains(text.String(), fragment) {
+				t.Errorf("error text %q does not contain %q", text.String(), fragment)
+			}
+		}
+		if strings.Contains(text.String(), forbidden) {
+			t.Errorf("error text %q contains forbidden refusal path %q", text.String(), forbidden)
+		}
+	}
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 		Name: "witself.memory.capture",
 		Arguments: map[string]any{
@@ -521,8 +544,62 @@ func TestMCPMemoryCaptureRequiresEvidenceBeforeWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError || backend.captureCalls != 0 {
-		t.Fatalf("evidence-free result = %#v; calls = %d", result, backend.captureCalls)
+	assertRefused(t, result, []string{sdkValidationError, "evidence"}, captureHandlerError)
+	for _, tc := range []struct {
+		name     string
+		evidence any
+	}{
+		{name: "empty", evidence: []map[string]any{}},
+		{name: "null", evidence: nil},
+	} {
+		t.Run("capture/"+tc.name, func(t *testing.T) {
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: "witself.memory.capture",
+				Arguments: map[string]any{
+					"content": "no evidence", "kind": "note",
+					"capture_reason": "explicit", "idempotency_key": "bad-capture-" + tc.name,
+					"evidence": tc.evidence,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRefused(t, result, []string{captureHandlerError}, sdkValidationError)
+		})
+	}
+	for _, tc := range []struct {
+		name     string
+		evidence any
+		omit     bool
+	}{
+		{name: "empty", evidence: []map[string]any{}},
+		{name: "null", evidence: nil},
+		{name: "omitted", omit: true},
+	} {
+		t.Run("supersede/"+tc.name, func(t *testing.T) {
+			replacement := map[string]any{
+				"content": "no replacement evidence", "kind": "note",
+				"capture_reason": "curation", "idempotency_key": "bad-replacement-" + tc.name,
+			}
+			if !tc.omit {
+				replacement["evidence"] = tc.evidence
+			}
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: "witself.memory.supersede",
+				Arguments: map[string]any{
+					"memory_id": "mem_1", "expected_version": 1, "idempotency_key": "bad-supersede-" + tc.name,
+					"replacements": []map[string]any{replacement},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.omit {
+				assertRefused(t, result, []string{sdkValidationError, "evidence"}, "replacement[0] requires")
+			} else {
+				assertRefused(t, result, []string{supersedeHandlerError}, sdkValidationError)
+			}
+		})
 	}
 }
 
