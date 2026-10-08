@@ -30,6 +30,6 @@
     "verify:route-signing-readiness": "node scripts/route-signing-readiness.mjs"
   },
   "devDependencies": {
-    "wrangler": "4.142.0"
+    "wrangler": "4.147.0"
   }
 }
