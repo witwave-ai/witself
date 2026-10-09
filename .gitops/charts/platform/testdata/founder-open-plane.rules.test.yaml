@@ -1611,3 +1611,355 @@ tests:
       - eval_time: 10m
         alertname: WitselfAccountBackupHealthUnavailable
         exp_alerts: []
+
+  - name: server OOM fires once and resolves while the old reason remains
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-b",uid="witself-server-b-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x130'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 25m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 38m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 47m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+
+  - name: non-OOM Error and Completed restarts do not alert
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-error",uid="witself-server-error-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-error",uid="witself-server-error-uid",container="witself-server",instance="kube-state-metrics:8080",reason="Error"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-completed",uid="witself-server-completed-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-completed",uid="witself-server-completed-uid",container="witself-server",instance="kube-state-metrics:8080",reason="Completed"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-worker-error",uid="witself-worker-error-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-worker-error",uid="witself-worker-error-uid",container="witself-worker",instance="kube-state-metrics:8080",reason="Error"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-worker-completed",uid="witself-worker-completed-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-worker-completed",uid="witself-worker-completed-uid",container="witself-worker",instance="kube-state-metrics:8080",reason="Completed"}
+        values: '_x11 1+0x19'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+
+  - name: a later non-OOM restart does not reuse an old OOM reason
+    interval: 1m
+    # The OOM reason is explicitly stale from 80m through 130m; Error replaces it at 80m.
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x68 2+0x50'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x68 stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale stale'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080",reason="Error"}
+        values: '_x80 1+0x50'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 50m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 82m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+
+  - name: worker OOM fires only the worker alert and resolves without refiring
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-worker-a",uid="witself-worker-a-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-worker-a",uid="witself-worker-a-uid",container="witself-worker",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-worker-b",uid="witself-worker-b-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x130'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-worker
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-worker container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-worker container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState and read the previous container's logs.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 25m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-worker
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-worker container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-worker container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState and read the previous container's logs.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 38m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-worker
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-worker container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-worker container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState and read the previous container's logs.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 47m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+
+  - name: two server replicas killed in one window produce one aggregate alert
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x49'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-a",uid="witself-server-a-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x49'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-b",uid="witself-server-b-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x19 1+0x40'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-b",uid="witself-server-b-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x20 1+0x40'
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 45m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 60m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+
+  - name: OOM alerts exclude other containers namespaces and exporter jobs
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="postgresql-a",uid="postgresql-a-uid",container="postgresql",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="postgresql-a",uid="postgresql-a-uid",container="postgresql",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="other",pod="witself-server-other-namespace",uid="witself-server-other-namespace-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="other",pod="witself-server-other-namespace",uid="witself-server-other-namespace-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="other",pod="witself-worker-other-namespace",uid="witself-worker-other-namespace-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="other",pod="witself-worker-other-namespace",uid="witself-worker-other-namespace-uid",container="witself-worker",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="other-exporter",namespace="witself",pod="witself-server-other-exporter",uid="witself-server-other-exporter-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="other-exporter",namespace="witself",pod="witself-server-other-exporter",uid="witself-server-other-exporter-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x19'
+      - series: kube_pod_container_status_restarts_total{job="other-exporter",namespace="witself",pod="witself-worker-other-exporter",uid="witself-worker-other-exporter-uid",container="witself-worker",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x19'
+      - series: kube_pod_container_status_last_terminated_reason{job="other-exporter",namespace="witself",pod="witself-worker-other-exporter",uid="witself-worker-other-exporter-uid",container="witself-worker",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x19'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfServerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfWorkerOOMKilled
+        exp_alerts: []
+
+  - name: a kube-state-metrics scrape gap does not resolve the server OOM alert
+    interval: 1m
+    # At 20m both series are stale; keep_firing_for alone preserves the alert.
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-g",uid="witself-server-g-uid",container="witself-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x8 stale 1+0x110'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-g",uid="witself-server-g-uid",container="witself-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x8 stale 1+0x110'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 19m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 20m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 21m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: a kube-state-metrics replacement does not resolve the server OOM alert
+    interval: 1m
+    # The old target vanishes at 15m; the new target has no pre-kill counter sample.
+    # At 25m the join to the old target's increase must sustain the alert beyond its hold.
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-h",uid="witself-server-h-uid",container="witself-server",instance="kube-state-metrics-old:8080"}
+        values: '0+0x10 1+0x3 stale stale stale stale stale stale stale stale stale stale stale'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-h",uid="witself-server-h-uid",container="witself-server",instance="kube-state-metrics-old:8080",reason="OOMKilled"}
+        values: '_x11 1+0x3 stale stale stale stale stale stale stale stale stale stale stale'
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="witself-server-h",uid="witself-server-h-uid",container="witself-server",instance="kube-state-metrics-new:8080"}
+        values: '_x16 1+0x9'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="witself-server-h",uid="witself-server-h-uid",container="witself-server",instance="kube-state-metrics-new:8080",reason="OOMKilled"}
+        values: '_x16 1+0x9'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 25m
+        alertname: WitselfServerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring

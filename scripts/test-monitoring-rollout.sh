@@ -370,6 +370,85 @@ ruby -ryaml -e '
   abort "config reloader image is not digest-pinned" unless args.include?(expected_reloader_image)
 ' "$child_render"
 
+# Keep the OOM inventory and its kube-state-metrics label contract together.
+# Check both the CI chart render and the serving cell that enables alerting.
+ruby -ryaml -e '
+  group_name = "witself-container-oom"
+  source_groups = Array(YAML.safe_load(File.read(ARGV[0]), aliases: false)["groups"])
+    .select { |group| group["name"] == group_name }
+  abort "expected exactly one source group #{group_name}" unless source_groups.length == 1
+  source_rules = source_groups[0]["rules"]
+  ARGV.drop(1).each do |path|
+    docs = YAML.load_stream(File.read(path)).compact
+    founder = docs.select do |doc|
+      doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-founder-open-plane" }
+    end
+    abort "#{group_name}: expected one selected founder rule resource in #{path}" unless founder.length == 1 && founder[0].dig("metadata", "namespace") == "monitoring" && founder[0].dig("metadata", "labels", "release") == "witself-monitoring"
+    groups = Array(founder[0].dig("spec", "groups")).select { |group| group["name"] == group_name }
+    abort "expected exactly one group #{group_name} in #{path}" unless groups.length == 1
+    rules = groups[0]["rules"]
+    abort "#{group_name}: rendered rules differ from source in #{path}" unless rules == source_rules
+    abort "#{group_name}: unexpected alert inventory" unless rules.map { |rule| rule["alert"] } == %w[WitselfServerOOMKilled WitselfWorkerOOMKilled]
+    server, worker = rules
+    rules.zip(%w[witself-server witself-worker]).each do |rule, service|
+      expected_labels = {"severity" => "warning", "service" => service, "witself_alert" => "true"}
+      abort "#{group_name}: unexpected labels for #{service}" unless rule["labels"] == expected_labels
+      abort "#{group_name}: unexpected hold for #{service}" unless rule["for"] == "0m" && rule["keep_firing_for"] == "5m"
+    end
+    abort "#{group_name}: server and worker expressions differ" unless worker["expr"] == server["expr"].gsub("witself-server", "witself-worker")
+    abort "#{group_name}: labels differ beyond service" unless server["labels"].reject { |key, _| key == "service" } == worker["labels"].reject { |key, _| key == "service" }
+    %w[summary description].each do |key|
+      annotation = worker.dig("annotations", key).to_s
+      abort "#{group_name}: worker #{key} names the wrong service" unless annotation.include?("witself-worker") && !annotation.include?("witself-server")
+    end
+
+    monitors = docs.select { |doc| doc["kind"] == "ServiceMonitor" && doc.dig("metadata", "name").to_s.include?("kube-state-metrics") }
+    abort "#{group_name}: expected one kube-state-metrics ServiceMonitor in #{path}" unless monitors.length == 1
+    monitor = monitors[0]
+    abort "#{group_name}: kube-state-metrics ServiceMonitor is outside Prometheus selection" unless monitor.dig("metadata", "namespace") == "monitoring" && monitor.dig("metadata", "labels", "release") == "witself-monitoring"
+    endpoints = Array(monitor.dig("spec", "endpoints"))
+    abort "#{group_name}: kube-state-metrics endpoints must honor subject labels" unless !endpoints.empty? && endpoints.all? { |endpoint| endpoint["honorLabels"] == true }
+    endpoints.each do |endpoint|
+      %w[relabelings metricRelabelings].each do |key|
+        value = endpoint[key]
+        abort "#{group_name}: unexpected kube-state-metrics #{key}: #{value.inspect}" unless value.nil? || value == []
+      end
+    end
+    abort "#{group_name}: unexpected kube-state-metrics jobLabel" unless monitor.dig("spec", "jobLabel") == "app.kubernetes.io/name"
+    selector = monitor.dig("spec", "selector", "matchLabels") || {}
+    abort "#{group_name}: unsupported kube-state-metrics Service selector" if selector.empty? || !Array(monitor.dig("spec", "selector", "matchExpressions")).empty?
+    namespace_selector = monitor.dig("spec", "namespaceSelector") || {}
+    services = docs.select do |doc|
+      next false unless doc["kind"] == "Service"
+      namespace = doc.dig("metadata", "namespace")
+      selected_namespace = namespace_selector["any"] == true || Array(namespace_selector["matchNames"]).include?(namespace) || (namespace_selector.empty? && namespace == monitor.dig("metadata", "namespace"))
+      selected_namespace && selector.all? { |key, value| doc.dig("metadata", "labels", key) == value }
+    end
+    abort "#{group_name}: expected one selected kube-state-metrics Service" unless services.length == 1
+    service = services[0]
+    abort "#{group_name}: kube-state-metrics Service does not supply the expected job label" unless service.dig("metadata", "labels", "app.kubernetes.io/name") == "kube-state-metrics"
+    pod_selector = service.dig("spec", "selector") || {}
+    abort "#{group_name}: kube-state-metrics Service has no pod selector" if pod_selector.empty?
+    deployments = docs.select do |doc|
+      doc["kind"] == "Deployment" && doc.dig("metadata", "namespace") == service.dig("metadata", "namespace") && pod_selector.all? { |key, value| doc.dig("spec", "template", "metadata", "labels", key) == value }
+    end
+    abort "#{group_name}: expected one selected kube-state-metrics Deployment" unless deployments.length == 1
+    args = Array(deployments[0].dig("spec", "template", "spec", "containers")).flat_map { |container| Array(container["command"]) + Array(container["args"]) }
+    filters = args.select { |arg| %w[--metric-allowlist= --metric-denylist= --metric-opt-in-list=].any? { |prefix| arg.start_with?(prefix) } }
+    abort "#{group_name}: unexpected kube-state-metrics metric filters: #{filters.inspect}" unless filters.empty?
+    args.select { |arg| arg.start_with?("--resources=") }.each do |arg|
+      abort "#{group_name}: kube-state-metrics resources omit pods" unless arg.delete_prefix("--resources=").split(",").include?("pods")
+    end
+    args.select { |arg| arg.start_with?("--namespaces=") }.each do |arg|
+      abort "#{group_name}: kube-state-metrics namespaces omit witself" unless arg.delete_prefix("--namespaces=").split(",").include?("witself")
+    end
+    args.select { |arg| arg.start_with?("--namespaces-denylist=") }.each do |arg|
+      abort "#{group_name}: kube-state-metrics namespaces deny witself" if arg.delete_prefix("--namespaces-denylist=").split(",").include?("witself")
+    end
+    abort "#{group_name}: kube-state-metrics custom-resource-state-only excludes pod metrics" if args.include?("--custom-resource-state-only=true")
+  end
+' "$rules" "$child_render" "$tmp/probes-child.yaml"
+
 helm template witself-apps "$apps_chart" \
   --set cell.name=monitoring-ci >"$apps_default_render"
 ruby -ryaml -e '

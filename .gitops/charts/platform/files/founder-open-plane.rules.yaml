@@ -259,6 +259,33 @@ groups:
           summary: Clients are reporting a sustained avatar generation-failure rate.
           description: Successful avatar generation-failure reports have exceeded 0.003 per second for 10 minutes; inspect renderer compatibility, proposal validation, and client failure reason classes.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: witself-container-oom
+    interval: 30s
+    rules:
+      - alert: WitselfServerOOMKilled
+        expr: max((kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",container="witself-server",reason="OOMKilled"} == 1) and on (namespace, pod, container) (increase(kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",container="witself-server"}[30m]) > 0))
+        for: 0m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
+          description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfWorkerOOMKilled
+        expr: max((kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",container="witself-worker",reason="OOMKilled"} == 1) and on (namespace, pod, container) (increase(kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",container="witself-worker"}[30m]) > 0))
+        for: 0m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: witself-worker
+          witself_alert: "true"
+        annotations:
+          summary: A witself-worker container was OOM-killed and restarted within the last 30 minutes.
+          description: kube-state-metrics reports OOMKilled as a witself-worker container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState and read the previous container's logs.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
   - name: witself-collectors
     interval: 30s
     rules:

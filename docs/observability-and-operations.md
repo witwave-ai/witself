@@ -978,6 +978,46 @@ Claude Code/Codex acceptance legs remains operator work; Cursor/Grok remain
 Scott-operated runtimes. Client freshness/staleness alerts and signed-in
 provider regression acceptance are still open.
 
+<a id="container-oom-alerts"></a>
+
+The `witself-container-oom` group in `founder-open-plane.rules.yaml` renders
+wherever monitoring alerting is enabled. Its kube-state-metrics v2.19.1 series
+join `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1`
+with an increase in `kube_pod_container_status_restarts_total` over 30 minutes.
+Both rules aggregate away pod identity and raise a warning alert on the existing
+incident route. Today they cover only `civo-sandbox-use1-serving`: production
+has monitoring disabled and the backup cell runs no Prometheus, so a drill OOM
+on the backup cell raises no alert. Enabling monitoring elsewhere is a separate
+decision.
+
+| Alert | Condition | Severity |
+| --- | --- | --- |
+| `WitselfServerOOMKilled` | A `witself-server` container in `witself` last terminated with `OOMKilled`, and its restart count increased within 30 minutes. | warning |
+| `WitselfWorkerOOMKilled` | A `witself-worker` container in `witself` last terminated with `OOMKilled`, and its restart count increased within 30 minutes. | warning |
+
+The alert fires at the first evaluation that sees the restart and normally stays
+active until about five minutes after the 30-minute increase window stops
+containing a pre-kill sample, about 35 minutes after the kill. If the pod is
+deleted (by an operator, a release roll or Argo sync replacing pods, or a node
+drain), or the container restarts for another reason, the alert resolves about
+five minutes later; a resolve does not mean the memory problem is fixed.
+`keep_firing_for: 5m` prevents a scrape gap or kube-state-metrics replacement
+shorter than five minutes from resolving it. Known gaps:
+
+- A kill is missed if its restart is already in the series' first sample
+  (within about one scrape interval of pod creation), if kube-state-metrics was
+  replaced across the kill so its new series start at the post-kill count, or
+  if monitoring was down for longer than the 30-minute window. A shorter outage
+  with unchanged series identity does not cause a miss: Prometheus retains its
+  TSDB on a PVC and the alert fires on recovery.
+- A pod deleted soon after the kill can disappear before the alert observes it.
+- A node-wide OOM kill also reports `OOMKilled`; the alert cannot distinguish
+  it from a container-limit kill.
+- A monitoring outage longer than five minutes inside the window resolves an
+  active alert, and the next good scrape can trigger it again.
+
+See the [Founder runbook](runbooks.md#founder-open-plane-monitoring) for diagnosis.
+
 <a id="postgresql-alerts"></a>
 
 Deployment-hardening batch B adds the following database rules in

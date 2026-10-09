@@ -4335,7 +4335,7 @@ in one parent commit.
    In the third GitOps change, set the immutable Secret names/keys and enable
    `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
    `witself_alert=true` incident route, the `witself_watchdog=true` dead-man
-   route, and the enabled subset of the 27 committed bounded incident rules to
+   route, and the enabled subset of the committed bounded incident rules to
    converge. Four collector rules and five sealed-plane rules have separate
    default-off gates; `WitselfWatchdog` is the separate heartbeat rule.
    Confirm zero
@@ -4411,6 +4411,25 @@ context. Scheduling the authenticated `~/.witself/mra-claude-code.sh` and
 `~/.witself/mra-codex.sh` legs remains Claude-driven operator work; no cron,
 launchd, or CI job is added here. Cursor and Grok legs remain Scott's runtimes.
 Freshness/staleness alerts and live provider regression evidence remain open.
+
+The [container OOM rules](observability-and-operations.md#container-oom-alerts)
+raise warning alerts on the existing incident route. They aggregate away pod
+identity, so first find the restarted pod. They currently cover only
+`civo-sandbox-use1-serving`; production monitoring is disabled and the backup
+cell runs no Prometheus. Each alert fires at the first evaluation that sees the
+restart and normally remains active for about 35 minutes: the 30-minute restart
+window plus `keep_firing_for: 5m`. If the pod is deleted (by an operator, a
+release roll or Argo sync replacing pods, or a node drain), or the container
+restarts for another reason, the alert resolves about five minutes later; a
+resolve does not mean the memory problem is fixed. A scrape gap or
+kube-state-metrics replacement shorter than five minutes does not resolve it;
+an outage longer than five minutes inside the window can cause a resolve
+followed by another trigger.
+
+| Alert | First diagnostic step |
+| --- | --- |
+| `WitselfServerOOMKilled` | Find the pod with `kubectl -n witself get pods -l app.kubernetes.io/name=witself-server` and its RESTARTS column, or query `kube_pod_container_status_last_terminated_reason{namespace="witself",container="witself-server",reason="OOMKilled"}`. Inspect `kubectl -n witself get pod <pod> -o jsonpath='{.status.containerStatuses[*].restartCount} {.status.containerStatuses[*].lastState.terminated.reason}'`, then `kubectl -n witself logs <pod> -c witself-server --previous`; use `kubectl describe node` to check memory pressure and a node-wide kill. Check whether a backup export, backup validation, or account import or export was running. A kill during backup validation or an evacuation import loses the in-memory job, which then reads `absent`; the control plane starts the drill or import again within its retry policy (see [API routes](api-routes.md)). Repeated kills on the same archive need the planned memory-bounded import and validation work, not another restart. |
+| `WitselfWorkerOOMKilled` | Find the pod with `kubectl -n witself get pods -l app.kubernetes.io/name=witself-worker` and its RESTARTS column, or query `kube_pod_container_status_last_terminated_reason{namespace="witself",container="witself-worker",reason="OOMKilled"}`. Inspect `kubectl -n witself get pod <pod> -o jsonpath='{.status.containerStatuses[*].restartCount} {.status.containerStatuses[*].lastState.terminated.reason}'`, then `kubectl -n witself logs <pod> -c witself-worker --previous`; use `kubectl describe node` to check memory pressure and a node-wide kill. |
 
 The four identity-capacity and audit-append alerts default
 off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
