@@ -112,6 +112,9 @@ apps:
       enabled: false
       minAvailable: 1
     topologySpreadConstraints: []
+    # Empty forwards nothing, keeping server chart defaults: requests 50m/64Mi, limit 256Mi.
+    # Non-empty overrides merge key by key with the server chart defaults; set every key you intend to change (for production: requests.cpu, requests.memory and limits.memory); a default key cannot be removed.
+    resources: {}
     # Prometheus Operator discovery is optional and remains disabled until a
     # cell has an intentionally configured monitoring stack.
     metrics:
