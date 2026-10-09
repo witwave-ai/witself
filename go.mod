@@ -2,7 +2,7 @@ module github.com/witwave-ai/witself
 
 go 1.27.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.78.0
@@ -23,7 +23,7 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.42.0
 )

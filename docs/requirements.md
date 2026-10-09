@@ -1908,14 +1908,14 @@ tool-level risk boundaries are tracked in [mcp-tools.md](mcp-tools.md).
 Witself should be implemented in Go and should use the latest stable Go release
 available at the time implementation or release work is performed.
 
-Current baseline as of September 14, 2026:
+Current baseline as of October 9, 2026:
 
-- Latest stable Go release: `go1.27.1`.
+- Latest stable Go release: `go1.27.2`.
 - Root module path: `github.com/witwave-ai/witself`.
 - Root `go.mod` language version: `go 1.27.0`.
-- Root `go.mod` toolchain directive: `toolchain go1.27.1`.
-- Nested `infra/pulumi/go.mod` minimum Go version: `go 1.27.1`.
-- Control-plane source-build image: `golang:1.27.1`; CI and release jobs inherit
+- Root `go.mod` toolchain directive: `toolchain go1.27.2`.
+- Nested `infra/pulumi/go.mod` minimum Go version: `go 1.27.2`.
+- Control-plane source-build image: `golang:1.27.2`; CI and release jobs inherit
   their Go version from the relevant module's `go.mod`.
 
 These baselines should be refreshed together before each release. The intent is
