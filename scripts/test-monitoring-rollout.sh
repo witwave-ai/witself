@@ -689,7 +689,7 @@ ruby -ryaml -e '
   rule = docs.find { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-postgresql" } }
   abort "PostgreSQL PrometheusRule missing from child chart" unless rule
   abort "PostgreSQL PrometheusRule is not selected by this Prometheus release" unless rule.dig("metadata", "labels", "release") == "witself-monitoring"
-  abort "PostgreSQL rule count changed" unless rule.dig("spec", "groups").flat_map { |group| group["rules"] }.length == 5
+  abort "PostgreSQL rule count changed" unless rule.dig("spec", "groups").flat_map { |group| group["rules"] }.length == 6
 ' <"$tmp/postgresql-child.yaml"
 
 "$promtool_bin" check rules "$rules"

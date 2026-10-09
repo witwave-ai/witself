@@ -633,7 +633,8 @@ of routed accounts into the dedicated Cloudflare R2 bucket
 
 - a backup reads an active account in one PostgreSQL `REPEATABLE READ`,
   read-only transaction and does not suspend it, alter placement, or write an
-  evacuation marker;
+  evacuation marker. The transaction runs as
+  `application_name = witself-export-backup` for its whole duration;
 - every cell receives a `witself_bak_...` credential distinct from its
   `witself_prv_...` provisioning credential, and neither credential is accepted
   as the other authority;

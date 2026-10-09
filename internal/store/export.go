@@ -184,6 +184,27 @@ type accountExportOptions struct {
 	self         bool
 }
 
+// Keep this closed list aligned with the PostgreSQL transaction-age alert rules.
+var exportApplicationNames = [...]string{
+	"witself-export-account",
+	"witself-export-backup",
+	"witself-export-evacuation",
+	"witself-export-self",
+}
+
+func exportApplicationName(options accountExportOptions) string {
+	switch {
+	case options.backup:
+		return exportApplicationNames[1]
+	case options.self:
+		return exportApplicationNames[3]
+	case options.evacuationID != "":
+		return exportApplicationNames[2]
+	default:
+		return exportApplicationNames[0]
+	}
+}
+
 func (s *Store) exportAccount(
 	ctx context.Context,
 	accountID, cellName, serverVersion string,
@@ -200,6 +221,14 @@ func (s *Store) exportAccount(
 		return fmt.Errorf("begin export snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// PostgreSQL Functions, "Configuration Settings Functions": set_config with
+	// is_local=true is equivalent to SET LOCAL. SQL Commands, SET: the local
+	// value ends at commit or rollback, restoring the pooled session default.
+	// TestExportTransactionApplicationNamePostgres proves pg_stat_activity sees
+	// the local value during the transaction and the default after it ends.
+	if _, err := tx.Exec(ctx, `SELECT set_config('application_name', $1, true)`, exportApplicationName(options)); err != nil {
+		return fmt.Errorf("set export application name: %w", err)
+	}
 	if err := ensureExportSchemaCompatibleTx(ctx, tx); err != nil {
 		return err
 	}
