@@ -78,7 +78,7 @@ tests:
               service: witself-postgresql
               witself_alert: 'true'
             exp_annotations:
-              summary: The oldest PostgreSQL transaction exceeds five minutes.
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
               runbook: docs/observability-and-operations.md#postgresql-alerts
   - name: deadlock counter reset alone is quiet but a subsequent increment alerts immediately
     interval: 1m
@@ -174,4 +174,223 @@ tests:
         exp_alerts: []
       - eval_time: 10m
         alertname: WitselfPostgreSQLExporterUnavailable
+        exp_alerts: []
+  - name: account exports at thirteen minutes do not page the general rule
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-account",usename="witself"}
+        values: 0+60x20
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",usename="witself"}
+        values: 0+60x20
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-evacuation",usename="witself"}
+        values: 0+60x20
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-self",usename="witself"}
+        values: 0+60x20
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+  - name: unlabeled application transaction still pages at eleven minutes
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",usename="witself"}
+        values: 0+60x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",usename="witself"}
+        values: 600+60x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+  - name: export pages after the long reader threshold persists
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",usename="witself"}
+        values: 2400+60x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              application_name: witself-export-backup
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: An account export transaction has been open for more than 45 minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+  - name: pg_dump stays in the general rule
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="pg_dump",usename="witself_backup_dump"}
+        values: 0+60x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.2:9187",service="witself-postgresql-metrics",application_name="pg_dump",usename="witself_backup_dump"}
+        values: 2400+60x15
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.2:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.2:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+  - name: near miss application names stay in the general rule
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-other"}
+        values: 0+60x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.2:9187",service="witself-postgresql-metrics",application_name="witself-export-backup-old"}
+        values: 0+60x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.3:9187",service="witself-postgresql-metrics",application_name="pg_dumpall"}
+        values: 0+60x15
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.4:9187",service="witself-postgresql-metrics",application_name="witself-export-other"}
+        values: 2400+60x15
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.2:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.3:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.4:9187
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: The oldest PostgreSQL transaction outside account exports exceeds five minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 11m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+  - name: exact export threshold does not fire
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",usename="witself"}
+        values: 2700+0x15
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+  - name: export transaction persists across activity bucket changes
+    interval: 1m
+    input_series:
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",state="active",wait_event="ClientWrite"}
+        values: 2700+60x3 0+0x12
+      - series: pg_stat_activity_max_tx_duration{namespace="witself",job="witself-postgresql-metrics",instance="10.0.0.1:9187",service="witself-postgresql-metrics",application_name="witself-export-backup",state="idle in transaction",wait_event="ClientRead"}
+        values: 0+0x3 2940+60x12
+    alert_rule_test:
+      - eval_time: 5m30s
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfPostgreSQLExportTransactionAgeHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: witself
+              job: witself-postgresql-metrics
+              instance: 10.0.0.1:9187
+              application_name: witself-export-backup
+              severity: warning
+              service: witself-postgresql
+              witself_alert: 'true'
+            exp_annotations:
+              summary: An account export transaction has been open for more than 45 minutes.
+              runbook: docs/observability-and-operations.md#postgresql-alerts
+      - eval_time: 5m30s
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WitselfPostgreSQLTransactionAgeHigh
         exp_alerts: []
