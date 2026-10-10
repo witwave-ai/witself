@@ -674,6 +674,11 @@ and warns when a source produces no row for 30 seconds. A stalled source cannot
 emit a new data chunk until rows arrive; these warnings help distinguish source
 stalls from transport failures. See [#555](https://github.com/witwave-ai/witself/issues/555).
 
+Import reads each chunk row by row, using a fixed read buffer plus the largest
+row (briefly twice a row that spans the buffer). Complete rows from a corrupt
+entry may reach the importer before corruption is detected; the whole import
+still fails and rolls back, and validation never commits.
+
 The schedule is deliberately disabled by default when
 `CP_ACCOUNT_BACKUPS_ENABLED` is absent or false. The committed Worker
 configuration leaves this operator activation binding absent; set it as a

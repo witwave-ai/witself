@@ -214,6 +214,11 @@ jobs:
           WITSELF_TEST_REQUIRE_PEAK_MEMORY: "1"
         run: go test ./internal/store -run '^TestImportPeakMemory$' -count=1 -v -timeout=15m
 
+      - name: test archive reader peak memory (no race)
+        env:
+          WITSELF_TEST_REQUIRE_PEAK_MEMORY: "1"
+        run: go test ./internal/export -run '^TestReadPeakMemory$' -count=1 -v -timeout=15m
+
       - name: Upload Go store coverage
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
