@@ -249,9 +249,11 @@ was cancelled by server shutdown, keeps no result; after its lock is released,
 status answers `absent` and the caller may start it again. A job that reaches
 the cell's 60-minute deadline also reads `absent`; the control plane decides
 whether another START can still finish within its own deadline. An archive
-that kills PostgreSQL can therefore be retried up to three times per drill;
-if the drill ends without a result, operators should check PostgreSQL for
-restarts or `OOMKilled`. There is no cell cancel action: a validation whose
+that kills PostgreSQL can be started up to three times per drill (two retries);
+if the drill ends without a result, operators should check PostgreSQL and the
+`witself-server` container for restarts or `OOMKilled`. On a cell that runs
+monitoring, `WitselfServerOOMKilled` raises a warning alert; the backup cell runs
+none. There is no cell cancel action: a validation whose
 caller has given up runs to its 60-minute bound and its result is kept as above.
 On a single-replica cell this can make other accounts' starts answer 503 for
 up to about 90 minutes; restarting the server clears it. The synchronous
@@ -411,6 +413,13 @@ string. Other phase failures remain visible only in control-plane diagnostics.
 - `account exists under a different evacuation`
 - `archive schema is newer than this cell — upgrade the cell first`
 - `invalid or corrupt archive`
+
+A target `witself-server` restart during an evacuation import, such as an OOM
+kill, makes a failing or non-OK POLL fetch record `archive import failed; retry required`
+while the server is restarting; once it returns, the job reads `absent` and
+records `import job ended without a receipt; retry required`, or
+`import job exhausted its attempts; operator attention required` after
+`IMPORT_MAX_ATTEMPTS = 6`.
 
 All responses have `Cache-Control: no-store`, including errors and the shared
 public-IP limiter's 429. Status errors use fixed text:
