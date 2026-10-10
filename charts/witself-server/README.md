@@ -334,6 +334,32 @@ and `WITSELF_SUPPORT_TICKET_RATE_WINDOW` into the API ConfigMap; API/CLI reads
 and replies remain available when new tickets are throttled. The server
 validates 1–1,000 tickets per 1 second–24 hours.
 
+Account request budgets are off by default (`requestBudget.enabled: false`).
+The API ConfigMap renders the following only when enabled; the worker
+ConfigMap receives none of these keys:
+
+| Chart value | Environment key | Default |
+| --- | --- | --- |
+| `requestBudget.enabled` | `WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED` | `false` |
+| `requestBudget.readPerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_READ_PER_MINUTE` | `0` |
+| `requestBudget.readBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_READ_BURST` | `0` |
+| `requestBudget.writePerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE` | `0` |
+| `requestBudget.writeBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST` | `0` |
+| `requestBudget.maxTrackedAccounts` | `WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS` | `10000` |
+
+The four rate/burst values are integers from 0–1,000,000 while disabled and
+1–1,000,000 when enabled. `maxTrackedAccounts` is always an integer from
+100–1,000,000. Rates are requests per minute per account; bursts are immediate
+request allowances. Each replica keeps its own separate read and write
+buckets. With N replicas, an account's cell-wide allowance lies between 1×
+and N×, depending on traffic distribution. A restart or rollout refills that
+replica's buckets, allowing at most one extra burst per replica per restart.
+An evicted account starts with full buckets. Enabled budget changes enter
+the server configuration checksum and roll API pods; disabled values leave
+the default render and checksum unchanged. The apps chart does not forward
+`requestBudget.*` yet (FU123-1), so no cell can enable this through its apps
+values. Per-plan values remain a founder decision (FU123-2).
+
 `worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` into
 the worker ConfigMap. Defaults are `enabled: false`, `after: 720h`,
 `batchSize: 100`, `interval: 1h`, and `batchTimeout: 10s`. The worker validates
@@ -408,6 +434,8 @@ See [values.yaml](values.yaml) for the full set and [values.schema.json](values.
 for validation. Most-used: `image.tag`, `image.digest`, `replicaCount`, `backend.kind`,
 `billing.endpoint`,
 `support.ticketRateLimit`, `support.ticketRateWindow`,
+`requestBudget.enabled`, `requestBudget.readPerMinute`, `requestBudget.readBurst`,
+`requestBudget.writePerMinute`, `requestBudget.writeBurst`, `requestBudget.maxTrackedAccounts`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
 `worker.messageRateBucketCleanup.*`,

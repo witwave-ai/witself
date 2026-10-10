@@ -260,6 +260,58 @@ flag rather than treating every limit response or CLI exit `7` as retryable:
   is `message_sent` or `message_delivered`; scope is `agent`, `realm`, or
   `recipient`. Details are value-free and never carry a tenant or message
   identifier or content. The client should retry with the same idempotency key.
+
+  The optional account request budget is off by default. When enabled, it
+  covers authenticated account routes, sharing separate `read` and `write`
+  budgets across an account's operator and agent tokens on each replica.
+  `GET` and `HEAD` are reads, as are exact `POST` paths
+  `/v1/memories:recall`, `/v1/messages:listen`, and `/v1/email:listen`.
+  Every other method and path is a write, including unknown or mis-cased
+  methods. The known read-only `POST`s for secret field `:access` and
+  `retry-canary:status` intentionally debit `write` (FU123-10). Message `:read`
+  marks a delivery read and is a write. MCP tool calls debit by the HTTP
+  requests the CLI sends: memory capture debits `write`, memory recall debits
+  `read`, and a tool making several requests debits once per request.
+
+  Unauthenticated, system-token, health, and metrics routes are never
+  budgeted. Missing or invalid tokens and authentication errors do not debit;
+  authenticated suspended or pending accounts and curator tokens do. The
+  budget debits after authentication, so it protects handler work, not the
+  token lookup: a refused request with a valid token still costs one
+  authentication query. Each replica keeps its own buckets. With N replicas,
+  an account's cell-wide allowance ranges from 1× when traffic reaches one
+  replica to N× when spread evenly. A restart or rollout refills buckets on
+  that replica, allowing at most one extra burst per replica per restart.
+  State is bounded by the configured account capacity; an evicted account
+  starts with full buckets.
+
+  A refusal returns HTTP 429 with `Retry-After: 1`,
+  `Content-Type: application/json`, and `Cache-Control: private, no-store`
+  for this example (the actual retry delay is rounded up to whole seconds,
+  with a minimum of 1):
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "rate_limited",
+    "error": "account request rate limit reached",
+    "retryable": true,
+    "retry_after": 1,
+    "details": {
+      "limit_dimension": "account_request_write",
+      "limit_key": "account_request_write_per_account_minute",
+      "scope": "account",
+      "retry_after": 1
+    }
+  }
+  ```
+
+  Read refusals use `account_request_read` and
+  `account_request_read_per_account_minute`. The response contains no account,
+  realm, agent, token, or request identity, and no per-replica limit, usage,
+  or window values. Current clients surface the generic
+  `APIError{Code:"rate_limited", Retryable:true}`; preserving its retry delay
+  in that client error is tracked in FU123-3.
 - `limit_exceeded` is a plan/quota hard cap or a rate debit that cannot fit the
   effective bucket even when empty. It is HTTP 403 with `retryable: false`.
   For message-producing routes, an effective limit of zero or an attempted

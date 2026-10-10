@@ -214,3 +214,11 @@ data:
   # rolling overlap.
   WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"
   WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"
+{{- if .Values.requestBudget.enabled }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED: "true"
+  WITSELF_ACCOUNT_REQUEST_BUDGET_READ_PER_MINUTE: {{ printf "%d" (int64 .Values.requestBudget.readPerMinute) | quote }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_READ_BURST: {{ printf "%d" (int64 .Values.requestBudget.readBurst) | quote }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE: {{ printf "%d" (int64 .Values.requestBudget.writePerMinute) | quote }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST: {{ printf "%d" (int64 .Values.requestBudget.writeBurst) | quote }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS: {{ printf "%d" (int64 .Values.requestBudget.maxTrackedAccounts) | quote }}
+{{- end }}

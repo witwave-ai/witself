@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "witself chart values",
   "type": "object",
-  "required": ["image", "backend", "billing", "support", "features", "agentEmail", "avatar", "worker", "server", "health", "metrics", "service"],
+  "required": ["image", "backend", "billing", "support", "requestBudget", "features", "agentEmail", "avatar", "worker", "server", "health", "metrics", "service"],
   "allOf": [
     {
       "if": {
@@ -156,6 +156,31 @@
       "properties": {
         "ticketRateLimit": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "ticketRateWindow": { "type": "string", "minLength": 1 }
+      }
+    },
+    "requestBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "readPerMinute", "readBurst", "writePerMinute", "writeBurst", "maxTrackedAccounts"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "readPerMinute": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "readBurst": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "writePerMinute": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "writeBurst": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "maxTrackedAccounts": { "type": "integer", "minimum": 100, "maximum": 1000000 }
+      },
+      "if": {
+        "properties": { "enabled": { "const": true } },
+        "required": ["enabled"]
+      },
+      "then": {
+        "properties": {
+          "readPerMinute": { "minimum": 1 },
+          "readBurst": { "minimum": 1 },
+          "writePerMinute": { "minimum": 1 },
+          "writeBurst": { "minimum": 1 }
+        }
       }
     },
     "billing": {

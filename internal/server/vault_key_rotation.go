@@ -454,6 +454,9 @@ func secretAgentSafetyHandler(auth PrincipalAuthFunc, next func(http.ResponseWri
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		if !admitAccountRequest(w, r, p.AccountID) {
+			return
+		}
 		if effectiveAccessProfile(p) != AccessProfileFull {
 			writeJSONError(w, http.StatusForbidden, "credential profile is not authorized for this route")
 			return
