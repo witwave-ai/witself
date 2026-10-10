@@ -32,6 +32,7 @@ func TestReadRoundTrip(t *testing.T) {
 		[]RowSource{newSource("realms", 3), newSource("audit", 300_000)}); err != nil {
 		t.Fatal(err)
 	}
+	assertEntryObserverParity(t, buf.Bytes(), 13)
 
 	var manifestSeen bool
 	rows := map[string]int{}
@@ -94,6 +95,7 @@ func TestReadDetectsTamper(t *testing.T) {
 		t.Fatal("marker row not found in tar bytes")
 	}
 	raw[i+4] = '7' // row now claims i=7; chunk hash no longer matches
+	assertEntryObserverParity(t, regzip(t, raw), 13)
 	var err error
 	_, err = Read(context.Background(), bytes.NewReader(regzip(t, raw)), ImportOptions{CurrentSchema: 13})
 	if !errors.Is(err, ErrCorrupt) {
@@ -106,6 +108,7 @@ func TestReadDetectsTamper(t *testing.T) {
 func TestReadDetectsTruncation(t *testing.T) {
 	archive := buildArchive(t, 13, "acc_trunc")
 	for _, cut := range []int{100, len(archive) / 2} {
+		assertEntryObserverParity(t, archive[:len(archive)-cut], 13)
 		_, err := Read(context.Background(), bytes.NewReader(archive[:len(archive)-cut]),
 			ImportOptions{CurrentSchema: 13})
 		if !errors.Is(err, ErrCorrupt) {
@@ -651,6 +654,7 @@ func TestReadDetectsChecksumTrailerTamperClasses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			archive := buildHandArchive(t, manifest,
 				append([]tarEntry{{trueChunkSum.Name, realmsChunk}}, tc.extra...), tc.sums)
+			assertEntryObserverParity(t, archive, 13)
 			_, err := Read(context.Background(), bytes.NewReader(archive), ImportOptions{CurrentSchema: 13})
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("error = %v, want ErrCorrupt", err)
@@ -731,6 +735,7 @@ func TestReadEnforcesShape(t *testing.T) {
 				}
 			}
 			archive := buildHandArchive(t, tc.manifest, tc.entries, tc.sums)
+			assertEntryObserverParity(t, archive, 13)
 			_, err := Read(context.Background(), bytes.NewReader(archive), ImportOptions{CurrentSchema: 13})
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("error = %v, want ErrCorrupt", err)

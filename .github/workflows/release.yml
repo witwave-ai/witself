@@ -209,6 +209,11 @@ jobs:
             -coverprofile="$RUNNER_TEMP/go-coverage-store.out"
           go tool cover -func="$RUNNER_TEMP/go-coverage-store.out"
 
+      - name: test import peak memory (no race)
+        env:
+          WITSELF_TEST_REQUIRE_PEAK_MEMORY: "1"
+        run: go test ./internal/store -run '^TestImportPeakMemory$' -count=1 -v -timeout=15m
+
       - name: Upload Go store coverage
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7

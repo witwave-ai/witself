@@ -16,6 +16,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/agentemailoutbound"
 	"github.com/witwave-ai/witself/internal/envconfig"
+	"github.com/witwave-ai/witself/internal/memlimit"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 	"github.com/witwave-ai/witself/internal/worker"
@@ -136,6 +137,7 @@ func run(args []string) int {
 }
 
 func serve() int {
+	memlimit.Configure(os.Stderr, "witself-worker")
 	jobs, err := jobConfigFromEnv(os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)

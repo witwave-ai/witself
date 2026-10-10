@@ -23,6 +23,7 @@ type Store struct {
 	memoryCurationMetrics          memoryCurationMetrics
 	activityMarkers                sync.Map // committed read markers, scoped to this database pool
 	activityMeteringFailures       atomic.Uint64
+	importObserver                 ImportObserver
 }
 
 // AuditAppendFailures returns failed account_events INSERT attempts made by
@@ -35,6 +36,11 @@ func (s *Store) AuditAppendFailures() uint64 {
 // Option applies process-lifetime store behavior selected before the server
 // migrates or begins serving requests.
 type Option func(*Store)
+
+// WithImportObserver fixes the value-free import observer for this store's lifetime.
+func WithImportObserver(observer ImportObserver) Option {
+	return func(s *Store) { s.importObserver = observer }
+}
 
 // WithAvatarPayloadCompactionEnabled activates irreversible avatar creative
 // payload cleanup. It defaults to false so a rolling schema-51 deployment can

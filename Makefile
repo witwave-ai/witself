@@ -367,6 +367,7 @@ check: ## Run CI's exact local gate set — run before every push
 	go vet -tags signup_b2_acceptance ./cmd/witself/
 	go build ./...
 	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
+	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^TestImportPeakMemory$$' -count=1 -v -timeout=15m
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra

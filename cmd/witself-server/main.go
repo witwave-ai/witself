@@ -18,6 +18,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/memlimit"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
@@ -110,6 +111,8 @@ func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
 }
 
 func serve() int {
+	memlimit.Configure(os.Stderr, "witself-server")
+	server.SweepStaleArchiveSpools(os.TempDir(), os.Stderr)
 	factDeletionEnabled, err := factDeletionEnabledFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -173,8 +176,7 @@ func serve() int {
 	}
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
-			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled),
-			store.WithSupportTicketRateLimit(supportTicketRateLimit))
+			serverStoreOptions(avatarPayloadCompactionEnabled, supportTicketRateLimit, os.Stderr)...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
@@ -3001,4 +3003,13 @@ func logBackupValidationJob(w io.Writer, accountID, cellName, validationID, outc
 		return
 	}
 	_, _ = fmt.Fprintf(w, "witself-server: account backup validation job account_id=%q cell=%q validation_id=%q outcome=%q download=%s duration=%s\n", accountID, cellName, validationID, outcome, download, total)
+}
+
+// serverStoreOptions keeps production import telemetry fixed at construction.
+func serverStoreOptions(avatarPayloadCompactionEnabled bool, supportTicketRateLimit store.SupportTicketRateLimitConfig, telemetry io.Writer) []store.Option {
+	return []store.Option{
+		store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled),
+		store.WithSupportTicketRateLimit(supportTicketRateLimit),
+		store.WithImportObserver(store.NewImportTelemetryLogger(telemetry, "witself-server", memlimit.Sample)),
+	}
 }
