@@ -24,6 +24,7 @@ const STATE_KEY = "account-backups";
 const RESTORE_DRILL_KEY = "restore-drill";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const DEFAULT_PAGE_SIZE = 4;
+const UNREACHED_COUNT_MAX_LISTS = 100;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_CATALOG_LIMIT = 64;
@@ -2013,10 +2014,17 @@ async function mapBounded(values, concurrency, operation) {
   return results;
 }
 
-function validScanState(state, slot) {
+function validScanState(state) {
   return isObject(state) &&
     state.schema_version === ACCOUNT_BACKUP_SCAN_SCHEMA &&
-    state.slot === slot &&
+    validDate(state.slot) &&
+    (state.pass_started_slot === undefined || validDate(state.pass_started_slot)) &&
+    (state.overrun_counted_slot === undefined || state.overrun_counted_slot === null ||
+      validDate(state.overrun_counted_slot)) &&
+    (state.last_account_id === undefined || state.last_account_id === null ||
+      (typeof state.last_account_id === "string" && ACCOUNT_ID.test(state.last_account_id))) &&
+    (state.unreached_entries === undefined ||
+      (Number.isSafeInteger(state.unreached_entries) && state.unreached_entries >= 0)) &&
     (
       state.cursor === null ||
       (
@@ -2044,6 +2052,18 @@ function validScanState(state, slot) {
         ACCOUNT_ID.test(failure.account_id ?? "") &&
         SCAN_FAILURE_STATUS.test(failure.status ?? ""),
     );
+}
+
+// Project only value-free pass fields across the public scrape boundary.
+export function accountBackupPassSnapshot(scan) {
+  if (!validScanState(scan)) return null;
+  return {
+    pass_started_slot: scan.pass_started_slot ?? scan.slot,
+    scanned: scan.scanned,
+    failed: scan.failed,
+    complete: scan.complete,
+    unreached_entries: scan.unreached_entries ?? 0,
+  };
 }
 
 async function dispatchBackup(env, job, config) {
@@ -2120,23 +2140,23 @@ function emptyHealth() {
   };
 }
 
-function addAccountHealth(health, status, now, intervalMinutes) {
+function addAccountHealth(health, status, now, intervalMinutes, overdue = false) {
   const threshold = 2 * intervalMinutes * 60_000;
+  let stale = false;
   if (status.last_committed_at === null) {
     health.never_committed_accounts++;
     const dates = [status.backups.current_job, ...status.backups.failures]
       .map((job) => job?.scheduled_at).filter(validDate).map(Date.parse);
-    if (dates.length && now - Math.min(...dates) > threshold) {
-      health.stale_accounts++;
-    }
+    stale = dates.length > 0 && now - Math.min(...dates) > threshold;
   } else {
     if (!validDate(status.last_committed_at)) throw new Error("invalid backup commit time");
     const age = Math.max(0, now - Date.parse(status.last_committed_at));
-    if (age > threshold) health.stale_accounts++;
+    stale = age > threshold;
     health.oldest_committed_age_seconds = Math.max(
       health.oldest_committed_age_seconds ?? 0, Math.floor(age / 1000),
     );
   }
+  if (stale || overdue) health.stale_accounts++;
 }
 
 // Only these aggregate fields may cross the public scrape boundary. Legacy or
@@ -2710,10 +2730,30 @@ export async function runAccountBackupValidation(env, input, dependencies = {}) 
   return (await beginAccountBackupValidation(env, input, dependencies)).complete();
 }
 
+async function countUnreachedEntries(env, lastAccountID) {
+  const after = lastAccountID === null ? null : `acct:${lastAccountID}`;
+  let cursor;
+  let count = 0;
+  // Start a separate keys-only walk: never reuse the scan cursor at a new limit.
+  // ASCII account ids use the same ordering in JavaScript and KV. Counting
+  // pending, archived, unrouted and already-read filtered keys makes this an
+  // upper bound on unreached live accounts, unless the walk hits its cap.
+  for (let lists = 0; lists < UNREACHED_COUNT_MAX_LISTS; lists++) {
+    const page = await env.DIRECTORY.list({ prefix: "acct:", limit: 1000, cursor });
+    count += page.keys.filter((key) => after === null || key.name > after).length;
+    if (page.list_complete) return Math.max(1, count);
+    cursor = page.cursor;
+  }
+  console.log("account-backup: unreached_capped=true");
+  // Even a zero count cannot prove that an incomplete pass has no tail.
+  return Math.max(1, count);
+}
+
 /**
- * One cron tick processes one bounded directory page. The slot and cursor are
- * durable in KV, so a large fleet advances over several ticks without issuing
- * more than one deterministic backup job per account and interval.
+ * One cron tick processes one bounded directory page of a durable pass. A pass
+ * carries its cursor across slots until it reaches the directory end; each job
+ * uses its dispatch tick's slot. Overruns publish coverage health before loading
+ * the next page. A completed pass starts again when its start slot differs.
  */
 export async function runScheduledAccountBackups(
   env,
@@ -2749,11 +2789,14 @@ export async function runScheduledAccountBackups(
       ACCOUNT_BACKUP_SCAN_KEY,
       { type: "json" },
     );
-    const scan = validScanState(stored, slot)
+    const storedValid = validScanState(stored);
+    const storedStart = stored?.pass_started_slot ?? stored?.slot;
+    let scan = storedValid && !(stored.complete && slot !== storedStart)
       ? stored
       : {
           schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
           slot,
+          pass_started_slot: slot,
           cursor: null,
           complete: false,
           scanned: 0,
@@ -2762,12 +2805,20 @@ export async function runScheduledAccountBackups(
           failed_retry: SCAN_FAILED_RETRY_POLICY,
           failure_sample: [],
           health: accountBackupHealthSnapshot(stored),
+          last_account_id: null,
+          overrun_counted_slot: null,
+          unreached_entries: 0,
         };
+    const passStartedSlot = scan.pass_started_slot ?? scan.slot;
+    const overrun = !scan.complete && Date.parse(slot) > Date.parse(passStartedSlot);
     if (scan.complete) {
       return {
         ran: false,
         configured: true,
         slot,
+        pass_started_slot: passStartedSlot,
+        overrun,
+        unreached_entries: scan.unreached_entries ?? 0,
         complete: true,
         scanned: scan.scanned,
         accepted: scan.accepted,
@@ -2778,6 +2829,36 @@ export async function runScheduledAccountBackups(
         previous_slot_terminal_failures: scan.previous_slot_terminal_failures ?? 0,
         previous_slot_status_unavailable: scan.previous_slot_status_unavailable ?? 0,
       };
+    }
+
+    if (overrun && scan.overrun_counted_slot !== slot) {
+      const unreached = await countUnreachedEntries(env, scan.last_account_id ?? null);
+      const progress = scan.health_progress ??
+        (scan.scanned === 0 ? emptyHealth() : unavailableHealth());
+      const updatedAt = new Date(Number(scheduledTime)).toISOString();
+      scan = {
+        ...scan,
+        pass_started_slot: passStartedSlot,
+        slot,
+        updated_at: updatedAt,
+        health: {
+          ...(progress.health_available ? {
+            stale_accounts: progress.stale_accounts + unreached,
+            never_committed_accounts: progress.never_committed_accounts,
+            oldest_committed_age_seconds: progress.oldest_committed_age_seconds,
+            health_available: true,
+          } : unavailableHealth()),
+          computed_at: updatedAt,
+        },
+        overrun_counted_slot: slot,
+        unreached_entries: unreached,
+      };
+      // Persist before loading the page so a rejected cursor still publishes
+      // coverage health. KV may reject the second put within one second: the
+      // catch then keeps this snapshot and old cursor. The next tick retries
+      // that page without recounting in this slot; only committed jobs are
+      // idempotent on redispatch. Do not delay or retry either write here.
+      await env.DIRECTORY.put(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
     }
 
     const cursor = scan.cursor ?? undefined;
@@ -2803,7 +2884,7 @@ export async function runScheduledAccountBackups(
     const previous = await mapBounded(jobs, config.concurrency, async (job) => {
       try {
         const status = await statusLoader(env, job.account_id);
-        addAccountHealth(healthProgress, status, healthTime, config.interval_minutes);
+        addAccountHealth(healthProgress, status, healthTime, config.interval_minutes, overrun);
         const records = [status.backups.current_job, ...status.backups.failures];
         return records.some((record) => record?.status === "failed" &&
           record.scheduled_at === previousSlot) ? "failed" : "ok";
@@ -2812,9 +2893,10 @@ export async function runScheduledAccountBackups(
         return "unavailable";
       }
     });
-    const previousFailures = (scan.previous_slot_terminal_failures ?? 0) +
+    const samePreviousSlot = scan.previous_slot === previousSlot;
+    const previousFailures = (samePreviousSlot ? scan.previous_slot_terminal_failures ?? 0 : 0) +
       previous.filter((result) => result === "failed").length;
-    const previousUnavailable = (scan.previous_slot_status_unavailable ?? 0) +
+    const previousUnavailable = (samePreviousSlot ? scan.previous_slot_status_unavailable ?? 0 : 0) +
       previous.filter((result) => result === "unavailable").length;
     const results = await mapBounded(
       jobs,
@@ -2845,6 +2927,10 @@ export async function runScheduledAccountBackups(
     const nextScan = {
       schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
       slot,
+      pass_started_slot: passStartedSlot,
+      last_account_id: page.account_ids.at(-1) ?? scan.last_account_id ?? null,
+      overrun_counted_slot: scan.overrun_counted_slot ?? null,
+      unreached_entries: complete ? 0 : scan.unreached_entries ?? 0,
       cursor: page.next_cursor,
       complete,
       updated_at: new Date(
@@ -2871,6 +2957,8 @@ export async function runScheduledAccountBackups(
     console.log(
       "account-backup: scheduled tick " +
       `slot=${slot} page_scanned=${jobs.length} ` +
+      `pass_started_slot=${passStartedSlot} overrun=${overrun} ` +
+      `unreached_entries=${nextScan.unreached_entries} ` +
       `page_accepted=${pageAccepted} page_failed=${pageFailed} ` +
       `scanned=${scanned} accepted=${accepted} failed=${failed} ` +
       `previous_slot_terminal_failures=${previousFailures} ` +
@@ -2881,6 +2969,9 @@ export async function runScheduledAccountBackups(
       ran: true,
       configured: true,
       slot,
+      pass_started_slot: passStartedSlot,
+      overrun,
+      unreached_entries: nextScan.unreached_entries,
       complete,
       scanned,
       accepted,

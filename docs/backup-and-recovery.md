@@ -688,6 +688,9 @@ Cloudflare schedule are separate rollout steps. Manual fleet-token operations
 make the path observable before the clock is activated. The
 periodic scan is cursor-based and bounded, and every account/interval pair has
 one deterministic backup id, so retries do not create mutable "latest" objects.
+The pass resumes across intervals in directory order; at the five-minute cron,
+capacity is 288 × page size accounts per one-day interval, reduced by pending,
+archived and unrouted directory entries that also consume page slots.
 Runtime defaults are one generation per 1,440 minutes, four accounts per scan
 page, concurrency two, four attempts per generation, and 64 catalog entries per
 account. Their bounded overrides are
