@@ -308,7 +308,7 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			setup: func(ic *importCtx) {
 				ic.agents["agt_ok"] = true
 				ic.transcripts["trn_1"] = transcriptImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
-				ic.entries["ent_foreign"] = "trn_other"
+				ic.entries.put("ent_foreign", "trn_other")
 			},
 			wantOK: false, want: "not an earlier entry",
 		},
@@ -886,7 +886,8 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	if !ic.tickets["tkt_1"] {
 		t.Error("support ticket id not recorded across a legal stream")
 	}
-	if _, ok := ic.transcripts["trn_1"]; !ok || ic.entries["ent_2"] != "trn_1" {
+	entryTranscript, _ := ic.entries.transcriptOf("ent_2")
+	if _, ok := ic.transcripts["trn_1"]; !ok || entryTranscript != "trn_1" {
 		t.Error("transcript ids not recorded across a legal stream")
 	}
 	if _, ok := ic.messages["msg_1"]; !ok {

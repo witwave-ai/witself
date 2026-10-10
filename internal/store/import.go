@@ -1130,7 +1130,7 @@ type importCtx struct {
 	avatarLastResetAt              map[string]time.Time
 	tickets                        map[string]bool
 	transcripts                    map[string]transcriptImportScope
-	entries                        map[string]string
+	entries                        importEntryIndex
 	factSubjects                   map[string]factImportScope
 	factSubjectNames               map[string]map[string]string
 	facts                          map[string]factImportScope
@@ -1242,7 +1242,7 @@ func newImportCtx(accountID string) *importCtx {
 		avatarLastResetAt:              map[string]time.Time{},
 		tickets:                        map[string]bool{},
 		transcripts:                    map[string]transcriptImportScope{},
-		entries:                        map[string]string{},
+		entries:                        importEntryIndex{},
 		factSubjects:                   map[string]factImportScope{},
 		factSubjectNames:               map[string]map[string]string{},
 		facts:                          map[string]factImportScope{},
@@ -2690,7 +2690,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("transcript_entries row recorder %q does not match transcript owner %q", agentID, scope.ownerAgentID)
 		}
 		if replyID, present := optionalStringField(obj, "reply_to_entry_id"); present {
-			if parentTranscript, ok := ic.entries[replyID]; !ok || parentTranscript != transcriptID {
+			if parentTranscript, ok := ic.entries.transcriptOf(replyID); !ok || parentTranscript != transcriptID {
 				return badf("transcript_entries row reply target %q is not an earlier entry in transcript %q", replyID, transcriptID)
 			}
 		}
@@ -2698,7 +2698,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		if err != nil {
 			return badf("transcript_entries row missing id")
 		}
-		ic.entries[id] = transcriptID
+		ic.entries.put(id, transcriptID)
 	case "usage_events":
 		if err := ic.validateUsageScope(obj, badf, "usage_events"); err != nil {
 			return err
@@ -5268,13 +5268,12 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 	retryCanaryHash := ""
 	retryCanaryFingerprint := ""
 	if payloadRetentionState == importedAgentEmailPayloadRetained {
-		byteaSize, byteaOK := importedByteaLength(rawValue)
+		byteaSize, byteaOK := importedRawMIMELength(rawValue)
 		if !byteaOK || int64(byteaSize) != rawSize ||
 			retainedAttachmentStorageBytes != attachmentStorageBytes {
 			return "", agentEmailMessageImportScope{}, fmt.Errorf("retained payload storage shape is invalid")
 		}
-		encodedRaw, _ := rawValue.(string)
-		raw, decodeErr := hex.DecodeString(encodedRaw[2:])
+		raw, decodeErr := decodeImportedRawMIME(rawValue)
 		if decodeErr != nil {
 			return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_mime is invalid")
 		}
@@ -6681,11 +6680,11 @@ func (s *Store) importAccountWithTracker(
 			}
 			return nil
 		},
-		Row: wrapImportRow(tracker, func(table string, row []byte) error {
+		Row: wrapImportRow(tracker, s.wrapImportRowClobber(func(table string, row []byte) error {
 			if _, ok := importColumns[table]; !ok {
 				return fmt.Errorf("%w: table %q not importable", ErrArchiveContent, table)
 			}
-			obj, err := decodeImportRow(row)
+			obj, err := s.decodeImportRow(table, row)
 			if err != nil {
 				return fmt.Errorf("%w: %s row is not JSON: %v", ErrArchiveContent, table, err)
 			}
@@ -6721,12 +6720,19 @@ func (s *Store) importAccountWithTracker(
 			if disposition.AlreadyImported {
 				return nil
 			}
+			rawMIME, hasRawMIME := obj["raw_mime"].(importedRawMIME)
+			if hasRawMIME {
+				delete(obj, "raw_mime")
+			}
 			normalizedRow, err := json.Marshal(obj)
 			if err != nil {
 				return fmt.Errorf("%w: marshal normalized %s row: %v", ErrArchiveContent, table, err)
 			}
+			if hasRawMIME {
+				return insertProjectedBytea(ctx, tx, table, obj, normalizedRow, "raw_mime", rawMIME.raw)
+			}
 			return insertProjected(ctx, tx, table, obj, normalizedRow)
-		}),
+		})),
 	})
 	if err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err

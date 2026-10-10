@@ -70,6 +70,21 @@ MEMORY_RECALL_LOAD_COMMIT                      ?= $(shell git rev-parse HEAD)
 MEMORY_RECALL_LOAD_PROVIDER                    ?= local
 MEMORY_RECALL_LOAD_HARDWARE                    ?= unspecified
 
+MEMORY_ARCHIVE_LOAD_PROFILE                                ?= ladder
+MEMORY_ARCHIVE_LOAD_TIMEOUT                                ?= 15m
+MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE                          ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_DIR                            ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_TRANSCRIPT_ENTRIES             ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_EMAILS                         ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_EMAIL_BYTES                    ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_MEMORIES                       ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_DECODE                         ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_FAKE_CGROUP_BYTES              ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_EXPECT_CGROUP_BYTES            ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_TOTAL_BYTES             ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_LIVE_BYTES              ?=
+MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_ANON_BYTES                 ?=
+
 # Leave the archive result path empty by default so ParseArchiveOptions can use
 # its pid-scoped path. This avoids concurrent Make invocations choosing the
 # same retained evidence file.
@@ -257,6 +272,20 @@ test-memory-recall-load: ## Run the opt-in deterministic PostgreSQL memory-recal
 	fi
 
 test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD := 1
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_PROFILE := $(MEMORY_ARCHIVE_LOAD_PROFILE)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_TIMEOUT := $(MEMORY_ARCHIVE_LOAD_TIMEOUT)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE := $(MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_DIR := $(MEMORY_ARCHIVE_LOAD_FOUNDER_DIR)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_TRANSCRIPT_ENTRIES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_TRANSCRIPT_ENTRIES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_EMAILS := $(MEMORY_ARCHIVE_LOAD_FOUNDER_EMAILS)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_EMAIL_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_EMAIL_BYTES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MEMORIES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_MEMORIES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_DECODE := $(MEMORY_ARCHIVE_LOAD_FOUNDER_DECODE)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_FAKE_CGROUP_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_FAKE_CGROUP_BYTES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_EXPECT_CGROUP_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_EXPECT_CGROUP_BYTES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_TOTAL_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_TOTAL_BYTES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_LIVE_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_LIVE_BYTES)
+test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_ANON_BYTES := $(MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_ANON_BYTES)
 test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS := $(MEMORY_ARCHIVE_LOAD_RESULTS)
 test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_SEED := $(MEMORY_ARCHIVE_LOAD_SEED)
 test-memory-archive-load: export WITSELF_MEMORY_ARCHIVE_LOAD_CARDINALITIES := $(MEMORY_ARCHIVE_LOAD_CARDINALITIES)
@@ -277,7 +306,7 @@ test-memory-archive-load: ## Run the opt-in deterministic whole-account archive 
 		exit 2; \
 	}
 	@go test ./internal/store -run '^TestNarrativeMemoryArchiveLoadPostgres$$' \
-			-count=1 -v -timeout 15m
+			-count=1 -v -timeout $(MEMORY_ARCHIVE_LOAD_TIMEOUT)
 	@if [ -n "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS" ]; then \
 		printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_ARCHIVE_LOAD_RESULTS"; \
 	else \
@@ -369,6 +398,7 @@ check: ## Run CI's exact local gate set — run before every push
 	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^TestImportPeakMemory$$' -count=1 -v -timeout=15m
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/export -run '^TestReadPeakMemory$$' -count=1 -v -timeout=15m
+	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$$' -count=1 -v -timeout=20m
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra

@@ -683,6 +683,124 @@ assertions or SLOs. Provider and hardware tier must be dotless labels containing
 only letters, digits, `+`, `_`, or `-`; release and commit metadata may contain
 dots.
 
+### Founder profile
+
+`MEMORY_ARCHIVE_LOAD_PROFILE=founder` selects a two-phase, file-backed whole-account
+workload. The default `ladder` profile and its result contract remain unchanged.
+`seed-export` creates a fresh schema, high-entropy transcript bodies, retained
+multipart emails, and memories with the existing archive-load ratios. It streams a
+backup archive and then an evacuation archive into the specified directory and
+writes `founder.json` with IDs, row counts, and compressed/uncompressed sizes. The
+source schema is removed at test cleanup; the archive files survive for the second
+phase. `import` spools each archive with a 32 KiB copy buffer, validates the backup,
+and imports the evacuation archive into a fresh destination schema. Each spool is
+removed after use. The phase context ends one minute before the Go test deadline.
+
+The make variables below become environment variables with the `WITSELF_` prefix.
+`MEMORY_ARCHIVE_LOAD_TIMEOUT` controls make's Go test timeout argument; direct
+`go test` callers must pass `-timeout`, and compiled test-binary callers must pass
+`-test.timeout`. The test does not read the exported timeout environment variable.
+Unset and empty optional values both use the default. Founder variables default
+to empty in make so the test owns these defaults.
+
+| Make variable | Founder default | Allowed values |
+|---|---:|---|
+| `MEMORY_ARCHIVE_LOAD_PROFILE` | `ladder` | empty, `ladder`, `founder` |
+| `MEMORY_ARCHIVE_LOAD_TIMEOUT` | `15m` | Go test timeout; use `90m` for the full profile |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE` | required | `seed-export`, `import` |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_DIR` | required | Absolute existing directory |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_TRANSCRIPT_ENTRIES` | `300000` | 1000–2000000 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_EMAILS` | `2` | 0–8 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_EMAIL_BYTES` | `10485760` | 1024–26214400 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_MEMORIES` | `2000` | 10–100000 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_DECODE` | `new` | `new`, `legacy` |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_FAKE_CGROUP_BYTES` | unset | 1–4611686018427387903 bytes; test-only fake cgroup root |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_EXPECT_CGROUP_BYTES` | unset | 1–4611686018427387903 bytes; must match a detected `cgroup-v1` or `cgroup-v2` limit |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_TOTAL_BYTES` | `234881024` | 67108864–1073741824 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_LIVE_BYTES` | `134217728` | 33554432–1073741824 |
+| `MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_ANON_BYTES` | `251658240` | 67108864–1073741824 |
+
+For `DECODE=new`, none of the three configured memory bounds may exceed a detected
+finite cgroup limit. The legacy control does not enforce these bounds.
+
+`MEMORY_ARCHIVE_LOAD_SEED` and the existing versions, evidence, relations, tags,
+and vector-dimension knobs above also apply. The founder transcript-entry count
+is controlled independently by `MEMORY_ARCHIVE_LOAD_FOUNDER_TRANSCRIPT_ENTRIES`.
+Before a founder-scale seed, set transcript and memory counts and the ratios from
+slice 108's drill row counts. If its raw-MIME census found an email larger than
+10 MiB, set `MEMORY_ARCHIVE_LOAD_FOUNDER_EMAIL_BYTES` to that size, up to 26214400.
+Transcript bodies contain 3200 high-entropy hex characters so gzip size represents
+the live workload. Compare the sizes in `founder.json` with the live 406 MB archive.
+
+The importer writes `founder-archive-load result {json}` with phase, decoder,
+memory-limit source, cgroup and soft limits, both outcomes, durations, counts,
+peak Go total, max Go live, max anon and file bytes, last `memory.peak`, RSS high
+water mark, and the three bounds in force. Go total means runtime total minus
+released heap; Go live is the last collected live heap. The `new` path gates both
+outcomes and the three bounds, skipping only unavailable anon measurements. The
+`legacy` path records a control with the same report and no memory assertions.
+
+For a release with slice 112 alone, the interim defaults at a 256 MiB container
+limit and 192 MiB soft limit are Go total ≤224 MiB, Go live ≤128 MiB, and anon
+≤240 MiB. The remaining 32 MiB archive-entry buffer explains the Go-total margin.
+At email rows, baseline ≤25 MiB + entry buffer 32 MiB + decoded raw 10 MiB +
+parse/pgx ≤22 MiB is about 94 MiB; at 300000 transcript entries the index adds
+≤14 MiB. The memory maps also remain live. `memory.peak` and file pages are
+informational: spooling charges page cache to the container, so they do not measure
+Go heap pressure alone. No gate is placed on `memory.current` or `memory.peak`.
+
+The dispatcher runs the full profile on an idle host after merge. These commands
+use the existing `witself-test-pg` network container and a 256 MiB memory limit;
+`debian:bookworm-slim` needs no timezone or CA bundle for the selected tests and
+`sslmode=disable` DSN. Record local times in MDT with UTC alongside them.
+
+```sh
+H=<merged-main-worktree>; D=/private/tmp/claude-501/founder-112; DB=codex_b
+mkdir -p "$D"
+cd "$H" && WITSELF_TEST_DATABASE_URL="postgres://postgres:test@127.0.0.1:5599/$DB?sslmode=disable" \
+  make test-memory-archive-load MEMORY_ARCHIVE_LOAD_PROFILE=founder MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE=seed-export \
+  MEMORY_ARCHIVE_LOAD_FOUNDER_DIR="$D" MEMORY_ARCHIVE_LOAD_TIMEOUT=90m
+cd "$H" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o "$D/store.test" ./internal/store
+for mode in new legacy; do
+  docker run --name "witself-founder-112-$mode" --memory=256m --memory-swap=256m \
+    --network container:witself-test-pg -v "$D":/work -w /work \
+    -e WITSELF_TEST_DATABASE_URL="postgres://postgres:test@127.0.0.1:5432/$DB?sslmode=disable" \
+    -e WITSELF_TEST_REQUIRE_DATABASE=1 \
+    -e WITSELF_MEMORY_ARCHIVE_LOAD=1 -e WITSELF_MEMORY_ARCHIVE_LOAD_PROFILE=founder \
+    -e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_PHASE=import -e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_DIR=/work \
+    -e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_DECODE="$mode" \
+    -e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_EXPECT_CGROUP_BYTES=268435456 \
+    debian:bookworm-slim /work/store.test -test.run '^TestNarrativeMemoryArchiveLoadPostgres$' \
+      -test.count=1 -test.v -test.timeout=90m > "$D/run-$mode.log" 2>&1
+  docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' "witself-founder-112-$mode"
+  docker rm "witself-founder-112-$mode"
+done
+```
+
+The interim `new` run must have `OOMKilled=false`, exit 0, PASS, both outcomes ok,
+a `cgroup-v1` or `cgroup-v2` source, limit 268435456, soft limit 201326592, and the
+three default bounds above. An OOM kill or exit 137 is a valid recorded legacy
+control. Preserve both result lines, inspect output, and archive sizes in the
+ledger before removing `$D`.
+
+The founder move uses the head containing **both slices 111 and 112**. Add these
+options to `docker run` to gate Go total and anon at 180 MiB; all other interim
+criteria still apply:
+
+```sh
+-e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_GO_TOTAL_BYTES=188743680 \
+-e WITSELF_MEMORY_ARCHIVE_LOAD_FOUNDER_MAX_ANON_BYTES=188743680 \
+```
+
+All move conditions, plus the steps that are already Scott's to approve, remain:
+
+- S1–S3 are released to the sandbox pair. S3 is slices 111 and 112.
+- Two drills in a row on the 256Mi backup cell meet live acceptance: zero restarts and **peak Go total ≤160 MiB** (`max_go_total` ≤167772160).
+- The founder-scale run under `--memory=256m` passes the **move-gating** bounds above (Go total and anon ≤180 MiB), on the head that carries 111 and 112.
+- S4 and S5 are merged and synced, putting production at 512Mi with a 384 MiB soft limit.
+- The sandbox serving cell's nightly founder export logs no server restart, and its `witself_go_memory_total_bytes` stays within budget once slice 108 telemetry is in.
+- The move is scheduled away from the 00:00Z (18:00 MDT) nightly backup window.
+
 ### Archive Result Contract
 
 The retained document has schema `witself.memory-archive-load-result.v1` and

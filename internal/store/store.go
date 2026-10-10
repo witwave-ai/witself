@@ -24,6 +24,8 @@ type Store struct {
 	activityMarkers                sync.Map // committed read markers, scoped to this database pool
 	activityMeteringFailures       atomic.Uint64
 	importObserver                 ImportObserver
+	importRowDecodeLegacy          bool
+	importRowClobber               bool
 }
 
 // AuditAppendFailures returns failed account_events INSERT attempts made by
