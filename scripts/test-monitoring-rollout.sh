@@ -689,7 +689,31 @@ ruby -ryaml -e '
   rule = docs.find { |doc| doc["kind"] == "PrometheusRule" && Array(doc.dig("spec", "groups")).any? { |group| group["name"] == "witself-postgresql" } }
   abort "PostgreSQL PrometheusRule missing from child chart" unless rule
   abort "PostgreSQL PrometheusRule is not selected by this Prometheus release" unless rule.dig("metadata", "labels", "release") == "witself-monitoring"
-  abort "PostgreSQL rule count changed" unless rule.dig("spec", "groups").flat_map { |group| group["rules"] }.length == 6
+  groups = rule.dig("spec", "groups")
+  legacy = groups.select { |group| group["name"] == "witself-postgresql" }
+  # Base fd8c172c has six rules; take slice 115s count if it merges first.
+  abort "PostgreSQL base rule count changed" unless legacy.length == 1 && legacy.first.fetch("rules").length == 6
+  capacity = groups.select { |group| group["name"] == "witself-postgresql-capacity" }
+  abort "PostgreSQL capacity group missing or duplicated" unless capacity.length == 1
+  rules = capacity.first.fetch("rules")
+  expected = %w[WitselfPostgreSQLOOMKilled WitselfPostgreSQLRestarted WitselfPostgreSQLVolumeFillingUp]
+  abort "PostgreSQL capacity rule inventory changed" unless rules.map { |item| item["alert"] }.sort == expected.sort
+  restarts = rules.select { |item| expected.first(2).include?(item["alert"]) }
+  restarts.each do |item|
+    abort "PostgreSQL restart labels changed" unless item["labels"] == {"severity" => "critical", "service" => "witself-postgresql", "witself_alert" => "true"}
+    abort "PostgreSQL restart timing changed" unless item["for"] == "0m" && item["keep_firing_for"] == "5m"
+  end
+  forecast = rules.find { |item| item["alert"] == expected.last }
+  abort "PostgreSQL forecast labels changed" unless forecast["labels"] == {"severity" => "warning", "service" => "postgres-storage", "witself_alert" => "true"}
+  abort "PostgreSQL forecast timing changed" unless forecast["for"] == "1h" && !forecast.key?("keep_firing_for")
+  %w[kube_pod_container_status_restarts_total kube_pod_container_status_last_terminated_reason].each do |metric|
+    selectors = restarts.map { |item| item.fetch("expr").scan(/#{metric}\{[^}]+\}/) }
+    expected_selectors = selectors[0].dup
+    if metric == "kube_pod_container_status_last_terminated_reason"
+      expected_selectors << selectors[0].first.to_s.sub(%q{reason="OOMKilled"}, %q{reason!="OOMKilled"})
+    end
+    abort "PostgreSQL restart/OOM selectors differ" unless selectors[0].length == 1 && selectors[1] == expected_selectors
+  end
 ' <"$tmp/postgresql-child.yaml"
 
 "$promtool_bin" check rules "$rules"
@@ -700,6 +724,7 @@ ruby -ryaml -e '
 ruby "$repo_root/scripts/testdata/monitoring-extensions.rb" "$repo_root" "$tmp" "$chart_archive"
 ruby "$repo_root/scripts/testdata/test-monitoring-platform-rules.rb" \
   "$tmp/monitoring-extensions-child.yaml" "$promtool_bin" "$tmp"
+ruby "$repo_root/scripts/testdata/test-monitoring-capacity-scrape.rb" "$tmp/monitoring-extensions-child.yaml"
 "$promtool_bin" check rules "$probe_rules"
 "$promtool_bin" test rules "$probe_rule_tests"
 

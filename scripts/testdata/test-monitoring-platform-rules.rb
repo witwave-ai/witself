@@ -17,6 +17,7 @@ upstream_alerts = %w[
 platform_alerts = %w[
   NodeFilesystemSpaceFillingUp WitselfPrometheusPVCUsageHigh
   WitselfCertificateExpiringSoon WitselfArgoApplicationUnhealthy
+  WitselfPostgreSQLMemoryNearLimit WitselfNodeMemoryWorkingSetHigh
 ].freeze
 records = %w[
   namespace_cpu:kube_pod_container_resource_requests:sum

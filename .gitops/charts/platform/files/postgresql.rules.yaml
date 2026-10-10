@@ -70,3 +70,40 @@ groups:
         annotations:
           summary: PostgreSQL exporter cannot connect to the database.
           runbook: docs/observability-and-operations.md#postgresql-alerts
+  - name: witself-postgresql-capacity
+    interval: 30s
+    rules:
+      - alert: WitselfPostgreSQLOOMKilled
+        expr: max by (namespace, pod) ((kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",container="postgresql",reason="OOMKilled"} == 1) and on (namespace, pod, container) (increase(kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",container="postgresql"}[30m]) > 0))
+        for: 0m
+        keep_firing_for: 5m
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: The PostgreSQL container was OOM-killed and restarted within the last 30 minutes.
+          description: kube-state-metrics reports OOMKilled as the PostgreSQL container's last termination reason and its restart count rose within 30 minutes. Both witself-server replicas lose the database while PostgreSQL restarts. Check WitselfPostgreSQLMemoryNearLimit and the cell's apps.civoPostgres.resourcesPreset.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLRestarted
+        expr: max by (namespace, pod) ((increase(kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",container="postgresql"}[30m]) > 0) unless on (namespace, pod, container) ((last_over_time(kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",container="postgresql",reason="OOMKilled"}[30m]) == 1) unless on (namespace, pod, container) (kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",container="postgresql",reason!="OOMKilled"} == 1)))
+        for: 0m
+        keep_firing_for: 5m
+        labels:
+          severity: critical
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: The PostgreSQL container restarted for a reason other than an OOM kill within the last 30 minutes.
+          description: kube-state-metrics reports that the PostgreSQL container's restart count rose within 30 minutes and its last termination reason is not OOMKilled. Both witself-server replicas lose the database while PostgreSQL restarts. Check the pod's restartCount and lastState and the previous container's termination lines.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
+      - alert: WitselfPostgreSQLVolumeFillingUp
+        expr: max by (namespace, persistentvolumeclaim) (predict_linear(kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"}[24h], 7 * 24 * 3600)) < 0
+        for: 1h
+        labels:
+          severity: warning
+          service: postgres-storage
+          witself_alert: "true"
+        annotations:
+          summary: The PostgreSQL volume is predicted to fill within 7 days at its 24-hour trend.
+          runbook: docs/observability-and-operations.md#postgresql-alerts

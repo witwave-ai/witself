@@ -152,6 +152,8 @@ run_state() (
     mkdir -p "$scratch"
     run_check monitoring-extensions ruby scripts/testdata/monitoring-extensions.rb \
       "$fixture" "$scratch" "$WITSELF_TEST_MONITORING_CHART"
+    run_check test-monitoring-capacity-scrape ruby scripts/testdata/test-monitoring-capacity-scrape.rb \
+      "$scratch/monitoring-extensions-child.yaml"
     for suite in test-monitoring-postgres-backup test-monitoring-memory-alerts; do
       run_check "$suite" ruby "scripts/testdata/$suite.rb" \
         "$fixture" "$scratch" "$WITSELF_TEST_MONITORING_CHART" "$WITSELF_TEST_PROMTOOL"

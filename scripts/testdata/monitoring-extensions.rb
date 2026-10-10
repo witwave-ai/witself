@@ -130,10 +130,10 @@ expected_upstream.each do |name, names|
   actual = group.fetch("rules").map { |rule| rule["alert"] }.compact
   abort "unexpected #{name} alert allowlist: #{actual.inspect}" unless actual.sort == names.sort
 end
-allowed_group_names = expected_upstream.keys + existing_group_names + %w[witself-watchdog witself-entitlement-delivery platform-resources platform-node platform-storage platform-certificates platform-argocd]
+allowed_group_names = expected_upstream.keys + existing_group_names + %w[witself-watchdog witself-entitlement-delivery platform-resources platform-node platform-storage platform-certificates platform-argocd platform-container-memory]
 abort "unexpected upstream group rendered: #{(rendered_groups.map { |group| group['name'] } - allowed_group_names).inspect}" unless (rendered_groups.map { |group| group["name"] } - allowed_group_names).empty?
 alerts = rendered_groups.flat_map { |group| group.fetch("rules") }.select { |rule| rule["alert"] }
-custom_names = %w[NodeFilesystemSpaceFillingUp WitselfPrometheusPVCUsageHigh WitselfCertificateExpiringSoon WitselfArgoApplicationUnhealthy]
+custom_names = %w[NodeFilesystemSpaceFillingUp WitselfPrometheusPVCUsageHigh WitselfCertificateExpiringSoon WitselfArgoApplicationUnhealthy WitselfPostgreSQLMemoryNearLimit WitselfNodeMemoryWorkingSetHigh]
 custom_names.each do |name|
   abort "expected exactly one #{name} alert" unless alerts.count { |rule| rule["alert"] == name } == 1
 end
@@ -230,9 +230,11 @@ end
 # must never remain enabled after their own capability is turned off.
 {
   "platform.monitoring.defaultRules.enabled" => %w[platform-certificates platform-argocd],
-  "platform.monitoring.nodeExporter.enabled" => %w[platform-resources platform-storage platform-certificates platform-argocd],
+  "platform.monitoring.nodeExporter.enabled" => %w[platform-resources platform-storage platform-certificates platform-argocd platform-container-memory],
   "platform.monitoring.alerting.enabled" => [],
-  "platform.certManager.enabled" => %w[platform-resources platform-node platform-storage platform-argocd],
+  "platform.certManager.enabled" => %w[platform-resources platform-node platform-storage platform-argocd platform-container-memory],
+  "platform.monitoring.kubelet.cadvisor" => %w[platform-resources platform-node platform-storage platform-certificates platform-argocd],
+  "platform.monitoring.postgresql.enabled" => %w[platform-resources platform-node platform-storage platform-certificates platform-argocd],
 }.each do |gate, expected_groups|
   raw = render_platform(platform_chart, serving_cell_values, "--set", "#{gate}=false")
   values = monitoring_values(raw)
@@ -242,6 +244,8 @@ end
   elsif gate == "platform.monitoring.nodeExporter.enabled"
     abort "node-exporter disabled but scrape/alerts remain active" unless values.dig("nodeExporter", "enabled") == false && values.dig("defaultRules", "rules", "nodeExporterAlerting") == false
     abort "node-exporter gate removed app/resource rules" unless values.dig("defaultRules", "rules", "kubernetesApps") == true && values.dig("defaultRules", "rules", "kubernetesResources") == true
+  elsif gate == "platform.monitoring.kubelet.cadvisor"
+    abort "cAdvisor disabled but scrape remains active" unless values.dig("kubelet", "serviceMonitor", "cAdvisor") == false
   end
   expected_names = expected_monitors.keys
   expected_names -= ["witself-cert-manager"] if gate == "platform.certManager.enabled"
