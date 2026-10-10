@@ -94,6 +94,6 @@ and read chunks; the OS can still delay a filesystem syscall. No writes, locks,
 repairs, network, credential loading, or external commands occur. Ordinary
 filesystem access-time updates can occur for the allowlisted files read.
 
-Tests use synthetic roots exclusively. Run with the repository's Go 1.27.1
+Tests use synthetic roots exclusively. Run with the repository's Go 1.27.2
 toolchain: `GOTOOLCHAIN=local GOPROXY=off /opt/homebrew/opt/go/bin/go test
 ./internal/clientinventory` and the same command with `-race`.
