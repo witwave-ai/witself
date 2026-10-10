@@ -1418,6 +1418,8 @@ that cannot yet be purchased. Human output uses the public names Personal,
 Professional, Team, and Enterprise while also showing the stable API plan IDs
 `free`, `standard`, `team`, and `enterprise`. Missing catalog caps are shown as
 no catalog cap, and missing retention days as indefinite.
+Capabilities in `coming_soon_features` print `Coming soon` for every plan that
+lists them, including their allowance rows, and `--json` carries the same array.
 
 `plan status` accepts `--account NAME` and optional `--endpoint CELL_URL`.
 Status and lifecycle mutations use the same authenticated cell billing

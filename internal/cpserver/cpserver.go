@@ -126,12 +126,16 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	// The public plan catalog — the same witself.plans.v0 document the
 	// Cloudflare Worker serves; here so the CLI needs exactly one host.
 	mux.HandleFunc("GET /v1/plans", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
+		doc := map[string]any{
 			"schema_version": "witself.plans.v0",
 			"updated":        cfg.Catalog.Updated,
 			"currency":       cfg.Catalog.Currency,
 			"plans":          cfg.Catalog.Plans,
-		})
+		}
+		if len(cfg.Catalog.ComingSoonFeatures) > 0 {
+			doc["coming_soon_features"] = cfg.Catalog.ComingSoonFeatures
+		}
+		writeJSON(w, http.StatusOK, doc)
 	})
 
 	// Plan verbs, mirroring the cell's :verb idiom.

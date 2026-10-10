@@ -58,6 +58,10 @@ send, and retention can each be overridden without changing plan, price,
 subscription, or invoice history. The Founder account has explicit unlimited
 commercial entitlement and indefinite retention, while independent platform
 limits continue to apply.
+In the public catalog, receive, send, realm aliases, and custom domains are
+marked coming soon; their entitlements stay in resolved snapshots. Receive and
+send are delivered only to the Founder cohort; realm aliases and custom
+domains remain dark for every account.
 
 V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
@@ -208,13 +212,12 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-08-16. It
-is a working packaging decision, not a claim that every runtime is already
-enabled. Receive and send entitlements are implemented in the canonical plan
-catalog and resolved cell policy, but both retain independent cell/edge rollout
-gates. Committed templates remain dark by default; the exact Founder production
-cohort currently has receive, outbound dispatch, and lifecycle-event delivery
-enabled.
+The following table records the current product direction as of 2026-10-10.
+Receive, send, realm aliases, and custom domains are coming soon in the public
+catalog. Their entitlements remain in resolved cell policy, with independent
+cell/edge rollout gates. Committed templates remain dark by default; the exact
+Founder production cohort currently has receive, outbound dispatch, and
+lifecycle-event delivery enabled.
 The realm, agent, active-memory, current-fact, inbound-agent-email byte, and
 custom-inbound-domain values are the Phase B canonical defaults described
 below; the other rows remain subject to their own implementation and rollout
@@ -238,21 +241,23 @@ and byte breakers described below apply instead.
 | Agent message sends per rolling minute | Not applicable | 30 | 120 | 600 |
 | Agent message deliveries per realm per rolling minute | Not applicable | 500 | 5,000 | 25,000 |
 | Agent message deliveries per recipient per rolling minute | Not applicable | 60 | 300 | 1,000 |
-| Receive agent email | No | Included; retained 90 days; safety breakers apply | Included; retained 365 days; safety breakers apply | Enabled; retained 365 days by default, contract override; safety breakers apply |
-| Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
-| Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
-| Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted; 100 GiB default |
-| Send agent email | No | No | Included | Included |
-| Permanent Realm ID email address | Reserved; delivery disabled | Active on `witmail.net` | Active on `witmail.net` | Active on `witmail.net` |
-| Realm email aliases | 0 | 0 | 1 active alias per realm | Contracted; 3 active aliases per realm by default |
-| Custom inbound email domains | No | No | 1 per account | Contracted; disabled until an explicit account limit is set |
+| Receive agent email | No | Coming soon | Coming soon | Coming soon |
+| Raw MIME and attachment retention | None stored | Coming soon | Coming soon | Coming soon |
+| Maximum raw email size | 0 (email disabled) | Coming soon | Coming soon | Coming soon |
+| Retained attachment storage per account | 0 | Coming soon | Coming soon | Coming soon |
+| Send agent email | No | No | Coming soon | Coming soon |
+| Permanent Realm ID email address | Reserved; delivery disabled | Coming soon | Coming soon | Coming soon |
+| Realm email aliases | 0 | 0 | Coming soon | Coming soon |
+| Custom inbound email domains | No | No | Coming soon | Coming soon |
 
 The permanent Witself-provided address format is
 `agent-name.realm-id@witmail.net`. It is reserved on every plan but Personal
-cannot receive mail. Team and Enterprise can add, rather than replace it with,
+cannot receive mail. Team and Enterprise list an additional alias address form,
 `agent-name.realm-email-alias@witmail.net`. Custom domains remain a separate
-feature: `agent-name.realm-email-alias@customer-domain`. A realm label remains
-part of the address on custom domains.
+feature: `agent-name.realm-email-alias@customer-domain`. Both the alias and
+custom-domain address forms are coming soon, and no paid plan receives mail
+outside the Founder cohort yet. A realm label remains part of the address on
+custom domains.
 
 The retired `agent-mail.witwave.ai` pilot domain is not another plan benefit.
 Compatibility there is limited to canonical local parts that were actually
@@ -267,18 +272,34 @@ onboarding, and delivery are all still dark.
 The [Feature Status](feature-status.md) scorecard is the authoritative progress
 view for those separately gated capabilities.
 
-In this table, an included feature does not imply unbounded throughput or a
+In this table, a listed entitlement does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
 shared rolling one-minute GCRA/token-bucket-equivalent budgets, not wall-clock
 minute buckets. Inbound hostile traffic must not create recipient charges.
-"Included" confirms catalog entitlement to outbound agent email, not that the
-worker or provider adapter is active. Its commercial allowance and overage
-treatment remain to be decided. Independent platform rate breakers still
-apply. "Contracted" means the quantity or policy is negotiated for the
-Enterprise account.
+"Coming soon" means the entitlement is listed but not yet delivered to
+customer accounts outside the Founder cohort. The commercial allowance and
+overage treatment for outbound agent email remain to be decided. Independent
+platform rate breakers still apply. "Contracted" means the quantity or policy
+is negotiated for the Enterprise account.
 
-The two agent-email byte allowances are hard limits in the resolved account
-snapshot, not retention policies:
+### Coming-soon plan features
+
+The top-level `coming_soon_features` array in `web/plans/plans.json` is
+presentation only. Keys stay in each plan's `features` array, which is the
+resolved entitlement pushed to cells; the entitlements and snapshot hashes are
+unchanged. Public catalog capability and allowance cells show `Coming soon`
+when a plan lists a marked feature.
+
+Promotion requires a founder delivery decision, then removing the feature key
+from `coming_soon_features`, updating both the matrix above and the receive/send
+table in [Agent Email](agent-email.md), and deploying both the plans Worker and
+the control plane. The doc-table guard enforces the matching label updates in
+both directions.
+
+The two agent-email byte allowances are planned hard limits in the resolved
+account snapshot, not retention policies. They are not deliverable allowances
+while agent email is coming soon; see the
+[cell storage safety boundary](#agent-email-cell-storage-safety-boundary):
 
 - `agent_email_max_raw_bytes` is the maximum raw-MIME size of each inbound
   message. Personal resolves to `0`, Professional to `10,485,760`, and Team
@@ -338,6 +359,13 @@ triggers apply the hard threshold to all positive writes, including rolling-old
 binaries, imports, and direct maintenance. Deletes and cascades release their
 exact logical charge, so retention can reopen admission without waiting for
 PostgreSQL's physical file size to shrink.
+
+The per-cell 3 GiB admission boundary is shared by every account on the cell and
+is smaller than one Professional (5 GiB) or Team (100 GiB) attachment-storage
+allowance. Those allowances are planned values, not storage any account can
+rely on today. Before agent email leaves coming soon, either the cell boundary
+must be resized or the allowances lowered so that no published allowance
+exceeds what a cell holds.
 
 At the boundary, an enabled inbound delivery returns HTTP 507 with the closed
 `storage_full` verdict. The receive edge converts that refusal into a sanitized

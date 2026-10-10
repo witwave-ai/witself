@@ -1,7 +1,8 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-08-24",
+  "updated": "2026-10-10",
   "currency": "USD",
+  "coming_soon_features": ["agent_email_custom_domain", "agent_email_realm_alias", "agent_email_receive", "agent_email_send"],
   "plans": [
     {
       "id": "free",
