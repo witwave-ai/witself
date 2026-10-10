@@ -692,8 +692,8 @@ ruby -ryaml -e '
   abort "PostgreSQL PrometheusRule is not selected by this Prometheus release" unless rule.dig("metadata", "labels", "release") == "witself-monitoring"
   groups = rule.dig("spec", "groups")
   legacy = groups.select { |group| group["name"] == "witself-postgresql" }
-  # Base fd8c172c has six rules; take slice 115s count if it merges first.
-  abort "PostgreSQL base rule count changed" unless legacy.length == 1 && legacy.first.fetch("rules").length == 6
+  # Slice 115 adds WitselfPostgreSQLImportTransactionAgeHigh to the legacy group: seven rules.
+  abort "PostgreSQL base rule count changed" unless legacy.length == 1 && legacy.first.fetch("rules").length == 7
   capacity = groups.select { |group| group["name"] == "witself-postgresql-capacity" }
   abort "PostgreSQL capacity group missing or duplicated" unless capacity.length == 1
   rules = capacity.first.fetch("rules")

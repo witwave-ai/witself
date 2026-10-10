@@ -273,6 +273,11 @@ func (tx *importTelemetryPanicTx) QueryRow(_ context.Context, sql string, _ ...a
 	})
 }
 func (tx *importTelemetryPanicTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	// The import labels its transaction (transaction-local application_name)
+	// before the first row insert; that statement is not the row callback.
+	if strings.HasPrefix(sql, "SELECT set_config('application_name'") {
+		return pgconn.CommandTag{}, nil
+	}
 	if !strings.HasPrefix(sql, "INSERT INTO accounts ") {
 		tx.t.Fatal("unexpected statement before row insert")
 	}

@@ -803,6 +803,9 @@ cell with the dedicated backup credential. The cell runs the complete semantic
 import with the archived account status, validates every graph and checksum,
 forces all deferred PostgreSQL constraints, and deliberately rolls the
 transaction back. The imported rows remain invisible outside that transaction.
+That transaction runs as `application_name = witself-import-validation`;
+evacuation imports run as `witself-import-evacuation`, and plain imports as
+`witself-import-account`.
 Only an exact rollback-validation acknowledgement is recorded in the backup
 catalog. The drill never changes `acct:` or `archived:` routing and there is no
 routine HTTP endpoint that commits a backup restore.

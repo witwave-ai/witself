@@ -1136,8 +1136,9 @@ PrometheusRules carry `release: witself-monitoring` for discovery.
 | Alert | Condition | Severity |
 | --- | --- | --- |
 | `WitselfPostgreSQLConnectionsHigh` | Sum of [`pg_stat_activity_count`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57) across connection states, divided by [`pg_settings_max_connections`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_setting.go#L90-L118), exceeds 0.8 for 10 minutes. | warning |
-| `WitselfPostgreSQLTransactionAgeHigh` | Oldest transaction age, [`pg_stat_activity_max_tx_duration`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57), excluding `application_name` matching `witself-export-(account\|backup\|evacuation\|self)`, exceeds 300 seconds for 5 minutes. | warning |
+| `WitselfPostgreSQLTransactionAgeHigh` | Oldest transaction age, [`pg_stat_activity_max_tx_duration`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_activity.go#L37-L57), excluding `application_name` matching `witself-export-(account\|backup\|evacuation\|self)` or `witself-import-(account\|evacuation\|validation)`, exceeds 300 seconds for 5 minutes. | warning |
 | `WitselfPostgreSQLExportTransactionAgeHigh` | Oldest account export transaction age, for `application_name` matching `witself-export-(account\|backup\|evacuation\|self)`, exceeds 2700 seconds for 5 minutes. | warning |
+| `WitselfPostgreSQLImportTransactionAgeHigh` | Oldest account import or backup validation transaction age, for `application_name` matching `witself-import-(account\|evacuation\|validation)`, exceeds 2700 seconds for 5 minutes. | warning |
 | `WitselfPostgreSQLDeadlocks` | [`pg_stat_database_deadlocks`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_database.go#L172-L181) increases over 10 minutes. | warning |
 | `WitselfPostgreSQLExporterUnavailable` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is absent or zero for 10 minutes. | critical |
 | `WitselfPostgreSQLDown` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is zero for 5 minutes. | critical |
@@ -1150,10 +1151,26 @@ Connection counts and limits are matched per scrape target before comparison.
 Account exports label their transaction `witself-export-<kind>` (account, backup,
 evacuation, self). Such a transaction pages under
 `WitselfPostgreSQLExportTransactionAgeHigh` once it has been open about 50 minutes
-(2700 seconds for 5 minutes). Every expected export ends by its own cap of at most
-60 minutes: the control plane's 60-minute pull cap for backup and evacuation
-exports, and the 15-minute self-export database phase. Every other transaction,
-including pg_dump, keeps the 5-minute threshold.
+(2700 seconds for 5 minutes). The control plane aborts backup and evacuation
+pulls after 120 seconds without bytes and at 60 minutes overall, and each alarm
+invocation is capped at 15 minutes. A transaction that outlives these caps keeps
+its alert firing until it ends.
+
+Imports label their transaction `witself-import-<kind>` (account, evacuation,
+validation) and page after about 50 minutes. The async import job allows 3 hours,
+so a legitimately slow import can page. A lock waiter behind an open account or
+evacuation export pages under the general rule like any other transaction,
+including a blocked schema migration and transactions queued behind it. A waiter
+whose client context is cancelled ends within about 100 ms in the local
+PostgreSQL 16.14 test: pgx v5.11.0 sends a PostgreSQL cancel request during
+asynchronous connection cleanup. Only a client that dies or is partitioned so
+that no cancel request reaches PostgreSQL can leave an orphaned lock waiter.
+`client_connection_check_interval` would reap that orphan; enabling it for cell
+databases is follow-up FU115-2 and is not enabled by this change. The export itself
+still pages after about 50 minutes. Every other transaction, including pg_dump,
+keeps the 5-minute threshold. This classification uses client-chosen
+`application_name`: a session can select an import or export name to enter the
+longer-threshold rule.
 `WitselfPostgreSQLDown` and `WitselfPostgreSQLExporterUnavailable` deliberately
 overlap for a database that remains down for 10 minutes; only exporter
 unavailability covers a missing `pg_up` series. The metric links above identify the

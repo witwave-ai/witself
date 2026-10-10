@@ -611,15 +611,19 @@ func waitForImportContention(ctx context.Context, t *testing.T, st *Store, r *im
 				}
 			}
 		}
+		// Each importer is identified by the backend pid captured from its own
+		// pool. Inside the import transaction the session's application_name is
+		// the transaction-local witself-import-* label, not the pool's name, so
+		// the pool name is checked only outside transactions (cleanup).
 		var aBlocked, bBlocked bool
 		if err := st.pool.QueryRow(waitCtx, `SELECT
-			EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.pid=$1 AND a.application_name=$4
+			EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.pid=$1
 				AND a.datname=current_database() AND a.wait_event_type='Lock' AND a.wait_event='advisory'
 				AND $3::int=ANY(pg_blocking_pids(a.pid)) AND a.query LIKE 'INSERT INTO accounts%'),
-			EXISTS(SELECT 1 FROM pg_stat_activity b WHERE b.pid=$2 AND b.application_name=$5
+			EXISTS(SELECT 1 FROM pg_stat_activity b WHERE b.pid=$2
 				AND b.datname=current_database() AND b.wait_event_type='Lock' AND b.wait_event='transactionid'
 				AND $1::int=ANY(pg_blocking_pids(b.pid)) AND b.query LIKE 'INSERT INTO accounts%')`,
-			r.pids[0], r.pids[1], r.barrierPID, r.names[0], r.names[1]).Scan(&aBlocked, &bBlocked); err != nil {
+			r.pids[0], r.pids[1], r.barrierPID).Scan(&aBlocked, &bBlocked); err != nil {
 			t.Fatalf("import contention direct blocker observation failed: %v", err)
 		}
 		if aBlocked && (!both || bBlocked) {
