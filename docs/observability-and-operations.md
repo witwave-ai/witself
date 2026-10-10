@@ -382,18 +382,24 @@ Audit counters measure append attempts: a standalone database failure can
 contribute to both audit counters, so their sum is not a unique failure count.
 Use counter increases to detect failures across process restarts. Known limitation: a container that restarts inside the same pod and fails an audit insert before its first scrape presents the same labels and an equal counter value as the previous process, so that single failure is not distinguishable from the old series and is not alerted; a process-start signal is the tracked follow-up.
 
-The four identity-capacity and audit-append alerts are gated by
-`platform.monitoring.collectorAlerts.enabled`, which defaults to false and is
-rendered from the cell catalog switch `collector_alerts`. Keep the gate off
-until compatible server and worker binaries are deployed and their scrape
-metrics verified. It also stays off on the serving cell for a semantic reason:
-`WitselfIdentityCapacityAtLimit` fires on any account whose usage equals its
-cap, and every Personal account holds its single root operator seat
-(`operator_seats` used = cap = 1), so the rule would page permanently; the
-rule must exclude structural minimums (or measure refused growth) before the
-group is enabled. Audit collector availability requires both the server and
-worker collectors to be present and healthy; identity capacity is collected
-only by the server.
+The four identity-capacity and audit-append rules form the `witself-collectors`
+group. It renders only where `platform.monitoring.collectorAlerts.enabled` is
+true. That value defaults to false and is generated from the cell catalog
+switch `collector_alerts`; see [.gitops/cells/catalog.yaml](../.gitops/cells/catalog.yaml)
+for which cells enable it. Three rules page at critical:
+`WitselfIdentityCapacityMetricsUnavailable` after 3 minutes,
+`WitselfAuditAppendMetricsUnavailable` after 3 minutes, and
+`WitselfAuditAppendFailures` at once.
+
+`WitselfIdentityCapacityAtLimit` is informational: severity `info` and no
+`witself_alert`, so Alertmanager sends it to the `null` receiver and it never
+reaches PagerDuty. It fires after 30 minutes of elective saturation only; see
+the `accounts_near_limit` and `accounts_at_limit` rows in the
+[metric definitions above](#prometheus-metrics). Enabling the group on a cell
+is a founder-approved GitOps change after the
+[pre-flip reads in the runbook](runbooks.md#collector-alert-enablement).
+Audit collector availability requires both the server and worker collectors
+to be present and healthy; identity capacity is collected only by the server.
 
 The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to
@@ -993,6 +999,15 @@ retained canary artifact. Two receivers are configured independently:
   alerting plane itself. Omitting its Secret omits the route, receiver, and
   mount.
 
+Only `witself_alert="true"` selects the incident route. The `severity` label
+selects no route: in PagerDuty mode it becomes the event severity, and the
+PagerDuty service picks the urgency from it. Alertmanager also groups and
+inhibits by `severity`. An alert without the incident label stays in Alertmanager on the
+`null` receiver unless it selects the dead-man route. Two rules carry no
+`witself_alert`: `WitselfWatchdog` (dead-man route only) and
+`WitselfIdentityCapacityAtLimit` (informational; it renders only where the
+collector group is enabled).
+
 The Witself product rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
 worker's existing closed-set job label. PostgreSQL rules additionally retain
@@ -1540,9 +1555,9 @@ snapshot, so these checkpoint alerts do not detect Stripe-only absence.
 
 The platform chart gates the `witself-probes` scrape job and its rules behind
 `platform.monitoring.uptimeProbes.enabled`, which defaults to `false`. The
-serving-cell rollout target is `civo-sandbox-use1-serving`; its checked-in
-values currently leave this gate and incident alerting disabled. The owner
-must enable the relevant values and deploy the control-plane change. Once
+serving-cell rollout target is `civo-sandbox-use1-serving`; its generated
+values (`.gitops/cells/civo-sandbox-use1-serving/values.yaml`) enable this gate
+and incident alerting. Once
 enabled, the serving cell's Prometheus scrapes the HTTPS endpoint every
 60 seconds. The rules in
 [uptime-probes.rules.yaml](../.gitops/charts/platform/files/uptime-probes.rules.yaml)

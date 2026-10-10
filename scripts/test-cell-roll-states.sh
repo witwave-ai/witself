@@ -22,6 +22,7 @@ case "$1" in
     mode=monitoring
     : "${WITSELF_TEST_MONITORING_CHART:?supply the verified monitoring chart}"
     : "${WITSELF_TEST_PROMTOOL:?supply promtool}"
+    : "${WITSELF_TEST_AMTOOL:?supply amtool}"
     shift
     ;;
   *) printf 'usage: %s [--monitoring-only | --state STATE ...]\n' "$0" >&2; exit 2 ;;
@@ -160,6 +161,8 @@ run_state() (
     done
     run_check test-monitoring-recovery ruby scripts/testdata/test-monitoring-recovery.rb \
       "$fixture" "$WITSELF_TEST_MONITORING_CHART"
+    run_check test-monitoring-alert-routing ruby scripts/testdata/test-monitoring-alert-routing.rb \
+      "$fixture" "$scratch" "$WITSELF_TEST_MONITORING_CHART" "$WITSELF_TEST_AMTOOL"
   elif [[ "$state" == committed ]]; then
     # Surrounding CI/Make targets already run the suites on committed values.
     run_check generation-check bash scripts/gitops-cell-values.sh --check

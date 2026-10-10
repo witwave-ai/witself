@@ -4431,10 +4431,43 @@ followed by another trigger.
 | `WitselfServerOOMKilled` | Find the pod with `kubectl -n witself get pods -l app.kubernetes.io/name=witself-server` and its RESTARTS column, or query `kube_pod_container_status_last_terminated_reason{namespace="witself",container="witself-server",reason="OOMKilled"}`. Inspect `kubectl -n witself get pod <pod> -o jsonpath='{.status.containerStatuses[*].restartCount} {.status.containerStatuses[*].lastState.terminated.reason}'`, then `kubectl -n witself logs <pod> -c witself-server --previous`; use `kubectl describe node` to check memory pressure and a node-wide kill. Check whether a backup export, backup validation, or account import or export was running. A kill during backup validation or an evacuation import loses the in-memory job, which then reads `absent`; the control plane starts the drill or import again within its retry policy (see [API routes](api-routes.md)). Repeated kills on the same archive need the planned memory-bounded import and validation work, not another restart. |
 | `WitselfWorkerOOMKilled` | Find the pod with `kubectl -n witself get pods -l app.kubernetes.io/name=witself-worker` and its RESTARTS column, or query `kube_pod_container_status_last_terminated_reason{namespace="witself",container="witself-worker",reason="OOMKilled"}`. Inspect `kubectl -n witself get pod <pod> -o jsonpath='{.status.containerStatuses[*].restartCount} {.status.containerStatuses[*].lastState.terminated.reason}'`, then `kubectl -n witself logs <pod> -c witself-worker --previous`; use `kubectl describe node` to check memory pressure and a node-wide kill. |
 
-The four identity-capacity and audit-append alerts default
-off through `platform.monitoring.collectorAlerts.enabled`. Keep this gate off
-until compatible server and worker binaries are deployed, then verify the
-metrics on both scrape targets before enabling it in a separate rollout.
+<a id="collector-alert-enablement"></a>
+
+Enable the four identity-capacity and audit-append alerts through the cell's
+catalog switch `collector_alerts`; see
+[.gitops/cells/catalog.yaml](../.gitops/cells/catalog.yaml) for the current state.
+
+1. Obtain the founder's go.
+2. Port-forward the cell's Prometheus:
+
+   ```sh
+   kubectl -n monitoring port-forward svc/prometheus-operated 9090:9090
+   ```
+
+   Run each read with
+   `curl -sG http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=<QUERY>'`.
+   All must be as expected:
+
+   - **Q1:** `witself_identity_capacity_metrics_up` returns one series per
+     server pod, each 1.
+   - **Q2:** `count by (container) (witself_audit_append_metrics_up)` returns
+     exactly two series, `container="witself-server"` and
+     `container="witself-worker"`. Then `min(witself_audit_append_metrics_up)`
+     is 1. Then
+     `count((witself_up or witself_worker_up) unless on (namespace, pod, container) witself_audit_append_metrics_up)`
+     returns no samples.
+   - **Q3:** For each of `WitselfIdentityCapacityMetricsUnavailable`,
+     `WitselfAuditAppendMetricsUnavailable`, and `WitselfAuditAppendFailures`,
+     copy the rule's `expr` from
+     [.gitops/charts/platform/files/founder-open-plane.rules.yaml](../.gitops/charts/platform/files/founder-open-plane.rules.yaml)
+     and run it. Each returns no samples.
+   - **Q4:** Record `max(witself_identity_capacity_accounts_at_limit)`. Any
+     value is fine, because the rule never pages.
+3. One reviewed PR sets the cell's catalog switch `collector_alerts: true`
+   and runs `make gitops-cell-values`.
+4. Rollback is reverting that PR. For an immediate stop, add an Alertmanager
+   silence on `service="identity"` or `service="audit"`.
+
 Existing alert routing and other rules are independent of this gate.
 
 `witself_identity_capacity_accounts_at_limit` counts only elective capacity:
@@ -4444,17 +4477,18 @@ and zero seeded agents per realm. Caps at or below those minimums remain in
 `accounts_near_limit` (80 percent of the total cap), nor to
 `min_headroom_ratio`; headroom is 1 when no eligible finite caps exist.
 Thus Personal's 1/1 operator and realm limits do not alert, while Professional's
-3/3 operator seats do after 30 minutes. Unlimited accounts contribute only to
-`accounts_unlimited`. This measures saturation, not attempted or rejected growth.
-Enabling `collectorAlerts` remains a separate config-only rollout after this
-ships and the deployed metrics have been verified.
+3/3 operator seats raise the informational `WitselfIdentityCapacityAtLimit`
+after 30 minutes, which never reaches PagerDuty. Unlimited accounts contribute
+only to `accounts_unlimited`. This measures saturation, not attempted or
+rejected growth. Follow the [enablement procedure above](#collector-alert-enablement)
+to enable `collectorAlerts`.
 
 First diagnostics once these collector alerts are enabled:
 
 | Alert | First diagnostic step |
 | --- | --- |
 | `WitselfIdentityCapacityMetricsUnavailable` | Check the server scrape target and `witself_identity_capacity_metrics_up`; if the target is healthy but the collector is 0, inspect database reachability and the read-only query's two-second timeout. Error text is intentionally absent from metrics. |
-| `WitselfIdentityCapacityAtLimit` | Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify which elective realm, agent-per-realm, or operator-seat caps are saturated. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
+| `WitselfIdentityCapacityAtLimit` | Informational: severity `info` and no `witself_alert`, so it never reaches PagerDuty. To see it, run `kubectl -n monitoring port-forward svc/prometheus-operated 9090:9090` and query `ALERTS{alertname="WitselfIdentityCapacityAtLimit"}`, or run `kubectl -n monitoring port-forward svc/alertmanager-operated 9093:9093` and read `http://127.0.0.1:9093/api/v2/alerts?filter=alertname%3D%22WitselfIdentityCapacityAtLimit%22`. Compare `witself_identity_capacity_accounts_at_limit` and `witself_identity_capacity_min_headroom_ratio` by the closed `dimension` label to identify which elective realm, agent-per-realm, or operator-seat caps are saturated. Use authenticated plan/count reads before changing limits; the scrape contains no account identity. |
 | `WitselfAuditAppendMetricsUnavailable` | Every server and worker replica must expose a healthy collector: compare `witself_up` and `witself_worker_up` with `witself_audit_append_metrics_up` on `namespace`, `pod`, and `container`. A missing collector from any replica, absence of either role's collectors, or any collector value below 1 fires the alert. Verify each process-local audit failure reader is wired and succeeding. |
 | `WitselfAuditAppendFailures` | Compare ten-minute increases in the server's `witself_audit_append_total{result="error",reason="error"}` and both server and worker `witself_audit_append_tx_failures_total` series, then inspect database insert failures in protected process logs. Nonzero counters without the same series in the ten-minutes-ago view also alert, covering startup failures before the first scrape; this can conservatively repeat an alert after a scrape gap. Both counters reset on process restart; a standalone insert failure can affect both, while input-validation errors are excluded from the transaction counter. A successful worker batch can still contain an earlier rolled-back audit failure, so its generic job-failure counter alone is insufficient. |
 
