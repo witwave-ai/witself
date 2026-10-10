@@ -82,6 +82,7 @@
 // authoritative copy moves to a Durable Object (KV has no transactions) and
 // KV stays the read projection. The O(accounts) scan in DELETE moves to DO
 // counters at the same time.
+import { recordSignupObservation, runScheduledSignupObservation } from "./signup-observation.mjs";
 import { readCanonicalLegal, readLegalJSON, validReconsent } from "./signup-legal.mjs";
 import { Container, getContainer } from "@cloudflare/containers";
 import {
@@ -2208,6 +2209,7 @@ async function handleVerify(env, token) {
       // Any later link (a resent email, a second click) lands here.
       return htmlPage(200, "Already verified", `Your account <code>${entry.account_id}</code> was already verified — nothing more to do. Back in your terminal, <code>witself account status</code> will show it active.`);
     }
+    if (body.activated === true) await recordSignupObservation(env, "verified");
     return htmlPage(200, "Account verified", `Your account <code>${entry.account_id}</code> is active. Back in your terminal, <code>witself account status</code> will confirm it — you're ready to create realms and agents.`);
   }
   // Dead-link arms match the cell handler's EXACT error strings: an old cell
@@ -2320,6 +2322,7 @@ async function handleResend(request, env, accountId) {
     // content; only the bounded reason code is loggable.
     console.log(`resend: verification email send failed for ${accountId} (reason=email_send_error)`);
   }
+  await recordSignupObservation(env, emailSent === true ? "email_resend_sent" : "email_resend_failed");
   if (!emailSent) {
     return err("could not send the verification email — try again shortly", 502);
   }
@@ -5304,6 +5307,7 @@ async function handleFetch(request, env, ctx) {
 
 // Keep scheduling helpers private: named exports are Worker entrypoints.
 function scheduleMaintenance(event, env, ctx) {
+  ctx.waitUntil(runScheduledSignupObservation(env));
   ctx.waitUntil(reapExpiredPendings(env));
   ctx.waitUntil(runScheduledPlacementRunner(env));
   ctx.waitUntil(runScheduledAccountBackups(env, event?.scheduledTime));

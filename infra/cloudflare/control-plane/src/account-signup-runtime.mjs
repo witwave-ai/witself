@@ -13,6 +13,14 @@ import {
   verifyTurnstileToken,
 } from "./signup-turnstile.mjs";
 
+import {
+  SIGNUP_OBSERVATION_OBJECT,
+  isSignupObservationKey,
+  recordSignupObservation,
+  recordSignupObservationCount,
+  signupObservationSnapshot,
+} from "./signup-observation.mjs";
+
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 // Dark ToS/privacy consent version labels mirror the cell store's bounds:
@@ -315,8 +323,9 @@ async function responseBody(response) {
 /**
  * One instance named provision:<provision_id> serializes a public signup.
  * Instances named invite:<code> serialize exact invite consumption, and
- * signup-counter:<scope> instances serialize daily abuse counters. No role
- * ever persists the bootstrap token returned by a cell.
+ * signup-counter:<scope> instances serialize daily abuse counters. The
+ * signup-observation singleton holds only aggregate observation counters.
+ * No role ever persists the bootstrap token returned by a cell.
  */
 export class DurableAccountSignup {
   constructor(ctx, env, dependencies = {}) {
@@ -332,6 +341,15 @@ export class DurableAccountSignup {
     this.placeAccount = dependencies.placeAccount;
     this.sendVerification = dependencies.sendVerification ?? (() => false);
     this.logVerification = dependencies.logVerification ?? (() => {});
+    const recordObservation = dependencies.recordObservation ??
+      ((key) => recordSignupObservation(this.env, key));
+    this.recordObservation = async (key) => {
+      try {
+        await recordObservation(key);
+      } catch {
+        // Observations must never change a signup response or saved state.
+      }
+    };
     this.now = dependencies.now ?? (() => new Date());
     this.hash = dependencies.hash ?? sha256Hex;
     this.verifyTurnstile =
@@ -370,8 +388,15 @@ export class DurableAccountSignup {
 
   async handleFetch(request) {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/invite/status") {
+    if (request.method === "GET" &&
+        (url.pathname === "/invite/status" || url.pathname === "/observation/snapshot")) {
       try {
+        if (url.pathname === "/observation/snapshot") {
+          if (this.objectName !== SIGNUP_OBSERVATION_OBJECT) {
+            fail("account signup endpoint not found", 404);
+          }
+          return json({ schema_version: 1, counts: await signupObservationSnapshot(this.storage) });
+        }
         return await this.inviteStatus();
       } catch (error) {
         return errorResponse(
@@ -384,6 +409,10 @@ export class DurableAccountSignup {
     if (request.method !== "POST") {
       return errorResponse("account signup endpoint not found", 404);
     }
+    if (url.pathname === "/observation/record" &&
+        this.objectName !== SIGNUP_OBSERVATION_OBJECT) {
+      return errorResponse("account signup endpoint not found", 404);
+    }
     let input;
     try {
       input = await request.json();
@@ -391,6 +420,18 @@ export class DurableAccountSignup {
       return errorResponse("invalid JSON body", 400);
     }
     try {
+      if (url.pathname === "/observation/record") {
+        if (!isObject(input) || Object.keys(input).length !== 1 ||
+            !Object.hasOwn(input, "key") || !isSignupObservationKey(input.key)) {
+          fail("invalid signup observation", 400);
+        }
+        if (typeof this.storage.transaction !== "function") {
+          fail("signup observation transaction is unavailable", 503);
+        }
+        await this.storage.transaction((transaction) =>
+          recordSignupObservationCount(transaction, input.key));
+        return json({ ok: true });
+      }
       if (url.pathname === "/run") {
         return await this.run(input, request.signal);
       }
@@ -623,6 +664,7 @@ export class DurableAccountSignup {
       fail("signup Durable Object identity mismatch", 400);
     }
     const fingerprint = await this.hash(requestCanonical(request));
+    if (state === undefined) await this.recordObservation("started");
     if (state !== undefined) {
       requireStoredSignupState(state);
       if (
@@ -667,12 +709,14 @@ export class DurableAccountSignup {
         });
         if (verdict?.ok !== true) {
           if (verdict?.reason === "invalid") {
+            await this.recordObservation("turnstile_invalid");
             fail("turnstile challenge required", 403, {
               responseFields: {
                 challenge_url: signupChallengeURL(input.origin),
               },
             });
           }
+          await this.recordObservation("turnstile_unavailable");
           fail("turnstile verification unavailable", 503, {
             responseFields: { retryable: true },
           });
@@ -728,6 +772,7 @@ export class DurableAccountSignup {
           if (state?.phase === "abuse_preflight") {
             await this.storage.delete(STATE_KEY);
           }
+          await this.recordObservation("quota_per_ip");
           fail("signup rate limit exceeded", 429);
         }
       }
@@ -749,6 +794,7 @@ export class DurableAccountSignup {
           if (state?.phase === "abuse_preflight") {
             await this.storage.delete(STATE_KEY);
           }
+          await this.recordObservation("quota_global");
           fail("signup rate limit exceeded", 429);
         }
       }
@@ -841,163 +887,172 @@ export class DurableAccountSignup {
       }
     }
 
-    if (!phaseAtLeast(state, "cell_selected")) {
-      if (typeof this.placeAccount !== "function") {
-        fail("signup placement authority is unavailable", 503);
-      }
-      const placed = await this.placeAccount(state.placement);
-      if (placed?.fail instanceof Response) {
-        return placed.fail;
-      }
-      const cell = placed?.cell;
-      const registrationID =
-        cell?.registration_id ?? cell?.registered_at ?? null;
-      if (
-        !cell ||
-        !CELL_NAME.test(cell.name ?? "") ||
-        !registrationID
-      ) {
-        fail("no eligible cell registration is available", 503);
-      }
-      state = await this.advance(state, "cell_selected", {
-        cell: {
-          name: cell.name,
-          registration_id: registrationID,
-        },
-      });
-    }
-
-    let cell = await this.exactCell(state);
-    if (!phaseAtLeast(state, "protocol_verified")) {
-      await this.requireProvisionProtocol(cell);
-      state = await this.advance(state, "protocol_verified");
-    }
-
-    if (!phaseAtLeast(state, "target_reserved")) {
-      const begun = await this.targetRequestImpl(
-        state.cell.name,
-        "/provision/begin",
-        {
-          provision_id: state.provision_id,
-          registration_id: state.cell.registration_id,
-        },
-      );
-      if (
-        begun?.provision_id !== state.provision_id ||
-        begun?.registration_id !== state.cell.registration_id
-      ) {
-        fail("target cell returned an invalid provisioning reservation", 502);
-      }
-      state = await this.advance(state, "target_reserved");
-    }
-
-    // Always replay the same cell operation, including after completion. The
-    // cell reissues a fresh bootstrap token only while its exact receipt still
-    // points at a pending, unclaimed account. The token stays on this stack.
-    cell = await this.exactCell(state);
-    const cellReceipt = await this.provisionAtCell(state, cell, request);
-    const account = cellReceipt.account;
-    if (state.account) {
-      for (
-        const field of ["account_id", "operator_id", "status"]
-      ) {
-        if (state.account[field] !== account[field]) {
-          fail("cell provisioning receipt changed across replay", 409);
+    const provisionAttempt = !phaseAtLeast(state, "completed");
+    let cell, cellReceipt, account, pendingKey, pending;
+    try {
+      if (!phaseAtLeast(state, "cell_selected")) {
+        if (typeof this.placeAccount !== "function") {
+          fail("signup placement authority is unavailable", 503);
         }
+        const placed = await this.placeAccount(state.placement);
+        if (placed?.fail instanceof Response) {
+          if (provisionAttempt) await this.recordObservation("provision_failed");
+          return placed.fail;
+        }
+        const cell = placed?.cell;
+        const registrationID =
+          cell?.registration_id ?? cell?.registered_at ?? null;
+        if (
+          !cell ||
+          !CELL_NAME.test(cell.name ?? "") ||
+          !registrationID
+        ) {
+          fail("no eligible cell registration is available", 503);
+        }
+        state = await this.advance(state, "cell_selected", {
+          cell: {
+            name: cell.name,
+            registration_id: registrationID,
+          },
+        });
       }
-    } else {
-      state = await this.advance(state, "cell_acknowledged", {
-        account: {
-          account_id: account.account_id,
-          operator_id: account.operator_id,
-          status: account.status,
-        },
-      });
-    }
 
-    if (!phaseAtLeast(state, "target_attached")) {
-      const attached = await this.targetRequestImpl(
-        state.cell.name,
-        "/provision/attach",
-        {
-          provision_id: state.provision_id,
-          registration_id: state.cell.registration_id,
-          account_id: state.account.account_id,
-          route_epoch: 0,
-        },
-      );
-      if (
-        attached?.provision_id !== state.provision_id ||
-        attached?.account_id !== state.account.account_id ||
-        attached?.attached !== true
-      ) {
-        fail("target cell returned an invalid provisioning attachment", 502);
+      cell = await this.exactCell(state);
+      if (!phaseAtLeast(state, "protocol_verified")) {
+        await this.requireProvisionProtocol(cell);
+        state = await this.advance(state, "protocol_verified");
       }
-      state = await this.advance(state, "target_attached");
-    }
 
-    const pendingKey = `pending:${state.account.account_id}`;
-    const pending = {
-      cell: state.cell.name,
-      created_at: state.created_at,
-      route_epoch: 0,
-      provision_id: state.provision_id,
-    };
-    if (!phaseAtLeast(state, "pending_projected")) {
-      await this.env.DIRECTORY.put(pendingKey, JSON.stringify(pending));
-      state = await this.advance(state, "pending_projected");
-    }
-
-    const routeKey = `acct:${state.account.account_id}`;
-    const route = {
-      cell: state.cell.name,
-      endpoint: cell.endpoint,
-      region: cell.region ?? null,
-      region_code: cell.region_code ?? null,
-      cell_registration_id: state.cell.registration_id,
-      epoch: 0,
-    };
-    if (!phaseAtLeast(state, "route_projected")) {
-      const current = await this.env.DIRECTORY.get(routeKey, {
-        type: "json",
-      });
-      if (
-        current &&
-        (
-          current.cell !== route.cell ||
-          current.cell_registration_id !== route.cell_registration_id ||
-          (Number.isSafeInteger(current.epoch) ? current.epoch : 0) !== 0
-        )
-      ) {
-        fail("account route changed before signup projection", 409);
+      if (!phaseAtLeast(state, "target_reserved")) {
+        const begun = await this.targetRequestImpl(
+          state.cell.name,
+          "/provision/begin",
+          {
+            provision_id: state.provision_id,
+            registration_id: state.cell.registration_id,
+          },
+        );
+        if (
+          begun?.provision_id !== state.provision_id ||
+          begun?.registration_id !== state.cell.registration_id
+        ) {
+          fail("target cell returned an invalid provisioning reservation", 502);
+        }
+        state = await this.advance(state, "target_reserved");
       }
-      await this.env.DIRECTORY.put(routeKey, JSON.stringify(route));
-      state = await this.advance(state, "route_projected");
-    }
 
-    if (!phaseAtLeast(state, "resident_promoted")) {
-      const promoted = await this.targetRequestImpl(
-        state.cell.name,
-        "/provision/promote",
-        {
-          provision_id: state.provision_id,
-          registration_id: state.cell.registration_id,
-          account_id: state.account.account_id,
-          route_epoch: 0,
-        },
-      );
-      if (
-        promoted?.provision_id !== state.provision_id ||
-        promoted?.account_id !== state.account.account_id ||
-        promoted?.resident !== true
-      ) {
-        fail("target cell returned an invalid resident promotion", 502);
+      // Always replay the same cell operation, including after completion. The
+      // cell reissues a fresh bootstrap token only while its exact receipt still
+      // points at a pending, unclaimed account. The token stays on this stack.
+      cell = await this.exactCell(state);
+      cellReceipt = await this.provisionAtCell(state, cell, request);
+      account = cellReceipt.account;
+      if (state.account) {
+        for (
+          const field of ["account_id", "operator_id", "status"]
+        ) {
+          if (state.account[field] !== account[field]) {
+            fail("cell provisioning receipt changed across replay", 409);
+          }
+        }
+      } else {
+        state = await this.advance(state, "cell_acknowledged", {
+          account: {
+            account_id: account.account_id,
+            operator_id: account.operator_id,
+            status: account.status,
+          },
+        });
       }
-      state = await this.advance(state, "resident_promoted");
-    }
 
-    if (!phaseAtLeast(state, "completed")) {
-      state = await this.advance(state, "completed");
+      if (!phaseAtLeast(state, "target_attached")) {
+        const attached = await this.targetRequestImpl(
+          state.cell.name,
+          "/provision/attach",
+          {
+            provision_id: state.provision_id,
+            registration_id: state.cell.registration_id,
+            account_id: state.account.account_id,
+            route_epoch: 0,
+          },
+        );
+        if (
+          attached?.provision_id !== state.provision_id ||
+          attached?.account_id !== state.account.account_id ||
+          attached?.attached !== true
+        ) {
+          fail("target cell returned an invalid provisioning attachment", 502);
+        }
+        state = await this.advance(state, "target_attached");
+      }
+
+      pendingKey = `pending:${state.account.account_id}`;
+      pending = {
+        cell: state.cell.name,
+        created_at: state.created_at,
+        route_epoch: 0,
+        provision_id: state.provision_id,
+      };
+      if (!phaseAtLeast(state, "pending_projected")) {
+        await this.env.DIRECTORY.put(pendingKey, JSON.stringify(pending));
+        state = await this.advance(state, "pending_projected");
+      }
+
+      const routeKey = `acct:${state.account.account_id}`;
+      const route = {
+        cell: state.cell.name,
+        endpoint: cell.endpoint,
+        region: cell.region ?? null,
+        region_code: cell.region_code ?? null,
+        cell_registration_id: state.cell.registration_id,
+        epoch: 0,
+      };
+      if (!phaseAtLeast(state, "route_projected")) {
+        const current = await this.env.DIRECTORY.get(routeKey, {
+          type: "json",
+        });
+        if (
+          current &&
+          (
+            current.cell !== route.cell ||
+            current.cell_registration_id !== route.cell_registration_id ||
+            (Number.isSafeInteger(current.epoch) ? current.epoch : 0) !== 0
+          )
+        ) {
+          fail("account route changed before signup projection", 409);
+        }
+        await this.env.DIRECTORY.put(routeKey, JSON.stringify(route));
+        state = await this.advance(state, "route_projected");
+      }
+
+      if (!phaseAtLeast(state, "resident_promoted")) {
+        const promoted = await this.targetRequestImpl(
+          state.cell.name,
+          "/provision/promote",
+          {
+            provision_id: state.provision_id,
+            registration_id: state.cell.registration_id,
+            account_id: state.account.account_id,
+            route_epoch: 0,
+          },
+        );
+        if (
+          promoted?.provision_id !== state.provision_id ||
+          promoted?.account_id !== state.account.account_id ||
+          promoted?.resident !== true
+        ) {
+          fail("target cell returned an invalid resident promotion", 502);
+        }
+        state = await this.advance(state, "resident_promoted");
+      }
+
+      if (!phaseAtLeast(state, "completed")) {
+        state = await this.advance(state, "completed");
+        await this.recordObservation("provisioned");
+      }
+    } catch (error) {
+      if (provisionAttempt) await this.recordObservation("provision_failed");
+      throw error;
     }
 
     if (!state.email_attempted) {
@@ -1033,11 +1088,12 @@ export class DurableAccountSignup {
             email: request.email,
           });
         }
-      } catch (error) {
+      } catch {
         console.log(
-          `signup: verification email for ${state.account.account_id} failed: ${error}`,
+          `signup: verification email step failed for ${state.account.account_id} (reason=email_send_or_record_error)`,
         );
       }
+      await this.recordObservation(emailSent === true ? "email_signup_sent" : "email_signup_failed");
       if (emailSent) {
         state = await this.save({
           ...state,

@@ -1789,7 +1789,7 @@ test("an ambiguous counter outcome replays its marker without re-verifying Turns
         }
         const response = await runtime.fetch(request);
         const body = await response.clone().json();
-        counterCalls.push({ scope: id.name, ...body });
+        if (id.name !== "signup-observation") counterCalls.push({ scope: id.name, ...body });
         if (id.name === "signup-counter:global" && loseGlobalResponse) {
           loseGlobalResponse = false;
           throw new Error("simulated lost committed counter response");

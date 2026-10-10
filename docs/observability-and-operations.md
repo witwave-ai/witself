@@ -1751,3 +1751,77 @@ for traversal/KV consistency limits and the separate default-off alert gate.
 Tests and rendered rules establish capability only; actual Worker deployment,
 fresh observation checks and alert activation require a later authorized
 rollout.
+
+## Signup funnel and verification email observations
+
+The public, unauthenticated CP `/metrics/probes` response includes aggregate
+`witself_signup_*` observations. A singleton named `signup-observation` in the
+existing `ACCOUNT_SIGNUP` namespace stores twelve lifetime counters under
+`observation:counts`. Signup, verification and resend record one closed outcome
+at each transition through a best-effort one-second deadline. No cell or Go
+container is called to collect these observations.
+
+Every five-minute maintenance tick reads that singleton, scans pending accounts
+sequentially, and writes one value-free `config:signup_observation` KV document.
+The document contains only schema version, observation time, the twelve counts
+and the pending scan's aggregate count, oldest creation time and completeness.
+The public scrape reads only that document, with its own five-second deadline.
+A missing, invalid or unreadable document emits only `witself_signup_metrics_up
+0`; it does not turn healthy probe HTTP 200 into 503. A failed singleton read
+preserves the previous document and lets its timestamp age.
+
+| Series | Meaning |
+|---|---|
+| `witself_signup_metrics_up` | A strictly valid document is readable; independent of its age or scan completeness. |
+| `witself_signup_observed_timestamp_seconds` | Publication time of the last successful maintenance observation, as Unix seconds. |
+| `witself_signup_events_total{event="started"}` | New-provision attempts admitted to the runtime's identity and fingerprint checks. |
+| `witself_signup_events_total{event="provisioned"}` | Transitions to completed provisioning. |
+| `witself_signup_events_total{event="provision_failed"}` | Failed provisioning attempts before completion, including placement failures. |
+| `witself_signup_events_total{event="verified"}` | Verification responses with an explicit `activated: true`. |
+| `witself_signup_denials_total{reason="quota_per_ip"}` | Daily per-IP quota denials inside the signup runtime. |
+| `witself_signup_denials_total{reason="quota_global"}` | Daily global quota denials. |
+| `witself_signup_denials_total{reason="turnstile_invalid"}` | Turnstile challenges rejected as invalid. |
+| `witself_signup_denials_total{reason="turnstile_unavailable"}` | Turnstile verification unavailable. |
+| `witself_signup_verification_email_total{context="signup",outcome="sent"}` | Signup email sends whose final send result is true. |
+| `witself_signup_verification_email_total{context="signup",outcome="failed"}` | Signup email attempts whose final send result is false or unavailable. |
+| `witself_signup_verification_email_total{context="resend",outcome="sent"}` | Successful verification-email resends. |
+| `witself_signup_verification_email_total{context="resend",outcome="failed"}` | Failed verification-email resends. |
+| `witself_signup_pending_scan_complete` | All listed pending keys fit within the scan's bounds and the listing ended. |
+| `witself_signup_pending_accounts` | Non-null pending values observed; omitted if the first list failed. |
+| `witself_signup_pending_oldest_age_seconds` | Age at scrape time of the earliest parseable pending creation time observed, clamped to zero; omitted when the count is unknown. |
+
+Counters are totals since the singleton was created. Record calls are
+best-effort: increments can be lost when a record times out, and a timed-out
+request that was already dispatched may still finish. These values are
+observations, not a ledger. `started` counts new-provision attempts, so a
+provision denied before state is saved and then retried counts again. A
+re-consent successor is not a new start. `provision_failed` counts failing
+attempts; invite, consent, legal and quota refusals are separate outcomes.
+Completed replay adds no provisioning or email count. A successful email send
+followed by a pending-record or audit-log failure remains `sent`.
+
+Pending scans use one list and at most 500 sequential reads, with a ten-second
+total deadline. The scan stops starting reads after eight seconds and publishes
+one partial document with `scan_complete` at zero. Partial pages, the read cap
+or a settled read failure also publish partial coverage; the reported count and
+oldest age then cover only observed rows. An unknown count omits both pending
+count and age. Age zero means
+"no pending account with a parseable time", including an empty scan. KV is
+eventually consistent, so even a complete scan is an observation rather than
+an exact simultaneous census. Only a KV call still stuck at the outer ten-second
+guard suppresses publication from the scan and leaves the old document unchanged,
+preventing a subsequent write from overlapping that unabortable operation.
+
+The KV cost is at most one list, 500 reads and one write per five-minute tick:
+about 4.3 million KV reads per 30-day month at the cap, and fewer while there
+are fewer pending accounts. Snapshot and document-write deadlines are each
+five seconds. The task never holds more than one KV or Durable Object call at
+a time.
+
+The closed label vocabulary is `event` (`started`, `provisioned`,
+`provision_failed`, `verified`), `reason` (`quota_per_ip`, `quota_global`,
+`turnstile_invalid`, `turnstile_unavailable`), `context` (`signup`, `resend`), and
+`outcome` (`sent`, `failed`). No email, IP, IP hash, account id, provision id or
+invite code appears anywhere in the observation document, singleton counter
+storage or metrics. Edge `SIGNUP_IP_LIMITER` rejections are deliberately
+uncounted to avoid waking the singleton for each rejected edge request.
