@@ -115,6 +115,14 @@ func TestNarrativeMemoryArchiveLoadPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory archive load testing is enabled")
 	}
+	switch os.Getenv("WITSELF_MEMORY_ARCHIVE_LOAD_PROFILE") {
+	case "", "ladder":
+	case "founder":
+		runFounderArchiveLoad(t, dsn)
+		return
+	default:
+		t.Fatal("WITSELF_MEMORY_ARCHIVE_LOAD_PROFILE must be ladder or founder")
+	}
 	opts, err := loadquality.ParseArchiveOptions(os.Getenv)
 	if err != nil {
 		t.Fatal(err)

@@ -218,6 +218,11 @@ jobs:
         env:
           WITSELF_TEST_REQUIRE_PEAK_MEMORY: "1"
         run: go test ./internal/export -run '^TestReadPeakMemory$' -count=1 -v -timeout=15m
+      - name: test import state memory (no race)
+        env:
+          WITSELF_TEST_REQUIRE_PEAK_MEMORY: "1"
+          WITSELF_TEST_REQUIRE_DATABASE: "1"
+        run: go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$' -count=1 -v -timeout=20m
 
       - name: Upload Go store coverage
         # yamllint disable-line rule:line-length
