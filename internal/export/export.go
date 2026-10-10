@@ -149,13 +149,13 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource, op
 		return err
 	}
 
+	var buf []byte
 	for _, src := range sources {
 		table := src.Table()
 		started := time.Now()
 		next, stop := watchSource(ctx, src, opts.Logger)
 		defer stop()
 		chunkNo := 0
-		buf := make([]byte, 0, chunkSize)
 		rows := 0
 		flush := func() error {
 			if rows == 0 {
@@ -177,7 +177,7 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource, op
 				Rows:   rows,
 			})
 			sums.TableRows[table] += rows
-			buf = buf[:0]
+			buf = resetChunkBuffer(buf)
 			rows = 0
 			return nil
 		}
@@ -197,6 +197,9 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource, op
 				if err := flush(); err != nil {
 					return err
 				}
+			}
+			if cap(buf) == 0 {
+				buf = make([]byte, 0, chunkSize)
 			}
 			buf = append(buf, row...)
 			buf = append(buf, '\n')
@@ -226,6 +229,14 @@ func Write(ctx context.Context, w io.Writer, m Manifest, sources []RowSource, op
 		return err
 	}
 	return gz.Close()
+}
+
+// resetChunkBuffer reuses ordinary chunks without retaining a solo oversized row.
+func resetChunkBuffer(buf []byte) []byte {
+	if cap(buf) > chunkSize {
+		return nil
+	}
+	return buf[:0]
 }
 
 func writeEntry(tw *tar.Writer, name string, data []byte) error {

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strconv"
 	"strings"
@@ -72,6 +73,13 @@ type ImportOptions struct {
 	// Row receives each table row, post-upgrade, in archive order. The
 	// archive writes tables in foreign-key dependency order, so inserting
 	// rows as they arrive satisfies references without buffering.
+	// The row slice is valid only until Row returns: Read reuses its memory
+	// for later rows. A callback retaining any part must copy it (bytes.Clone).
+	// Rows arrive while their entry streams in, before its checksum is known.
+	// Before ErrCorrupt for a truncated or damaged entry, Row may have received
+	// that entry's complete rows: only rows ending in a newline within the bytes
+	// the archive delivered, in order. A trailing fragment is never delivered.
+	// If Row returns an error, Read returns it unchanged and reads no further.
 	Row func(table string, row []byte) error
 }
 
@@ -79,7 +87,9 @@ type ImportOptions struct {
 // checksums. Rows are delivered to opts.Row as they are decoded; integrity
 // is only fully proven at the end, so callers MUST stage everything in a
 // transaction and commit only when Read returns nil — nothing may be
-// considered landed before that.
+// considered landed before that. Chunk-reading memory is a fixed read buffer
+// plus the largest row, not the entry size. A row longer than the read buffer
+// briefly needs a second copy while it is assembled.
 func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error) {
 	var m Manifest
 
@@ -140,6 +150,7 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 	tableIdx := 0 // position in m.Tables of the table currently streaming
 	nextChunk := 0
 	var sums *Checksums
+	entryReader := newEntryRowReader()
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -191,20 +202,9 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 		if opts.OnEntryStart != nil {
 			opts.OnEntryStart(EntryStart{Table: table, Chunk: chunkNo, EntryBytes: hdr.Size})
 		}
-		data, err := readEntry(tr, hdr)
-		if err != nil {
-			return m, err
-		}
-		sum := sha256.Sum256(data)
 		rows := 0
 		stats := EntryStats{Table: table, Chunk: chunkNo, EntryBytes: hdr.Size}
-		for len(data) > 0 {
-			nl := bytes.IndexByte(data, '\n')
-			if nl < 0 {
-				return m, fmt.Errorf("%w: %s: unterminated row", ErrCorrupt, hdr.Name)
-			}
-			row := data[:nl]
-			data = data[nl+1:]
+		err = entryReader.readEntry(tr, hdr, func(row []byte) error {
 			rows++
 			if len(row) > stats.LargestRowBytes {
 				stats.LargestRowBytes = len(row)
@@ -214,19 +214,20 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 			}
 			row, err := upgradeRow(table, row, m.SchemaVersion, opts.CurrentSchema)
 			if err != nil {
-				return m, err
+				return err
 			}
 			if row == nil {
-				continue // upgrader dropped the row
+				return nil // upgrader dropped the row
 			}
 			if opts.Row != nil {
 				if err := opts.Row(table, row); err != nil {
-					return m, err
+					return err
 				}
 			}
-			if err := ctx.Err(); err != nil {
-				return m, err
-			}
+			return ctx.Err()
+		})
+		if err != nil {
+			return m, err
 		}
 		if opts.OnEntry != nil {
 			stats.Rows = rows
@@ -234,7 +235,7 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 		}
 		seen[hdr.Name] = ChunkSum{
 			Name:   hdr.Name,
-			SHA256: hex.EncodeToString(sum[:]),
+			SHA256: hex.EncodeToString(entryReader.hasher.Sum(nil)),
 			Bytes:  int(hdr.Size),
 			Rows:   rows,
 		}
@@ -303,6 +304,125 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 		}
 	}
 	return m, nil
+}
+
+const entryReadBufferBytes = 256 << 10
+
+// entrySizeReader preserves readEntry's io.ReadFull boundary semantics while
+// streaming: a short entry fails, but an error accompanying its final bytes is
+// left for tar.Reader.Next to report after the entry completes.
+type entrySizeReader struct {
+	reader io.Reader
+	hdr    *tar.Header
+	got    int64
+}
+
+func (r *entrySizeReader) Read(p []byte) (int, error) {
+	if r.got == r.hdr.Size {
+		return 0, io.EOF
+	}
+	if remaining := r.hdr.Size - r.got; int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.got += int64(n)
+	if r.got == r.hdr.Size {
+		return n, nil
+	}
+	if err == io.EOF && r.got < r.hdr.Size {
+		if r.got > 0 {
+			err = io.ErrUnexpectedEOF
+		}
+		return n, fmt.Errorf("%w: %s: %v", ErrCorrupt, r.hdr.Name, err)
+	}
+	if err != nil && err != io.EOF {
+		return n, fmt.Errorf("%w: %s: %v", ErrCorrupt, r.hdr.Name, err)
+	}
+	return n, err
+}
+
+// entryRowReader belongs to one Read call. Only assembled rows use rowBuf;
+// ordinary rows borrow the fixed bufio buffer for the duration of the callback.
+type entryRowReader struct {
+	reader *bufio.Reader
+	rowBuf []byte
+	pieces [][]byte
+	hasher hash.Hash
+}
+
+func newEntryRowReader() *entryRowReader {
+	return &entryRowReader{
+		reader: bufio.NewReaderSize(nil, entryReadBufferBytes),
+		hasher: sha256.New(),
+	}
+}
+
+func (r *entryRowReader) readEntry(tr *tar.Reader, hdr *tar.Header, row func([]byte) error) error {
+	defer func() {
+		r.pieces = nil
+		r.rowBuf = r.rowBuf[:0]
+		if cap(r.rowBuf) > 1<<20 {
+			r.rowBuf = nil
+		}
+	}()
+	if hdr.Size > maxChunkBytes {
+		return fmt.Errorf("%w: entry %s claims %d bytes", ErrCorrupt, hdr.Name, hdr.Size)
+	}
+	r.hasher.Reset()
+	r.reader.Reset(io.TeeReader(&entrySizeReader{reader: tr, hdr: hdr}, r.hasher))
+	for {
+		segment, err := r.reader.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			if len(r.pieces) == 0 && len(r.rowBuf)+len(segment) <= cap(r.rowBuf) {
+				r.rowBuf = append(r.rowBuf, segment...)
+			} else {
+				piece := make([]byte, len(segment))
+				copy(piece, segment)
+				r.pieces = append(r.pieces, piece)
+			}
+			continue
+		}
+		if err != nil {
+			// Bytes returned with an error are a fragment, never another row.
+			if err == io.EOF {
+				if len(segment) == 0 && len(r.rowBuf) == 0 && len(r.pieces) == 0 {
+					return nil
+				}
+				return fmt.Errorf("%w: %s: unterminated row", ErrCorrupt, hdr.Name)
+			}
+			if errors.Is(err, ErrCorrupt) {
+				return err // entrySizeReader already adds the readEntry diagnostic.
+			}
+			return fmt.Errorf("%w: %s: %v", ErrCorrupt, hdr.Name, err)
+		}
+		tail := segment[:len(segment)-1]
+		if len(r.rowBuf) == 0 && len(r.pieces) == 0 {
+			if err := row(tail); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(r.pieces) == 0 && len(r.rowBuf)+len(tail) <= cap(r.rowBuf) {
+			r.rowBuf = append(r.rowBuf, tail...)
+		} else {
+			size := len(r.rowBuf) + len(tail)
+			for _, piece := range r.pieces {
+				size += len(piece)
+			}
+			assembled := make([]byte, size)
+			offset := copy(assembled, r.rowBuf)
+			for _, piece := range r.pieces {
+				offset += copy(assembled[offset:], piece)
+			}
+			copy(assembled[offset:], tail)
+			r.rowBuf = assembled
+			r.pieces = nil
+		}
+		if err := row(r.rowBuf); err != nil {
+			return err
+		}
+		r.rowBuf = r.rowBuf[:0]
+	}
 }
 
 // archiveCompletionReader forwards unchanged until completion arms ctx.
