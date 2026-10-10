@@ -278,8 +278,12 @@ The apps schema accepts only `requests` and `limits`, with Kubernetes quantities
 as their values.
 
 The backup cell deliberately keeps the server chart defaults as the OOM
-early-warning canary. Production resource changes belong in their own slice,
-never alongside a pin change.
+early-warning canary. `civo-prod-use1-serving` sets all three keys: requests of
+50m CPU and 128Mi memory, and a 512Mi memory limit (design 2026-10-09 S5).
+Case G of `scripts/testdata/apps-server-resources.rb` and
+`TestProductionServerResources` pin those values and the rendered pod spec.
+Production resource changes belong in their own change, never alongside a pin
+change.
 
 ## Serving-cell monitoring extensions
 
