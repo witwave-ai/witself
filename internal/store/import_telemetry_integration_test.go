@@ -327,9 +327,10 @@ func assertImportTelemetryLines(t *testing.T, output string, fixture importTelem
 		allowedTables[table.name] = true
 	}
 	refKeys := ""
-	if fixture.info.Purpose == "backup_validation" {
+	switch fixture.info.Purpose {
+	case "backup_validation":
 		refKeys = " backup_id"
-	} else if fixture.info.Purpose == "evacuation_import" {
+	case "evacuation_import":
 		refKeys = " evacuation_id"
 	}
 	wantedChunks := make(map[string]archiveexport.ChunkSum)

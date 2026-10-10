@@ -35,7 +35,7 @@ func TestReadEntryHooks(t *testing.T) {
 		{Table: "tokens", Chunk: 1, EntryBytes: 3, Rows: 1, LargestRowBytes: 2},
 	}
 	// Changing every delivered row proves byte counts are taken before upgrade.
-	upgraders[13] = func(_ string, row map[string]any) (map[string]any, error) {
+	upgraders[13] = func(_ string, _ map[string]any) (map[string]any, error) {
 		return map[string]any{"upgraded": true}, nil
 	}
 	t.Cleanup(func() { delete(upgraders, 13) })
