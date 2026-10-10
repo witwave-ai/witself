@@ -239,12 +239,14 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Durable phases and value-free logs are inspectable, and a tested external receiver now exists on the monitoring plane, but continuous signup funnel, delivery, pending-age, recovery-failure, and abuse signals are not yet connected to it.",
+          "summary": "Global-quota denials and provisioning and verification-email failure ratios now page through uptime-probe rules. Pending-age, Turnstile and per-IP counters are exported but not alerted; recovery-failure signals are not connected.",
           "evidence": [
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/files/uptime-probes.rules.yaml",
             "docs/launch-readiness.md",
             "docs/observability-and-operations.md",
-            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs",
+            "infra/cloudflare/control-plane/src/signup-observation.mjs"
           ]
         },
         "recovery": {
@@ -286,7 +288,7 @@
         {
           "id": "signup-operations-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect value-free phase, delivery, pending-age, recovery, and abuse signals to continuous dashboards and a tested external receiver.",
+          "summary": "Connect pending-age and Turnstile alerting, recovery-failure signals, and continuous dashboards.",
           "ref": "docs/observability-and-operations.md"
         },
         {

@@ -138,6 +138,10 @@ func TestBillingAlertRulesMatchEmitterAndRunbooks(t *testing.T) {
 				"WitselfBillingReconciliationStalled",
 				"WitselfStripeWebhookProcessingFailures",
 				"WitselfBillingMutationRecoveryFailing",
+				"WitselfSignupGlobalQuotaDenied",
+				"WitselfSignupProvisioningFailureRatioHigh",
+				"WitselfVerificationEmailFailureRatioHigh",
+				"WitselfSignupMetricsUnavailable",
 			},
 		},
 		{
