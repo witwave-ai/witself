@@ -998,10 +998,13 @@ func writeAgentEmailCellStoragePrometheus(
 }
 
 // SupportSLOMetrics is the value-free first-response posture: tickets still
-// waiting for their first fleet-side answer, and the oldest wait in seconds.
+// waiting for their first fleet-side answer, their oldest and newest waits,
+// and the count of urgent-priority tickets among them.
 type SupportSLOMetrics struct {
 	UnansweredTickets       int64
 	OldestUnansweredSeconds int64
+	NewestUnansweredSeconds int64
+	UnansweredUrgentTickets int64
 }
 
 // writeSupportSLOPrometheus renders the support first-response posture. The
@@ -1020,13 +1023,18 @@ func writeSupportSLOPrometheus(
 	readCtx, cancel := context.WithTimeout(ctx, agentEmailCellStorageMetricsTimeout)
 	defer cancel()
 	status, err := read(readCtx)
-	if err != nil || status.UnansweredTickets < 0 || status.OldestUnansweredSeconds < 0 {
+	if err != nil || status.UnansweredTickets < 0 || status.OldestUnansweredSeconds < 0 ||
+		status.NewestUnansweredSeconds < 0 || status.UnansweredUrgentTickets < 0 ||
+		status.NewestUnansweredSeconds > status.OldestUnansweredSeconds ||
+		status.UnansweredUrgentTickets > status.UnansweredTickets {
 		_, _ = fmt.Fprintln(w, "witself_support_slo_metrics_up 0")
 		return
 	}
 	_, _ = fmt.Fprintln(w, "witself_support_slo_metrics_up 1")
 	writeIntGauge(w, "witself_support_unanswered_tickets", "Tickets awaiting their first fleet-side response.", status.UnansweredTickets)
 	writeIntGauge(w, "witself_support_oldest_unanswered_seconds", "Age of the oldest ticket awaiting its first response.", status.OldestUnansweredSeconds)
+	writeIntGauge(w, "witself_support_newest_unanswered_seconds", "Age of the newest ticket awaiting its first response.", status.NewestUnansweredSeconds)
+	writeIntGauge(w, "witself_support_unanswered_urgent_tickets", "Urgent-priority tickets awaiting their first fleet-side response.", status.UnansweredUrgentTickets)
 }
 
 // SealedPlanePostureMetrics contains only cell-wide counts and ages; no tenant identifiers.

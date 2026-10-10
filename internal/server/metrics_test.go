@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -829,27 +830,68 @@ func metricsMuxForCellStorageTest(
 func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
 	ok := httptest.NewRecorder()
 	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
-		return SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 90061}, nil
+		return SupportSLOMetrics{
+			UnansweredTickets: 2, OldestUnansweredSeconds: 90061,
+			NewestUnansweredSeconds: 61, UnansweredUrgentTickets: 1,
+		}, nil
 	}, nil, nil, nil, nil, nil, nil).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := ok.Body.String()
 	for _, want := range []string{
 		"witself_support_slo_metrics_up 1",
 		"witself_support_unanswered_tickets 2",
 		"witself_support_oldest_unanswered_seconds 90061",
+		"witself_support_newest_unanswered_seconds 61",
+		"witself_support_unanswered_urgent_tickets 1",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, body)
 		}
 	}
-	broken := httptest.NewRecorder()
-	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
-		return SupportSLOMetrics{}, errors.New("db down with tenant detail")
-	}, nil, nil, nil, nil, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	b := broken.Body.String()
-	if !strings.Contains(b, "witself_support_slo_metrics_up 0") ||
-		strings.Contains(b, "witself_support_unanswered_tickets") ||
-		strings.Contains(b, "db down") {
-		t.Fatalf("failed read leaked or rendered gauges:\n%s", b)
+	sampleShape := regexp.MustCompile(`^witself_support_[a-z_]+ [0-9]+$`)
+	samples := 0
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "witself_support_") {
+			samples++
+			if !sampleShape.MatchString(line) {
+				t.Fatalf("support sample must be label-free: %q", line)
+			}
+		}
+	}
+	if samples != 5 {
+		t.Fatalf("support sample count = %d, want 5", samples)
+	}
+	for _, tc := range []struct {
+		name   string
+		status SupportSLOMetrics
+		err    error
+	}{
+		{name: "broken read", err: errors.New("db down with tenant detail")},
+		{name: "newest exceeds oldest", status: SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 60, NewestUnansweredSeconds: 61}},
+		{name: "urgent exceeds unanswered", status: SupportSLOMetrics{UnansweredTickets: 2, UnansweredUrgentTickets: 3}},
+		{name: "negative newest", status: SupportSLOMetrics{NewestUnansweredSeconds: -1}},
+		{name: "negative oldest", status: SupportSLOMetrics{OldestUnansweredSeconds: -1}},
+		{name: "negative unanswered", status: SupportSLOMetrics{UnansweredTickets: -1}},
+		{name: "negative urgent", status: SupportSLOMetrics{UnansweredUrgentTickets: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			broken := httptest.NewRecorder()
+			metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
+				return tc.status, tc.err
+			}, nil, nil, nil, nil, nil, nil).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			b := broken.Body.String()
+			samples := 0
+			for _, line := range strings.Split(b, "\n") {
+				if strings.HasPrefix(line, "witself_support_") {
+					samples++
+					if line != "witself_support_slo_metrics_up 0" {
+						t.Fatalf("failed read rendered support gauge: %q", line)
+					}
+				}
+			}
+			if samples != 1 || strings.Contains(b, "db down") || strings.Contains(b, "tenant detail") {
+				t.Fatal("failed read must render only _up 0 without error detail")
+			}
+		})
 	}
 }
 

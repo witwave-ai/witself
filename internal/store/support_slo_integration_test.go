@@ -9,8 +9,9 @@ import (
 	"github.com/witwave-ai/witself/internal/testenv"
 )
 
-// The SLO read against Postgres: empty queue reads zero/zero, an unanswered
-// ticket counts with a positive age, and the first fleet-side reply clears it.
+// The SLO read against Postgres distinguishes oldest/newest unanswered ages
+// and urgent tickets, then clears each ticket after its first fleet-side reply.
+// Counts use deltas because other tests can leave tickets in the shared schema.
 func TestReadSupportSLOMetricsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -75,9 +76,56 @@ func TestReadSupportSLOMetricsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if during.UnansweredTickets != before.UnansweredTickets+1 ||
-		during.OldestUnansweredSeconds < 0 {
-		t.Fatalf("during = %+v (before %+v); want one more unanswered, age >= 0",
+		during.OldestUnansweredSeconds < 0 ||
+		during.NewestUnansweredSeconds < 0 || during.NewestUnansweredSeconds > 60 ||
+		during.NewestUnansweredSeconds > during.OldestUnansweredSeconds ||
+		during.UnansweredUrgentTickets != before.UnansweredUrgentTickets {
+		t.Fatalf("during = %+v (before %+v); want one more unanswered, newest age 0..60 <= oldest, unchanged urgent count",
 			during, before)
+	}
+
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE support_tickets SET opened_at = now() - interval '2 hours' WHERE account_id = $1 AND id = $2`,
+		accountID, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	urgent, _, err := st.OpenTicket(ctx, OpenTicketInput{
+		AccountID:  accountID,
+		OperatorID: provisioned.OperatorID,
+		Subject:    "urgent slo probe",
+		Body:       "an urgent first response is needed",
+		Priority:   TicketPriorityUrgent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withUrgent, err := st.ReadSupportSLOMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withUrgent.UnansweredTickets != before.UnansweredTickets+2 ||
+		withUrgent.UnansweredUrgentTickets != before.UnansweredUrgentTickets+1 ||
+		withUrgent.OldestUnansweredSeconds < 7200 ||
+		withUrgent.NewestUnansweredSeconds < 0 || withUrgent.NewestUnansweredSeconds > 60 ||
+		withUrgent.NewestUnansweredSeconds > withUrgent.OldestUnansweredSeconds {
+		t.Fatalf("with urgent = %+v (before %+v); want two more unanswered, one more urgent, oldest age >= 7200, newest age 0..60 <= oldest",
+			withUrgent, before)
+	}
+
+	if _, err := st.ReplyAdminTicket(ctx, ReplyAdminInput{
+		AccountID: accountID, AdminHandle: "scott",
+		TicketID: urgent.ID, Body: "answering the urgent ticket first",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	afterUrgent, err := st.ReadSupportSLOMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterUrgent.UnansweredUrgentTickets != before.UnansweredUrgentTickets ||
+		afterUrgent.UnansweredTickets != before.UnansweredTickets+1 {
+		t.Fatalf("after urgent reply = %+v (before %+v); want unchanged urgent count and one more unanswered",
+			afterUrgent, before)
 	}
 
 	if _, err := st.ReplyAdminTicket(ctx, ReplyAdminInput{
