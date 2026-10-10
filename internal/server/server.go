@@ -271,7 +271,7 @@ type Config struct {
 	FinalizeAccountEvacuation func(ctx context.Context, accountID, evacuationID string) (AccountEvacuationFinalizationRecord, error)
 
 	// StreamAccountExport, when set (with the provisioning pair), enables
-	// POST /v1/accounts/{id}:export — streaming the account's complete
+	// POST /v1/accounts/{id}:export-evacuation — streaming the account's complete
 	// logical archive. Refuses unless the account is suspended or closed
 	// (ErrConflict): the write freeze is what makes the snapshot consistent.
 	// Errors after the first byte can only be signaled in-stream; the
@@ -284,6 +284,8 @@ type Config struct {
 	// include archive content; accountID and the exact export error are the
 	// complete input.
 	ReportAccountExportFailure func(ctx context.Context, accountID string, err error)
+	// ExportWriteStallTimeout is a test override; zero uses 150 seconds.
+	ExportWriteStallTimeout time.Duration
 	// ReportAccountBackupValidationFailure observes a rollback-only validation
 	// that could not acknowledge: a failed archive download or a classified
 	// import error. The handler answers the control plane with a value-free
@@ -5395,8 +5397,11 @@ func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) h
 			// the archive's own trailing checksums are the integrity story.
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-Witself-Export-Format", "1")
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			guard := newExportWriteGuard(w, exportWriteStallTimeout(cfg), cancel)
 			err := cfg.StreamAccountExport(
-				r.Context(), accountID, evacuationID, w, http.NewResponseController(w).Flush,
+				ctx, accountID, evacuationID, guard, guard.Flush,
 			)
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -5414,6 +5419,9 @@ func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) h
 					cfg.ReportAccountExportFailure(r.Context(), accountID, err)
 				}
 				return
+			}
+			if err := guard.finish(); err != nil && cfg.ReportAccountExportFailure != nil {
+				cfg.ReportAccountExportFailure(r.Context(), accountID, err)
 			}
 			return
 		}
@@ -5995,14 +6003,11 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			w.Header().Set("X-Witself-Export-Purpose", "backup")
 			w.Header().Set(AccountBackupIDHeader, backupID)
 			w.Header().Set(AccountBackupCellHeader, cellName)
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			guard := newExportWriteGuard(w, exportWriteStallTimeout(cfg), cancel)
 			err := cfg.StreamAccountBackup(
-				r.Context(), exportAccountID, backupID, cellName, w, func() error {
-					err := http.NewResponseController(w).Flush()
-					if errors.Is(err, http.ErrNotSupported) {
-						return nil
-					}
-					return err
-				},
+				ctx, exportAccountID, backupID, cellName, guard, guard.Flush,
 			)
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -6017,6 +6022,10 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 					cfg.ReportAccountExportFailure(
 						r.Context(), exportAccountID, err,
 					)
+				}
+			default:
+				if err := guard.finish(); err != nil && cfg.ReportAccountExportFailure != nil {
+					cfg.ReportAccountExportFailure(r.Context(), exportAccountID, err)
 				}
 			}
 			return
