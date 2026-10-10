@@ -21,6 +21,83 @@ memory or message content, vector/profile values, database metadata, and error
 text are never collected. Families not named in this implementation note are
 still pending rather than silently implied by the document.
 
+Server memory instrumentation (2026-10-09): `/metrics` samples the Go runtime
+at scrape time. All six series are unlabelled:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `witself_go_heap_live_bytes` | gauge | Live heap after the most recent GC. |
+| `witself_go_heap_goal_bytes` | gauge | Current GC heap goal. |
+| `witself_go_memory_total_bytes` | gauge | Go total memory minus heap pages released to the OS. |
+| `witself_go_memory_limit_bytes` | gauge | Go soft limit; 9223372036854775807 means unlimited. |
+| `witself_go_gc_cycles_total` | counter | Completed GC cycles. |
+| `witself_container_memory_limit_bytes` | gauge | Finite cgroup limit found at startup, or 0 when none. |
+
+The server and worker detect cgroup v2, then v1, before opening the store or
+starting listeners or jobs. A finite limit sets the Go soft limit to 75% using
+`L/4*3`: 201326592 bytes for a 256Mi server and 402653184 for a 512Mi worker.
+The reserve allows for GC overshoot, non-Go resident memory, and dirty spool
+page cache. A present `GOMEMLIMIT`, including `off` or an empty value, preserves
+the operator's setting; its value is never logged. On the server, detection
+also supplies the container gauge and import sampler. Startup emits exactly
+one memory line:
+
+```text
+<prefix>: memory limit applied source="cgroup-v2" cgroup_limit=<L> soft_limit=<limit> factor_percent=75
+<prefix>: memory limit unchanged source="env" cgroup_source="cgroup-v2" cgroup_limit=<L> soft_limit=<limit>
+<prefix>: memory limit unchanged source="none" reason="no_cgroup_file"
+```
+
+The applied and detected source can also be `cgroup-v1`; an env override can
+have `cgroup_source="none"` with limit 0. No-limit reasons are `no_cgroup_file`,
+`unlimited`, `unreadable`, or `unparseable`. The prefix is `witself-server` or
+`witself-worker`. Detection failures do not prevent startup.
+
+Before serving, the server removes direct regular files matching
+`^witself-(backup-validate|account-import|self-export)-[0-9]{1,10}\.tar\.gz$`
+from `os.TempDir()`, then emits:
+
+```text
+witself-server: stale archive spool sweep dir=%q removed=%d bytes=%d failed=%d
+```
+
+Symlinks, directories, nested files, and near-matching names survive. Removal
+failures are counted and are not fatal. This assumes one witself-server per
+temp directory. The chart uses a per-pod `/tmp` emptyDir; self-hosters running
+multiple servers on one host must give each server its own `TMPDIR`. The worker
+does not sweep.
+
+Every call that reaches the importer, after request-ID validation, uses a fresh
+tracker and emits value-free telemetry, including backup validation and
+evacuation leases: counts, sizes, runtime memory, canonical table names, and IDs
+from the request. Row content, archive
+column names, manifest IDs, and error text never enter these lines. Purpose is
+`backup_validation`, `evacuation_import`, or `import`; `<ref>` is `backup_id=%q`
+for validation, `evacuation_id=%q` for evacuation, and absent for plain import.
+A row of at least 4 MiB is logged immediately before decoding, even if decoding
+fails. Rows of at least 1 MiB are sampled after processing. Each completed chunk
+emits an entry line, and every call that reaches the importer, after request-ID
+validation, emits one deferred summary:
+
+```text
+<prefix>: account import large row purpose=%q account_id=%q <ref> table=%q chunk=%d row_bytes=%d go_live=%d go_total=%d go_limit=%d anon=%d rss=%d
+<prefix>: account import entry purpose=%q account_id=%q <ref> table=%q chunk=%d entry_bytes=%d rows=%d largest_row_bytes=%d large_rows=%d go_live=%d go_goal=%d go_total=%d go_limit=%d anon=%d file=%d rss=%d rss_hwm=%d
+<prefix>: account import memory purpose=%q account_id=%q <ref> outcome=%q entries=%d rows=%d largest_row_bytes=%d largest_row_table=%q max_go_total=%d max_go_total_table=%q max_go_total_chunk=%d max_anon=%d max_anon_table=%q max_anon_chunk=%d max_go_live=%d max_rss=%d rss_hwm=%d memory_peak=%d file=%d go_limit=%d duration=%s
+```
+
+Numbers are base-10 integers; -1 means unavailable. Outcomes are `ok`, `canceled`
+(including deadline expiry), or `error`. Tables are canonical names or `unknown`;
+unset summary table maxima are `none`, with chunk -1. An import with no completed
+entries has largest row size 0 and largest-row table `none`. Entry row sizes are
+archived bytes before upgrade; large-row lines use bytes after upgrade. Entry
+`go_total`, `anon`, and `rss` are maxima across that entry's samples. Summary
+maxima include samples from unfinished entries. `rss` is current process RSS;
+`rss_hwm` is its high-water mark. Both exclude spool page cache. `memory_peak`
+and `file` are informational: spool page cache is charged to the container,
+so neither cgroup `memory.peak` nor `memory.current` isolates Go heap pressure.
+Use Go total, anonymous memory, and the row/entry sequence to investigate pressure.
+These samples are observations, not continuous peak guarantees.
+
 Worker implementation status (2026-07-23): `witself-worker` has private health
 and Prometheus listeners, process/job-loop gauges and counters, and value-free
 transcript-retention batch and item counters. It runs in a distinct Deployment

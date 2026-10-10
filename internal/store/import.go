@@ -6498,6 +6498,29 @@ func (s *Store) importAccount(
 	expectedAccountID string,
 	options accountImportOptions,
 	r io.Reader,
+) (_ export.Manifest, _ AccountImportDisposition, resultErr error) {
+	tracker := s.beginImport(expectedAccountID, options)
+	returned := false
+	defer func() {
+		outcome := "error"
+		if returned {
+			outcome = importOutcome(resultErr)
+		}
+		tracker.Finish(outcome)
+	}()
+	m, disposition, resultErr := s.importAccountWithTracker(ctx, beginner, expectedAccountID, options, r, tracker)
+	returned = true
+	return m, disposition, resultErr
+}
+
+// Keep normal returns distinct from panic unwinding without recovering the panic.
+func (s *Store) importAccountWithTracker(
+	ctx context.Context,
+	beginner txBeginner,
+	expectedAccountID string,
+	options accountImportOptions,
+	r io.Reader,
+	tracker ImportTracker,
 ) (export.Manifest, AccountImportDisposition, error) {
 	tx, err := beginner.Begin(ctx)
 	if err != nil {
@@ -6534,6 +6557,13 @@ func (s *Store) importAccount(
 
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
+		OnEntryStart: func(entry export.EntryStart) {
+			tracker.EntryStart(importTelemetryTable(entry.Table), entry.Chunk, entry.EntryBytes)
+		},
+		OnEntry: func(entry export.EntryStats) {
+			entry.Table = importTelemetryTable(entry.Table)
+			tracker.Entry(entry)
+		},
 		OnManifest: func(m export.Manifest) error {
 			ic.schemaVersion = m.SchemaVersion
 			if m.AccountID == "" || m.AccountID != expectedAccountID {
@@ -6651,7 +6681,7 @@ func (s *Store) importAccount(
 			}
 			return nil
 		},
-		Row: func(table string, row []byte) error {
+		Row: wrapImportRow(tracker, func(table string, row []byte) error {
 			if _, ok := importColumns[table]; !ok {
 				return fmt.Errorf("%w: table %q not importable", ErrArchiveContent, table)
 			}
@@ -6696,7 +6726,7 @@ func (s *Store) importAccount(
 				return fmt.Errorf("%w: marshal normalized %s row: %v", ErrArchiveContent, table, err)
 			}
 			return insertProjected(ctx, tx, table, obj, normalizedRow)
-		},
+		}),
 	})
 	if err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err

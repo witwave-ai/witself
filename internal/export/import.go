@@ -36,6 +36,23 @@ var ErrCorrupt = errors.New("corrupt archive")
 // a hostile or damaged archive, refused before allocation.
 const maxChunkBytes = 1 << 30 // 1 GiB
 
+// EntryStart identifies a checked chunk header before its contents are read.
+type EntryStart struct {
+	Table      string
+	Chunk      int
+	EntryBytes int64
+}
+
+// EntryStats describes a completed chunk's archived, pre-upgrade rows.
+type EntryStats struct {
+	Table           string
+	Chunk           int
+	EntryBytes      int64
+	Rows            int
+	LargestRowBytes int
+	LargeRows       int
+}
+
 // ImportOptions parameterizes Read.
 type ImportOptions struct {
 	// CurrentSchema is the destination's schema version. Rows written at an
@@ -47,6 +64,11 @@ type ImportOptions struct {
 	// cheap preconditions (account collision, id mismatch) so a bad import
 	// stops before streaming gigabytes.
 	OnManifest func(Manifest) error
+	// OnEntryStart runs after chunk name/order checks and before reading it.
+	// OnEntry runs only after all rows in that chunk complete successfully.
+	// Neither callback receives row contents or changes validation decisions.
+	OnEntryStart func(EntryStart)
+	OnEntry      func(EntryStats)
 	// Row receives each table row, post-upgrade, in archive order. The
 	// archive writes tables in foreign-key dependency order, so inserting
 	// rows as they arrive satisfies references without buffering.
@@ -166,12 +188,16 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 			return m, fmt.Errorf("%w: chunk %s out of sequence (want %06d)", ErrCorrupt, hdr.Name, nextChunk)
 		}
 
+		if opts.OnEntryStart != nil {
+			opts.OnEntryStart(EntryStart{Table: table, Chunk: chunkNo, EntryBytes: hdr.Size})
+		}
 		data, err := readEntry(tr, hdr)
 		if err != nil {
 			return m, err
 		}
 		sum := sha256.Sum256(data)
 		rows := 0
+		stats := EntryStats{Table: table, Chunk: chunkNo, EntryBytes: hdr.Size}
 		for len(data) > 0 {
 			nl := bytes.IndexByte(data, '\n')
 			if nl < 0 {
@@ -180,6 +206,12 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 			row := data[:nl]
 			data = data[nl+1:]
 			rows++
+			if len(row) > stats.LargestRowBytes {
+				stats.LargestRowBytes = len(row)
+			}
+			if len(row) >= 1<<20 {
+				stats.LargeRows++
+			}
 			row, err := upgradeRow(table, row, m.SchemaVersion, opts.CurrentSchema)
 			if err != nil {
 				return m, err
@@ -195,6 +227,10 @@ func Read(ctx context.Context, r io.Reader, opts ImportOptions) (Manifest, error
 			if err := ctx.Err(); err != nil {
 				return m, err
 			}
+		}
+		if opts.OnEntry != nil {
+			stats.Rows = rows
+			opts.OnEntry(stats)
 		}
 		seen[hdr.Name] = ChunkSum{
 			Name:   hdr.Name,

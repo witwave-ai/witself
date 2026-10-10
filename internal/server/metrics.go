@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/memlimit"
 )
 
 // runtimeMetrics is deliberately small and dependency-free. Labels are drawn
@@ -938,8 +940,34 @@ func observeHistogram[K comparable](target map[K]*metricHistogram, key K, value 
 }
 
 func (m *runtimeMetrics) writePrometheus(w io.Writer) {
+	writeGoMemoryPrometheus(w)
 	snapshot := m.snapshot()
 	snapshot.writePrometheusSnapshot(w)
+}
+
+func writeGoMemoryPrometheus(w io.Writer) {
+	samples := []metrics.Sample{
+		{Name: "/gc/heap/live:bytes"},
+		{Name: "/gc/heap/goal:bytes"},
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/gc/gomemlimit:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+	}
+	metrics.Read(samples)
+	for _, metric := range []struct {
+		name, help, kind string
+		value            uint64
+	}{
+		{"witself_go_heap_live_bytes", "Go live heap bytes after the most recent GC.", "gauge", samples[0].Value.Uint64()},
+		{"witself_go_heap_goal_bytes", "Go heap target for the current GC cycle.", "gauge", samples[1].Value.Uint64()},
+		{"witself_go_memory_total_bytes", "Go runtime memory bytes excluding released heap pages.", "gauge", samples[2].Value.Uint64() - samples[3].Value.Uint64()},
+		{"witself_go_memory_limit_bytes", "Go soft memory limit in bytes; MaxInt64 means unlimited.", "gauge", samples[4].Value.Uint64()},
+		{"witself_go_gc_cycles_total", "Completed Go garbage collection cycles.", "counter", samples[5].Value.Uint64()},
+		{"witself_container_memory_limit_bytes", "Container memory limit detected at startup, or zero when none.", "gauge", uint64(memlimit.Current().CgroupLimit)},
+	} {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", metric.name, metric.help, metric.name, metric.kind, metric.name, metric.value)
+	}
 }
 
 func writeAgentEmailCellStoragePrometheus(
