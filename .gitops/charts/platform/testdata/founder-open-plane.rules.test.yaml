@@ -225,6 +225,199 @@ tests:
             exp_annotations:
               summary: A support ticket has waited over 24h for its first response — the published promise is one business day.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: new support ticket notifies and the notification expires
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_tickets'
+        values: 0+0x2 1+0x40
+      - series: 'witself_support_newest_unanswered_seconds'
+        values: 0+0x2 0+60x40
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A new support ticket is waiting for its first response.
+              description: Fires while the newest unanswered ticket is under 30 minutes old. List the queue with witself-admin ticket list and answer urgent tickets first.
+              runbook: docs/runbooks.md#support-ticket-alerts
+      - eval_time: 32m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A new support ticket is waiting for its first response.
+              description: Fires while the newest unanswered ticket is under 30 minutes old. List the queue with witself-admin ticket list and answer urgent tickets first.
+              runbook: docs/runbooks.md#support-ticket-alerts
+      - eval_time: 33m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+  - name: empty support queue never notifies
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_tickets'
+        values: 0+0x20
+      - series: 'witself_support_newest_unanswered_seconds'
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+  - name: old support queue with no new ticket stays silent
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_tickets'
+        values: 1+0x20
+      - series: 'witself_support_newest_unanswered_seconds'
+        values: 7200+60x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+  - name: second support ticket after notification expiry notifies again
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_tickets'
+        values: 1+0x40 2+0x20
+      - series: 'witself_support_newest_unanswered_seconds'
+        values: 0+60x40 0+60x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A new support ticket is waiting for its first response.
+              description: Fires while the newest unanswered ticket is under 30 minutes old. List the queue with witself-admin ticket list and answer urgent tickets first.
+              runbook: docs/runbooks.md#support-ticket-alerts
+      - eval_time: 31m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+      - eval_time: 43m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A new support ticket is waiting for its first response.
+              description: Fires while the newest unanswered ticket is under 30 minutes old. List the queue with witself-admin ticket list and answer urgent tickets first.
+              runbook: docs/runbooks.md#support-ticket-alerts
+  - name: absent support gauges stay silent
+    interval: 1m
+    input_series:
+      - series: 'witself_up'
+        values: 1+0x10
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: WitselfSupportUrgentTicketWaiting
+        exp_alerts: []
+  - name: support ticket replicas aggregate away pod identity
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_tickets{pod="a"}'
+        values: 0+0x2 1+0x40
+      - series: 'witself_support_newest_unanswered_seconds{pod="a"}'
+        values: 0+0x2 0+60x40
+      - series: 'witself_support_unanswered_tickets{pod="b"}'
+        values: 0+0x2 1+0x40
+      - series: 'witself_support_newest_unanswered_seconds{pod="b"}'
+        values: 0+0x2 0+60x40
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfSupportTicketOpened
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A new support ticket is waiting for its first response.
+              description: Fires while the newest unanswered ticket is under 30 minutes old. List the queue with witself-admin ticket list and answer urgent tickets first.
+              runbook: docs/runbooks.md#support-ticket-alerts
+  - name: support slow response waits for the four hour boundary and hold
+    interval: 1m
+    input_series:
+      - series: 'witself_support_oldest_unanswered_seconds'
+        values: 14300+60x30
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfSupportFirstResponseSlow
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: WitselfSupportFirstResponseSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A support ticket has waited over four hours for its first response.
+              runbook: docs/runbooks.md#support-ticket-alerts
+  - name: support slow response warning and breach page fire together
+    interval: 1m
+    input_series:
+      - series: 'witself_support_oldest_unanswered_seconds'
+        values: 90000+0x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSupportFirstResponseSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A support ticket has waited over four hours for its first response.
+              runbook: docs/runbooks.md#support-ticket-alerts
+      - eval_time: 20m
+        alertname: WitselfSupportFirstResponseBreach
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A support ticket has waited over 24h for its first response — the published promise is one business day.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: urgent support ticket warns after the hold and resolves
+    interval: 1m
+    input_series:
+      - series: 'witself_support_unanswered_urgent_tickets'
+        values: 0+0x2 1+0x5 0+0x5
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WitselfSupportUrgentTicketWaiting
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WitselfSupportUrgentTicketWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: An urgent-priority support ticket is waiting for its first response.
+              runbook: docs/runbooks.md#support-ticket-alerts
+      - eval_time: 9m
+        alertname: WitselfSupportUrgentTicketWaiting
+        exp_alerts: []
   - name: transcript entries batch rejection ratio fires above the threshold
     interval: 1m
     input_series:

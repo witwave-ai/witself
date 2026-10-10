@@ -4533,6 +4533,24 @@ change). Other alert groups and the monitoring stack remain enabled. Keep any
 diagnostic evidence value-free; credentials, ciphertext, wrapped keys, and
 client error details belong outside metric labels and public incident notes.
 
+### Support ticket alerts
+
+| Alert | Condition | Severity | First diagnostic step |
+| --- | --- | --- | --- |
+| `WitselfSupportFirstResponseBreach` | Oldest unanswered ticket is over 24 hours old for 15 minutes. | Critical | Run `witself-admin ticket list`, then answer urgent tickets first, oldest next. |
+| `WitselfSupportTicketOpened` | At least one unanswered ticket exists and the newest is under 30 minutes old for 1 minute. | Warning | Run `witself-admin ticket list`, then answer urgent tickets first, oldest next. |
+| `WitselfSupportFirstResponseSlow` | Oldest unanswered ticket is over 4 hours old for 15 minutes. | Warning | Run `witself-admin ticket list`, then answer urgent tickets first, oldest next. |
+| `WitselfSupportUrgentTicketWaiting` | At least one urgent-priority ticket awaits its first response for 1 minute. | Warning | Run `witself-admin ticket list`, then answer urgent tickets first, oldest next. |
+
+The alerts carry no ticket, account or email identifiers, so the queue is the
+only place to see which ticket fired. They cover only tickets with no first
+response. A customer's follow-up on an answered ticket raises nothing.
+
+Tickets arriving less than 30 minutes apart hold one
+`WitselfSupportTicketOpened` alert open. The queue, not the alert count, shows how
+many are waiting. Production renders these rules only once its alerting is
+enabled.
+
 ## Incident communications
 
 The public incident log is the GitHub `incident` label on
