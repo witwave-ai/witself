@@ -2,6 +2,17 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "definitions": {
+    "resourceQuantity": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+        }
+      ]
+    },
     "egressHostCIDR": {
       "type": "string",
       "description": "Exact hosts (/32 IPv4, /128 IPv6) are preferred where stable; provider ranges are acceptable for anycast-fronted services. Require IPv4 /16 or narrower, or IPv6 /32 or narrower.",
@@ -63,6 +74,40 @@
         "witselfServer": {
           "type": "object",
           "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "requests": {
+                  "type": "object",
+                  "$comment": "The allOf wrapper preserves the resources error path in Helm 4 propertyNames diagnostics.",
+                  "allOf": [
+                    {
+                      "propertyNames": {
+                        "pattern": "^(cpu|memory|ephemeral-storage|hugepages-[0-9A-Za-z]+|[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$"
+                      }
+                    }
+                  ],
+                  "additionalProperties": {
+                    "$ref": "#/definitions/resourceQuantity"
+                  }
+                },
+                "limits": {
+                  "type": "object",
+                  "$comment": "The allOf wrapper preserves the resources error path in Helm 4 propertyNames diagnostics.",
+                  "allOf": [
+                    {
+                      "propertyNames": {
+                        "pattern": "^(cpu|memory|ephemeral-storage|hugepages-[0-9A-Za-z]+|[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$"
+                      }
+                    }
+                  ],
+                  "additionalProperties": {
+                    "$ref": "#/definitions/resourceQuantity"
+                  }
+                }
+              }
+            },
             "imageDigest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$"

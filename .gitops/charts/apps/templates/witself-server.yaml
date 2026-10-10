@@ -219,6 +219,9 @@
 {{- $_ := set $serverValues "terminationGracePeriodSeconds" .Values.apps.witselfServer.terminationGracePeriodSeconds -}}
 {{- $_ := set $serverValues "podDisruptionBudget" .Values.apps.witselfServer.podDisruptionBudget -}}
 {{- $_ := set $serverValues "topologySpreadConstraints" .Values.apps.witselfServer.topologySpreadConstraints -}}
+{{- with .Values.apps.witselfServer.resources -}}
+{{- $_ := set $serverValues "resources" . -}}
+{{- end -}}
 {{- if gt (len .Values.apps.witselfServer.networkPolicy.metricsFrom) 0 -}}
 {{- $_ := set $serverValues "networkPolicy" (dict "enabled" true "metricsFrom" .Values.apps.witselfServer.networkPolicy.metricsFrom) -}}
 {{- end -}}

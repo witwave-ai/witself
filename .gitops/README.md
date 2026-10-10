@@ -266,6 +266,21 @@ Server/worker egress allow-list plumbing is deferred: cells consume released
 OCI server charts, so new templates would require a chart release and cell pin
 updates. This batch changes neither server chart versions nor egress behavior.
 
+## witself-server container resources
+
+`apps.witselfServer.resources` defaults to `{}` and is not forwarded, so the
+server chart defaults apply: requests of 50m CPU and 64Mi memory, with a 256Mi
+memory limit. A non-empty map is forwarded as the server chart's `resources`.
+Overrides merge key by key with the server chart defaults; set every key you
+intend to change (for production: `requests.cpu`, `requests.memory` and
+`limits.memory`); a default key cannot be removed.
+The apps schema accepts only `requests` and `limits`, with Kubernetes quantities
+as their values.
+
+The backup cell deliberately keeps the server chart defaults as the OOM
+early-warning canary. Production resource changes belong in their own slice,
+never alongside a pin change.
+
 ## Serving-cell monitoring extensions
 
 The platform chart's monitoring extensions are default off. The replacement
