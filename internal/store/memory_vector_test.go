@@ -51,6 +51,33 @@ func TestMemoryVectorProfileAndValues(t *testing.T) {
 	if _, _, err := normalizeMemoryVector([]float64{math.NaN(), 0}, profile); !errors.Is(err, ErrMemoryInputInvalid) {
 		t.Fatalf("non-finite vector error = %v", err)
 	}
+	for _, tc := range []struct {
+		name       string
+		dimensions int
+	}{
+		{name: "dimensions_two", dimensions: 2},
+		{name: "dimensions_zero", dimensions: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := MemoryVectorProfile{
+				Dimensions: tc.dimensions, DistanceMetric: MemoryVectorMetricEuclidean,
+				Normalization: MemoryVectorNormalizationNone,
+			}
+			for _, input := range []struct {
+				name   string
+				vector []float64
+			}{
+				{name: "nil", vector: nil},
+				{name: "empty", vector: []float64{}},
+			} {
+				t.Run(input.name, func(t *testing.T) {
+					if _, _, err := normalizeMemoryVector(input.vector, profile); !errors.Is(err, ErrMemoryInputInvalid) {
+						t.Fatalf("empty vector with %d-dimensional profile error = %v, want ErrMemoryInputInvalid", tc.dimensions, err)
+					}
+				})
+			}
+		})
+	}
 	similarity, err := memoryVectorSimilarity(profile, []float64{1, 0}, []float64{0, 1})
 	if err != nil || math.Abs(similarity-0.5) > 1e-12 {
 		t.Fatalf("orthogonal cosine similarity = %v / %v", similarity, err)

@@ -319,6 +319,7 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        createTool,
+		InputSchema: mcpInputSchema[mcpSecretCreateInput](mcpNonEmptyArray("fields")),
 		Description: "Create one structured secret for this authenticated agent. Sensitive values are encrypted in this active client under its local agent vault key; only ciphertext and public metadata reach Witself. A password policy generates and immediately seals a password locally, and otpauth_uri is parsed into a canonical encrypted TOTP payload locally. The result is always redacted and does not return a generated password, enrollment URI, TOTP seed, AVK bytes, or any other sensitive field value; use one exact authorized value-returning tool later when needed.",
 		Annotations: mcpWriteClosedWorldAnnotations(false, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSecretCreateInput) (*mcp.CallToolResult, mcpSecretCreateOutput, error) {

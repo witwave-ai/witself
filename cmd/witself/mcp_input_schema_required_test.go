@@ -21,7 +21,7 @@ func TestMCPInputSchemasRequireHandlerRequiredFields(t *testing.T) {
 		{tool: "witself.agent.peers"},
 		{tool: "witself.fact.set", required: []string{"predicate", "value", "idempotency_key"}, optional: []string{"subject", "recreate_deleted", "direct_user_authorized"}},
 		{tool: "witself.fact.delete", required: []string{"mode"}, optional: []string{"subject", "predicate", "fact_id", "expected_resolved_assertion_id", "expected_candidate_revision", "idempotency_key", "direct_user_authorized"}},
-		{tool: "witself.fact.propose", required: []string{"predicate", "value", "idempotency_key", "reason"}, optional: []string{"subject", "confidence"}},
+		{tool: "witself.fact.propose", required: []string{"predicate", "value", "idempotency_key"}, optional: []string{"subject", "confidence", "reason"}},
 		{tool: "witself.fact.propose_from_transcript", required: []string{"transcript_id", "entry_sequence", "predicate", "value", "reason", "idempotency_key"}, optional: []string{"subject"}},
 		{tool: "witself.fact.candidate.get", required: []string{"candidate_id"}},
 		{tool: "witself.fact.confirm", required: []string{"candidate_id", "idempotency_key"}},
@@ -149,19 +149,34 @@ func TestMCPInputSchemasRequireHandlerRequiredFields(t *testing.T) {
 		},
 		{
 			tool: "witself.memory.curation.plan", path: "draft.actions.items.create.snapshot.evidence.items",
-			required: []string{"resolution_state", "type"},
-			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code"},
+			required: []string{"resolution_state"},
+			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code", "type"},
 		},
 		{
 			tool: "witself.memory.curation.plan", path: "draft.actions.items.replace.snapshot.evidence.items",
-			required: []string{"resolution_state", "type"},
-			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code"},
+			required: []string{"resolution_state"},
+			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code", "type"},
 		},
 		{
 			tool: "witself.memory.curation.plan", path: "draft.actions.items.propose_fact.evidence.items",
-			required: []string{"resolution_state", "type"},
-			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code"},
+			required: []string{"resolution_state"},
+			optional: []string{"input_evidence_id", "role", "external_locator", "resolved_kind", "terminal_reason_code", "type"},
 		},
+	}
+
+	arrayRows := []struct {
+		tool     string
+		path     string
+		minItems int // 0 means absent.
+		nullable bool
+	}{
+		// Each constraint matches an existing refusal in the named guard.
+		{tool: "witself.secret.create", path: "fields", minItems: 1, nullable: true},                      // validateMCPSecretCreateBounds
+		{tool: "witself.memory.supersede", path: "replacements", minItems: 1, nullable: true},             // toClientMemorySupersede
+		{tool: "witself.message.request.select", path: "selected_agent_ids", minItems: 1, nullable: true}, // validSelectedMessageRequestAgents
+		{tool: "witself.memory.vector.set", path: "vector", minItems: 1, nullable: true},                  // store.normalizeMemoryVector
+		{tool: "witself.memory.curation.plan", path: "draft.actions"},                                     // plan handler's nil-actions guard
+		{tool: "witself.memory.curation.rollback", path: "expected_produced_heads"},                       // rollback handler's nil-heads guard
 	}
 
 	declared := make(map[string]bool, len(rows))
@@ -178,6 +193,15 @@ func TestMCPInputSchemasRequireHandlerRequiredFields(t *testing.T) {
 			t.Errorf("duplicate nested required-field row for tool %q path %q", row.tool, row.path)
 		}
 		declaredNested[key] = true
+	}
+
+	declaredArrays := make(map[[2]string]bool, len(arrayRows))
+	for _, row := range arrayRows {
+		key := [2]string{row.tool, row.path}
+		if declaredArrays[key] {
+			t.Errorf("duplicate array-constraint row for tool %q path %q", row.tool, row.path)
+		}
+		declaredArrays[key] = true
 	}
 
 	ctx := context.Background()
@@ -310,6 +334,79 @@ func TestMCPInputSchemasRequireHandlerRequiredFields(t *testing.T) {
 	for _, row := range nestedRows {
 		t.Run(row.tool+"/"+row.path, func(t *testing.T) {
 			check(t, row.tool, row.path, row.required, row.optional)
+		})
+	}
+	for _, row := range arrayRows {
+		t.Run(row.tool+"/"+row.path, func(t *testing.T) {
+			root, exists := schemas[row.tool]
+			if !exists {
+				t.Fatalf("array-constraint row names stale tool %q: no server lists it", row.tool)
+			}
+			schema := root
+			for _, segment := range strings.Split(row.path, ".") {
+				if segment == "items" {
+					schema = requireMCPArrayItem(t, root, schema)
+				} else {
+					schema = requireMCPObjectProperty(t, root, schema, segment)
+				}
+			}
+			if !mcpSchemaAllowsType(schema, "array") {
+				t.Errorf("tool %q path %q does not allow array values", row.tool, row.path)
+			}
+			if got := mcpSchemaAllowsType(schema, "null"); got != row.nullable {
+				t.Errorf("tool %q path %q nullable = %t, want %t", row.tool, row.path, got, row.nullable)
+			}
+			got, exists := schema["minItems"]
+			if row.minItems == 0 {
+				if exists {
+					t.Errorf("tool %q path %q minItems = %v, want absent", row.tool, row.path, got)
+				}
+			} else if !exists || got != float64(row.minItems) {
+				t.Errorf("tool %q path %q minItems = %v, want %d", row.tool, row.path, got, row.minItems)
+			}
+			if got, exists := schema["maxItems"]; exists {
+				t.Errorf("tool %q path %q maxItems = %v, want absent", row.tool, row.path, got)
+			}
+		})
+	}
+	for tool, root := range schemas {
+		t.Run(tool+"/array_constraints", func(t *testing.T) {
+			var walk func(map[string]any, string)
+			walk = func(schema map[string]any, path string) {
+				schema = resolveMCPObjectSchema(t, root, schema)
+				_, hasMinItems := schema["minItems"]
+				_, hasMaxItems := schema["maxItems"]
+				if (hasMinItems || hasMaxItems || schema["type"] == "array") && !declaredArrays[[2]string{tool, path}] {
+					t.Errorf("tool %q path %q has an undeclared array constraint; add an arrayRows entry citing the handler", tool, path)
+				}
+				childPath := func(segment string) string {
+					if path == "" {
+						return segment
+					}
+					return path + "." + segment
+				}
+				if properties, ok := schema["properties"].(map[string]any); ok {
+					names := make([]string, 0, len(properties))
+					for name := range properties {
+						names = append(names, name)
+					}
+					slices.Sort(names)
+					for _, name := range names {
+						property, ok := properties[name].(map[string]any)
+						if !ok {
+							t.Fatalf("tool %q path %q property schema has unexpected type %T", tool, childPath(name), properties[name])
+						}
+						walk(property, childPath(name))
+					}
+				}
+				if item, ok := schema["items"].(map[string]any); ok {
+					walk(item, childPath("items"))
+				}
+				if additional, ok := schema["additionalProperties"].(map[string]any); ok {
+					walk(additional, childPath("additionalProperties"))
+				}
+			}
+			walk(root, "")
 		})
 	}
 }
