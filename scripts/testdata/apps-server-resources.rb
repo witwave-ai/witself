@@ -4,7 +4,13 @@ require "yaml"
 require "open3"
 require "tmpdir"
 
-SERVER_RESOURCE_CELLS = [].freeze
+PROD_CELL = "civo-prod-use1-serving".freeze
+PRODUCTION_SERVER_RESOURCES = {
+  "requests" => {"cpu" => "50m".freeze, "memory" => "128Mi".freeze}.freeze,
+  "limits" => {"memory" => "512Mi".freeze}.freeze
+}.freeze
+REQUIRED_RESOURCE_KEYS = [%w[requests cpu], %w[requests memory], %w[limits memory]].freeze
+SERVER_RESOURCE_CELLS = [PROD_CELL].freeze
 CANARY = "civo-sandbox-use1-backup keeps the server chart's 256Mi limit as the OOM early-warning canary (design 2026-10-09 §3 rank 4); changing it is a separate founder decision".freeze
 BACKUP_CELL = "civo-sandbox-use1-backup".freeze
 SERVING_CELL = "civo-sandbox-use1-serving".freeze
@@ -117,7 +123,7 @@ class ResourceChecks
     check("A", "catalog", mismatch, cells == expected_cells)
 
     baseline = {}
-    # A's renders always run: B and F reuse these exact nested values.
+    # A's renders always run: B, F and G reuse these exact nested values.
     paths.each do |path|
       cell = File.basename(File.dirname(path))
       values = nested_values(apps_render(path), "A", cell)
@@ -126,6 +132,14 @@ class ResourceChecks
       check("A", cell, "resources presence must match SERVER_RESOURCE_CELLS", values.key?("resources") == SERVER_RESOURCE_CELLS.include?(cell))
       if values.key?("resources")
         check("A", cell, "nested resources must equal the cell override exactly", values["resources"] == configured)
+      end
+      if SERVER_RESOURCE_CELLS.include?(cell)
+        complete = configured.is_a?(Hash) && REQUIRED_RESOURCE_KEYS.all? do |block, key|
+          fields = configured[block]
+          value = fields[key] if fields.is_a?(Hash)
+          !value.nil? && !value.to_s.empty?
+        end
+        check("A", cell, "every server resources override must set requests.cpu, requests.memory and limits.memory, because overrides merge key by key with the server chart defaults (FU109-1)", complete)
       end
     end
 
@@ -181,16 +195,33 @@ class ResourceChecks
       backup_docs = child_render(baseline.fetch(BACKUP_CELL), dir, "F", BACKUP_CELL)
       backup_resources = container_resources(backup_docs, "witself-server", "F", BACKUP_CELL)
       check("F", BACKUP_CELL, "server container limits.memory must remain 256Mi", backup_resources.is_a?(Hash) && backup_resources.dig("limits", "memory") == "256Mi")
+
+      production_path = File.join(@root, ".gitops/cells", PROD_CELL, "values.yaml")
+      production_values = read_values(production_path, "G", PROD_CELL).fetch("apps").fetch("witselfServer")
+      production_resources = production_values["resources"]
+      check("G", PROD_CELL, "G1: resources must equal requests.cpu=50m, requests.memory=128Mi and limits.memory=512Mi exactly; changing them is its own reviewed production change (design 2026-10-09 S5)", production_resources == PRODUCTION_SERVER_RESOURCES)
+      production_docs = child_render(baseline.fetch(PROD_CELL), dir, "G", PROD_CELL)
+      rendered_resources = container_resources(production_docs, "witself-server", "G", PROD_CELL)
+      check("G", PROD_CELL, "G4: server container limits.memory must equal 512Mi", rendered_resources.is_a?(Hash) && rendered_resources.dig("limits", "memory") == "512Mi")
+      check("G", PROD_CELL, "G2: server container resources must equal the production override merged with chart defaults", rendered_resources == deep_merge(server_defaults, PRODUCTION_SERVER_RESOURCES))
+      check("G", PROD_CELL, "G3: server container resources must equal the production override exactly; a chart-default key (for example limits.cpu) would be inherited and must be set explicitly", rendered_resources == PRODUCTION_SERVER_RESOURCES)
+      # apps/templates/witself-server.yaml deep-copies the worker values; absent
+      # cell resources inherit apps/values.yaml's worker.resources (100m/128Mi/512Mi).
+      production_worker_override = production_values.dig("worker", "resources") ||
+        read_values(File.join(@apps_chart, "values.yaml"), "G", PROD_CELL).dig("apps", "witselfServer", "worker", "resources")
+      check("G", PROD_CELL, "G5: nested worker.resources must equal the cell worker override or apps defaults; server resources must never leak into the worker", baseline.fetch(PROD_CELL).dig("worker", "resources") == production_worker_override)
+      rendered_worker_resources = container_resources(production_docs, "witself-worker", "G", PROD_CELL)
+      check("G", PROD_CELL, "G5: worker container resources must equal the worker override merged with chart defaults; server resources must never leak into the worker", rendered_worker_resources == deep_merge(worker_defaults, production_worker_override) && rendered_worker_resources != PRODUCTION_SERVER_RESOURCES)
     end
     puts "apps server resources: PASS (cases #{@cases.join(',')}; #{cells.length} catalog cells; #{@helm_processes} helm processes)"
   end
 end
 
 unless ARGV.length.between?(1, 2)
-  abort "case setup / cell all: usage: apps-server-resources.rb ROOT [A,B,C,D,E,F]"
+  abort "case setup / cell all: usage: apps-server-resources.rb ROOT [A,B,C,D,E,F,G]"
 end
-cases = ARGV.fetch(1, "A,B,C,D,E,F").split(",", -1).uniq
-unknown = cases - %w[A B C D E F]
+cases = ARGV.fetch(1, "A,B,C,D,E,F,G").split(",", -1).uniq
+unknown = cases - %w[A B C D E F G]
 unless unknown.empty?
   abort "case selector / cell all: unknown cases #{unknown.inspect}"
 end

@@ -118,6 +118,15 @@ apps:
           matchLabels:
             app.kubernetes.io/name: witself-server
             app.kubernetes.io/instance: witself-server
+    # Production server memory (design 2026-10-09 S5). Every key is set because
+    # overrides merge key by key with the server chart defaults; the backup cell
+    # keeps the chart default 256Mi limit as the OOM early-warning canary.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
     worker:
       enabled: true
       # Preview reports value-free counts only.
