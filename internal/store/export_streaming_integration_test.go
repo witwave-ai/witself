@@ -43,7 +43,7 @@ func TestMigration97And98ExportIndexesPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	assertMigrationTestVersion(t, dsn, 98)
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 	for _, filename := range []string{
 		"migrations/0097_index_account_export_order_hot.sql",
 		"migrations/0098_index_account_export_order.sql",
