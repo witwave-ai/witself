@@ -2380,3 +2380,7 @@ isolated PostgreSQL schema. For each active route it checks the refusal, identic
 answers for real and never-issued IDs, no leaked values, and no change to the
 other account's rows. Routes listed in `tenantRuntimePending` are not yet run.
 The control-plane Worker is not covered yet.
+
+MCP tools are pinned to the first route they call, with the installed binding's
+bearer token, by `cmd/witself/mcp_tool_route_matrix_test.go`; later routes carry
+source citations.
