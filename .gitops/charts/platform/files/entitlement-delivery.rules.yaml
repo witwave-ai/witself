@@ -65,3 +65,29 @@ groups:
         annotations:
           summary: A completed control-plane traversal retains pending or unverified entitlement deliveries.
           runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring
+      - alert: WitselfEntitlementDeliveryStuck
+        # Every sample of the last completed traversal's failed count stayed
+        # above zero for six hours, and a traversal completed inside the
+        # window, so at least two traversal results agree. The gauge must be
+        # present for 300 of the window's 360 one-minute scrapes. Six hours is
+        # the CycleIncomplete budget: at 100 directory entries per five-minute
+        # tick, a traversal fits it up to about 7,200 entries. A slower
+        # traversal leaves windows with no completion, where this rule cannot
+        # fire; CycleIncomplete warns instead. With 130a, refused pending
+        # downgrades count as blocked. A control plane below 130a counts them
+        # as failed again, so Stuck can page during such a rollback. Absence
+        # of witself_cp_entitlement_apply_blocked_total shows that old
+        # classification when Stripe observation is available.
+        expr: |
+          (min_over_time(witself_entitlement_delivery_last_cycle_accounts{job="witself-probes",outcome="failed"}[6h]) > 0)
+            and on(job, instance) (count_over_time(witself_entitlement_delivery_last_cycle_accounts{job="witself-probes",outcome="failed"}[6h]) >= 300)
+            and on(job, instance) (changes(witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job="witself-probes"}[6h]) >= 1)
+            and on(job, instance) (last_over_time(witself_entitlement_delivery_enabled{job="witself-probes"}[5m]) == 1)
+        for: 10m
+        labels:
+          severity: critical
+          service: entitlement-delivery
+          witself_alert: "true"
+        annotations:
+          summary: Entitlement delivery has failed on every completed traversal for six hours.
+          runbook: docs/billing-and-limits.md#entitlement-delivery-monitoring

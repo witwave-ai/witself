@@ -544,6 +544,489 @@
           ]
         }
       ]
+    },
+    {
+      "name": "B-T3 (a) every traversal result fails for six hours before the ten-minute hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0x129 1x570"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "498m30s",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "499m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (b) blocked pending deliveries keep the existing gap alert without paging as stuck",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"apply_pending\"}",
+          "values": "1+0x700"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "130m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "400m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "60m",
+          "alertname": "WitselfEntitlementDeliveryGap",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "severity": "warning",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "A completed control-plane traversal retains pending or unverified entitlement deliveries.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (c) a frozen completed traversal cannot prove persistent failures across results",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0x129 1x570"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "500m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (d) an hourly healthy traversal prevents a persistent failure alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58 0 1x58"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "400m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (e) a newly observed failing series waits for the 300-sample floor",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "1+0x700"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "308m30s",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "309m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (f) eighty missing scrapes require sample coverage to recover before alerting",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1x199 _x80 1x420"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x199 _x80 17800+60x420"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "1x199 _x80 1x420"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "300m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "560m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "587m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "591m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (g) disabled delivery suppresses retained failing traversal samples",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "0+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0x129 1x570"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (h) a healthy completed traversal immediately clears the stuck alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000+60x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "0x129 1x379 0x200"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "505m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "512m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (i) a sparse completion proves results across the six-hour window until it ages out",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000x199 13000x500"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "1+0x700"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "400m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "558m30s",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "559m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "B-T3 (j) sparse recurring completions keep persistent failures firing across windows",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "witself_entitlement_delivery_enabled{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1+0x700"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_completed_timestamp_seconds{job=\"witself-probes\",instance=\"cp:443\"}",
+          "values": "1000x199 13000x299 31000x200"
+        },
+        {
+          "series": "witself_entitlement_delivery_last_cycle_accounts{job=\"witself-probes\",instance=\"cp:443\",outcome=\"failed\"}",
+          "values": "1+0x700"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "400m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "600m",
+          "alertname": "WitselfEntitlementDeliveryStuck",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "job": "witself-probes",
+                "instance": "cp:443",
+                "outcome": "failed",
+                "severity": "critical",
+                "service": "entitlement-delivery",
+                "witself_alert": "true"
+              },
+              "exp_annotations": {
+                "summary": "Entitlement delivery has failed on every completed traversal for six hours.",
+                "runbook": "docs/billing-and-limits.md#entitlement-delivery-monitoring"
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

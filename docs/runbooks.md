@@ -4996,6 +4996,58 @@ points customers here.
    public issue only after the disclosure decision, under the same value-free
    rules.
 
+## Billing failure alerts
+
+`WitselfStripeWebhookRejections` is critical when the summed rejected webhook
+rate over 15 minutes exceeds `0.01` per second for five minutes. Read the public,
+value-free `witself_cp_stripe_webhook_events_total{outcome="rejected"}` series
+first, then the authenticated `/v1/plan-lifecycle/status`; investigate Stripe
+endpoint/signing configuration and rejected traffic through authorized operator
+procedures. Do not manually change entitlements, reset the lifecycle cursor, or
+paste account, customer, subscription, event, receipt or cursor identifiers into
+alerts or public incident notes. It clears when the trailing rejection rate
+falls to or below the threshold.
+
+`WitselfBillingReconciliationStalled` is critical when observed backlog age is
+over 900 seconds and reconciliation failures increased in the last 15 minutes,
+sustained for five minutes. Read the public, value-free
+`witself_cp_billing_reconciliation_lag_seconds` and
+`witself_cp_billing_reconciliation_failures_total` series first, then the
+authenticated `/v1/plan-lifecycle/status` to investigate failed lifecycle or
+billing-mutation recovery. Do not manually change entitlements, reset the
+lifecycle cursor, or paste identifiers into alerts or public incident notes.
+Catching up to at most 900 seconds of observed lag, or having no failures in the
+trailing 15-minute window, clears it; old work alone does not keep it open.
+
+`WitselfStripeWebhookProcessingFailures` warns when at least three verified
+Stripe deliveries failed to fold into billing state within the trailing six
+hours, sustained for five minutes. Read the public, value-free
+`witself_cp_stripe_webhook_events_total{outcome="processing_failed"}` series
+first, then the authenticated `/v1/plan-lifecycle/status`. Check the Stripe
+dashboard's failed deliveries: a first event for a customer not yet linked to an
+account is repaired only by Stripe's redelivery. One or two failures can be a
+receipt-lease race or a transient store error that redelivery repairs. Do not
+manually change entitlements, reset the lifecycle cursor, or paste identifiers
+into alerts or public incident notes. It clears once fewer than three failures
+remain in the window: six hours after the earliest of three failures, if no more
+arrive, subject to scrape and evaluation timing.
+
+`WitselfBillingMutationRecoveryFailing` is critical when at least ten
+billing-mutation recovery batches failed in the trailing hour for five minutes
+and no backlog older than 900 seconds is known. Read the public, value-free
+`witself_cp_billing_mutation_batch_failures_total` and
+`witself_cp_billing_reconciliation_lag_seconds` series first, then the
+authenticated `/v1/plan-lifecycle/status`; investigate list failures, item
+failures and batch deadlines. Absent lag is unknown backlog coverage. Do not
+manually change entitlements, reset the lifecycle cursor, or paste identifiers
+into alerts or public incident notes. It clears when fewer than ten failed
+batches remain in the trailing hour, when the batch series becomes stale, or
+when observed backlog age exceeds 900 seconds. Requiring a live batch series
+prevents retained range samples from paging after rollback or a probe scrape
+outage makes lag stale. As a young backlog ages past 900 seconds it can hand
+over to `WitselfBillingReconciliationStalled`, opening a second critical incident for
+the same fault; treat both as one incident.
+
 ## Entitlement delivery monitoring
 
 These alerts diagnose the CP-to-cell acknowledgement path without changing
@@ -5046,6 +5098,31 @@ account; preserve the CP as entitlement authority. Do not force an apply,
 override a plan, change billing, or bypass a fit check as monitoring remediation.
 A later completely measured healthy traversal clears the gap. Its 30-minute
 persistence is aggregate observation persistence, not the age of one account.
+
+For `WitselfEntitlementDeliveryStuck`, every observed completed traversal has
+retained a failed delivery for six hours, with at least two traversal results
+in the window (the result in force at its start and a completion inside it).
+The failed gauge must be present for at least 300 of 360 one-minute scrapes and
+the condition must persist for ten minutes; a new series with only failing
+samples can reach that floor after five hours. With 130a, refused downgrades
+that remain pending count as blocked. A control plane below 130a counts refused
+downgrades as failed again, so Stuck can page during such a rollback. The
+absence of `witself_cp_entitlement_apply_blocked_total` shows the old
+classification when Stripe observation is available. First check whether a
+cell is down, then follow the `WitselfEntitlementDeliveryGap` steps above
+without forcing entitlements or
+resetting the cursor. A healthy completed traversal clears it. At 100 directory
+entries per five-minute tick, above about 7,200 entries a traversal outgrows the
+six-hour window and this rule can stay silent;
+`WitselfEntitlementDeliveryCycleIncomplete` warns instead.
+
+For the **130a rollback acceptance check**, confirm the control-plane version
+and inspect `witself_cp_entitlement_apply_blocked_total` alongside the public
+Stripe observation series. A control plane below 130a counts refused downgrades
+as failed again; absence of the blocked counter shows that old classification
+when Stripe observation is available. Accept that Stuck can page during such a
+rollback if its persistence conditions are met. If Stripe observation itself
+is absent, counter absence alone does not identify the control-plane version.
 
 ## Account-move transport rollout
 

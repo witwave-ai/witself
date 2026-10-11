@@ -773,3 +773,270 @@ tests:
       - eval_time: 31m
         alertname: WitselfProbeStale
         exp_alerts: []
+  - name: B-T1 (a) processing failures require three deliveries and clear when the earliest leaves the six-hour window
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="processing_failed",job="witself-probes",instance="control-plane"}'
+        values: "0x29 1x59 2x59 3x300"
+    alert_rule_test:
+      - eval_time: 149m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 151m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 154m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 155m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 156m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 380m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 387m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 388m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 389m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 391m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+  - name: B-T1 (b) two processing failures in six hours do not alert
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="processing_failed",job="witself-probes",instance="control-plane"}'
+        values: "0x29 1x269 2x200"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 301m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+  - name: B-T1 (c) processing failures survive a process counter reset
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="processing_failed",job="witself-probes",instance="control-plane"}'
+        values: "0x29 1x29 2x29 0x29 1x100"
+    alert_rule_test:
+      - eval_time: 119m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 124m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+      - eval_time: 125m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 127m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+              runbook: docs/runbooks.md#billing-failure-alerts
+  - name: B-T1 (d) other webhook outcomes cannot trigger processing failures
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="verified",job="witself-probes",instance="control-plane"}'
+        values: "0+10x100"
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="rejected",job="witself-probes",instance="control-plane"}'
+        values: "0+10x100"
+      - series: 'witself_cp_stripe_webhook_events_total{outcome="replayed",job="witself-probes",instance="control-plane"}'
+        values: "0+10x100"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: WitselfStripeWebhookProcessingFailures
+        exp_alerts: []
+  - name: B-T2 (a) recovery failures alert after ten batches without a known backlog
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_mutation_batch_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24x4 25x4 26x4 27x4 28x4 29x4 30x4 31x4 32x4 33x4 34x4 35x4 36x4 37x4 38x4 39x4 40x4"
+    alert_rule_test:
+      - eval_time: 48m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 53m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 54m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: control-plane
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Billing-mutation recovery batches keep failing and no old backlog is observed.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 57m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: control-plane
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Billing-mutation recovery batches keep failing and no old backlog is observed.
+              runbook: docs/runbooks.md#billing-failure-alerts
+  - name: B-T2 (b) an old backlog routes failing recovery to the existing stalled alert
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_mutation_batch_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24x4 25x4 26x4 27x4 28x4 29x4 30x4 31x4 32x4 33x4 34x4 35x4 36x4 37x4 38x4 39x4 40x4"
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="control-plane"}'
+        values: "1200+0x200"
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24x4 25x4 26x4 27x4 28x4 29x4 30x4 31x4 32x4 33x4 34x4 35x4 36x4 37x4 38x4 39x4 40x4"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 120m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfBillingReconciliationStalled
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: control-plane
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
+              runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+  - name: B-T2 (c) a young backlog does not suppress recovery failures
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_mutation_batch_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24x4 25x4 26x4 27x4 28x4 29x4 30x4 31x4 32x4 33x4 34x4 35x4 36x4 37x4 38x4 39x4 40x4"
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="control-plane"}'
+        values: "600+0x200"
+    alert_rule_test:
+      - eval_time: 54m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: control-plane
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Billing-mutation recovery batches keep failing and no old backlog is observed.
+              runbook: docs/runbooks.md#billing-failure-alerts
+      - eval_time: 57m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: control-plane
+              severity: critical
+              service: control-plane-stripe
+              witself_alert: "true"
+            exp_annotations:
+              summary: Billing-mutation recovery batches keep failing and no old backlog is observed.
+              runbook: docs/runbooks.md#billing-failure-alerts
+  - name: B-T2 (d) nine failed batches per hour stay below the recovery threshold
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_mutation_batch_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 3x4 4x4 5x4 6x4 6x4 7x4 8x4 9x4 9x4 10x4 11x4 12x4 12x4 13x4 14x4 15x4 15x4 16x4 17x4 18x4 18x4 19x4 20x4 21x4 21x4 22x4 23x4 24x4 24x4 25x4 26x4 27x4 27x4 28x4 29x4 30x4 30x4"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 120m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+      - eval_time: 180m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
+  - name: B-T2 (e) stale recovery samples cannot page after the old backlog suppressor disappears
+    interval: 1m
+    input_series:
+      - series: 'witself_cp_billing_mutation_batch_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24 stale"
+      - series: 'witself_cp_billing_reconciliation_lag_seconds{job="witself-probes",instance="control-plane"}'
+        values: "1200+0x120 stale"
+      - series: 'witself_cp_billing_reconciliation_failures_total{job="witself-probes",instance="control-plane"}'
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19x4 20x4 21x4 22x4 23x4 24 stale"
+    alert_rule_test:
+      - eval_time: 128m
+        alertname: WitselfBillingMutationRecoveryFailing
+        exp_alerts: []
