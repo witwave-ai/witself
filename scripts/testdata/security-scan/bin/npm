@@ -1,0 +1,20 @@
+#!/bin/bash
+set -eu
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/npm.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+if [ "$*" = --version ]; then
+  printf '10.0.0-stub\n'
+  exit 0
+fi
+printf 'npm\n' >> "$SECURITY_SCAN_CASE/tool-order.log"
+printf 'GHSA-stub-private-diagnostic\n' >&2
+kind=all
+for argument in "$@"; do
+  [ "$argument" != --omit=dev ] || kind=prod
+done
+fixture=$SECURITY_SCAN_FIXTURES/npm/npm-prod.json
+[ ! -f ".scan-npm-$kind.json" ] || fixture=$PWD/.scan-npm-$kind.json
+cat "$fixture"
+code=1
+[ ! -f ".scan-npm-$kind-exit" ] || code=$(cat ".scan-npm-$kind-exit")
+exit "$code"

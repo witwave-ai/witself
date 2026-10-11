@@ -1,0 +1,5 @@
+#!/bin/bash
+set -eu
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/unexpected.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+exit 97

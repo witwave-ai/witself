@@ -784,6 +784,9 @@ jobs:
         run: bash scripts/test-memory-load-quality-workflow.sh
       - name: hosted runner image and required check name contract checks
         run: bash scripts/test-workflow-runner-labels.sh
+      - name: security scan offline contract checks
+        timeout-minutes: 5
+        run: bash scripts/test-security-scan.sh
 
       - name: monitoring rollout capability checks
         run: |
