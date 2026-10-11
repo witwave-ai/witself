@@ -109,7 +109,7 @@ func TestStripeWebhookObservationPreservesResponses(t *testing.T) {
 	if !reflect.DeepEqual(with, want) || !reflect.DeepEqual(with, without) {
 		t.Fatalf("webhook HTTP contract changed: with=%v without=%v", with, without)
 	}
-	if observation.WebhookEvents != (StripeWebhookEvents{Verified: 4, Rejected: 1, Replayed: 1}) {
+	if observation.WebhookEvents != (StripeWebhookEvents{Verified: 4, Rejected: 1, Replayed: 1, ProcessingFailed: 1}) {
 		t.Fatalf("webhook counters = %+v", observation.WebhookEvents)
 	}
 	encoded, err := json.Marshal(observation)
@@ -193,7 +193,7 @@ func TestStripeObservationTickIsAuthenticatedAndStripeOnly(t *testing.T) {
 					if err := json.Unmarshal(doc["stripe_observation"], &observation); err != nil {
 						t.Fatal(err)
 					}
-					if observation.SchemaVersion != 1 || !observation.ReconciliationObserved || !observation.ReconciliationComplete || observation.OldestPendingAt != nil || observation.ObservedAt.IsZero() {
+					if observation.SchemaVersion != 2 || !observation.ReconciliationObserved || !observation.ReconciliationComplete || observation.OldestPendingAt != nil || observation.ObservedAt.IsZero() {
 						t.Fatalf("successful empty tick observation = %+v", observation)
 					}
 				}

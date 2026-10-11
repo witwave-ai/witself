@@ -4718,8 +4718,12 @@ transactional fleet snapshot.
 For `WitselfEntitlementDeliveryGap`, examine pending and failed observations
 separately. Pending means the CP has not recorded the exact desired snapshot
 acknowledgement, including never-delivered requests, lost acknowledgements and
-blocked downgrades. Failed includes an unknown current delivery result even
-when stored revisions previously matched. Use existing authorized admin
+blocked downgrades. A refused downgrade that is still pending counts as pending
+and is counted as blocked, not failed. A refusal on an account that is not
+pending still counts as failed. The `witself_cp_entitlement_apply_blocked_total`
+counter records blocked account visits and exists only when a Stripe provider
+is configured. Failed includes an unknown current delivery result even when
+stored revisions previously matched. Use existing authorized admin
 inspection to compare desired/applied revision and hash for the affected
 account; preserve the CP as entitlement authority. Do not force an apply,
 override a plan, change billing, or bypass a fit check as monitoring remediation.

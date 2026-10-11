@@ -109,6 +109,8 @@ type PlanLifecycleObserver struct {
 	mutationLastSuccessEpoch float64
 	stripeVerified           uint64
 	stripeRejected           uint64
+	stripeProcessingFailed   uint64
+	entitlementApplyBlocked  uint64
 	reconciliationFailures   uint64
 	oldestPendingAt          *time.Time
 	reconciliationObserved   bool
@@ -119,24 +121,31 @@ type PlanLifecycleObserver struct {
 // Worker lifecycle cron for its probe exposition. Counters have process
 // lifetime. OldestPendingAt is the earliest retained observation from bounded,
 // pre-reconciliation billing-mutation scans, not a fleet-global backlog claim.
+// EntitlementApplyBlocked counts account visits that remain pending after the
+// atomic fit check refused a downgrade or restore-recovery reapply, not distinct
+// accounts.
 type StripeObservation struct {
-	SchemaVersion          int                 `json:"schema_version"`
-	WebhookEvents          StripeWebhookEvents `json:"webhook_events"`
-	ReconciliationFailures uint64              `json:"reconciliation_failures"`
-	OldestPendingAt        *time.Time          `json:"oldest_pending_at"`
-	ReconciliationObserved bool                `json:"reconciliation_observed"`
-	ReconciliationComplete bool                `json:"reconciliation_complete"`
-	ObservedAt             time.Time           `json:"observed_at"`
+	SchemaVersion           int                 `json:"schema_version"`
+	WebhookEvents           StripeWebhookEvents `json:"webhook_events"`
+	ReconciliationFailures  uint64              `json:"reconciliation_failures"`
+	OldestPendingAt         *time.Time          `json:"oldest_pending_at"`
+	ReconciliationObserved  bool                `json:"reconciliation_observed"`
+	ReconciliationComplete  bool                `json:"reconciliation_complete"`
+	ObservedAt              time.Time           `json:"observed_at"`
+	MutationBatchFailures   uint64              `json:"mutation_batch_failures"`
+	EntitlementApplyBlocked uint64              `json:"entitlement_apply_blocked"`
 }
 
 // StripeWebhookEvents deliberately has a fixed vocabulary and no identities.
 // Replayed is a subset of verified deliveries whose normalized receipt had
 // already been durably processed. Verified also includes zero-event deliveries
-// and deliveries whose later lifecycle processing failed.
+// and deliveries whose later lifecycle processing failed. ProcessingFailed is
+// the subset of verified deliveries whose lifecycle fold returned an error.
 type StripeWebhookEvents struct {
-	Verified uint64 `json:"verified"`
-	Rejected uint64 `json:"rejected"`
-	Replayed uint64 `json:"replayed"`
+	Verified         uint64 `json:"verified"`
+	Rejected         uint64 `json:"rejected"`
+	Replayed         uint64 `json:"replayed"`
+	ProcessingFailed uint64 `json:"processing_failed"`
 }
 
 func (o *PlanLifecycleObserver) observeStripeVerification(verified bool) {
@@ -152,21 +161,33 @@ func (o *PlanLifecycleObserver) observeStripeVerification(verified bool) {
 	}
 }
 
+func (o *PlanLifecycleObserver) observeStripeProcessingFailure() {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stripeProcessingFailed++
+}
+
 // StripeSnapshot returns only fixed fields suitable for the authenticated
 // lifecycle tick response; scraping never has to wake the control-plane process.
 func (o *PlanLifecycleObserver) StripeSnapshot(now time.Time, replayed uint64) StripeObservation {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return StripeObservation{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		WebhookEvents: StripeWebhookEvents{
 			Verified: o.stripeVerified, Rejected: o.stripeRejected, Replayed: replayed,
+			ProcessingFailed: o.stripeProcessingFailed,
 		},
-		ReconciliationFailures: o.reconciliationFailures,
-		OldestPendingAt:        cloneTime(o.oldestPendingAt),
-		ReconciliationObserved: o.reconciliationObserved,
-		ReconciliationComplete: o.reconciliationComplete,
-		ObservedAt:             now.UTC(),
+		ReconciliationFailures:  o.reconciliationFailures,
+		OldestPendingAt:         cloneTime(o.oldestPendingAt),
+		ReconciliationObserved:  o.reconciliationObserved,
+		ReconciliationComplete:  o.reconciliationComplete,
+		ObservedAt:              now.UTC(),
+		MutationBatchFailures:   o.mutationBatchesError,
+		EntitlementApplyBlocked: o.entitlementApplyBlocked,
 	}
 }
 
@@ -198,6 +219,7 @@ func (o *PlanLifecycleObserver) complete(now time.Time, summary PlanLifecycleSum
 	o.status.LastSeeded = summary.Seeded
 	o.status.LastApplyPending = summary.ApplyPending
 	o.status.LastFailed = summary.Failed
+	o.entitlementApplyBlocked += uint64(max(0, summary.Blocked))
 	view := cloneBillingMutationBatchView(summary.BillingMutations)
 	o.status.BillingMutations = &view
 	if view.Succeeded {
@@ -280,7 +302,31 @@ type PlanLifecycleSummary struct {
 	Seeded           int
 	ApplyPending     int
 	Failed           int
+	Blocked          int
 	BillingMutations BillingMutationBatchView
+}
+
+// applyBlockedOnly excludes errors that also carry a delivery or read failure.
+func applyBlockedOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !applyBlockedOnly(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if err == lifecycle.ErrApplyBlocked {
+		return true
+	}
+	return applyBlockedOnly(errors.Unwrap(err))
 }
 
 func billingMutationBatchView(
@@ -451,7 +497,11 @@ func ReconcileAccountIDs(
 					summary.ApplyPending++
 				}
 				if err != nil {
-					summary.Failed++
+					if pending && applyBlockedOnly(err) {
+						summary.Blocked++
+					} else {
+						summary.Failed++
+					}
 				}
 				mu.Unlock()
 			}
@@ -537,6 +587,7 @@ func ReconcileActiveAccounts(
 		summary.Seeded += pageSummary.Seeded
 		summary.ApplyPending += pageSummary.ApplyPending
 		summary.Failed += pageSummary.Failed
+		summary.Blocked += pageSummary.Blocked
 		if pageErr != nil && pageSummary.Failed == 0 {
 			return summary, current, errors.Join(mutationErr, pageErr)
 		}

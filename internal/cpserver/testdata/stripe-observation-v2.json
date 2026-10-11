@@ -1,0 +1,1 @@
+{"schema_version":2,"webhook_events":{"verified":7,"rejected":2,"replayed":3,"processing_failed":1},"reconciliation_failures":4,"oldest_pending_at":"2026-09-20T11:40:00Z","reconciliation_observed":true,"reconciliation_complete":true,"observed_at":"2026-09-20T12:00:00Z","mutation_batch_failures":2,"entitlement_apply_blocked":6}

@@ -405,6 +405,12 @@ var ErrBillingUnavailable = errors.New("billing provider is not configured")
 // customer plan-change decision.
 var ErrAdminInput = errors.New("invalid admin plan override")
 
+// ErrApplyBlocked means the cell's atomic fit check refused the snapshot: a
+// downgrade, or a restore-recovery reapply when the cell's fence differs from
+// the record. The account stays pending in the customer's favor and every
+// reconcile retries it; this is not a delivery failure.
+var ErrApplyBlocked = errors.New("plan apply blocked")
+
 // refuse builds a user-addressed refusal.
 func refuse(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrRefusal}, args...)...)
@@ -3473,7 +3479,7 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 				r.ApplyBlocked = report
 				return nil
 			})
-			return fmt.Errorf("plan apply blocked: %s", report)
+			return fmt.Errorf("%w: %s", ErrApplyBlocked, report)
 		}
 	} else {
 		ack, err = m.cfg.Applier.Apply(ctx, accountID, request)
