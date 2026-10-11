@@ -89,6 +89,8 @@ aliases and the internal `_managed-hooks` family so additions and removals
 cannot silently escape the check. `_managed-hooks` is runtime integration
 plumbing, not a customer workflow.
 
+Under a command heading in an implemented family that is not marked target, tables headed `Flag` list shipped flags and tables headed `Target flag` list target flags. Every flag table in a target family or under a target heading is target. A command heading that ends with `(target; not implemented)` describes a verb the CLI does not dispatch. `TestCommandSurfaceDocumentedFlagsExist` checks these tables and headings against the built CLI.
+
 <!-- BEGIN COMMAND FAMILY STATUS -->
 
 | Binary | Family | Marker | Aliases |
@@ -208,20 +210,29 @@ plumbing, not a customer workflow.
 
 ## Global Flags
 
-These flags are available on every command unless a command explicitly says
-otherwise.
+No flag is global today. Each command registers its own flags. Many commands share the flags below, but a command accepts one only when it registers it.
+
+<!-- BEGIN COMMON FLAGS -->
 
 | Flag | Description |
 |---|---|
-| `--json` | Emit machine-readable JSON. |
+| `--account NAME` | Local account name; default `WITSELF_ACCOUNT` or `default`. |
+| `--endpoint URL` | Server or control-plane endpoint for this command. |
+| `--token-file PATH` | File holding the operator or agent token for this command. |
+| `--realm NAME` | Local realm name; default `WITSELF_REALM` or `default`. |
+| `--agent NAME` | Local agent name; default `WITSELF_AGENT`. |
+| `--json` | Print JSON instead of columns. |
+
+<!-- END COMMON FLAGS -->
+
+These global flags are target behavior and are not implemented:
+
+| Target flag | Description |
+|---|---|
 | `--quiet` | Suppress non-essential human output. |
 | `--config PATH` | Use a specific config file. |
 | `--profile NAME` | Use a named local or managed-service profile. |
-| `--endpoint URL` | Specific remote managed, staging, private, localhost, or self-hosted API endpoint for this command. |
-| `--realm NAME_OR_ID` | Select the realm scope. |
 | `--store-file PATH` | Use a specific local development store file in local mock/development mode. |
-| `--token-file PATH` | Read the managed-service or agent token from a file for this command. Highest auth precedence. |
-| `--agent NAME_OR_ID` | Operator/admin only: act as or create for a specific agent when the caller has permission. |
 | `--no-input` | Fail instead of prompting. Required for fully unattended runs. |
 
 ## Environment Variables
@@ -763,9 +774,9 @@ witself version
 witself version --json
 ```
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--short` | Print only the version string in human mode. |
 
@@ -853,12 +864,17 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--endpoint URL` | Specific remote managed, staging, private, localhost, or self-hosted API endpoint. |
+| `--bootstrap-token-file PATH` | Use a one-time self-hosted first-operator bootstrap token. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--browser` | Use the browser login flow. Default when available for managed endpoints. |
 | `--device-code` | Use a device-code flow for headless environments. |
 | `--no-browser` | Do not open a browser; print the verification URL or next command. |
 | `--token VALUE` | Token value. Least safe; useful for tests. |
 | `--token-file PATH` | Read token from a file. |
-| `--bootstrap-token-file PATH` | Use a one-time self-hosted first-operator bootstrap token. |
 | `--local` | Configure a local-only profile. |
 | `--profile NAME` | Save credentials under a named profile. |
 
@@ -867,7 +883,7 @@ not collect raw account passwords. When no credential store is available, stored
 operator auth should use an owner-only local auth file where supported. The
 operator auth model is tracked in [operator-auth.md](operator-auth.md).
 
-### `witself auth logout`
+### `witself auth logout` (target; not implemented)
 
 Remove local authentication material for a profile.
 
@@ -878,7 +894,7 @@ Flags:
 | `--all` | Remove authentication material for all profiles. |
 | `--yes` | Skip confirmation. |
 
-### `witself auth status`
+### `witself auth status` (target; not implemented)
 
 Show whether the current profile is authenticated or locally usable.
 
@@ -888,7 +904,7 @@ Flags:
 |---|---|
 | `--show-source` | Show whether auth came from env, token file, config, or prompt. |
 
-### `witself auth whoami`
+### `witself auth whoami` (target; not implemented)
 
 Show the current realm, profile, and principal.
 
@@ -1044,11 +1060,16 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--display-name TEXT` | Customer account display name. |
-| `--legal-name TEXT` | Legal customer name for billing records. |
 | `--email EMAIL` | Primary account/operator email. |
 | `--invite CODE` | Optional invite code; the server decides whether one is required. |
 | `--challenge TOKEN` | Turnstile token copied from the signup challenge page after a challenge-required response. |
 | `--accept-terms` | Record acceptance of the current Terms of Service and Privacy Policy versions with the signup. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
+| `--legal-name TEXT` | Legal customer name for billing records. |
 | `--billing-email EMAIL` | Billing contact email. |
 | `--support-email EMAIL` | Support contact email. |
 | `--address-field KEY=VALUE` | Set a billing/customer address field. Repeatable. |
@@ -1085,7 +1106,7 @@ When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md) for the payment setup
 portion of account creation.
 
-### `witself account show`
+### `witself account show` (target; not implemented)
 
 Show the current managed-service customer account.
 
@@ -1096,7 +1117,7 @@ Flags:
 | `--show-usage` | Include usage summary. |
 | `--show-billing` | Include billing summary when allowed. |
 
-### `witself account update`
+### `witself account update` (target; not implemented)
 
 Update customer account details.
 
@@ -1114,7 +1135,7 @@ Flags:
 | `--dry-run` | Show planned account changes without applying them. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account members`
+### `witself account members` (target; not implemented)
 
 List human operators and admins for the customer account.
 
@@ -1125,7 +1146,7 @@ Flags:
 | `--role ROLE` | Filter by role. |
 | `--include-disabled` | Include disabled members. |
 
-### `witself account invite EMAIL`
+### `witself account invite EMAIL` (target; not implemented)
 
 Invite a human operator/admin to the customer account.
 
@@ -1139,7 +1160,7 @@ Flags:
 | `--dry-run` | Validate and preview the invite without sending it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account remove PRINCIPAL`
+### `witself account remove PRINCIPAL` (target; not implemented)
 
 Remove a human operator/admin from the customer account.
 
@@ -1152,7 +1173,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself account set-role PRINCIPAL ROLE`
+### `witself account set-role PRINCIPAL ROLE` (target; not implemented)
 
 Change a human operator/admin's account-level role.
 
@@ -1174,10 +1195,15 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--effective-at TIMESTAMP` | Schedule closure for a future time when supported. |
-| `--dry-run` | Show closure impact, blockers, and scheduled effects without closing the account. |
 | `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
+| `--effective-at TIMESTAMP` | Schedule closure for a future time when supported. |
+| `--dry-run` | Show closure impact, blockers, and scheduled effects without closing the account. |
 
 ## `witself realm`
 
@@ -1193,9 +1219,9 @@ the realm is backed by a local development store file.
 
 Create a realm.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--display-name TEXT` | Human-readable display name. |
 | `--description TEXT` | Realm description. |
@@ -1207,13 +1233,13 @@ Flags:
 
 List realms visible to the current principal.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--include-disabled` | Include disabled or archived realms when allowed. |
 
-### `witself realm show NAME_OR_ID`
+### `witself realm show NAME_OR_ID` (target; not implemented)
 
 Show realm metadata, usage summary, and counts.
 
@@ -1225,7 +1251,7 @@ Flags:
 | `--show-agents` | Include agent summary counts. |
 | `--show-groups` | Include security-group summary counts. |
 
-### `witself realm use NAME_OR_ID`
+### `witself realm use NAME_OR_ID` (target; not implemented)
 
 Set the default realm for the current profile.
 
@@ -1235,7 +1261,7 @@ Flags:
 |---|---|
 | `--profile NAME` | Set the default realm on a named profile. |
 
-### `witself realm rename NAME_OR_ID NEW_NAME`
+### `witself realm rename NAME_OR_ID NEW_NAME` (target; not implemented)
 
 Rename a realm. Operator/admin only.
 
@@ -1268,7 +1294,7 @@ The managed close is a durable idempotent workflow. A successful command can
 report that the close was accepted while the control plane continues the exact
 operation in the background. Repeating the command is safe.
 
-### `witself realm members NAME_OR_ID`
+### `witself realm members NAME_OR_ID` (target; not implemented)
 
 List human operators, admins, and agent principals in a realm.
 
@@ -1280,7 +1306,7 @@ Flags:
 | `--humans` | Include human operators/admins. Default: true. |
 | `--role ROLE` | Filter by role. |
 
-### `witself realm members add REALM_NAME_OR_ID PRINCIPAL`
+### `witself realm members add REALM_NAME_OR_ID PRINCIPAL` (target; not implemented)
 
 Add a human operator/admin principal or agent principal to a realm.
 
@@ -1292,7 +1318,7 @@ Flags:
 | `--dry-run` | Validate and preview the member addition without changing access. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm members remove REALM_NAME_OR_ID PRINCIPAL`
+### `witself realm members remove REALM_NAME_OR_ID PRINCIPAL` (target; not implemented)
 
 Remove a human operator/admin principal or agent principal from a realm.
 
@@ -1304,7 +1330,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm members set-role REALM_NAME_OR_ID PRINCIPAL ROLE`
+### `witself realm members set-role REALM_NAME_OR_ID PRINCIPAL ROLE` (target; not implemented)
 
 Change a realm member's role.
 
@@ -1315,7 +1341,7 @@ Flags:
 | `--dry-run` | Show planned role change without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm init`
+### `witself realm init` (target; not implemented)
 
 Create the local development store for local mock/development mode. This is the
 local backend bootstrap command; `realm create --local` may call it internally.
@@ -1336,7 +1362,7 @@ Flags:
 | `--operator NAME` | Name for the first local operator/admin context. |
 | `--force` | Overwrite an empty or test store. Should fail on non-empty stores. |
 
-### `witself realm status`
+### `witself realm status` (target; not implemented)
 
 Show local mock/development store file path, backend type, and item counts.
 
@@ -1543,7 +1569,7 @@ Flags:
 | `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
 | `--json` | Emit the stable JSON projection. |
 
-### `witself billing usage`
+### `witself billing usage` (target; not implemented)
 
 Show usage and metering data.
 
@@ -1565,7 +1591,7 @@ Flags:
 | `--group-by FIELD` | Group usage by `realm`, `agent`, `dimension`, or `day`. |
 | `--show-limits` | Include limit and overage context for each dimension. |
 
-### `witself billing limits`
+### `witself billing limits` (target; not implemented)
 
 Show current plan limits and rate limits.
 
@@ -1581,7 +1607,7 @@ Flags:
 | `--dimension DIMENSION` | Show one limit dimension. Repeatable. |
 | `--include-usage` | Include current usage next to each limit. |
 
-### `witself billing plans`
+### `witself billing plans` (target; not implemented)
 
 List available plans.
 
@@ -1591,7 +1617,7 @@ Flags:
 |---|---|
 | `--include-enterprise` | Include enterprise/contact-sales plans when available. |
 
-### `witself billing subscribe PLAN`
+### `witself billing subscribe PLAN` (target; not implemented)
 
 Start or change a subscription.
 
@@ -1612,7 +1638,7 @@ Flags:
 When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md).
 
-### `witself billing subscription`
+### `witself billing subscription` (target; not implemented)
 
 Show or manage subscription state.
 
@@ -1627,7 +1653,7 @@ Flags:
 | `--yes` | Confirm the change. |
 | `--reason TEXT` | Audit reason for subscription changes. |
 
-### `witself billing payment-methods`
+### `witself billing payment-methods` (target; not implemented)
 
 List payment methods.
 
@@ -1637,7 +1663,7 @@ Flags:
 |---|---|
 | `--include-expired` | Include expired payment methods. |
 
-### `witself billing payment-methods add`
+### `witself billing payment-methods add` (target; not implemented)
 
 Add a payment method through a provider-safe flow.
 
@@ -1647,7 +1673,7 @@ Flags:
 |---|---|
 | `--setup` | Create a hosted payment-method setup flow and print/open the URL. |
 | `--provider-token TOKEN` | Attach a payment-provider token. Do not pass raw card data. |
-| `--type card|bank|crypto` | Preferred payment-method type when the provider supports multiple setup flows. |
+| `--type card\|bank\|crypto` | Preferred payment-method type when the provider supports multiple setup flows. |
 | `--set-default` | Make the new payment method the default. |
 | `--open` | Open the hosted setup URL when possible. |
 | `--no-open` | Print the hosted setup URL without opening a browser. |
@@ -1657,7 +1683,7 @@ Flags:
 When `--setup` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md).
 
-### `witself billing sessions show SESSION_ID`
+### `witself billing sessions show SESSION_ID` (target; not implemented)
 
 Show the status of a hosted provider session created by checkout,
 payment-method setup, identity verification, crypto payment, or another provider
@@ -1679,7 +1705,7 @@ Flags:
 With `--json`, output should use the hosted provider session result from
 [json-contracts.md](json-contracts.md).
 
-### `witself billing payment-methods remove PAYMENT_METHOD_ID`
+### `witself billing payment-methods remove PAYMENT_METHOD_ID` (target; not implemented)
 
 Remove a payment method.
 
@@ -1691,7 +1717,7 @@ Flags:
 | `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason for removing the payment method. |
 
-### `witself billing payment-methods set-default PAYMENT_METHOD_ID`
+### `witself billing payment-methods set-default PAYMENT_METHOD_ID` (target; not implemented)
 
 Set the default payment method.
 
@@ -1717,7 +1743,7 @@ configured provider supports it. The provider determines the exact supported
 assets, networks, limits, confirmation behavior, settlement currency, refunds,
 and recurring-payment capabilities.
 
-### `witself billing crypto quote`
+### `witself billing crypto quote` (target; not implemented)
 
 Create or preview a crypto payment quote for an invoice, subscription setup, or
 account balance.
@@ -1735,7 +1761,7 @@ Flags:
 | `--provider NAME` | Payment provider to use when more than one is configured. |
 | `--expires-in DURATION` | Requested quote lifetime when the provider allows it. |
 
-### `witself billing crypto checkout`
+### `witself billing crypto checkout` (target; not implemented)
 
 Start a provider-hosted crypto checkout or payment setup flow.
 
@@ -1758,7 +1784,7 @@ With `--json`, output should use the hosted provider session result from
 [json-contracts.md](json-contracts.md), with crypto payment metadata included
 when available.
 
-### `witself billing crypto status SESSION_ID`
+### `witself billing crypto status SESSION_ID` (target; not implemented)
 
 Show the status of a crypto payment flow by its hosted provider session id
 (`hps_...`), matching the `next_command` poll examples. This reads
@@ -1848,7 +1874,7 @@ Flags:
 | `--idempotency-key KEY` | Required 16-128 character printable-ASCII, account-scoped retry identity for apply. |
 | `--yes` | Required explicit apply confirmation. |
 
-### `witself billing invoices show INVOICE_ID`
+### `witself billing invoices show INVOICE_ID` (target; not implemented)
 
 Show one invoice.
 
@@ -1856,9 +1882,9 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--format json|text` | Output format. |
+| `--format json\|text` | Output format. |
 
-### `witself billing invoices download INVOICE_ID`
+### `witself billing invoices download INVOICE_ID` (target; not implemented)
 
 Download an invoice PDF or JSON representation.
 
@@ -1867,7 +1893,7 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--out PATH` | Write invoice to a file. |
-| `--format pdf|json` | Download format. |
+| `--format pdf\|json` | Download format. |
 
 ## `witself support`
 
@@ -1890,7 +1916,7 @@ Flags:
 | `--subject TEXT` | Ticket subject. |
 | `--body TEXT` | Ticket body. |
 | `--body-file PATH` | Read ticket body from a file. |
-| `--priority low|normal|high|urgent` | Ticket priority. |
+| `--priority low\|normal\|high\|urgent` | Ticket priority. |
 | `--category CATEGORY` | Ticket category. |
 | `--realm NAME_OR_ID` | Related realm. |
 | `--agent NAME_OR_ID` | Related agent. |
@@ -2402,9 +2428,9 @@ Read one memory deterministically by `id`. This is the exact-id counterpart to
 ranked `recall`; neither operation makes a backend model call or mutates the
 memory.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin or `read`-policy caller: read a memory owned by a specific agent. |
 | `--owner-group NAME_OR_ID` | Read a group-owned memory. |
@@ -2865,16 +2891,21 @@ Flags:
 
 | Flag | Description |
 |---|---|
+| `--sensitive` | Mark the fact `sensitive` (PII); value is redacted in list/scan by default. |
+| `--type HINT` | Type hint such as `string`, `email`, `url`, `date`, or `number`. |
+| `--source-ref TEXT` | Provenance. |
+| `--recreate-deleted` | Explicitly create a new fact id at an address whose prior fact was permanently deleted. Never inferred. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--value TEXT` | Fact value from a flag. |
 | `--value-file PATH` | Read the fact value from a file. |
 | `--value-stdin` | Read the fact value from stdin. |
 | `--primary` | Promote this fact to primary for its logical kind. Demotes the prior primary. |
 | `--not-primary` | Clear the primary flag for this fact. |
-| `--sensitive` | Mark the fact `sensitive` (PII); value is redacted in list/scan by default. |
 | `--not-sensitive` | Clear the `sensitive` marker. |
-| `--format HINT` | Type hint such as `string`, `email`, `url`, `date`, or `number`. |
-| `--source TEXT` | Provenance. |
-| `--recreate-deleted` | Explicitly create a new fact id at an address whose prior fact was permanently deleted. Never inferred. |
 | `--owner-agent NAME_OR_ID` | Set a fact for a specific agent. `contribute`/`curate` policy or operator. |
 | `--owner-group NAME_OR_ID` | Set a group-owned fact. |
 | `--dry-run` | Show the planned upsert and any primary demotion without writing. |
@@ -2890,9 +2921,9 @@ witself fact get email
 witself fact get email --owner-agent archivist --reason "operator lookup"
 ```
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin or `read`-policy caller: get a fact owned by a specific agent. |
 | `--owner-group NAME_OR_ID` | Get a group-owned fact. |
@@ -2915,14 +2946,19 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--prefix TEXT` | Filter by name prefix or namespace, such as `aws/`. |
+| `--category TEXT` | Filter by name prefix or namespace, such as `aws/`. |
+| `--include-sensitive` | Include `sensitive` facts; values remain redacted unless individually read. |
+| `--limit N` | Maximum number of rows. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--primary-only` | Show only `primary` facts. |
 | `--format HINT` | Filter by format hint. |
 | `--owner-agent NAME_OR_ID` | Filter by the agent that owns the fact. |
 | `--owner-group NAME_OR_ID` | Filter by group-owned facts. |
 | `--all-agents` | Operator/admin only: include facts owned by every agent in the realm. |
-| `--include-sensitive` | Include `sensitive` facts; values remain redacted unless individually read. |
-| `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
 ### `witself fact delete PREDICATE`
@@ -3085,15 +3121,20 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--length N` | Password length. Default: `32`. |
-| `--lower` | Include lowercase letters. Default: true. |
-| `--upper` | Include uppercase letters. Default: true. |
+| `--lowercase` | Include lowercase letters. Default: true. |
+| `--uppercase` | Include uppercase letters. Default: true. |
 | `--digits` | Include digits. Default: true. |
 | `--symbols` | Include symbols. Default: true. |
+| `--no-ambiguous` | Avoid ambiguous characters such as `O`, `0`, `I`, `l`, and `1`. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--no-lower` | Disable lowercase letters. |
 | `--no-upper` | Disable uppercase letters. |
 | `--no-digits` | Disable digits. |
 | `--no-symbols` | Disable symbols. |
-| `--no-ambiguous` | Avoid ambiguous characters such as `O`, `0`, `I`, `l`, and `1`. |
 | `--words N` | Generate a human-readable passphrase with N words instead of a random-character password. |
 | `--separator TEXT` | Separator for passphrase mode. Default: `-`. |
 | `--count N` | Generate N values. Default: `1`. |
@@ -3170,9 +3211,9 @@ witself secret create deploy/tls \
   --sensitive-file private-key=./tls.key
 ```
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--description TEXT` | Required human-readable description. Prompts in interactive mode if omitted. |
 | `--template TEMPLATE` | Optional field convention, such as `login`, `api-key`, `ssh-key`, `certificate`, `env`, or `generic`. Default: `generic`. |
@@ -3216,9 +3257,9 @@ same value-free read as the read-only, idempotent `witself.secret.status` tool.
 Show non-sensitive fields and redacted sensitive fields for a secret. This never
 reveals sensitive values; use `secret reveal` for that.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: show a secret owned by a specific agent. |
 | `--group NAME_OR_ID` | Show a group-owned secret. |
@@ -3244,16 +3285,21 @@ Flags:
 |---|---|
 | `--template TEMPLATE` | Filter by template. |
 | `--tag TAG` | Filter by tag. Repeatable. |
+| `--limit N` | Maximum number of rows. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--prefix TEXT` | Filter by name prefix. |
 | `--owner-agent NAME_OR_ID` | Filter by the agent that owns the secret. |
 | `--group NAME_OR_ID` | Filter by group-owned secrets. |
 | `--all-agents` | Operator/admin only: include secrets owned by every agent in the realm. |
 | `--include-group` | Operator/admin only: include group-owned secrets alongside agent-owned results. |
-| `--limit N` | Maximum number of rows. |
 | `--include-archived` | Include archived secrets when allowed. Maps to MCP `include_archived` and the JSON `archived` field. |
 | `--include-disabled` | Include secrets whose owning agent is disabled, when allowed. |
 
-### `witself secret scan`
+### `witself secret scan` (target; not implemented)
 
 Scan visible secrets and produce a redacted inventory. Operator/admin callers can
 scan across all agents in the realm without revealing sensitive values.
@@ -3296,9 +3342,9 @@ witself secret reveal github/builder password --json
 witself secret reveal github/builder password --owner-agent builder-agent --reason "operator recovery"
 ```
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: reveal a secret field owned by a specific agent. |
 | `--group NAME_OR_ID` | Operator/admin or `group:manage`: reveal a field from a group-owned secret. |
@@ -3306,7 +3352,7 @@ Flags:
 | `--reason TEXT` | Audit reason for the reveal. |
 | `--ttl DURATION` | Request a short-lived reveal lease when supported. |
 
-### `witself secret update NAME`
+### `witself secret update NAME` (target; not implemented)
 
 Update fields on an existing secret.
 
@@ -3333,7 +3379,7 @@ Flags:
 | `--remove-tag TAG` | Remove tag. Repeatable. |
 | `--reason TEXT` | Audit reason for the update. |
 
-### `witself secret rename NAME NEW_NAME`
+### `witself secret rename NAME NEW_NAME` (target; not implemented)
 
 Rename a secret within the same owner. `NEW_NAME` must be unique for that owner
 inside the current realm.
@@ -3346,7 +3392,7 @@ Flags:
 | `--group NAME_OR_ID` | Rename a group-owned secret. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret copy NAME NEW_NAME`
+### `witself secret copy NAME NEW_NAME` (target; not implemented)
 
 Copy a secret. By default this copies non-sensitive fields and structure only;
 copying sensitive values must be explicit.
@@ -3368,9 +3414,9 @@ Flags:
 
 Archive a secret without permanently deleting it.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: archive a secret owned by a specific agent. |
 | `--group NAME_OR_ID` | Archive a group-owned secret. |
@@ -3382,9 +3428,9 @@ Flags:
 
 Restore an archived secret when supported.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: restore a secret owned by a specific agent. |
 | `--group NAME_OR_ID` | Restore a group-owned secret. |
@@ -3413,7 +3459,7 @@ same mutation as destructive, idempotent `witself.secret.delete`; callers must
 supply `secret_id`, `expected_row_version`, and `idempotency_key`. Irreversible
 purge remains a separate future operation.
 
-### `witself secret grant NAME`
+### `witself secret grant NAME` (target; not implemented)
 
 Grant an agent access to a secret. Secret access is grant-based and composes with
 realm roles per [authorization-and-roles.md](authorization-and-roles.md); it does
@@ -3434,7 +3480,7 @@ Flags:
 | `--dry-run` | Show planned access grant without changing permissions. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself secret revoke NAME`
+### `witself secret revoke NAME` (target; not implemented)
 
 Revoke an agent's access to a secret.
 
@@ -3517,7 +3563,7 @@ plaintext-exported, and is revealed only through the guarded `totp show
 --reveal-seed` path. The TOTP model is tracked in [totp-2fa.md](totp-2fa.md);
 `totp:enroll` and `totp:code` are distinct scopes.
 
-### `witself totp enroll NAME`
+### `witself totp enroll NAME` (target; not implemented)
 
 Enroll TOTP setup material into an existing or new secret.
 
@@ -3543,7 +3589,7 @@ Flags:
 | `--account TEXT` | Account label. |
 | `--digits N` | Number of TOTP digits. Default: `6`. |
 | `--period SECONDS` | TOTP period. Default: `30`. |
-| `--algorithm SHA1|SHA256|SHA512` | TOTP HMAC algorithm. Default: `SHA1`. |
+| `--algorithm SHA1\|SHA256\|SHA512` | TOTP HMAC algorithm. Default: `SHA1`. |
 | `--create-secret` | Create the secret if it does not exist. |
 
 ### `witself totp code NAME`
@@ -3558,9 +3604,9 @@ witself totp code github/builder
 witself totp code github/builder --json
 ```
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: generate a code for a secret owned by a specific agent. |
 | `--group NAME_OR_ID` | Generate a code for a group-owned secret. |
@@ -3572,16 +3618,16 @@ Flags:
 
 Show TOTP metadata without revealing the seed.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--owner-agent NAME_OR_ID` | Operator/admin only: show TOTP metadata for a secret owned by a specific agent. |
 | `--group NAME_OR_ID` | Show TOTP metadata for a group-owned secret. |
 | `--reveal-seed` | Reveal the underlying TOTP seed. Admin/operator path only; emits a `totp.seed_revealed` audit event. |
 | `--reason TEXT` | Audit reason when revealing seed. |
 
-### `witself totp delete NAME`
+### `witself totp delete NAME` (target; not implemented)
 
 Remove TOTP setup material from a secret.
 
@@ -3644,7 +3690,7 @@ Flags:
 | `--permission VERB` | One of `read`, `contribute`, `curate`, or `forget`. |
 | `--target-agent NAME_OR_ID` | Target is a specific agent. Mutually exclusive with `--target-group`. |
 | `--target-group NAME_OR_ID` | Target is a security group. Mutually exclusive with `--target-agent`. |
-| `--scope memory|fact|both` | Identity data the policy applies to. Default: `both`. |
+| `--scope memory\|fact\|both` | Identity data the policy applies to. Default: `both`. |
 | `--filter-kind KIND` | Restrict to memories of a kind. Repeatable. |
 | `--filter-tag TAG` | Restrict to memories/facts with a tag. Repeatable. |
 | `--filter-name PATTERN` | Restrict to fact names matching a pattern or namespace. |
@@ -3667,7 +3713,7 @@ Flags:
 | `--target-agent NAME_OR_ID` | Filter by target agent. |
 | `--target-group NAME_OR_ID` | Filter by target group. |
 | `--permission VERB` | Filter by permission verb. |
-| `--scope memory|fact|both` | Filter by scope. |
+| `--scope memory\|fact\|both` | Filter by scope. |
 | `--limit N` | Maximum number of rows. |
 | `--cursor TOKEN` | Continue from a pagination cursor. |
 
@@ -3725,7 +3771,7 @@ Flags:
 | `--permission VERB` | Permission verb to evaluate. |
 | `--target-agent NAME_OR_ID` | Target agent to evaluate. Mutually exclusive with `--target-group`. |
 | `--target-group NAME_OR_ID` | Target group to evaluate. |
-| `--scope memory|fact|both` | Scope to evaluate. |
+| `--scope memory\|fact\|both` | Scope to evaluate. |
 | `--filter-kind KIND` | Evaluate against a memory kind. Repeatable. |
 | `--filter-tag TAG` | Evaluate against a tag. Repeatable. |
 | `--filter-name PATTERN` | Evaluate against a fact name. |
@@ -5219,6 +5265,11 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--email-agent-segment SEGMENT` | Use the v0.0.241+ strict atomic-create route with one byte-for-byte canonical lowercase agent-email segment. Empty, normalized, reserved, or colliding values fail without creating the agent. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--display-name TEXT` | Human-readable display name. |
 | `--description TEXT` | Description of the agent's purpose. |
 | `--tag TAG` | Add a tag. Repeatable. |
@@ -5230,9 +5281,9 @@ Flags:
 
 List agent principals.
 
-Flags:
+Target flags (not implemented):
 
-| Flag | Description |
+| Target flag | Description |
 |---|---|
 | `--tag TAG` | Filter by tag. Repeatable. |
 | `--group NAME_OR_ID` | Filter to members of a security group. |
@@ -5258,7 +5309,7 @@ when present. The text view shows a compact age such as `2m ago`, `5h ago`, or
 `never` beside the UTC activity timestamp; JSON returns the exact optional
 `last_activity_at`, `last_runtime`, `last_location`, and `last_event` fields.
 
-### `witself agent show NAME_OR_ID`
+### `witself agent show NAME_OR_ID` (target; not implemented)
 
 Show one agent principal, including its `primary` facts as identity anchors.
 
@@ -5271,7 +5322,7 @@ Flags:
 | `--show-facts` | Include the agent's `primary` facts. Default: true. |
 | `--show-usage` | Include usage summary when available. |
 
-### `witself agent rename NAME_OR_ID NEW_NAME`
+### `witself agent rename NAME_OR_ID NEW_NAME` (target; not implemented)
 
 Rename an agent. Operator/admin by default. The agent keeps its identity,
 memories, facts, policies, group membership, audit history, and tokens unless a
@@ -5285,7 +5336,7 @@ Flags:
 | `--dry-run` | Show planned rename and token-rotation effects without applying them. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself agent copy SOURCE_AGENT NEW_AGENT`
+### `witself agent copy SOURCE_AGENT NEW_AGENT` (target; not implemented)
 
 Copy an agent into a new named agent. Operator/admin by default. By default this
 copies agent metadata, policy bindings, and group membership, but not memories
@@ -5307,7 +5358,7 @@ Flags:
 | `--yes` | Skip confirmation when allowed. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself agent disable NAME_OR_ID`
+### `witself agent disable NAME_OR_ID` (target; not implemented)
 
 Disable an agent principal. Operator/admin by default. Disabled agents cannot
 authenticate with existing tokens.
@@ -5320,7 +5371,7 @@ Flags:
 | `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
 
-### `witself agent enable NAME_OR_ID`
+### `witself agent enable NAME_OR_ID` (target; not implemented)
 
 Re-enable an agent principal. Operator/admin by default.
 
@@ -5341,13 +5392,18 @@ Flags:
 
 | Flag | Description |
 |---|---|
+| `--yes` | Skip confirmation. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
 | `--archive` | Archive instead of permanently deleting. |
 | `--permanent` | Permanently delete when allowed. |
 | `--forget-identity` | Soft-delete memories and facts owned by the agent. Default for safe deletion. |
 | `--transfer-identity-to AGENT_OR_GROUP` | Transfer owned memories and facts to another agent or group. |
 | `--delete-identity` | Permanently delete owned memories and facts when allowed. Requires confirmation and audit reason. |
 | `--dry-run` | Show deletion impact, blockers, and identity-handling plan without deleting anything. |
-| `--yes` | Skip confirmation. |
 | `--reason TEXT` | Audit reason. |
 
 ## `witself token`
@@ -5372,10 +5428,15 @@ Flags:
 | `--agent NAME_OR_ID` | Create an agent token. |
 | `--operator` | Create an operator token. Operator/admin only. |
 | `--name TEXT` | Token display name. |
-| `--expires-at TIMESTAMP` | Token expiration. |
-| `--scope SCOPE` | Token scope, such as `memory:read` or `message:send`. Repeatable. |
 | `--out PATH` | Write the new token to a file instead of stdout. |
 | `--ttl DURATION` | Token lifetime. Optional for durable agent tokens. |
+
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
+| `--expires-at TIMESTAMP` | Token expiration. |
+| `--scope SCOPE` | Token scope, such as `memory:read` or `message:send`. Repeatable. |
 | `--dry-run` | Validate and show planned token creation without issuing a token. |
 
 If neither `--ttl` nor `--expires-at` is supplied for an agent token, the token
@@ -5395,7 +5456,7 @@ not create a named additional operator yet; `--name` labels the token for later
 list/show surfaces. Operator listing, additional named operator records, and
 safe operator deletion are tracked as the next lifecycle slice.
 
-### `witself token list`
+### `witself token list` (target; not implemented)
 
 List tokens visible to the current principal.
 
@@ -5416,11 +5477,16 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--dry-run` | Show planned revocation without revoking the token. |
-| `--reason TEXT` | Audit reason. |
 | `--yes` | Skip confirmation. |
 
-### `witself token rotate TOKEN_ID`
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
+| `--dry-run` | Show planned revocation without revoking the token. |
+| `--reason TEXT` | Audit reason. |
+
+### `witself token rotate TOKEN_ID` (target; not implemented)
 
 Rotate a token and return the replacement once.
 
@@ -5578,16 +5644,21 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--transport stdio|http` | MCP transport. Initial target: `stdio`. |
-| `--listen ADDRESS` | Listen address for HTTP transport. |
-| `--auth-token-file PATH` | Token file for HTTP transport auth. |
 | `--read-only` | Serve without create/update/forget/delete tools (inspection-only). |
-| `--profile full|read-only|curator-preview|curator-apply` | Select the exact MCP surface. Curator profiles require a token with the same authenticated access profile; preview exposes 10 curation-only tools and apply exposes 11. |
+| `--profile full\|read-only\|curator-preview\|curator-apply` | Select the exact MCP surface. Curator profiles require a token with the same authenticated access profile; preview exposes 10 curation-only tools and apply exposes 11. |
 | `--token-file PATH` | Override the installed token file, including when launching a short-lived restricted curator profile. |
 | `--no-value-tools` | Disable implemented private-value MCP tools (`secret.reveal`, `totp.code`, `password.generate`); value-returning `reference.resolve` must join this gate when implemented. |
 | `--agent NAME_OR_ID` | Operator/admin only: bind the server to one agent principal. Agent tokens are already bound by identity. |
 
-### `witself mcp tools`
+Target flags (not implemented):
+
+| Target flag | Description |
+|---|---|
+| `--transport stdio\|http` | MCP transport. Initial target: `stdio`. |
+| `--listen ADDRESS` | Listen address for HTTP transport. |
+| `--auth-token-file PATH` | Token file for HTTP transport auth. |
+
+### `witself mcp tools` (target; not implemented)
 
 Print the MCP tool list and schemas.
 
