@@ -25,8 +25,14 @@ safety rules.
   legal pages were ratified and published, the CLI can read them with
   `witself legal`, and signup records the accepted Terms and Privacy versions.
 - **Erasure posture — 2026-08-31 (#312/#313).** In-product fact deletion is
-  enabled and the 30-day closed-account purge runs in enforce mode on both
-  production cells after its preview review.
+  enabled, and the closed-account purge runs in enforce mode after its preview
+  review. The purge treats an account as eligible 720 hours (30 days) after
+  closure. On 2026-08-31 it ran on the former serving cell and on
+  `civo-sandbox-use1-backup`. The former serving cell was lost on 2026-09-19;
+  its replacement, `civo-sandbox-use1-serving`, still uses the fleet registry
+  name `civo-sandbox-usw2-dev`. Today the purge runs in enforce mode on
+  `civo-sandbox-use1-serving` and `civo-sandbox-use1-backup`; the values of the
+  onboarded, not yet provisioned `civo-prod-use1-serving` set the same.
 
 ## Current needs-Scott list
 

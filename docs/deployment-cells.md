@@ -335,15 +335,25 @@ for Founder. A point-in-time metric scrape passed, but continuous Prometheus
 scraping, PVC metrics collection, Alertmanager routing, a tested external
 receiver, and provider backpressure still block cohort expansion.
 
-At the v0.0.253 rollout freeze, placement status reported zero movable live
-accounts, one placeable archived account, and no pending or active placement.
-The runner remains disabled because capacity monitoring is incomplete; the
-schema-88 backup validation cell remains non-accepting and therefore is not a
-possible destination. Do not re-enable scheduled placement or invoke manual restore,
-rebalance, export/import, or evacuation until every possible accepting
-destination is schema-91-capable, has verified storage headroom, and has
-continuous capacity monitoring. The runner's disable flag does not revoke
-manual fleet-token placement authority.
+At the v0.0.253 rollout freeze, placement stopped because capacity monitoring
+was incomplete and the backup validation cell ran an older schema. Since then
+the release train rolls both live Civo cells to the same release, backup cell
+first, and the serving cell runs the monitoring stack with paging. Capacity
+monitoring is still a condition below. These rules hold:
+
+- `civo-sandbox-use1-backup` is the rollback-only drill target, registered
+  `backup_validation_target=true` and `accepting=false`. It is not a placement
+  or move destination unless it is deliberately reclassified.
+- `civo-prod-use1-serving` is onboarded, not provisioned; see the note at the
+  top of this page.
+- Scheduled placement is the control plane's opt-in `config:placement_runner`
+  setting. Git does not record its live value; read it with
+  `witself-admin settings placement-runner show --json` before any move. Do not
+  enable it until every accepting cell has verified storage headroom and
+  continuous capacity monitoring.
+- Move accounts one at a time with [Account moves in a chosen order](runbooks.md#account-moves-in-a-chosen-order),
+  with the runner disabled. The runner's disable flag does not revoke manual
+  fleet-token placement authority.
 
 Every other cell/account remains subject to its own explicit activation. Treat
 the README procedure as the repeatable contract for a new cell or cohort, not

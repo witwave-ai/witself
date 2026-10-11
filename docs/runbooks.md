@@ -216,7 +216,9 @@ of `witself operator list`.
 
 Recovery proves inbox control: a code goes to the account's email, and
 redeeming it rotates the owner's credentials — the old tokens die, agents and
-other operators are untouched. Requesting a code changes nothing by itself.
+other operators are untouched. Requesting a code does not change the account
+or its credentials; a new request replaces any earlier unused code. Requests
+are rate-limited.
 
 ```sh
 witself account recover
@@ -259,8 +261,10 @@ working. Three emails tell the story:
 
 1. **New address**: a confirmation code (proves the inbox can receive).
 2. **Old address, immediately**: a warning that a change was requested — if it
-   wasn't you, `witself account recover` rotates the owner credentials before the
-   change can commit.
+   wasn't you, request a code with `witself account recover`, then redeem it
+   with `witself account recover --code CODE`. Redeeming the code revokes
+   every owner token, so a change that has not yet been submitted cannot
+   commit with the old token.
 3. **Old address, after the commit**: a revert link valid for **48 hours**.
    Clicking it points the account back at the old address and kills any
    outstanding recovery code — the safety net if a stolen token moved the
@@ -341,6 +345,77 @@ witself account close --yes
 ```
 
 Add `--reason TEXT` to record why.
+
+## Handle a data-subject request
+
+A data-subject request asks to see, export, correct or delete personal data.
+
+**Intake.** Requests arrive at `legal@witwave.ai` or as an in-product support
+ticket. The [Privacy Policy](legal/privacy-policy.md) promises a reply within
+30 days. Data-deletion tickets always go to a human
+([support-policy.md](support-policy.md)).
+
+**Who is asking.** No operator command exports, corrects or closes an account
+for its owner, so the owner runs every step. Account-level steps (`status`,
+`export`, `events`, `change-email`, `change-display-name`, `close`) use the
+owner's operator credential. `recover` needs no credential; the code emailed
+to the account address is the proof. Deleting one fact or memory
+runs as the agent that holds it (`--account`, `--realm`, `--agent`, or an
+agent `--token-file`); the owner manages those agents. Holding these
+credentials is the identity check, and only the account email can recover the
+owner credential; see
+[Account email is the root of trust](security-policy.md#account-email-is-the-root-of-trust).
+Never ask for a token, a recovery code or a vault key. An owner who lost the
+credential runs `witself account recover`, then redeems the emailed code with
+`--code`. Managed recovery works only for an active account: a suspended
+owner who lost the credential has no self-service path, so escalate.
+
+**Someone else's data.** If the requester is not the account holder, for
+example a person named in an agent's memories, the customer is the controller
+of that content (see the Privacy Policy). Tell the requester to contact the
+customer. Do not search customer content.
+
+| Request | Owner runs | Notes |
+| --- | --- | --- |
+| Access and portability | `witself account status`, `witself export --out FILE`, `witself account events` | The export is the whole account and is verified before it is written. Sealed-plane values export only as ciphertext. `account events` is the owner's audit trail. |
+| Correction | `witself account change-email`, `witself account change-display-name` | `change-email` sends a code to the new address; run it again with `--code` to commit. Agents correct their own facts and memories with their usual write commands. Delete a wrong item as in the next row. |
+| Deletion of one item | `witself fact delete`, `witself memory delete` (as the agent) | Preview with `--dry-run`. `fact delete` applies with `--yes`. `memory delete` applies with `--yes --expected-version N --scrub-set-revision SHA256 --idempotency-key KEY`. Take `--expected-version` and `--scrub-set-revision` from the preview. Choose a fresh `--idempotency-key`; reuse it only to retry the same deletion. Deletion is permanent. |
+| Deletion of the account | `witself export --out FILE`, then `witself account close --yes` | See the timing below. |
+
+```sh
+witself account status
+witself export --out FILE
+witself account events
+witself account change-email --new-email new@example.com
+witself account change-display-name "New Display Name"
+witself fact delete --dry-run PREDICATE
+witself memory delete MEM_ID --dry-run
+witself account close --yes
+witself account recover
+```
+
+Closing revokes every credential at once. It does not delete content at once.
+The cell's purge worker treats a closed account as eligible 720 hours (30 days)
+after it closed. It runs every 5 minutes and takes up to 100 eligible accounts
+per pass, in closure order. It waits while the account's vault lifecycle work
+is active and while the account is being moved between cells. Afterwards only
+a value-free tombstone remains; see
+[the data-retention policy](data-retention-policy.md#account-closure-and-erasure).
+
+The purge does not delete backup copies: account snapshots in R2, the nightly
+encrypted cell database dumps, pre-migration database dumps, and evacuation
+archives in R2. How long each copy is kept depends on bucket lifecycle rules
+and operator procedures that Git does not record. An evacuation archive of a
+closed account is kept as durable retention and is never restored, so the
+purge does not reach it. Stripe keeps its own billing records. The control
+plane's directory keeps routing entries without the email address. An email
+change keeps the old and new addresses in a control-plane record that expires
+24 hours after its last write; its revert record keeps both for 48 hours.
+
+**Reply.** Answer within 30 days of the request and say what was done. For a
+closed account, give the closure time and the earliest purge time, 720 hours
+later. Do not confirm that the purge has finished: no operator command reads
+one account's purge state yet.
 
 ## Close a realm without resurrecting its email route
 

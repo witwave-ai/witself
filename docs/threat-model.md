@@ -420,6 +420,9 @@ keep each agent's AVK separate from bearer tokens and backend storage.
 - Self-hosted operators are responsible for their cloud account, Kubernetes
   cluster, IAM, database, network controls, backups, KMS credentials, and
   operational monitoring. Witself requires no backend model credential.
+- On Witself Cloud the account email is the root of trust: inbox control
+  recovers the owner credential. See
+  [security-policy.md](security-policy.md#account-email-is-the-root-of-trust).
 
 ## Required Controls
 
