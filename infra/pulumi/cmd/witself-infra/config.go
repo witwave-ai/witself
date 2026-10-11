@@ -31,6 +31,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/witwave-ai/witself/infra/pulumi/internal/backend"
+	"github.com/witwave-ai/witself/infra/pulumi/internal/cell"
 )
 
 // witselfHome is the managed root shared with the other witself CLIs:
@@ -141,6 +142,8 @@ type cellEntry struct {
 	ControlPlane           *string          `yaml:"control_plane,omitempty"`
 	FleetTokenFile         *string          `yaml:"fleet_token_file,omitempty"`
 	CivoNodeSize           *string          `yaml:"civo_node_size,omitempty"`
+	CivoNodeCount          *int             `yaml:"civo_node_count,omitempty"`
+	CivoCoreQuota          *int             `yaml:"civo_core_quota,omitempty"`
 	CivoAdminCIDR          *string          `yaml:"civo_admin_cidr,omitempty"`
 	CivoIngress            *string          `yaml:"civo_ingress,omitempty"`
 	CivoDNS                *string          `yaml:"civo_dns,omitempty"`
@@ -235,6 +238,12 @@ func (e *cellEntry) flagValues() map[string]string {
 	set("control-plane", e.ControlPlane)
 	set("fleet-token-file", e.FleetTokenFile)
 	set("civo-node-size", e.CivoNodeSize)
+	if e.CivoNodeCount != nil {
+		out["civo-node-count"] = strconv.Itoa(*e.CivoNodeCount)
+	}
+	if e.CivoCoreQuota != nil {
+		out["civo-core-quota"] = strconv.Itoa(*e.CivoCoreQuota)
+	}
 	set("civo-admin-cidr", e.CivoAdminCIDR)
 	set("civo-ingress", e.CivoIngress)
 	set("civo-dns", e.CivoDNS)
@@ -287,6 +296,57 @@ var secretShapes = regexp.MustCompile(
 		`|github_pat_[A-Za-z0-9_]{20}` +
 		`|cf(?:ut|at|k)_[A-Za-z0-9_-]{20}`)
 
+// validateCivoInventoryIntegers checks the original YAML nodes before decoding
+// into *int fields, since yaml.v3 otherwise truncates floating-point values.
+func validateCivoInventoryIntegers(raw []byte) error {
+	type integerNodes struct {
+		CivoNodeCount yaml.Node `yaml:"civo_node_count"`
+		CivoCoreQuota yaml.Node `yaml:"civo_core_quota"`
+	}
+	var nodes struct {
+		Defaults integerNodes            `yaml:"defaults"`
+		Cells    map[string]integerNodes `yaml:"cells"`
+	}
+	if err := yaml.NewDecoder(strings.NewReader(string(raw))).Decode(&nodes); err != nil {
+		return err
+	}
+	validate := func(location string, entry integerNodes) error {
+		for _, field := range []struct {
+			key  string
+			node yaml.Node
+		}{
+			{"civo_node_count", entry.CivoNodeCount},
+			{"civo_core_quota", entry.CivoCoreQuota},
+		} {
+			if field.node.Kind == 0 { // Absent keys keep the built-in defaults.
+				continue
+			}
+			node := &field.node
+			for node.Kind == yaml.AliasNode {
+				node = node.Alias
+			}
+			if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+				return fmt.Errorf("%s: %s must be an integer", location, field.key)
+			}
+		}
+		return nil
+	}
+	if err := validate("defaults", nodes.Defaults); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(nodes.Cells))
+	for name := range nodes.Cells {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := validate(fmt.Sprintf("cell %q", name), nodes.Cells[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // loadInfraConfig reads + validates the config. Unknown YAML keys are
 // errors (a typo like k8s_verion must not silently fall back to a
 // default), and secret-shaped values are rejected with a line number.
@@ -306,6 +366,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		if secretShapes.MatchString(line) {
 			return nil, path, fmt.Errorf("%s:%d looks like a credential — infra.yaml holds names, IDs, and token file PATHS, never secret values", path, i+1)
 		}
+	}
+	if err := validateCivoInventoryIntegers(raw); err != nil {
+		return nil, path, fmt.Errorf("parse %s: %w", path, err)
 	}
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
@@ -346,6 +409,12 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		}
 		if d.CivoIngress != nil || d.CivoDNS != nil || d.RegisterDraining != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set civo_ingress/civo_dns/register_draining — ingress shape and registration state are per-cell only", path)
+		}
+		if d.CivoNodeCount != nil {
+			return nil, path, fmt.Errorf("%s: defaults must not set civo_node_count — a node count is a per-cell spend decision", path)
+		}
+		if d.CivoCoreQuota != nil && (*d.CivoCoreQuota < 1 || *d.CivoCoreQuota > civoMaxCoreQuota) {
+			return nil, path, fmt.Errorf("%s: defaults: civo_core_quota %d must be from 1 to 1024", path, *d.CivoCoreQuota)
 		}
 	}
 	// Sort for deterministic collision diagnostics, independent of map iteration.
@@ -409,6 +478,23 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		}
 		if e.CivoDNS != nil && *e.CivoDNS == "cloudflare" && (e.CivoIngress == nil || *e.CivoIngress != "loadbalancer") {
 			return nil, path, fmt.Errorf("%s: cell %q: civo_dns cloudflare requires civo_ingress loadbalancer", path, name)
+		}
+	}
+	for _, name := range names {
+		e := cfg.Cells[name]
+		if e.CivoCoreQuota != nil {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_core_quota is an account setting; record it under defaults, not on a cell", path, name)
+		}
+		if e.CivoNodeCount == nil {
+			continue
+		}
+		if e.Cloud == nil || *e.Cloud != "civo" {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_node_count applies only to cloud civo", path, name)
+		}
+		profile, _ := civoInventoryShape(e, cfg.Defaults)
+		minimum := cell.CivoDefaultNodeCount(profile)
+		if *e.CivoNodeCount < minimum || *e.CivoNodeCount > cell.CivoMaxNodeCount {
+			return nil, path, fmt.Errorf("%s: cell %q: civo_node_count %d must be from %d to %d for profile %s", path, name, *e.CivoNodeCount, minimum, cell.CivoMaxNodeCount, profile)
 		}
 	}
 	return &cfg, path, nil

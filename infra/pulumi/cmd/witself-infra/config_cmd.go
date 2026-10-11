@@ -109,6 +109,9 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	get := func(name string) string { return fs.Lookup(name).Value.String() }
 	explicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if explicit["civo-node-count"] || explicit["civo-core-quota"] {
+		return fmt.Errorf("-civo-node-count and -civo-core-quota are not recorded by config add-cell; a new cell starts at its profile's node count. Record civo_node_count on the cell's entry, or civo_core_quota under defaults, by hand (see the README)")
+	}
 	dryRun := false
 	if f := fs.Lookup("dry-run"); f != nil {
 		dryRun = f.Value.String() == "true"

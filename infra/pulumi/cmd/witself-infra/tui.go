@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -243,7 +244,9 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 		case "", "minimal":
 			profileLabel = "minimal development"
 		case "prod":
-			profileLabel = "prod (2 nodes)"
+			if e.CivoNodeCount == nil {
+				profileLabel = "prod (2 nodes)"
+			}
 		}
 		out = append(out, settingRow{key: "profile", value: profileLabel, fromEntry: fromEntry})
 	} else {
@@ -290,6 +293,9 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 		}
 		out = append(out, settingRow{key: "database", value: "in-cluster PostgreSQL · persistent volume", fromEntry: false})
 		str("node size", "g4s.kube.medium", e.CivoNodeSize, func(x *cellEntry) *string { return x.CivoNodeSize })
+		if e.CivoNodeCount != nil {
+			out = append(out, settingRow{key: "node count", value: strconv.Itoa(*e.CivoNodeCount), fromEntry: true})
+		}
 		str("admin cidr", "required", e.CivoAdminCIDR, func(x *cellEntry) *string { return x.CivoAdminCIDR })
 		if e.SecurityContext != nil && e.SecurityContext.Civo != nil && e.SecurityContext.Civo.TokenFile != nil {
 			out = append(out, settingRow{key: "credential", value: "token file · " + *e.SecurityContext.Civo.TokenFile, fromEntry: true})
