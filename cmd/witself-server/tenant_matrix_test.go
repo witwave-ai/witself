@@ -58,6 +58,10 @@ type tenantRow struct {
 }
 
 type tenantProbe struct {
+	SameRealm           *tenantSameAccountRule
+	OtherRealm          *tenantSameAccountRule
+	SameAccountAllowed  map[string]string // Peer-visible fixture keys, each with a source citation.
+	OtherRealmAllowed   map[string]string // Separate exceptions for the other-realm caller.
 	Name                string
 	Kind                probeKind
 	Cred                tenantCred
@@ -92,8 +96,11 @@ type tenantRequest struct {
 func tenantRows() []tenantRow {
 	rows := append(tenantRowsF1(), tenantRowsF2()...)
 	for i := range rows {
+		tenantSameAccountF1(&rows[i])
+		tenantSameAccountF2(&rows[i])
 		for j := range rows[i].Probes {
 			probe := &rows[i].Probes[j]
+			tenantSameAccountLimitations(rows[i].Pattern, probe)
 			if probe.Kind == own && probe.Build != nil {
 				probe.Build = tenantOwnBuild(rows[i].Pattern+"/"+probe.Name, probe.Build)
 			}

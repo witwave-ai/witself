@@ -2384,3 +2384,6 @@ The control-plane Worker is not covered yet.
 MCP tools are pinned to the first route they call, with the installed binding's
 bearer token, by `cmd/witself/mcp_tool_route_matrix_test.go`; later routes carry
 source citations.
+
+Same-account agent and realm boundaries are covered by the matrix, with separate
+peer and other-realm probes and source-cited exceptions for intentionally shared data.
