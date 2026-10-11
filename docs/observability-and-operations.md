@@ -1098,15 +1098,22 @@ See the [Founder runbook](runbooks.md#founder-open-plane-monitoring) for diagnos
 
 <a id="postgresql-alerts"></a>
 
-Deployment-hardening batch B adds the following database rules in
+The database rules in
 [`postgresql.rules.yaml`](../.gitops/charts/platform/files/postgresql.rules.yaml)
-for the serving cell, now `civo-sandbox-use1-serving`. They require monitoring,
+cover the serving cell, now `civo-sandbox-use1-serving`. They require monitoring,
 alerting, the default-off `platform.monitoring.postgresql.enabled` switch, and
 an enabled Civo PostgreSQL
-exporter. They select the `witself-postgresql-metrics` service in the `witself`
-namespace. Their fixed `service: witself-postgresql`, severity, and
-`witself_alert: "true"` labels use the existing PagerDuty incident route; the
-PrometheusRule carries `release: witself-monitoring` for discovery.
+exporter. The original `witself-postgresql` group selects the
+`witself-postgresql-metrics` service in the `witself` namespace. The
+`witself-postgresql-capacity` group uses kube-state-metrics and kubelet volume
+stats. `WitselfPostgreSQLMemoryNearLimit` instead lives in
+[`platform.rules.yaml`](../.gitops/charts/platform/files/platform.rules.yaml),
+group `platform-container-memory`; it requires monitoring, alerting,
+`defaultRules.enabled`, `kubelet.cadvisor`, and `postgresql.enabled` under
+`platform.monitoring`. These alerts carry `service: witself-postgresql`, except
+the volume forecast's `service: postgres-storage`; severity and
+`witself_alert: "true"` use the existing PagerDuty incident route. The
+PrometheusRules carry `release: witself-monitoring` for discovery.
 
 | Alert | Condition | Severity |
 | --- | --- | --- |
@@ -1116,6 +1123,10 @@ PrometheusRule carries `release: witself-monitoring` for discovery.
 | `WitselfPostgreSQLDeadlocks` | [`pg_stat_database_deadlocks`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/collector/pg_stat_database.go#L172-L181) increases over 10 minutes. | warning |
 | `WitselfPostgreSQLExporterUnavailable` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is absent or zero for 10 minutes. | critical |
 | `WitselfPostgreSQLDown` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is zero for 5 minutes. | critical |
+| `WitselfPostgreSQLOOMKilled` | The PostgreSQL container's last termination reason is `OOMKilled` and its restart counter increased within 30 minutes, per pod. | critical |
+| `WitselfPostgreSQLRestarted` | The PostgreSQL container's restart counter increased within 30 minutes, per pod. A last-known `OOMKilled` reason within that window suppresses it unless a non-OOM termination reason is current. | critical |
+| `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container working set exceeds 90% of its memory limit for 10 minutes. | warning |
+| `WitselfPostgreSQLVolumeFillingUp` | A 24-hour available-space trend predicts the PostgreSQL PVC will fill within 7 days, for 1 hour. | warning |
 
 Connection counts and limits are matched per scrape target before comparison.
 Account exports label their transaction `witself-export-<kind>` (account, backup,
@@ -1125,13 +1136,55 @@ evacuation, self). Such a transaction pages under
 60 minutes: the control plane's 60-minute pull cap for backup and evacuation
 exports, and the 15-minute self-export database phase. Every other transaction,
 including pg_dump, keeps the 5-minute threshold.
-The two critical rules deliberately
+`WitselfPostgreSQLDown` and `WitselfPostgreSQLExporterUnavailable` deliberately
 overlap for a database that remains down for 10 minutes; only exporter
-unavailability covers a missing series. The metric links above identify the
+unavailability covers a missing `pg_up` series. The metric links above identify the
 upstream postgres_exporter 0.20.1 definitions declared by Bitnami PostgreSQL chart
 18.8.0. Its exporter image tag is mutable; verify the resolved version and all
 five metric families in a live scrape during activation. Batch B prepares these
 rules; serving-cell scrape and alert delivery acceptance follows deployment.
+
+The OOM and restart alerts use a 30-minute counter-increase window and
+`keep_firing_for: 5m`, with no pending hold. A StatefulSet pod replacement whose
+new counter starts at zero does not create a restart incident. A last-known OOM
+reason within the same 30-minute window suppresses the non-OOM restart alert,
+including across a pod replacement or kube-state-metrics gap. A current
+non-OOM termination reason lifts that suppression, so a genuine newer Error
+restart fires without waiting for the OOM lookback to expire. A backend-only
+OOM kill that leaves the postmaster running is not a container restart; among
+these new alerts, only the memory-near-limit alert can warn of that pressure.
+The memory alert uses the last five minutes of samples to bridge brief scrape
+gaps, requires `for: 10m`, and retains `keep_firing_for: 5m` after recovery.
+
+The volume forecast has a 24-hour trend window, a 7-day horizon and a 1-hour
+pending hold. It complements the existing critical
+`WitselfPostgresPVCApproachingCapacity` rule at 80% used and
+`WitselfPostgresPVCMetricsUnavailable` absence rule in
+[`founder-open-plane.rules.yaml`](../.gitops/charts/platform/files/founder-open-plane.rules.yaml),
+using their exact PostgreSQL PVC selector. There is no fill-level or
+minimum-history guard: a bulk load or account import can fire the forecast for
+most of a day. Its conservative `max by (namespace, persistentvolumeclaim)`
+aggregation can let an old series mask a new forecast for up to 24 hours after
+a node move.
+
+The OOM, restart, memory-near-limit and node working-set alerts stay silent when
+their required kube-state-metrics, cAdvisor or node-exporter series stop
+reporting, after any retained samples or firing hold expire. No absence guard
+covers those series yet.
+
+| Alert | First diagnostic step |
+| --- | --- |
+| `WitselfPostgreSQLOOMKilled` | Read the PostgreSQL container's restart count and last termination: `kubectl -n witself get pod witself-postgresql-0 -o jsonpath='{range .status.containerStatuses[?(@.name=="postgresql")]}{.restartCount}{"\t"}{.lastState.terminated.reason}{"\t"}{.lastState.terminated.finishedAt}{"\n"}{end}'`. |
+| `WitselfPostgreSQLRestarted` | Read the previous container's termination lines: `kubectl -n witself logs witself-postgresql-0 -c postgresql --previous --tail=100`. |
+| `WitselfPostgreSQLMemoryNearLimit` | Compare container memory use: `kubectl -n witself top pod witself-postgresql-0 --containers`. |
+| `WitselfPostgreSQLVolumeFillingUp` | Read filesystem capacity: `kubectl -n witself exec witself-postgresql-0 -c postgresql -- df -h /bitnami/postgresql`. |
+
+Database logs may contain customer values. Do not paste them into incidents or
+tickets; quote only the termination lines.
+
+Raising `apps.civoPostgres.resourcesPreset` or expanding the PVC is a separate
+reviewed change. A preset change restarts PostgreSQL once; both server replicas
+lose the database during that restart.
 
 <a id="serving-cell-monitoring-extensions"></a>
 
@@ -1182,12 +1235,14 @@ identify the node, workload, PVC, certificate, or Argo application.
 | Upstream `kubernetes-resources` | `KubeMemoryOvercommit` | Pod memory requests exceed the upstream cluster availability threshold. |
 | Upstream `kubernetes-resources` | `KubeCPUOvercommit` | Pod CPU requests exceed the upstream cluster availability threshold. |
 | Local `platform-node` | `NodeFilesystemSpaceFillingUp` | Writable filesystem is over 80% used and its six-hour trend predicts exhaustion within 24 hours, for 1 hour. |
+| Local `platform-node` | `WitselfNodeMemoryWorkingSetHigh` | Node working-set estimate exceeds 90% of allocatable memory for 15 minutes, with a 5-minute firing hold after recovery. |
+| Local `platform-container-memory` | `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container working set exceeds 90% of its memory limit for 10 minutes. |
 | Local `platform-storage` | `WitselfPrometheusPVCUsageHigh` | Prometheus PVC usage in `monitoring` exceeds 80% for 15 minutes. |
 | Local `platform-certificates` | `WitselfCertificateExpiringSoon` | Certificate expiration is less than 14 days away for 1 hour. |
 | Local `platform-argocd` | `WitselfArgoApplicationUnhealthy` | `argocd_app_info` reports health other than Healthy or sync other than Synced for 15 minutes. |
 
 [`platform.rules.yaml`](../.gitops/charts/platform/files/platform.rules.yaml)
-supplies the four local alerts. The two upstream
+supplies the six local alerts. The two upstream
 `NodeFilesystemSpaceFillingUp` variants are disabled and replaced by the local
 rule with the same name because their 85%/90% thresholds cannot be selected as
 80%. Two local recording rules supply only the prerequisites for overcommit:
@@ -1196,6 +1251,24 @@ rule with the same name because their 85%/90% thresholds cannot be selected as
 Pending/Running pod requests, deduplicate kube-state-metrics series, and also
 carry `witself_alert: "true"`. This avoids enabling the unrelated upstream
 recording groups.
+
+`WitselfNodeMemoryWorkingSetHigh` estimates node working set as
+`MemTotal - MemFree - Buffers - (Cached - Shmem) - SReclaimable` from
+node-exporter and divides by kube-state-metrics allocatable memory. Subtracting
+buffers, cache excluding shared memory, and reclaimable slab avoids counting
+reclaimable memory as working set. Each input uses its last sample within five
+minutes. The upstream cAdvisor metric relabeling drops the root cgroup, and
+MemAvailable is not the eviction signal. In the dispatcher's 2026-10-10 serving
+cell dry run, this estimate matched the kubelet's own
+`node_memory_working_set_bytes` from `/metrics/resource` within about 1.7% across three
+samples on each node; the resulting ratio of about 83% was consistent with
+`kubectl top node`. The comparison validates the approximation within a few
+percent on the measured nodes. The alert overlaps the upstream
+`NodeMemoryHighUtilization`, which
+remains enabled. Both new local memory alerts require monitoring, alerting and
+`defaultRules.enabled`; the node alert additionally needs
+`nodeExporter.enabled`, while the PostgreSQL alert needs `kubelet.cadvisor`
+and `postgresql.enabled`. All these switches are under `platform.monitoring`.
 
 Only the `defaultRules.rules` keys `nodeExporterAlerting`, `kubernetesApps`, and
 `kubernetesResources` are enabled. The following keys are explicitly false:

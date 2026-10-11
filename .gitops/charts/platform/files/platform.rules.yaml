@@ -54,6 +54,48 @@ groups:
         annotations:
           summary: Node filesystem is over 80 percent used and predicted to fill within 24 hours.
           runbook: docs/observability-and-operations.md#platform-alerts
+      - alert: WitselfNodeMemoryWorkingSetHigh
+        expr: |
+          max by (node) (
+            (
+              last_over_time(node_memory_MemTotal_bytes{job="node-exporter"}[5m])
+              - last_over_time(node_memory_MemFree_bytes{job="node-exporter"}[5m])
+              - last_over_time(node_memory_Buffers_bytes{job="node-exporter"}[5m])
+              - (last_over_time(node_memory_Cached_bytes{job="node-exporter"}[5m]) - last_over_time(node_memory_Shmem_bytes{job="node-exporter"}[5m]))
+              - last_over_time(node_memory_SReclaimable_bytes{job="node-exporter"}[5m])
+            )
+            * on (namespace, pod) group_left (node)
+            topk by (namespace, pod) (1, max by (namespace, pod, node) (last_over_time(kube_pod_info{job="kube-state-metrics",node!=""}[5m])))
+          )
+          / on (node)
+          max by (node) (last_over_time(kube_node_status_allocatable{job="kube-state-metrics",resource="memory"}[5m]) > 0)
+          > 0.9
+        for: 15m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: platform
+          witself_alert: "true"
+        annotations:
+          summary: Node working-set memory is above 90 percent of allocatable.
+          runbook: docs/observability-and-operations.md#platform-alerts
+  - name: platform-container-memory
+    rules:
+      - alert: WitselfPostgreSQLMemoryNearLimit
+        expr: |
+          max by (namespace, pod, container) (last_over_time(container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}[5m]))
+          / on (namespace, pod, container)
+          max by (namespace, pod, container) (last_over_time(kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",container="postgresql",resource="memory"}[5m]) > 0)
+          > 0.9
+        for: 10m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: witself-postgresql
+          witself_alert: "true"
+        annotations:
+          summary: The PostgreSQL container working set is above 90 percent of its memory limit.
+          runbook: docs/observability-and-operations.md#postgresql-alerts
   - name: platform-storage
     rules:
       # kubernetesStorage stays off: only Prometheus claims in the monitoring

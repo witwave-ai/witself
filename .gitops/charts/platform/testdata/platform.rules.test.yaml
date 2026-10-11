@@ -250,3 +250,876 @@ tests:
   - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
     eval_time: 30m
     exp_samples: []
+- name: B1 PostgreSQL memory fires after ten minutes and excludes the metrics sidecar
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="metrics",id="/kubepods/postgresql/metrics",image="postgres-exporter:latest",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 30m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 30m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+- name: B2 PostgreSQL memory below ninety percent stays silent
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 361758720+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B3 PostgreSQL memory exactly ninety percent stays silent
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 900+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 30m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B4 PostgreSQL memory retains its five minute firing hold after recovery
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x19 314572800+0x20
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 19m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 24m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 26m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 19m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 24m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 26m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B5 PostgreSQL memory excludes pod cgroups other namespaces jobs paths and
+    containers
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="",id="/kubepods/postgresql",image="",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="other",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: container_memory_working_set_bytes{job="other-kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/other-job",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/resource",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/resource",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="witself-server",id="/kubepods/server",image="witself:latest",instance="n1:10250",node="n1"}
+    values: 990+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="other",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="other",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="other",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="witself-server",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 1000+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="witself-server",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="witself-server",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 15m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B6i PostgreSQL memory hold survives two stale working-set scrapes
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x4 stale stale 382730240+0x33
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+- name: B6ii PostgreSQL memory hold survives two stale limit scrapes
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x4 stale stale 402653184+0x33
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 9m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+- name: B7 PostgreSQL cgroup replacement retains the firing hold after the old high series expires
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x12 stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/new",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: _x13 80530636.8+0x27
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
+    values: 0.38+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
+    values: 2147483648+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 11m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 18m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 21m30s
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 22m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 24m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 16m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 18m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 21m30s
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: The PostgreSQL container working set is above 90 percent of its memory
+          limit.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 22m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+  - eval_time: 24m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B8 PostgreSQL memory without a limit remains silent
+  interval: 1m
+  input_series:
+  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 15m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: C1 Node working set uses allocatable excludes reclaimable memory and applies a
+    strict threshold
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 100+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core",instance="ksm:8080",uid="n1-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 50000+0x40
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 90+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 100+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n2",instance="n2:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n2",node="n2",uid="ne-n2-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n2",resource="memory",unit="byte",instance="ksm:8080",uid="n2-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n2",resource="cpu",unit="core",instance="ksm:8080",uid="n2-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n2",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n2-uid"}
+    values: 50000+0x40
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 20+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 280+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n3",instance="n3:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n3",node="n3",uid="ne-n3-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n3",resource="memory",unit="byte",instance="ksm:8080",uid="n3-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n3",resource="cpu",unit="core",instance="ksm:8080",uid="n3-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n3",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n3-uid"}
+    values: 50000+0x40
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 80+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 100+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n4",instance="n4:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n4",node="n4",uid="ne-n4-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n4",resource="memory",unit="byte",instance="ksm:8080",uid="n4-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n4",resource="cpu",unit="core",instance="ksm:8080",uid="n4-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n4",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n4-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 30m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+  - eval_time: 30m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+- name: C2 Node working set keeps firing five minutes after recovery
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x29 200+0x10
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 100+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core",instance="ksm:8080",uid="n1-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 33m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 36m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 33m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+  - eval_time: 36m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+- name: C3i Node working-set hold survives two stale node-exporter scrapes
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1100+0x4 stale stale 1100+0x33
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x4 stale stale 50+0x33
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x4 stale stale 20+0x33
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 100+0x4 stale stale 100+0x33
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x4 stale stale 20+0x33
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x4 stale stale 20+0x33
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core",instance="ksm:8080",uid="n1-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+- name: C3ii Node working-set hold survives two stale kube-state-metrics scrapes
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 100+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x4 stale stale 1+0x33
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x4 stale stale 1000+0x33
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core",instance="ksm:8080",uid="n1-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+- name: C3iii Node-exporter pod replacement preserves one node alert and its hold
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1100+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 100+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 20+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x7 stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale stale stale stale stale
+      stale stale stale stale stale stale stale stale stale
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 1100+0x32
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 50+0x32
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 20+0x32
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 100+0x32
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 20+0x32
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1b",instance="n1-new:9100"}
+    values: _x8 20+0x32
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1b",node="n1",uid="ne-n1b-uid",instance="ksm:8080"}
+    values: _x8 1+0x32
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core",instance="ksm:8080",uid="n1-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 14m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 16m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts
+- name: C4 Node working set excludes other exporters unmapped pods and unrelated pod
+    info
+  interval: 1m
+  input_series:
+  - series: node_memory_MemTotal_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 10+0x40
+  - series: node_memory_Buffers_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 80+0x40
+  - series: node_memory_Shmem_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="other-exporter",namespace="monitoring",pod="ne-n5",instance="n5:9100"}
+    values: 20+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n5",node="n5",uid="ne-n5-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n5",resource="memory",unit="byte",instance="ksm:8080",uid="n5-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n5",resource="cpu",unit="core",instance="ksm:8080",uid="n5-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n5",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n5-uid"}
+    values: 50000+0x40
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 1100+0x40
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 10+0x40
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 20+0x40
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 80+0x40
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 20+0x40
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n6",instance="n6:9100"}
+    values: 20+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n6",resource="memory",unit="byte",instance="ksm:8080",uid="n6-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n6",resource="cpu",unit="core",instance="ksm:8080",uid="n6-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n6",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n6-uid"}
+    values: 50000+0x40
+  - series: kube_pod_info{job="kube-state-metrics",namespace="witself",pod="witself-server-0",node="n7",uid="witself-server-0-uid",instance="ksm:8080"}
+    values: 1+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n7",resource="memory",unit="byte",instance="ksm:8080",uid="n7-uid"}
+    values: 1000+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n7",resource="cpu",unit="core",instance="ksm:8080",uid="n7-uid"}
+    values: 2+0x40
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n7",resource="ephemeral_storage",unit="byte",instance="ksm:8080",uid="n7-uid"}
+    values: 50000+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 16m
+    exp_samples: []
+  alert_rule_test:
+  - eval_time: 16m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+- name: C5 Node reclaimable memory remains silent at eighty-three percent while shared
+    memory counts toward a sustained ninety-three percent
+  interval: 1m
+  input_series:
+  # Initial working set: 1700 - 50 - 150 - (750 - 200) - 120 = 830.
+  # At 20m Cached falls to 650: working set becomes 930; the hold ends at 35m.
+  # The retired Inactive_file numerator reports 1300 even before the transition.
+  # Dropping the Shmem correction reports only 630 then 730 and misses the alert.
+  - series: node_memory_MemTotal_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 1700+0x45
+  - series: node_memory_MemFree_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 50+0x45
+  - series: node_memory_Buffers_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 150+0x45
+  - series: node_memory_Cached_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 750+0x19 650+0x25
+  - series: node_memory_Shmem_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 200+0x45
+  - series: node_memory_SReclaimable_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 120+0x45
+  - series: node_memory_Inactive_file_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 350+0x19 250+0x25
+  - series: node_memory_Active_file_bytes{job="node-exporter",namespace="monitoring",pod="ne-n1",instance="n1:9100"}
+    values: 200+0x45
+  - series: kube_pod_info{job="kube-state-metrics",namespace="monitoring",pod="ne-n1",node="n1",uid="ne-n1-uid",instance="ksm:8080"}
+    values: 1+0x45
+  - series: kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte",instance="ksm:8080",uid="n1-uid"}
+    values: 1000+0x45
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 15m
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 19m30s
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 34m30s
+    exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="pending"})
+    eval_time: 34m30s
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfNodeMemoryWorkingSetHigh",alertstate="firing"})
+    eval_time: 35m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 19m30s
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 34m30s
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts: []
+  - eval_time: 35m
+    alertname: WitselfNodeMemoryWorkingSetHigh
+    exp_alerts:
+    - exp_labels:
+        node: n1
+        severity: warning
+        service: platform
+        witself_alert: 'true'
+      exp_annotations:
+        summary: Node working-set memory is above 90 percent of allocatable.
+        runbook: docs/observability-and-operations.md#platform-alerts

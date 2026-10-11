@@ -393,7 +393,7 @@ spec:
 {{ .Files.Get "files/postgresql.rules.yaml" | nindent 12 }}{{ end }}
 {{- $groups := list }}
 {{- range $group := (fromYaml (.Files.Get "files/platform.rules.yaml")).groups }}
-{{- if or (and $platformRules (has $group.name (list "platform-resources" "platform-storage"))) (and $platformRules $monitoring.nodeExporter.enabled (eq $group.name "platform-node")) (and $monitoring.certManager.enabled $.Values.platform.certManager.enabled (eq $group.name "platform-certificates")) (and $monitoring.argocd.enabled (eq $group.name "platform-argocd")) }}
+{{- if or (and $platformRules (has $group.name (list "platform-resources" "platform-storage"))) (and $platformRules $monitoring.nodeExporter.enabled (eq $group.name "platform-node")) (and $platformRules $monitoring.kubelet.cadvisor $monitoring.postgresql.enabled (eq $group.name "platform-container-memory")) (and $monitoring.certManager.enabled $.Values.platform.certManager.enabled (eq $group.name "platform-certificates")) (and $monitoring.argocd.enabled (eq $group.name "platform-argocd")) }}
 {{- $groups = append $groups $group }}
 {{- end }}
 {{- end }}
