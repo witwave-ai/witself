@@ -192,6 +192,18 @@ startup probe bounds each migration file: the chart allows 600 s
 not forward probe settings, so a cell cannot raise this for one roll; a file
 whose measured time approaches half the budget needs a code change first.
 
+Migration `0101_add_transcript_storage_usage.sql` adds the cell-local
+`transcript_storage_usage` table, which is excluded from account archives;
+logical import recomputes it from retained transcript entries. Down takes
+ACCESS EXCLUSIVE NOWAIT locks on `accounts`, then `transcript_entries`, before
+dropping only its triggers, functions, and table; the 0099/0100 indexes remain.
+Up takes account-first NOWAIT fences:
+EXCLUSIVE on `accounts`, then SHARE ROW EXCLUSIVE on `transcript_entries`. A busy
+startup fails and retries; once the fences succeed, account-row and entry writes
+wait for the backfill while plain reads continue. The release must follow the
+schema-change backup procedure and cannot use `--no-schema-change`. A physical
+whole-database restore preserves both the counter and its triggers.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -1671,7 +1683,7 @@ capabilities or archive URL query strings.
 The protocol-3 transport change itself leaves schema 98 unchanged: deploy the
 control plane first, then protocol-3 cells with
 `roll-train.sh VERSION --no-schema-change …` only when the release contains no
-schema changes. Releases containing migrations 0099/0100 require the schema-change
+schema changes. Releases containing migrations 0099/0100/0101 require the schema-change
 procedure described above. See
 [the rollout matrix and mixed-version rules](deployment-cells.md#account-evacuation-transport-rollout).
 

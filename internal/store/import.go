@@ -6568,6 +6568,9 @@ func (s *Store) importAccountWithTracker(
 			return export.Manifest{}, AccountImportDisposition{}, err
 		}
 	}
+	if err := enableTranscriptStorageUsageBulkTx(ctx, tx); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, err
+	}
 
 	ic := newImportCtx(expectedAccountID)
 	ic.expectedEvacuationID = options.evacuationID
@@ -6996,6 +6999,10 @@ func (s *Store) importAccountWithTracker(
 		if tag.RowsAffected() != 1 {
 			return export.Manifest{}, AccountImportDisposition{},
 				fmt.Errorf("%w: imported account is missing for agent-email attachment recompute", ErrArchiveContent)
+		}
+		if err := recomputeTranscriptStorageUsageTx(ctx, tx, m.AccountID); err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("recompute imported transcript storage usage: %w", err)
 		}
 	}
 	if disposition.AlreadyImported {

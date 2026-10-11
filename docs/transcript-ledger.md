@@ -627,6 +627,23 @@ verbatim and does not meter the restore itself. `GET /v1/usage` and
 `witself usage` expose only the bearer-token agent's own rollups in this slice;
 realm/account aggregation and billing conversion remain deferred.
 
+### Storage usage counter
+
+Schema 101 adds the cell-local `transcript_storage_usage` counter, which measures
+retained entry bytes: the entry half of `transcript_storage_byte`, including external ids, roles,
+visible bodies, JSON payload/artifact bytes, model labels, and reply ids. It
+excludes conversation titles and metadata, the entry's own generated id, and
+storage engine overhead. Sixteen shards per account, chosen by transcript, are kept
+current by statement triggers on every entry insert, update, and delete.
+UPDATE applies the net byte change for each account/shard. Decreases clamp at
+zero and leave missing shards absent, so counter undercount drift cannot block
+retention or purge.
+
+Import sets the transaction-local `witself.transcript_storage_usage_bulk` setting
+to skip grouped trigger updates, then recomputes the account once from its
+imported entries. The counter is cell-local and never archived. Nothing enforces
+a transcript storage cap yet.
+
 ## Structured Objects And File Artifacts
 
 The object-store adapter in this section is roadmap-only and is not
