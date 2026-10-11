@@ -105,8 +105,11 @@ platform:
     alerting:
       enabled: false
     collectorAlerts:
-      # Enable after the server exposes healthy identity-capacity metrics and
-      # both server and worker expose healthy audit-append metrics.
+      # Enable per cell only through the catalog switch collector_alerts,
+      # with the founder's go, after every server exposes healthy
+      # identity-capacity metrics and every server and worker exposes
+      # healthy audit-append metrics. WitselfIdentityCapacityAtLimit is
+      # informational and never routed to PagerDuty.
       enabled: false
     sealedPlaneAlerts:
       # Enable only after the server release exposes healthy sealed posture

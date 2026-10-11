@@ -554,6 +554,7 @@ ruby -ryaml -rbase64 -e '
   File.binwrite(ARGV[1], raw)
 ' "$pagerduty_child_render" "$pagerduty_alertmanager_config"
 "$amtool_bin" check-config "$pagerduty_alertmanager_config" >/dev/null
+ruby "$repo_root/scripts/testdata/test-monitoring-alert-routing.rb" "$repo_root" "$tmp" "$chart_archive" "$amtool_bin"
 
 ruby -ryaml -e '
   alertmanager_route_of = lambda do |name|
@@ -770,7 +771,7 @@ ruby "$repo_root/scripts/testdata/test-monitoring-memory-alerts.rb" \
 
 # Reuse the already verified archive and tools for every roll state. This stays
 # inside the normal CI monitoring gate without downloading a chart per state.
-WITSELF_TEST_MONITORING_CHART="$chart_archive" WITSELF_TEST_PROMTOOL="$promtool_bin" \
+WITSELF_TEST_MONITORING_CHART="$chart_archive" WITSELF_TEST_PROMTOOL="$promtool_bin" WITSELF_TEST_AMTOOL="$amtool_bin" \
   bash "$repo_root/scripts/test-cell-roll-states.sh" --monitoring-only
 
 echo "monitoring rollout capability checks passed"

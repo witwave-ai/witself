@@ -1122,11 +1122,9 @@ For operator activation on a provisioned cell:
    ServiceMonitor, monitoring stack, or alert receiver. Rules render only when
    the backup switch and `platform.monitoring.enabled` are both enabled.
    `civo-sandbox-use1-backup` therefore gets dumps and exporter telemetry but
-   **no page** while its monitoring stack remains off. The serving cell has
-   monitoring enabled, but its current `platform.monitoring.alerting.enabled`
-   is `false`, keeping Alertmanager null-routed: backup rules can fire without
-   delivering a page. Actual paging requires the independently reviewed
-   receiver policy and credentials. Follow the normal reviewed GitOps rollout.
+   **no page** while its monitoring stack remains off. The serving cell's
+   generated values enable monitoring and alerting with the PagerDuty
+   receiver, so its backup rules page. Follow the normal reviewed GitOps rollout.
    No account-snapshot switch, including `CP_ACCOUNT_BACKUPS_ENABLED`, is involved.
 4. Once GitOps has converged, run an initial Job so activation does not wait for
    tomorrow's schedule:

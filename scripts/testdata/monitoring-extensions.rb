@@ -137,10 +137,34 @@ custom_names = %w[NodeFilesystemSpaceFillingUp WitselfPrometheusPVCUsageHigh Wit
 custom_names.each do |name|
   abort "expected exactly one #{name} alert" unless alerts.count { |rule| rule["alert"] == name } == 1
 end
-alerts.each do |rule|
-  next if rule["alert"] == "WitselfWatchdog"
-  abort "#{rule['alert']} cannot reach the existing alert route" unless rule.dig("labels", "witself_alert") == "true"
+check_alert_labels = lambda do |rules|
+  rules.each do |rule|
+    labels = rule.fetch("labels")
+    case rule.fetch("alert")
+    when "WitselfWatchdog"
+      abort "WitselfWatchdog must use only the dead-man route" unless !labels.key?("witself_alert") && labels["witself_watchdog"] == "true"
+    when "WitselfIdentityCapacityAtLimit"
+      abort "WitselfIdentityCapacityAtLimit must be informational and unrouted" unless labels == {"severity" => "info", "service" => "identity"}
+    else
+      abort "#{rule['alert']} cannot reach the existing alert route" unless labels["witself_alert"] == "true"
+    end
+  end
 end
+check_alert_labels.call(alerts)
+
+collector_render = render_platform(platform_chart, File.join(repo_root, ".gitops/cells/civo-sandbox-use1-serving/values.yaml"),
+  "--set", "platform.monitoring.collectorAlerts.enabled=true")
+collector_values_path = File.join(scratch, "monitoring-extensions-collectors-child-values.yaml")
+File.write(collector_values_path, YAML.dump(monitoring_values(collector_render)))
+collector_child_raw = command("helm", "template", "witself-monitoring", chart_archive, "--namespace", "monitoring", "--values", collector_values_path)
+File.write(File.join(scratch, "monitoring-extensions-collectors-child.yaml"), collector_child_raw)
+collector_groups = documents(collector_child_raw).select { |doc| doc["kind"] == "PrometheusRule" }
+  .flat_map { |doc| Array(doc.dig("spec", "groups")) }
+collector_group = collector_groups.select { |group| group["name"] == "witself-collectors" }
+expected_collectors = %w[WitselfIdentityCapacityMetricsUnavailable WitselfIdentityCapacityAtLimit WitselfAuditAppendMetricsUnavailable WitselfAuditAppendFailures]
+abort "collector-on render must contain exactly the four collector alerts" unless collector_group.length == 1 &&
+  collector_group[0].fetch("rules").map { |rule| rule["alert"] }.sort == expected_collectors.sort
+check_alert_labels.call(collector_groups.flat_map { |group| group.fetch("rules") }.select { |rule| rule["alert"] })
 rule_resources.each do |doc|
   abort "PrometheusRule is outside discovery scope" unless doc.dig("metadata", "namespace") == "monitoring" && doc.dig("metadata", "labels", "release") == "witself-monitoring"
 end

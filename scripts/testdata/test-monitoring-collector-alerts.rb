@@ -12,6 +12,18 @@ collector_alerts = %w[
 source = YAML.safe_load(File.read(File.join(chart, 'files/founder-open-plane.rules.yaml')))
 source_rules = source.fetch('groups').flat_map { |group| group.fetch('rules') }
 abort 'collector alert inventory changed' unless source_rules.count { |rule| collector_alerts.include?(rule['alert']) } == 4
+collector_contracts = {
+  'WitselfIdentityCapacityMetricsUnavailable' => [{'severity' => 'critical', 'service' => 'identity', 'witself_alert' => 'true'}, '3m'],
+  'WitselfIdentityCapacityAtLimit' => [{'severity' => 'info', 'service' => 'identity'}, '30m'],
+  'WitselfAuditAppendMetricsUnavailable' => [{'severity' => 'critical', 'service' => 'audit', 'witself_alert' => 'true'}, '3m'],
+  'WitselfAuditAppendFailures' => [{'severity' => 'critical', 'service' => 'audit', 'witself_alert' => 'true'}, '0m']
+}.freeze
+collector_contracts.each do |name, (labels, duration)|
+  rule = source_rules.find { |candidate| candidate['alert'] == name }
+  abort "collector alert missing: #{name}" unless rule
+  abort "collector alert labels changed: #{name}" unless rule['labels'] == labels
+  abort "collector alert duration changed: #{name}" unless rule['for'] == duration
+end
 sealed_alerts = %w[
   WitselfSealedPlanePostureMetricsUnavailable WitselfSecretMaterialDeliveryErrorRatio
   WitselfVaultRotationFenceConflicts WitselfVaultRotationStuckOpen
