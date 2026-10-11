@@ -1,8 +1,11 @@
 // witself-plans: serves the public Witself plan catalog as JSON.
 //
 // The catalog lives in plans.json next to this file — git is the source of
-// truth; `wrangler deploy` publishes it. Plans with "available": false (Team,
-// Enterprise) are announced but not purchasable yet.
+// truth; `wrangler deploy` publishes it. Plans with "available": false (today
+// only Enterprise) are announced but not purchasable. Keys in
+// coming_soon_features stay in each plan's features, the resolved entitlement
+// the control plane pushes to cells, but are not yet delivered. Every public
+// catalog surface shows them as coming soon.
 import plans from "./plans.json";
 
 const body = JSON.stringify(plans, null, 2) + "\n";

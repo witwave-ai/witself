@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,6 +37,7 @@ func TestPlanListShowsCanonicalPolicyMatrix(t *testing.T) {
 		"Active memories / agent", "Transcript retention", "Receive-email entitlement",
 		"Send-email entitlement",
 		"90 days", "365 days", "No catalog cap", "Entitlements do not prove delivery readiness",
+		"Coming soon in a capability or allowance row means the entitlement is listed but not yet delivered to customer accounts.",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("plan list omitted %q:\n%s", want, stdout)
@@ -57,21 +59,155 @@ func TestPlanListJSONCanFilterUnavailablePlans(t *testing.T) {
 		t.Fatalf("plan list JSON = %d stderr=%q", code, stderr)
 	}
 	var doc struct {
-		SchemaVersion string       `json:"schema_version"`
-		Updated       string       `json:"updated"`
-		Plans         []plans.Plan `json:"plans"`
+		SchemaVersion      string       `json:"schema_version"`
+		Updated            string       `json:"updated"`
+		ComingSoonFeatures []string     `json:"coming_soon_features"`
+		Plans              []plans.Plan `json:"plans"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-08-24" || len(doc.Plans) != 3 {
+	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-10-10" || len(doc.Plans) != 3 {
 		t.Fatalf("filtered catalog = %+v", doc)
+	}
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(doc.ComingSoonFeatures, catalog.ComingSoonFeatures) {
+		t.Errorf("coming_soon_features = %v; want %v", doc.ComingSoonFeatures, catalog.ComingSoonFeatures)
 	}
 	if doc.Plans[0].ID != plans.Free || doc.Plans[1].ID != "standard" ||
 		!doc.Plans[1].Recommended || doc.Plans[1].Badge != "Most popular" ||
 		doc.Plans[2].ID != "team" {
 		t.Fatalf("available plans = %+v", doc.Plans)
 	}
+}
+
+func TestPlanListMarksComingSoonFeatures(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const footer = "Coming soon in a capability or allowance row means the entitlement is listed but not yet delivered to customer accounts."
+	gatedRows := []struct {
+		label        string
+		feature      string
+		personal     string
+		professional string
+	}{
+		{"Receive-email entitlement", plans.AgentEmailReceiveFeature, "Disabled", ""},
+		{"Send-email entitlement", plans.AgentEmailSendFeature, "Disabled", "Disabled"},
+		{"Email retention", plans.AgentEmailReceiveFeature, "30 days cleanup", ""},
+		{"Maximum raw email", plans.AgentEmailReceiveFeature, "0", ""},
+		{"Attachment storage / account", plans.AgentEmailReceiveFeature, "0", ""},
+		{"Realm email aliases / realm", plans.AgentEmailRealmAliasFeature, "0", "0"},
+		{"Custom inbound domains", plans.AgentEmailCustomDomainFeature, "0", "0"},
+	}
+	rowCells := func(t *testing.T, catalog *plans.Catalog, entries []plans.Plan) map[string][]string {
+		t.Helper()
+		rows := make(map[string][]string)
+		for _, row := range planCatalogRows(catalog, entries) {
+			if _, exists := rows[row.label]; exists {
+				t.Fatalf("duplicate row %q", row.label)
+			}
+			if len(row.cells) != len(entries) {
+				t.Fatalf("row %q has %d cells; want %d", row.label, len(row.cells), len(entries))
+			}
+			rows[row.label] = row.cells
+		}
+		return rows
+	}
+	t.Run("canonical", func(t *testing.T) {
+		// Require the gates independently of the display rule, so removing a
+		// canonical marker cannot make the expected cells silently change too.
+		for _, gate := range gatedRows {
+			if !catalog.FeatureComingSoon(gate.feature) {
+				t.Errorf("canonical catalog must mark %s coming soon", gate.feature)
+			}
+		}
+		for _, reverse := range []bool{false, true} {
+			entries := slices.Clone(catalog.Plans)
+			if reverse {
+				slices.Reverse(entries)
+			}
+			rows := rowCells(t, catalog, entries)
+			for _, gate := range gatedRows {
+				cells, exists := rows[gate.label]
+				if !exists {
+					t.Fatalf("missing row %q", gate.label)
+				}
+				for i, plan := range entries {
+					want := gate.personal
+					if plan.ID != plans.Free {
+						want = gate.professional
+					}
+					comingSoon := plan.HasFeature(gate.feature) && catalog.FeatureComingSoon(gate.feature)
+					if comingSoon {
+						want = "Coming soon"
+					}
+					if cells[i] != want || (cells[i] == "Coming soon") != comingSoon || cells[i] == "Enabled" {
+						t.Errorf("%s / %s = %q; want %q (coming soon=%t)", gate.label, plan.Name, cells[i], want, comingSoon)
+					}
+				}
+			}
+		}
+		for _, tc := range []struct {
+			name    string
+			entries []plans.Plan
+			count   int
+		}{
+			{"all plans", catalog.Plans, 1},
+			{"personal only", catalog.Plans[:1], 0},
+		} {
+			stdout, stderr, code := capturePlanCLI(t, func() int {
+				printPlanCatalog(catalog, tc.entries)
+				return 0
+			})
+			if code != 0 || stderr != "" || strings.Count(stdout, footer) != tc.count {
+				t.Errorf("%s footer count = %d; want %d (code=%d stderr=%q)", tc.name, strings.Count(stdout, footer), tc.count, code, stderr)
+			}
+		}
+	})
+	t.Run("marker removed", func(t *testing.T) {
+		var doc map[string]any
+		if err := json.Unmarshal(witself.PlansJSON, &doc); err != nil {
+			t.Fatal(err)
+		}
+		delete(doc, "coming_soon_features")
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unmarked, err := plans.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := rowCells(t, unmarked, unmarked.Plans)
+		receiveCells, exists := rows["Receive-email entitlement"]
+		if !exists {
+			t.Fatal("unmarked catalog has no receive row")
+		}
+		foundTeam := false
+		for i, plan := range unmarked.Plans {
+			if plan.ID == "team" {
+				foundTeam = true
+				if got := receiveCells[i]; got != "Enabled" {
+					t.Errorf("unmarked Team receive = %q; want Enabled", got)
+				}
+			}
+		}
+		if !foundTeam {
+			t.Fatal("unmarked catalog has no Team plan")
+		}
+		stdout, stderr, code := capturePlanCLI(t, func() int {
+			printPlanCatalog(unmarked, unmarked.Plans)
+			return 0
+		})
+		if code != 0 || stderr != "" || strings.Contains(stdout, footer) {
+			t.Errorf("unmarked catalog footer present=%t (code=%d stderr=%q)", strings.Contains(stdout, footer), code, stderr)
+		}
+	})
 }
 
 func TestResolvePlanTargetAcceptsStableIDAndCustomerName(t *testing.T) {

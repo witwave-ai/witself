@@ -19,6 +19,12 @@ Cloudflare's `mx.cloudflare.net` authserv-id is trusted, attested
 `dmarc=fail` is rejected, and the signed relay carries the edge-attested
 SPF/DKIM/DMARC results.
 
+The catalog marks receive, send, realm aliases, and custom domains as coming
+soon through `coming_soon_features` in `web/plans/plans.json`. Professional and
+Team keep their listed entitlements in their resolved snapshots. No account
+outside the Founder cohort receives or sends agent email until the respective
+marker is removed.
+
 Committed templates and a fresh cell remain fail-closed. The current Founder
 deployment deliberately differs from those defaults:
 
@@ -74,9 +80,12 @@ Receive and send are independent account entitlements. The settled catalog is:
 | Plan | Receive | Send |
 |---|---:|---:|
 | Personal | No | No |
-| Professional | Yes | No |
-| Team | Yes | Yes |
-| Enterprise | Yes | Yes |
+| Professional | Coming soon | No |
+| Team | Coming soon | Coming soon |
+| Enterprise | Coming soon | Coming soon |
+
+`coming_soon_features` in `web/plans/plans.json` controls these catalog labels
+without changing the listed entitlements.
 
 The Founder account has explicit unlimited commercial entitlement. That does
 not remove platform protection. Outbound admission uses GCRA refill rates of 30
@@ -144,7 +153,9 @@ counter/enforcement and administrator surfaces with both catalog keys absent.
 After all Phase-A writers converge, Phase B rolls schema 82 to promote any
 compatibility rows and rebuild exact account counters. The final Phase-B
 catalog then activates Personal `0`/`0`, Professional `10 MiB`/`5 GiB`, and
-Team and Enterprise `25 MiB`/`100 GiB` raw-message/attachment-storage limits.
+Team and Enterprise `25 MiB`/`100 GiB` raw-message/attachment-storage limits;
+these are planned allowances while agent email is coming soon, subject to the
+[cell storage boundary](billing-and-limits.md#agent-email-cell-storage-safety-boundary).
 The Founder account remains explicitly unlimited for attachment storage; that
 audited override must survive final catalog reconciliation.
 
@@ -973,7 +984,8 @@ The resolved plan feature is `agent_email_custom_domain` and its account-wide
 limit is `agent_email_custom_domains_per_account`. The Phase-B canonical
 catalog sets Personal and Professional to disabled with zero, Team to one, and
 Enterprise to feature-present but zero until an administrator applies the
-contracted account limit. A missing effective limit is explicit unlimited. The
+contracted account limit; the custom-domain feature is coming soon on every
+plan that lists it. A missing effective limit is explicit unlimited. The
 independent inbound `agent_email_receive` entitlement still controls whether
 any eventual route may deliver.
 

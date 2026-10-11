@@ -68,25 +68,81 @@ func planList(args []string) int {
 	}
 	if *jsonOut {
 		return printJSON(struct {
-			SchemaVersion string       `json:"schema_version"`
-			Updated       string       `json:"updated"`
-			Currency      string       `json:"currency"`
-			Plans         []plans.Plan `json:"plans"`
-		}{plans.SchemaVersion, catalog.Updated, catalog.Currency, selected})
+			SchemaVersion      string       `json:"schema_version"`
+			Updated            string       `json:"updated"`
+			Currency           string       `json:"currency"`
+			ComingSoonFeatures []string     `json:"coming_soon_features,omitempty"`
+			Plans              []plans.Plan `json:"plans"`
+		}{plans.SchemaVersion, catalog.Updated, catalog.Currency, catalog.ComingSoonFeatures, selected})
 	}
 	printPlanCatalog(catalog, selected)
 	return 0
 }
 
+type planCatalogRow struct {
+	label string
+	cells []string
+}
+
+func planCatalogRows(catalog *plans.Catalog, entries []plans.Plan) []planCatalogRow {
+	var rows []planCatalogRow
+	writeRow := func(label, gate string, values func(plans.Plan) string) {
+		row := planCatalogRow{label: label, cells: make([]string, len(entries))}
+		for i, plan := range entries {
+			if gate != "" && plan.HasFeature(gate) && catalog.FeatureComingSoon(gate) {
+				row.cells[i] = "Coming soon"
+			} else {
+				row.cells[i] = values(plan)
+			}
+		}
+		rows = append(rows, row)
+	}
+	writeRow("Plan ID", "", func(plan plans.Plan) string { return planCLIColumn(plan.ID) })
+	writeRow("Monthly price", "", func(plan plans.Plan) string { return formatPlanPrice(catalog.Currency, plan) })
+	writeRow("Availability", "", func(plan plans.Plan) string {
+		if plan.Available {
+			return "Available"
+		}
+		return "Coming soon"
+	})
+	writeRow("Realms", "", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.RealmLimit) })
+	writeRow("Agents / realm", "", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.AgentPerRealmLimit) })
+	writeRow("Active memories / agent", "", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredMemoryLimit) })
+	writeRow("Current facts / agent", "", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredFactLimit) })
+	writeRow("Transcript retention", "", func(plan plans.Plan) string {
+		return formatPlanRetention(plan, plans.TranscriptRetentionDaysPolicy, false)
+	})
+	writeRow("Secrets / agent", "", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredSecretLimit) })
+	writeRow("Messaging", "", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.MessagingFeature) })
+	writeRow("Message retention", "", func(plan plans.Plan) string {
+		return formatPlanRetention(plan, plans.MessageRetentionDaysPolicy, !plan.HasFeature(plans.MessagingFeature))
+	})
+	writeRow("Receive-email entitlement", plans.AgentEmailReceiveFeature, func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailReceiveFeature) })
+	writeRow("Send-email entitlement", plans.AgentEmailSendFeature, func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailSendFeature) })
+	writeRow("Email retention", plans.AgentEmailReceiveFeature, func(plan plans.Plan) string {
+		return formatPlanRetention(plan, plans.AgentEmailRetentionDaysPolicy, !plan.HasFeature(plans.AgentEmailReceiveFeature))
+	})
+	writeRow("Maximum raw email", plans.AgentEmailReceiveFeature, func(plan plans.Plan) string {
+		return formatPlanByteLimit(plan, plans.AgentEmailMaxRawBytesLimit)
+	})
+	writeRow("Attachment storage / account", plans.AgentEmailReceiveFeature, func(plan plans.Plan) string {
+		return formatPlanByteLimit(plan, plans.AgentEmailAttachmentStorageBytesLimit)
+	})
+	writeRow("Realm email aliases / realm", plans.AgentEmailRealmAliasFeature, func(plan plans.Plan) string {
+		return formatPlanLimit(plan, plans.AgentEmailRealmAliasesPerRealmLimit)
+	})
+	writeRow("Custom inbound domains", plans.AgentEmailCustomDomainFeature, func(plan plans.Plan) string {
+		value := formatPlanLimit(plan, plans.AgentEmailCustomDomainsPerAccountLimit)
+		if plan.ID == "enterprise" && value == "0" {
+			return "Contracted (0 default)"
+		}
+		return value
+	})
+	return rows
+}
+
 func printPlanCatalog(catalog *plans.Catalog, entries []plans.Plan) {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	writeRow := func(label string, values func(plans.Plan) string) {
-		_, _ = fmt.Fprint(tw, label)
-		for _, plan := range entries {
-			_, _ = fmt.Fprintf(tw, "\t%s", values(plan))
-		}
-		_, _ = fmt.Fprintln(tw)
-	}
 	_, _ = fmt.Fprint(tw, "CAPABILITY")
 	for _, plan := range entries {
 		name := planCLIColumn(plan.Name)
@@ -96,47 +152,13 @@ func printPlanCatalog(catalog *plans.Catalog, entries []plans.Plan) {
 		_, _ = fmt.Fprintf(tw, "\t%s", name)
 	}
 	_, _ = fmt.Fprintln(tw)
-	writeRow("Plan ID", func(plan plans.Plan) string { return planCLIColumn(plan.ID) })
-	writeRow("Monthly price", func(plan plans.Plan) string { return formatPlanPrice(catalog.Currency, plan) })
-	writeRow("Availability", func(plan plans.Plan) string {
-		if plan.Available {
-			return "Available"
+	for _, row := range planCatalogRows(catalog, entries) {
+		_, _ = fmt.Fprint(tw, row.label)
+		for _, cell := range row.cells {
+			_, _ = fmt.Fprintf(tw, "\t%s", cell)
 		}
-		return "Coming soon"
-	})
-	writeRow("Realms", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.RealmLimit) })
-	writeRow("Agents / realm", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.AgentPerRealmLimit) })
-	writeRow("Active memories / agent", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredMemoryLimit) })
-	writeRow("Current facts / agent", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredFactLimit) })
-	writeRow("Transcript retention", func(plan plans.Plan) string {
-		return formatPlanRetention(plan, plans.TranscriptRetentionDaysPolicy, false)
-	})
-	writeRow("Secrets / agent", func(plan plans.Plan) string { return formatPlanLimit(plan, plans.StoredSecretLimit) })
-	writeRow("Messaging", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.MessagingFeature) })
-	writeRow("Message retention", func(plan plans.Plan) string {
-		return formatPlanRetention(plan, plans.MessageRetentionDaysPolicy, !plan.HasFeature(plans.MessagingFeature))
-	})
-	writeRow("Receive-email entitlement", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailReceiveFeature) })
-	writeRow("Send-email entitlement", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailSendFeature) })
-	writeRow("Email retention", func(plan plans.Plan) string {
-		return formatPlanRetention(plan, plans.AgentEmailRetentionDaysPolicy, !plan.HasFeature(plans.AgentEmailReceiveFeature))
-	})
-	writeRow("Maximum raw email", func(plan plans.Plan) string {
-		return formatPlanByteLimit(plan, plans.AgentEmailMaxRawBytesLimit)
-	})
-	writeRow("Attachment storage / account", func(plan plans.Plan) string {
-		return formatPlanByteLimit(plan, plans.AgentEmailAttachmentStorageBytesLimit)
-	})
-	writeRow("Realm email aliases / realm", func(plan plans.Plan) string {
-		return formatPlanLimit(plan, plans.AgentEmailRealmAliasesPerRealmLimit)
-	})
-	writeRow("Custom inbound domains", func(plan plans.Plan) string {
-		value := formatPlanLimit(plan, plans.AgentEmailCustomDomainsPerAccountLimit)
-		if plan.ID == "enterprise" && value == "0" {
-			return "Contracted (0 default)"
-		}
-		return value
-	})
+		_, _ = fmt.Fprintln(tw)
+	}
 	_ = tw.Flush()
 
 	for _, plan := range entries {
@@ -148,6 +170,14 @@ func printPlanCatalog(catalog *plans.Catalog, entries []plans.Plan) {
 	fmt.Printf("Catalog updated %s. Missing caps mean no catalog cap; missing policy days mean indefinite retention.\n", planCLIColumn(catalog.Updated))
 	fmt.Println("Enterprise is not purchasable and requires explicit contracted overrides before customer sale.")
 	fmt.Println("Entitlements do not prove delivery readiness; managed email routing and account rollout gates remain separate.")
+	for _, feature := range catalog.ComingSoonFeatures {
+		for _, plan := range entries {
+			if plan.HasFeature(feature) {
+				fmt.Println("Coming soon in a capability or allowance row means the entitlement is listed but not yet delivered to customer accounts.")
+				return
+			}
+		}
+	}
 }
 
 func formatPlanPrice(currency string, plan plans.Plan) string {

@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-08-24" {
-		t.Fatalf("catalog updated = %q; want 2026-08-24", c.Updated)
+	if c.Updated != "2026-10-10" {
+		t.Fatalf("catalog updated = %q; want 2026-10-10", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)

@@ -400,7 +400,11 @@ func (p Plan) HasFeature(name string) bool { return slices.Contains(p.Features, 
 type Catalog struct {
 	Updated  string
 	Currency string
-	Plans    []Plan
+	// ComingSoonFeatures is presentation-only: these keys stay in each plan's
+	// Features because that array is the resolved entitlement. Removing a key
+	// from ComingSoonFeatures is the decision to deliver that capability.
+	ComingSoonFeatures []string `json:"coming_soon_features,omitempty"`
+	Plans              []Plan
 
 	byID map[string]Plan
 }
@@ -409,6 +413,11 @@ type Catalog struct {
 func (c *Catalog) Get(id string) (Plan, bool) {
 	p, ok := c.byID[id]
 	return p, ok
+}
+
+// FeatureComingSoon reports whether the catalog marks a feature as not yet delivered.
+func (c *Catalog) FeatureComingSoon(name string) bool {
+	return slices.Contains(c.ComingSoonFeatures, name)
 }
 
 // Prices returns purchasable plan prices in cents — the shape billing
@@ -432,10 +441,11 @@ func Load() (*Catalog, error) { return Parse(witself.PlansJSON) }
 // Parse parses and validates a witself.plans.v0 document.
 func Parse(raw []byte) (*Catalog, error) {
 	var doc struct {
-		SchemaVersion string `json:"schema_version"`
-		Updated       string `json:"updated"`
-		Currency      string `json:"currency"`
-		Plans         []Plan `json:"plans"`
+		SchemaVersion      string   `json:"schema_version"`
+		Updated            string   `json:"updated"`
+		Currency           string   `json:"currency"`
+		ComingSoonFeatures []string `json:"coming_soon_features,omitempty"`
+		Plans              []Plan   `json:"plans"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("plan catalog: %w", err)
@@ -446,11 +456,18 @@ func Parse(raw []byte) (*Catalog, error) {
 	if len(doc.Plans) == 0 {
 		return nil, fmt.Errorf("plan catalog: no plans")
 	}
+	if err := ValidateFeatures(doc.ComingSoonFeatures); err != nil {
+		return nil, fmt.Errorf("plan catalog: coming_soon_features: %w", err)
+	}
+	if !slices.IsSorted(doc.ComingSoonFeatures) {
+		return nil, fmt.Errorf("plan catalog: coming_soon_features: must be sorted ascending")
+	}
 	c := &Catalog{
-		Updated:  doc.Updated,
-		Currency: doc.Currency,
-		Plans:    doc.Plans,
-		byID:     make(map[string]Plan, len(doc.Plans)),
+		Updated:            doc.Updated,
+		Currency:           doc.Currency,
+		ComingSoonFeatures: doc.ComingSoonFeatures,
+		Plans:              doc.Plans,
+		byID:               make(map[string]Plan, len(doc.Plans)),
 	}
 	recommendedPlan := ""
 	for i, p := range doc.Plans {
@@ -495,6 +512,11 @@ func Parse(raw []byte) (*Catalog, error) {
 		}
 		c.Plans[i] = p
 		c.byID[p.ID] = p
+	}
+	for _, feature := range c.ComingSoonFeatures {
+		if !slices.ContainsFunc(c.Plans, func(p Plan) bool { return p.HasFeature(feature) }) {
+			return nil, fmt.Errorf("plan catalog: coming_soon_features: feature %q is not listed by any plan", feature)
+		}
 	}
 	free, ok := c.byID[Free]
 	switch {

@@ -71,6 +71,33 @@ func TestCanonicalCatalogOwnsEveryPlanContractKeyExactlyOnce(t *testing.T) {
 	assertExactPlanKeyOwners(t, "policy", wantPolicies, policyOwners)
 }
 
+func TestComingSoonPlanFeaturesAreNotGenerallyAvailable(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatalf("Load feature status: %v", err)
+	}
+	plansCatalog, err := plans.Load()
+	if err != nil {
+		t.Fatalf("Load plans: %v", err)
+	}
+	for _, owner := range catalog.Features {
+		for _, key := range owner.PlanFeatureKeys {
+			if plansCatalog.FeatureComingSoon(key) && owner.ManagedRollout == RolloutGeneral {
+				t.Errorf("coming-soon feature %q has generally available owner %q", key, owner.ID)
+			}
+			if owner.ManagedRollout != RolloutDark && owner.ManagedRollout != RolloutNotStarted {
+				continue
+			}
+			for _, plan := range plansCatalog.Plans {
+				if plan.Available && plan.HasFeature(key) && !plansCatalog.FeatureComingSoon(key) {
+					t.Errorf("available plan %q lists %q with %s owner %q without a coming-soon marker",
+						plan.ID, key, owner.ManagedRollout, owner.ID)
+				}
+			}
+		}
+	}
+}
+
 func assertExactPlanKeyOwners(t *testing.T, kind string, want map[string]bool, owners map[string][]string) {
 	t.Helper()
 	for key := range want {
