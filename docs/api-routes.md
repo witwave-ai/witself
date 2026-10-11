@@ -2222,3 +2222,113 @@ The unauthenticated `/v1/version` response adds `store_schema_version` (currentl
 An absent backup validation protocol field means protocol 1 (synchronous validation only).
 The control plane rejects a newer archive schema before minting a capability
 when this attestation is available.
+
+## Tenant isolation matrix (cell API)
+
+Every cell API route has a row in `cmd/witself-server/tenant_matrix_test.go`
+(with rows split into `tenant_matrix_rows_*_test.go`). CI fails when a route
+registered in `internal/server` has no matrix row. Each row says how a tenant
+credential is refused on another account's objects, or why the route is exempt.
+
+The static matrix distinguishes ordinary foreign-object refusals from the
+following closed, source-cited contracts. `TestTenantMatrixCoversEveryRoute`
+(T3) pins each exception and the required query/body probes. Expanding a set
+requires an explicit row and guard change. Part 122a supplies these declarations
+and static checks; request execution and the two runtime phases belong to 122b.
+
+- **Curator authority (A1).** Curator probes are required only where
+  `memoryCurationProfileAllows` grants that permission. Its full-only set is
+  `POST /v1/memory-curation-requests`,
+  `POST /v1/memory-curation-runs/{run}/cancel`, and
+  `POST /v1/memory-curation-runs/{run}/rollback`
+  (`internal/server/memory_curation.go:664-688`). These retain full-agent
+  foreign or own coverage. A curator refusal on these routes is an additional
+  permission test, not their isolation control.
+- **Empty results (A2).** An `EmptyList` foreign probe cites the account-scoped
+  query in `EmptyListWhy`. Phase 1 requires HTTP 200, no B leak, and equal B-id
+  and never-issued-id responses after `sameRefusal` normalization. Phase 2
+  requires B's own control body to contain a seeded B id or canary; status
+  difference is not evidence on a list route. The set comprises
+  `GET /v1/realms/{realm}/agents` (`internal/store/agent.go:193-214`),
+  the `from` and `thread_id` filters on `GET /v1/messages`
+  (`internal/store/message.go:1163-1184`), and the `subject` filter on
+  `GET /v1/fact-occurrences` (`internal/store/fact_temporal.go:79-98`).
+- **Caller namespaces (A3).** The closed set is
+  `PUT /v1/fact-subjects/{subject}`
+  (`internal/store/fact_subject.go:47-99`),
+  `GET /v1/self/avatar/versions/{version}`
+  (`internal/store/avatar_query.go:179-184,497-502`),
+  `POST /v1/self/avatar:activate`
+  (`internal/store/avatar_mutation.go:358-360`), and
+  `POST /v1/self/avatar:rollback`
+  (`internal/store/avatar_mutation.go:489-491`). Each carries an own probe,
+  `CallerNamespaced`, a dedicated `Fresh` A principal, and a `NamespaceBuild`
+  for the separate paired challenge. Send B's key/version and a never-issued
+  key/version as A; neither response may leak a B value beyond the carried
+  key, B's fingerprint must stay unchanged, and both answers must match after
+  normalizing generated ids. Fresh avatar profiles have no versions: reads
+  expect 404 and activation/rollback expect 409.
+- **Query references (A4).** Coverage includes curator-preview
+  `GET /v1/memory-curation-status?run_id=${curation_run}`
+  (`internal/store/memory_curation.go:2462-2467`),
+  `GET /v1/messages?from=${peer_agent}`,
+  `GET /v1/messages?thread_id=${message-main-to-peer}&direction=outbox`, and
+  `GET /v1/fact-occurrences?subject=${fact.subject}`. These are foreign-object
+  probes even though the path itself has no id. Each empty-result filter is
+  pinned under A2 with its query citation; a successful B control must expose
+  the seeded B result. The thread slot carries a `thr_` thread id, and the
+  explicit outbox direction matches the main-to-peer seed
+  (`internal/store/message.go:1163-1184,1469`). The fact occurrence control
+  seeds a date/datetime fact
+  inside the requested occurrence window
+  (`internal/store/fact_temporal.go:79-98`).
+- **Body references (A5).** A `BodyRef` probe uses an A-owned path object from
+  `f.own(key)` (template `${own.KEY}`), and exactly one B reference in the
+  declared JSON path. The path uses dot-separated object keys and numeric
+  array indexes. T4 proves that B's value occurs only in that field; all other
+  ids, canaries and payload values come from A. The original foreign-path
+  probes remain separate, so rejecting a path object cannot conceal a body
+  authorization defect. Runtime B controls select the corresponding B-owned
+  path and payload fixtures. Transcript reply targets outside the own
+  transcript return 400 (`internal/store/transcript.go:277-289` and
+  `internal/server/server.go:3980-3982,4018-4020`); that cited refusal is
+  separate from the path-object 403/404 case.
+- **Opaque provenance (A6).** `POST /v1/fact-candidates` is an own row:
+  `source_ref` is stored without looking up its apparent transcript reference
+  (`internal/store/fact_candidate.go:168-183`). The MCP row for
+  `witself.fact.propose_from_transcript` must record
+  `GET /v1/transcripts/{transcript}` as its first route; isolation is checked
+  by that read before candidate creation.
+- **Idempotency (A7).** Every sent request receives a fresh `Idempotency-Key`
+  except the three `NoIdempotencyKey` previews: `DELETE /v1/facts`,
+  `DELETE /v1/facts/{fact}` (`internal/server/fact.go:413-425`), and
+  `DELETE /v1/memories/{memory}` (`internal/server/memory.go:842-845`). Each
+  must include `dry_run=true` and a `NoIdempotencyKeyWhy` citation. Apply
+  probes always receive a key.
+- **Local sequences (A8).** Avatar versions, profile revisions and row
+  revisions are local sequence numbers, not B values. `values()` excludes
+  the `version` and other numeric shapes. Operator
+  `/v1/agents/{agent}/avatar/...` routes remain foreign probes on the agent id.
+- **Own controls (A9).** Ordinary own builds always use dedicated
+  `sideMissing` slots that no foreign probe uses; they never build from
+  `sideB`. A-own accessor slots are separately seeded in A and never enter
+  B's value set. `ShowsOwn` is permitted only on GET probes and the read/list
+  POST routes `memories:recall`, `messages:listen`, and `email:listen`;
+  runtime checks those responses against A canaries seeded by 122b. T3
+  rejects `ShowsOwn` on other POST, PUT or PATCH own probes.
+- **Backup authority (A10).** `POST /v1/accounts/` includes an exemption
+  probe for `/v1/accounts/${account}:export-backup`, with `Cred: credBackup`
+  and the incomplete body `{`. Runtime sends A's operator and agent
+  credentials and requires 401, then uses the backup credential against a
+  never-issued account. T3 requires that backup probe; the handler checks
+  its dedicated bearer before backup input processing
+  (`internal/server/server.go:5931-5947`).
+- **Credential templates (A11).** Templates never read a fixture side's
+  token. They carry `${cred}`, which the runner resolves from the probe's
+  `Cred`. Thus the bootstrap exemption's `bootstrap_token` receives A's
+  agent credential, matching its credential declaration.
+- **Mutation proof (A12).** MB5 changes the selected tenant row's class and
+  its probe together: `Kind: exemption, Cred: none`. T3 must pass that
+  deliberately consistent declaration while T6 fails on the real
+  no-credential HTTP 401. A class/kind mismatch is not the intended MB5
+  evidence.
