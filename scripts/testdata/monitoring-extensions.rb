@@ -94,7 +94,7 @@ def assert_email_only_change(apps_chart, backup_values, email_line, *overrides)
 end
 abort "backup apps render must add exactly one ACME contact line" unless backup.fetch("apps").scan(email_line).length == 1
 assert_email_only_change(apps_chart, backup_values, email_line)
-assert_email_only_change(apps_chart, backup_values, email_line, "--set", "apps.witselfServer.chartVersion=0.0.274", "--set", "apps.witselfServer.imageTag=0.0.274")
+assert_email_only_change(apps_chart, backup_values, email_line, "--set", "apps.witselfServer.chartVersion=0.0.274", "--set", "apps.witselfServer.imageTag=0.0.274", "--set", "apps.witselfServer.requestBudget.enabled=false")
 
 serving_render = cell_renders.fetch("civo-sandbox-use1-serving").fetch("platform")
 serving_values = monitoring_values(serving_render)

@@ -111,6 +111,31 @@
             "imageDigest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "requestBudget": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "readPerMinute", "readBurst", "writePerMinute", "writeBurst", "maxTrackedAccounts"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "readPerMinute": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+                "readBurst": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+                "writePerMinute": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+                "writeBurst": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+                "maxTrackedAccounts": { "type": "integer", "minimum": 100, "maximum": 1000000 }
+              },
+              "if": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              },
+              "then": {
+                "properties": {
+                  "readPerMinute": { "minimum": 1 },
+                  "readBurst": { "minimum": 1 },
+                  "writePerMinute": { "minimum": 1 },
+                  "writeBurst": { "minimum": 1 }
+                }
+              }
             }
           }
         },

@@ -84,6 +84,7 @@ func resolveCell(name string, cfg *Catalog) (templateData, error) {
 		SealedPlaneAlerts:       entry.Switches.SealedPlaneAlerts,
 		MemoryAlerts:            entry.Switches.MemoryAlerts,
 		PostgresBackup:          entry.Switches.PostgresBackup,
+		RequestBudget:           entry.Switches.RequestBudget,
 		overlayName:             entry.Overlay,
 	}, nil
 }

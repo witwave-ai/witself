@@ -50,6 +50,16 @@ apps:
     podDisruptionBudget:
       enabled: false
     topologySpreadConstraints: []
+{{- with .RequestBudget }}
+    # From catalog switches.request_budget: per account, per minute, per replica.
+    requestBudget:
+      enabled: true
+      readPerMinute: {{ .ReadPerMinute }}
+      readBurst: {{ .ReadBurst }}
+      writePerMinute: {{ .WritePerMinute }}
+      writeBurst: {{ .WriteBurst }}
+      maxTrackedAccounts: {{ .MaxTrackedAccounts }}
+{{- end }}
     worker:
       enabled: true
       # Preview reports value-free counts only.

@@ -34,7 +34,7 @@ when "serving-backup", "serving-postgres", "all-pins"
   cells.each do |cell, config|
     next if state != "all-pins" && config["role"] != "serving"
     values = YAML.safe_load(File.read(values_path(root, cell)), aliases: false)
-    version = "0.0.292"
+    version = values.fetch("apps").fetch("witselfServer").fetch("imageTag")
     server_digest = values.fetch("apps").fetch("witselfServer")["imageDigest"]
     server_digest = "sha256:" + "a" * 64 if server_digest.to_s.empty?
     args = ["--roll-cell", cell, "--version", version, "--image-digest", server_digest]

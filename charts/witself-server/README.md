@@ -356,9 +356,11 @@ and N×, depending on traffic distribution. A restart or rollout refills that
 replica's buckets, allowing at most one extra burst per replica per restart.
 An evicted account starts with full buckets. Enabled budget changes enter
 the server configuration checksum and roll API pods; disabled values leave
-the default render and checksum unchanged. The apps chart does not forward
-`requestBudget.*` yet (FU123-1), so no cell can enable this through its apps
-values. Per-plan values remain a founder decision (FU123-2).
+the default render and checksum unchanged. The apps chart forwards
+`requestBudget` only when `apps.witselfServer.requestBudget.enabled` is true
+and both chart and image are `v0.0.334` or newer; cells set it through the
+catalog switch `request_budget`. Per-plan values remain a founder decision
+(FU123-2).
 
 `worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` into
 the worker ConfigMap. Defaults are `enabled: false`, `after: 720h`,
