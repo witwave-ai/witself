@@ -437,6 +437,9 @@ func requireAgentEmailSendPrincipal(
 			writeAgentEmailOutboundCodedError(w, http.StatusUnauthorized, "auth_failed", "invalid token", false)
 			return
 		}
+		if !admitAccountRequest(w, r, p.AccountID) {
+			return
+		}
 		if p.AccountStatus != "active" {
 			writeAgentEmailOutboundCodedError(w, http.StatusForbidden, "forbidden", "agent email send requires an active account", false)
 			return
@@ -712,6 +715,9 @@ func requireAgentEmailSendOperatorAnyStatus(
 		}
 		if !ok {
 			writeAgentEmailOutboundCodedError(w, http.StatusUnauthorized, "auth_failed", "invalid token", false)
+			return
+		}
+		if !admitAccountRequest(w, r, accountID) {
 			return
 		}
 		h(w, r, principal{operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})

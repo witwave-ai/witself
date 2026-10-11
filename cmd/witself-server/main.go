@@ -174,6 +174,10 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	if err := configureAccountRequestBudget(&cfg, os.LookupEnv, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
 			serverStoreOptions(avatarPayloadCompactionEnabled, supportTicketRateLimit, os.Stderr)...)

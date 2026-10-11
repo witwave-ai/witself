@@ -35,6 +35,9 @@ import (
 
 // Config holds the listen addresses for the three witself-server listeners.
 type Config struct {
+	AccountRequestBudget    AccountRequestBudgetConfig
+	accountRequestBudgetNow func() time.Time
+
 	// BeginAccountImport acquires exclusive cross-replica import ownership.
 	BeginAccountImport func(context.Context, string, string) (AccountImportLease, error)
 	// AccountImportStatus reads durable receipts and advisory lock state only.
@@ -2324,6 +2327,9 @@ func ConfigFromEnv() Config {
 // Run binds the three listeners, serves until ctx is cancelled (or a listener
 // fails), then shuts them down gracefully.
 func Run(ctx context.Context, cfg Config) error {
+	if err := cfg.AccountRequestBudget.Validate(); err != nil {
+		return fmt.Errorf("account request budget: %w", err)
+	}
 	metrics := newRuntimeMetrics()
 	instrumentedConfig := metrics.instrumentConfig(cfg)
 	jobs := newAccountImportJobs(ctx, cfg.AccountImportJobConcurrency)
@@ -3132,7 +3138,18 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/events/admin:list",
 			eventsAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminEventsAll))
 	}
-	return securityResponseHeaders(activityContextMux(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))))
+	handler := securityResponseHeaders(activityContextMux(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))))
+	if cfg.AccountRequestBudget.Enabled {
+		if err := cfg.AccountRequestBudget.Validate(); err != nil {
+			panic("invalid account request budget configuration")
+		}
+		budget := newAccountRequestBudget(cfg.AccountRequestBudget, cfg.accountRequestBudgetNow)
+		if cfg.metrics != nil {
+			cfg.metrics.accountRequestBudget.Store(budget)
+		}
+		return accountRequestBudgetMux(budget, handler)
+	}
+	return handler
 }
 
 // bootstrapLoginHandler exchanges a bootstrap token (JSON {"bootstrap_token"})
@@ -3377,6 +3394,9 @@ func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.R
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		if !admitAccountRequest(w, r, accountID) {
+			return
+		}
 		h(w, r, principal{operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})
 	}
 }
@@ -3415,6 +3435,9 @@ func requireDomainPrincipalAnyProfile(auth PrincipalAuthFunc, h func(http.Respon
 		}
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		if !admitAccountRequest(w, r, p.AccountID) {
 			return
 		}
 		if p.AccountStatus != "active" {

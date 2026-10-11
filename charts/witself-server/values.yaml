@@ -74,6 +74,16 @@ support:
   ticketRateLimit: 10
   ticketRateWindow: 60s
 
+# Off by default. Budgets are per replica, per minute, and per account;
+# bursts are the number of requests admitted immediately for each class.
+requestBudget:
+  enabled: false
+  readPerMinute: 0
+  readBurst: 0
+  writePerMinute: 0
+  writeBurst: 0
+  maxTrackedAccounts: 10000
+
 backup:
   existingSecret:
     # Name of a Secret containing the cell's backup-only credential. Empty

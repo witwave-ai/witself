@@ -117,5 +117,8 @@ the pod and can be fenced by imperative one-shot operations.
 {{- if .Values.billing.endpoint -}}
 {{- $_ := set $config "billing" .Values.billing -}}
 {{- end -}}
+{{- if .Values.requestBudget.enabled -}}
+{{- $_ := set $config "requestBudget" .Values.requestBudget -}}
+{{- end -}}
 {{- $config | toJson | sha256sum -}}
 {{- end -}}

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
@@ -24,6 +25,8 @@ import (
 // request paths, memory content, database details, and error text never enter
 // this collector.
 type runtimeMetrics struct {
+	accountRequestBudget atomic.Pointer[accountRequestBudget]
+
 	mu sync.Mutex
 
 	httpInFlight int64
@@ -943,6 +946,21 @@ func (m *runtimeMetrics) writePrometheus(w io.Writer) {
 	writeGoMemoryPrometheus(w)
 	snapshot := m.snapshot()
 	snapshot.writePrometheusSnapshot(w)
+	if budget := m.accountRequestBudget.Load(); budget != nil {
+		budget.mu.Lock()
+		rejections := budget.rejections
+		tracked := len(budget.entries)
+		evictions := budget.capacityEvictions
+		budget.mu.Unlock()
+		_, _ = fmt.Fprintln(w, "# HELP witself_account_request_budget_rejections_total Account request budget refusals in this replica.")
+		_, _ = fmt.Fprintln(w, "# TYPE witself_account_request_budget_rejections_total counter")
+		_, _ = fmt.Fprintf(w, "witself_account_request_budget_rejections_total{class=\"read\"} %d\n", rejections[0])
+		_, _ = fmt.Fprintf(w, "witself_account_request_budget_rejections_total{class=\"write\"} %d\n", rejections[1])
+		writeIntGauge(w, "witself_account_request_budget_tracked_accounts", "Accounts tracked by this replica's request budget.", int64(tracked))
+		_, _ = fmt.Fprintln(w, "# HELP witself_account_request_budget_capacity_evictions_total Non-idle account buckets evicted at capacity in this replica.")
+		_, _ = fmt.Fprintln(w, "# TYPE witself_account_request_budget_capacity_evictions_total counter")
+		_, _ = fmt.Fprintf(w, "witself_account_request_budget_capacity_evictions_total %d\n", evictions)
+	}
 }
 
 func writeGoMemoryPrometheus(w io.Writer) {

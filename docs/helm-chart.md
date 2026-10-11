@@ -150,6 +150,31 @@ and `WITSELF_SUPPORT_TICKET_RATE_WINDOW` in the API ConfigMap. These are shared
 per-account new-ticket bounds; replies and reads remain available. The server
 validates limits of 1–1,000 tickets and windows of 1 second–24 hours.
 
+The account request budget is off by default (`requestBudget.enabled: false`).
+Its values map to API ConfigMap environment keys only when enabled:
+
+| Chart value | Environment key | Default |
+| --- | --- | --- |
+| `requestBudget.enabled` | `WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED` | `false` |
+| `requestBudget.readPerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_READ_PER_MINUTE` | `0` |
+| `requestBudget.readBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_READ_BURST` | `0` |
+| `requestBudget.writePerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE` | `0` |
+| `requestBudget.writeBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST` | `0` |
+| `requestBudget.maxTrackedAccounts` | `WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS` | `10000` |
+
+The four rate/burst integers accept 0–1,000,000 while disabled and require
+1–1,000,000 when enabled; `maxTrackedAccounts` always requires 100–1,000,000.
+Rates are per minute and per account; bursts are immediate request allowances.
+Each replica keeps independent read and write buckets. With N replicas,
+an account receives between 1× and N× the configured allowance, depending on
+traffic distribution. A restart or rollout refills that replica's buckets,
+allowing at most one extra burst per replica per restart. Evicted accounts
+start with full buckets. The disabled render adds no environment key or
+checksum input; enabled changes roll the API pods. Workers receive no budget
+configuration. The apps chart does not forward `requestBudget.*` yet
+(FU123-1); this chart change does not enable a budget on any cell. Per-plan
+values remain a founder decision (FU123-2).
+
 `worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` in the
 worker ConfigMap. It defaults to `enabled: false`, `after: 720h`,
 `batchSize: 100`, `interval: 1h`, and `batchTimeout: 10s`. Process startup
