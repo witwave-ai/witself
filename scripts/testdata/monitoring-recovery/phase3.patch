@@ -11,7 +11,7 @@ index 22a9501..16561cc 100644
        postgres_backup: true
        memory_alerts: false
 diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
-index 1cd953a..6611f11 100644
+index 5325f2d..8fe36d8 100644
 --- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 +++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
 @@ -218,20 +218,44 @@ apps:
@@ -65,6 +65,67 @@ index 1cd953a..6611f11 100644
    awsAlbIngress:
      enabled: false
    certManager:
+diff --git a/internal/gitopsvalues/generate_test.go b/internal/gitopsvalues/generate_test.go
+index 76c2df2..9f4ef18 100644
+--- a/internal/gitopsvalues/generate_test.go
++++ b/internal/gitopsvalues/generate_test.go
+@@ -82,8 +82,8 @@ func TestSealedPlaneAlertsTemplate(t *testing.T) {
+ 				}
+ 				return
+ 			}
+-			if strings.Contains(got, sealedPlaneAlertsBlock) {
+-				t.Fatalf("disabled switch enabled sealedPlaneAlerts:\n%s", got)
++			if strings.Contains(got, "sealedPlaneAlerts") {
++				t.Fatalf("disabled switch rendered sealedPlaneAlerts:\n%s", got)
+ 			}
+ 		})
+ 	}
+@@ -108,19 +108,19 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	// Alert groups stay off until the monitoring recovery rollout is complete.
+-	// Only the sealed-plane group can be enabled, in phase 3, on the serving cell.
++	// Only the serving cell enables the sealed-plane group.
+ 	// The collector group has its own catalog switch, checked in
+ 	// TestCollectorAlertsFollowCatalogSwitch.
+ 	serving := cfg.Cells["civo-sandbox-use1-serving"]
+-	if serving.Switches.SealedPlaneAlerts {
+-		t.Fatalf("civo-sandbox-use1-serving switches: sealed_plane_alerts=%v, want false",
++	if !serving.Switches.SealedPlaneAlerts {
++		t.Fatalf("civo-sandbox-use1-serving switches: sealed_plane_alerts=%v, want true",
+ 			serving.Switches.SealedPlaneAlerts)
+ 	}
+ 	for name, cell := range cfg.Cells {
+ 		if name == "civo-sandbox-use1-serving" {
+-			if !cell.Switches.Monitoring || cell.Switches.SealedPlaneAlerts {
+-				t.Error("serving cell must enable monitoring with alert groups off during recovery")
++			// The serving cell enables monitoring and the sealed-plane group.
++			if !cell.Switches.Monitoring || !cell.Switches.SealedPlaneAlerts {
++				t.Error("replacement serving cell must enable monitoring and the sealed-plane group")
+ 			}
+ 			continue
+ 		}
+@@ -139,8 +139,8 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
+ 		body := string(generated[cell])
+ 		hasSealed := strings.Contains(body, sealedPlaneAlertsBlock)
+ 		if cell == "civo-sandbox-use1-serving" {
+-			if hasSealed {
+-				t.Errorf("%s enables sealedPlaneAlerts before phase 3", valuesRel(cell))
++			if !hasSealed {
++				t.Errorf("%s missing sealedPlaneAlerts block", valuesRel(cell))
+ 			}
+ 			continue
+ 		}
+@@ -216,7 +216,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
+ 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
+ 					}
+ 					wantMonitoring := entry.Role == "serving" && monitoringEnabled
+-					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
++					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
+ 						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
+ 					}
+ 					if entry.Role == "backup" && postgres.Metrics.ServiceMonitor.Enabled {
 diff --git a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl b/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 index e9d5cce..aa0de15 100644
 --- a/internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
@@ -137,67 +198,3 @@ index e9d5cce..aa0de15 100644
    awsAlbIngress:
      enabled: false
    certManager:
-diff --git a/internal/gitopsvalues/generate_test.go b/internal/gitopsvalues/generate_test.go
-index c52a6fc..708b9e4 100644
---- a/internal/gitopsvalues/generate_test.go
-+++ b/internal/gitopsvalues/generate_test.go
-@@ -82,8 +82,8 @@ func TestSealedPlaneAlertsTemplate(t *testing.T) {
- 				}
- 				return
- 			}
--			if strings.Contains(got, sealedPlaneAlertsBlock) {
--				t.Fatalf("disabled switch enabled sealedPlaneAlerts:\n%s", got)
-+			if strings.Contains(got, "sealedPlaneAlerts") {
-+				t.Fatalf("disabled switch rendered sealedPlaneAlerts:\n%s", got)
- 			}
- 		})
- 	}
-@@ -108,20 +108,22 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
- 	if err != nil {
- 		t.Fatal(err)
- 	}
--	// Alert groups stay off until the monitoring recovery rollout is complete.
- 	// The collector group stays off on purpose: WitselfIdentityCapacityAtLimit
- 	// would fire permanently because every Personal account already holds its
- 	// single root operator seat (used == cap == 1). Only the sealed-plane group
--	// can be enabled in phase 3 on the serving cell.
-+	// is enabled on the serving cell.
- 	serving := cfg.Cells["civo-sandbox-use1-serving"]
--	if serving.Switches.CollectorAlerts || serving.Switches.SealedPlaneAlerts {
--		t.Fatalf("civo-sandbox-use1-serving switches: collector_alerts=%v sealed_plane_alerts=%v, want false/false",
-+	if serving.Switches.CollectorAlerts || !serving.Switches.SealedPlaneAlerts {
-+		t.Fatalf("civo-sandbox-use1-serving switches: collector_alerts=%v sealed_plane_alerts=%v, want false/true",
- 			serving.Switches.CollectorAlerts, serving.Switches.SealedPlaneAlerts)
- 	}
- 	for name, cell := range cfg.Cells {
- 		if name == "civo-sandbox-use1-serving" {
--			if !cell.Switches.Monitoring || cell.Switches.CollectorAlerts || cell.Switches.SealedPlaneAlerts {
--				t.Error("serving cell must enable monitoring with alert groups off during recovery")
-+			// The serving cell enables monitoring and the sealed-plane group,
-+			// with the collector group off until the
-+			// identity-capacity rule semantics are fixed.
-+			if !cell.Switches.Monitoring || cell.Switches.CollectorAlerts || !cell.Switches.SealedPlaneAlerts {
-+				t.Error("replacement serving cell must enable monitoring and the sealed-plane group only")
- 			}
- 			continue
- 		}
-@@ -141,8 +143,8 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
- 		hasSealed := strings.Contains(body, sealedPlaneAlertsBlock)
- 		hasCollector := strings.Contains(body, "    collectorAlerts:\n      enabled: true\n")
- 		if cell == "civo-sandbox-use1-serving" {
--			if hasSealed {
--				t.Errorf("%s enables sealedPlaneAlerts before phase 3", valuesRel(cell))
-+			if !hasSealed {
-+				t.Errorf("%s missing sealedPlaneAlerts block", valuesRel(cell))
- 			}
- 			if hasCollector {
- 				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
-@@ -224,7 +226,7 @@ func TestPostgresBackupSingleCatalogSwitch(t *testing.T) {
- 						t.Errorf("postgresBackupAlerts.enabled must match postgres_backup=%v", enabled)
- 					}
- 					wantMonitoring := entry.Role == "serving" && monitoringEnabled
--					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled {
-+					if monitoring.Enabled != wantMonitoring || monitoring.Alerting.Enabled != wantMonitoring {
- 						t.Errorf("postgres_backup=%v changed independent monitoring or alerting switch", enabled)
- 					}
- 					if entry.Role == "backup" && postgres.Metrics.ServiceMonitor.Enabled {

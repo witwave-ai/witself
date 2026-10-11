@@ -1,17 +1,23 @@
 #!/usr/bin/env ruby
 # Render each recovery patch in an isolated fixture. An optional verified
 # kube-prometheus-stack archive also exercises the upstream stack resources.
-# Regenerate phase2.patch (1 -> 2) and phase3.patch (2 -> 3) by reconstructing
-# adjacent-phase snapshots in isolation from the phase-3 base; regenerate cell
-# values in each snapshot. Copy only the four files below into a/ (earlier phase)
-# and b/ (later phase), preserving repository-relative paths. From their parent,
-# run `git diff --no-index --no-prefix a b` to retain a/ and b/ patch prefixes
-# (exit 1 means differences). Use the exact git apply --include set:
+# The patches replay phase2.patch (1 -> 2), phase3.patch (2 -> 3), and
+# phase4.patch (3 -> 4). Phase 4 opts into collector alerts: one catalog switch
+# line and its two generated values lines. The checked-in tree is at phase 3 or
+# 4; this helper detects which. To regenerate adjacent-phase snapshots, start
+# from the checked-in base and reverse later patches in a scratch copy, then
+# regenerate cell values. For phase 4 from a phase-3 base, flip the catalog switch
+# in scratch and run scripts/gitops-cell-values.sh --write --root <copy>.
+# Copy only the four files below into a/ (earlier phase) and b/ (later phase),
+# preserving repository-relative paths. From their parent, run
+# `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --no-index --no-prefix --no-color a b`
+# to retain a/ and b/ patch prefixes (exit 1 means differences).
+# Use the exact git apply --include set:
 #   --include=.gitops/cells/catalog.yaml
 #   --include=internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl
 #   --include=.gitops/cells/civo-sandbox-use1-serving/values.yaml
 #   --include=internal/gitopsvalues/generate_test.go
-# Save each diff to its phase patch, then replay both patches with this helper.
+# Save each diff to its phase patch, then replay all three with this helper.
 require "yaml"
 require "open3"
 require "tmpdir"
@@ -89,6 +95,14 @@ def no_external_alerting(values, label)
   check("#{label}: no upstream alert rules", values.dig("defaultRules", "create") == false)
 end
 
+phase4_patch = File.read(File.join(root, "scripts/testdata/monitoring-recovery/phase4.patch"))
+phase4_sections = phase4_patch.lines.grep(/^diff --git /).map(&:chomp)
+expected_phase4_sections = [".gitops/cells/catalog.yaml", cell_path].map do |path|
+  "diff --git a/#{path} b/#{path}"
+end
+check("phase4.patch must contain exactly the catalog and serving values sections",
+      phase4_sections.sort == expected_phase4_sections.sort)
+
 expected_peer = {
   "namespaceSelector" => {"matchLabels" => {"kubernetes.io/metadata.name" => "monitoring"}},
   "podSelector" => {"matchLabels" => {"app.kubernetes.io/name" => "prometheus"}}
@@ -129,6 +143,12 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
   reference_pg = child_values(reference_apps, "witself-postgresql")
   reference_monitoring = child_values(render("witself-platform", platform_chart, reference_path),
                                      "witself-monitoring")
+  reference_collectors = Marshal.load(Marshal.dump(reference))
+  reference_collectors["platform"]["monitoring"]["collectorAlerts"] = {"enabled" => true}
+  reference_collectors_path = File.join(fixture, "reference-collectors-cell-values.yaml")
+  File.write(reference_collectors_path, reference_collectors.to_yaml)
+  reference_monitoring_collectors = child_values(render("witself-platform", platform_chart, reference_collectors_path),
+                                                "witself-monitoring")
   fixture_paths.each do |relative|
     destination = File.join(fixture, relative)
     FileUtils.mkdir_p(File.dirname(destination))
@@ -144,29 +164,37 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
   original_files = fixture_paths.to_h { |relative| [relative, File.binread(File.join(fixture, relative))] }
   fixture_cell = File.join(fixture, cell_path)
   current = YAML.safe_load(File.read(fixture_cell), aliases: false)
-  # The same tests remain valid after either later GitOps change lands.
-  current_phase = if current.dig("platform", "monitoring", "alerting", "enabled")
+  # Detect the checked-in phase before reversing the later GitOps changes.
+  current_phase = if current.dig("platform", "monitoring", "collectorAlerts", "enabled") == true
+                    4
+                  elsif current.dig("platform", "monitoring", "alerting", "enabled")
                     3
                   elsif current.dig("apps", "witselfServer", "metrics", "serviceMonitor", "enabled")
                     2
                   else
                     1
                   end
+  puts "checked-in monitoring phase: #{current_phase}"
   current_phase.downto(2) { |phase| apply_phase.call(phase, true) }
 
   reference_server_values = File.join(fixture, "reference-server-values.yaml")
   File.write(reference_server_values, child_values(reference_apps, "witself-server").to_yaml)
   reference_server = render("witself-server", server_chart, reference_server_values, "--namespace", "witself")
   reference_stack = nil
+  reference_stack_collectors = nil
   if stack_archive
     reference_values = File.join(fixture, "reference-monitoring-values.yaml")
     File.write(reference_values, reference_monitoring.to_yaml)
     reference_stack = render("witself-monitoring", stack_archive, reference_values,
                              "--namespace", "monitoring", "--include-crds")
+    reference_collectors_values = File.join(fixture, "reference-collectors-monitoring-values.yaml")
+    File.write(reference_collectors_values, reference_monitoring_collectors.to_yaml)
+    reference_stack_collectors = render("witself-monitoring", stack_archive, reference_collectors_values,
+                                       "--namespace", "monitoring", "--include-crds")
   end
 
   baseline_monitoring = nil
-  (1..3).each do |phase|
+  (1..4).each do |phase|
     apply_phase.call(phase) if phase > 1
     label = "phase #{phase}"
     if phase == current_phase
@@ -177,9 +205,17 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
     catalog = YAML.safe_load(File.read(File.join(fixture, ".gitops/cells/catalog.yaml")), aliases: false)
     switches = catalog.fetch("cells").fetch(cell_name).fetch("switches")
     check("#{label}: catalog alert switches must follow the recovery phase",
-          switches["monitoring"] == true && switches["collector_alerts"] == false && switches["sealed_plane_alerts"] == (phase == 3))
+          switches["monitoring"] == true && switches.key?("collector_alerts") && switches["collector_alerts"] == (phase == 4) && switches["sealed_plane_alerts"] == (phase >= 3))
     values = YAML.safe_load(File.read(fixture_cell), aliases: false)
     check("#{label}: monitoring stack must be enabled", values.dig("platform", "monitoring", "enabled") == true)
+    case phase
+    when 1, 2
+      check("#{label}: collector alerts must not be enabled", values.dig("platform", "monitoring", "collectorAlerts", "enabled") != true)
+    when 3
+      check("#{label}: collectorAlerts key must be absent", !values.fetch("platform").fetch("monitoring").key?("collectorAlerts"))
+    when 4
+      check("#{label}: collector alerts must be enabled", values.dig("platform", "monitoring", "collectorAlerts") == {"enabled" => true})
+    end
     check("#{label}: recovery chart/image pins changed", %w[chartVersion imageTag].all? do |key|
       values.dig("apps", "witselfServer", key) == reference_pins.fetch(key)
     end)
@@ -228,7 +264,15 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
       check("phase 2 must preserve phase 1 monitoring stack", monitoring == baseline_monitoring)
     else
       check("#{label}: alerting and the sealed-plane rule group enabled", %w[alerting sealedPlaneAlerts].all? { |key| values.dig("platform", "monitoring", key, "enabled") == true })
-      check("#{label}: monitoring values must match the serving reference", monitoring == reference_monitoring)
+      expected_monitoring = phase == 4 ? reference_monitoring_collectors : reference_monitoring
+      check("#{label}: monitoring values must match the phase's serving reference", monitoring == expected_monitoring)
+      collector_groups = monitoring.dig("additionalPrometheusRulesMap", "founder-open-plane", "groups").select { |group| group["name"] == "witself-collectors" }
+      if phase == 4
+        check("#{label}: collector group must contain exactly four alerts", collector_groups.length == 1 &&
+              collector_groups[0].fetch("rules").length == 4 && collector_groups[0].fetch("rules").all? { |rule| rule.key?("alert") })
+      else
+        check("#{label}: collector group must be absent", collector_groups.empty?)
+      end
     end
 
     next unless stack_archive
@@ -250,11 +294,12 @@ Dir.mktmpdir("witself-monitoring-recovery-") do |fixture|
       check("#{label}: rendered rules absent", selected(stack, "PrometheusRule").empty?)
       check("#{label}: Grafana and node exporter absent", stack.none? { |doc| doc.dig("metadata", "name").to_s.match?(/grafana|node-exporter/) })
     else
-      check("#{label}: rendered PagerDuty and dead-man configuration must match the serving reference", config == alertmanager_config(reference_stack))
+      expected_stack = phase == 4 ? reference_stack_collectors : reference_stack
+      check("#{label}: rendered PagerDuty and dead-man configuration must match the serving reference", config == alertmanager_config(expected_stack))
       check("#{label}: exact immutable receiver mounts", alertmanager.dig("spec", "secrets").sort == %w[witself-monitoring-deadman-v1 witself-monitoring-pagerduty-v1])
-      check("#{label}: rendered rules must match the serving reference with collector alerts off and sealed-plane alerts on", selected(stack, "PrometheusRule") == selected(reference_stack, "PrometheusRule"))
+      check("#{label}: rendered rules must match the phase's serving reference", selected(stack, "PrometheusRule") == selected(expected_stack, "PrometheusRule"))
     end
   end
 end
 
-puts "replacement-cell monitoring phases 1/2/3 #{stack_archive ? 'stack and application' : 'application'} rendering checks passed"
+puts "replacement-cell monitoring phases 1/2/3/4 #{stack_archive ? 'stack and application' : 'application'} rendering checks passed"

@@ -72,24 +72,34 @@ not a per-cell overlay: both Azure cells share them.
 The sealed-plane alert group is a catalog switch (`sealed_plane_alerts`)
 rendered in the serving-cell overlay next to `collector_alerts`, not a
 `roll-cell.sh` pin. The `civo-sandbox-use1-serving` overlay emits enabled alert blocks only when
-`monitoring: true`. Its checked-in configuration enables monitoring and sealed-plane alerts,
-while collector alerts remain disabled. The recovery fixture replays the three phases
+`monitoring: true`. The collector group follows the catalog switch `collector_alerts`;
+see [`.gitops/cells/catalog.yaml`](../.gitops/cells/catalog.yaml) for the current state.
+The recovery fixture replays four phases
 from a temporary disabled-discovery baseline without changing the checked-in
-serving configuration.
+serving configuration. Phase 4, `scripts/testdata/monitoring-recovery/phase4.patch`,
+is the collector opt-in: the catalog switch line and its two generated values lines.
+The checked-in tree is at phase 3 or 4; the helper detects which and reverses the
+later patches first.
 Setting switches on an overlay without a `platform.monitoring` block has
 no effect.
 
 To regenerate `scripts/testdata/monitoring-recovery/phase2.patch` (phase 1 to 2)
-and `phase3.patch` (phase 2 to 3) from the phase-3 base, reconstruct the adjacent-phase
-snapshots in isolation and regenerate cell values in each. Copy only the four files
+or `phase3.patch` (phase 2 to 3) or `phase4.patch` (phase 3 to 4), start from the
+checked-in base, at phase 3 or 4. Reverse-apply the later patches in a scratch copy
+to reach each earlier snapshot, then reconstruct the adjacent-phase snapshots and
+regenerate cell values in each. For `phase4.patch` from a phase-3 base, create the
+later snapshot by flipping the catalog switch in a scratch copy and running
+`scripts/gitops-cell-values.sh --write --root <copy>`.
+Copy only the four files
 into `a/` (earlier phase) and `b/` (later phase), preserving repository-relative paths,
-then run `git diff --no-index --no-prefix a b` from their parent to retain the `a/`
-and `b/` patch prefixes (exit 1 means differences). The exact `git apply --include`
+then run `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --no-index --no-prefix --no-color a b`
+from their parent to retain the `a/` and `b/` patch prefixes (exit 1 means differences).
+The exact `git apply --include`
 set is `--include=.gitops/cells/catalog.yaml`,
 `--include=internal/gitopsvalues/overlays/civo-sandbox-use1-serving.yaml.tmpl`,
 `--include=.gitops/cells/civo-sandbox-use1-serving/values.yaml`, and
 `--include=internal/gitopsvalues/generate_test.go`. Save each diff to its phase patch
-and replay both with `ruby scripts/testdata/test-monitoring-recovery.rb "$PWD"`.
+and replay all four phases with `ruby scripts/testdata/test-monitoring-recovery.rb "$PWD"`.
 
 ## Usage
 

@@ -1,0 +1,26 @@
+diff --git a/.gitops/cells/catalog.yaml b/.gitops/cells/catalog.yaml
+index 16561cc..4dc6367 100644
+--- a/.gitops/cells/catalog.yaml
++++ b/.gitops/cells/catalog.yaml
+@@ -72,7 +72,7 @@ cells:
+     switches:
+       domain_documentation_only: true
+       monitoring: true
+-      collector_alerts: false
++      collector_alerts: true
+       sealed_plane_alerts: true
+       postgres_backup: true
+       memory_alerts: false
+diff --git a/.gitops/cells/civo-sandbox-use1-serving/values.yaml b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
+index 8fe36d8..ddef55f 100644
+--- a/.gitops/cells/civo-sandbox-use1-serving/values.yaml
++++ b/.gitops/cells/civo-sandbox-use1-serving/values.yaml
+@@ -227,6 +227,8 @@ platform:
+     enabled: true
+     alerting:
+       enabled: true
++    collectorAlerts:
++      enabled: true
+     sealedPlaneAlerts:
+       enabled: true
+     memoryAlerts:

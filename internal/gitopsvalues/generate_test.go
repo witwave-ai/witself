@@ -108,22 +108,19 @@ func TestCatalogSealedPlaneAlertsSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The collector group stays off on purpose: WitselfIdentityCapacityAtLimit
-	// would fire permanently because every Personal account already holds its
-	// single root operator seat (used == cap == 1). Only the sealed-plane group
-	// is enabled on the serving cell.
+	// Only the serving cell enables the sealed-plane group.
+	// The collector group has its own catalog switch, checked in
+	// TestCollectorAlertsFollowCatalogSwitch.
 	serving := cfg.Cells["civo-sandbox-use1-serving"]
-	if serving.Switches.CollectorAlerts || !serving.Switches.SealedPlaneAlerts {
-		t.Fatalf("civo-sandbox-use1-serving switches: collector_alerts=%v sealed_plane_alerts=%v, want false/true",
-			serving.Switches.CollectorAlerts, serving.Switches.SealedPlaneAlerts)
+	if !serving.Switches.SealedPlaneAlerts {
+		t.Fatalf("civo-sandbox-use1-serving switches: sealed_plane_alerts=%v, want true",
+			serving.Switches.SealedPlaneAlerts)
 	}
 	for name, cell := range cfg.Cells {
 		if name == "civo-sandbox-use1-serving" {
-			// The serving cell enables monitoring and the sealed-plane group,
-			// with the collector group off until the
-			// identity-capacity rule semantics are fixed.
-			if !cell.Switches.Monitoring || cell.Switches.CollectorAlerts || !cell.Switches.SealedPlaneAlerts {
-				t.Error("replacement serving cell must enable monitoring and the sealed-plane group only")
+			// The serving cell enables monitoring and the sealed-plane group.
+			if !cell.Switches.Monitoring || !cell.Switches.SealedPlaneAlerts {
+				t.Error("replacement serving cell must enable monitoring and the sealed-plane group")
 			}
 			continue
 		}
@@ -141,21 +138,14 @@ func TestGeneratedValuesSealedPlaneAlertsOnlyOnServingCell(t *testing.T) {
 	for _, cell := range sortedCells(generated) {
 		body := string(generated[cell])
 		hasSealed := strings.Contains(body, sealedPlaneAlertsBlock)
-		hasCollector := strings.Contains(body, "    collectorAlerts:\n      enabled: true\n")
 		if cell == "civo-sandbox-use1-serving" {
 			if !hasSealed {
 				t.Errorf("%s missing sealedPlaneAlerts block", valuesRel(cell))
-			}
-			if hasCollector {
-				t.Errorf("%s rendered collectorAlerts, which must stay off until the identity-capacity rule semantics are fixed", valuesRel(cell))
 			}
 			continue
 		}
 		if hasSealed {
 			t.Errorf("%s unexpectedly rendered sealedPlaneAlerts", valuesRel(cell))
-		}
-		if hasCollector {
-			t.Errorf("%s unexpectedly rendered collectorAlerts", valuesRel(cell))
 		}
 	}
 }
@@ -424,4 +414,238 @@ func TestProductionServingOnboarding(t *testing.T) {
 			}
 		}
 	}
+}
+
+const collectorAlertsBlock = "    collectorAlerts:\n      enabled: true\n"
+
+func TestCollectorAlertsFollowCatalogSwitch(t *testing.T) {
+	for _, overlay := range []string{"civo-sandbox-use1-serving.yaml.tmpl", "civo-prod-use1-serving.yaml.tmpl"} {
+		t.Run(overlay, func(t *testing.T) {
+			tmpl := templates.Lookup(overlay)
+			if tmpl == nil {
+				t.Fatal("missing overlay template")
+			}
+			for _, tc := range []struct {
+				name       string
+				monitoring bool
+				collectors bool
+			}{
+				{name: "enabled", monitoring: true, collectors: true},
+				{name: "disabled", monitoring: true},
+				{name: "monitoring-disabled", collectors: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					data := templateData{
+						Monitoring:               tc.monitoring,
+						CollectorAlerts:          tc.collectors,
+						ChartVersion:             "0.0.1",
+						ImageTag:                 "0.0.1",
+						CivoPostgresChartVersion: "1.0.0",
+						CertManagerChartVersion:  "v1.0.0",
+					}
+					var buf bytes.Buffer
+					if err := tmpl.Execute(&buf, data); err != nil {
+						t.Fatalf("execute overlay: %v", err)
+					}
+					if tc.monitoring && tc.collectors {
+						if strings.Count(buf.String(), collectorAlertsBlock) != 1 {
+							t.Error("enabled switch must render exactly one collectorAlerts block")
+						}
+					} else if strings.Contains(buf.String(), "collectorAlerts") {
+						t.Error("disabled monitoring or collector switch rendered collectorAlerts")
+					}
+				})
+			}
+		})
+	}
+	root := repoRoot(t)
+	cfg, err := loadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := generateAll(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cell := range cfg.Cells {
+		want := 0
+		if cell.Switches.CollectorAlerts {
+			want = 1
+			if cell.Role != "serving" || !cell.Switches.Monitoring {
+				t.Errorf("%s: collector_alerts requires role serving and monitoring", name)
+			}
+		}
+		if got := bytes.Count(generated[name], []byte(collectorAlertsBlock)); got != want {
+			t.Errorf("%s: generated %d collectorAlerts blocks, want %d from catalog", name, got, want)
+		}
+	}
+}
+
+func TestCollectorFlipIsOneCatalogLine(t *testing.T) {
+	root := repoRoot(t)
+	const cellName = "civo-sandbox-use1-serving"
+	catalogBytes, err := os.ReadFile(filepath.Join(root, catalogRelPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog map[string]any
+	if err := yaml.Unmarshal(catalogBytes, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	var fields any = catalog
+	for _, key := range []string{"cells", cellName, "switches"} {
+		mapping, ok := fields.(map[string]any)
+		if !ok {
+			t.Fatalf("catalog %s must be a mapping", key)
+		}
+		fields = mapping[key]
+	}
+	switches, ok := fields.(map[string]any)
+	if !ok {
+		t.Fatal("serving switches must be a mapping")
+	}
+	committedSwitch, ok := switches["collector_alerts"].(bool)
+	if !ok {
+		t.Fatal("serving switches must include an explicit boolean collector_alerts key")
+	}
+	cfg, err := loadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charts, err := loadChartPins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := cfg.Cells[cellName]
+	cell.Switches.CollectorAlerts = !committedSwitch
+	cfg.Cells[cellName] = cell
+	flipped, err := generateCell(root, cellName, cfg, charts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valuesPath := valuesRel(cellName)
+	committed, err := os.ReadFile(filepath.Join(root, valuesPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, disabled := flipped, committed
+	oldLine, newLine := "      collector_alerts: false\n", "      collector_alerts: true\n"
+	if committedSwitch {
+		enabled, disabled = committed, flipped
+		oldLine, newLine = newLine, oldLine
+	}
+	block := []byte(collectorAlertsBlock)
+	if bytes.Count(enabled, block) != 1 || bytes.Contains(disabled, block) {
+		t.Fatal("collector flip must add or remove exactly one enabled block")
+	}
+	if !bytes.Equal(bytes.Replace(enabled, block, nil, 1), disabled) {
+		t.Fatal("collector flip changed generated values beyond its two-line block")
+	}
+	if bytes.Count(catalogBytes, []byte(oldLine)) != 1 {
+		t.Fatal("collector flip requires exactly one matching catalog switch line")
+	}
+	patch, err := os.ReadFile(filepath.Join(root, "scripts/testdata/monitoring-recovery/phase4.patch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patched := applyCollectorFlipPatch(t, patch, map[string][]byte{
+		catalogRelPath: catalogBytes,
+		valuesPath:     committed,
+	}, committedSwitch)
+	if !bytes.Equal(patched[valuesPath], flipped) {
+		t.Error("phase4.patch values do not equal the generator's collector flip")
+	}
+	wantCatalog := bytes.Replace(catalogBytes, []byte(oldLine), []byte(newLine), 1)
+	if !bytes.Equal(patched[catalogRelPath], wantCatalog) {
+		t.Error("phase4.patch catalog does not equal the single switch-line flip")
+	}
+}
+
+// Apply by unique hunk context so release pin and roll-state line offsets do not
+// matter. No git executable or repository metadata is needed by this test.
+func applyCollectorFlipPatch(t *testing.T, patch []byte, current map[string][]byte, reverse bool) map[string][]byte {
+	t.Helper()
+	result := make(map[string][]byte, len(current))
+	sections := []string{""}
+	for _, line := range strings.SplitAfter(string(patch), "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			sections = append(sections, strings.TrimPrefix(line, "diff --git "))
+		} else {
+			sections[len(sections)-1] += line
+		}
+	}
+	if sections[0] != "" || len(sections) != len(current)+1 {
+		t.Fatal("phase4.patch must have exactly the catalog and serving values sections")
+	}
+	for _, section := range sections[1:] {
+		lines := strings.SplitAfter(section, "\n")
+		var path string
+		for candidate := range current {
+			if lines[0] == "a/"+candidate+" b/"+candidate+"\n" {
+				path = candidate
+			}
+		}
+		if path == "" {
+			t.Fatal("phase4.patch contains an unexpected file section")
+		}
+		if _, exists := result[path]; exists {
+			t.Fatal("phase4.patch repeats a file section")
+		}
+		body := string(current[path])
+		var old, replacement strings.Builder
+		inHunk := false
+		hunks := 0
+		apply := func() {
+			if !inHunk {
+				return
+			}
+			before, after := old.String(), replacement.String()
+			if reverse {
+				before, after = after, before
+			}
+			if before == "" || strings.Count(body, before) != 1 {
+				t.Fatalf("phase4.patch %s hunk must match exactly once", path)
+			}
+			body = strings.Replace(body, before, after, 1)
+			old.Reset()
+			replacement.Reset()
+		}
+		for i, line := range lines[1:] {
+			if line == "" && i == len(lines)-2 {
+				continue // SplitAfter's final empty element is not a patch line.
+			}
+			if strings.HasPrefix(line, "@@ ") {
+				apply()
+				inHunk = true
+				hunks++
+				continue
+			}
+			if !inHunk {
+				if strings.HasPrefix(line, "index ") || line == "--- a/"+path+"\n" || line == "+++ b/"+path+"\n" {
+					continue
+				}
+				t.Fatal("phase4.patch contains unsupported section metadata")
+			}
+			if !strings.HasSuffix(line, "\n") {
+				t.Fatal("phase4.patch hunk line must end with a newline")
+			}
+			switch line[0] {
+			case ' ':
+				old.WriteString(line[1:])
+				replacement.WriteString(line[1:])
+			case '-':
+				old.WriteString(line[1:])
+			case '+':
+				replacement.WriteString(line[1:])
+			default:
+				t.Fatal("phase4.patch contains an unsupported hunk line")
+			}
+		}
+		if hunks == 0 {
+			t.Fatal("phase4.patch section has no hunks")
+		}
+		apply()
+		result[path] = []byte(body)
+	}
+	return result
 }
