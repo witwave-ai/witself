@@ -1,4 +1,5 @@
 import { ACCOUNT_BACKUP_SCAN_KEY, accountBackupConfig, accountBackupHealthSnapshot } from "./account-backup-runtime.mjs";
+import { signupObservationLines } from "./signup-observation.mjs";
 import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
 
 // Use a dedicated five-minute Workers cron and reuse DIRECTORY. An Actions
@@ -382,6 +383,7 @@ export async function uptimeProbeMetricsResponse(request, env) {
   // Failure-isolated and independently bounded: an entitlement checkpoint
   // outage must not change healthy probe exposition to HTTP 503.
   const delivery = entitlementDeliveryLines(env);
+  const signup = signupObservationLines(env);
   // A failed KV read is a scrape failure, not a newly computed unhealthy fleet.
   const backups = accountBackupLines(env).catch(() => null);
   try {
@@ -423,7 +425,7 @@ export async function uptimeProbeMetricsResponse(request, env) {
     }
     const backupLines = await backups;
     if (backupLines === null) throw new Error("backup snapshot unavailable");
-    lines.push(...await delivery, ...backupLines);
+    lines.push(...await delivery, ...backupLines, ...await signup);
     return new Response(`${lines.join("\n")}\n`, { headers });
   } catch {
     return new Response("probe results unavailable\n", { status: 503, headers });

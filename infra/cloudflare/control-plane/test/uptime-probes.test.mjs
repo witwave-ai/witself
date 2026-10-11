@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
 import { register } from "node:module";
 import test from "node:test";
+import { SIGNUP_OBSERVATION_KEY } from "../src/signup-observation.mjs";
 
 import {
   UPTIME_PROBE_RUN_KEY,
@@ -158,7 +159,7 @@ test("the template cron triggers keep probe and maintenance work exclusive", asy
       assert.deepEqual(directory.lists.map(({ prefix }) => prefix), ["cell:"]);
       assert.deepEqual(directory.writes.map(({ key }) => key), [UPTIME_PROBE_RUN_KEY]);
     } else {
-      assert.equal(pending.length, cron === MAINTENANCE_CRON ? 6 : 0);
+      assert.equal(pending.length, cron === MAINTENANCE_CRON ? 7 : 0);
       assert.deepEqual(calls, [], "maintenance and unknown crons must never probe");
       assert.equal(directory.reads.includes(UPTIME_PROBE_RUN_KEY), false);
       assert.deepEqual(directory.writes, []);
@@ -1213,13 +1214,14 @@ test("public metrics bypass account/auth paths, preserve stale timestamps and ke
   assert.equal(response.headers.get("Strict-Transport-Security"), "max-age=31536000; includeSubDomains");
   assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
   assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
-  assert.deepEqual(directory.reads.sort(), [UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY].sort());
+  assert.deepEqual(directory.reads.sort(), [UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY, SIGNUP_OBSERVATION_KEY].sort());
   assert.deepEqual(directory.lists, []);
   assert.deepEqual(directory.writes, []);
   const body = await response.text();
   assert.equal(body.includes(PRIVATE_MARKER), false);
   assert.ok(body.endsWith("\n"));
   assert.deepEqual(body.trim().split("\n").filter((line) => !line.startsWith("#")).sort(), [
+    "witself_signup_metrics_up 0",
     "witself_control_plane_account_backup_enabled 0",
     "witself_control_plane_account_backup_health_available 0",
     "witself_entitlement_delivery_enabled 0",
@@ -1440,7 +1442,7 @@ test("the complete legacy pair remains readable and migrates with one new-key wr
   assertPersistenceMetrics(body, { targetCount: 2, writeOK: true });
   assert.ok(body.includes('witself_probe_up{target="cell-a"} 0\n'));
   assert.ok(body.includes('witself_probe_up{target="control_plane"} 1\n'));
-  assert.deepEqual(directory.reads, [UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY]);
+  assert.deepEqual(directory.reads, [SIGNUP_OBSERVATION_KEY, UPTIME_PROBE_RUN_KEY, UPTIME_PROBES_KEY, UPTIME_PROBE_SCHEDULER_KEY]);
   assert.equal(directory.writes.length, 0);
 
   await runScheduledUptimeProbes({ DIRECTORY: directory }, async () => new Response(null, { status: 200 }));
@@ -1452,7 +1454,7 @@ test("the complete legacy pair remains readable and migrates with one new-key wr
   directory.reads = [];
   response = await worker.fetch(metricsRequest(), { DIRECTORY: directory }, {});
   body = await response.text();
-  assert.deepEqual(directory.reads, [UPTIME_PROBE_RUN_KEY]);
+  assert.deepEqual(directory.reads, [SIGNUP_OBSERVATION_KEY, UPTIME_PROBE_RUN_KEY]);
   assertSchedulerMetrics(body, { timestamp: NOW / 1000, targetCount: 1, directoryOK: true });
   assertPersistenceMetrics(body, { targetCount: 1, writeOK: true });
   assert.ok(body.includes('witself_probe_up{target="cell-a"} 1\n'));
@@ -1467,7 +1469,7 @@ test("new-document reads take precedence without consulting stale or invalid leg
   const response = await worker.fetch(metricsRequest(), { DIRECTORY: directory }, {});
   assert.equal(response.status, 200);
   const body = await response.text();
-  assert.deepEqual(directory.reads, [UPTIME_PROBE_RUN_KEY]);
+  assert.deepEqual(directory.reads, [SIGNUP_OBSERVATION_KEY, UPTIME_PROBE_RUN_KEY]);
   assertSchedulerMetrics(body, { timestamp: NOW / 1000, targetCount: 1, directoryOK: true });
   assertPersistenceMetrics(body, { targetCount: 2, writeOK: true });
   assert.ok(body.includes('witself_probe_up{target="cell-a"} 0\n'));
@@ -1533,7 +1535,7 @@ test("invalid or unparseable run documents expose stale zero gauges and never fa
       assert.equal(response.status, 200);
       assert.equal(response.headers.get("Cache-Control"), "no-store");
       assertMissingRunMetrics(await response.text());
-      assert.deepEqual(directory.reads, [UPTIME_PROBE_RUN_KEY]);
+      assert.deepEqual(directory.reads, [SIGNUP_OBSERVATION_KEY, UPTIME_PROBE_RUN_KEY]);
       assert.equal(directory.writes.length, 0);
     });
   }

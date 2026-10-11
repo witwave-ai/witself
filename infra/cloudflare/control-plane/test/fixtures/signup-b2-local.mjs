@@ -248,8 +248,14 @@ export async function makeSignupB2Fixture(options) {
     return storages.get(name);
   }
   env.ACCOUNT_SIGNUP = {
-    idFromName(name) { check(roles.has(name), "signup namespace identity"); return { name }; },
+    idFromName(name) {
+      if (name === "signup-observation") return { name };
+      check(roles.has(name), "signup namespace identity"); return { name };
+    },
     get(id) {
+      if (id?.name === "signup-observation") {
+        return { async fetch() { return Response.json({ ok: true }); } };
+      }
       check(roles.has(id?.name), "signup namespace handle");
       return { async fetch(request) {
         const url = urlOf(request);
