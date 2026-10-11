@@ -43,6 +43,7 @@ type templateData struct {
 	CollectorAlerts             bool
 	SealedPlaneAlerts           bool
 	MemoryAlerts                bool
+	ControlPlaneAlerts          bool
 	PostgresBackup              bool
 	RequestBudget               *RequestBudgetSwitch
 	Overlay                     string

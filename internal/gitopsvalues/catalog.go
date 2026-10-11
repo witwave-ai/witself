@@ -83,6 +83,7 @@ type Switches struct {
 	CollectorAlerts         bool                 `yaml:"collector_alerts,omitempty"`
 	SealedPlaneAlerts       bool                 `yaml:"sealed_plane_alerts,omitempty"`
 	MemoryAlerts            bool                 `yaml:"memory_alerts,omitempty"`
+	ControlPlaneAlerts      bool                 `yaml:"control_plane_alerts,omitempty"`
 	PostgresBackup          bool                 `yaml:"postgres_backup,omitempty"`
 	RequestBudget           *RequestBudgetSwitch `yaml:"request_budget,omitempty"`
 }
