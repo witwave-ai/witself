@@ -637,7 +637,7 @@ type mcpFactListOutput struct {
 }
 type mcpFactProposeInput struct {
 	mcpFactSetInput
-	Reason     string   `json:"reason"`
+	Reason     string   `json:"reason,omitempty" jsonschema:"optional brief note on why this may be durable; at most 1024 bytes"`
 	Confidence *float64 `json:"confidence,omitempty" jsonschema:"confidence from 0 to 1; omit for the service default"`
 }
 type mcpFactProposeFromTranscriptInput struct {
@@ -2029,6 +2029,7 @@ func registerMessageRequestMCPTools(server *mcp.Server, runtimeName string, back
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.message.request.select"),
+		InputSchema: mcpInputSchema[mcpMessageRequestSelectInput](mcpNonEmptyArray("selected_agent_ids")),
 		Description: "As the exact immutable coordinator, persist this client agent's ranking decision by selecting at most max_assignees exact agent ids from durable offers. Witself validates and reserves claims but performs no inference, capability filtering, or ranking. Selecting fewer than max_assignees is valid.",
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMessageRequestSelectInput) (*mcp.CallToolResult, mcpMessageRequestSelectOutput, error) {

@@ -489,6 +489,7 @@ func registerMemoryMCPTools(server *mcp.Server, runtimeName string, backend wits
 		})
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        mcpToolName(runtimeName, "witself.memory.vector.set"),
+			InputSchema: mcpInputSchema[mcpMemoryVectorPutInput](mcpNonEmptyArray("vector")),
 			Description: "Store one finite client-supplied vector for an exact memory version and immutable profile. The backend validates and stores it but performs no inference; vectors never appear in the response.",
 			Annotations: mcpWriteClosedWorldAnnotations(false, true),
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryVectorPutInput) (*mcp.CallToolResult, client.MemoryVectorReceipt, error) {
@@ -685,6 +686,7 @@ func registerMemoryMCPTools(server *mcp.Server, runtimeName string, backend wits
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.supersede"),
+		InputSchema: mcpInputSchema[mcpMemorySupersedeInput](mcpNonEmptyArray("replacements")),
 		Description: "Atomically and reversibly replace one exact active narrative-memory version with one or more client-authored memories and exact evidence. Use for a client-decided merge, split, or consolidation; the backend performs no synthesis or model inference. Never copy credentials, secret values, private keys, TOTP seeds, or generated codes into replacements; sensitive=true is not a sealed-secret substitute. Every replacement and the operation require distinct fresh idempotency keys. This preserves source history and is not permanent deletion.",
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemorySupersedeInput) (*mcp.CallToolResult, mcpMemorySupersedeOutput, error) {

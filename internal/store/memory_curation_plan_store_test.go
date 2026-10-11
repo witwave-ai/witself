@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,34 @@ func TestHashMemoryCurationPlanRequestUsesCanonicalDecodedDraft(t *testing.T) {
 	}
 	if changed == hashA {
 		t.Fatal("draft revision was not bound into the request hash")
+	}
+
+	rawC := []byte(strings.Replace(string(rawA), `"type":"conversation"`, `"type":""`, 1))
+	rawD := []byte(strings.Replace(string(rawA), `"type":"conversation",`, "", 1))
+	if string(rawC) == string(rawA) || string(rawD) == string(rawA) || string(rawC) == string(rawD) {
+		t.Fatal("blank and omitted evidence type fixtures must differ from the original and each other")
+	}
+	draftC, err := DecodeMemoryCurationPlanDraft(rawC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftD, err := DecodeMemoryCurationPlanDraft(rawD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(draftC, draftD) {
+		t.Fatal("blank and omitted evidence type decode to different drafts")
+	}
+	hashC, err := hashMemoryCurationPlanRequest("mrun_aaaaaaaaaaaaaaaa", 3, draftC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashD, err := hashMemoryCurationPlanRequest("mrun_aaaaaaaaaaaaaaaa", 3, draftD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hashC != hashD {
+		t.Fatal("blank and omitted evidence type produce different request hashes")
 	}
 }
 
