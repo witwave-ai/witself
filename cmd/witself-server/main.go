@@ -221,10 +221,10 @@ func serve() int {
 			if err != nil {
 				return server.SupportSLOMetrics{}, err
 			}
-			return server.SupportSLOMetrics{
-				UnansweredTickets:       m.UnansweredTickets,
-				OldestUnansweredSeconds: m.OldestUnansweredSeconds,
-			}, nil
+			// A conversion, not a field-by-field copy: the two structs must keep
+			// identical fields, so a field added to one side fails the build
+			// instead of silently reading zero in the metrics.
+			return server.SupportSLOMetrics(m), nil
 		}
 		cfg.ReadSealedPlanePostureMetrics = func(ctx context.Context) (server.SealedPlanePostureMetrics, error) {
 			m, err := st.ReadSealedPlanePostureMetrics(ctx)
