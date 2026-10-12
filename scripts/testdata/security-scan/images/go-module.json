@@ -1,0 +1,28 @@
+{
+  "descriptor": {
+    "name": "grype",
+    "version": "0.120.1"
+  },
+  "source": {
+    "type": "image"
+  },
+  "matches": [
+    {
+      "artifact": {
+        "name": "fixture-go-module",
+        "version": "v1.0.0",
+        "type": "go-module"
+      },
+      "vulnerability": {
+        "id": "CVE-0000-0010",
+        "severity": "Critical",
+        "fix": {
+          "state": "fixed",
+          "versions": [
+            "v1.0.1"
+          ]
+        }
+      }
+    }
+  ]
+}

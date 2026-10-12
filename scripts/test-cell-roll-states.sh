@@ -189,6 +189,7 @@ run_state() (
     for suite in test-monitoring-memory-alerts test-monitoring-collector-alerts; do
       run_check "$suite" ruby "scripts/testdata/$suite.rb" "$fixture"
     done
+    run_check security-scan-targets ruby scripts/testdata/security-scan/targets-coverage.rb "$fixture" 0.0.333
     if [[ "${WITSELF_TEST_SKIP_POSTGRESQL_CHART:-}" == 1 ]]; then
       printf 'cell roll states: NOT RUN test-civo-postgres-chart (WITSELF_TEST_SKIP_POSTGRESQL_CHART=1) — this run is not a full gate [%s]\n' "$state" >&2
     else

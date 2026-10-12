@@ -343,10 +343,12 @@ Use concurrency cancellation so superseded pushes do not leave stale CI running.
 
 ## Vulnerability Scans
 
-`make security-scan` runs the on-demand Go and npm vulnerability scans. It needs
+`make security-scan` runs the on-demand Go, npm, and image vulnerability scans. It needs
 network access and must not run beside a local gate. It is not part of `make
 check` or `make check-infra`. Those gates and CI's required `helm` check run only
-the offline contract tests in `scripts/test-security-scan.sh`. The existing
+the offline contract tests in `scripts/test-security-scan.sh` and
+`scripts/test-security-scan-images.sh`. The roll-state matrix also checks image
+target coverage against the cell values produced by each roll state. The existing
 required root-module govulncheck step in CI, its release counterpart, and
 `make govulncheck` are unchanged.
 
@@ -369,10 +371,62 @@ runs with Cloudflare credentials. Lower-severity entries are informational.
 Other npm projects, including the dashboard acceptance harness, are not scanned.
 A Worker directory without a lockfile makes the scan incomplete.
 
+The image scanner uses Grype to scan the latest released `witself-server` and
+`witself-postgres-backup` images plus the live pins of `civo-sandbox-use1-serving`
+and `civo-sandbox-use1-backup`. It reads the checked-in cell values; it does not
+query live infrastructure. Pinned images use their digest when present, otherwise
+their tag. Backup images may be an image object or a `repository:tag` string.
+An enabled backup without an image makes the scan incomplete with
+`unpinned backup image`; an invalid backup image keeps the cell's other targets in the scan.
+Duplicate pinned refs are scanned once, and a release image is omitted
+when its repository and tag already appear in a live pin. Grype reads registries
+directly on `linux/amd64`, without Docker. Critical or High matches with a fix
+available are findings; other matches are informational. In the server image,
+`go-module` matches are also informational because govulncheck already judges
+those source modules with reachability. This leaves the gap between a source fix
+and a release; scanning the released binary with govulncheck is FU132-8. Go
+modules in the backup image are still subject to the image threshold.
+
+The image scan does not cover PostgreSQL mirrors (FU132-3), the control-plane
+container built at deploy time (FU132-4), the dark `civo-prod-use1-serving` cell
+until it is provisioned (FU132-5), or the released CLI/MCP `witself` image
+(FU132-11).
+
+Use the `targets` scope to print the planned images without running a scanner:
+
+```sh
+bash scripts/security-scan.sh targets --release-version 0.0.333
+```
+
+Its tab-separated output contains source, repository, tag, and a digest shortened
+to 12 hex characters (or `-`). It lists live pins in the two-cell order above,
+server before backup, followed by release server and backup. Omit
+`--release-version` to resolve the latest release with `gh release view`;
+`--repo OWNER/NAME` selects the release repository and defaults to
+`witwave-ai/witself`. A supplied version makes target discovery offline.
+
+Grype is checksum-pinned in `scripts/security-scan-grype.env`. To bump it, verify
+the new release's signed checksums with this command (replace `<v>` with the
+release version):
+
+```sh
+cosign verify-blob --bundle grype_<v>_checksums.txt.sigstore.json --certificate-identity https://github.com/anchore/grype/.github/workflows/release.yaml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com grype_<v>_checksums.txt
+```
+
+The certificate identity is a branch ref (`refs/heads/main`). After verification,
+write the version and the checksums for both `linux_amd64` and `darwin_arm64` tarballs to that file,
+without printing the checksums. Its exact keys are `GRYPE_VERSION`,
+`GRYPE_LINUX_AMD64_SHA256`, and `GRYPE_DARWIN_ARM64_SHA256`; the file is parsed as
+data, never sourced. Each download is verified before extracting only the
+`grype` member. There is no environment override for checksums. Other platforms
+require `--grype PATH`, an executable whose version is marked caller-supplied in
+the report. `GRYPE_DB_CACHE_DIR` can select a persistent database cache; otherwise
+the database cache is removed with the scan's private temporary directory.
+
 For a local report that keeps finding detail off the console, use:
 
 ```sh
-bash scripts/security-scan.sh go,npm --report ~/.witself/handoff/security-scan-local.md
+bash scripts/security-scan.sh all --report ~/.witself/handoff/security-scan-local.md
 ```
 
 The report's parent directory is created as needed. Without `--report`, the
@@ -383,15 +437,17 @@ section, and at most 60,000 bytes. Their first line has this machine-readable
 shape (counts include rows beyond the display cap):
 
 ```text
-<!-- witself-security-scan v1 status=<clean|findings|incomplete> go=<n> npm_prod=<n> npm_toolchain=<n> images=0 incomplete=<n> -->
+<!-- witself-security-scan v1 status=<clean|findings|incomplete> go=<n> npm_prod=<n> npm_toolchain=<n> images=<n> incomplete=<n> -->
 ```
 
 Exit `0` means every planned target validated and no finding met a threshold;
 `1` means findings; `2` means invalid usage; `3` means an incomplete scan, such
 as a missing tool, missing lockfile, failed scanner, invalid output, or no
-targets. Incomplete takes precedence over findings, and the report retains
-findings from targets that completed. Image scanning and scheduled reporting
-are not included in this first part.
+targets. Image failures also include a checksum mismatch, failed release lookup,
+or missing cell values. Incomplete takes precedence over findings, and the report
+retains findings from targets that completed. Successful `targets` output has no
+summary on standard error; failure exits `3` with one reason-class line.
+Scheduled reporting is not included yet.
 
 ## Hosted Runner Images And Required Check Names
 

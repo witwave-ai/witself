@@ -1,0 +1,80 @@
+{
+  "descriptor": {
+    "name": "grype",
+    "version": "0.120.1"
+  },
+  "source": {
+    "type": "image"
+  },
+  "matches": [
+    {
+      "artifact": {
+        "name": "fixture-package-1",
+        "version": "1.0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-0000-0001",
+        "severity": "Critical",
+        "fix": {
+          "state": "fixed",
+          "versions": [
+            "1.1",
+            "1.2"
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "fixture-package-2",
+        "version": "1.0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-0000-0002",
+        "severity": "High",
+        "fix": {
+          "state": "fixed",
+          "versions": [
+            "1.1",
+            "1.2"
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "fixture-package-3",
+        "version": "1.0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-0000-0003",
+        "severity": "High",
+        "fix": {
+          "state": "not-fixed",
+          "versions": []
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "fixture-package-4",
+        "version": "1.0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-0000-0004",
+        "severity": "Medium",
+        "fix": {
+          "state": "fixed",
+          "versions": [
+            "1.1",
+            "1.2"
+          ]
+        }
+      }
+    }
+  ]
+}

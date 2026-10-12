@@ -1,0 +1,10 @@
+#!/bin/bash
+set -eu
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/gh.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+printf 'GHSA-stub-private-diagnostic\n' >&2
+if [ "$1 $2" != 'release view' ]; then exit 97; fi
+if [ -f "$SECURITY_SCAN_CASE/gh.tag" ]; then cat "$SECURITY_SCAN_CASE/gh.tag"; else printf 'v0.0.333\n'; fi
+code=0
+[ ! -f "$SECURITY_SCAN_CASE/gh.exit" ] || code=$(cat "$SECURITY_SCAN_CASE/gh.exit")
+exit "$code"
