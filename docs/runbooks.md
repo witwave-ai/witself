@@ -4528,6 +4528,64 @@ freshness summary, even when its catalog receipt exists. A drill that never
 reports a finish is not recorded as failed in the summary; the staleness alert
 covers the lack of validation only when an earlier validated finish is recorded.
 
+Weekly scheduled restore drills ship off by default. Activate them only with
+the founder's go, after the freshness signal has recorded a validated drill and
+the backup-cell load is accepted: two drills at or under 160 MiB, or an explicit
+founder exception. Configure the operator secrets in this order:
+`CP_RESTORE_DRILLS_TARGET_CELL=civo-sandbox-use1-backup` first; then, if the
+defaults are unsuitable, `CP_RESTORE_DRILLS_WEEKDAY` (0–6, default 3) and
+`CP_RESTORE_DRILLS_START_HOUR_UTC` (1–18, default 16); finally
+`CP_RESTORE_DRILLS_ENABLED=true`. Keep all four settings out of the committed
+Worker configuration. The existing `CP_PUBLIC_ORIGIN` must be an exact HTTPS
+origin without a trailing slash. The registered target must remain
+`accepting=false`, `backup_validation_target=true` and free of live projections.
+
+The default window is Wednesday 16:00–20:00Z. Hold every train, control-plane
+deploy and move from the window start until 92 minutes after the window ends:
+16:00–21:32Z for the default. The scheduler waits for the current periodic
+backup pass to complete, for the freshness summary to have no running drill,
+and for an eligible account with no lifecycle operation or active export. It
+examines at most three accounts per tick in a stable weekly rotation and always requires
+an alarm-driven drill. A complete scan clears the backup guard only when its
+`pass_started_slot ?? slot` matches the slot calculated with the same
+`backupJobIdentity` helper, interval and `scheduledTime` as the backup tick.
+A stale or unavailable scan, or a failed or rejected backup tick, holds the
+schedule at `pending`/`backup_scan_incomplete`. If a candidate already has a
+running drill, the tick holds at `pending`/`drill_running`, preserves the
+rotation and starts no other account, even if freshness has not yet caught
+up. Immediately before begin, the scheduler checks the current clock; at or
+after the window end it writes `pending`/`window_closed` without starting.
+Before starting any manual drill, including the release chain's drill, wait until
+`witself_control_plane_account_backup_restore_drill_running` is 0. An absent or
+unavailable gauge is not zero; establish that no drill is running before
+proceeding. KV has no compare-and-set, so these guards are not a fleet-wide
+lock against overlapping ticks or manual starts.
+
+Read the schedule without printing its account or backup ids:
+
+```sh
+curl --fail-with-body \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  "${CONTROL_PLANE}/v1/backups/status" |
+jq '.restore_drill_schedule | if . == null then null else {state, reason, window_start, drill_id} end'
+```
+
+The field is absent while disabled or when the status request supplies
+`account_id`; an enabled but unavailable fleet schedule is null. `started`
+acknowledges only the start: follow the matching drill id in
+the account record and catalog `validations` to prove validation, and check
+that the freshness gauges advance. A `starting` record without a saved outcome
+becomes `start_unconfirmed` on the next tick and is not retried that window.
+Every post-begin outcome write, including its retry, first re-reads the
+schedule. If the same window already has a final state, that record is kept
+and the tick logs `restore-drill-schedule: state=<stored state> reason=kept`.
+A busy outcome preserves the rotation seen by that re-read rather than
+moving it backwards.
+See [scheduled restore drills](backup-and-recovery.md#scheduled-restore-drills-off-by-default)
+for every state and reason. To turn scheduling off, set
+`CP_RESTORE_DRILLS_ENABLED` to `false` or delete that secret. A running drill
+still finishes through its own alarm.
+
 For an over-capacity fleet, raise `CP_ACCOUNT_BACKUPS_PAGE_SIZE` only with the
 founder's go. The maximum is 20: at one page per five-minute tick, that is 5,760
 directory entries per day, with pending, archived and unrouted entries also

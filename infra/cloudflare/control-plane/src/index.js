@@ -80,6 +80,11 @@
 //                                      "deadline_at"}],"updated_at"}
 //                                      value-free drill freshness; written by
 //                                      account backup objects at drill start and finish
+//   config:restore_drill_schedule -> {"schema_version","window_start","state",
+//                                     "reason","rotation_after","examined_after",
+//                                     "account_id","backup_id","drill_id",
+//                                     "started_at","error","history","updated_at"}
+//                                     opt-in weekly rotation; fleet-authenticated only
 //   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:
@@ -159,6 +164,12 @@ import {
   runManualAccountBackup,
   runScheduledAccountBackups,
 } from "./account-backup-runtime.mjs";
+import {
+  chainRestoreDrill,
+  readRestoreDrillSchedule,
+  restoreDrillScheduleConfig,
+  runScheduledRestoreDrill,
+} from "./restore-drill-schedule.mjs";
 import {
   handleRealmEmailAliasAdminRequest,
   handleRealmEmailAliasCustomerRequest,
@@ -4720,6 +4731,15 @@ async function handleAccountBackups(request, env, url, ctx) {
       if (accountID !== undefined && !ACCOUNT_ID.test(accountID)) {
         return err("invalid account_id", 400);
       }
+      if (accountID === undefined && restoreDrillScheduleConfig(env).enabled) {
+        // The optional schedule read cannot delay the existing status read by
+        // more than five seconds or change its failure behavior.
+        const [status, restoreDrillSchedule] = await Promise.all([
+          accountBackupStatus(env, accountID),
+          readRestoreDrillSchedule(env),
+        ]);
+        return json({ ...status, restore_drill_schedule: restoreDrillSchedule });
+      }
       return json(await accountBackupStatus(env, accountID));
     }
 
@@ -5340,7 +5360,10 @@ function scheduleMaintenance(event, env, ctx) {
   ctx.waitUntil(runScheduledSignupObservation(env));
   ctx.waitUntil(reapExpiredPendings(env));
   ctx.waitUntil(runScheduledPlacementRunner(env));
-  ctx.waitUntil(runScheduledAccountBackups(env, event?.scheduledTime));
+  ctx.waitUntil(chainRestoreDrill(
+    runScheduledAccountBackups(env, event?.scheduledTime),
+    (backupTickResult) => runScheduledRestoreDrill(env, event?.scheduledTime, { backupTickResult }),
+  ));
   ctx.waitUntil(runScheduledCanonicalRealmRouteInventory(env));
   ctx.waitUntil(runScheduledAgentEmailDomainVerification(env));
   ctx.waitUntil(runScheduledPlanLifecycle(

@@ -12,6 +12,7 @@ and the persisted `scan` (or null). Additive fields:
 | Fleet | `oldest_committed_age_seconds` | Nonnegative integer maximum age of each live account's newest commit; null when no account has a commit or live health is unavailable. |
 | Fleet | `never_committed_accounts` | All live accounts without a commit, including overdue ones also counted as stale. Null when live health is unavailable. |
 | Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
+| Fleet | `restore_drill_schedule` | Present only when `CP_RESTORE_DRILLS_ENABLED` is true. The stored weekly drill schedule record, or null when absent, unparsable, or unavailable. Includes its window, state, reason, rotation and selected account/backup/drill ids, timestamps, and up to eight prior windows. This operational record requires fleet authentication; it is not a public freshness metric. |
 | Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
 | Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null), plus `driver: "alarm"` for an alarm-driven drill (absent for a request-driven one). For `/restore-drill:finish`, an empty sanitized failure reason is recorded as `backup failed`. Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 90 minutes after start for an alarm drill and 30 minutes for a request-driven one; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
 | Scan | `slot` | Scheduled interval of the most recent tick that wrote the record. |
@@ -57,6 +58,14 @@ aggregate fields null. This preserves operational status during an account
 outage; null must not be interpreted as zero. The persisted `scan.health` can
 differ from these live fields because it describes completed or overrun pass health.
 No account values are included in the new aggregate health fields.
+
+The optional `restore_drill_schedule` read has its own five-second bound and
+runs in parallel with the existing status read. A failed or hung schedule read
+returns null for that field without failing the route. With scheduled drills
+disabled, this key is not read and the status response is unchanged. Per-account
+status does not include the fleet schedule field. A schedule state of `started`
+confirms the start only; follow that drill's `account.restore_drill` and catalog
+`validations` for its result.
 
 For an account with no committed backup, the earliest known job is the minimum
 of `backups.current_job.scheduled_at` and all `backups.failures[].scheduled_at`.
