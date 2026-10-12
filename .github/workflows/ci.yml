@@ -659,6 +659,9 @@ jobs:
       - name: roll train offline contract checks
         timeout-minutes: 10
         run: bash scripts/test-roll-train.sh
+      - name: release operations offline contract checks
+        timeout-minutes: 10
+        run: bash scripts/test-release-ops.sh
 
       - name: memory load quality workflow contract checks
         run: bash scripts/test-memory-load-quality-workflow.sh
