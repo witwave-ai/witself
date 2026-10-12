@@ -338,6 +338,7 @@ CI should use minimal permissions by default:
 - Package publishing: `contents: read`, `packages: write`.
 - Release publishing: only the permissions needed to create releases, update the
   Homebrew tap, publish packages, sign artifacts, and publish provenance.
+- Scheduled security scan: `contents: read`; its report job adds `issues: write`.
 
 Use concurrency cancellation so superseded pushes do not leave stale CI running.
 
@@ -347,7 +348,9 @@ Use concurrency cancellation so superseded pushes do not leave stale CI running.
 network access and must not run beside a local gate. It is not part of `make
 check` or `make check-infra`. Those gates and CI's required `helm` check run only
 the offline contract tests in `scripts/test-security-scan.sh` and
-`scripts/test-security-scan-images.sh`. The roll-state matrix also checks image
+`scripts/test-security-scan-images.sh`, plus the issue and workflow contracts in
+`scripts/test-security-scan-issue.sh` and `scripts/test-security-scan-workflow.sh`.
+The roll-state matrix also checks image
 target coverage against the cell values produced by each roll state. The existing
 required root-module govulncheck step in CI, its release counterpart, and
 `make govulncheck` are unchanged.
@@ -447,7 +450,69 @@ targets. Image failures also include a checksum mismatch, failed release lookup,
 or missing cell values. Incomplete takes precedence over findings, and the report
 retains findings from targets that completed. Successful `targets` output has no
 summary on standard error; failure exits `3` with one reason-class line.
-Scheduled reporting is not included yet.
+
+### Weekly scheduled run
+
+`.github/workflows/security-scan.yml` runs every Monday at 13:17 UTC: 07:17 MDT
+or 06:17 MST (starting November 1, 2026). It also supports an on-demand run:
+
+```sh
+gh workflow run security-scan.yml --ref main
+```
+
+The `scan` job uses the repository's Go toolchain and Node 22 on `ubuntu-24.04`,
+with a 45-minute timeout and only `contents: read`. Only the release lookup step
+receives the token in its environment as `GH_TOKEN`. Checkout (with
+`persist-credentials: false`), setup-go, and setup-node receive the job's
+read-only token through their default `token` input. No scanner step receives
+a token in its environment or as an input.
+The separate `report` job runs no scanner, has a 10-minute timeout, and adds
+`issues: write`. It runs only for `main`, so dispatching on another branch runs
+the scan without changing issues. A failed scan keeps the workflow red even
+when reporting succeeds. This workflow has no pull-request or push trigger and
+is not a required check. Existing PR-time govulncheck behavior is unchanged.
+
+Workflow logs, summaries, artifacts, and issues are public. The workflow's
+`SECURITY_SCAN_PUBLIC_DETAIL` switch defaults to `counts` pending the founder's
+merge decision. The modes are:
+
+- `counts`: publish the status header, report and section headings, time, commit,
+  and finding, informational, scanned, and incomplete counts. Advisory IDs,
+  package names, image names, and cell names stay in the local report.
+- `no-cells`: publish the report's details with every `cell:<name>` token replaced
+  by `pinned`.
+- `full`: publish the complete bounded report, including live cell names.
+
+Only the rendered public report is uploaded as `security-scan-report`, retained
+for 30 days, appended to the job summary, and used as the issue body. Keep the
+private-first reporting policy in `docs/security-policy.md` in mind before
+changing the detail mode. Findings or an incomplete scan open or update one
+`security` issue titled `Scheduled security scan findings`. An existing issue
+qualifies only when its title and label match, its body starts with the scan
+header, and its author is `app/github-actions` or `github-actions[bot]`. If
+several qualify, only the lowest-numbered issue is updated; its comment names
+the other matches. Human-authored issues are never changed. The workflow creates
+the `security` label if it is missing and leaves an existing label unchanged.
+A clean successful scan comments on and closes the selected tracking issue;
+with no tracking issue it writes nothing.
+
+A missing or invalid report, including a missing artifact after a timeout, is
+incomplete and cannot close the issue. A clean header from an unsuccessful scan
+job is also treated as incomplete. The scan failure uses GitHub's normal workflow
+notifications; it adds no paging alert. The dispatcher obtains founder approval
+for public detail, issue-write permission, and the scanner thresholds before
+merging, using real reports rendered in all three modes.
+
+Triage follows the affected component:
+
+- Go: bump the toolchain or vulnerable module and ship a security release, as
+  v0.0.331 did.
+- npm production dependencies: merge a Dependabot PR or make a manual dependency
+  bump, then deploy the affected Worker.
+- npm toolchain: bump Wrangler through `infra/cloudflare/wrangler-version.json`
+  using the Wrangler update procedure above.
+- Images: ship a release and run the release train, or use a backup image re-pin
+  slice when the live backup pin needs to advance.
 
 ## Hosted Runner Images And Required Check Names
 
@@ -466,7 +531,8 @@ file, so a workflow that requests the new label cannot merge before the allowed
 list changes. Then change the runner labels, the guard's allowed list and its
 canaries, and the label assertions in
 `scripts/test-memory-load-quality-workflow.sh`,
-`scripts/test-provider-contract-workflow.sh`, and
+`scripts/test-provider-contract-workflow.sh`,
+`scripts/test-security-scan-workflow.sh`, and
 `scripts/test-mirror-postgresql-image.sh` together. The canaries name the
 current label, and the `unreviewed new image` canary must name an image that is
 still not allowed. macOS and Windows labels are unchanged by this rule.

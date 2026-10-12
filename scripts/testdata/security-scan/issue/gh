@@ -1,0 +1,36 @@
+#!/bin/bash
+# Synthetic GitHub responses. This stub cannot contact GitHub.
+set -euo pipefail
+printf '%s|%s|%s\n' "$0" "$PWD" "$*" >> "$SECURITY_SCAN_ISSUE_CASE/argv.log"
+printf '%s|%s|%s\n' "${GOPROXY:?}" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_ISSUE_CASE/env.log"
+jq -cn --args '$ARGS.positional' -- "$@" >> "$SECURITY_SCAN_ISSUE_CASE/argv.jsonl"
+command_name="$1 $2"
+shift 2
+repo=
+body_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) repo=$2; shift 2 ;;
+    --body-file) body_file=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$repo" = witwave-ai/witself ] || exit 97
+if [ -n "$body_file" ]; then
+  [ -f "$body_file" ] || exit 96
+  case "$body_file" in "$TMPDIR"/*) ;; *) exit 95 ;; esac
+  [ "$(find "${body_file%/*}" -maxdepth 0 -perm 700 -print)" = "${body_file%/*}" ] || exit 94
+  cat "$body_file" > "$SECURITY_SCAN_ISSUE_CASE/body.md"
+fi
+if [ -f "$SECURITY_SCAN_ISSUE_CASE/fail-command" ] && [ "$command_name" = "$(cat "$SECURITY_SCAN_ISSUE_CASE/fail-command")" ]; then
+  printf 'synthetic GitHub failure\n' >&2
+  exit 1
+fi
+case "$command_name" in
+  'issue list') cat "$SECURITY_SCAN_ISSUE_CASE/issues.json" ;;
+  'label list') cat "$SECURITY_SCAN_ISSUE_CASE/labels.json" ;;
+  'label create') printf 'security\n' ;;
+  'issue create') printf 'https://github.com/witwave-ai/witself/issues/17\n' ;;
+  'issue edit'|'issue comment'|'issue close') printf 'synthetic GitHub write succeeded\n' ;;
+  *) exit 93 ;;
+esac
