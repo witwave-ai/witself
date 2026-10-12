@@ -285,6 +285,31 @@ Case G of `scripts/testdata/apps-server-resources.rb` and
 Production resource changes belong in their own change, never alongside a pin
 change.
 
+## witself-server account request budget
+
+The per-account request budget is off by default and is not forwarded. A cell
+turns it on only by adding `switches.request_budget` to its catalog entry,
+directly after the cell's `switches:` line. All five integer keys are required:
+`read_per_minute`, `read_burst`, `write_per_minute` and `write_burst` must each
+be from 1 to 1,000,000; `max_tracked_accounts` must be from 100 to 1,000,000.
+An empty or null block is refused. Remove the block to turn the budget off.
+
+The generator renders `apps.witselfServer.requestBudget` with `enabled: true`
+through the three Civo overlays. The apps chart forwards it only when enabled
+and when both the server chart and image are at least `v0.0.334`; an enabled
+budget with either pin below that version fails the render. Values are
+cell-wide and per replica, so N replicas admit up to N× the configured
+allowance. Per-plan values remain FU123-2.
+
+The enabling PR also adds the cell to `requestBudgetCells` in
+`internal/gitopsvalues/request_budget_test.go` and `REQUEST_BUDGET_CELLS` in
+`scripts/testdata/apps-server-request-budget.rb`. For the sandbox serving cell,
+run `ruby scripts/testdata/test-monitoring-recovery.rb "$PWD"` as well.
+
+**An enabled cell cannot be rolled below `v0.0.334`.** The apps render fails,
+Argo stops syncing that cell's `witself-apps`, and the rollback never reaches
+the server. Remove the catalog block first, in its own PR, then roll back.
+
 ## Serving-cell monitoring extensions
 
 The platform chart's monitoring extensions are default off. The replacement

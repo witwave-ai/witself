@@ -58,21 +58,33 @@ type CellConfig struct {
 	Switches      Switches `yaml:"switches"`
 }
 
+// RequestBudgetSwitch presence turns the server's per-account request budget on
+// for this cell. Remove the block to turn it off. Values are cell-wide and per
+// replica (slice 123), not per plan.
+type RequestBudgetSwitch struct {
+	ReadPerMinute      int `yaml:"read_per_minute"`
+	ReadBurst          int `yaml:"read_burst"`
+	WritePerMinute     int `yaml:"write_per_minute"`
+	WriteBurst         int `yaml:"write_burst"`
+	MaxTrackedAccounts int `yaml:"max_tracked_accounts"`
+}
+
 // Switches are per-cell enablement flags that select generated blocks.
 // Large unique YAML still lives in overlay templates.
 type Switches struct {
-	AWSZoneType             string `yaml:"aws_zone_type,omitempty"`
-	DomainDocumentationOnly bool   `yaml:"domain_documentation_only,omitempty"`
-	GCPManagedHA            bool   `yaml:"gcp_managed_ha,omitempty"`
-	GCPWorkerJobs           bool   `yaml:"gcp_worker_jobs,omitempty"`
-	GCPFactDeletion         bool   `yaml:"gcp_fact_deletion,omitempty"`
-	GCPAvatarCompaction     bool   `yaml:"gcp_avatar_compaction,omitempty"`
-	GCPAgentEmailDark       bool   `yaml:"gcp_agent_email_dark,omitempty"`
-	Monitoring              bool   `yaml:"monitoring,omitempty"`
-	CollectorAlerts         bool   `yaml:"collector_alerts,omitempty"`
-	SealedPlaneAlerts       bool   `yaml:"sealed_plane_alerts,omitempty"`
-	MemoryAlerts            bool   `yaml:"memory_alerts,omitempty"`
-	PostgresBackup          bool   `yaml:"postgres_backup,omitempty"`
+	AWSZoneType             string               `yaml:"aws_zone_type,omitempty"`
+	DomainDocumentationOnly bool                 `yaml:"domain_documentation_only,omitempty"`
+	GCPManagedHA            bool                 `yaml:"gcp_managed_ha,omitempty"`
+	GCPWorkerJobs           bool                 `yaml:"gcp_worker_jobs,omitempty"`
+	GCPFactDeletion         bool                 `yaml:"gcp_fact_deletion,omitempty"`
+	GCPAvatarCompaction     bool                 `yaml:"gcp_avatar_compaction,omitempty"`
+	GCPAgentEmailDark       bool                 `yaml:"gcp_agent_email_dark,omitempty"`
+	Monitoring              bool                 `yaml:"monitoring,omitempty"`
+	CollectorAlerts         bool                 `yaml:"collector_alerts,omitempty"`
+	SealedPlaneAlerts       bool                 `yaml:"sealed_plane_alerts,omitempty"`
+	MemoryAlerts            bool                 `yaml:"memory_alerts,omitempty"`
+	PostgresBackup          bool                 `yaml:"postgres_backup,omitempty"`
+	RequestBudget           *RequestBudgetSwitch `yaml:"request_budget,omitempty"`
 }
 
 func loadCatalog(root string) (*Catalog, error) {
@@ -85,6 +97,14 @@ func loadCatalog(root string) (*Catalog, error) {
 	dec.KnownFields(true)
 	var cfg Catalog
 	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var probe struct {
+		Cells map[string]struct {
+			Switches map[string]any `yaml:"switches"`
+		} `yaml:"cells"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cfg.Schema != catalogSchema {
@@ -108,6 +128,41 @@ func loadCatalog(root string) (*Catalog, error) {
 		cell := cfg.Cells[name]
 		if cell.Unprovisioned && cell.Switches.DomainDocumentationOnly {
 			return nil, fmt.Errorf("%s: cell %q sets unprovisioned with domain_documentation_only; an unprovisioned cell needs an authoritative API host", path, name)
+		}
+		budget := cell.Switches.RequestBudget
+		if _, present := probe.Cells[name].Switches["request_budget"]; present && budget == nil {
+			return nil, fmt.Errorf("%s: cell %q switches.request_budget must be a mapping of five integers; remove the key to turn it off", path, name)
+		}
+		if budget == nil {
+			continue
+		}
+		if cell.Overlay == "" {
+			return nil, fmt.Errorf("%s: cell %q sets switches.request_budget without an overlay; only overlay templates render it", path, name)
+		}
+		// yaml.v3 converts float scalars to int by truncation, even with
+		// KnownFields enabled. The untyped probe preserves their scalar type.
+		budgetProbe, _ := probe.Cells[name].Switches["request_budget"].(map[string]any)
+		for _, rate := range []struct {
+			key   string
+			value int
+		}{
+			{"read_per_minute", budget.ReadPerMinute},
+			{"read_burst", budget.ReadBurst},
+			{"write_per_minute", budget.WritePerMinute},
+			{"write_burst", budget.WriteBurst},
+		} {
+			if _, nonInteger := budgetProbe[rate.key].(float64); nonInteger {
+				return nil, fmt.Errorf("parse %s: cannot unmarshal !!float into int for cell %q switches.request_budget.%s", path, name, rate.key)
+			}
+			if rate.value < 1 || rate.value > 1000000 {
+				return nil, fmt.Errorf("%s: cell %q switches.request_budget.%s must be an integer from 1 to 1000000", path, name, rate.key)
+			}
+		}
+		if _, nonInteger := budgetProbe["max_tracked_accounts"].(float64); nonInteger {
+			return nil, fmt.Errorf("parse %s: cannot unmarshal !!float into int for cell %q switches.request_budget.max_tracked_accounts", path, name)
+		}
+		if budget.MaxTrackedAccounts < 100 || budget.MaxTrackedAccounts > 1000000 {
+			return nil, fmt.Errorf("%s: cell %q switches.request_budget.max_tracked_accounts must be an integer from 100 to 1000000", path, name)
 		}
 	}
 	return &cfg, nil

@@ -6,6 +6,7 @@ bash "$repo_root/scripts/test-witself-server-image.sh"
 bash "$repo_root/scripts/test-postgres-backup.sh"
 ruby "$repo_root/scripts/testdata/postgres-mirror-chart.rb" "$repo_root"
 ruby "$repo_root/scripts/testdata/apps-server-resources.rb" "$repo_root"
+ruby "$repo_root/scripts/testdata/apps-server-request-budget.rb" "$repo_root"
 bash "$repo_root/scripts/test-mirror-postgresql-image.sh"
 bash "$repo_root/scripts/test-egress-networkpolicy.sh"
 bash "$repo_root/scripts/test-account-request-budget-chart.sh"
@@ -78,6 +79,7 @@ helm template witself-server "$server_chart" --namespace witself \
   >"$billing_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set apps.witselfServer.chartVersion=0.0.255 \
   --set apps.witselfServer.imageTag=0.0.255 \
   --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai \
@@ -105,6 +107,7 @@ helm template witself-apps "$apps_chart" \
   --values "$civo_backup_cell" >"$civo_backup_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_backup_cell" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set cell.name=civo-ci-use1-legacy \
   --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.chartVersion=0.0.223 \
@@ -187,11 +190,13 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set-string apps.witselfServer.billing.endpoint= \
   >"$email_production_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set apps.witselfServer.chartVersion=0.0.244 \
   --set apps.witselfServer.imageTag=0.0.244 \
   --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
@@ -1683,6 +1688,7 @@ for unsafe_pin in chartVersion imageTag; do
   if helm template witself-apps "$apps_chart" \
     --values "$civo_cell" \
     --values "$apps_email_production_profile" \
+    --set apps.witselfServer.requestBudget.enabled=false \
     --set "apps.witselfServer.${unsafe_pin}=0.0.240" \
     --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
     --set-string apps.witselfServer.billing.endpoint= \
@@ -1748,6 +1754,7 @@ expect_apps_template_failure \
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   --set-json 'apps.witselfServer.agentEmail.receiveProduction.accountIDs=["acc_bbbbbbbbbbbbbbbb","acc_aaaaaaaaaaaaaaaa"]' \
@@ -1758,6 +1765,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set-string apps.witselfServer.billing.endpoint= \
   --set-json 'apps.witselfServer.agentEmail.receiveProduction.accountIDs=["acc_aaaaaaaaaaaaaaaa"]' \
   >/dev/null 2>&1; then
@@ -1767,6 +1775,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   >/dev/null 2>&1; then
@@ -1776,6 +1785,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set apps.witselfServer.requestBudget.enabled=false \
   --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID=agent_aaaaaaaaaaaaaaaa \
   >/dev/null 2>&1; then

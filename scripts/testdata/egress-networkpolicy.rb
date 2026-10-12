@@ -31,6 +31,8 @@ def capture(*args, **options)
 end
 
 def helm(chart, values = nil, overrides = {}, release: 'witself-server', namespace: 'witself')
+  # Egress fixtures pin older child charts; keep the request budget out of them.
+  overrides = {'apps.witselfServer.requestBudget.enabled' => false}.merge(overrides) if release == 'witself-apps'
   args = ['helm', 'template', release, chart, '--namespace', namespace]
   args.concat(['--values', values]) if values
   overrides.each { |key, value| args.concat(['--set-json', "#{key}=#{JSON.generate(value)}"]) }

@@ -222,6 +222,18 @@
 {{- with .Values.apps.witselfServer.resources -}}
 {{- $_ := set $serverValues "resources" . -}}
 {{- end -}}
+{{- /* requestBudgetMinVersion is a placeholder: it must equal the first release whose server chart and image carry slice 123. */ -}}
+{{- $requestBudgetMinVersion := "0.0.334" -}}
+{{- $requestBudget := default dict .Values.apps.witselfServer.requestBudget -}}
+{{- if $requestBudget.enabled -}}
+{{- $requestBudgetReady := and
+      (semverCompare (printf ">=%s-0" $requestBudgetMinVersion) .Values.apps.witselfServer.chartVersion)
+      (semverCompare (printf ">=%s-0" $requestBudgetMinVersion) .Values.apps.witselfServer.imageTag) -}}
+{{- if not $requestBudgetReady -}}
+{{- fail (printf "apps.witselfServer.requestBudget requires chart and image v%s or newer" $requestBudgetMinVersion) -}}
+{{- end -}}
+{{- $_ := set $serverValues "requestBudget" $requestBudget -}}
+{{- end -}}
 {{- if gt (len .Values.apps.witselfServer.networkPolicy.metricsFrom) 0 -}}
 {{- $_ := set $serverValues "networkPolicy" (dict "enabled" true "metricsFrom" .Values.apps.witselfServer.networkPolicy.metricsFrom) -}}
 {{- end -}}
