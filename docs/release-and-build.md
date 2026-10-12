@@ -1099,10 +1099,30 @@ Docker and fails rather than skipping.
 
 To bump the pins, edit `images/witself-postgres-backup/Dockerfile`: choose a
 reviewed official PostgreSQL 18 multi-architecture base index digest and exact
-`age`/`aws-cli` revisions available for each of `x86_64` and `aarch64` in that
-base's Alpine repositories. Alpine rebuild revisions may differ by architecture;
-keep each revision explicit and reject unsupported architectures. Keep the base
-and package pins consistent and update the Dockerfile's version comments.
+package revisions available in that base's Alpine repositories. Record `age`
+separately for `x86_64` and `aarch64` in the `case "$(apk --print-arch)"` block,
+using `<arch>) age_version=<revision> ;;` for each architecture and an
+`unsupported` default branch. Install `"age=$age_version"` and one exact
+`aws-cli=<revision>` that is available on both `x86_64` and `aarch64`, with
+`apk add --no-cache`. Alpine rebuild revisions may
+differ by architecture; the current pins are `age=1.3.2-r1` on both architectures
+and `aws-cli=2.34.63-r0`. Keep the base and package pins consistent and update
+the Dockerfile's version comments. In the same change, append an entry to
+`backupImageToolReleases` in `internal/gitopsvalues/backup_image_tools.go`, with
+`FirstRelease` set to the first tag that will contain that distinct tool set.
+The ledger is append-only and records both architecture-specific `age`
+revisions, one `aws-cli` revision, and the base image. Its package history is:
+
+| First release | age on x86_64 | age on aarch64 | aws-cli |
+| --- | --- | --- | --- |
+| 0.0.291 | 1.3.1-r6 | 1.3.1-r6 | 2.34.63-r0 |
+| 0.0.330 | 1.3.2-r0 | 1.3.2-r0 | 2.34.63-r0 |
+| 0.0.336 | 1.3.2-r0 | 1.3.2-r1 | 2.34.63-r0 |
+| 0.0.337 | 1.3.2-r1 | 1.3.2-r1 | 2.34.63-r0 |
+
+`TestBackupImageToolLedgerIsOrderedAndMatchesDockerfile` fails until that entry
+is added. After tagging, confirm it with
+`git show vFIRST:images/witself-postgres-backup/Dockerfile` and the tag before it.
 Run `make check-postgres-backup-image`
 and validate a two-platform build for `linux/amd64,linux/arm64` before the
 reviewed change is released. The two-platform CI tripwire does not replace
@@ -1117,6 +1137,10 @@ image while the tag records the release. Ordinary rolls and regeneration
 preserve an existing backup pin; repeat `--backup-image` to update it. The
 resolver accepts `--repository ghcr.io/witwave-ai/images/witself-postgres-backup`
 and verifies registry manifest bytes before returning their index digest.
+See **Keeping the backup image pin current** in the
+[scheduled-backup runbook](backup-and-recovery.md#scheduled-postgresql-backups)
+for the CI tool and release-distance rules and the re-pin and emergency rollback
+procedures.
 
 Until an operator opts in, the default empty `backup.image` object selects
 `backup.legacyImage` (`postgres:18-alpine3.23`) and the runner still installs
