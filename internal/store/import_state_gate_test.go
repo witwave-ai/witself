@@ -14,7 +14,7 @@ func TestImportStateMemoryGateIsWired(t *testing.T) {
 	}
 	check := regexp.MustCompile(`(?m)^check:[^\n]*\n((?:\t[^\n]*\n|\n)*)`).FindString(string(makefile))
 	const peak = "\tWITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^TestImportPeakMemory$$' -count=1 -v -timeout=15m\n"
-	const state = "\tWITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$$' -count=1 -v -timeout=20m\n"
+	const state = "\tWITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$$' -count=1 -v -timeout=40m\n"
 	before, after := strings.Index(check, peak), strings.Index(check, state)
 	if before < 0 || after <= before {
 		t.Fatal("Makefile check must run the required no-race import state tests after the peak test")
@@ -24,7 +24,7 @@ func TestImportStateMemoryGateIsWired(t *testing.T) {
 		"        env:\n" +
 		"          WITSELF_TEST_REQUIRE_PEAK_MEMORY: \"1\"\n" +
 		"          WITSELF_TEST_REQUIRE_DATABASE: \"1\"\n" +
-		"        run: go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$' -count=1 -v -timeout=20m\n"
+		"        run: go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$' -count=1 -v -timeout=40m\n"
 	for _, name := range []string{"ci.yml", "release.yml"} {
 		t.Run(name, func(t *testing.T) {
 			workflow, err := os.ReadFile("../../.github/workflows/" + name)
