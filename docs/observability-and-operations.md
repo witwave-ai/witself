@@ -1582,10 +1582,10 @@ snapshot, so these checkpoint alerts do not detect Stripe-only absence.
 The platform chart gates the `witself-probes` scrape job and its rules behind
 `platform.monitoring.uptimeProbes.enabled`, which defaults to `false`. The
 serving-cell rollout target is `civo-sandbox-use1-serving`; its generated
-values (`.gitops/cells/civo-sandbox-use1-serving/values.yaml`) enable this gate
-and incident alerting. Once
-enabled, the serving cell's Prometheus scrapes the HTTPS endpoint every
-60 seconds. The rules in
+values (`.gitops/cells/civo-sandbox-use1-serving/values.yaml`) enable
+monitoring, this gate, `platform.monitoring.entitlementDelivery.enabled` and
+incident alerting. The serving cell's Prometheus scrapes the HTTPS endpoint
+every 60 seconds. The rules in
 [uptime-probes.rules.yaml](../.gitops/charts/platform/files/uptime-probes.rules.yaml)
 cover target failures, the scheduler, and the Stripe observations:
 
@@ -1633,12 +1633,44 @@ cover target failures, the scheduler, and the Stripe observations:
   or billing-mutation reconciliation and its pending receipts. Old work alone
   and failures without old observed work do not fire this alert. Catching up or
   having no failures within the 15-minute window clears the condition.
+- `WitselfStripeWebhookProcessingFailures`: at least three verified Stripe
+  deliveries failed to fold into billing state within the trailing six hours,
+  sustained for five minutes, warning. Read the public `processing_failed`
+  counter, then the authenticated lifecycle status and Stripe dashboard's
+  failed deliveries. A first event for a customer not yet linked to an account
+  is repaired only by Stripe's redelivery. It clears once fewer than three
+  failures remain in the window: six hours after the earliest of three if no
+  more arrive, subject to scrape and evaluation timing.
+- `WitselfBillingMutationRecoveryFailing`: at least ten billing-mutation
+  recovery batches failed in the trailing hour while no backlog older than
+  900 seconds is known, sustained for five minutes, critical. The batch counter
+  must still be currently scraped; stale lag alone cannot open this alert.
+  Read the public batch-failure counter and lag, then the authenticated lifecycle
+  status; investigate list failures, item failures and batch deadlines. Missing
+  lag means unknown backlog coverage. It clears when fewer than ten failures
+  remain in the hour, the batch series becomes stale, or observed lag exceeds
+  900 seconds. As a young backlog ages past 900 seconds, it can hand over to
+  `WitselfBillingReconciliationStalled`, opening a second critical incident for
+  the same fault; treat both as one incident. See the
+  [billing failure runbook](runbooks.md#billing-failure-alerts).
 
-Both Stripe alerts remain silent when their required series are absent. Their
+Absent series never start a Stripe-family alert. The range-based rules can
+still stay pending or firing on samples retained from before the series
+disappeared: `WitselfStripeWebhookRejections` for up to its 15-minute window and
+`WitselfStripeWebhookProcessingFailures` for up to six hours. Only
+`WitselfBillingMutationRecoveryFailing` requires a currently scraped series, and
+`WitselfBillingReconciliationStalled` requires a current lag sample. Their
 counter snapshots and lag sample do not establish complete coverage of missing
 webhook deliveries, all webhook HTTP 5xx responses, or a stopped lifecycle cron.
 Use checkpoint freshness alerts and probe availability alerts alongside them;
 absence of a Stripe alert is not proof of healthy billing.
+
+If the Worker rolls back to a schema-1-only version before the container,
+every `witself_cp_*` Stripe series stays absent until the container roll
+completes and a lifecycle tick supplies schema 1. This gap is not limited to
+one tick. A control plane below 130a counts refused downgrades as failed again,
+so `WitselfEntitlementDeliveryStuck` can page during that rollback; see the
+[rollback acceptance check](runbooks.md#entitlement-delivery-monitoring).
 
 These alerts use the existing Alertmanager incident route and PagerDuty
 receiver. No PagerDuty key is copied into the control plane; alerting stays in
@@ -1792,10 +1824,9 @@ change repaired during that page; the gauges do not reconstruct earlier
 failure history or measure per-account unapplied age.
 
 See [billing and limits](billing-and-limits.md#entitlement-delivery-monitoring)
-for traversal/KV consistency limits and the separate default-off alert gate.
-Tests and rendered rules establish capability only; actual Worker deployment,
-fresh observation checks and alert activation require a later authorized
-rollout.
+for traversal/KV consistency limits and the alert gate. The gate is off by
+default; the checked-in values for `civo-sandbox-use1-serving` enable it, so
+these rules are active there.
 
 ## Signup funnel and verification email observations
 
