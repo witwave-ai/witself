@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { register } from "node:module";
 import test from "node:test";
 import { SIGNUP_OBSERVATION_KEY } from "../src/signup-observation.mjs";
+import { ACCOUNT_BACKUP_SCAN_KEY, ACCOUNT_BACKUP_SCAN_SCHEMA, RESTORE_DRILL_FRESHNESS_KEY } from "../src/account-backup-runtime.mjs";
 
 import {
   UPTIME_PROBE_RUN_KEY,
@@ -1567,4 +1568,53 @@ test("transport errors and timeouts fail the scrape for each persisted run key",
       });
     }
   }
+});
+
+test("backup scan and restore drill freshness reads share one scrape timeout", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
+  const directory = new DirectoryKV({ [UPTIME_PROBE_RUN_KEY]: runDocument() });
+  const get = directory.get.bind(directory);
+  const backupReads = [];
+  let scanResolved = false;
+  directory.get = (key, options) => {
+    if (key === ACCOUNT_BACKUP_SCAN_KEY) {
+      backupReads.push({ key, options });
+      return new Promise((resolve) => setTimeout(() => {
+        scanResolved = true;
+        resolve({ schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health: {
+          computed_at: new Date(NOW).toISOString(), health_available: true,
+          stale_accounts: 2, never_committed_accounts: 3, oldest_committed_age_seconds: 4,
+        } });
+      }, 4_000));
+    }
+    if (key === RESTORE_DRILL_FRESHNESS_KEY) {
+      backupReads.push({ key, options });
+      return new Promise(() => {});
+    }
+    return get(key, options);
+  };
+  let response;
+  const pending = uptimeProbeMetricsResponse(metricsRequest(), {
+    DIRECTORY: directory, CP_ACCOUNT_BACKUPS_ENABLED: "true",
+  }).then((value) => { response = value; });
+  await flush();
+  t.mock.timers.tick(4_000);
+  await flush();
+  assert.equal(scanResolved, true, "the scan completes after four seconds");
+  assert.equal(response, undefined, "the freshness deadline has not elapsed");
+  t.mock.timers.tick(999);
+  await flush();
+  assert.equal(response, undefined);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(response?.status, 200, "parallel reads answer within five seconds total");
+  await pending;
+  const body = await response.text();
+  assert.match(body, /witself_control_plane_account_backup_restore_drill_freshness_available 0\n/);
+  assert.match(body, /witself_control_plane_account_backup_health_available 1\n/);
+  assert.match(body, /witself_control_plane_account_backup_stale_accounts 2\n/);
+  assert.deepEqual(backupReads, [
+    { key: ACCOUNT_BACKUP_SCAN_KEY, options: { type: "json" } },
+    { key: RESTORE_DRILL_FRESHNESS_KEY, options: { type: "text" } },
+  ]);
 });

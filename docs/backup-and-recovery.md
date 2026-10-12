@@ -891,6 +891,12 @@ gets a request-driven drill. `wait: false` refuses that path with HTTP 409
 `asynchronous restore drill requires a target cell with backup validation protocol 2`
 and records no drill.
 
+The control plane keeps a value-free restore drill freshness summary across all
+accounts, updated when a drill starts and when it finishes. It never records
+which account. The public probe scrape exposes its timestamps, latest finished
+result and unexpired running count only when periodic backups are enabled.
+A catalog validation receipt alone does not update this summary.
+
 A full disaster-recovery exercise that commits data must use a
 disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine

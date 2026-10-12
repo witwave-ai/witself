@@ -2266,3 +2266,232 @@ tests:
               summary: A witself-server container was OOM-killed and restarted within the last 30 minutes.
               description: kube-state-metrics reports OOMKilled as a witself-server container's last termination reason and its restart count rose within 30 minutes. Check the pod's restartCount and lastState, read the previous container's logs, and check for a backup export, backup validation, or account import or export that was running on that replica.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  # P1: the negative timestamp makes age exactly eight days at 2h00m.
+  # The condition first holds at 2h01m, and its 30-minute hold ends at 2h31m.
+  # At 4h00m a successful drill writes 14400, exactly that sample's timestamp.
+  - name: restore drill staleness pages after eight days and resolves on a validated drill
+    interval: 10m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x25'
+      - series: witself_control_plane_account_backup_restore_drill_last_validated_timestamp_seconds
+        values: '-684000+0x23 14400+0x1'
+    alert_rule_test:
+      - eval_time: 1h59m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2h00m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2h30m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2h31m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: No restore drill has validated a committed account backup for more than eight days.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 3h59m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: No restore drill has validated a committed account backup for more than eight days.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 4h00m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+
+  # P2a: no freshness record remains silent beyond both alert holds.
+  - name: restore drill alerts stay silent without freshness
+    interval: 10m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x24'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+
+  # P2b: stale and failed records remain silent when backups are disabled.
+  - name: restore drill alerts stay silent with backups disabled
+    interval: 10m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '0+0x24'
+      - series: witself_control_plane_account_backup_restore_drill_last_validated_timestamp_seconds
+        values: '-684000+0x24'
+      - series: witself_control_plane_account_backup_restore_drill_last_result
+        values: '0+0x24'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+
+  # P3: samples disappear from 3h00m through 3h40m and resume at 3h50m.
+  # At 3h45m the last sample is 55 minutes old, still within last_over_time.
+  - name: restore drill staleness bridges a 50-minute scrape gap
+    interval: 10m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x17 _x5 1+0x1'
+      - series: witself_control_plane_account_backup_restore_drill_last_validated_timestamp_seconds
+        values: '-684000+0x17 _x5 -684000+0x1'
+    alert_rule_test:
+      - eval_time: 2h30m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2h31m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: No restore drill has validated a committed account backup for more than eight days.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 3h45m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: No restore drill has validated a committed account backup for more than eight days.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 3h50m
+        alertname: WitselfRestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: No restore drill has validated a committed account backup for more than eight days.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+
+  # P4a: failure starts at 5m, fires at 15m, and resolves at 25m.
+  - name: a failed restore drill pages after ten minutes and resolves on a validated drill
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x40'
+      - series: witself_control_plane_account_backup_restore_drill_last_result
+        values: '1+0x4 0+0x19 1+0x10'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 16m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 24m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 25m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+
+  # P4b: the five-minute failure never satisfies the ten-minute hold.
+  - name: a five-minute restore drill failure stays silent
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x40'
+      - series: witself_control_plane_account_backup_restore_drill_last_result
+        values: '1+0x4 0+0x4 1+0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+
+  # P4c: failure starts at 0m and fires at 10m despite the first missing sample.
+  # Both series are absent from 10m through 59m and resume at 60m.
+  - name: a failed restore drill bridges a 50-minute scrape gap
+    interval: 1m
+    input_series:
+      - series: witself_control_plane_account_backup_enabled
+        values: '1+0x9 _x50 1+0x20'
+      - series: witself_control_plane_account_backup_restore_drill_last_result
+        values: '0+0x9 _x50 0+0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 59m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
+      - eval_time: 60m
+        alertname: WitselfRestoreDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: control-plane
+              witself_alert: "true"
+            exp_annotations:
+              summary: The most recent finished restore drill failed.
+              runbook: docs/runbooks.md#operate-periodic-account-backups
