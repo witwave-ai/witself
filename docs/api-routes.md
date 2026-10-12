@@ -14,28 +14,48 @@ and the persisted `scan` (or null). Additive fields:
 | Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
 | Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
 | Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null), plus `driver: "alarm"` for an alarm-driven drill (absent for a request-driven one). For `/restore-drill:finish`, an empty sanitized failure reason is recorded as `backup failed`. Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 90 minutes after start for an alarm drill and 30 minutes for a request-driven one; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
+| Scan | `slot` | Scheduled interval of the most recent tick that wrote the record. |
+| Scan | `pass_started_slot` | Scheduled interval in which this directory pass read its first page; legacy records fall back to `slot`. |
+| Scan | `last_account_id` | Last account id on the most recent nonempty live-account page in this pass, or null; authenticated status only, never a public metric. |
+| Scan | `overrun_counted_slot` | Interval of the last unreached-entry count in this pass, or null. |
+| Scan | `unreached_entries` | Directory entries after `last_account_id` at the latest overrun count, at least one after an overrun count while incomplete, and zero before overrun or on completion. An upper bound on unreached live accounts when the bounded count finishes; see the cap below. |
 | Scan | `previous_slot` | Immediately preceding scheduled interval's timestamp. |
-| Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot; deduplicated between current job and failure history. |
-| Scan | `previous_slot_status_unavailable` | Accounts whose previous-slot state could not be read; never interpreted as success. |
+| Scan | `previous_slot_terminal_failures` | Accounts with a terminal failed job for that slot on pages read since the current slot began; deduplicated between current job and failure history. |
+| Scan | `previous_slot_status_unavailable` | Accounts on pages read since the current slot began whose previous-slot state could not be read; never interpreted as success. |
 | Scan | `health_available`, `stale_accounts`, `oldest_committed_age_seconds`, `never_committed_accounts`, `computed_at` | Validated persisted health projection shared with Prometheus, including immediately after a Worker deploy. Malformed snapshots report unavailable; `scan` is null only when no snapshot exists. |
 | Scan | `health` | Persisted fleet health snapshot used by Prometheus: `stale_accounts`, `oldest_committed_age_seconds`, `never_committed_accounts`, `health_available`, and `computed_at`. |
-| Scan | `health_progress` | Internal aggregate progress for the current traversal; not published as complete health. |
+| Scan | `health_progress` | Internal aggregate progress for the current pass; used for overrun snapshots and published as complete health when the pass finishes. |
 
-Scan counters accumulate over cursor pages; `complete` marks full traversal.
-Existing `accepted` and `failed` retain dispatch semantics. Each scheduled scan
-reuses the pre-dispatch account-status reads to compute health. On completion,
-it publishes `scan.health`; while a subsequent scan is incomplete, the prior
-snapshot remains visible. `computed_at` is the first page's observation time,
-also used to calculate ages and staleness throughout that traversal. An unreadable
-account makes the completed snapshot unavailable with null aggregate counts.
-Legacy scan records have no health snapshot until a new full scan completes.
+Each pass traverses the directory in order, carrying its cursor across scheduled
+intervals until `complete` marks full traversal. `scanned`, `accepted`, `failed`
+and `failure_sample` accumulate per pass and reset when a new pass starts;
+`accepted` and `failed` retain dispatch semantics. A completed pass starts again
+when the tick's slot differs from `pass_started_slot`. Pre-dispatch account-status
+reads supply health. Completion publishes `scan.health`; until then the prior
+snapshot remains visible unless the pass overruns its starting interval.
+At most once per later slot, before loading the next page, the scheduler persists
+an overrun snapshot adding unreached entries to progress `stale_accounts`, with
+`computed_at` set to that tick's time. It counts only `acct:` keys, without reading
+their values, from the directory start through at most 100 lists of 1,000 keys.
+The upper bound includes pending, archived and unrouted keys, and filtered keys
+already read after `last_account_id`. At the cap, `unreached_capped=true` is logged
+and the partial count is retained; it is no longer a guaranteed upper bound.
+An overrunning incomplete pass contributes at least one unreached entry. The snapshot survives
+a failed page load. Later non-completing ticks keep it until another overrun count.
+Completed health uses the first page's observation time for `computed_at`, ages
+and age-based staleness. Accounts first reached after the pass's starting slot
+are also stale, once each, so completion preserves their overdue evidence until
+a later pass completes without it. An unreadable account makes progress and
+completed health unavailable with null aggregate counts. Legacy records retain
+their cursor and snapshot; missing progress after scanned accounts makes an
+overrun snapshot unavailable until a new full pass supplies health.
 
 Authenticated fleet health reads current catalogs with bounded concurrency and
 a maximum of 100 directory pages. Any health failure returns HTTP 200 with the
 existing `schedule` and `scan`, `health_available: false`, and all three live
 aggregate fields null. This preserves operational status during an account
 outage; null must not be interpreted as zero. The persisted `scan.health` can
-differ from these live fields because it describes the last completed scan.
+differ from these live fields because it describes completed or overrun pass health.
 No account values are included in the new aggregate health fields.
 
 For an account with no committed backup, the earliest known job is the minimum
@@ -43,12 +63,19 @@ of `backups.current_job.scheduled_at` and all `backups.failures[].scheduled_at`.
 With no known job, or a job at most two intervals old, the account contributes
 only to `never_committed_accounts`, which has no critical alert. An overdue
 never-committed account contributes to both counts.
+During an overrun, persisted `stale_accounts` also includes directory entries the
+pass has not reached in its starting slot, an upper bound on unreached live
+accounts unless the count reaches its cap; live fleet health is unchanged.
 
 Public `/metrics/probes` reads the persisted scan once, without listing accounts
 or reading account Durable Objects. Aggregate gauges use the prefix
 `witself_control_plane_account_backup_`: `enabled`, `interval_seconds`,
 `health_available`, `health_age_seconds`, `stale_accounts`,
-`never_committed_accounts`, and `oldest_committed_age_seconds`. Snapshot age is
+`never_committed_accounts`, and `oldest_committed_age_seconds`. Valid pass records
+also expose `pass_started_timestamp_seconds` (Unix seconds),
+`pass_scanned_accounts`, `pass_failed_accounts`, `pass_complete` (0 or 1), and
+`unreached_entries`. These five gauges are absent when disabled or the record
+fails its shape check, and never include `last_account_id`. Snapshot age is
 time since `computed_at`; commit age is the age recorded at computation, or zero
 when no commits exist. Disabled schedules expose only enabled/availability.
 Missing, legacy, malformed or unavailable snapshots expose availability zero

@@ -4215,3 +4215,706 @@ test("restore drill docs describe the alarm driver and the request-driver fallba
     for (const fragment of rejects) assert.equal(text.includes(fragment), false, `${file}: forbidden ${fragment}`);
   }
 });
+
+// A keys-only KV listing with opaque, insertion-stable cursors. Values are
+// serialized exactly as KV stores them so a new Worker can resume from a copy.
+class PagedKV {
+  constructor(entries = {}) {
+    this.values = new Map(Object.entries(entries).map(([key, value]) => [key, JSON.stringify(value)]));
+    this.listCalls = [];
+    this.putCalls = [];
+    this.getCalls = [];
+    this.throwPutAt = null;
+    this.beforeList = null;
+    this.afterPut = null;
+  }
+
+  async get(key, options) {
+    this.getCalls.push(key);
+    const value = this.values.get(key);
+    return value === undefined ? null : options?.type === "json" ? JSON.parse(value) : value;
+  }
+
+  async put(key, value) {
+    this.putCalls.push({ key, value });
+    if (this.putCalls.length === this.throwPutAt) throw new Error("fixture rejected KV write");
+    this.values.set(key, value);
+    await this.afterPut?.(key, value);
+  }
+
+  async delete(key) {
+    this.values.delete(key);
+  }
+
+  async list({ prefix = "", limit = 1000, cursor } = {}) {
+    assert.ok(Number.isInteger(limit) && limit > 0 && limit <= 1000);
+    this.listCalls.push({ prefix, limit, cursor });
+    await this.beforeList?.({ prefix, limit, cursor });
+    let after = "";
+    if (cursor !== undefined) {
+      assert.match(cursor, /^after:/);
+      after = Buffer.from(cursor.slice("after:".length), "base64url").toString("utf8");
+    }
+    const remaining = [...this.values.keys()].sort().filter((name) => name.startsWith(prefix) && name > after);
+    const names = remaining.slice(0, limit);
+    const complete = remaining.length <= limit;
+    return {
+      keys: names.map((name) => ({ name })),
+      list_complete: complete,
+      ...(complete ? {} : { cursor: `after:${Buffer.from(names.at(-1)).toString("base64url")}` }),
+    };
+  }
+
+  value(key = ACCOUNT_BACKUP_SCAN_KEY) {
+    const value = this.values.get(key);
+    return value === undefined ? null : JSON.parse(value);
+  }
+
+  serialize() {
+    return JSON.stringify([...this.values]);
+  }
+
+  static from(serialized) {
+    const copy = new PagedKV();
+    copy.values = new Map(JSON.parse(serialized));
+    return copy;
+  }
+}
+
+const PASS_START = Date.parse("2026-10-10T00:00:00.000Z");
+const PASS_TICK = 5 * 60_000;
+const passISO = (time) => new Date(time).toISOString();
+const passAccountIDs = (count) => Array.from({ length: count }, (_, index) => `coverage_${String(index).padStart(4, "0")}`);
+const passStatus = (committed = passISO(PASS_START)) => ({
+  last_committed_at: committed,
+  backups: { current_job: null, failures: [] },
+});
+
+function passFixture(count, { interval = "5", pageSize = "4", ids = passAccountIDs(count) } = {}) {
+  const kv = new PagedKV(Object.fromEntries(ids.map((id) => [`acct:${id}`, sourceRoute()])));
+  const env = {
+    CP_ACCOUNT_BACKUPS_ENABLED: "true",
+    CP_ACCOUNT_BACKUPS_CONCURRENCY: "1",
+    ...(interval === null ? {} : { CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES: interval }),
+    ...(pageSize === null ? {} : { CP_ACCOUNT_BACKUPS_PAGE_SIZE: pageSize }),
+    DIRECTORY: kv,
+    ACCOUNT_BACKUP: {},
+    BACKUPS: {},
+  };
+  const jobs = [];
+  const dependencies = {
+    status: async () => passStatus(),
+    dispatch: async (_env, job) => {
+      jobs.push(job);
+      return { accepted: true, status: "committed" };
+    },
+  };
+  return { kv, env, ids, jobs, dependencies };
+}
+
+function passRecord(overrides = {}) {
+  const progress = {
+    stale_accounts: 0, never_committed_accounts: 0,
+    oldest_committed_age_seconds: 0, health_available: true,
+    computed_at: passISO(PASS_START),
+  };
+  return {
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
+    slot: passISO(PASS_START), pass_started_slot: passISO(PASS_START),
+    cursor: null, complete: false, scanned: 0, accepted: 0, failed: 0,
+    failed_retry: "next_interval", failure_sample: [],
+    last_account_id: null, overrun_counted_slot: null, unreached_entries: 0,
+    health: { ...progress }, health_progress: { ...progress },
+    ...overrides,
+  };
+}
+
+async function passScrape(env) {
+  const response = await uptimeProbeMetricsResponse(new Request("https://example/metrics/probes"), env);
+  assert.equal(response.status, 200);
+  return response.text();
+}
+
+function assertPassGauge(text, suffix, value) {
+  assert.ok(text.includes(`witself_control_plane_account_backup_${suffix} ${value}\n`), `${suffix} must equal ${value}`);
+}
+
+test("scheduled passes carry the cursor across slots and reach every account in order", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(20);
+  const overrunSnapshots = [];
+  f.kv.afterPut = async (_key, value) => {
+    const scan = JSON.parse(value);
+    if (scan.overrun_counted_slot === scan.slot && !scan.complete) overrunSnapshots.push(scan.health.stale_accounts);
+  };
+  for (let tick = 0; tick < 5; tick++) {
+    const result = await runScheduledAccountBackups(f.env, PASS_START + tick * PASS_TICK, f.dependencies);
+    assert.equal(result.pass_started_slot, passISO(PASS_START));
+    assert.equal(result.overrun, tick > 0);
+    assert.equal(result.scanned, (tick + 1) * 4);
+    assert.equal(Object.hasOwn(result, "last_account_id"), false);
+    if (tick > 0) assert.equal(f.kv.value().health.stale_accounts, 16);
+    for (const job of f.jobs.slice(tick * 4, (tick + 1) * 4)) {
+      assert.equal(job.backup_id, backupJobIdentity(job.account_id, PASS_START + tick * PASS_TICK, 5).backup_id);
+    }
+  }
+  assert.deepEqual(f.jobs.map((job) => job.account_id), f.ids);
+  assert.equal(new Set(f.jobs.map((job) => job.account_id)).size, 20);
+  assert.ok(overrunSnapshots.length >= 4);
+  assert.ok(overrunSnapshots.every((stale) => stale === 16));
+  assert.equal(f.kv.value().complete, true);
+  assert.equal(f.kv.value().unreached_entries, 0);
+  const next = await runScheduledAccountBackups(f.env, PASS_START + 5 * PASS_TICK, f.dependencies);
+  assert.equal(next.pass_started_slot, passISO(PASS_START + 5 * PASS_TICK));
+  assert.equal(next.overrun, false);
+  assert.equal(next.scanned, 4);
+  assert.deepEqual(f.jobs.slice(20).map((job) => job.account_id), f.ids.slice(0, 4));
+});
+
+test("the default schedule pages on the first tick after an interval with one unreached account", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1153, { interval: null, pageSize: null });
+  for (let tick = 0; tick < 288; tick++) await runScheduledAccountBackups(f.env, PASS_START + tick * PASS_TICK, f.dependencies);
+  assert.equal(f.kv.value().complete, false);
+  assert.equal(f.kv.value().scanned, 1152);
+  assert.equal(f.kv.value().unreached_entries, 0);
+  assert.equal(f.kv.listCalls.filter((call) => call.limit === 1000).length, 0);
+  let overrunSnapshot;
+  let overrunScrape;
+  f.kv.afterPut = async (_key, value) => {
+    const scan = JSON.parse(value);
+    if (scan.slot === passISO(PASS_START + 86400_000) && !scan.complete) {
+      overrunSnapshot = scan;
+      overrunScrape = await passScrape(f.env);
+    }
+  };
+  const result = await runScheduledAccountBackups(f.env, PASS_START + 86400_000, f.dependencies);
+  assert.ok(overrunSnapshot, "overrun is durable before the final directory page");
+  assert.equal(overrunSnapshot.unreached_entries, 1);
+  assert.equal(overrunSnapshot.health.stale_accounts, 1);
+  assertPassGauge(overrunScrape, "stale_accounts", 1);
+  assertPassGauge(overrunScrape, "unreached_entries", 1);
+  assert.equal(result.complete, true);
+  assert.equal(result.overrun, true);
+  assert.equal(f.kv.value().health.stale_accounts, 1);
+  // Completion deliberately clears the estimate; the earlier put proves paging.
+  assert.equal(f.kv.value().unreached_entries, 0);
+  assert.equal(f.jobs.at(-1).account_id, f.ids.at(-1));
+  assert.equal(f.jobs.at(-1).backup_id, backupJobIdentity(f.ids.at(-1), PASS_START + 86400_000, 1440).backup_id);
+
+  const boundary = passFixture(1152, { interval: null, pageSize: null });
+  for (let tick = 0; tick < 288; tick++) await runScheduledAccountBackups(boundary.env, PASS_START + tick * PASS_TICK, boundary.dependencies);
+  assert.equal(boundary.kv.value().complete, true);
+  assert.equal(boundary.kv.value().updated_at, passISO(PASS_START + 287 * PASS_TICK));
+  assert.equal(boundary.kv.value().health.stale_accounts, 0);
+  const next = await runScheduledAccountBackups(boundary.env, PASS_START + 86400_000, boundary.dependencies);
+  assert.equal(next.overrun, false);
+  assert.equal(next.scanned, 4);
+  assert.equal(next.pass_started_slot, passISO(PASS_START + 86400_000));
+  assert.equal(boundary.kv.value().health.stale_accounts, 0);
+  assert.equal(boundary.kv.listCalls.filter((call) => call.limit === 1000).length, 0);
+});
+
+test("never-reached accounts count stale only when their pass overran", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const overrun of [false, true]) {
+    const f = passFixture(6, { pageSize: "2" });
+    f.dependencies.status = async () => passStatus(null);
+    for (let tick = 0; tick < 3; tick++) {
+      await runScheduledAccountBackups(f.env, PASS_START + tick * (overrun ? PASS_TICK : 60_000), f.dependencies);
+    }
+    assert.equal(f.kv.value().complete, true);
+    assert.equal(f.kv.value().health.stale_accounts, overrun ? 4 : 0);
+    assert.equal(f.kv.value().health.never_committed_accounts, 6);
+    const live = await accountBackupHealth(f.env, { ...f.dependencies, now: () => PASS_START + 2 * PASS_TICK });
+    assert.equal(live.stale_accounts, 0, "live fleet health retains its age-only definition");
+    assert.equal(live.never_committed_accounts, 6);
+  }
+});
+
+test("the scan cursor survives a fresh Worker and failed ticks", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const original = passFixture(12, { interval: "60", pageSize: "2" });
+  await runScheduledAccountBackups(original.env, PASS_START, original.dependencies);
+  const persistedCursor = original.kv.value().cursor;
+  const kv = PagedKV.from(original.kv.serialize());
+  const env = { ...original.env, DIRECTORY: kv };
+  const resumedJobs = [];
+  const dependencies = {
+    status: async () => passStatus(),
+    dispatch: async (_env, job) => { resumedJobs.push(job); return { accepted: true, status: "committed" }; },
+  };
+  const restarted = await import(new URL("../src/account-backup-runtime.mjs?restart=1", import.meta.url));
+  await restarted.runScheduledAccountBackups(env, PASS_START + PASS_TICK, dependencies);
+  assert.equal(kv.listCalls[0].cursor, persistedCursor);
+  assert.deepEqual(resumedJobs.map((job) => job.account_id), original.ids.slice(2, 4));
+
+  const beforeFailure = kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  kv.beforeList = async ({ limit }) => { if (limit === 2) throw new Error("fixture page unavailable"); };
+  const failed = await restarted.runScheduledAccountBackups(env, PASS_START + 2 * PASS_TICK, dependencies);
+  assert.equal(failed.succeeded, false);
+  assert.equal(kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), beforeFailure);
+  const old = kv.value();
+  const overrun = await restarted.runScheduledAccountBackups(env, PASS_START + 3600_000, dependencies);
+  assert.equal(overrun.succeeded, false);
+  const saved = kv.value();
+  assert.deepEqual(saved, {
+    ...old, pass_started_slot: old.pass_started_slot,
+    slot: passISO(PASS_START + 3600_000), updated_at: passISO(PASS_START + 3600_000),
+    health: { ...old.health_progress, stale_accounts: 8, computed_at: passISO(PASS_START + 3600_000) },
+    overrun_counted_slot: passISO(PASS_START + 3600_000), unreached_entries: 8,
+  });
+  assert.equal(saved.cursor, old.cursor);
+  kv.beforeList = null;
+  const beforeResume = kv.listCalls.length;
+  await restarted.runScheduledAccountBackups(env, PASS_START + 3600_000 + PASS_TICK, dependencies);
+  assert.equal(kv.listCalls[beforeResume].cursor, old.cursor);
+  assert.equal(kv.listCalls.slice(beforeResume).filter((call) => call.limit === 1000).length, 0);
+  assert.equal(kv.value().scanned, 6);
+
+  const limited = passFixture(8, { interval: "60", pageSize: "2" });
+  await runScheduledAccountBackups(limited.env, PASS_START, limited.dependencies);
+  const oldCursor = limited.kv.value().cursor;
+  limited.kv.throwPutAt = limited.kv.putCalls.length + 2;
+  const rejected = await runScheduledAccountBackups(limited.env, PASS_START + 3600_000, limited.dependencies);
+  assert.equal(rejected.succeeded, false);
+  assert.equal(limited.kv.value().cursor, oldCursor);
+  assert.equal(limited.kv.value().scanned, 2);
+  assert.equal(limited.kv.value().health.stale_accounts, 6);
+  const firstDispatch = limited.jobs.slice(2);
+  const countLists = limited.kv.listCalls.filter((call) => call.limit === 1000).length;
+  const retry = await runScheduledAccountBackups(limited.env, PASS_START + 3600_000 + PASS_TICK, limited.dependencies);
+  assert.equal(retry.scanned, 4);
+  assert.notEqual(limited.kv.value().cursor, oldCursor);
+  assert.deepEqual(limited.jobs.slice(4), firstDispatch);
+  assert.equal(limited.kv.listCalls.filter((call) => call.limit === 1000).length, countLists);
+});
+
+test("legacy scan records keep their cursor and snapshot", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const legacy = (record) => {
+    const result = { ...record };
+    for (const key of ["pass_started_slot", "last_account_id", "overrun_counted_slot", "unreached_entries"]) delete result[key];
+    return result;
+  };
+  const complete = passFixture(2, { pageSize: "2" });
+  await runScheduledAccountBackups(complete.env, PASS_START, complete.dependencies);
+  complete.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(legacy(complete.kv.value())));
+  const completedRaw = complete.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const cached = await runScheduledAccountBackups(complete.env, PASS_START + 60_000, complete.dependencies);
+  assert.equal(cached.ran, false);
+  assert.equal(cached.pass_started_slot, passISO(PASS_START));
+  assert.equal(cached.overrun, false);
+  assert.equal(cached.unreached_entries, 0);
+  assert.equal(complete.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), completedRaw);
+
+  for (const hasProgress of [true, false]) {
+    const f = passFixture(4, { pageSize: "2" });
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const old = legacy(f.kv.value());
+    if (!hasProgress) delete old.health_progress;
+    f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(old));
+    let snapshot;
+    f.kv.afterPut = async (_key, value) => { const scan = JSON.parse(value); if (!scan.complete) snapshot = scan; };
+    const beforeLists = f.kv.listCalls.length;
+    const result = await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    assert.equal(result.overrun, true);
+    assert.equal(result.scanned, 4);
+    assert.equal(result.pass_started_slot, passISO(PASS_START));
+    assert.equal(f.kv.listCalls.slice(beforeLists).find((call) => call.limit === 2).cursor, old.cursor);
+    assert.deepEqual(f.jobs.slice(2).map((job) => job.account_id), f.ids.slice(2));
+    assert.equal(snapshot.cursor, old.cursor);
+    assert.equal(snapshot.unreached_entries, 4, "legacy last_account_id is null, so the upper bound starts at the directory beginning");
+    assert.equal(snapshot.health.health_available, hasProgress);
+    assert.equal(f.kv.value().health.health_available, hasProgress);
+    if (!hasProgress) assert.equal(snapshot.health.stale_accounts, null);
+  }
+});
+
+test("a new pass starts at most once per slot and starts clean", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const fits = passFixture(2, { pageSize: "2" });
+  await runScheduledAccountBackups(fits.env, PASS_START, fits.dependencies);
+  const cached = await runScheduledAccountBackups(fits.env, PASS_START + 60_000, fits.dependencies);
+  assert.equal(cached.ran, false);
+  assert.equal(fits.jobs.length, 2);
+
+  const f = passFixture(4, { pageSize: "2" });
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(f.kv.value().health.stale_accounts, 2);
+  const secondTime = PASS_START + PASS_TICK + 60_000;
+  const second = await runScheduledAccountBackups(f.env, secondTime, f.dependencies);
+  const restarted = f.kv.value();
+  assert.equal(second.scanned, 2);
+  assert.equal(second.pass_started_slot, passISO(PASS_START + PASS_TICK));
+  assert.equal(restarted.health_progress.computed_at, passISO(secondTime));
+  assert.equal(restarted.health_progress.stale_accounts, 0);
+  assert.equal(restarted.overrun_counted_slot, null);
+  assert.equal(restarted.unreached_entries, 0);
+  assert.deepEqual(f.jobs.slice(4).map((job) => job.account_id), f.ids.slice(0, 2));
+  for (const job of f.jobs.slice(4)) assert.equal(job.backup_id, backupJobIdentity(job.account_id, secondTime, 5).backup_id);
+  await runScheduledAccountBackups(f.env, secondTime + 60_000, f.dependencies);
+  assert.equal(f.kv.value().complete, true);
+  assert.equal(f.kv.value().health.computed_at, passISO(secondTime));
+  assert.equal(f.kv.value().health.stale_accounts, 0);
+
+  const filtered = passFixture(6, { pageSize: "2" });
+  for (let tick = 0; tick < 3; tick++) await runScheduledAccountBackups(filtered.env, PASS_START + tick * PASS_TICK, filtered.dependencies);
+  for (const id of filtered.ids.slice(0, 2)) filtered.kv.values.set(`pending:${id}`, "pending");
+  const filteredSecondTime = PASS_START + 2 * PASS_TICK + 60_000;
+  await runScheduledAccountBackups(filtered.env, filteredSecondTime, filtered.dependencies);
+  const clean = filtered.kv.value();
+  assert.equal(clean.scanned, 0);
+  assert.equal(clean.accepted, 0);
+  assert.equal(clean.failed, 0);
+  assert.deepEqual(clean.failure_sample, []);
+  assert.equal(clean.last_account_id, null, "a fresh pass cannot inherit the previous pass's tail on a filtered page");
+  assert.equal(clean.overrun_counted_slot, null);
+  assert.equal(clean.unreached_entries, 0);
+  assert.equal(clean.health_progress.computed_at, passISO(filteredSecondTime));
+  assert.equal(clean.health_progress.stale_accounts, 0);
+  let fromStart;
+  filtered.kv.afterPut = async (_key, value) => {
+    const scan = JSON.parse(value);
+    if (scan.slot === passISO(PASS_START + 3 * PASS_TICK) && scan.scanned === 0) fromStart = scan;
+  };
+  await runScheduledAccountBackups(filtered.env, PASS_START + 3 * PASS_TICK, filtered.dependencies);
+  assert.equal(fromStart.unreached_entries, 6);
+  await runScheduledAccountBackups(filtered.env, PASS_START + 4 * PASS_TICK, filtered.dependencies);
+  assert.equal(filtered.kv.value().health.computed_at, passISO(filteredSecondTime));
+
+  const changed = passFixture(2, { interval: "1440", pageSize: "2" });
+  let oddDay = PASS_START;
+  if (backupJobIdentity("slot", oddDay, 2880).scheduled_at === passISO(oddDay)) oddDay += 86400_000;
+  await runScheduledAccountBackups(changed.env, oddDay, changed.dependencies);
+  changed.env.CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES = "2880";
+  const widened = await runScheduledAccountBackups(changed.env, oddDay + PASS_TICK, changed.dependencies);
+  assert.equal(widened.ran, true);
+  assert.equal(widened.overrun, false);
+  assert.ok(Date.parse(widened.pass_started_slot) < oddDay);
+  assert.equal(widened.scanned, 2);
+  assert.equal(changed.kv.listCalls.filter((call) => call.limit === 1000).length, 0);
+});
+
+test("scrape exposes only value-free pass gauges", async () => {
+  const f = passFixture(0);
+  const scan = passRecord({
+    scanned: 7, accepted: 5, failed: 2, complete: true,
+    last_account_id: "acct_private_coverage", unreached_entries: 3,
+  });
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
+  const text = await passScrape(f.env);
+  for (const [suffix, value] of [
+    ["pass_started_timestamp_seconds", PASS_START / 1000],
+    ["pass_scanned_accounts", 7], ["pass_failed_accounts", 2],
+    ["pass_complete", 1], ["unreached_entries", 3],
+  ]) assertPassGauge(text, suffix, value);
+  assert.doesNotMatch(text, /last_account_id|acct_private_coverage/);
+  assert.equal(f.kv.getCalls.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length, 1);
+  const gaugeNames = /witself_control_plane_account_backup_(?:pass_started_timestamp_seconds|pass_scanned_accounts|pass_failed_accounts|pass_complete|unreached_entries)(?:\s|$)/;
+  f.env.CP_ACCOUNT_BACKUPS_ENABLED = "false";
+  assert.doesNotMatch(await passScrape(f.env), gaugeNames);
+  assert.equal(f.kv.getCalls.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length, 1);
+  f.env.CP_ACCOUNT_BACKUPS_ENABLED = "true";
+  for (const invalid of [
+    { slot: "invalid" }, { pass_started_slot: "invalid" }, { pass_started_slot: null },
+    { overrun_counted_slot: "invalid" }, { last_account_id: "invalid account" },
+    { last_account_id: 7 }, { unreached_entries: -1 }, { unreached_entries: 1.5 },
+    { unreached_entries: Number.MAX_SAFE_INTEGER + 1 }, { accepted: 4 },
+  ]) {
+    f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify({ ...scan, ...invalid }));
+    const reads = f.kv.getCalls.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length;
+    assert.doesNotMatch(await passScrape(f.env), gaugeNames, JSON.stringify(invalid));
+    assert.equal(f.kv.getCalls.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length, reads + 1);
+  }
+  const legacy = { ...scan };
+  for (const key of ["pass_started_slot", "last_account_id", "overrun_counted_slot", "unreached_entries"]) delete legacy[key];
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(legacy));
+  const legacyText = await passScrape(f.env);
+  assertPassGauge(legacyText, "pass_started_timestamp_seconds", PASS_START / 1000);
+  assertPassGauge(legacyText, "unreached_entries", 0);
+});
+
+test("the unreached count is bounded", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (line) => logs.push(line));
+  const f = passFixture(0);
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(passRecord({
+    cursor: "persisted-page", scanned: 1, accepted: 1, last_account_id: "a",
+  })));
+  let lists = 0;
+  f.kv.list = async ({ prefix, limit, cursor }) => {
+    assert.equal(prefix, "acct:");
+    assert.equal(limit, 1000);
+    assert.equal(cursor, lists === 0 ? undefined : `count-page-${lists}`);
+    lists++;
+    return {
+      keys: Array.from({ length: 1000 }, (_, index) => ({ name: `acct:z${String(lists * 1000 + index).padStart(8, "0")}` })),
+      list_complete: false, cursor: `count-page-${lists}`,
+    };
+  };
+  const result = await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, {
+    ...f.dependencies,
+    activeAccountPage: async (_env, _limit, cursor) => {
+      assert.equal(cursor, "persisted-page");
+      return { account_ids: [], next_cursor: "next-page" };
+    },
+  });
+  assert.equal(lists, 100);
+  assert.equal(result.unreached_entries, 100000);
+  assert.equal(f.kv.value().health.stale_accounts, 100000);
+  assert.ok(logs.some((line) => line.includes("unreached_capped=true")));
+  assert.equal(f.kv.getCalls.some((key) => key.startsWith("acct:")), false);
+});
+
+test("the unreached count is an upper bound over filtered directory entries", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(6, { pageSize: "2", ids: ["a", "b", "c", "d", "e", "f"] });
+  for (const id of ["c", "d"]) f.kv.values.set(`pending:${id}`, "pending");
+  f.kv.values.set("archived:e", "archived");
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  assert.deepEqual(f.jobs.map((job) => job.account_id), ["a", "b"]);
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(f.kv.value().unreached_entries, 4);
+  assert.equal(f.kv.value().health.stale_accounts, 4);
+  assert.equal(f.kv.value().last_account_id, "b");
+  let thirdSnapshot;
+  f.kv.afterPut = async (_key, value) => { const scan = JSON.parse(value); if (!scan.complete) thirdSnapshot = scan; };
+  await runScheduledAccountBackups(f.env, PASS_START + 2 * PASS_TICK, f.dependencies);
+  assert.equal(thirdSnapshot.unreached_entries, 4);
+  assert.equal(f.kv.value().complete, true);
+  assert.equal(f.kv.value().health.stale_accounts, 1);
+  assert.equal(f.kv.value().unreached_entries, 0);
+  assert.deepEqual(f.jobs.map((job) => job.account_id), ["a", "b", "f"]);
+
+  const emptyFirst = passFixture(6, { pageSize: "2", ids: ["a", "b", "c", "d", "e", "f"] });
+  for (const id of ["a", "b"]) emptyFirst.kv.values.set(`pending:${id}`, "pending");
+  await runScheduledAccountBackups(emptyFirst.env, PASS_START, emptyFirst.dependencies);
+  assert.equal(emptyFirst.kv.value().last_account_id, null);
+  assert.equal(emptyFirst.kv.value().scanned, 0);
+  await runScheduledAccountBackups(emptyFirst.env, PASS_START + PASS_TICK, emptyFirst.dependencies);
+  assert.equal(emptyFirst.kv.value().unreached_entries, 6);
+  assert.equal(emptyFirst.kv.value().health.stale_accounts, 6);
+});
+
+test("previous-slot counters cover only the current slot inside a pass", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const failedStatus = (time) => {
+    const slot = backupJobIdentity("slot", time, 5).scheduled_at;
+    const job = { status: "failed", scheduled_at: passISO(Date.parse(slot) - PASS_TICK) };
+    return { last_committed_at: passISO(PASS_START), backups: { current_job: job, failures: [job] } };
+  };
+  const f = passFixture(6, { pageSize: "2" });
+  for (let tick = 0; tick < 3; tick++) {
+    const time = PASS_START + tick * PASS_TICK;
+    f.dependencies.status = async () => failedStatus(time);
+    await runScheduledAccountBackups(f.env, time, f.dependencies);
+    assert.equal(f.kv.value().previous_slot_terminal_failures, 2);
+    assert.equal(f.kv.value().previous_slot, passISO(time - PASS_TICK));
+  }
+  const sameSlot = passFixture(6, { pageSize: "2" });
+  sameSlot.dependencies.status = async () => failedStatus(PASS_START);
+  await runScheduledAccountBackups(sameSlot.env, PASS_START, sameSlot.dependencies);
+  await runScheduledAccountBackups(sameSlot.env, PASS_START + 60_000, sameSlot.dependencies);
+  assert.equal(sameSlot.kv.value().previous_slot_terminal_failures, 4);
+  sameSlot.dependencies.status = async () => failedStatus(PASS_START + PASS_TICK);
+  await runScheduledAccountBackups(sameSlot.env, PASS_START + PASS_TICK, sameSlot.dependencies);
+  assert.equal(sameSlot.kv.value().previous_slot_terminal_failures, 2);
+
+  const unavailable = passFixture(6, { pageSize: "2" });
+  for (let tick = 0; tick < 3; tick++) {
+    const time = PASS_START + tick * PASS_TICK;
+    unavailable.dependencies.status = async (_env, id) => {
+      if (unavailable.ids.indexOf(id) % 2) throw new Error("fixture status unavailable");
+      return failedStatus(time);
+    };
+    await runScheduledAccountBackups(unavailable.env, time, unavailable.dependencies);
+    assert.equal(unavailable.kv.value().previous_slot_terminal_failures, 1);
+    assert.equal(unavailable.kv.value().previous_slot_status_unavailable, 1);
+  }
+});
+
+test("T11: successful overrun ticks count unreached entries at most once per slot", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(8, { interval: "60", pageSize: "2" });
+  await runScheduledAccountBackups(f.env, PASS_START + 11 * PASS_TICK, f.dependencies);
+  const before = f.kv.value();
+  assert.equal(before.complete, false);
+  assert.notEqual(before.cursor, null);
+  const overrunTime = PASS_START + 12 * PASS_TICK;
+  const slot = passISO(overrunTime);
+  const writes = [];
+  f.kv.afterPut = async (key, value) => {
+    assert.equal(key, ACCOUNT_BACKUP_SCAN_KEY);
+    writes.push({ scan: JSON.parse(value), pageLists: f.kv.listCalls.filter((call) => call.limit === 2).length });
+  };
+  const puts = f.kv.putCalls.length;
+  const lists = f.kv.listCalls.length;
+  const first = await runScheduledAccountBackups(f.env, overrunTime, f.dependencies);
+  assert.equal(first.ran, true);
+  assert.equal(first.overrun, true);
+  assert.equal(first.complete, false);
+  assert.equal(first.scanned, 4);
+  assert.equal(f.kv.putCalls.length - puts, 2, "the first overrun tick has an early and a final put");
+  assert.equal(writes.length, 2);
+  assert.deepEqual(f.kv.listCalls.slice(lists), [
+    { prefix: "acct:", limit: 1000, cursor: undefined },
+    { prefix: "acct:", limit: 2, cursor: before.cursor },
+  ]);
+  assert.equal(writes[0].pageLists, 1, "the early put precedes the overrun page load");
+  assert.equal(writes[0].scan.cursor, before.cursor);
+  assert.equal(writes[0].scan.scanned, 2);
+  assert.equal(writes[0].scan.overrun_counted_slot, slot);
+  assert.equal(writes[0].scan.unreached_entries, 6);
+  assert.equal(writes[1].pageLists, 2);
+  assert.equal(writes[1].scan.scanned, 4);
+  assert.notEqual(writes[1].scan.cursor, before.cursor);
+
+  const afterFirst = f.kv.value();
+  const secondPuts = f.kv.putCalls.length;
+  const secondLists = f.kv.listCalls.length;
+  const second = await runScheduledAccountBackups(f.env, overrunTime + PASS_TICK, f.dependencies);
+  assert.equal(second.ran, true);
+  assert.equal(second.overrun, true);
+  assert.equal(second.slot, slot);
+  assert.equal(second.complete, false);
+  assert.equal(second.scanned, 6);
+  assert.equal(f.kv.listCalls.slice(secondLists).filter((call) => call.limit === 1000).length, 0);
+  assert.deepEqual(f.kv.listCalls.slice(secondLists), [
+    { prefix: "acct:", limit: 2, cursor: afterFirst.cursor },
+  ]);
+  assert.equal(f.kv.putCalls.length - secondPuts, 1, "a successful same-slot tick only writes its final page");
+  assert.equal(writes.length, 3);
+  assert.equal(writes[1].scan.overrun_counted_slot, slot);
+  assert.equal(f.kv.value().overrun_counted_slot, slot);
+  assert.equal(f.kv.value().unreached_entries, 6);
+  assert.deepEqual(f.kv.value().health, afterFirst.health);
+  assert.deepEqual(f.jobs.map((job) => job.account_id), f.ids.slice(0, 6));
+});
+
+test("T12: increasing the interval does not overrun an incomplete pass with an earlier slot", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(6, { interval: "1440", pageSize: "2" });
+  // Two-day slots are anchored to the Unix epoch; use the second day of one.
+  const day = 86400_000;
+  const oddDay = PASS_START + (Math.floor(PASS_START / day) % 2 === 0 ? day : 0);
+  await runScheduledAccountBackups(f.env, oddDay, f.dependencies);
+  const before = f.kv.value();
+  assert.equal(before.pass_started_slot, passISO(oddDay));
+  assert.equal(before.complete, false);
+  assert.equal(before.scanned, 2);
+  assert.notEqual(before.cursor, null);
+  assert.equal(before.overrun_counted_slot, null);
+  f.env.CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES = "2880";
+  const lists = f.kv.listCalls.length;
+  const puts = f.kv.putCalls.length;
+  const result = await runScheduledAccountBackups(f.env, oddDay + PASS_TICK, f.dependencies);
+  const saved = f.kv.value();
+  assert.equal(result.ran, true);
+  assert.equal(result.slot, passISO(oddDay - day));
+  assert.ok(Date.parse(result.slot) < Date.parse(before.pass_started_slot));
+  assert.equal(result.overrun, false);
+  assert.equal(result.complete, false);
+  assert.equal(result.scanned, 4);
+  assert.equal(saved.pass_started_slot, before.pass_started_slot);
+  assert.equal(saved.overrun_counted_slot, null);
+  assert.deepEqual(saved.health, before.health);
+  assert.equal(f.kv.listCalls.filter((call) => call.limit === 1000).length, 0);
+  assert.deepEqual(f.kv.listCalls.slice(lists), [
+    { prefix: "acct:", limit: 2, cursor: before.cursor },
+  ]);
+  assert.equal(f.kv.putCalls.length - puts, 1);
+  assert.deepEqual(f.jobs.slice(2).map((job) => job.account_id), f.ids.slice(2, 4));
+});
+
+test("T13: an incomplete pass keeps an unreached floor after its remaining accounts disappear", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(4, { pageSize: "2", ids: ["a", "b", "c", "d"] });
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const before = f.kv.value();
+  assert.deepEqual(f.jobs.map((job) => job.account_id), ["a", "b"]);
+  assert.equal(before.complete, false);
+  assert.notEqual(before.cursor, null);
+  await f.kv.delete("acct:c");
+  await f.kv.delete("acct:d");
+  const writes = [];
+  f.kv.afterPut = async (_key, value) => {
+    writes.push({ scan: JSON.parse(value), pageLists: f.kv.listCalls.filter((call) => call.limit === 2).length });
+  };
+  const result = await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(result.ran, true);
+  assert.equal(result.overrun, true);
+  assert.equal(writes.length, 2);
+  const early = writes[0];
+  assert.equal(early.pageLists, 1, "capture the durable overrun snapshot before the empty page");
+  assert.equal(early.scan.complete, false);
+  assert.equal(early.scan.cursor, before.cursor);
+  assert.equal(early.scan.unreached_entries, 1);
+  assert.ok(early.scan.health.stale_accounts >= 1);
+  assert.equal(result.complete, true);
+  assert.equal(f.kv.value().unreached_entries, 0);
+  assert.deepEqual(f.jobs.map((job) => job.account_id), ["a", "b"]);
+});
+
+test("T14: overrun tick logs expose pass fields without account identifiers", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (...args) => logs.push(args.map(String).join(" ")));
+  const f = passFixture(6, { pageSize: "2" });
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const beforeOverrunLogs = logs.length;
+  const result = await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(result.overrun, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.unreached_entries, 4);
+  assert.deepEqual(result.failure_sample, []);
+  const tickLogs = logs.slice(beforeOverrunLogs).filter((line) => line.startsWith("account-backup: scheduled tick "));
+  assert.equal(tickLogs.length, 1);
+  const fields = tickLogs[0].split(/\s+/);
+  assert.ok(fields.includes(`pass_started_slot=${passISO(PASS_START)}`));
+  assert.ok(fields.includes("overrun=true"));
+  assert.ok(fields.includes("unreached_entries=4"));
+  for (const line of logs) {
+    assert.equal(line.includes("last_account_id"), false, "logs must omit the private scan field");
+    for (const id of f.ids) assert.equal(line.includes(id), false, "logs must omit fixture account ids");
+  }
+});
+
+test("T15: early overrun health retains never-committed progress and adds unreached entries to stale progress", async (t) => {
+  t.mock.method(console, "log", () => {});
+  // Cover both T3's new signups and never-committed accounts already age-stale.
+  for (const hasOldJob of [false, true]) {
+    const f = passFixture(6, { pageSize: "2" });
+    f.dependencies.status = async () => ({
+      ...passStatus(null),
+      backups: {
+        current_job: hasOldJob ? { status: "failed", scheduled_at: passISO(PASS_START - 3 * PASS_TICK) } : null,
+        failures: [],
+      },
+    });
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const before = f.kv.value();
+    const progress = before.health_progress;
+    assert.equal(progress.never_committed_accounts, 2);
+    assert.equal(progress.stale_accounts, hasOldJob ? 2 : 0);
+    const writes = [];
+    f.kv.afterPut = async (_key, value) => {
+      writes.push({ scan: JSON.parse(value), pageLists: f.kv.listCalls.filter((call) => call.limit === 2).length });
+    };
+    const result = await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    assert.equal(result.overrun, true);
+    assert.equal(result.complete, false);
+    assert.equal(result.scanned, 4);
+    assert.equal(writes.length, 2);
+    const early = writes[0];
+    assert.equal(early.pageLists, 1, "health is persisted before the next page changes progress");
+    assert.equal(early.scan.cursor, before.cursor);
+    assert.equal(early.scan.scanned, 2);
+    assert.equal(early.scan.unreached_entries, 4);
+    assert.equal(early.scan.health.health_available, true);
+    assert.equal(early.scan.health.never_committed_accounts, progress.never_committed_accounts);
+    assert.equal(early.scan.health.stale_accounts, progress.stale_accounts + early.scan.unreached_entries);
+    assert.equal(f.kv.value().health_progress.never_committed_accounts, 4);
+    assert.deepEqual(f.kv.value().health, early.scan.health);
+  }
+});

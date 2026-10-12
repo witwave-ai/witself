@@ -1,4 +1,4 @@
-import { ACCOUNT_BACKUP_SCAN_KEY, accountBackupConfig, accountBackupHealthSnapshot } from "./account-backup-runtime.mjs";
+import { ACCOUNT_BACKUP_SCAN_KEY, accountBackupConfig, accountBackupHealthSnapshot, accountBackupPassSnapshot } from "./account-backup-runtime.mjs";
 import { signupObservationLines } from "./signup-observation.mjs";
 import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
 
@@ -352,6 +352,14 @@ async function accountBackupLines(env) {
       SNAPSHOT_TIMEOUT_MS,
     );
     const health = accountBackupHealthSnapshot(scan);
+    const pass = accountBackupPassSnapshot(scan);
+    if (pass !== null) {
+      values.pass_started_timestamp_seconds = Date.parse(pass.pass_started_slot) / 1000;
+      values.pass_scanned_accounts = pass.scanned;
+      values.pass_failed_accounts = pass.failed;
+      values.pass_complete = Number(pass.complete);
+      values.unreached_entries = pass.unreached_entries;
+    }
     values.interval_seconds = accountBackupConfig(env).interval_minutes * 60;
     values.health_available = Number(health.health_available);
     if (health.computed_at !== null) {

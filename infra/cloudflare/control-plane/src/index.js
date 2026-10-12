@@ -65,9 +65,15 @@
 //   config:placement_runner -> {"enabled":bool,"restore_archives":bool,
 //                               "restore_batch":N,"restore_any_region":bool,
 //                               "rebalance":bool,"rebalance_batch":N}
-//   config:account_backup_scan -> {"schema_version","slot","cursor",
-//                                  "complete","updated_at"}
-//                                  opt-in periodic backup directory cursor
+//   config:account_backup_scan -> {"schema_version","slot","pass_started_slot",
+//                                  "cursor","complete","updated_at",
+//                                  "last_account_id","overrun_counted_slot",
+//                                  "unreached_entries","scanned","accepted",
+//                                  "failed","failure_sample","health",
+//                                  "health_progress"}
+//                                  opt-in directory pass carried across slots;
+//                                  slot is the most recent write's tick slot,
+//                                  dispatch counts accumulate per pass
 //   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:

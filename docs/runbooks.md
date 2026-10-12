@@ -4012,14 +4012,20 @@ printf '%s' true |
 ```
 
 Confirm `/v1/backups/status` reports `schedule.enabled=true`, then watch it
-through at least one complete cursor scan. `scan.accepted` counts dispatch
-acceptance, not completion; `scan.failed` remains dispatch failures. Inspect
+through at least one complete directory pass. A pass resumes from its cursor in
+directory order across intervals, so a slot change never discards an unfinished
+tail. `scan.pass_started_slot` identifies its starting interval; `scan.slot` is
+the latest tick's interval. `scan.scanned`, `scan.accepted`, `scan.failed` and
+`scan.failure_sample` reset only when a new pass starts. `scan.accepted` counts
+dispatch acceptance, not completion; `scan.failed` remains dispatch failures. Inspect
 `scan.previous_slot_terminal_failures` for accounts with a terminal failure
 in the immediately preceding scheduled slot, and
 `scan.previous_slot_status_unavailable` for accounts whose state could not be
-read. These counters accumulate over the scan's pages, before new dispatches;
-only `scan.complete=true` represents the whole scan. Retry-in-progress is not
-a terminal failure. Failures from older slots are not included in that counter.
+read. These previous-slot counters reset when `scan.previous_slot` changes and
+accumulate over pages read since the current slot began, before new dispatches;
+they cover only those pages even when `scan.complete=true` finishes a pass that
+spanned slots. Retry-in-progress is not a terminal failure. Failures from older
+slots are not included in that counter.
 
 Per-account `account.last_committed_at` is null until a verified catalog entry
 exists. New entries retain `committed_at`; older entries use `verified_at` as
@@ -4045,16 +4051,31 @@ The existing retry budget and backoff still apply. This does not extend the
 edge/provider's own connection or invocation lifetime; cell streaming and
 provider-compatible execution remain necessary.
 
-The public `/metrics/probes` scrape reads only `scan.health`, persisted by the
-scheduled scan using the same per-account status reads as previous-slot failure
-accounting. Counts cover the entire traversal; the last completed snapshot stays
-visible while a later scan progresses. `computed_at` is the first page's
-observation time, used throughout that traversal for age and stale calculations.
-Compare this snapshot with the authenticated fleet route's live health fields.
+The public `/metrics/probes` scrape reads the persisted scan once, using
+`scan.health` and value-free pass fields. The scheduled pass reuses per-account
+status reads from previous-slot failure accounting. A completed snapshot stays
+visible while a later pass progresses within its starting interval. Once the
+pass overruns, at most once per later slot it counts unreached `acct:` entries
+using keys only and writes a snapshot before loading the next page. This adds
+the count to progress `stale_accounts` and timestamps it with the current tick,
+so a failed page load still leaves overdue evidence. `unreached_entries` is an
+upper bound on unreached live accounts: it also includes pending, archived and
+unrouted keys, and filtered keys already read after the last reached account.
+The count stops after 100 lists of 1,000 keys; `unreached_capped=true` means the
+retained partial count is no longer a guaranteed upper bound. An overrunning incomplete pass
+contributes at least one. Unavailable progress publishes unavailable health.
+Completion clears `unreached_entries` and publishes progress health, counting
+every account first reached after the starting slot as stale once. That overdue
+evidence remains until a later pass completes without it. Completed health's
+`computed_at` is the first page's observation time, used throughout the pass for
+age calculations. The authenticated fleet route's live age-based health is unchanged.
 
 Gauges prefixed `witself_control_plane_account_backup_` are `enabled`,
 `interval_seconds`, `health_available`, `health_age_seconds`, `stale_accounts`,
-`never_committed_accounts`, and `oldest_committed_age_seconds`. The last gauge
+`never_committed_accounts`, and `oldest_committed_age_seconds`. Valid pass records
+also expose `pass_started_timestamp_seconds` (Unix seconds),
+`pass_scanned_accounts`, `pass_failed_accounts`, `pass_complete` (0 or 1), and
+`unreached_entries`. Invalid pass records omit these five gauges. The commit-age gauge
 is the computed commit age (zero when no commits exist); snapshot age measures
 time since `computed_at`. Missing or incomplete health evidence sets availability
 to zero and omits aggregate counts. Disabled schedules expose enabled/availability
@@ -4063,11 +4084,27 @@ existing scrape availability alerts.
 
 With uptime-probe scraping and founder-open-plane rules enabled,
 `WitselfAccountBackupStale` pages after five minutes of overdue backup evidence.
+An overrunning pass therefore pages at critical about 10 minutes after its
+interval ends: up to one five-minute tick plus the rule's `for: 5m`. At the default
+one-day interval this is the interval plus up to about 10 minutes, even for
+accounts the scheduler has never reached.
 `WitselfAccountBackupHealthUnavailable` pages after five minutes of availability
 zero or snapshot age greater than three configured intervals. For old snapshots,
 inspect scan cursor progress and the scheduler; do not infer fresh health from
 old counts. These metrics contain no account ids, backup ids, object paths, or
 error text.
+
+For an over-capacity fleet, raise `CP_ACCOUNT_BACKUPS_PAGE_SIZE` only with the
+founder's go. The maximum is 20: at one page per five-minute tick, that is 5,760
+directory entries per day, with pending, archived and unrouted entries also
+consuming page slots. An overrun that persists while `pass_scanned_accounts`
+does not move points at a stuck cursor. Delete `config:account_backup_scan` to
+reset it; the next tick starts a new pass, and health reads unavailable until
+that pass completes or publishes an available overrun snapshot.
+`pass_failed_accounts` above zero for several passes points
+at accounts whose dispatch keeps failing. No rule pages on that gauge yet;
+an account reached but rejected before its Durable Object saves a job may still
+have no age-based stale evidence.
 
 Set the secret to `false` (or delete
 it, since absence is disabled) to stop future periodic scans. Do not
