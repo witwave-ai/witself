@@ -185,9 +185,12 @@ schema-change handling and `--backup-evidence`.
 The train carrying 0099 and 0100 must not overlap a pre-migration backup, the
 nightly 00:00Z backup export, a restore drill, or an in-flight evacuation import,
 because concurrent builds wait for older snapshots. Before the train, the
-dispatcher times both migrations on a restored copy of the serving cell. If
-their total approaches the 150 s startup budget, the dispatcher raises the
-startup probe's `failureThreshold` for that roll.
+dispatcher times both migrations on a restored copy of the serving cell. Store
+migrations run at server and worker startup, before the health listener, so the
+startup probe bounds each migration file: the chart allows 600 s
+(`probes.startup` and `worker.probes.startup`, 5 s x 120). The apps chart does
+not forward probe settings, so a cell cannot raise this for one roll; a file
+whose measured time approaches half the budget needs a code change first.
 
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.

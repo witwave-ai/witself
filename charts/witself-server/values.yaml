@@ -240,7 +240,9 @@ worker:
       path: /startupz
       periodSeconds: 5
       timeoutSeconds: 2
-      failureThreshold: 30
+      # 600 s: store migrations run before the health listener starts, and a
+      # migration file that outlives the budget restarts from zero on retry.
+      failureThreshold: 120
   resources:
     requests:
       cpu: 50m
@@ -417,7 +419,9 @@ probes:
     path: /startupz
     periodSeconds: 5
     timeoutSeconds: 2
-    failureThreshold: 30
+    # 600 s: store migrations run before the health listener starts, and a
+    # migration file that outlives the budget restarts from zero on retry.
+    failureThreshold: 120
 
 service:
   type: ClusterIP

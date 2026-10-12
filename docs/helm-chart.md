@@ -425,7 +425,7 @@ probes:
     port: health
     periodSeconds: 5
     timeoutSeconds: 2
-    failureThreshold: 30
+    failureThreshold: 120
 
 database:
   existingSecret:
