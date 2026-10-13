@@ -808,10 +808,22 @@ func TestRuntimeMetricsObserveMessageRateLimitRejectionsWithBoundedLabels(t *tes
 		"message_private_identifier", "request_private_identifier", "private message body",
 		"private reply body", "private result body", "private request body", "private offer body",
 		"private completion body", "private_source_value", "private_dimension", "private_scope",
-		"private_operation", "999", "998",
+		"private_operation",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+	// The limit (999) and usage (998) must never surface as a label value or as a
+	// whole sample token. A plain substring check also matched unrelated Go runtime
+	// gauges such as witself_go_heap_live_bytes 3529984 and failed at random.
+	for _, forbidden := range []string{"999", "998"} {
+		token := regexp.MustCompile(`(^|[^0-9])` + forbidden + `([^0-9]|$)`)
+		for _, line := range strings.Split(text, "\n") {
+			if strings.Contains(line, `="`+forbidden+`"`) ||
+				(strings.HasPrefix(line, "witself_message_rate_limit") && token.MatchString(line)) {
+				t.Fatalf("metrics exposed %q in line %q", forbidden, line)
+			}
 		}
 	}
 }
