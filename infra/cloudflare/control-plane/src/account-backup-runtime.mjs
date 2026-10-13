@@ -947,6 +947,7 @@ export class DurableAccountBackup {
       }
     }
 
+    // Keep /run for older control planes; the scheduler now uses /start.
     try {
       return await this.fence.run(async () => {
         const result = await this.run(input);
@@ -2069,7 +2070,7 @@ export function accountBackupPassSnapshot(scan) {
 async function dispatchBackup(env, job, config) {
   const id = env.ACCOUNT_BACKUP.idFromName(job.account_id);
   const response = await env.ACCOUNT_BACKUP.get(id).fetch(
-    new Request("http://account-backup.internal/run", {
+    new Request("http://account-backup.internal/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2089,9 +2090,9 @@ async function dispatchBackup(env, job, config) {
     body?.schema_version === "witself.v0" &&
     body?.account_id === job.account_id &&
     body?.backup_id === job.backup_id &&
-    ["committed", "retrying", "failed", "busy"].includes(body?.status);
+    ["accepted", "committed", "busy", "failed"].includes(body?.status);
   const accepted = acknowledged &&
-    ["committed", "retrying"].includes(body?.status);
+    ["accepted", "committed"].includes(body?.status);
   return {
     account_id: job.account_id,
     acknowledged,
