@@ -784,18 +784,21 @@ func TestImportStateMemoryPostgres(t *testing.T) {
 	started := time.Now()
 	defer func() { t.Logf("memory tiers wall_time=%s", time.Since(started)) }()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
-	defer cancel()
+	// Each tier gets its own budget: a slow ci tier on a loaded host must not
+	// leave the large tier an expired context (2026-10-12: ci took 18m4s).
 	tiers := []struct {
 		name                                  string
+		budget                                time.Duration
 		limit, bound                          int64
 		email, transcripts, entries, memories int
 	}{
-		{"ci", 167772160, 150994944, 4 << 20, 16, 60000, 200},
-		{"large", 268435456, 251658240, agentemail.RelayMaximumRawBytes, 1, 8, 2},
+		{"ci", 24 * time.Minute, 167772160, 150994944, 4 << 20, 16, 60000, 200},
+		{"large", 10 * time.Minute, 268435456, 251658240, agentemail.RelayMaximumRawBytes, 1, 8, 2},
 	}
 	for _, tier := range tiers {
 		t.Run(tier.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), tier.budget)
+			defer cancel()
 			seed := seedImportStateFixture(ctx, t, dsn, tier.transcripts, tier.entries, tier.memories, 2, []int{tier.email}, false, false)
 			if tier.name == "ci" {
 				t.Run("real_rows", func(t *testing.T) {
