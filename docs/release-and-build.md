@@ -164,6 +164,173 @@ therefore not complete until the replacement pods are Ready and report the
 expected build from `/v1/version`. This startup behavior must be considered
 before any future explicit migration Job is introduced.
 
+### Schema-change train rehearsal
+
+Before a train that changes the store schema, run the migration rehearsal from
+the candidate checkout and retain its reports with the train evidence. This is
+local development tooling: it starts one disposable PostgreSQL container,
+migrates with the store's embedded Goose files, loads data, and runs each
+scenario against a fresh database cloned from that loaded baseline. It neither
+deploys a cell nor connects to a remote database. The rehearsal is separate from
+`make check`; the ordinary gate runs its offline contract tests only.
+
+Use Bash 3.2 or later, Python 3, a local Go toolchain with cached dependencies,
+and a local Docker engine exposing cgroup v2 `memory.stat`, `memory.current`, and
+`memory.max`. The helper build is offline. `make rehearse-migrations` passes its
+selected Go toolchain's `GOROOT` to the wrapper; the report records the selected
+binary's `go env GOVERSION` as `helper_go_version` (or `null` if it is not a
+recognized release version). Docker uses an empty private configuration and the
+local socket.
+
+For example, to rehearse schema 97 to 98 with the serving synthetic shape
+(choose the candidate train's actual range):
+
+```sh
+make rehearse-migrations REHEARSAL_ARGS='--from 97 --to 98 --synthetic --scenario quiet --scenario load --scenario mem16 --out /tmp/witself-migration-rehearsal'
+```
+
+`--from` is required; `--to` defaults to the latest embedded migration. A range
+with no pending file is refused. The synthetic fixture targets the schema-97
+table graph. Other baselines and archives must still contain the tables and
+columns used by the helper's size measurements; older schemas are unverified. The
+default image comes from the pinned PostgreSQL image in
+`.gitops/cells/civo-sandbox-use1-serving/values.yaml`, using the repository's
+values reader. `--image` overrides it. The image must already be local unless
+`--pull` is explicitly supplied. The container uses a random localhost port and
+a unique `witself-rehearsal-` name; it never uses the shared test container or
+port 5599. The local PostgreSQL socket uses trust authentication; TCP uses SCRAM
+with a per-run password in a 0600 file inside the private work directory. Exit
+and signal traps remove the container, then its named `<container>-data` volume,
+and check with `docker volume inspect` that the volume is gone. If it remains,
+the wrapper prints `rehearse-store-migrations: cleanup_failed volume=<container>-data`
+and exits non-zero. A pre-existing volume of that name is refused with
+`volume_exists`. Cleanup also removes the private work directory and password file.
+
+Resource defaults are `--memory 384m` (also the swap limit) and `--cpus 0.38`,
+with `--shared-buffers 128MB`, `--maintenance-work-mem 64MB`, and
+`--max-wal-size 400MB`. Override these flags only when the retained evidence
+clearly identifies the intended resource envelope.
+
+Choose exactly one data source: `--synthetic`, `--restore FILE` for a local
+custom-format PostgreSQL archive supplied by the operator, or `--restore -` to
+stream that archive from stdin. FILE mode reads an archive the operator supplies;
+the harness never writes or fetches one. Real serving backups use `--restore -`
+(never decrypt to a file), with `--size-profile restore`:
+
+```sh
+age --decrypt -i IDENTITY_FILE ARCHIVE | GOROOT=$(go env GOROOT) bash scripts/rehearse-store-migrations.sh --restore - --size-profile restore --from 97 --to 98 --scenario quiet --out /tmp/witself-migration-rehearsal
+```
+
+With `--restore -`, no plaintext archive file is written. The restored database lives in a named Docker volume inside the Docker Desktop VM disk until cleanup removes it; host disk encryption (FileVault) protects it at rest.
+
+`--size-profile restore` requires `--restore` and records size checks as `info`;
+size does not stop the rehearsal. Size checks are informational for restored data.
+With this profile, a restored run reports `restored_data_ready: true` only when
+every scenario passes, and keeps `serving_readiness: false`.
+
+Synthetic defaults are 330,304 transcript entries over
+three accounts in a 90/8/2 split and about 2,000 transcripts, 174,212 curation
+mutations, and 30,225 curation run inputs. `--entries`, `--transcripts`,
+`--mutations`, and `--run-inputs` change the synthetic shape. Before running a
+scenario, the default `--size-profile serving` checks the measured transcript heap,
+total relation size, and stored body-plus-payload bytes against approximately
+460 MiB, 1,387 MiB, and 1,055 MiB respectively, each within ten percent. Read those
+measurements in the report; row counts alone do not establish serving scale.
+Use `--size-profile smoke` only for a deliberately tiny shape: it skips the
+serving-size checks and reports `serving_readiness: false`. That mode exercises
+the harness and report parser and cannot establish that a schema-change train
+is safe at serving scale.
+
+The supporting fixture populates every table indexed by migrations 97 and 98;
+`--other-rows` defaults to 300. Curation mutations need about 30,000 parent
+requests to retain the requested distinct-request distribution and foreign keys.
+The stored-column measurement uses the requested nullable expression
+`sum(pg_column_size(body)+pg_column_size(payload))`; rows without a payload are
+excluded by PostgreSQL. The JSON also includes the null-aware sum separately.
+
+Repeat `--scenario` to select the required experiments; the default is `quiet`:
+
+| Scenario | Experiment |
+| --- | --- |
+| `quiet` | Apply each file without concurrent writes. |
+| `load` | Append 100-entry batches with foreign-key checks at `--append-rate` batches per second (default one). `--long-tx SECONDS` also holds a REPEATABLE READ transaction, establishing its snapshot five seconds before the first file. |
+| `kill` | Use `--kill-file BASENAME` and `--kill-after SECONDS` to kill the migrator during the selected file, restart it, and check convergence and orphan lifetime. |
+| `mem16` | Set the role's `maintenance_work_mem=16MB`, `max_parallel_maintenance_workers=0`, and `client_connection_check_interval=5s` before applying files. |
+
+The kill scenario fails if the selected file finishes before the requested
+interruption; killing later helper cleanup does not count. A requested long
+transaction must remain open for its full duration, even when migration files
+finish earlier.
+
+For a migration that creates derived state, pass `--verify-sql FILE` containing
+the verification query. Keep this query free of private output: reports retain
+the verification outcome, not data returned by the query. Verification uses
+`--timeout`; an expired deadline reports `verification_timeout`, distinct from
+a verification failure. The report also records invalid indexes and, for the
+kill scenario, convergence attempts and the orphaned backend's observed lifetime.
+
+`--out DIR` receives value-free `report.md` and `report.json`. Per-file evidence
+includes elapsed time, sampled strong relation-lock time (held or queued),
+anonymous-memory rise over the pre-file baseline, OOM/restart status, and the
+appender's longest blocked wait under load. `lock_hold_ms` includes both held and
+queued time; `lock_queued_ms` records queued time alone. The report also includes
+whole-batch appender transaction latency as a conservative upper bound; that
+measure includes ordinary execution time.
+
+The memory check uses anonymous memory (`anon`) from cgroup v2 `memory.stat`.
+Page cache is reclaimed at the memory cap, so total `memory.current` can stay
+flat while a migration consumes real anonymous-memory headroom. PostgreSQL's
+`shared_buffers` are already resident on a long-running server. Each file records
+`memory_baseline_anon_bytes`, `memory_peak_anon_bytes`, `memory_peak_shmem_bytes`,
+and `memory_peak_file_bytes`; `memory_rise_bytes` is peak anon minus the pre-file
+anon baseline. `memory_current_rise_bytes` retains the total-memory rise as
+informational evidence and does not gate the result. `memory_max_bytes` records
+the container cap, or `null` when `memory.max` is `max`. Missing or nonnumeric
+anon samples fail measurement. Concurrent index builds may exceed the unchanged
+20 MiB default because their sorts consume anonymous memory sized by
+`maintenance_work_mem`; retain that no-go as evidence.
+
+Memory uses a continuous sampler through Docker exec; locks and appender blocking
+use a PostgreSQL observer. Both target a sample every 200 ms; short events
+may fall between samples. The report records the largest sampling gaps and
+fails measurement if a memory or lock-observer gap exceeds one second. That
+tolerance accommodates local scheduling and Docker overhead without treating a
+stalled sampler as complete evidence. Read these limits as separate checks:
+
+| Check | Default decision |
+| --- | --- |
+| Quiet elapsed time | Each file at most 45 seconds; all files together at most 75 seconds. Override with `--file-limit` and `--total-limit` (seconds). |
+| Memory | Each file's anonymous memory rises at most 20 MiB over its anon baseline; override with `--memory-rise-limit` (MiB). An OOM kill fails. |
+| Locks and blocked appender | Use the worse tier of held-or-queued strong relation-lock time and the appender's longest blocked wait. At most 15 seconds is `go`; more than 15 and at most 30 seconds is `founder`; more than 30 seconds is `no-go`. Override with `--lock-go-seconds` and `--lock-founder-seconds`; founder must exceed go. |
+| Interrupted migration | Converge within two attempts, leave no invalid indexes, and leave no orphan alive longer than ten seconds with the client connection check interval set. |
+
+Exit zero means every requested scenario passes. `founder` requires a founder
+decision and is not an automatic `go`; preserve that finding in the train
+review. `--timeout` bounds each migration attempt and verification query
+(default 600 seconds).
+`--load-timeout` separately bounds synthetic loading, archive restoration, or
+baseline cloning
+(default 3,600 seconds); loading is outside the migration timing thresholds.
+Threshold overrides are experiment inputs, not permission to discard a
+failed serving-scale result. Retain evidence for the intended migration range,
+data shape, resource caps, and all requested scenarios before proceeding.
+
+The real PostgreSQL integration tests are opt-in through
+`WITSELF_TEST_REHEARSAL=1` and are excluded from `make check`.
+`TestTinyRehearsalIntegration` rehearses a tiny synthetic dataset from schema 97
+to 98 and validates report parsing. `TestTinyRestoreRehearsalIntegration` starts
+a loopback-only `witself-rehearsal-src-*` source container, makes a `pg_dump -Fc`,
+and pipes it to `--restore - --size-profile restore`. It is the precondition for
+a real-data restore rehearsal. Run both tests on
+a host with Docker and `postgres:18-alpine3.23` already available locally, or set
+`WITSELF_REHEARSAL_IMAGE` to another local image. The integration tests never pull
+an image. Their success is plumbing evidence, not full-scale timing or memory
+evidence.
+
+```sh
+WITSELF_TEST_REHEARSAL=1 go test ./internal/tools/migrationrehearsal -run '^TestTiny(Restore)?RehearsalIntegration$' -count=1 -v -timeout 30m
+```
+
 ### Cloudflare Worker Dependencies
 
 Wrangler is pinned once in
