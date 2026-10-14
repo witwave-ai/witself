@@ -32,7 +32,7 @@ const docs = `${repo}/blob/main/docs`;
 const professional = plans.find(plan => plan.id === 'standard');
 if (!professional) throw new Error('The management example requires the available Professional plan.');
 const managementExample = p.management.example.map(([speaker, text]) => [speaker, text.replaceAll('{price}', `$${fmt(professional.price_monthly)}`)]);
-const code = (text, id) => `<div class="codebox"><pre><code${id ? ` id="${id}"` : ''}>${esc(text)}</code></pre>${id ? `<button type="button" data-copy="${id}" hidden aria-label="Copy Homebrew install command">Copy</button>` : ''}</div>`;
+const code = (text, id, label = 'Homebrew install command', wrap = false) => `<div class="codebox"><pre><code${id ? ` id="${id}"` : ''}>${wrap ? text.split(' ').map(word => `<span>${esc(word)}</span>`).join(' ') : esc(text)}</code></pre>${id ? `<button type="button" data-copy="${id}" hidden aria-label="Copy ${esc(label)}">Copy</button>` : ''}</div>`;
 const steps = [
   {title: 'Install the CLI', text: 'Use Homebrew above, or choose a native installer. Release installers verify checksums.', commands: ''},
   {title: 'Create your account and agent', text: 'Start free. Complete the browser challenge, retry with the challenge token, and verify your email. Then create a realm, agent, and local token.', commands: 'witself account create --name personal --email you@example.com --accept-terms\n# Complete the challenge; retry the same command with --challenge TOKEN.\n# Follow the verification link in your email, then check status:\nwitself account status --account personal\nwitself realm create --account personal main\n# Use the returned realm ID and agent ID in the next commands:\nwitself agent create --account personal --realm REALM_ID assistant\nwitself token create --account personal --agent AGENT_ID'},
@@ -113,7 +113,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
   </section>
   <section id="inspect" class="inspection wrap" aria-labelledby="inspection-title">
     <div class="section-intro"><p class="eyebrow">${esc(p.inspection.eyebrow)}</p><h2 id="inspection-title">${esc(p.inspection.title)}</h2><p>${esc(p.inspection.intro)}</p></div>
-    <div class="inspection-grid">${p.inspection.screenshots.map(screenshot => `<figure class="inspection-card"><a class="inspection-image" href="${esc(screenshot.src)}" aria-label="View full-size ${esc(screenshot.name)} screenshot"><img src="${esc(screenshot.src)}" alt="${esc(screenshot.alt)}" width="${screenshotSize(screenshot.src).width}" height="${screenshotSize(screenshot.src).height}" loading="lazy" decoding="async"></a><figcaption><h3>${esc(screenshot.name)}</h3><p>${esc(screenshot.caption)}</p><a class="text-link" href="${docs}/${esc(screenshot.guide)}">Explore the ${screenshot.guide === 'agent-console.md' ? 'console' : 'terminal'} guide <span aria-hidden="true">↗</span></a></figcaption></figure>`).join('')}</div>
+    <div class="inspection-grid">${p.inspection.screenshots.map(screenshot => `<figure class="inspection-card"><a class="inspection-image" href="${esc(screenshot.src)}" aria-label="View full-size ${esc(screenshot.name)} screenshot"><img src="${esc(screenshot.src)}" alt="${esc(screenshot.alt)}" width="${screenshotSize(screenshot.src).width}" height="${screenshotSize(screenshot.src).height}" loading="lazy" decoding="async"></a><figcaption><h3>${esc(screenshot.name)}</h3><p>${esc(screenshot.caption)}</p><p class="inspection-command-label">${esc(p.inspection.commandLabel)}</p>${code(screenshot.command, screenshot.commandId, `${screenshot.name} command`, true)}<p>${esc(screenshot.commandNote)}</p><a class="text-link" href="${docs}/${esc(screenshot.guide)}">Explore the ${screenshot.guide === 'agent-console.md' ? 'console' : 'terminal'} guide <span aria-hidden="true">↗</span></a></figcaption></figure>`).join('')}</div>
     <p class="fine-print inspection-caption">${esc(p.inspection.screenshotNote)}</p>
     <div class="inspection-footer"><p>${esc(p.inspection.boundary)}</p><p class="inspection-demo">${esc(p.inspection.demoLabel)} <code>${esc(p.inspection.demoCommand)}</code></p></div>
   </section>
@@ -155,7 +155,7 @@ const markdown = [
   `## ${p.intro}\n\n${p.introText}`,
   ...p.features.map(([title, text]) => `### ${title}\n\n${text}`),
   `## ${p.inspection.title}\n\n${p.inspection.intro}`,
-  ...p.inspection.screenshots.map(screenshot => `### ${screenshot.name}\n\n${screenshot.caption}\n\n![${screenshot.alt}](${absolute(screenshot.src)})\n\n[Read the guide](${docs}/${screenshot.guide}).`),
+  ...p.inspection.screenshots.map(screenshot => `### ${screenshot.name}\n\n${screenshot.caption}\n\n![${screenshot.alt}](${absolute(screenshot.src)})\n\n${p.inspection.commandLabel}:\n\n\`\`\`sh\n${screenshot.command}\n\`\`\`\n\n${screenshot.commandNote}\n\n[Read the guide](${docs}/${screenshot.guide}).`),
   `${p.inspection.screenshotNote}\n\n${p.inspection.boundary}\n\n${p.inspection.demoLabel}\n\n\`\`\`sh\n${p.inspection.demoCommand}\n\`\`\``,
   '## Supported integrations\n\nCommands assume a configured agent.',
   ...p.runtimes.map(r => `- **${r.name}**: ${r.note}. ${r.platforms}. Command: \`witself install ${r.command}\`.`),
