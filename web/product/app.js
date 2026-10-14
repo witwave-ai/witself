@@ -6,7 +6,7 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     try {
       await navigator.clipboard.writeText(code.textContent);
       button.textContent = 'Copied';
-      document.getElementById('copy-status').textContent = 'Install command copied.';
+      document.getElementById('copy-status').textContent = 'Command copied.';
     } catch {
       button.textContent = 'Select command';
       const range = document.createRange();
