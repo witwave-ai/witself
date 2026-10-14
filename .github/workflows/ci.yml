@@ -13,33 +13,129 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Keep this required check named exactly go. Mirror the Go jobs in release.yml;
-  # both pre-tag PostgreSQL image tripwires must also succeed before merges.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+      website: ${{ steps.scope.outputs.website }}
+      website_only: ${{ steps.scope.outputs.website_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Test change classification and required gates
+        run: node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs
+      - name: Classify the complete change set
+        id: scope
+        run: node scripts/ci-product-scope.mjs
+
+  website:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    uses: ./.github/workflows/product-site-checks.yml
+
+  # Keep every required check reporting a real result in both lanes. Application
+  # and shared changes retain the full gates mirrored by the release workflow.
   go:
     name: go
     if: ${{ always() }}
-    needs: [go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]
+    needs: [changes, website, go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - name: Require all Go gates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require scoped CI gates
         env:
-          GO_REST_RESULT: ${{ needs.go-rest.result }}
-          GO_STORE_RESULT: ${{ needs.go-store.result }}
-          GO_INFRA_RESULT: ${{ needs.go-infra.result }}
-          BACKUP_IMAGE_RESULT: ${{ needs.postgres-backup-image.result }}
-          POSTGRES_MIRROR_RESULT: ${{ needs.postgres-image-mirror.result }}
-          PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}
-        run: |
-          for result in "$BACKUP_IMAGE_RESULT" "$POSTGRES_MIRROR_RESULT" "$GO_REST_RESULT" "$GO_STORE_RESULT" "$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "A required CI gate did not succeed: $result" >&2
-              exit 1
-            fi
-          done
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci-product-gate.mjs
+
+  release-config:
+    if: ${{ always() }}
+    needs: [changes, website, release-config-full]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require scoped CI gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci-product-gate.mjs
+
+  homebrew-formula:
+    if: ${{ always() }}
+    needs: [changes, website, homebrew-formula-full]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require scoped CI gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci-product-gate.mjs
+
+  helm:
+    if: ${{ always() }}
+    needs: [changes, website, helm-full]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require scoped CI gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci-product-gate.mjs
+
+  # Frozen required names: these labels identify checks, not their runners.
+  avatar-renderer-portability:
+    name: avatar-renderer-portability (${{ matrix.check }})
+    if: ${{ always() }}
+    needs: [changes, website, avatar-renderer-portability-full]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: ubuntu-latest
+            runner: ubuntu-24.04
+          - check: ubuntu-24.04-arm
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require scoped CI gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci-product-gate.mjs
 
   go-rest:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -153,6 +249,8 @@ jobs:
           govulncheck ./...
 
   go-store:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -226,6 +324,8 @@ jobs:
           if-no-files-found: error
 
   go-infra:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -258,6 +358,8 @@ jobs:
           golangci-lint run ./...
 
   postgres-backup-image:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -268,6 +370,8 @@ jobs:
         run: make check-postgres-backup-image
 
   postgres-image-mirror:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -283,7 +387,9 @@ jobs:
           CI: "true"
         run: make check-postgres-image-mirror
 
-  release-config:
+  release-config-full:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -334,7 +440,9 @@ jobs:
       - name: Pin and run ShellCheck and actionlint
         run: bash scripts/test-ci-static-analysis.sh
 
-  homebrew-formula:
+  homebrew-formula-full:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -353,6 +461,8 @@ jobs:
   # those separate gates are documented in provider-integration-certification.
   provider-integration-contract:
     name: provider integration / ${{ matrix.target }}
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -506,8 +616,8 @@ jobs:
           retention-days: 90
 
   provider-contract-evidence:
-    needs: [provider-integration-contract]
-    if: always()
+    needs: [changes, provider-integration-contract]
+    if: always() && needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -552,12 +662,12 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # Both check names are required by the repository ruleset and by the
-  # release train's floor in scripts/roll-train.sh. They are frozen contract
-  # strings, not runner labels: the x64 name predates the explicit image pin.
-  # Renaming either needs the ordered procedure in docs/release-and-build.md.
-  avatar-renderer-portability:
-    name: avatar-renderer-portability (${{ matrix.check }})
+  # Keep both native renderer architectures in the application lane. The
+  # lightweight wrappers above preserve their existing required check names.
+  avatar-renderer-portability-full:
+    name: avatar renderer full (${{ matrix.check }})
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -584,7 +694,9 @@ jobs:
           '^TestPerceptual(V1PolicyGolden|Continuity.*Golden.*|ContinuityFingerprintSpeciesAndPlaceholderBehavior)$'
           -count=1
 
-  helm:
+  helm-full:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 require 'yaml'
 require 'open3'
+require 'json'
 
 root = ARGV.fetch(0)
 def check(message, condition)
@@ -40,18 +41,30 @@ tripwire = ci.fetch('postgres-backup-image')
 build_step = tripwire.fetch('steps').find { |step| step['run'] == 'make check-postgres-backup-image' }
 check('pre-tag CI must require a Docker build and smoke test',
       build_step && build_step.dig('env', 'CI') == 'true' &&
-      !tripwire.key?('if') && !build_step.key?('if') &&
+      tripwire['needs'] == 'changes' && tripwire['if'] == "needs.changes.outputs.application == 'true'" &&
+      !build_step.key?('if') &&
       !tripwire.fetch('continue-on-error', false) && !build_step.fetch('continue-on-error', false))
 go_gate = ci.fetch('go')
 check('required go gate must depend on the backup image tripwire',
       go_gate.fetch('needs').include?('postgres-backup-image') && go_gate.fetch('if').include?('always()'))
-gate_step = go_gate.fetch('steps').find { |step| step.dig('env', 'BACKUP_IMAGE_RESULT') == '${{ needs.postgres-backup-image.result }}' }
-check('required go gate must inspect the backup image result', gate_step)
-gate_env = gate_step.fetch('env').transform_values { 'success' }
+gate_step = go_gate.fetch('steps').find { |step| step['name'] == 'Require scoped CI gates' }
+check('required go gate must inspect all dependency results',
+      gate_step && gate_step['run'] == 'node scripts/ci-product-gate.mjs' &&
+      gate_step.dig('env', 'NEEDS_JSON') == '${{ toJSON(needs) }}')
+gate_needs = go_gate.fetch('needs').to_h { |name| [name, {'result' => 'success'}] }
+gate_needs['changes']['outputs'] = {'application' => 'true', 'website' => 'true', 'website_only' => 'false'}
 %w[success failure skipped cancelled].each do |result|
-  _, _, status = Open3.capture3(gate_env.merge('BACKUP_IMAGE_RESULT' => result), 'bash', '-c', gate_step.fetch('run'))
+  gate_needs['postgres-backup-image']['result'] = result
+  _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', gate_step.fetch('run'), chdir: root)
   check("required go gate must accept only a successful backup build: #{result}", status.success? == (result == 'success'))
 end
+gate_needs.each { |name, value| value['result'] = 'skipped' unless %w[changes website].include?(name) }
+gate_needs['changes']['outputs'] = {'application' => 'false', 'website' => 'true', 'website_only' => 'true'}
+_, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', gate_step.fetch('run'), chdir: root)
+check('website-only gate must accept an explicitly scoped backup skip', status.success?)
+gate_needs['postgres-backup-image']['result'] = 'failure'
+_, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', gate_step.fetch('run'), chdir: root)
+check('website-only gate must not hide a failed backup build', !status.success?)
 
 workflow = YAML.safe_load(File.read(File.join(root, '.github/workflows/release.yml')), aliases: false)
 release = workflow.fetch('jobs').fetch('goreleaser')

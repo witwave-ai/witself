@@ -129,7 +129,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -382,7 +382,10 @@ check-postgres-image-mirror: ## Verify digest-preserving local copies; Skopeo is
 	bash scripts/test-postgres-image-mirror-check.sh
 	bash scripts/check-postgres-image-mirror.sh
 
-check: ## Run CI's exact local gate set — run before every push
+check-product-site: ## Check brochure output, indexing, screenshots, and deployment without publishing
+	node web/product/check.mjs
+
+check: ## Run the full application gate set (see CLAUDE.md for brochure-only scope)
 	bash scripts/check-conflict-markers.sh
 	bash scripts/test-conflict-markers.sh
 	$(MAKE) check-cell-secrets
@@ -435,6 +438,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-release-ops.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
+	node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs
 	bash scripts/test-workflow-runner-labels.sh
 	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-capture-billing-rollout-inventory.sh
