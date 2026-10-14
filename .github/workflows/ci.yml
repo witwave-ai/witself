@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Main pushes must finish independently: a brochure run does not replace
+  # application coverage from an earlier merge. PR updates still supersede runs.
+  group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
