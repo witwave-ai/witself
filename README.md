@@ -1,5 +1,8 @@
 # Witself
 
+Visit [witself.com](https://witself.com/) for the product overview, pricing,
+and supported AI integrations.
+
 Status: active development. The `witself` CLI ships incrementally (with `ws`
 kept as a short alias).
 
