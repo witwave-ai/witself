@@ -4,9 +4,10 @@ This directory owns the one-page product brochure for WitSelf: what it does, sup
 free-plan limits, and paid plans. It is a static public-information page. Account setup and management stay in the
 WitSelf CLI and AI integrations; the brochure has no login flow.
 
-**Publishing is on hold until the product domain is acquired and launch is authorized.** The proposed `witself.ai`
-domain is not assumed to be owned or configured. Committing this source does not deploy the site, configure DNS,
-verify a search property, or submit anything for indexing. No automatic deployment workflow is enabled for it.
+**Publishing is on hold until launch is authorized.** The product domain is `witself.com`, registered with
+Cloudflare. Committing this source does not deploy the site, configure its custom domain, verify a search property,
+or submit anything for indexing. The product workflow validates changes automatically; publishing requires a
+separate manual launch and an explicitly enabled repository variable.
 
 ## Preview locally
 
@@ -21,15 +22,14 @@ Open <http://127.0.0.1:4178/>. The build writes generated files to `web/product/
 The default preview emits `noindex` metadata and a `robots.txt` crawl disallow, with no production canonical URL or
 domain-ownership claim. Keep this preview local; crawler directives are not access controls.
 
-When a public domain is owned, configured, and approved for launch, the production build interface is:
+The production build targets the product domain:
 
 ```sh
-node web/product/build.mjs --site-url https://owned-domain.example/ --production
+node web/product/build.mjs --site-url https://witself.com/ --production
 ```
 
-Replace the example URL with the actual canonical origin. Production mode generates the canonical URL and sitemap,
-removes the preview indexing restriction, and permits crawling. It does not create a `CNAME`, configure hosting, or
-publish the output.
+Production mode generates the canonical URL and sitemap, removes the preview indexing restriction, and permits
+crawling. Building does not configure hosting or publish the output.
 
 ## Content and maintenance
 
@@ -48,18 +48,83 @@ publish the output.
 Keep generated output disposable. Review both the rendered page and its text representation whenever product copy,
 prices, or entitlements change.
 
-## Repository ownership and hosting recommendation
+## Repository ownership and Cloudflare hosting
 
 This source lives in the **WitSelf monorepo at `web/product/`** so product behavior, install instructions, pricing,
-and the brochure can change together. A separate marketing-source repository is not needed.
-Give the site an independent deployment workflow and, later, CI scoped to this directory and its content dependencies
-such as `web/plans/plans.json`. Publishing a brochure should not require a server release.
+and the brochure can change together. A separate marketing-source or publishing repository is not needed.
+GitHub stores the source and runs the independent [product-site workflow](../../.github/workflows/product-site.yml).
+[Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/) hosts the generated
+brochure. This is an assets-only Worker named `witself-product`; [wrangler.toml](wrangler.toml) has no Worker script
+or application runtime. Only `web/product/dist/` is uploaded. The intended custom domain is `witself.com`; public
+`workers.dev` and preview URLs are disabled. Connecting the custom domain is a separate operator action at the
+first authorized launch. The workflow does not create domain records, add a `www` hostname, or configure redirects.
 
-Use **GitHub for source and review, with Cloudflare static hosting for the public site**. GitHub's current
-[Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits) prohibit using
-Pages as free hosting for sites primarily facilitating commercial transactions or providing commercial SaaS.
-Because this brochure markets paid SaaS plans, do not assume GitHub Pages is an appropriate production host. This is
-a hosting recommendation; no deployment is included in the prototype.
+Both `route` and `routes` are deliberately absent from the Wrangler configuration. With `workers_dev=false`, this
+preserves operator-managed routes and domains on subsequent deployments, as described in
+[Wrangler's route-management guidance](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth).
+Do not add `routes=[]`: an explicit empty list asks Wrangler to clear routes instead of leaving them managed outside
+the workflow. GitHub deployment credentials grant **Workers Editor for the existing `witself-product` Worker
+only**; they do not grant zone-write or custom-domain management permissions.
+
+The workflow checks source syntax, preview indexing restrictions, the production output, and a Wrangler dry-run on
+pull requests and pushes to `main` affecting this directory, the plan catalog, the workflow, or its shared Wrangler
+dependencies. It does not depend on a server release. Generated files stay excluded from Git.
+
+The HTML build uses Node 22 without package installation. Deployment tooling reuses the committed dependency lock
+in `infra/cloudflare/control-plane/`, with lifecycle scripts disabled, and the existing `assertWranglerVersion`
+gate in `infra/cloudflare/wrangler-version.mjs`. There is no second Wrangler version or floating `npx` download.
+Every Wrangler invocation passes the reviewed empty environment file to avoid loading local dotenv files.
+
+To check the deployment locally without credentials or publication, install the locked dependencies and run:
+
+```sh
+npm ci --ignore-scripts --prefix infra/cloudflare/control-plane
+node --test infra/cloudflare/control-plane/test/wrangler-version.test.mjs
+node web/product/build.mjs --site-url https://witself.com/ --production
+infra/cloudflare/control-plane/node_modules/.bin/wrangler deploy \
+  --config web/product/wrangler.toml \
+  --env-file infra/cloudflare/wrangler-production-empty.env \
+  --dry-run
+```
+
+### Launch hold and manual publishing
+
+Keep the repository Actions variable `WITSELF_PRODUCT_PUBLISH_ENABLED` **false or unset** until launch is authorized.
+Every publishing attempt requires all four conditions:
+
+- The workflow is started manually through `workflow_dispatch`.
+- The selected branch is `main`.
+- The `publish` input is `true` (its default is `false`).
+- The repository variable `WITSELF_PRODUCT_PUBLISH_ENABLED` is exactly `true`.
+
+The deployment job enforces these conditions before receiving deployment credentials in its final step. Pushes
+and pull requests never publish, even after the launch variable is enabled. A manual run with `publish=false`
+performs validation only.
+
+Before the first authorized launch:
+
+1. In a fresh account, an operator must first create `witself-product` without public routes, a custom domain,
+   `workers.dev`, or preview URLs, using the reviewed assets and pinned Wrangler. This bootstrap is needed only
+   once: a token limited to an existing Worker cannot create it. The current account already has this Worker.
+2. Confirm the `witself.com` zone is active in the intended Cloudflare account. At first authorized launch, the
+   operator separately connects `witself.com` to `witself-product` through Cloudflare's
+   [custom-domain setup](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/), including
+   review of conflicting DNS records and certificate readiness. Connecting the domain makes the current assets
+   publicly reachable; it is a launch action, not part of the GitHub workflow.
+3. Configure the GitHub environment **product-site**, restricted to deployments from `main`. Set the repository
+   variable `CLOUDFLARE_ACCOUNT_ID` to the intended account and add the environment secret `CLOUDFLARE_API_TOKEN`.
+   Use **Workers Editor scoped only to the existing `witself-product` Worker**, without zone-write permissions.
+   The operator manages the custom domain separately. Follow
+   [Cloudflare's GitHub Actions guidance](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
+   The account ID is public configuration; keep the API token out of this repository and ordinary Actions variables.
+4. Enable the repository variable `WITSELF_PRODUCT_PUBLISH_ENABLED=true`, then manually run **product-site** from
+   `main` with `publish=true`. The deployment rebuilds the exact selected commit before publishing.
+5. Verify `https://witself.com/`, its HTTPS certificate, canonical URL, public assets, `robots.txt`, `sitemap.xml`,
+   Markdown guide, and plan catalog.
+
+Remove or set the launch variable to `false` to block further workflow publishing. That hold does not unpublish an
+already live site. Domain registration, GitHub settings, credentials, and launching are separate actions; committing
+this workflow does not perform them. No Cloudflare automatic build integration or GitHub Pages site is required.
 
 ## Search and AI discovery
 

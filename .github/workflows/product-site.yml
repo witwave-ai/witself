@@ -1,0 +1,151 @@
+name: product-site
+
+on:
+  pull_request:
+    paths:
+      - 'web/product/**'
+      - 'web/plans/plans.json'
+      - '.github/workflows/product-site.yml'
+      - 'infra/cloudflare/*/package.json'
+      - 'infra/cloudflare/control-plane/package-lock.json'
+      - 'infra/cloudflare/wrangler-version.*'
+      - 'infra/cloudflare/wrangler-production-empty.env'
+  push:
+    branches: [main]
+    paths:
+      - 'web/product/**'
+      - 'web/plans/plans.json'
+      - '.github/workflows/product-site.yml'
+      - 'infra/cloudflare/*/package.json'
+      - 'infra/cloudflare/control-plane/package-lock.json'
+      - 'infra/cloudflare/wrangler-version.*'
+      - 'infra/cloudflare/wrangler-production-empty.env'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish witself.com after launch authorization
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-site-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Check source syntax
+        run: |
+          node --check web/product/build.mjs
+          node --check web/product/content.mjs
+          node --check web/product/app.js
+      - name: Verify the local preview stays unindexed
+        run: |
+          node web/product/build.mjs
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, existsSync } from 'node:fs';
+          const out = 'web/product/dist/';
+          const html = readFileSync(out + 'index.html', 'utf8');
+          assert(html.includes('<meta name="robots" content="noindex, nofollow">'));
+          assert(!html.includes('rel="canonical"'));
+          assert.equal(readFileSync(out + 'robots.txt', 'utf8'), 'User-agent: *\nDisallow: /\n');
+          assert(!existsSync(out + 'sitemap.xml'));
+          NODE
+      - name: Build and verify the production site
+        run: |
+          node web/product/build.mjs --site-url https://witself.com/ --production
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, statSync } from 'node:fs';
+          const out = 'web/product/dist/';
+          const read = name => readFileSync(out + name, 'utf8');
+          for (const name of ['index.html', 'styles.css', 'app.js', 'favicon.svg',
+            'product.md', 'llms.txt', 'plans.json', 'robots.txt', 'sitemap.xml']) {
+            assert(statSync(out + name).isFile(), `Missing site file: ${name}`);
+          }
+          const html = read('index.html');
+          assert(html.includes('<link rel="canonical" href="https://witself.com/">'));
+          assert(html.includes('<meta name="robots" content="index, follow, max-snippet:-1">'));
+          assert(!html.includes('noindex'));
+          assert.equal(read('robots.txt'), 'User-agent: *\nAllow: /\n\nSitemap: https://witself.com/sitemap.xml\n');
+          assert(read('sitemap.xml').includes('<loc>https://witself.com/</loc>'));
+          assert(read('llms.txt').includes('https://witself.com/product.md'));
+          assert.deepEqual(JSON.parse(read('plans.json')),
+            JSON.parse(readFileSync('web/plans/plans.json', 'utf8')));
+          JSON.parse(html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)[1]);
+          NODE
+      - name: Install the committed Wrangler dependency set
+        run: npm ci --ignore-scripts --prefix infra/cloudflare/control-plane
+      - name: Verify the shared Wrangler version
+        run: |
+          node --input-type=module <<'NODE'
+          import { assertWranglerVersion } from './infra/cloudflare/wrangler-version.mjs';
+          await assertWranglerVersion('control-plane');
+          NODE
+      - name: Validate the static-assets deployment without publishing
+        run: |
+          infra/cloudflare/control-plane/node_modules/.bin/wrangler deploy \
+            --config web/product/wrangler.toml \
+            --env-file infra/cloudflare/wrangler-production-empty.env \
+            --dry-run
+
+  deploy:
+    # Keep WITSELF_PRODUCT_PUBLISH_ENABLED false or unset until launch is authorized.
+    # Pushes and pull requests never publish or receive deployment secrets.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.publish &&
+      vars.WITSELF_PRODUCT_PUBLISH_ENABLED == 'true'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: product-site
+      url: https://witself.com/
+    steps:
+      - name: Require the exact launch ref and hold value
+        env:
+          LAUNCH_ENABLED: ${{ vars.WITSELF_PRODUCT_PUBLISH_ENABLED }}
+        # Actions string comparisons ignore case; the final check does not.
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$LAUNCH_ENABLED" = true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install the committed Wrangler dependency set
+        run: npm ci --ignore-scripts --prefix infra/cloudflare/control-plane
+      - name: Verify the shared Wrangler version
+        run: |
+          node --input-type=module <<'NODE'
+          import { assertWranglerVersion } from './infra/cloudflare/wrangler-version.mjs';
+          await assertWranglerVersion('control-plane');
+          NODE
+      - name: Build the approved production site
+        run: node web/product/build.mjs --site-url https://witself.com/ --production
+      - name: Deploy static assets to Cloudflare
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          infra/cloudflare/control-plane/node_modules/.bin/wrangler deploy \
+            --config web/product/wrangler.toml \
+            --env-file infra/cloudflare/wrangler-production-empty.env
