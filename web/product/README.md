@@ -4,10 +4,11 @@ This directory owns the one-page product brochure for WitSelf: what it does, sup
 free-plan limits, and paid plans. It is a static public-information page. Account setup and management stay in the
 WitSelf CLI and AI integrations; the brochure has no login flow.
 
-**Publishing is on hold until launch is authorized.** The product domain is `witself.com`, registered with
-Cloudflare. Committing this source does not deploy the site, configure its custom domain, verify a search property,
-or submit anything for indexing. The product workflow validates changes automatically; publishing requires a
-separate manual launch and an explicitly enabled repository variable.
+**The product page is live at <https://witself.com/>.** The domain is registered with Cloudflare. Committing this
+source does not deploy the site, configure its custom domain, verify a search property, or submit anything for
+indexing. The product workflow validates changes automatically; publishing requires a separate manual run and an
+explicitly enabled repository variable. See [DISCOVERY.md](DISCOVERY.md) for the search/AI setup, recovery procedure,
+existing automation, and dated verification record.
 
 ## Preview locally
 
@@ -60,9 +61,9 @@ and the brochure can change together. A separate marketing-source or publishing 
 GitHub stores the source and runs the independent [product-site workflow](../../.github/workflows/product-site.yml).
 [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/) hosts the generated
 brochure. This is an assets-only Worker named `witself-product`; [wrangler.toml](wrangler.toml) has no Worker script
-or application runtime. Only `web/product/dist/` is uploaded. The intended custom domain is `witself.com`; public
-`workers.dev` and preview URLs are disabled. Connecting the custom domain is a separate operator action at the
-first authorized launch. The workflow does not create domain records, add a `www` hostname, or configure redirects.
+or application runtime. Only `web/product/dist/` is uploaded. Its custom domain is `witself.com`; public
+`workers.dev` and preview URLs are disabled. Connecting or restoring the custom domain is a separate operator action.
+The workflow does not create domain records, add a `www` hostname, or configure redirects.
 
 Both `route` and `routes` are deliberately absent from the Wrangler configuration. With `workers_dev=false`, this
 preserves operator-managed routes and domains on subsequent deployments, as described in
@@ -92,10 +93,11 @@ infra/cloudflare/control-plane/node_modules/.bin/wrangler deploy \
   --dry-run
 ```
 
-### Launch hold and manual publishing
+### Manual publishing and recovery
 
-Keep the repository Actions variable `WITSELF_PRODUCT_PUBLISH_ENABLED` **false or unset** until launch is authorized.
-Every publishing attempt requires all four conditions:
+Launch was authorized and `WITSELF_PRODUCT_PUBLISH_ENABLED` was verified as `true` on 2026-10-14.
+For a fresh environment, keep it **false or unset** until launch is authorized. Every publishing attempt requires
+all four conditions:
 
 - The workflow is started manually through `workflow_dispatch`.
 - The selected branch is `main`.
@@ -106,7 +108,7 @@ The deployment job enforces these conditions before receiving deployment credent
 and pull requests never publish, even after the launch variable is enabled. A manual run with `publish=false`
 performs validation only.
 
-Before the first authorized launch:
+For a fresh environment or hosting recovery:
 
 1. In a fresh account, an operator must first create `witself-product` without public routes, a custom domain,
    `workers.dev`, or preview URLs, using the reviewed assets and pinned Wrangler. This bootstrap is needed only
@@ -138,11 +140,7 @@ URL, matching structured data, and a sitemap. Google states that its AI search f
 or schema, and that crawling, indexing, and appearance are not guaranteed. `llms.txt` and Markdown are convenience
 formats, not ranking mechanisms. See [Google's AI features guidance](https://developers.google.com/search/docs/appearance/ai-features).
 
-After the domain and hosting are ready:
-
-1. Build and publish using the final canonical URL; verify HTTPS, crawler access, public links, and production metadata.
-2. Verify the domain property in Google Search Console through the domain owner's DNS access.
-3. Submit the generated sitemap and use URL Inspection to check the live homepage and request indexing.
-4. Add a clear product link from Witwave and monitor Search Console for crawl issues and search visibility.
-
-These are future launch steps. None has been completed by creating this local prototype.
+The build and CI preserve the on-page foundation. Search Console, Bing Webmaster Tools, DNS ownership, Cloudflare
+crawler access, and inbound links require separate operational configuration. [DISCOVERY.md](DISCOVERY.md) records
+what was done, what can be rebuilt from Git, what must be restored with the providers, and how to verify the result.
+It also distinguishes submission, crawlability, indexing, and AI citations; none is proof of the next.
