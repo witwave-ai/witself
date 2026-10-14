@@ -89,8 +89,10 @@ An unavailable or empty comparison also takes the full path.
 
 All six required merge-check names remain active: brochure-only changes satisfy them through successful website
 validation; application and mixed changes must satisfy their original application jobs as well. This preserves
-branch protection without waiting for deliberately skipped application jobs. Screenshot capture still has its
-own bounded workflow when its inputs change. Generated files stay excluded from Git.
+branch protection without waiting for deliberately skipped application jobs. Each `main` push has its own CI run
+group, so brochure changes neither cancel nor queue behind application checks already running. New revisions of
+the same pull request still cancel its obsolete checks. Screenshot capture retains its own bounded workflow
+when its inputs change. Generated files stay excluded from Git.
 
 The HTML build uses Node 22 without package installation. Deployment tooling reuses the committed dependency lock
 in `infra/cloudflare/control-plane/`, with lifecycle scripts disabled, and the existing `assertWranglerVersion`
