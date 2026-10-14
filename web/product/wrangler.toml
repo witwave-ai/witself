@@ -1,0 +1,11 @@
+# Assets-only product brochure. Deploy through the held product-site workflow.
+name = "witself-product"
+compatibility_date = "2026-10-13"
+workers_dev = false
+preview_urls = false
+
+# Omit both route and routes so deployments preserve operator-managed domains.
+# Do not replace this omission with routes = []; CI has no zone-write access.
+
+[assets]
+directory = "./dist"
