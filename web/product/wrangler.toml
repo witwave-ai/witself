@@ -1,4 +1,4 @@
-# Assets-only product brochure. Deploy through the held product-site workflow.
+# Assets-only product brochure. Deploy through the manual product-site workflow.
 name = "witself-product"
 compatibility_date = "2026-10-13"
 workers_dev = false

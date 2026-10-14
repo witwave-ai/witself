@@ -58,7 +58,8 @@ export const product = {
     demoLabel: 'Just exploring? Try demo data without an account:',
     demoCommand: 'witself tui --demo',
   },
-  setupPrompt: 'Help me install WitSelf, set up my free account, and connect it to this AI. Walk me through any steps I need to complete myself, then verify that it works.',
+  setupIntro: 'Ask this to have AI help you get everything set up:',
+  setupPrompt: 'Read https://witself.com/product.md, then help me install WitSelf, set up my free account, and connect it to this AI. Walk me through any steps I need to complete myself, then verify everything works.',
   intro: 'Keep the context. Change the tool.',
   introText: 'Decisions, preferences, and project history belong with your agent. WitSelf makes that context available through the CLI and the Model Context Protocol (MCP), wherever the same agent is connected.',
   features: [
