@@ -2,9 +2,27 @@
 
 ## Gates
 
-Run `make check` before every push. It is CI's exact gate set, including
-`check-infra` for the nested Pulumi module and the Cloudflare Workers. Never
-tag on red.
+Before every push, fetch `origin/main` and classify the complete branch plus
+staged, unstaged, and untracked files:
+
+```sh
+git fetch origin
+node scripts/ci-product-scope.mjs --base origin/main
+```
+
+Only a positive `"website_only":true` result permits `make check-product-site`
+instead of the full local application gate. Install its locked tooling first
+with `npm ci --ignore-scripts --prefix infra/cloudflare/control-plane`.
+The exact allowlist lives in `scripts/ci-product-scope.mjs`: brochure copy,
+layout/build code, the two screenshots and manifest, and brochure documentation.
+This is a standing website-only rule; no per-push exception is needed.
+
+For application changes, mixed changes, an unavailable comparison, or any file
+outside that allowlist, run `make check`, including `check-infra` for the nested
+Pulumi module and Cloudflare Workers. Shared pricing/dependencies, hosting
+configuration, screenshot capture tools, workflows, checks, and this policy
+always require the full path. The change introducing this exception is itself
+on the full path. Never tag on red.
 
 **Read a gate's verdict from its own output, never from a wrapper's exit
 code.** A gate wrapped inline as
@@ -71,4 +89,9 @@ Commit locally per logical change; push, run CI, and tag once per feature
 batch. Merge only at a settle-verified green: confirm the local head matches
 the PR head, wait until every check has reported and none is failing, then
 squash-merge with `--match-head-commit` and verify post-merge CI against the
-new commit.
+new commit. The six required check names remain successful checks in both
+lanes: for a positively classified brochure-only change, they require passed
+website validation and confirm application jobs were intentionally skipped.
+For application or mixed changes, every applicable application gate must pass.
+Brochure-only merges publish automatically after the separate website checks;
+mixed changes retain manual website publication after full CI.

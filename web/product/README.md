@@ -5,10 +5,10 @@ free-plan limits, and paid plans. It is a static public-information page. Accoun
 WitSelf CLI and AI integrations; the brochure has no login flow.
 
 **The product page is live at <https://witself.com/>.** The domain is registered with Cloudflare. Committing this
-source does not deploy the site, configure its custom domain, verify a search property, or submit anything for
-indexing. The product workflow validates changes automatically; publishing requires a separate manual run and an
-explicitly enabled repository variable. See [DISCOVERY.md](DISCOVERY.md) for the search/AI setup, recovery procedure,
-existing automation, and dated verification record.
+source locally does not publish it. Brochure-only changes merged into `main` publish automatically after website
+checks pass, while the repository's publication switch is enabled. Application or mixed changes retain manual
+publication. Neither path configures domains, verifies search properties, or submits pages for indexing.
+See [DISCOVERY.md](DISCOVERY.md) for the search/AI setup, recovery procedure, and dated verification record.
 
 ## Preview locally
 
@@ -72,41 +72,56 @@ Do not add `routes=[]`: an explicit empty list asks Wrangler to clear routes ins
 the workflow. GitHub deployment credentials grant **Workers Editor for the existing `witself-product` Worker
 only**; they do not grant zone-write or custom-domain management permissions.
 
-The workflow checks source syntax, preview indexing restrictions, the production output, and a Wrangler dry-run on
-pull requests and pushes to `main` affecting this directory, the plan catalog, the workflow, or its shared Wrangler
-dependencies. It does not depend on a server release. Generated files stay excluded from Git.
+### Fast brochure checks
+
+[CI](../../.github/workflows/ci.yml) and the publisher share
+[product-site-checks.yml](../../.github/workflows/product-site-checks.yml), which runs `make check-product-site`.
+It checks source syntax, preview indexing restrictions, required production files, canonical/robots/sitemap/AI
+reading metadata, plan equality, JSON-LD parsing, screenshot freshness, and a locked Wrangler deployment dry run.
+It needs Node and the deployment dependencies, without Go, PostgreSQL, Helm, or an application release.
+
+The [scope classifier](../../scripts/ci-product-scope.mjs) uses the complete Git diff, including both sides of
+renames, rather than GitHub's limited path-filter list. Its exact file allowlist covers brochure content,
+layout/build code, icon, the two screenshots and manifest, and this directory's README and discovery runbook.
+Only changes entirely within that list use the fast path. Shared plan prices, dependencies, screenshot tooling,
+`wrangler.toml`, workflows/checks, policy, new unknown files, and mixed application changes use the full suite.
+An unavailable or empty comparison also takes the full path.
+
+All six required merge-check names remain active: brochure-only changes satisfy them through successful website
+validation; application and mixed changes must satisfy their original application jobs as well. This preserves
+branch protection without waiting for deliberately skipped application jobs. Screenshot capture still has its
+own bounded workflow when its inputs change. Generated files stay excluded from Git.
 
 The HTML build uses Node 22 without package installation. Deployment tooling reuses the committed dependency lock
 in `infra/cloudflare/control-plane/`, with lifecycle scripts disabled, and the existing `assertWranglerVersion`
 gate in `infra/cloudflare/wrangler-version.mjs`. There is no second Wrangler version or floating `npx` download.
 Every Wrangler invocation passes the reviewed empty environment file to avoid loading local dotenv files.
 
-To check the deployment locally without credentials or publication, install the locked dependencies and run:
+To check locally without credentials or publication:
 
 ```sh
 npm ci --ignore-scripts --prefix infra/cloudflare/control-plane
-node --test infra/cloudflare/control-plane/test/wrangler-version.test.mjs
-node web/product/build.mjs --site-url https://witself.com/ --production
-infra/cloudflare/control-plane/node_modules/.bin/wrangler deploy \
-  --config web/product/wrangler.toml \
-  --env-file infra/cloudflare/wrangler-production-empty.env \
-  --dry-run
+make check-product-site
 ```
 
-### Manual publishing and recovery
+The check restores the unindexed local preview even after a failed production check; if it cannot restore it,
+it removes `dist/`. To select the correct pre-push gate, first fetch `origin/main`, then run
+`node scripts/ci-product-scope.mjs --base origin/main`. Only `"website_only":true` qualifies for the website-only
+local gate; otherwise follow the full `make check` policy in [CLAUDE.md](../../CLAUDE.md).
+
+### Automatic publishing and recovery
 
 Launch was authorized and `WITSELF_PRODUCT_PUBLISH_ENABLED` was verified as `true` on 2026-10-14.
-For a fresh environment, keep it **false or unset** until launch is authorized. Every publishing attempt requires
-all four conditions:
+For a fresh environment, keep it **false or unset** until launch is authorized. Publication always requires
+passed website validation, the `main` branch, the current `main` commit, the `product-site` environment, and an
+exactly `true` repository publication variable. Old queued runs cannot overwrite a newer `main` commit.
 
-- The workflow is started manually through `workflow_dispatch`.
-- The selected branch is `main`.
-- The `publish` input is `true` (its default is `false`).
-- The repository variable `WITSELF_PRODUCT_PUBLISH_ENABLED` is exactly `true`.
-
-The deployment job enforces these conditions before receiving deployment credentials in its final step. Pushes
-and pull requests never publish, even after the launch variable is enabled. A manual run with `publish=false`
-performs validation only.
+A push to `main` publishes automatically only when the complete push is positively classified as brochure-only.
+Pull requests never publish or receive the Cloudflare secret. Application, shared, or mixed changes do not
+publish automatically; after their full CI passes, run **product-site** manually from `main` with `publish=true`.
+Manual runs default to `publish=false`, which validates without deploying. This remains the recovery/redeploy path.
+The deployment rebuilds production output from the checked commit and exposes the scoped token only to the
+final deployment step. The website workflow does not wait for unrelated application CI.
 
 For a fresh environment or hosting recovery:
 
@@ -125,13 +140,13 @@ For a fresh environment or hosting recovery:
    [Cloudflare's GitHub Actions guidance](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
    The account ID is public configuration; keep the API token out of this repository and ordinary Actions variables.
 4. Enable the repository variable `WITSELF_PRODUCT_PUBLISH_ENABLED=true`, then manually run **product-site** from
-   `main` with `publish=true`. The deployment rebuilds the exact selected commit before publishing.
+   `main` with `publish=true`. The selected commit must still be the current `main` commit at deployment time.
 5. Verify `https://witself.com/`, its HTTPS certificate, canonical URL, public assets, `robots.txt`, `sitemap.xml`,
    Markdown guide, and plan catalog.
 
 Remove or set the launch variable to `false` to block further workflow publishing. That hold does not unpublish an
-already live site. Domain registration, GitHub settings, credentials, and launching are separate actions; committing
-this workflow does not perform them. No Cloudflare automatic build integration or GitHub Pages site is required.
+already live site. Domain registration, GitHub settings, and credentials remain separate operator actions;
+the workflow does not create or modify them. No Cloudflare automatic build integration or GitHub Pages site is required.
 
 ## Search and AI discovery
 

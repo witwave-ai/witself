@@ -231,6 +231,8 @@ PY
 
 ruby - "$source_root" <<'RUBY'
 require 'yaml'
+require 'json'
+require 'open3'
 root = ARGV.fetch(0)
 workflow = YAML.load_file(File.join(root, '.github/workflows/release.yml'))
 jobs = workflow.fetch('jobs')
@@ -261,7 +263,7 @@ ci = YAML.load_file(File.join(root, '.github/workflows/ci.yml')).fetch('jobs')
 tripwire = ci.fetch('postgres-image-mirror')
 raise 'release mirror must run on the pinned hosted image' unless mirror.fetch('runs-on') == 'ubuntu-24.04'
 raise 'mirror tripwire must run on release runner OS' unless tripwire.fetch('runs-on') == mirror.fetch('runs-on')
-raise 'PR mirror tripwire can be skipped' if tripwire.key?('if')
+raise 'PR mirror tripwire scope is not exact' unless tripwire['needs'] == 'changes' && tripwire['if'] == "needs.changes.outputs.application == 'true'"
 tripwire_steps = tripwire.fetch('steps')
 install = tripwire_steps.find { |step| step['name'] == 'Install digest-preserving registry copier' }.fetch('run')
 raise 'tripwire does not check runner package installation' unless install.include?('sudo apt-get update') && install.include?('sudo apt-get install --yes skopeo')
@@ -270,7 +272,21 @@ raise 'tripwire diverges from local check target' unless check.fetch('run').stri
 raise 'CI tripwire may skip when skopeo is missing' unless check.fetch('env').fetch('CI') == 'true'
 raise 'CI tripwire step can be skipped' if check.key?('if')
 raise 'tripwire cannot block required CI gate' unless ci.fetch('go').fetch('needs').include?('postgres-image-mirror')
-aggregate = ci.fetch('go').fetch('steps').find { |step| step['name'] == 'Require all Go gates' }
-raise 'required gate does not reject failed tripwire' unless aggregate.fetch('env').fetch('POSTGRES_MIRROR_RESULT') == '${{ needs.postgres-image-mirror.result }}' && aggregate.fetch('run').include?('"$POSTGRES_MIRROR_RESULT"')
+aggregate = ci.fetch('go').fetch('steps').find { |step| step['name'] == 'Require scoped CI gates' }
+raise 'required gate does not inspect all tripwire results' unless aggregate && aggregate.dig('env', 'NEEDS_JSON') == '${{ toJSON(needs) }}' && aggregate['run'] == 'node scripts/ci-product-gate.mjs'
+gate_needs = ci.fetch('go').fetch('needs').to_h { |name| [name, {'result' => 'success'}] }
+gate_needs['changes']['outputs'] = {'application' => 'true', 'website' => 'true', 'website_only' => 'false'}
+%w[success failure skipped cancelled].each do |result|
+  gate_needs['postgres-image-mirror']['result'] = result
+  _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', aggregate.fetch('run'), chdir: root)
+  raise "application gate accepted wrong mirror result: #{result}" unless status.success? == (result == 'success')
+end
+gate_needs.each { |name, value| value['result'] = 'skipped' unless %w[changes website].include?(name) }
+gate_needs['changes']['outputs'] = {'application' => 'false', 'website' => 'true', 'website_only' => 'true'}
+_, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', aggregate.fetch('run'), chdir: root)
+raise 'website-only gate rejected its scoped mirror skip' unless status.success?
+gate_needs['postgres-image-mirror']['result'] = 'failure'
+_, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', aggregate.fetch('run'), chdir: root)
+raise 'website-only gate hid a failed mirror tripwire' if status.success?
 puts 'PostgreSQL mirror release independence, PR tripwire, signing, and provenance checks passed'
 RUBY

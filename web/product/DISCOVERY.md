@@ -29,14 +29,29 @@ Never hand-edit `dist/` to make an SEO change.
 
 ## Existing automation and its limits
 
-[product-site.yml](../../.github/workflows/product-site.yml) runs on relevant pull requests and pushes to `main`.
-It checks source syntax, preview indexing restrictions, required production files, the exact canonical and robots
-directives, the sitemap URL, the `llms.txt` guide link, plan-catalog equality, and JSON-LD parsing. It also runs a
-Cloudflare deployment dry run. Builds verify the committed screenshot manifest and source freshness.
+[CI](../../.github/workflows/ci.yml) validates affected website changes on pull requests and `main`;
+[product-site.yml](../../.github/workflows/product-site.yml) handles publication separately. Both call
+[product-site-checks.yml](../../.github/workflows/product-site-checks.yml), using the same local command:
 
-The workflow's manual `publish=false` mode runs those website checks without deploying. Publishing requires
-`main`, `publish=true`, the enabled repository variable, and the `product-site` environment. Pushes never publish.
-The broader application CI still runs separately; this document does not introduce a website-only merge exemption.
+```sh
+npm ci --ignore-scripts --prefix infra/cloudflare/control-plane
+make check-product-site
+```
+
+This checks source syntax, preview indexing restrictions, required production files, the exact canonical and robots
+directives, sitemap URL, `llms.txt` guide link, plan-catalog equality, JSON-LD parsing, screenshot freshness and PNGs,
+and a Cloudflare deployment dry run. The command restores the safe local preview afterward.
+
+The complete Git diff determines the lane using the exact [brochure allowlist](../../scripts/ci-product-scope.mjs).
+Brochure-only changes keep the six required merge checks but satisfy them through website validation, without the
+full application suite. Application, mixed, shared dependency/pricing, hosting configuration, tooling, workflow,
+and policy changes keep full application gates. Missing comparison evidence fails closed to the full path.
+See [README.md](README.md#fast-brochure-checks) and [CLAUDE.md](../../CLAUDE.md) for the local pre-push policy.
+
+A brochure-only push to `main` publishes automatically after website validation. The publication switch must be
+exactly `true`; the deployment must use the current `main` commit and the protected `product-site` environment.
+Other changes retain manual `publish=true` publication after full CI. Manual `publish=false` runs validate only.
+No publishing path needs to wait for a server release, and pull requests never receive deployment credentials.
 
 These checks do **not** verify live response headers, Cloudflare rules, external links, Google/Bing ownership or
 indexing, or actual AI-provider fetches. Parsing JSON-LD does not prove schema validity or rich-result eligibility.
@@ -173,8 +188,8 @@ separately. Recheck provider state when restoring the site.
 Follow-ups are explicit: verify Bing inclusion and recheck provider crawler traffic. The Witwave automatic publisher credential previously failed;
 its product link was published manually, and that separate repository's publishing repair is not part of this setup.
 
-For future automation, first extract the existing build assertions into one reusable local/CI command, then add a
-read-only post-deployment HTTP check covering the public files. An optional
+The build assertions now share one local/CI command. A future read-only post-deployment HTTP check could cover
+the public files. An optional
 [IndexNow notification](https://www.indexnow.org/documentation) could notify participating
 engines after a successful, verified deployment; it is not installed here and would not replace Google Search
 Console. These are proposed hooks, not currently running jobs. Do not add recurring submissions or promise index

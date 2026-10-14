@@ -89,8 +89,16 @@ def check(text, workflow):
             "cell attempt identity")
     require(re.findall(r"^\s+path: (.+)$", upload, re.M) ==
             ["${{ runner.temp }}/provider-contract-${{ matrix.target }}.json"], "only sanitized cell uploaded")
-    require(f"needs: [{native_id}]" in aggregate and "if: always()" in aggregate,
-            "aggregate observes every native outcome")
+    if workflow == "ci":
+        require(re.findall(r"^    needs: (.+)$", native, re.M) == ["changes"] and
+                re.findall(r"^    if: (.+)$", native, re.M) == ["needs.changes.outputs.application == 'true'"],
+                "native provider jobs use only the positive application scope")
+        require(re.findall(r"^    needs: (.+)$", aggregate, re.M) == [f"[changes, {native_id}]"] and
+                re.findall(r"^    if: (.+)$", aggregate, re.M) == ["always() && needs.changes.outputs.application == 'true'"],
+                "application aggregate observes every native outcome")
+    else:
+        require(f"needs: [{native_id}]" in aggregate and "if: always()" in aggregate,
+                "aggregate observes every native outcome")
     result = step(aggregate, "Require every native provider job")
     require(f"NATIVE_RESULT: ${{{{ needs.{native_id}.result }}}}" in result and
             'run: test "$NATIVE_RESULT" = success' in result, "native failure cannot be hidden")
@@ -134,9 +142,11 @@ def check(text, workflow):
                     for use in re.findall(r"^\s*-?\s*uses: (.+)$", block, re.M)), "immutable action pins")
     if workflow == "ci":
         gate = job(text, "go")
-        require("provider-contract-evidence]" in gate and
-                "PROVIDER_EVIDENCE_RESULT: ${{ needs.provider-contract-evidence.result }}" in gate and
-                '"$GO_INFRA_RESULT" "$PROVIDER_EVIDENCE_RESULT"; do' in gate,
+        require(re.findall(r"^    needs: (.+)$", gate, re.M) == [
+                    "[changes, website, go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]"] and
+                re.findall(r"^    if: (.+)$", gate, re.M) == ["${{ always() }}"] and
+                "NEEDS_JSON: ${{ toJSON(needs) }}" in gate and
+                "run: node scripts/ci-product-gate.mjs" in gate,
                 "required go check enforces aggregate")
     else:
         publish = job(text, "goreleaser")
@@ -202,6 +212,22 @@ try:
                 count += 1
                 continue
             raise AssertionError("accepted canary " + workflow + ": " + name)
+        if workflow == "ci":
+            scope_canaries = [
+                ("native scope bypass", "    if: needs.changes.outputs.application == 'true'", "    if: always()"),
+                ("aggregate outcome bypass", "    if: always() && needs.changes.outputs.application == 'true'", "    if: success() && needs.changes.outputs.application == 'true'"),
+                ("aggregate lost scope dependency", "    needs: [changes, provider-integration-contract]", "    needs: [provider-integration-contract]"),
+            ]
+            begin = source.index("  provider-integration-")
+            prefix, suffix = source[:begin], source[begin:]
+            for name, before, after in scope_canaries:
+                require(before in suffix, "scope canary has a target: " + name)
+                try:
+                    check(prefix + suffix.replace(before, after, 1), workflow)
+                except AssertionError:
+                    count += 1
+                    continue
+                raise AssertionError("accepted scope canary: " + name)
     config = (root / ".goreleaser.yaml").read_text()
     conditional = "glob: '{{ if not .IsSnapshot }}evidence/provider-contract-release/provider-contract-evidence.json{{ end }}'"
     for section in ("checksum", "release"):
