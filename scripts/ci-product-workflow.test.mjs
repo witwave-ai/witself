@@ -72,9 +72,9 @@ function assertWebsiteCall(job, label) {
   assert.equal(job['continue-on-error'], undefined);
 }
 
-// Evaluate only the small boolean-expression grammar used by deployment.
+// Evaluate only the small expression grammar used by deployment and concurrency.
 // Never eval workflow source: mutation tests must not execute changed code.
-function evaluateCondition(source, context) {
+function evaluateExpression(source, context) {
   const text = expression(source);
   const tokenPattern = /\s*(&&|\|\||==|!=|[()!]|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.-]*)/gy;
   const tokens = [];
@@ -122,7 +122,7 @@ function evaluateCondition(source, context) {
     while (tokens[cursor] === '&&') {
       cursor++;
       const right = equal();
-      left = Boolean(left) && Boolean(right);
+      left = left && right;
     }
     return left;
   };
@@ -131,13 +131,31 @@ function evaluateCondition(source, context) {
     while (tokens[cursor] === '||') {
       cursor++;
       const right = and();
-      left = Boolean(left) || Boolean(right);
+      left = left || right;
     }
     return left;
   };
-  const result = Boolean(or());
+  const result = or();
   assert.equal(cursor, tokens.length, 'Unconsumed deployment condition');
   return result;
+}
+
+function assertCIConcurrency(ci) {
+  assert.equal(ci.concurrency['cancel-in-progress'], true, 'New PR updates must cancel superseded checks');
+  const group = context => {
+    const template = ci.concurrency.group.match(/^([^$]*)\$\{\{([\s\S]+)\}\}$/);
+    assert(template, 'Concurrency group must contain a supported expression');
+    return template[1] + evaluateExpression(template[2], context);
+  };
+  const main = {'github.event_name': 'push', 'github.ref': 'refs/heads/main'};
+  const pr = {'github.event_name': 'pull_request', 'github.ref': 'refs/pull/42/merge'};
+  const firstMain = group({...main, 'github.run_id': '1001'});
+  const nextMain = group({...main, 'github.run_id': '1002'});
+  assert.notEqual(firstMain, nextMain, 'A brochure main push must not cancel or queue behind earlier application CI');
+  const firstPR = group({...pr, 'github.run_id': '1003'});
+  assert.equal(firstPR, group({...pr, 'github.run_id': '1004'}), 'Updates to one PR must retain their cancellation group');
+  assert.notEqual(firstPR, group({...pr, 'github.ref': 'refs/pull/43/merge', 'github.run_id': '1005'}), 'Different PRs must run independently');
+  assert.notEqual(firstMain, firstPR, 'Main pushes and PRs must run independently');
 }
 
 function assertWorkflowContracts(sources) {
@@ -147,6 +165,7 @@ function assertWorkflowContracts(sources) {
   assert.deepEqual(Object.keys(ci.on).sort(), ['pull_request', 'push']);
   assert.deepEqual(ci.on.push, {branches: ['main']}, 'CI main push cannot have a path filter');
   assert.equal(ci.on.pull_request, null, 'CI PR cannot have a path filter');
+  assertCIConcurrency(ci);
   assertClassifier(ci.jobs.changes, ['application', 'website', 'website_only'], 'ci changes');
   assertWebsiteCall(ci.jobs.website, 'ci website');
 
@@ -237,7 +256,7 @@ function assertWorkflowContracts(sources) {
               };
               const expected = ref === 'refs/heads/main' && enabled === 'true' && validation === 'success' &&
                 ((event === 'push' && websiteOnly === 'true') || (event === 'workflow_dispatch' && publish));
-              assert.equal(evaluateCondition(deploy.if, context), expected, `Deployment fence: ${JSON.stringify(context)}`);
+              assert.equal(evaluateExpression(deploy.if, context), expected, `Deployment fence: ${JSON.stringify(context)}`);
             }
           }
         }
@@ -263,6 +282,10 @@ test('website lanes preserve required checks, application gates, and deployment 
   assertWorkflowContracts(workflows);
 });
 
+test('main push runs remain independent while newer updates cancel only their own PR checks', () => {
+  assertCIConcurrency(workflows['ci.yml']);
+});
+
 test('exact launch shell guard rejects disabled, case-changed, and non-main settings', () => {
   const guard = workflows['product-site.yml'].jobs.deploy.steps.find(step => step.name === 'Require the exact launch ref and hold value');
   for (const [ref, enabled, expected] of [
@@ -277,6 +300,8 @@ test('exact launch shell guard rejects disabled, case-changed, and non-main sett
 });
 
 const mutations = [
+  ['main pushes share a cancellation or queue group', data => { data['ci.yml'].concurrency.group = 'ci-${{ github.ref }}'; }],
+  ['concurrency cancellation disabled', data => { data['ci.yml'].concurrency['cancel-in-progress'] = false; }],
   ['missing Go application dependency', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'go-store'); }],
   ['missing required website dependency', data => { data['ci.yml'].jobs.helm.needs = data['ci.yml'].jobs.helm.needs.filter(id => id !== 'website'); }],
   ['skipped required wrapper', data => { data['ci.yml'].jobs.go.if = "needs.changes.outputs.application == 'true'"; }],
