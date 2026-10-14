@@ -1,0 +1,23 @@
+{
+  "schema": "witself.product-screenshots.v1",
+  "fixture": "synthetic-demo-only",
+  "source_digest": "ed224373dc33f0f5056cfbdbbb339bc230606e58c3810176f553ec93ffe2d428",
+  "captured_at": "2026-10-14T05:16:19.660Z",
+  "renderer": {
+    "browser": "153.0.8010.12",
+    "terminal": "xterm 6.0.0",
+    "platform": "darwin"
+  },
+  "images": {
+    "agent-console.png": {
+      "width": 1440,
+      "height": 1000,
+      "sha256": "78444f9bbdc22cf2b750708857fc383d86d5d85fb5193bdc1d96a901bad2c2f0"
+    },
+    "agent-tui.png": {
+      "width": 1196,
+      "height": 880,
+      "sha256": "f0261caac2a76256677ed4a77cda7530e992310c662de0ed31871dc1e9029dfe"
+    }
+  }
+}

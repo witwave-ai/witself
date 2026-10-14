@@ -48,6 +48,11 @@ crawling. Building does not configure hosting or publish the output.
 Keep generated output disposable. Review both the rendered page and its text representation whenever product copy,
 prices, or entitlements change.
 
+The brochure includes real terminal and browser console screenshots with synthetic demo data. Their capture tool,
+source-freshness checks, and automatic review-artifact workflow are documented in
+[screenshots/README.md](screenshots/README.md). Ordinary brochure copy builds use the committed PNGs; refreshing
+screenshots is a separate command that needs Go and the locked browser tools.
+
 ## Repository ownership and Cloudflare hosting
 
 This source lives in the **WitSelf monorepo at `web/product/`** so product behavior, install instructions, pricing,
