@@ -80,6 +80,11 @@ It checks source syntax, preview indexing restrictions, required production file
 reading metadata, plan equality, JSON-LD parsing, screenshot freshness, and a locked Wrangler deployment dry run.
 It needs Node and the deployment dependencies, without Go, PostgreSQL, Helm, or an application release.
 
+Measured on 2026-10-14: the shared website validation took **14 seconds** in the
+[CI migration run](https://github.com/witwave-ai/witself/actions/runs/38637358631/job/116103907984).
+Queue time, change classification, merge checks, and publication are additional; use recent Actions runs to measure
+the complete turnaround.
+
 The [scope classifier](../../scripts/ci-product-scope.mjs) uses the complete Git diff, including both sides of
 renames, rather than GitHub's limited path-filter list. Its exact file allowlist covers brochure content,
 layout/build code, icon, the two screenshots and manifest, and this directory's README and discovery runbook.
