@@ -45,13 +45,17 @@ render = lambda do |values, *overrides|
   app ? YAML.safe_load(app.dig('spec', 'source', 'helm', 'values')) : {}
 end
 
-# The PagerDuty fixture omits both opt-ins so a chart-only rollout cannot page
-# on collector or sealed-posture absence. The serving cell opts in only the
-# sealed-plane group through its catalog switch; the collector group stays off
-# until its separate config-only rollout (WitselfIdentityCapacityAtLimit now
-# counts only elective capacity, never a Personal account's structural caps).
+# The PagerDuty fixture omits both opt-ins. Each cell opts in per group through
+# its catalog switches, and the serving render must match the catalog.
+# WitselfIdentityCapacityAtLimit counts only elective capacity, never a Personal
+# account's structural caps.
 pagerduty = File.join(chart, 'ci/monitoring-pagerduty-values.yaml')
 serving = File.join(root, '.gitops/cells/civo-sandbox-use1-serving/values.yaml')
+catalog = YAML.safe_load(File.read(File.join(root, '.gitops/cells/catalog.yaml')))
+switches = catalog.fetch('cells').fetch('civo-sandbox-use1-serving').fetch('switches', {})
+serving_excluded = []
+serving_excluded << 'witself-collectors' unless switches['collector_alerts'] == true
+serving_excluded << 'witself-sealed-plane' unless switches['sealed_plane_alerts'] == true
 disabled = render.call(pagerduty)
 abort "gated alerts rendered without an opt-in: #{pagerduty}" unless disabled.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_opt_ins
 enabled = render.call(pagerduty, '--set', 'platform.monitoring.collectorAlerts.enabled=true')
@@ -66,7 +70,10 @@ both = render.call(pagerduty, '--set', 'platform.monitoring.collectorAlerts.enab
   '--set', 'platform.monitoring.sealedPlaneAlerts.enabled=true')
 abort 'both opt-ins did not preserve the complete source rules' unless both.dig('additionalPrometheusRulesMap', 'founder-open-plane') == source
 serving_render = render.call(serving)
-abort 'serving cell must render the sealed-plane alerts and keep the collector group off' unless serving_render.dig('additionalPrometheusRulesMap', 'founder-open-plane') == without_collectors
+abort 'serving cell alert groups must match the catalog switches' unless serving_render.dig('additionalPrometheusRulesMap', 'founder-open-plane') == filtered.call(*serving_excluded)
+serving_collectors = render.call(serving, '--set', 'platform.monitoring.collectorAlerts.enabled=true')
+serving_collectors_expected = switches['sealed_plane_alerts'] == true ? source : without_sealed
+abort 'serving collector opt-in did not preserve other rules and gates' unless serving_collectors.dig('additionalPrometheusRulesMap', 'founder-open-plane') == serving_collectors_expected
 
 fixture = File.join(chart, 'ci/monitoring-values.yaml')
 enabled = render.call(fixture)
