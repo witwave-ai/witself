@@ -26,6 +26,9 @@ const fmt = (n) => n == null ? 'Custom' : new Intl.NumberFormat('en-US').format(
 const has = (plan, key) => plan.features.includes(key) && !catalog.coming_soon_features.includes(key);
 const repo = 'https://github.com/witwave-ai/witself';
 const docs = `${repo}/blob/main/docs`;
+const professional = plans.find(plan => plan.id === 'standard');
+if (!professional) throw new Error('The management example requires the available Professional plan.');
+const managementExample = p.management.example.map(([speaker, text]) => [speaker, text.replaceAll('{price}', `$${fmt(professional.price_monthly)}`)]);
 const code = (text, id) => `<div class="codebox"><pre><code${id ? ` id="${id}"` : ''}>${esc(text)}</code></pre>${id ? `<button type="button" data-copy="${id}" hidden aria-label="Copy Homebrew install command">Copy</button>` : ''}</div>`;
 const steps = [
   {title: 'Install the CLI', text: 'Use Homebrew above, or choose a native installer. Release installers verify checksums.', commands: ''},
@@ -83,13 +86,14 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="site-header wrap">
   <a class="brand" href="#" aria-label="WitSelf home"><span class="brand-mark" aria-hidden="true">›_</span> WitSelf<span class="brand-by">by Witwave</span></a>
-  <nav aria-label="Main navigation"><a href="#integrations">Integrations</a><a href="#pricing">Pricing</a><a class="repo-link" href="${repo}">GitHub <span aria-hidden="true">↗</span></a></nav>
+  <nav aria-label="Main navigation"><a href="#manage">Manage with AI</a><a href="#pricing">Pricing</a><a class="repo-link" href="${repo}">GitHub <span aria-hidden="true">↗</span></a></nav>
 </header>
 <main id="main">
   <section class="hero wrap" aria-labelledby="hero-title">
     <div class="hero-copy"><p class="eyebrow"><span class="status-dot"></span> Persistent context for AI agents</p>
       <h1 id="hero-title">Memory that moves<br>with your AI<span class="accent">.</span></h1>
       <p class="hero-description">${esc(p.summary)}</p>
+      <a class="management-promise" href="#manage">${esc(p.management.promise)} <span aria-hidden="true">↓</span></a>
       <div class="hero-actions"><a class="button primary" href="#install">Get started free <span aria-hidden="true">↗</span></a><a class="text-link" href="${repo}">Explore the source <span aria-hidden="true">↗</span></a></div>
       <div class="hero-install">${code(p.installers[0].command, 'brew-command')}<p>macOS · Linux · Windows <span>Free plan available</span></p></div>
     </div>
@@ -105,6 +109,17 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
     <div class="section-intro"><p class="eyebrow">Built to carry forward</p><h2 id="overview-title">${esc(p.intro)}</h2><p>${esc(p.introText)}</p></div>
     <div class="feature-list">${p.features.map(([title, text], i) => `<article><span class="feature-number">0${i + 1}</span><h3>${esc(title)}</h3><p>${esc(text)}</p></article>`).join('')}</div>
   </section>
+  <section id="manage" class="management wrap" aria-labelledby="management-title">
+    <div class="management-copy"><p class="eyebrow">Managed in plain English</p><h2 id="management-title">${esc(p.management.title)}</h2><p class="management-intro">${esc(p.management.intro)}</p>
+      <dl class="management-prompts">${p.management.prompts.map(([label, prompt]) => `<div><dt>${esc(label)}</dt><dd>“${esc(prompt)}”</dd></div>`).join('')}</dl>
+    </div>
+    <aside class="upgrade-example" aria-label="Illustrative AI conversation about upgrading to Professional">
+      <div class="demo-heading"><span class="mono">${esc(p.management.exampleTitle)}</span><span class="demo-label">Example conversation</span></div>
+      <ol class="upgrade-messages">${managementExample.map(([speaker, text]) => `<li class="${speaker === 'You' ? 'from-you' : 'from-ai'}"><span>${esc(speaker)}</span><p>${esc(text)}</p></li>`).join('')}</ol>
+      <p class="demo-footnote">${esc(p.management.exampleNote)}</p>
+    </aside>
+    <div class="management-notes"><p>${esc(p.management.requirement)}</p><p>${esc(p.management.support)}</p></div>
+  </section>
   <section id="integrations" class="integrations wrap" aria-labelledby="integrations-title">
     <div class="section-heading"><div><p class="eyebrow">Works where you work</p><h2 id="integrations-title">One memory. Across your tools.</h2></div><a class="text-link" href="${docs}/cli-command-surface.md#witself-install">Integration guide <span aria-hidden="true">↗</span></a></div>
     <div class="runtime-grid">${p.runtimes.map(r => `<article class="runtime"><h3>${esc(r.name)}</h3><p>${esc(r.note)}</p><code>witself install ${esc(r.command)}</code></article>`).join('')}</div>
@@ -117,7 +132,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
     <p class="fine-print roadmap">Enterprise is coming soon. Agent email, email aliases, and custom email domains are coming soon and are not currently included as delivered features. <a href="plans.json">View the full plan catalog.</a></p>
   </div></section>
   <section id="install" class="install wrap" aria-labelledby="install-title">
-    <div class="section-intro"><p class="eyebrow">From install to your next conversation</p><h2 id="install-title">Give your AI something to remember.</h2><p>Everything starts in your terminal. Manage your account through WitSelf, and let your connected AI work with its memory.</p></div>
+    <div class="section-intro"><p class="eyebrow">Start with a conversation</p><h2 id="install-title">Let your AI help you get set up.</h2><p>Give your AI the <a href="product.md">product and setup guide</a>, then ask:</p><blockquote class="setup-prompt">“${esc(p.setupPrompt)}”</blockquote><p class="setup-note">Use an AI with local command access. You’ll complete identity verification and review the terms. The commands are here whenever you need them.</p></div>
     <ol class="setup-steps">${steps.map((step, i) => `<li><span class="step-index">${i + 1}</span><div><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p>${i === 0 ? p.installers.map((installer, j) => j === 0 ? `<p class="command-label">${esc(installer.name)}</p>${code(installer.command)}` : `<details class="installer"><summary>${esc(installer.name)}</summary>${code(installer.command)}</details>`).join('') : i === 1 ? `<details class="installer"><summary>Account and agent setup commands</summary>${code(step.commands)}<p class="fine-print">Replace you@example.com, REALM_ID, and AGENT_ID with your own values. Read the <a href="https://self.witwave.ai/legal/terms">Terms</a> and <a href="https://self.witwave.ai/legal/privacy">Privacy Policy</a> before using --accept-terms.</p></details>` : code(step.commands)}</div></li>`).join('')}</ol>
     <div class="agent-callout"><span class="mono">READING THIS WITH AN AI?</span><p>Give it the <a href="product.md">complete product and setup guide</a>.<br>Same information, in plain Markdown.</p><a class="text-link" href="llms.txt">AI reading index <span aria-hidden="true">↗</span></a></div>
   </section>
@@ -129,8 +144,13 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
 
 const markdown = [
   `# ${p.name}\n\n> ${p.headline}\n\n${p.summary}`,
+  p.management.promise,
   `## ${p.intro}\n\n${p.introText}`,
   ...p.features.map(([title, text]) => `### ${title}\n\n${text}`),
+  `## Manage WitSelf through your AI\n\n${p.management.title}\n\n${p.management.intro}`,
+  ...p.management.prompts.map(([label, prompt]) => `### ${label}\n\n“${prompt}”`),
+  `### Example conversation: ${p.management.exampleTitle}\n\n${managementExample.map(([speaker, text]) => `**${speaker}:** ${text}`).join('\n\n')}\n\n${p.management.exampleNote}`,
+  `${p.management.requirement}\n\n${p.management.support}`,
   '## Supported integrations\n\nCommands assume a configured agent.',
   ...p.runtimes.map(r => `- **${r.name}**: ${r.note}. ${r.platforms}. Command: \`witself install ${r.command}\`.`),
   p.runtimeNote,
@@ -138,7 +158,7 @@ const markdown = [
   `| Plan | ${plans.map(plan => plan.name).join(' | ')} |\n| --- | ${plans.map(() => '---').join(' | ')} |\n| Monthly USD | ${plans.map(plan => `$${plan.price_monthly}`).join(' | ')} |\n${rows.map(([label, value]) => `| ${label} | ${plans.map(value).join(' | ')} |`).join('\n')}`,
   'Enterprise is coming soon. Agent email, email aliases, and custom email domains are coming soon and are not currently delivered features.',
   `Full catalog: [plans.json](${absolute('plans.json')}). Catalog updated: ${catalog.updated}.`,
-  '## Install and connect',
+  `## Install and connect\n\nGive your AI this guide, then ask:\n\n“${p.setupPrompt}”\n\nUse an AI with local command access. You’ll complete identity verification and review the terms.`,
   ...p.installers.map(installer => `### ${installer.name}\n\n\`\`\`\n${installer.command}\n\`\`\``),
   ...steps.slice(1).map(step => `### ${step.title}\n\n${step.text}\n\n\`\`\`sh\n${step.commands}\n\`\`\``),
   'Replace you@example.com, REALM_ID, and AGENT_ID with your own values. Read the [Terms](https://self.witwave.ai/legal/terms) and [Privacy Policy](https://self.witwave.ai/legal/privacy) before using --accept-terms. Release installers verify checksums.',
@@ -151,7 +171,7 @@ await mkdir(out, {recursive: true});
 await writeFile(new URL('index.html', out), html);
 await writeFile(new URL('product.md', out), markdown);
 await writeFile(new URL('plans.json', out), JSON.stringify(catalog, null, 2) + '\n');
-await writeFile(new URL('llms.txt', out), `# WitSelf\n\n> ${p.summary}\n\n## Product\n\n- [Complete product and setup guide](${absolute('product.md')}): features, supported AI tools, pricing, free plan limits, and setup.\n- [Plan catalog](${absolute('plans.json')}): machine-readable pricing and availability.\n- [Source repository](${repo})\n- [Documentation](${repo}/tree/main/docs)\n- [Witwave](https://witwave.ai/): the company and project behind WitSelf.\n`);
+await writeFile(new URL('llms.txt', out), `# WitSelf\n\n> ${p.summary}\n\n## Product\n\n- [Complete product and setup guide](${absolute('product.md')}): features, supported AI tools, pricing, free plan limits, setup, and managing WitSelf through your AI using the CLI.\n- [Plan catalog](${absolute('plans.json')}): machine-readable pricing and availability.\n- [Source repository](${repo})\n- [Documentation](${repo}/tree/main/docs)\n- [Witwave](https://witwave.ai/): the company and project behind WitSelf.\n`);
 await writeFile(new URL('robots.txt', out), production ? `User-agent: *\nAllow: /\n\nSitemap: ${absolute('sitemap.xml')}\n` : 'User-agent: *\nDisallow: /\n');
 if (production) await writeFile(new URL('sitemap.xml', out), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${esc(canonical)}</loc></url></urlset>\n`);
 await writeFile(new URL('.nojekyll', out), '');
