@@ -59,8 +59,9 @@ the `chartVersion` and `imageTag` recorded alongside the matching digest for
 digest-pinned images, refusing a newer live pin or an unrecognized digest.
 
 The public plan Worker, legal Worker (`witself-legal`), and Cloudflare
-control-plane Worker/container are separate deployments. Deploy all three from
-the same clean, exactly tagged checkout only after its release workflow succeeds:
+control-plane Worker/container are separate deployments. For normal application
+releases, deploy all three from the same clean, exactly tagged checkout only
+after its release workflow succeeds:
 
 ```sh
 cd infra/cloudflare/control-plane
@@ -86,8 +87,20 @@ curl --fail --silent --show-error -H 'Accept: text/markdown' \
 Require them to match the Privacy Policy and DPA Markdown headers in the release
 tag, including each Effective date. The legal Worker's consent manifest derives
 its versions from those headers, and the control plane reads its Terms and
-Privacy versions through `LEGAL_DOCUMENTS`; both deployments must use the same
-tag. See [Publish the legal pages](runbooks.md#publish-the-legal-pages).
+Privacy versions through `LEGAL_DOCUMENTS`; normal application releases must
+use the same tag for both deployments. Also verify exact served Markdown bytes
+and the complete manifest as described in
+[Publish the legal pages](runbooks.md#publish-the-legal-pages).
+
+A policy-only publication may deploy only `witself-legal` from a clean, tested
+commit merged to `main`, without a new application tag or control-plane/plan
+deploy. The runbook's prerequisites still apply: preserve prior exact text and
+fingerprints, advance the affected version, pass the full local gate required
+by `CLAUDE.md` and full PR/post-merge CI, and verify that the live control plane
+and released CLI already use the canonical legal manifest. Record the exact
+merged commit and verify the served Markdown and manifest after publication.
+This exception does not cover Worker logic or configuration changes and does
+not weaken any normal application release gate.
 
 The control-plane renderer
 injects the release version, full commit, and commit timestamp as Docker build

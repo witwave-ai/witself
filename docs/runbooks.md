@@ -39,10 +39,33 @@ The account is remembered locally as `default` (binding in
 
 The public `self.witwave.ai/legal*` pages live in the separate `witself-legal`
 Worker in `web/legal/`, which bundles the Markdown in `docs/legal/`. A
-control-plane deploy does not publish these pages. Publish from the same clean
-release tag worktree used for the control-plane deploy, after that tag's release
-workflow succeeds. Confirm that `git status --porcelain` is empty and that
-`git describe --tags --exact-match HEAD` identifies the intended release tag.
+control-plane deploy does not publish these pages. For a normal application
+release, publish from the same clean release tag worktree used for the
+control-plane deploy, after that tag's release workflow succeeds. Confirm that
+`git status --porcelain` is empty and that `git describe --tags --exact-match
+HEAD` identifies the intended release tag.
+
+A policy-only update may instead publish only `witself-legal` from a clean,
+tested commit merged to `main`, without an application release, control-plane
+deploy, or plan deploy. This exception covers legal text and its version,
+archive, fingerprint, and publication documentation changes; it does not cover
+Worker logic or configuration changes. Before using it:
+
+- Give changed policy text a new version and Effective date, preserve its prior
+  text byte-for-byte under `docs/legal/versions/<version>/`, update the affected
+  compiled consent version, and append its new fingerprint to
+  `internal/legal/testdata/published-versions.json`. Never rewrite published
+  fingerprints or archives.
+- Pass the local full `make check` required by [CLAUDE.md](../CLAUDE.md), the
+  legal version/archive tests, and the legal Worker deployment dry run. Require
+  full GitHub CI to pass for the PR and exact merged commit; legal updates do
+  not qualify for the brochure-only check path.
+- Verify that the deployed control-plane version reads canonical consent
+  versions through its `LEGAL_DOCUMENTS` binding and that the released CLI
+  selects signup versions from `/legal/versions.json`. If either prerequisite
+  is missing, use the coordinated, tagged application release procedure.
+- Record the exact merged `main` commit being published and confirm its
+  checkout is clean. This policy-only path does not require a release tag.
 
 From the root of that worktree, run:
 
@@ -59,23 +82,26 @@ configuration and does not run the control-plane config renderer or require its
 deploy inputs such as `EMAIL_DIRECTORY_KV_ID`. Normal Cloudflare deployment
 authentication is still required.
 
-After publication, verify both served Version/Effective lines:
+After publication, return to the repository root and compare the served
+Markdown with the approved source:
 
 ```sh
 curl --fail --silent --show-error -H 'Accept: text/markdown' \
-  https://self.witwave.ai/legal/privacy | grep '^\*\*Version '
+  https://self.witwave.ai/legal/privacy | cmp docs/legal/privacy-policy.md -
 curl --fail --silent --show-error -H 'Accept: text/markdown' \
-  https://self.witwave.ai/legal/dpa | grep '^\*\*Version '
+  https://self.witwave.ai/legal/dpa | cmp docs/legal/data-processing-addendum.md -
+curl --fail --silent --show-error https://self.witwave.ai/legal/versions.json
 ```
 
-Require each line, including its Effective date, to match the corresponding
-`docs/legal/privacy-policy.md` or `docs/legal/data-processing-addendum.md` header
-in the release tag; an old line means publication is not complete. The legal
-Worker derives the consent versions in `/legal/versions.json` from those
-Markdown headers, and the control plane reads the Terms and Privacy versions
-through its `LEGAL_DOCUMENTS` service binding. Deploy the legal Worker and the
-control plane from the same tag so the published text and signup consent stay
-aligned. See the [release checklist](release-and-build.md#current-automated-release-and-rollout-boundary).
+Require exact bytes, including Version/Effective lines, from the published
+commit. Repeat the comparison with `?format=md` and for any other changed legal
+document. Verify every manifest entry's version and `/legal/<slug>` path against
+the bundled documents; unchanged entries must remain unchanged. An old page or
+manifest means publication is not complete. The legal Worker derives the
+manifest from those Markdown headers, and the control plane reads its Terms
+and Privacy versions through `LEGAL_DOCUMENTS`. Normal application releases
+still deploy the legal Worker and control plane from the same tag. See the
+[release checklist](release-and-build.md#current-automated-release-and-rollout-boundary).
 
 ## Check account status
 
