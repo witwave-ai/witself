@@ -1,10 +1,14 @@
 # Witself Self-Hosting
 
-Status: implemented self-host preview; production support and cross-platform
-acceptance remain conditional. The public server image, startup migrations,
-Helm chart, PostgreSQL path, capability contract, and multi-cloud Pulumi cell
-tooling exist. See the canonical [Feature Status](feature-status.md) scorecard
-for current readiness gates.
+Status: **self-host preview. The complete independent self-hosting setup has
+not been tested end to end, and the documentation may have gaps.**
+
+The public server image, startup migrations, Helm chart, PostgreSQL path,
+capability contract, and multi-cloud Pulumi cell tooling exist. Component
+availability and tests do not establish a validated self-hosting workflow.
+Production support and cross-platform acceptance remain conditional. See the
+canonical [Feature Status](feature-status.md) scorecard for current readiness
+gates.
 
 Narrative-memory decision (accepted 2026-07-14): self-hosted memory requires
 PostgreSQL but no backend AI, model, or embedding-provider credential. Curation
@@ -56,7 +60,7 @@ Initial support should be explicit:
 |---|---|
 | Local development | Runs on a laptop or CI using the local development adapter with deterministic lexical recall plus optional client-vector hybrid ranking. Community or best-effort only. Not production. |
 | Self-host preview | Runs `witself-server` with production-shaped config and PostgreSQL. Best-effort issue triage, no SLA. |
-| Production self-hosted | Paid or contracted support only after documented deployment, migrations, canonical PostgreSQL backups, observability, disaster recovery, upgrade paths, and client-vault recovery guidance exist. |
+| Future production self-hosted | Not currently offered. Paid or contracted support would require validated deployment, migrations, canonical PostgreSQL backups, observability, disaster recovery, upgrade paths, and client-vault recovery guidance. |
 
 Witself should not claim production self-host support until migrations,
 backup/restore, disaster recovery, observability, lexical-recall verification,
