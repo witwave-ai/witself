@@ -85,7 +85,7 @@ export const product = {
   ],
   questions: [
     ['Is WitSelf an AI model?', 'No. WitSelf is the persistent context and identity layer for your agents. Your connected AI client performs the reasoning. Model subscriptions and inference costs stay with that provider.'],
-    ['Do I need a web management dashboard?', 'No. Manage WitSelf through the CLI, directly or by asking your AI to use it. There is no account sign-in on this product page. Signup verification and secure payment setup may open a browser.'],
+    ['How do I manage my account? Is there a dashboard I need to log into?', 'Manage your account by asking your AI assistant in plain English. It uses the WitSelf CLI installed on your computer and needs permission to run local commands and access your account. There’s no separate account dashboard to log into. Identity verification and secure payment steps may open your browser.'],
     ['Can my AI update WitSelf and get support?', 'An AI with local command access can check your installed version, explain release notes, and help run the appropriate installer or package-manager update. It can also help troubleshoot and, on Professional or Team, open and follow support tickets through the CLI. Your AI guides the work; support tickets go to the WitSelf team.'],
     ['Can I move between AI tools?', 'Yes. Connect supported tools to the same WitSelf account, realm, and agent to use that agent’s saved facts and memories. Transcript capture and automatic context differ by integration.'],
     ['Can I run it myself?', 'The source and self-hosting documentation are on GitHub. The plans above describe the managed service; self-hosted infrastructure and operations are your responsibility.'],
