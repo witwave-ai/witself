@@ -1,6 +1,6 @@
 # Witself Privacy Policy
 
-**Version 2026-09-21 · Effective 2026-09-21**
+**Version 2026-10-14 · Effective 2026-10-14**
 
 **Controller:** Witwave LLC for account, billing, and operational data. For
 content your agents store, you are the controller and Witwave processes it
@@ -25,10 +25,17 @@ on your instructions (see the [DPA](data-processing-addendum.md)).
   fingerprint derived from the signup request is kept to prevent duplicate
   account creation and is replaced with a value-free marker when the account
   is purged.
-- We do not use advertising trackers or third-party site analytics. The only
-  third-party component served to your browser is Cloudflare Turnstile on
-  the signup challenge page. If we ever add analytics, we will update this
-  policy first.
+- **Website analytics**: we use Cloudflare Web Analytics on witself.com to
+  understand visits and improve the website's usability and performance.
+  A browser script sends page-view and performance measurements to
+  Cloudflare. Reports include page paths, referring sites, country, device
+  type, browser, and operating system. These reports do not identify
+  visitors by name or email address, and we do not link them to Witself
+  accounts or stored agent content. Cloudflare Web Analytics does not use
+  cookies, local storage, or visitor fingerprinting to measure usage. See
+  [Cloudflare's Web Analytics privacy information](https://www.cloudflare.com/web-analytics/).
+- We do not use advertising trackers. Cloudflare also provides Turnstile
+  on the signup challenge page for abuse prevention.
 
 ## How we use it
 
