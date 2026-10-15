@@ -88,7 +88,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="site-header wrap">
-  <a class="brand" href="#" aria-label="WitSelf home"><span class="brand-mark" aria-hidden="true">›_</span> WitSelf<span class="brand-by">by Witwave</span></a>
+  <a class="brand" href="#" aria-label="WitSelf home"><span class="brand-mark" aria-hidden="true"><span>›<span class="brand-cursor">_</span></span></span> WitSelf<span class="brand-by">by Witwave</span></a>
   <nav aria-label="Main navigation"><a href="#inspect">Product</a><a href="#pricing">Pricing</a><a class="repo-link" href="${repo}">GitHub <span aria-hidden="true">↗</span></a></nav>
 </header>
 <main id="main">
@@ -102,7 +102,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
     <aside class="continuity" aria-label="Illustrative example: the same agent using two AI tools">
       <div class="demo-heading"><span class="mono">ONE AGENT. CONTINUOUS CONTEXT.</span><span class="demo-label">Example</span></div>
       <div class="conversation"><span class="tool-label"><span class="tool-initial">C</span> In Claude Code <span>Today</span></span><p>“Remember why we chose<br>PostgreSQL for this project.”</p></div>
-      <div class="memory-link"><span></span><div><b class="brand-mark small" aria-hidden="true">›_</b><strong>WitSelf</strong><small>Identity · facts · memory</small></div><span></span></div>
+      <div class="memory-link"><span></span><div><b class="brand-mark small" aria-hidden="true"><span>›<span class="brand-cursor">_</span></span></b><strong>WitSelf</strong><small>Identity · facts · memory</small></div><span></span></div>
       <div class="conversation"><span class="tool-label"><span class="tool-initial dark">↗</span> In Codex <span>Next session</span></span><p>“What did we decide<br>about the database?”</p></div>
       <p class="demo-footnote">Connect both tools to the same WitSelf agent.<br>Recall the saved decision and its context.</p>
     </aside>
@@ -146,7 +146,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
   </section>
   <section class="faq wrap" aria-labelledby="faq-title"><div><p class="eyebrow">A few useful answers</p><h2 id="faq-title">Before you start.</h2></div><div>${p.questions.map(([q,a]) => `<details><summary>${esc(q)}<span aria-hidden="true">+</span></summary><p>${esc(a)}${q === 'Can I run it myself?' ? ` <a href="${docs}/runbooks.md">Self-hosting documentation.</a>` : ''}</p></details>`).join('')}</div></section>
 </main>
-<footer class="wrap"><div><a class="brand" href="#"><span class="brand-mark" aria-hidden="true">›_</span> WitSelf</a><p>A product of <a href="https://witwave.ai/">Witwave</a>.<br>Born from building agents that work together.</p></div><nav aria-label="Footer"><a href="${repo}">GitHub</a><a href="${repo}/tree/main/docs">Documentation</a><a href="https://witwave.ai/">Witwave</a><a href="https://self.witwave.ai/legal/terms">Terms</a><a href="https://self.witwave.ai/legal/privacy">Privacy</a><a href="product.md">Plain text</a></nav></footer>
+<footer class="wrap"><div><a class="brand" href="#"><span class="brand-mark" aria-hidden="true"><span>›<span class="brand-cursor">_</span></span></span> WitSelf</a><p>A product of <a href="https://witwave.ai/">Witwave</a>.<br>Born from building agents that work together.</p></div><nav aria-label="Footer"><a href="${repo}">GitHub</a><a href="${repo}/tree/main/docs">Documentation</a><a href="https://witwave.ai/">Witwave</a><a href="https://self.witwave.ai/legal/terms">Terms</a><a href="https://self.witwave.ai/legal/privacy">Privacy</a><a href="product.md">Plain text</a></nav></footer>
 <p id="copy-status" class="sr-only" role="status" aria-live="polite"></p>
 </body></html>\n`;
 
