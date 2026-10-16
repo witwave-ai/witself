@@ -24,17 +24,25 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-image="witself-postgres-backup-check:$$"
+images=()
 cleanup() {
-  docker image rm "$image" >/dev/null 2>&1 || true
+  local image
+  for image in "${images[@]}"; do
+    docker image rm "$image" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT
 
-# One native CI platform is enough to detect missing pinned APK revisions.
-# Keep the normal layer cache; the release build still covers both platforms.
-docker build --platform linux/amd64 \
-  --file "$repo_root/images/witself-postgres-backup/Dockerfile" \
-  --tag "$image" "$repo_root/images/witself-postgres-backup"
-docker run --rm --network none --platform linux/amd64 --entrypoint /bin/sh \
-  "$image" -ec 'age --version; aws --version; pg_dump --version'
-echo "postgres backup image check passed"
+# Alpine package revisions can diverge between architectures. Build each release
+# platform without layer reuse so a cached APK install cannot conceal pin drift.
+for architecture in amd64 arm64; do
+  platform="linux/$architecture"
+  image="witself-postgres-backup-check:$$-$architecture"
+  images+=("$image")
+  docker build --no-cache --platform "$platform" \
+    --file "$repo_root/images/witself-postgres-backup/Dockerfile" \
+    --tag "$image" "$repo_root/images/witself-postgres-backup"
+  docker run --rm --network none --platform "$platform" --entrypoint /bin/sh \
+    "$image" -ec 'age --version; aws --version; pg_dump --version'
+done
+echo "postgres backup image check passed (linux/amd64, linux/arm64)"

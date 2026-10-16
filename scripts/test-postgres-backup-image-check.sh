@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the image gate without Docker, a registry, or credentials.
+# Exercise both image platforms without Docker, a registry, or credentials.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -15,7 +15,7 @@ done
 cat >"$work_dir/docker/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
-fail() { echo "fake docker: $*" >&2; exit 90; }
+fail() { echo refused-fake-docker-call >>"$BACKUP_CHECK_LOG"; echo "fake docker: $*" >&2; exit 90; }
 case "${1:-}" in
   info)
     echo info >>"$BACKUP_CHECK_LOG"
@@ -23,9 +23,10 @@ case "${1:-}" in
     ;;
   build)
     shift
-    platform= dockerfile= image= context=
+    platform= dockerfile= image= context= no_cache=false
     while (($#)); do
       case $1 in
+        --no-cache) no_cache=true; shift ;;
         --platform) platform=$2; shift 2 ;;
         --file|-f) dockerfile=$2; shift 2 ;;
         --tag|-t) image=$2; shift 2 ;;
@@ -33,13 +34,15 @@ case "${1:-}" in
         *) [[ -z $context ]] || fail "extra build argument"; context=$1; shift ;;
       esac
     done
-    [[ $platform == linux/amd64 ]] || fail "build platform must be linux/amd64"
+    [[ $platform == linux/amd64 || $platform == linux/arm64 ]] || fail "unexpected build platform"
+    architecture=${platform#linux/}
+    [[ $no_cache == true ]] || fail "cached APK install could hide pin drift"
     [[ $dockerfile == "$BACKUP_CHECK_ROOT/images/witself-postgres-backup/Dockerfile" ]] || fail "wrong Dockerfile"
     [[ $context == "$BACKUP_CHECK_ROOT/images/witself-postgres-backup" ]] || fail "wrong build context"
-    [[ $image == witself-postgres-backup-check:* ]] || fail "image must have an isolated local tag"
-    printf '%s\n' "$image" >"$BACKUP_CHECK_IMAGE"
-    echo build >>"$BACKUP_CHECK_LOG"
-    [[ $BACKUP_CHECK_SCENARIO != build-fails ]]
+    [[ $image == witself-postgres-backup-check:*"-$architecture" ]] || fail "image must have an isolated per-platform tag"
+    printf '%s\n' "$image" >"$BACKUP_CHECK_IMAGES/image-$architecture"
+    printf 'build:%s\n' "$architecture" >>"$BACKUP_CHECK_LOG"
+    [[ $BACKUP_CHECK_SCENARIO != "$architecture-build-fails" ]]
     ;;
   run)
     shift
@@ -54,19 +57,23 @@ case "${1:-}" in
         *) break ;;
       esac
     done
-    [[ $platform == linux/amd64 ]] || fail "run platform must be linux/amd64"
+    [[ $platform == linux/amd64 || $platform == linux/arm64 ]] || fail "unexpected run platform"
+    architecture=${platform#linux/}
     [[ $remove == true && $network == none && $entrypoint == /bin/sh ]] || fail "unsafe runtime options"
-    [[ $# == 3 && $1 == "$(<"$BACKUP_CHECK_IMAGE")" && $2 == -ec ]] || fail "wrong image or shell arguments"
-    echo run >>"$BACKUP_CHECK_LOG"
-    PATH="$BACKUP_CHECK_VERSIONS:$PATH" /bin/sh "$2" "$3"
+    [[ $# == 3 && $1 == "$(<"$BACKUP_CHECK_IMAGES/image-$architecture")" && $2 == -ec ]] || fail "wrong image or shell arguments"
+    printf 'run:%s\n' "$architecture" >>"$BACKUP_CHECK_LOG"
+    [[ $BACKUP_CHECK_SCENARIO != "$architecture-run-fails" ]] || exit 93
+    BACKUP_CHECK_PLATFORM="$architecture" PATH="$BACKUP_CHECK_VERSIONS:$PATH" /bin/sh "$2" "$3"
     ;;
   image)
     shift
     [[ ${1:-} == rm ]] || fail "unexpected image command"
     shift
-    if [[ ${1:-} == -f || ${1:-} == --force ]]; then shift; fi
-    [[ $# == 1 && $1 == "$(<"$BACKUP_CHECK_IMAGE")" ]] || fail "cleanup targeted the wrong image"
-    echo cleanup >>"$BACKUP_CHECK_LOG"
+    [[ $# == 1 ]] || fail "cleanup must target one owned tag without force"
+    architecture=${1##*-}
+    [[ $architecture == amd64 || $architecture == arm64 ]] || fail "cleanup platform missing"
+    [[ -f $BACKUP_CHECK_IMAGES/image-$architecture && $1 == "$(<"$BACKUP_CHECK_IMAGES/image-$architecture")" ]] || fail "cleanup targeted an unowned image"
+    printf 'cleanup:%s\n' "$architecture" >>"$BACKUP_CHECK_LOG"
     ;;
   *) fail "unexpected command (pushing is forbidden)" ;;
 esac
@@ -79,8 +86,8 @@ for executable in age aws pg_dump; do
 set -eu
 name=${0##*/}
 [ "$#" = 1 ] && [ "$1" = --version ] || exit 91
-printf '%s\n' "$name" >>"$BACKUP_CHECK_LOG"
-[ "$BACKUP_CHECK_SCENARIO" != "$name-fails" ] || exit 92
+printf '%s:%s\n' "$name" "$BACKUP_CHECK_PLATFORM" >>"$BACKUP_CHECK_LOG"
+[ "$BACKUP_CHECK_SCENARIO" != "$BACKUP_CHECK_PLATFORM-$name-fails" ] || exit 92
 printf '%s test-version\n' "$name"
 VERSION
   chmod +x "$work_dir/versions/$executable"
@@ -96,7 +103,7 @@ run_case() {
   if [[ $scenario == no-cli ]]; then test_path="$work_dir/no-docker"; fi
   env PATH="$test_path" CI="$ci" GITHUB_ACTIONS="$actions" \
     BACKUP_CHECK_ROOT="$repo_root" BACKUP_CHECK_LOG="$case_dir/docker.log" \
-    BACKUP_CHECK_IMAGE="$case_dir/image" BACKUP_CHECK_SCENARIO="$scenario" \
+    BACKUP_CHECK_IMAGES="$case_dir" BACKUP_CHECK_SCENARIO="$scenario" \
     BACKUP_CHECK_VERSIONS="$work_dir/versions" \
     "$bash_bin" "$repo_root/scripts/check-postgres-backup-image.sh" "$@" \
     >"$case_dir/output" 2>&1 || status=$?
@@ -120,21 +127,31 @@ run_case() {
       [[ $(<"$case_dir/docker.log") == info ]] || { echo "backup image check: work ran without a daemon" >&2; exit 1; }
     fi
   else
-    local expected_log=$'info\nbuild'
-    if [[ $scenario != build-fails ]]; then
-      expected_log+=$'\nrun\nage'
-      if [[ $scenario != age-fails ]]; then
-        expected_log+=$'\naws'
-        if [[ $scenario != aws-fails ]]; then expected_log+=$'\npg_dump'; fi
-      fi
-    fi
-    expected_log+=$'\ncleanup'
+    local expected_log=info architecture probe attempted=()
+    for architecture in amd64 arm64; do
+      attempted+=("$architecture")
+      expected_log+=$'\nbuild:'"$architecture"
+      if [[ $scenario == "$architecture-build-fails" ]]; then break; fi
+      expected_log+=$'\nrun:'"$architecture"
+      if [[ $scenario == "$architecture-run-fails" ]]; then break; fi
+      for probe in age aws pg_dump; do
+        expected_log+=$'\n'"$probe:$architecture"
+        if [[ $scenario == "$architecture-$probe-fails" ]]; then break; fi
+      done
+      if [[ $scenario == "$architecture-"*-fails ]]; then break; fi
+    done
+    for architecture in "${attempted[@]}"; do expected_log+=$'\ncleanup:'"$architecture"; done
     [[ $(<"$case_dir/docker.log") == "$expected_log" ]] || {
-      echo "backup image check: $name missed a version probe, failure boundary, or image cleanup" >&2
+      echo "backup image check: $name missed a platform, version probe, failure boundary, or owned image cleanup" >&2
+      cat "$case_dir/docker.log" >&2
       exit 1
     }
     if grep -Fq 'skipped: no docker' "$case_dir/output"; then
       echo "backup image check: $name concealed an available-Docker result as a skip" >&2
+      exit 1
+    fi
+    if [[ $expected == failure ]] && grep -Fq 'image check passed' "$case_dir/output"; then
+      echo "backup image check: $name falsely announced success" >&2
       exit 1
     fi
   fi
@@ -150,8 +167,11 @@ for scenario in no-cli daemon-fails; do
 done
 run_case success success '' '' success
 run_case ci-success success true true success --require-docker
-for scenario in build-fails age-fails aws-fails pg_dump-fails; do
-  run_case "$scenario" "$scenario" '' '' failure
+for architecture in amd64 arm64; do
+  for failure in build run age aws pg_dump; do
+    scenario="$architecture-$failure-fails"
+    run_case "$scenario" "$scenario" '' '' failure
+  done
 done
 
 printf 'postgres backup image check tests: PASS (%s cases)\n' "$case_count"
