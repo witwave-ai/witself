@@ -60,7 +60,7 @@ export const product = {
   },
   setupRequirement: 'Before installation, confirm this is a supported AI tool with permission to run commands on the intended computer. If not, direct the user to a supported tool on their computer and stop.',
   setupIntro: 'On your computer, ask a supported AI tool like Cursor, Claude Code, or Codex:',
-  setupPrompt: 'Read https://witself.com/product.md and help me install WitSelf, set up my free account, and connect it to this AI.',
+  setupPrompt: 'Read https://witself.com/product.md, then help me install WitSelf, set up my free account, and connect it to this AI. Walk me through any steps I need to complete myself, then verify everything works.',
   intro: 'Keep the context. Change the tool.',
   introText: 'Decisions, preferences, and project history belong with your agent. WitSelf makes that context available through the CLI and the Model Context Protocol (MCP), wherever the same agent is connected.',
   features: [
