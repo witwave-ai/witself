@@ -17,6 +17,20 @@ var (
 	ErrCannotCloseDefault = errors.New("the deployment's default account cannot be closed")
 )
 
+// CheckAccountClose verifies the same owner, default-account, and vault lifecycle
+// fences as CloseAccount without changing account state. Its short transaction
+// releases the account lock before the caller performs any external billing work.
+// CloseAccount must still recheck because eligibility can change after this read.
+func (s *Store) CheckAccountClose(ctx context.Context, accountID, operatorID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = checkAccountCloseTx(ctx, tx, accountID, operatorID)
+	return err
+}
+
 // CloseAccount permanently closes the operator's account: status -> 'closed'
 // (a tombstone — the row lives forever) and every live credential on the
 // account is revoked. Idempotent: closing an already-closed account succeeds.
@@ -28,55 +42,11 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var isDefault bool
-	var status string
-	var isOwner bool
-	// FOR UPDATE OF a locks the accounts row so a concurrent close
-	// serializes rather than racing: two callers both reading
-	// status='active' would each fire the audit event, producing a
-	// duplicate account.closed record. Locking makes the status check
-	// authoritative — the loser sees 'closed' and skips the event.
-	err = tx.QueryRow(ctx,
-		`SELECT a.is_default, a.status, (o.is_root OR o.role = 'account_owner')
-		 FROM accounts a
-		 JOIN operators o ON o.account_id = a.id
-		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
-		 FOR UPDATE OF a`,
-		accountID, operatorID).Scan(&isDefault, &status, &isOwner)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotAccountOwner // operator not on this account at all
-	}
+	status, err := checkAccountCloseTx(ctx, tx, accountID, operatorID)
 	if err != nil {
-		return fmt.Errorf("verify close authority: %w", err)
-	}
-	if isDefault {
-		return ErrCannotCloseDefault
-	}
-	if !isOwner {
-		return ErrNotAccountOwner
+		return err
 	}
 	if status != "closed" {
-		// Closing revokes every agent token and is irreversible. Refuse to strand
-		// an enrollment transfer or open rotation that could then neither finish
-		// nor cancel. The owner can cancel it while active or suspended and retry
-		// the close; ExportAccount enforces the same lifecycle fence.
-		var activeVaultLifecycle bool
-		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-			  SELECT 1 FROM agent_vault_key_enrollments
-			   WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')
-			) OR EXISTS (
-			  SELECT 1 FROM agent_vault_key_rotations
-			   WHERE account_id=$1 AND lifecycle_state='open'
-			) OR EXISTS (
-			  SELECT 1 FROM agent_vault_keys
-			   WHERE account_id=$1 AND lifecycle_state='pending'
-			)`, accountID).Scan(&activeVaultLifecycle); err != nil {
-			return fmt.Errorf("check vault key lifecycle before close: %w", err)
-		}
-		if activeVaultLifecycle {
-			return ErrVaultLifecycleInProgress
-		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE accounts SET status = 'closed', closed_at = now(), closed_reason = $2
 			 WHERE id = $1`, accountID, reason); err != nil {
@@ -99,9 +69,6 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 	if err := s.supersedeOpenAvatarStyleRolloutsForAccountTx(ctx, tx, accountID, "account_closed"); err != nil {
 		return err
 	}
-	// Only record the audit event if this call was the one that actually
-	// closed the account (status != "closed" branch above). A no-op
-	// second close mustn't produce a fresh closure event.
 	if status != "closed" {
 		eventMeta := map[string]any{}
 		if reason != "" {
@@ -115,4 +82,58 @@ func (s *Store) CloseAccount(ctx context.Context, accountID, operatorID, reason 
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func checkAccountCloseTx(ctx context.Context, tx pgx.Tx, accountID, operatorID string) (string, error) {
+	var isDefault bool
+	var status string
+	var isOwner bool
+	// FOR UPDATE OF a locks the accounts row so a concurrent close
+	// serializes rather than racing: two callers both reading
+	// status='active' would each fire the audit event, producing a
+	// duplicate account.closed record. Locking makes the status check
+	// authoritative — the loser sees 'closed' and skips the event.
+	err := tx.QueryRow(ctx,
+		`SELECT a.is_default, a.status, (o.is_root OR o.role = 'account_owner')
+		 FROM accounts a
+		 JOIN operators o ON o.account_id = a.id
+		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
+		 FOR UPDATE OF a`,
+		accountID, operatorID).Scan(&isDefault, &status, &isOwner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotAccountOwner // operator not on this account at all
+	}
+	if err != nil {
+		return "", fmt.Errorf("verify close authority: %w", err)
+	}
+	if isDefault {
+		return "", ErrCannotCloseDefault
+	}
+	if !isOwner {
+		return "", ErrNotAccountOwner
+	}
+	if status != "closed" {
+		// Closing revokes every agent token and is irreversible. Refuse to strand
+		// an enrollment transfer or open rotation that could then neither finish
+		// nor cancel. The owner can cancel it while active or suspended and retry
+		// the close; ExportAccount enforces the same lifecycle fence.
+		var activeVaultLifecycle bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM agent_vault_key_enrollments
+			   WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')
+			) OR EXISTS (
+			  SELECT 1 FROM agent_vault_key_rotations
+			   WHERE account_id=$1 AND lifecycle_state='open'
+			) OR EXISTS (
+			  SELECT 1 FROM agent_vault_keys
+			   WHERE account_id=$1 AND lifecycle_state='pending'
+			)`, accountID).Scan(&activeVaultLifecycle); err != nil {
+			return "", fmt.Errorf("check vault key lifecycle before close: %w", err)
+		}
+		if activeVaultLifecycle {
+			return "", ErrVaultLifecycleInProgress
+		}
+	}
+	return status, nil
 }

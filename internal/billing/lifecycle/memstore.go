@@ -98,6 +98,23 @@ func (s *MemStore) List(_ context.Context) ([]Record, error) {
 	return out, nil
 }
 
+// GetBillingMutationAccount returns the exact durable lane without claiming it.
+func (s *MemStore) GetBillingMutationAccount(_ context.Context, accountID string) (BillingAccountMutationLease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lease, found := s.billingMutationAccounts[accountID]
+	if !found {
+		return BillingAccountMutationLease{}, false, nil
+	}
+	if err := validateBillingAccountMutationLease(lease); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	if lease.AccountID != accountID {
+		return BillingAccountMutationLease{}, false, ErrBillingMutationConflict
+	}
+	return cloneBillingAccountMutationLease(lease), true, nil
+}
+
 // ClaimBillingMutationAccount serializes provider work for one account. A
 // zero expected generation starts a new operation only after the prior lane is
 // idle; a positive generation can resume only that exact operation.
@@ -124,6 +141,12 @@ func (s *MemStore) ClaimBillingMutationAccount(
 			return BillingAccountMutationLease{}, false,
 				ErrBillingMutationConflict
 		}
+	}
+	// Closure is a permanent account-lane fence, even if the worker crashed
+	// before writing its Record marker and even after this lease expires.
+	if exists && current.OperationID == accountClosureOperationID(accountID) &&
+		operationID != current.OperationID {
+		return BillingAccountMutationLease{}, false, ErrAccountBillingClosed
 	}
 	if expectedOperationGeneration > 0 {
 		if !exists || current.OperationID != operationID ||

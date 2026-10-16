@@ -1942,10 +1942,25 @@ POST /v1/accounts/{account_id}:close
   `POST /v1/accounts/{account_id}/members/{principal}:set-role` changes a
   member's account-level role (`witself account set-role`).
 - `POST /v1/accounts/{account_id}:close` closes the account
-  (`witself account close`). It is audited and supports `dry_run`. It returns
+  (`witself account close`). It is audited; `dry_run` is not implemented. It returns
   conflict while any pending/approved enrollment or open rotation exists;
   cancellation remains available while suspended so the work can be settled
-  before close.
+  before close. Managed cells confirm subscription cancellation before revoking
+  credentials. A provider failure leaves account access and routing available
+  for retry; it is never a successful close.
+- `GET /v1/account/close-eligibility` is the cell's read-only, owner-authenticated
+  closure preflight, including pending and suspended accounts. It checks the
+  default-account and vault lifecycle fences and returns no billing secrets.
+- `POST /v1/accounts/{account_id}/billing:close` is a cell-only control-plane
+  callback, not a public standalone cancellation API. The Worker verifies the
+  routed cell's provision credential, replaces it with private bridge proof,
+  and the control plane independently checks owner eligibility at the cell.
+  It freezes billing mutations, expires open checkout links, cancels managed
+  subscriptions immediately, and requires provider readback before returning
+  `status=billing_closed`. It bypasses purchase cohort restrictions so disabling
+  purchases cannot prevent cancellation. Ordinary billing administrators cannot
+  invoke account closure. See [closure rollout and
+  recovery](account-closure-billing.md).
 
 The shipped customer command is the top-level `witself export`; it streams the
 authenticated account from the dedicated `GET /v1/export` route.

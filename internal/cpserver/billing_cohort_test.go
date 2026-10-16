@@ -164,6 +164,12 @@ func (s *billingCohortStoreSpy) List(ctx context.Context) ([]lifecycle.Record, e
 	return s.delegate.List(ctx)
 }
 
+func (s *billingCohortStoreSpy) GetBillingMutationAccount(ctx context.Context, accountID string) (lifecycle.BillingAccountMutationLease, bool, error) {
+	// A read-only account fence lookup does not create or claim a receipt.
+	s.stateCalls.Add(1)
+	return s.delegate.GetBillingMutationAccount(ctx, accountID)
+}
+
 func (s *billingCohortStoreSpy) ClaimBillingMutationAccount(
 	ctx context.Context,
 	accountID, operationID string,

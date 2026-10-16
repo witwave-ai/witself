@@ -947,11 +947,15 @@ func TestManagerOnR2Store(t *testing.T) {
 	}
 }
 
-// TestR2StoreLive runs the contract against a REAL bucket when credentials
-// are provided (WITSELF_TEST_R2_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY}) —
+// TestR2StoreLive runs the contract against a REAL bucket only when explicitly
+// opted in with WITSELF_TEST_R2_LIVE=1 and credentials are provided
+// (WITSELF_TEST_R2_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY}) —
 // this is what verifies R2's S3-compatible API honors If-Match from Go.
 // Skipped otherwise.
 func TestR2StoreLive(t *testing.T) {
+	if os.Getenv("WITSELF_TEST_R2_LIVE") != "1" {
+		t.Skip("external R2 writes disabled; set WITSELF_TEST_R2_LIVE=1 together with WITSELF_TEST_R2_* credentials to opt in")
+	}
 	endpoint := os.Getenv("WITSELF_TEST_R2_ENDPOINT")
 	bucket := os.Getenv("WITSELF_TEST_R2_BUCKET")
 	access := os.Getenv("WITSELF_TEST_R2_ACCESS_KEY")
@@ -981,5 +985,18 @@ func TestR2StoreLive(t *testing.T) {
 	// The load-bearing assertion: real R2 must 412 the stale writer.
 	if err := s.Put(ctx, got); !errors.Is(err, ErrStale) {
 		t.Fatalf("stale CAS on real R2 = %v; want ErrStale — If-Match must be honored", err)
+	}
+}
+
+func TestR2StoreLiveRequiresExplicitOptIn(t *testing.T) {
+	// Even an inherited credential set must not turn an ordinary test run into
+	// cloud writes. An unusable endpoint makes any accidental fallthrough fail.
+	t.Setenv("WITSELF_TEST_R2_ENDPOINT", "not-an-endpoint")
+	t.Setenv("WITSELF_TEST_R2_BUCKET", "test")
+	t.Setenv("WITSELF_TEST_R2_ACCESS_KEY", "test")
+	t.Setenv("WITSELF_TEST_R2_SECRET_KEY", "test")
+	for _, value := range []string{"", "0", "true", " 1", "1 "} {
+		t.Setenv("WITSELF_TEST_R2_LIVE", value)
+		t.Run("refuse_"+value, TestR2StoreLive)
 	}
 }

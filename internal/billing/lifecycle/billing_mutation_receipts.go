@@ -207,6 +207,11 @@ type BillingAccountMutationLease struct {
 // rotates through a fixed global shard set; receipt and account claims remain
 // authoritative while the index is only a value-minimal discovery structure.
 type BillingMutationStore interface {
+	// GetBillingMutationAccount exposes the existing durable lane fence so
+	// completed hosted actions cannot replay during a pre-Record close crash.
+	GetBillingMutationAccount(
+		ctx context.Context, accountID string,
+	) (lease BillingAccountMutationLease, found bool, err error)
 	ClaimBillingMutationAccount(
 		ctx context.Context,
 		accountID, operationID string,

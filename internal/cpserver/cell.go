@@ -343,7 +343,11 @@ func CellAuthenticate(resolve CellResolver) AuthFunc {
 
 func accountRoleAllows(role string, permission AccountPermission) bool {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "account_owner", "account_billing":
+	case "account_owner":
+		return permission == AccountPermissionAccountClose ||
+			permission == AccountPermissionBillingRead ||
+			permission == AccountPermissionBillingManage
+	case "account_billing":
 		return permission == AccountPermissionBillingRead ||
 			permission == AccountPermissionBillingManage
 	case "account_admin":

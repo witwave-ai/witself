@@ -265,6 +265,7 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		Catalog:              catalog,
 		Providers:            providers,
 		Authenticate:         authenticate,
+		CloseAuthenticate:    cpserver.CellCloseAuthenticate(cellResolve),
 		BillingMutationGate:  billingMutationGate,
 		AdminAuthenticate:    adminAuthenticate,
 		AdminAccountExists:   cpserver.BridgeAccountExists(bridgeURL, bridgeToken),
