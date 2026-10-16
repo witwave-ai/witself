@@ -58,10 +58,9 @@ export const product = {
     demoLabel: 'Just exploring? Try demo data without an account:',
     demoCommand: 'witself tui --demo',
   },
-  setupRequirement: 'Use a supported AI tool, such as Cursor, Claude Code, or Codex, on the Mac, Windows PC, or Linux computer where you want WitSelf installed, with permission to run local commands.',
-  setupBoundary: 'A regular ChatGPT, browser, or mobile chat without access to that computer can explain the steps, but cannot install WitSelf for you. If you’re on a phone or tablet, continue in a supported tool on your computer.',
-  setupIntro: 'Ask this to have AI help you get everything set up:',
-  setupPrompt: 'Read https://witself.com/product.md. Before making changes, confirm that you are a supported WitSelf AI tool with permission to run commands on the computer where I want it installed. If not, tell me which supported tool to open on my computer and stop. Otherwise, help me install WitSelf, set up my free account, and connect it to this AI. Walk me through any steps I need to complete myself, then verify everything works.',
+  setupRequirement: 'Before installation, confirm this is a supported AI tool with permission to run commands on the intended computer. If not, direct the user to a supported tool on their computer and stop.',
+  setupIntro: 'On your computer, ask a supported AI tool like Cursor, Claude Code, or Codex:',
+  setupPrompt: 'Read https://witself.com/product.md and help me install WitSelf, set up my free account, and connect it to this AI.',
   intro: 'Keep the context. Change the tool.',
   introText: 'Decisions, preferences, and project history belong with your agent. WitSelf makes that context available through the CLI and the Model Context Protocol (MCP), wherever the same agent is connected.',
   features: [
