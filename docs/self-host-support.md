@@ -1,8 +1,10 @@
 # Witself Self-Hosted Support
 
-Status: implemented self-host preview. Production self-host support is not yet
-an advertised entitlement; it may become paid or contracted after the
-hardening and acceptance gates in the canonical
+Status: **self-host preview. The complete independent self-hosting setup has
+not been tested end to end, and the documentation may have gaps.**
+
+Production self-host support is not currently offered. It may become paid or
+contracted after the hardening and acceptance gates in the canonical
 [Feature Status](feature-status.md) scorecard are closed.
 
 Narrative-memory amendment (accepted 2026-07-14): self-host support includes
@@ -26,10 +28,11 @@ Client curation and optional client-supplied vectors follow
 
 Managed Witself Cloud is the default supported product.
 
-Self-hosting is first-class in the sense that the public repo includes the
-backend server, Helm chart, Pulumi cell tooling, configuration docs, migration
-paths, PostgreSQL retrieval and optional client-vector guidance, and operational
-guidance needed to run Witself outside Witself Cloud.
+The public repository includes components and guidance for self-hosting
+experiments: the backend server, Helm chart, Pulumi cell tooling, configuration
+docs, migration paths, PostgreSQL retrieval and optional client-vector guidance,
+and operational guidance. Component availability and tests do not establish a
+validated self-hosting workflow.
 
 Self-hosting is not automatically a production support entitlement. Production
 self-host support should be paid or contracted after the required production
@@ -49,7 +52,7 @@ self-digest, or plaintext-exported. See
 |---|---|
 | Local development | Community or best-effort only. No production support. |
 | Self-host preview | Best-effort issue triage for public chart/server problems. No SLA. |
-| Production self-hosted | Paid or contracted support only, after production hardening requirements are met. |
+| Future production self-hosted | Not currently offered. Paid or contracted support would require validated production hardening and operational paths. |
 
 Notes:
 
@@ -60,8 +63,9 @@ Notes:
 - Self-host preview covers the public `witself-server` image, Helm chart, and
   Pulumi cell tooling run against externally managed PostgreSQL, on a best-effort
   basis. Optional client vectors use migration-0032 JSONB and need no extension.
-- Production self-hosted is the only tier that carries a support commitment, and
-  only under a paid or contracted agreement.
+- A future production self-hosted tier would carry a support commitment only
+  under a paid or contracted agreement, after the required validation. It is not
+  currently offered.
 
 The tiers span both planes. A deployment may run the open plane only or enable
 the ciphertext-only sealed plane. The latter adds vault enrollment, ciphertext
