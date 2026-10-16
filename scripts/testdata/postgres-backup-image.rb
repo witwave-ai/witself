@@ -31,8 +31,12 @@ check('backup multiarch manifest must be included in keyless signing',
 dockerfile = File.read(File.join(root, backup.fetch('dockerfile')))
 check('backup base must pin an official PostgreSQL 18 Alpine digest',
       dockerfile.match?(/^FROM postgres:18-alpine@sha256:[a-f0-9]{64}$/))
+check('backup must select exact age revisions for both supported Alpine architectures',
+      dockerfile.include?('case "$(apk --print-arch)" in') &&
+      %w[x86_64 aarch64].all? { |arch| dockerfile.match?(/#{arch}\) age_version=\d+\.\d+\.\d+-r\d+ ;;/) } &&
+      dockerfile.include?('*) echo "unsupported backup image architecture" >&2; exit 1 ;;'))
 check('backup must pin both tools during the build',
-      dockerfile.match?(/apk add --no-cache age=\d+\.\d+\.\d+-r\d+ aws-cli=\d+\.\d+\.\d+-r\d+;/))
+      dockerfile.match?(/apk add --no-cache "age=\$age_version" aws-cli=\d+\.\d+\.\d+-r\d+;/))
 check('backup must verify required tools while building', dockerfile.include?('for tool in bash psql pg_dump gzip date age aws; do command -v "$tool"'))
 check('backup must disable the inherited database server entrypoint', dockerfile.match?(/^ENTRYPOINT \[\]$/))
 
@@ -71,6 +75,12 @@ release = workflow.fetch('jobs').fetch('goreleaser')
 required_gates = %w[go verify provider-integration-verify provider-contract-evidence dashboard-acceptance homebrew-verify]
 check('backup publication must retain every existing release prerequisite', (required_gates - release.fetch('needs')).empty?)
 steps = release.fetch('steps')
+ci_qemu = tripwire.fetch('steps').find { |step| step.fetch('uses', '').start_with?('docker/setup-qemu-action@') }
+release_qemu = steps.find { |step| step.fetch('uses', '').start_with?('docker/setup-qemu-action@') }
+check('pre-tag CI must register ARM emulation using the pinned release action',
+      ci_qemu && release_qemu && ci_qemu['uses'] == release_qemu['uses'] &&
+      ci_qemu['uses'].match?(/@[a-f0-9]{40}$/) && ci_qemu.dig('with', 'platforms') == 'arm64' &&
+      tripwire.fetch('steps').index(ci_qemu) < tripwire.fetch('steps').index(build_step))
 attest = steps.find { |step| step['name'] == 'Attest container SBOMs' }
 check('backup must receive the same signed SBOM as the other release images',
       attest && attest['if'] == "github.event_name == 'push'" &&

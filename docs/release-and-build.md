@@ -739,22 +739,26 @@ server image. The release workflow also generates and attests its Syft SBOM.
 The backup image has no moving `latest` channel.
 
 The backup-image job in `.github/workflows/ci.yml` is the pre-tag pin-drift
-tripwire: it builds this Dockerfile for `linux/amd64` without pushing and runs
-`age --version`, `aws --version`, and `pg_dump --version` inside the resulting
-image. This catches unavailable Alpine package revisions before a release tag
-can begin publishing artifacts. Run `make check-postgres-backup-image` locally
+tripwire: it builds this Dockerfile for `linux/amd64` and `linux/arm64` without
+pushing and runs `age --version`, `aws --version`, and `pg_dump --version`
+inside the resulting image on each architecture. The install layer is rebuilt
+without cache so an older cached layer cannot hide unavailable Alpine package
+revisions before a release tag can begin publishing artifacts.
+Run `make check-postgres-backup-image` locally
 for the same check; `make check` includes it. Local runs print
 `skipped: no docker` when a Docker daemon is unavailable, while CI requires
 Docker and fails rather than skipping.
 
 To bump the pins, edit `images/witself-postgres-backup/Dockerfile`: choose a
 reviewed official PostgreSQL 18 multi-architecture base index digest and exact
-`age`/`aws-cli` revisions available for both `x86_64` and `aarch64` in that
-base's Alpine repositories. Keep the base and package pins consistent and
-update the Dockerfile's version comments. Run `make check-postgres-backup-image`
+`age`/`aws-cli` revisions available for each of `x86_64` and `aarch64` in that
+base's Alpine repositories. Alpine rebuild revisions may differ by architecture;
+keep each revision explicit and reject unsupported architectures. Keep the base
+and package pins consistent and update the Dockerfile's version comments.
+Run `make check-postgres-backup-image`
 and validate a two-platform build for `linux/amd64,linux/arm64` before the
-reviewed change is released. The single-platform CI tripwire does not replace
-that two-platform validation or the release's provenance and SBOM checks.
+reviewed change is released. The two-platform CI tripwire does not replace
+the release's provenance and SBOM checks.
 
 Cell activation is separate from publication. An explicit
 `scripts/roll-cell.sh CELL VERSION --backup-image` plus the existing rollout
