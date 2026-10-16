@@ -140,7 +140,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">\n<meta property="
     <div class="management-notes"><p>${esc(p.management.requirement)}</p><p>${esc(p.management.support)}</p></div>
   </section>
   <section id="install" class="install wrap" aria-labelledby="install-title">
-    <div class="section-intro"><p class="eyebrow">Start with a conversation</p><h2 id="install-title">Let your AI help you get set up.</h2><p>${esc(p.setupIntro)}</p><div class="setup-prompt">${code(p.setupPrompt, 'setup-prompt', 'setup prompt')}</div><p class="setup-note">Use an AI with local command access. You’ll complete identity verification and review the terms. The commands are here whenever you need them.</p></div>
+    <div class="section-intro"><p class="eyebrow">Start with a conversation</p><h2 id="install-title">Let your AI help you get set up.</h2><p>${esc(p.setupIntro)}</p><div class="setup-prompt">${code(p.setupPrompt, 'setup-prompt', 'setup prompt')}</div><p class="setup-note">You’ll complete identity verification and review the terms. The commands are here whenever you need them.</p></div>
     <ol class="setup-steps">${steps.map((step, i) => `<li><span class="step-index">${i + 1}</span><div><h3>${esc(step.title)}</h3><p>${esc(step.text)}</p>${i === 0 ? p.installers.map((installer, j) => j === 0 ? `<p class="command-label">${esc(installer.name)}</p>${code(installer.command)}` : `<details class="installer"><summary>${esc(installer.name)}</summary>${code(installer.command)}</details>`).join('') : i === 1 ? `<details class="installer"><summary>Account and agent setup commands</summary>${code(step.commands)}<p class="fine-print">Replace you@example.com, REALM_ID, and AGENT_ID with your own values. Read the <a href="https://self.witwave.ai/legal/terms">Terms</a> and <a href="https://self.witwave.ai/legal/privacy">Privacy Policy</a> before using --accept-terms.</p></details>` : code(step.commands)}</div></li>`).join('')}</ol>
     <div class="agent-callout"><span class="mono">PRODUCT AND SETUP GUIDE</span><p>Read the <a href="product.md">complete product and setup guide</a>.<br>Same information, in plain Markdown.</p><a class="text-link" href="llms.txt">AI reading index <span aria-hidden="true">↗</span></a></div>
   </section>
@@ -168,7 +168,7 @@ const markdown = [
   ...p.management.prompts.map(([label, prompt]) => `### ${label}\n\n“${prompt}”`),
   `### Example conversation: ${p.management.exampleTitle}\n\n${managementExample.map(([speaker, text]) => `**${speaker}:** ${text}`).join('\n\n')}\n\n${p.management.exampleNote}`,
   `${p.management.requirement}\n\n${p.management.support}`,
-  `## Install and connect\n\n${p.setupIntro}\n\n“${p.setupPrompt}”\n\nUse an AI with local command access. You’ll complete identity verification and review the terms.`,
+  `## Install and connect\n\n${p.setupRequirement}\n\n${p.setupIntro}\n\n\`\`\`text\n${p.setupPrompt}\n\`\`\`\n\nYou’ll complete identity verification and review the terms.`,
   ...p.installers.map(installer => `### ${installer.name}\n\n\`\`\`\n${installer.command}\n\`\`\``),
   ...steps.slice(1).map(step => `### ${step.title}\n\n${step.text}\n\n\`\`\`sh\n${step.commands}\n\`\`\``),
   'Replace you@example.com, REALM_ID, and AGENT_ID with your own values. Read the [Terms](https://self.witwave.ai/legal/terms) and [Privacy Policy](https://self.witwave.ai/legal/privacy) before using --accept-terms. Release installers verify checksums.',
