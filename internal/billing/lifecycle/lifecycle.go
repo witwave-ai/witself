@@ -293,8 +293,14 @@ type AdminChange struct {
 // the control plane's registry, and the account -> cell mapping stays in the
 // directory.
 type Record struct {
-	AccountID string
-	Email     string
+	// BillingClosureOperationID is an irreversible fence against new provider
+	// work once account closure begins. It survives a failed cell close and
+	// makes an exact retry finish cancellation without reopening purchases.
+	BillingClosureOperationID string
+	BillingClosureStartedAt   time.Time
+	BillingClosedAt           time.Time
+	AccountID                 string
+	Email                     string
 	// Provider names the configured provider this account's billing objects
 	// live at. Pinned when the customer is first created and kept for the
 	// life of those objects (subscription, card, invoice history) — a default
@@ -2028,10 +2034,17 @@ func (m *Manager) cancelCurrentPendingIdempotent(
 // lead recorded). A new request replaces any pending change — including its
 // provider-side state.
 func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	ctx, cancel := context.WithTimeout(ctx, billingMutationExecutionTimeout)
+	defer cancel()
 	operationID, err := newBillingOperationID()
 	if err != nil {
 		return Outcome{}, err
 	}
+	release, err := m.claimOpenBillingAccount(ctx, accountID, operationID)
+	if err != nil {
+		return Outcome{}, err
+	}
+	defer release()
 	return m.requestUpgrade(
 		ctx, accountID, email, planID, operationID, false,
 		billingMutationApproval{})
@@ -2342,10 +2355,17 @@ func (m *Manager) requestUpgrade(
 // the account must be pruned first; nothing is silently degraded. The check
 // runs again, authoritatively, before the snapshot is applied.
 func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	ctx, cancel := context.WithTimeout(ctx, billingMutationExecutionTimeout)
+	defer cancel()
 	operationID, err := newBillingOperationID()
 	if err != nil {
 		return Outcome{}, err
 	}
+	release, err := m.claimOpenBillingAccount(ctx, accountID, operationID)
+	if err != nil {
+		return Outcome{}, err
+	}
+	defer release()
 	return m.requestDowngrade(
 		ctx, accountID, email, planID, operationID, false,
 		billingMutationApproval{})
@@ -2567,7 +2587,18 @@ func (m *Manager) requestDowngrade(
 // sees it and this returns "nothing is pending" instead of clobbering the new
 // entitlement.
 func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
-	_, err := m.cancelPending(ctx, accountID, "", false)
+	ctx, cancel := context.WithTimeout(ctx, billingMutationExecutionTimeout)
+	defer cancel()
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return err
+	}
+	release, err := m.claimOpenBillingAccount(ctx, accountID, operationID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = m.cancelPending(ctx, accountID, "", false)
 	return err
 }
 
@@ -2878,6 +2909,12 @@ func (m *Manager) resolveEvent(
 			event.Type, provider)
 	}
 
+	if seed.BillingClosureOperationID != "" {
+		return EventReceiptResolution{
+			Decision: "ignored", IgnoreReason: "account_closing",
+			AccountID: seed.AccountID, ResolvedAt: resolvedAt,
+		}, nil
+	}
 	if resolver, ok := configured.(billing.EventResolver); ok {
 		resolved, err := resolver.ResolveEvent(ctx, event)
 		if err != nil {
@@ -2981,6 +3018,9 @@ func (m *Manager) foldEventResolution(
 	}
 	event := *resolution.Event
 	r, err := m.mutate(ctx, resolution.AccountID, "", func(r *Record) error {
+		if r.BillingClosureOperationID != "" {
+			return errSkipWrite
+		}
 		switch event.Type {
 		case billing.EventSubscriptionActivated:
 			key := entitlementEventKey(event)
@@ -3133,6 +3173,9 @@ func (m *Manager) foldEventResolution(
 	if err != nil {
 		return "", err
 	}
+	if r.BillingClosureOperationID != "" {
+		return "ignored", nil
+	}
 	// The provider event is already folded. Keep webhook processing successful
 	// and let the durable apply fence reconcile any transient cell failure.
 	_ = m.apply(ctx, r.AccountID)
@@ -3165,6 +3208,9 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 	r, err := m.load(ctx, accountID, "")
 	if err != nil {
 		return err
+	}
+	if r.BillingClosureOperationID != "" {
+		return nil
 	}
 	var firstErr error
 	// Replay only this account's bounded provider/customer receipt index. No
@@ -3301,6 +3347,9 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 	r, err := m.load(ctx, accountID, "")
 	if err != nil {
 		return err
+	}
+	if r.BillingClosureOperationID != "" {
+		return nil
 	}
 	if r.Version == 0 {
 		return fmt.Errorf("lifecycle: account %s has no stored plan record", accountID)
@@ -3457,6 +3506,9 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 // SnapshotApplyPending reports whether the cell has acknowledged the exact
 // currently resolved snapshot, not merely the same plan label.
 func SnapshotApplyPending(r Record, snapshot PlanSnapshot) bool {
+	if r.BillingClosureOperationID != "" {
+		return false
+	}
 	return r.SnapshotRevision == 0 ||
 		r.DesiredSnapshotHash != snapshot.Hash ||
 		r.AppliedSnapshotRevision != r.SnapshotRevision ||

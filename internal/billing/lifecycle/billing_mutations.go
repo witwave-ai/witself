@@ -123,6 +123,9 @@ func (m *Manager) PreviewBillingMutation(
 		return BillingMutationPreview{}, err
 	}
 
+	if err := m.requireOpenBillingAccount(ctx, accountID); err != nil {
+		return BillingMutationPreview{}, err
+	}
 	_, provider, providerErr := m.providerFor(r)
 	providerCapability := func(ok bool, capability string) {
 		if providerErr != nil {
@@ -301,6 +304,9 @@ func (m *Manager) ExecuteBillingMutation(
 		return BillingMutationExecution{}, errors.New(
 			"lifecycle: durable billing mutation store is required")
 	}
+	if err := m.requireOpenBillingAccount(ctx, accountID); err != nil {
+		return BillingMutationExecution{}, err
+	}
 	operationID := billingMutationOperationID(accountID, command.IdempotencyKey)
 	stored, exists, err := store.GetBillingMutation(ctx, operationID)
 	if err != nil {
@@ -378,7 +384,7 @@ func (m *Manager) ExecuteBillingMutation(
 	accountLease, acquired, err := store.ClaimBillingMutationAccount(
 		ctx, accountID, operationID, expectedAccountGeneration,
 		claimToken, claimNow, claimNow.Add(billingMutationClaimLease))
-	if errors.Is(err, ErrBillingMutationSuperseded) {
+	if errors.Is(err, ErrBillingMutationSuperseded) || errors.Is(err, ErrAccountBillingClosed) {
 		if exists && stored.Status == BillingMutationPending {
 			if _, supersedeErr := store.SupersedeBillingMutation(
 				ctx, stored, claimNow); supersedeErr != nil &&
@@ -386,7 +392,7 @@ func (m *Manager) ExecuteBillingMutation(
 				return BillingMutationExecution{}, supersedeErr
 			}
 		}
-		return BillingMutationExecution{}, ErrBillingMutationSuperseded
+		return BillingMutationExecution{}, err
 	}
 	if err != nil {
 		return BillingMutationExecution{}, err
@@ -399,6 +405,10 @@ func (m *Manager) ExecuteBillingMutation(
 			ctx, accountLease, m.cfg.Now().UTC())
 	}
 
+	if err := m.requireOpenBillingAccount(ctx, accountID); err != nil {
+		releaseAccount()
+		return BillingMutationExecution{}, err
+	}
 	if !exists {
 		receipt, err = buildBillingMutationReceipt(
 			accountID, email, actor, command,
@@ -427,13 +437,13 @@ func (m *Manager) ExecuteBillingMutation(
 				ctx, accountID, operationID, accountLease.OperationGeneration,
 				claimToken, revalidateNow,
 				revalidateNow.Add(billingMutationClaimLease))
-		if errors.Is(revalidateErr, ErrBillingMutationSuperseded) {
+		if errors.Is(revalidateErr, ErrBillingMutationSuperseded) || errors.Is(revalidateErr, ErrAccountBillingClosed) {
 			if _, supersedeErr := store.SupersedeBillingMutation(
 				ctx, stored, revalidateNow); supersedeErr != nil &&
 				!errors.Is(supersedeErr, ErrBillingMutationClaimActive) {
 				return BillingMutationExecution{}, supersedeErr
 			}
-			return BillingMutationExecution{}, ErrBillingMutationSuperseded
+			return BillingMutationExecution{}, revalidateErr
 		}
 		if revalidateErr != nil {
 			releaseAccount()
@@ -790,6 +800,19 @@ func (m *Manager) reconcileBillingMutation(
 	if stored.Status != BillingMutationPending {
 		return billingMutationReconcileNoop, nil
 	}
+	if err := m.requireOpenBillingAccount(ctx, stored.AccountID); err != nil {
+		if errors.Is(err, ErrAccountBillingClosed) {
+			_, supersedeErr := store.SupersedeBillingMutation(ctx, stored, m.cfg.Now().UTC())
+			if errors.Is(supersedeErr, ErrBillingMutationClaimActive) {
+				return billingMutationReconcileBusy, nil
+			}
+			if supersedeErr != nil {
+				return billingMutationReconcileNoop, supersedeErr
+			}
+			return billingMutationReconcileSuperseded, nil
+		}
+		return billingMutationReconcileNoop, err
+	}
 	enabled, err := m.billingMutationEnabledForAccount(ctx, stored.AccountID)
 	if err != nil {
 		return billingMutationReconcileNoop, fmt.Errorf(
@@ -828,6 +851,10 @@ func (m *Manager) reconcileBillingMutation(
 			ctx, accountLease, m.cfg.Now().UTC())
 	}
 
+	if err := m.requireOpenBillingAccount(ctx, stored.AccountID); err != nil {
+		releaseAccount()
+		return billingMutationReconcileNoop, err
+	}
 	claimed, acquired, err := store.ClaimBillingMutation(
 		ctx, stored, claimToken, claimNow,
 		claimNow.Add(billingMutationClaimLease))

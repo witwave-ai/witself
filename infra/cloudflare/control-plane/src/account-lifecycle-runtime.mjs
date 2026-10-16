@@ -48,6 +48,10 @@ const EVACUATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const STATE_KEY = "account-lifecycle";
 const RESTORE_QUARANTINE_KEY = "restore-quarantine";
 const RESTORE_QUARANTINE_SCHEMA = "witself.restore-quarantine.v1";
+// Account closure includes provider cancellation before credentials can be
+// revoked. Allow the four-minute billing operation plus the bridge response
+// and final cell commit, while retaining a bounded ambiguous-outcome retry.
+export const ACCOUNT_CLOSE_TIMEOUT_MS = 4.75 * 60 * 1000;
 export const IMPORT_START_WAIT_SECONDS = 20;
 export const IMPORT_START_TIMEOUT_MS = 90_000;
 export const IMPORT_POLL_TIMEOUT_MS = 15_000;
@@ -3058,7 +3062,7 @@ export class DurableAccountLifecycle {
             Authorization: input.authorization,
           },
           body: input.body || "{}",
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(ACCOUNT_CLOSE_TIMEOUT_MS),
         },
       );
       const parsed = await responseBody(response);

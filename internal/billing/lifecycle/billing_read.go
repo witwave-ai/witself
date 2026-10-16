@@ -128,6 +128,17 @@ func (m *Manager) CreateBillingSetup(
 	ctx context.Context,
 	accountID, email string,
 ) (billing.Action, error) {
+	ctx, cancel := context.WithTimeout(ctx, billingMutationExecutionTimeout)
+	defer cancel()
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return billing.Action{}, err
+	}
+	release, err := m.claimOpenBillingAccount(ctx, accountID, operationID)
+	if err != nil {
+		return billing.Action{}, err
+	}
+	defer release()
 	r, provider, err := m.ensureBillingCustomer(ctx, accountID, email)
 	if err != nil {
 		return billing.Action{}, err
@@ -184,6 +195,17 @@ func (m *Manager) CreateBillingPortal(
 	ctx context.Context,
 	accountID, email string,
 ) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, billingMutationExecutionTimeout)
+	defer cancel()
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return "", err
+	}
+	release, err := m.claimOpenBillingAccount(ctx, accountID, operationID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if !m.BillingAvailable() {
 		return "", ErrBillingUnavailable
 	}
@@ -225,6 +247,9 @@ func (m *Manager) ensureBillingCustomer(
 		if err != nil {
 			return Record{}, nil, err
 		}
+		if seed.BillingClosureOperationID != "" {
+			return Record{}, nil, ErrAccountBillingClosed
+		}
 		if strings.TrimSpace(seed.CustomerID) != "" {
 			_, provider, err := m.providerFor(seed)
 			return seed, provider, err
@@ -244,6 +269,9 @@ func (m *Manager) ensureBillingCustomer(
 		}
 
 		folded, err := m.mutate(ctx, accountID, email, func(r *Record) error {
+			if r.BillingClosureOperationID != "" {
+				return ErrAccountBillingClosed
+			}
 			if strings.TrimSpace(r.CustomerID) != "" {
 				return errSkipWrite
 			}

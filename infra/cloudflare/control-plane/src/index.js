@@ -99,6 +99,9 @@ import {
 import {
   containerEnvVars,
   forwardAdminPolicyRequest,
+  forwardAccountBillingCloseRequest,
+  isAccountBillingClosePath,
+  withoutAccountCloseCredentials,
   handleInternalBridgeRequest,
   isInternalBridgePath,
   matchAdminPolicyPath,
@@ -4824,6 +4827,7 @@ function isProtectedWorkerRoute(pathname) {
     ADMIN_PATH.test(pathname) ||
     ADMIN_REVOKE_PATH.test(pathname) ||
     Boolean(matchAdminPolicyPath(pathname)) ||
+    isAccountBillingClosePath(pathname) ||
     Boolean(matchRealmEmailCanonicalClosePath(pathname)) ||
     Boolean(matchRealmEmailAliasCustomerPath(pathname)) ||
     Boolean(matchAgentEmailDomainCustomerPath(pathname)) ||
@@ -4897,6 +4901,18 @@ async function handleFetch(request, env, ctx) {
     // public or signup limits, touching account state or reaching a container.
     if (url.pathname === SIGNUP_LEGAL_READINESS_PATH) {
       return handleSignupLegalReadiness(request, env);
+    }
+
+    // A cell's owner-close callback has its own routed-cell authority. Keep it
+    // outside the public IP limiter so another caller cannot throttle billing
+    // cancellation, and terminate malformed paths before the generic proxy.
+    if (isAccountBillingClosePath(url.pathname)) {
+      return forwardAccountBillingCloseRequest(
+        request,
+        env,
+        (bridgedRequest) =>
+          getContainer(env.CONTROL_PLANE, "singleton").fetch(bridgedRequest),
+      );
     }
 
     // Machine lifecycle callbacks carry their own bridge authority, and the
@@ -5308,7 +5324,9 @@ async function handleFetch(request, env, ctx) {
     }
 
     // Cold path: the Go container.
-    return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
+    return getContainer(env.CONTROL_PLANE, "singleton").fetch(
+      withoutAccountCloseCredentials(request),
+    );
 }
 
 // Keep scheduling helpers private: named exports are Worker entrypoints.

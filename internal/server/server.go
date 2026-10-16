@@ -157,7 +157,12 @@ type Config struct {
 
 	// CloseAccount, when set, enables POST /v1/account:close — the permanent,
 	// owner-only tombstone of the authenticated operator's account.
-	CloseAccount func(ctx context.Context, accountID, operatorID, reason string) error
+	// ownerBearer is forwarded only to the configured billing coordinator before
+	// closing; it must never be logged or retained.
+	CloseAccount func(ctx context.Context, accountID, operatorID, reason, ownerBearer string) error
+	// CheckAccountClose exposes an owner-only, status-independent eligibility
+	// read for the control plane's billing-close authorization.
+	CheckAccountClose func(ctx context.Context, accountID, operatorID string) error
 
 	// GetAccount, when set, enables GET /v1/account — the authenticated
 	// operator's account lifecycle record. Reachable at any status: a pending
@@ -2622,6 +2627,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.CloseAccount != nil {
 			mux.HandleFunc("POST /v1/account:close", closeAccountHandler(cfg.Authenticate, cfg.CloseAccount))
 		}
+		if cfg.CheckAccountClose != nil {
+			mux.HandleFunc("GET /v1/account/close-eligibility", accountCloseEligibilityHandler(cfg.Authenticate, cfg.CheckAccountClose))
+		}
 		if cfg.GetAccount != nil {
 			mux.HandleFunc("GET /v1/account", getAccountHandler(cfg.Authenticate, cfg.GetAccount))
 		}
@@ -3347,6 +3355,9 @@ func capabilitiesHandler(cfg Config) http.HandlerFunc {
 }
 
 type principal struct {
+	// bearer is request-scoped and only forwarded for account-close billing
+	// coordination. Never log, serialize, or persist it.
+	bearer        string
 	operatorID    string
 	accountID     string
 	accountStatus string
@@ -3397,7 +3408,7 @@ func requireOperatorAnyStatus(auth AuthFunc, h func(http.ResponseWriter, *http.R
 		if !admitAccountRequest(w, r, accountID) {
 			return
 		}
-		h(w, r, principal{operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})
+		h(w, r, principal{bearer: tok, operatorID: operatorID, accountID: accountID, accountStatus: accountStatus})
 	}
 }
 
@@ -6428,25 +6439,13 @@ func resumeAccountHandler(auth AuthFunc, resume func(ctx context.Context, accoun
 // tombstone + revoke every live credential. Owner-only; the seeded default
 // account is refused. Idempotent. Not status-gated: a pending account can
 // always be abandoned by its owner.
-func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, accountID, operatorID, reason string) error) http.HandlerFunc {
+func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, accountID, operatorID, reason, ownerBearer string) error) http.HandlerFunc {
 	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
 		var req struct {
 			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req) // body optional
-		err := closeAccount(r.Context(), p.accountID, p.operatorID, req.Reason)
-		switch {
-		case errors.Is(err, ErrNotAccountOwner):
-			writeJSONError(w, http.StatusForbidden, "only the account owner can close the account")
-			return
-		case errors.Is(err, ErrCannotCloseDefault):
-			writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be closed")
-			return
-		case errors.Is(err, ErrConflict):
-			writeJSONError(w, http.StatusConflict, "active vault key enrollment or rotation must be cancelled before closing the account")
-			return
-		case err != nil:
-			writeJSONError(w, http.StatusInternalServerError, "could not close account")
+		if writeAccountCloseError(w, closeAccount(r.Context(), p.accountID, p.operatorID, req.Reason, p.bearer)) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -6454,6 +6453,44 @@ func closeAccountHandler(auth AuthFunc, closeAccount func(ctx context.Context, a
 			"schema_version": "witself.v0",
 			"account_id":     p.accountID,
 			"status":         "closed",
+		})
+	})
+}
+
+// ErrAccountBillingClosePending leaves the account and its credentials intact
+// when the billing coordinator cannot confirm durable cancellation.
+var ErrAccountBillingClosePending = errors.New("account billing closure could not be confirmed")
+
+func writeAccountCloseError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, ErrNotAccountOwner):
+		writeJSONError(w, http.StatusForbidden, "only the account owner can close the account")
+	case errors.Is(err, ErrCannotCloseDefault):
+		writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be closed")
+	case errors.Is(err, ErrConflict):
+		writeJSONError(w, http.StatusConflict, "active vault key enrollment or rotation must be cancelled before closing the account")
+	case errors.Is(err, ErrAccountBillingClosePending):
+		writeJSONError(w, http.StatusServiceUnavailable, "billing cancellation could not be confirmed; the account remains open; retry closing the account")
+	case err != nil:
+		writeJSONError(w, http.StatusInternalServerError, "could not close account")
+	default:
+		return false
+	}
+	return true
+}
+
+func accountCloseEligibilityHandler(auth AuthFunc, check func(context.Context, string, string) error) http.HandlerFunc {
+	return requireOperatorAnyStatus(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		if writeAccountCloseError(w, check(r.Context(), p.accountID, p.operatorID)) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"schema_version": "witself.v0",
+			"kind":           "operator",
+			"account_id":     p.accountID,
+			"operator_id":    p.operatorID,
+			"account_role":   "account_owner",
 		})
 	})
 }

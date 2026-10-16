@@ -454,7 +454,7 @@ func TestBillingMutationsRefuseProviderlessMode(t *testing.T) {
 	}
 }
 
-func TestConcurrentBillingSetupUsesPersistedCustomerAuthority(t *testing.T) {
+func TestConcurrentBillingCustomerCreationUsesPersistedAuthority(t *testing.T) {
 	ctx := context.Background()
 	provider := &billingReadProviderStub{
 		ensureIDs:     []string{"customer_one", "customer_two"},
@@ -473,8 +473,14 @@ func TestConcurrentBillingSetupUsesPersistedCustomerAuthority(t *testing.T) {
 	results := make(chan result, 2)
 	for range 2 {
 		go func() {
-			action, err := manager.CreateBillingSetup(
+			// Exercise the customer CAS seam directly. Public setup operations
+			// now share the account mutation lane with account closure.
+			record, provider, err := manager.ensureBillingCustomer(
 				ctx, "acct_race", "owner@example.com")
+			var action billing.Action
+			if err == nil {
+				action, err = provider.SetupLink(ctx, record.CustomerID)
+			}
 			results <- result{action: action, err: err}
 		}()
 	}

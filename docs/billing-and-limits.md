@@ -175,6 +175,11 @@ last success, and the oldest pending timestamp observed in that bounded sample.
 Health remains liveness-only; no account, operation, provider, plan, customer,
 actor, digest, URL, or raw error becomes a metric label.
 
+The automatic account-closure cancellation path is documented in
+[Account closure and billing](account-closure-billing.md), including its
+provider-confirmation requirements, retry behavior, and coordinated release
+boundary. Its source implementation is not evidence of production activation.
+
 Production payment activation completed on 2026-08-31. Account billing reads and
 mutations derive distinct `billing:read` and `billing:manage` authority from the
 cell-authenticated account role; older cells that omit the role fail closed. The

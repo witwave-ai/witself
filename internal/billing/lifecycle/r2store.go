@@ -284,6 +284,29 @@ func (s *R2Store) List(ctx context.Context) ([]Record, error) {
 	return out, nil
 }
 
+// GetBillingMutationAccount reads the existing account lane, including a
+// permanent closure reservation that has no lifecycle Record yet.
+func (s *R2Store) GetBillingMutationAccount(ctx context.Context, accountID string) (BillingAccountMutationLease, bool, error) {
+	data, _, err := s.c.Get(ctx, s.billingMutationAccountKey(accountID))
+	if errors.Is(err, blob.ErrNotFound) {
+		return BillingAccountMutationLease{}, false, nil
+	}
+	if err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	var lease BillingAccountMutationLease
+	if err := json.Unmarshal(data, &lease); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	if err := validateBillingAccountMutationLease(lease); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	if lease.AccountID != accountID {
+		return BillingAccountMutationLease{}, false, ErrBillingMutationConflict
+	}
+	return lease, true, nil
+}
+
 // ClaimBillingMutationAccount uses one hashed per-account object as the
 // distributed provider-mutation lane. The account id is verified inside the
 // object, while no raw account identifier appears in the R2 key.
@@ -344,6 +367,12 @@ func (s *R2Store) ClaimBillingMutationAccount(
 		}
 		if current.AccountID != accountID {
 			return BillingAccountMutationLease{}, false, ErrBillingMutationConflict
+		}
+		// A closure reservation cannot be overtaken during the gap before its
+		// Record write. It remains terminal after release or lease expiry.
+		if current.OperationID == accountClosureOperationID(accountID) &&
+			operationID != current.OperationID {
+			return BillingAccountMutationLease{}, false, ErrAccountBillingClosed
 		}
 		if expectedOperationGeneration > 0 {
 			if current.OperationID != operationID ||

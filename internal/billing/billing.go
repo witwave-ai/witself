@@ -366,3 +366,13 @@ type Provider interface {
 	// subscription, or a downgrade to free is scheduled).
 	NextCharge(ctx context.Context, customerID string) (*UpcomingCharge, error)
 }
+
+// AccountClosureCanceller confirms that an account can no longer incur new
+// subscription charges. Implementations must verify ownership, expire pending
+// purchase sessions, cancel subscriptions immediately, and verify the resulting
+// provider state. Retries with the same operation ID must be safe after a lost
+// response. This is deliberately separate from CancelPending, which may restore
+// renewal by abandoning a scheduled downgrade.
+type AccountClosureCanceller interface {
+	CancelForAccountClosure(ctx context.Context, customerID, accountID, operationID string) error
+}

@@ -483,7 +483,7 @@ func CloseAccount(ctx context.Context, controlPlane, accountID, operatorToken, r
 	if err != nil {
 		return err
 	}
-	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + ":close"
+	url := apiV1Base(controlPlane) + "/accounts/" + accountID + ":close"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -491,13 +491,27 @@ func CloseAccount(ctx context.Context, controlPlane, accountID, operatorToken, r
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+operatorToken)
 
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := (&http.Client{
+		Timeout:       billingMutationTransportTimeout + 30*time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}).Do(req)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", controlPlane, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return responseError(resp, "close failed: "+resp.Status)
+	}
+	const maxCloseResponse = 8 << 10
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxCloseResponse+1))
+	var result struct {
+		SchemaVersion string `json:"schema_version"`
+		AccountID     string `json:"account_id"`
+		Status        string `json:"status"`
+	}
+	if err != nil || len(responseBody) > maxCloseResponse || json.Unmarshal(responseBody, &result) != nil ||
+		result.SchemaVersion != "witself.v0" || result.AccountID != accountID || result.Status != "closed" {
+		return errors.New("account closure could not be confirmed; retry closing the account")
 	}
 	return nil
 }

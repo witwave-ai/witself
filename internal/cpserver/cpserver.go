@@ -1,7 +1,8 @@
 // Package cpserver is the control plane's HTTP layer: the plan lifecycle
 // verbs the CLI drives, the per-provider billing webhook routes, and the
 // public plan catalog — the service surface over the lifecycle Manager
-// (issue #31). Cells never call this; they only receive applied snapshots.
+// (issue #31). Cells receive applied snapshots and confirm provider cleanup
+// through the account-closure callback before revoking account access.
 //
 // Auth: plan verbs act on behalf of an account owner, but operator tokens
 // live on CELLS (the cell's database holds the hashes), so the control plane
@@ -43,6 +44,8 @@ const (
 	// AccountPermissionBillingManage allows provider-hosted setup/portal and
 	// subscription lifecycle mutations.
 	AccountPermissionBillingManage AccountPermission = "billing:manage"
+	// AccountPermissionAccountClose is owner-only terminal billing cleanup.
+	AccountPermissionAccountClose AccountPermission = "account:close"
 )
 
 // AccountAccess is authenticated, role-derived authority. ActorID and Role
@@ -94,6 +97,9 @@ type Config struct {
 	// Authenticate guards the plan verbs. Required — there is deliberately
 	// no default-open mode.
 	Authenticate AuthFunc
+	// CloseAuthenticate validates owner authority and closure eligibility for
+	// active, pending, and suspended accounts. Absent keeps closure unavailable.
+	CloseAuthenticate AuthFunc
 	// BillingMutationGate optionally limits every billing:manage route to an
 	// account cohort. nil preserves the historical globally-enabled behavior.
 	// The gate runs only after account authentication and before any handler can
@@ -152,6 +158,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 		withAccount(cfg, AccountPermissionBillingRead, billingInvoices))
 	mux.HandleFunc("GET /v1/accounts/{id}/billing/payments",
 		withAccount(cfg, AccountPermissionBillingRead, billingPayments))
+	mux.HandleFunc("POST /v1/accounts/{id}/billing:close", accountBillingCloseRoute(cfg))
 	mux.HandleFunc("POST /v1/accounts/{id}/billing:portal",
 		withAccount(cfg, AccountPermissionBillingManage, billingPortal))
 	mux.HandleFunc("POST /v1/accounts/{id}/billing:preview",
@@ -1854,6 +1861,13 @@ func writeBillingMutationGateUnavailable(w http.ResponseWriter) {
 
 func writeBillingMutationManagerError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, lifecycle.ErrAccountBillingClosed):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"schema_version": "witself.v0",
+			"code":           "account_billing_closed",
+			"error":          "Account closure has started; billing changes are disabled. Retry account closure to finish.",
+			"retryable":      false,
+		})
 	case errors.Is(err, lifecycle.ErrBillingMutationInput):
 		writeBillingMutationEnvelopeError(w,
 			strings.TrimPrefix(err.Error(), lifecycle.ErrBillingMutationInput.Error()+": "))
@@ -1894,6 +1908,10 @@ func writeBillingMutationManagerError(w http.ResponseWriter, err error) {
 // writeBillingManagerError keeps provider and storage detail on the server
 // side. Only lifecycle refusals are customer-addressed and safe to return.
 func writeBillingManagerError(w http.ResponseWriter, err error) {
+	if errors.Is(err, lifecycle.ErrAccountBillingClosed) || errors.Is(err, lifecycle.ErrBillingMutationInProgress) {
+		writeBillingMutationManagerError(w, err)
+		return
+	}
 	if errors.Is(err, lifecycle.ErrBillingUnavailable) {
 		writeJSON(w, http.StatusNotImplemented, map[string]any{
 			"schema_version": "witself.v0",

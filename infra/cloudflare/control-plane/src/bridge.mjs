@@ -1,13 +1,16 @@
 // Production trust bridge between the Cloudflare Worker, the Go control-plane
 // container, and cells.
 //
-// There are two deliberately different credentials:
+// These credentials have separate trust boundaries:
 //   * witself_adm_* is presented by a human administrator and is verified by
 //     the Worker against DIRECTORY. It never crosses the Worker boundary.
 //   * INTERNAL_BRIDGE_TOKEN is shared only by this Worker and the Go
 //     control-plane container. The Worker uses it when proxying an
 //     authenticated admin request to Go; Go uses it for the internal
 //     directory/apply callbacks below.
+//   * Cell provision tokens prove the routed cell started an owner-account
+//     closure. They are exchanged for a dedicated bridge-proof header and
+//     never forwarded to the container or replaced with owner authority.
 //
 // Go contract:
 //   external proxy:
@@ -22,6 +25,10 @@
 //     Authorization: Bearer $INTERNAL_BRIDGE_TOKEN
 //     X-Witself-Admin-ID: <Worker-verified immutable admin id>
 //     X-Witself-Admin-Handle: <Worker-verified non-secret handle>
+//   account closure proxy:
+//     POST /v1/accounts/{id}/billing:close
+//     Authorization: Bearer <original account-owner token>
+//     X-Witself-Account-Close-Bridge: $INTERNAL_BRIDGE_TOKEN
 //   callbacks:
 //     GET  /v1/internal/accounts?cursor=&limit=
 //     GET  /v1/internal/accounts/{id}:resolve
@@ -57,6 +64,10 @@ import {
 import planContract from "./plan-contract.json" with { type: "json" };
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
+const ACCOUNT_BILLING_CLOSE_PATH = new RegExp(
+  `^/v1/accounts/(${ACCOUNT_ID_PATTERN})/billing:close$`,
+);
+const CELL_NAME_PATTERN = /^[a-z0-9-]{1,64}$/;
 const LIMIT_DIMENSION_PATTERN =
   `(?:${Object.keys(planContract.limit_maximums).join("|")})`;
 const ADMIN_POLICY_PATH = new RegExp(
@@ -95,6 +106,12 @@ const PLAN_LIMIT_KEYS = new Set(Object.keys(PLAN_LIMIT_MAXIMUMS));
 const PLAN_POLICY_BOUNDS = Object.freeze(planContract.policy_bounds);
 const PLAN_POLICY_KEYS = new Set(Object.keys(PLAN_POLICY_BOUNDS));
 
+export const ACCOUNT_CLOSE_BRIDGE_HEADER = "X-Witself-Account-Close-Bridge";
+export const CELL_PROVISION_HEADER = "X-Witself-Cell-Provision-Token";
+// The account billing lane bounds provider work at four minutes. Preserve time
+// for its durable acknowledgement rather than cutting it off at the ordinary
+// fifteen-second admin bridge deadline.
+export const ACCOUNT_BILLING_CLOSE_TIMEOUT_MS = 4.5 * 60 * 1000;
 export const ADMIN_ID_HEADER = "X-Witself-Admin-ID";
 export const ADMIN_HANDLE_HEADER = "X-Witself-Admin-Handle";
 export const BRIDGE_TIMEOUT_MS = 15_000;
@@ -220,6 +237,28 @@ export function matchAdminPolicyPath(pathname) {
 export function isInternalBridgePath(pathname) {
   return pathname === INTERNAL_ACCOUNTS_PATH ||
     pathname.startsWith(INTERNAL_PATH_PREFIX);
+}
+
+// This broad classifier also captures malformed and encoded variants so they
+// terminate at this boundary instead of falling into the generic Go proxy.
+export function isAccountBillingClosePath(pathname) {
+  let decoded = pathname;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    // A literal billing:close suffix still needs to terminate on bad escapes.
+  }
+  return decoded.startsWith("/v1/accounts/") &&
+    /\/billing:close(?:\/|$)/.test(decoded);
+}
+
+// No unverified closure proof may cross the generic proxy, including through
+// a path normalization discrepancy between the Worker and the Go router.
+export function withoutAccountCloseCredentials(request) {
+  const headers = new Headers(request.headers);
+  headers.delete(ACCOUNT_CLOSE_BRIDGE_HEADER);
+  headers.delete(CELL_PROVISION_HEADER);
+  return new Request(request, { headers });
 }
 
 function internalBridgeAuthorized(request, env) {
@@ -416,6 +455,79 @@ export async function forwardAdminPolicyRequest(
   } catch (cause) {
     const detail = cause?.name === "TimeoutError" ? "timed out" : "unreachable";
     return err(`control-plane container ${detail}`, 502);
+  }
+}
+
+// The cell calls this only after owner/default-account/vault preflight. Both
+// credentials are required: routed-cell authority proves this is the closing
+// flow, and the original owner bearer is independently authenticated by Go.
+// A customer with only an owner token cannot freeze billing while retaining
+// the paid account. Raw cell credentials never reach the container.
+export async function forwardAccountBillingCloseRequest(request, env, containerFetch) {
+  const url = new URL(request.url);
+  const match = url.pathname.match(ACCOUNT_BILLING_CLOSE_PATH);
+  if (!match) return err("account billing close route not found", 404);
+  if (request.method !== "POST") return err("method not allowed", 405);
+  if (url.search) return err("query parameters are not allowed", 400);
+
+  const authorization = request.headers.get("Authorization") ?? "";
+  const provisionToken = request.headers.get(CELL_PROVISION_HEADER) ?? "";
+  if (!/^Bearer [^\s]+$/.test(authorization) || !provisionToken) {
+    return err("unauthorized", 401);
+  }
+  const bridgeToken = env.INTERNAL_BRIDGE_TOKEN;
+  if (typeof bridgeToken !== "string" || !bridgeToken ||
+      bridgeToken.trim() !== bridgeToken) {
+    return err("internal bridge is not configured", 503);
+  }
+
+  try {
+    const resolved = await activeAccountRoute(env, match[1]);
+    if (resolved.response) return resolved.response;
+    if (typeof resolved.route.cell !== "string" ||
+        !CELL_NAME_PATTERN.test(resolved.route.cell)) {
+      return err("account cell routing is unavailable", 503);
+    }
+    const cell = await env.DIRECTORY.get(`cell:${resolved.route.cell}`, {
+      type: "json",
+    });
+    if (!validCellEndpoint(cell?.endpoint) ||
+        typeof cell?.provision_token !== "string" ||
+        !cell.provision_token || cell.provision_token.trim() !== cell.provision_token) {
+      return err("account cell routing is unavailable", 503);
+    }
+    if (!timingSafeEqual(provisionToken, cell.provision_token)) {
+      return err("unauthorized", 401);
+    }
+  } catch {
+    return err("account cell routing is unavailable", 503);
+  }
+
+  let bounded;
+  try {
+    bounded = await boundedBody(request);
+  } catch {
+    return err("request body is unavailable", 400);
+  }
+  if (bounded?.tooLarge) return err("request body too large", 413);
+  const target = new URL(request.url);
+  target.protocol = "http:";
+  target.host = "control-plane.internal";
+  const headers = new Headers({
+    Authorization: authorization,
+    [ACCOUNT_CLOSE_BRIDGE_HEADER]: bridgeToken,
+  });
+  const contentType = request.headers.get("Content-Type");
+  if (contentType) headers.set("Content-Type", contentType);
+  try {
+    return relay(await containerFetch(new Request(target, {
+      method: "POST",
+      headers,
+      body: bounded?.body,
+      signal: AbortSignal.timeout(ACCOUNT_BILLING_CLOSE_TIMEOUT_MS),
+    })));
+  } catch {
+    return err("account billing closure is unavailable", 502);
   }
 }
 

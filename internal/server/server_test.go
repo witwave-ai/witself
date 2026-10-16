@@ -1388,7 +1388,7 @@ func TestCloseAccount(t *testing.T) {
 		}
 		return "", "", "", false, nil
 	}
-	closeFn := func(_ context.Context, accountID, operatorID, _ string) error {
+	closeFn := func(_ context.Context, accountID, operatorID, _, _ string) error {
 		if accountID == "acc_default" {
 			return ErrCannotCloseDefault
 		}
@@ -1655,7 +1655,7 @@ func TestPendingAccountIsGated(t *testing.T) {
 		return Realm{ID: "realm_x", Name: name}, nil
 	}
 	closed := false
-	closeFn := func(_ context.Context, _, _, _ string) error {
+	closeFn := func(_ context.Context, _, _, _, _ string) error {
 		closed = true
 		return nil
 	}
@@ -1961,7 +1961,7 @@ func TestSuspendedAccountIsGated(t *testing.T) {
 	resumed := false
 	resume := func(_ context.Context, _, _ string) error { resumed = true; return nil }
 	closed := false
-	closeFn := func(_ context.Context, _, _, _ string) error { closed = true; return nil }
+	closeFn := func(_ context.Context, _, _, _, _ string) error { closed = true; return nil }
 	srv := httptest.NewServer(apiMux(Config{
 		Authenticate:       auth,
 		CreateRealm:        create,

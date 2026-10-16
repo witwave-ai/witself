@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   AccountLifecycleRuntimeError,
+  ACCOUNT_CLOSE_TIMEOUT_MS,
   DurableAccountLifecycle,
 } from "../src/account-lifecycle-runtime.mjs";
 import {
@@ -2572,6 +2573,78 @@ test("placement snapshot refusal aborts before export publication", async () => 
   const state = coordinator.storage.values.get("account-lifecycle");
   assert.equal(state.last_completed.outcome, "aborted");
   assert.equal(directory.value(`archived:${ACCOUNT}`), null);
+});
+
+test("owner close waits for billing cancellation with a bounded timeout", async (t) => {
+  const directory = new KV({
+    [`acct:${ACCOUNT}`]: sourceRoute(),
+    [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example"),
+  });
+  const timeoutCalls = [];
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    timeoutCalls.push(ms);
+    return controller.signal;
+  });
+  const coordinator = runtime({
+    directory,
+    bucket: new Bucket(),
+    fetch: async (url, init) => {
+      assert.equal(url, "https://source.example/v1/account:close");
+      assert.equal(init.signal, controller.signal);
+      assert.equal(init.headers.Authorization, "Bearer owner-token");
+      assert.equal(init.signal.aborted, false);
+      assert.equal(directory.value(`acct:${ACCOUNT}`).cell, SOURCE);
+      return Response.json({ account_id: ACCOUNT, status: "closed" });
+    },
+  });
+  const response = await coordinator.fetch(request("close", {
+    authorization: "Bearer owner-token", body: "{}",
+  }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(timeoutCalls, [ACCOUNT_CLOSE_TIMEOUT_MS]);
+  assert.equal(ACCOUNT_CLOSE_TIMEOUT_MS, 285_000);
+  assert.equal(directory.value(`acct:${ACCOUNT}`), null);
+});
+
+test("timed-out owner close keeps the live route until the cell confirms closure", async (t) => {
+  const directory = new KV({
+    [`acct:${ACCOUNT}`]: sourceRoute(),
+    [`cell:${SOURCE}`]: cell(SOURCE, "https://source.example"),
+  });
+  const timeoutCalls = [];
+  const closeController = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    timeoutCalls.push(ms);
+    return ms === ACCOUNT_CLOSE_TIMEOUT_MS
+      ? closeController.signal : new AbortController().signal;
+  });
+  const coordinator = runtime({
+    directory,
+    bucket: new Bucket(),
+    fetch: async (url, init) => {
+      if (url.endsWith("/v1/account:close")) {
+        assert.equal(init.signal, closeController.signal);
+        closeController.abort(new DOMException("close timed out", "TimeoutError"));
+        init.signal.throwIfAborted();
+      }
+      if (url.endsWith(":contact")) {
+        return Response.json({ account_id: ACCOUNT, status: "active" });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  const response = await coordinator.fetch(request("close", {
+    authorization: "Bearer owner-token", body: "{}",
+  }));
+  assert.equal(response.status, 502);
+  assert.match((await response.json()).error, /close outcome is ambiguous.*retry shortly/);
+  assert.deepEqual(timeoutCalls, [ACCOUNT_CLOSE_TIMEOUT_MS, 15_000]);
+  const persisted = coordinator.storage.values.get("account-lifecycle");
+  assert.equal(persisted.location.kind, "live");
+  assert.equal(persisted.operation.kind, "close");
+  assert.equal(persisted.operation.phase, "claimed");
+  assert.equal(directory.value(`acct:${ACCOUNT}`).cell, SOURCE);
 });
 
 test("closed authority removes a stale route on replay", async () => {

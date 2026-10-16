@@ -1191,6 +1191,16 @@ by the same active vault-key lifecycle check as export because it revokes the
 tokens needed to settle that work. Cancellation remains available while the
 account is suspended.
 
+On managed cells, closure first expires unfinished billing checkout links and
+cancels paid subscriptions immediately, then revokes account access. It does not
+issue a refund or a final prorated invoice. If billing cancellation cannot be
+confirmed, closure fails and credentials remain usable so the owner can retry.
+Once closure has started, new purchases are disabled. If a vault operation
+begins during cancellation, settle it and retry closing the account. Export
+anything you want to keep before closing. Uninstalling alone does not cancel a
+subscription or close an account. See the [rollout and recovery
+requirements](account-closure-billing.md).
+
 Flags:
 
 | Flag | Description |

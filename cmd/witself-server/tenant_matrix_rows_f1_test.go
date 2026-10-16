@@ -51,6 +51,7 @@ func tenantRowsF1() []tenantRow {
 		tenantF1Foreign("POST /v1/tokens/", credOperator, "/v1/tokens/${token.revoke}:revoke", "", "token.revoke"),
 		tenantF1Scratch("POST /v1/account:close", "S-close", `{"reason":"${canary.account.close}"}`),
 		tenantF1Own("GET /v1/account", credOperator, "Account identity comes solely from the authenticated operator.", ""),
+		tenantF1Own("GET /v1/account/close-eligibility", credOperator, "Close eligibility and owner identity come solely from the authenticated operator.", ""),
 		tenantF1Scratch("POST /v1/account:rename", "S-rename", `{"display_name":"${name.account.rename}"}`),
 		tenantF1Own("GET /v1/account/placement-policy", credOperator, "Reads the authenticated account's placement policy.", ""),
 		tenantF1Scratch("PATCH /v1/account/placement-policy", "S-placement", `{"preferred_clouds":[],"preferred_regions":[],"preferred_channels":[],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":[]}`),

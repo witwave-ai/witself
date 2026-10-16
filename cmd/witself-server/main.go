@@ -1176,18 +1176,12 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.CloseAccount = func(ctx context.Context, accountID, operatorID, reason string) error {
-			err := st.CloseAccount(ctx, accountID, operatorID, reason)
-			switch {
-			case errors.Is(err, store.ErrNotAccountOwner):
-				return server.ErrNotAccountOwner
-			case errors.Is(err, store.ErrCannotCloseDefault):
-				return server.ErrCannotCloseDefault
-			case errors.Is(err, store.ErrVaultLifecycleInProgress):
-				return server.ErrConflict
-			default:
-				return err
-			}
+		billingCloseEndpoint := os.Getenv("WITSELF_BILLING_ENDPOINT")
+		cfg.CheckAccountClose = func(ctx context.Context, accountID, operatorID string) error {
+			return accountCloseStoreError(st.CheckAccountClose(ctx, accountID, operatorID))
+		}
+		cfg.CloseAccount = func(ctx context.Context, accountID, operatorID, reason, ownerBearer string) error {
+			return closeAccountWithBilling(ctx, st, billingCloseEndpoint, provisionToken, accountID, operatorID, reason, ownerBearer)
 		}
 		cfg.GetAccount = func(ctx context.Context, accountID string) (server.AccountRecord, error) {
 			a, err := st.GetAccount(ctx, accountID)

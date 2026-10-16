@@ -494,9 +494,11 @@ func TestBillingHTTPValidatesHostedActionsAndDropsUnsafeOptionalLinks(t *testing
 	})
 	h := newBillingHTTPHarness(t, provider, store, nil)
 
+	// An ambiguous setup deliberately retains the durable account lane. Check
+	// the independent portal URL first so this test still reaches both validators.
 	for _, path := range []string{
-		"/v1/accounts/acct_1/billing:setup",
 		"/v1/accounts/acct_1/billing:portal",
+		"/v1/accounts/acct_1/billing:setup",
 	} {
 		var status int
 		var raw []byte
