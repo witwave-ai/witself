@@ -2,27 +2,44 @@
 
 ## Gates
 
-Before every push, fetch `origin/main` and classify the complete branch plus
-staged, unstaged, and untracked files:
+Before every push, use the deterministic local check selector:
 
 ```sh
-git fetch origin
-node scripts/ci-product-scope.mjs --base origin/main
+make check-local
 ```
 
-Only a positive `"website_only":true` result permits `make check-product-site`
-instead of the full local application gate. Install its locked tooling first
-with `npm ci --ignore-scripts --prefix infra/cloudflare/control-plane`.
-The exact allowlist lives in `scripts/ci-product-scope.mjs`: brochure copy,
-layout/build code, the two screenshots and manifest, and brochure documentation.
-This is a standing website-only rule; no per-push exception is needed.
+It fetches `origin`, compares against `origin/main`, and includes the complete
+branch plus staged, unstaged, and untracked files. Do not substitute a narrower
+base or decide eligibility from a short diff. It selects one of three paths:
 
-For application changes, mixed changes, an unavailable comparison, or any file
-outside that allowlist, run `make check`, including `check-infra` for the nested
-Pulumi module and Cloudflare Workers. Shared pricing/dependencies, hosting
-configuration, screenshot capture tools, workflows, checks, and this policy
-always require the full path. The change introducing this exception is itself
-on the full path. Never tag on red.
+- **Brochure only:** the existing positive `website_only` classification installs
+  locked website tooling and runs `make check-product-site`. Its exact allowlist
+  remains in `scripts/ci-product-scope.mjs`.
+- **Verified release roll only:** `scripts/local-roll-scope.mjs` must accept an
+  existing cell's generated application chart version, image tag, and image
+  digest as the only changes. `scripts/check-local-roll.mjs` then verifies the
+  release, artifact identities, unchanged migration sources, generated values,
+  and selected-cell rendering. Only its complete PASS replaces the full local
+  application gate. Partial updates, downgrades, extra configuration, database
+  or backup images, secrets, and source changes do not qualify. A confirmed
+  migration-source change selects the full application path automatically.
+- **Everything else:** run `make check`, including `check-infra`, with required
+  PostgreSQL and Node tests. Prepare the isolated database and locked Worker
+  dependencies described below before running this path.
+
+These are standing, machine-checked local rules; no per-push exception is needed
+when the selected gate passes. If release evidence or artifact verification is
+missing or fails, the selector stops. Passing unrelated application tests does
+not repair bad release evidence; resolve it or use the normal full validation
+and release procedure. See [the rollout gate guide](docs/local-roll-gate.md).
+
+Shared dependencies, hosting, screenshot tools, workflows, check code, and this
+policy always require the full path. This policy change itself requires the full
+path. GitHub CI classification, required PR checks, exact post-merge checks,
+backup-first rollout order, schema/backup obligations, and live convergence are
+unchanged. The command does not push, merge, tag, deploy, or authorize a rollout.
+It is not a Git hook and cannot prevent someone from bypassing local checks.
+Never tag on red.
 
 **Read a gate's verdict from its own output, never from a wrapper's exit
 code.** A gate wrapped inline as
@@ -41,6 +58,9 @@ status and ends its log with `run-gate: PASS <cmd>` or
 ```
 scripts/run-gate.sh --log /tmp/check.log check
 ```
+
+To retain the selector's complete verdict, use
+`scripts/run-gate.sh --log /tmp/local-check.log -- make check-local`.
 
 ## Tests that pass by not running
 

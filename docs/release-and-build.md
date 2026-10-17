@@ -49,6 +49,12 @@ artifact exists, roll only the intended canary or wave with
 application is actually installed and healthy. See
 [Deployment Cells](deployment-cells.md) and [`.gitops/README.md`](../.gitops/README.md).
 
+Before pushing prepared values, `make check-local` selects the required local
+checks. A strictly classified application-pin-only roll to an already verified
+release can use the [focused local rollout gate](local-roll-gate.md). Full
+GitHub CI, schema/backup requirements, backup-first ordering, and live
+verification remain unchanged.
+
 The release train (`scripts/roll-train.sh`) supports both tag-only
 `repository:VERSION` images and digest-pinned `repository@sha256:...` images.
 For a digest-pinned cell, convergence requires the selected pod and deployment
