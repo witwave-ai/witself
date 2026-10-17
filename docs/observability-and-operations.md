@@ -1525,12 +1525,19 @@ to the original cursor envelope, preserving the existing reconciliation flow.
 
 | Metric | Meaning |
 | --- | --- |
-| `witself_cp_stripe_webhook_events_total{outcome="verified"\|"rejected"\|"replayed"}` | Process-lifetime webhook observations. `verified` and `rejected` count verification attempts; verified requests include duplicates, zero-event deliveries, and requests whose later processing fails. `replayed` counts normalized deliveries whose durable receipt was already processed and overlaps verified observations. Do not sum the three outcomes as unique events. |
+| `witself_cp_stripe_webhook_events_total{outcome="verified"\|"rejected"\|"replayed"\|"processing_failed"}` | Process-lifetime webhook observations. `verified` and `rejected` count verification attempts; verified requests include duplicates, zero-event deliveries, and requests whose later processing fails. `replayed` counts normalized deliveries whose durable receipt was already processed. `processing_failed` counts verified deliveries whose fold returned an error. Both are subsets of verified observations; do not sum the four outcomes as unique events. |
 | `witself_cp_billing_reconciliation_lag_seconds` | Age of the oldest observed pending billing-mutation receipt from the bounded pre-reconciliation batch scan. An older observation survives incomplete or failed scans; a complete empty scan clears it to `0`. Omitted when no valid observation establishes either pending work or an empty scan. |
 | `witself_cp_billing_reconciliation_failures_total` | Process-lifetime account and billing-mutation reconciliation failures, including failed scans that produce no item-level failure. |
+| `witself_cp_billing_mutation_batch_failures_total` | Process-lifetime billing-mutation recovery batches that returned an error from a list failure, item failure or deadline. |
+| `witself_cp_entitlement_apply_blocked_total` | Process-lifetime account visits whose snapshot the cell's atomic fit check refused while the account stays pending: a downgrade, or a restore-recovery reapply. Repeated visits count again. Exists only when a Stripe provider is configured. |
 
-`outcome` is the only application label in these three families, with exactly
-the three values above; the lag and failure series have no application labels.
+A refused downgrade that is still pending counts as pending and is counted as
+blocked, not failed. A refusal on an account that is not pending still counts
+as failed, including a restore-recovery reapply behind an acknowledged record.
+
+`outcome` is the only application label in these five families, with exactly
+the four values above; the other series have no application labels.
+A control plane before this release sends schema 1 without the three new series.
 Account, customer, subscription, event, receipt, and cursor identifiers never
 appear in their names or labels. Counters are sampled by the lifecycle cron,
 reset when the container process restarts, and can lose increments between
@@ -1600,6 +1607,7 @@ cover target failures, the scheduler, and the Stripe observations:
   for five minutes, critical. Investigate Stripe endpoint/signing configuration
   and rejected traffic. This observes verification rejection; a verified request
   that later returns a processing error does not increase the rejected counter.
+  The `processing_failed` outcome now counts those requests.
 - `WitselfBillingReconciliationStalled`: observed lag exceeds 900 seconds and
   reconciliation failures increased within the preceding 15 minutes, with both
   conditions sustained for five minutes, critical. Investigate failed lifecycle

@@ -112,7 +112,11 @@ func TestPlanLifecycleTickReportsDeliveryGaps(t *testing.T) {
 			if mode == "unreadable" {
 				pending = 0
 			} // Stored CP acknowledgement alone cannot prove a successful current observation.
-			if first["scanned"] != float64(1) || first["apply_pending"] != pending || first["failed"] != float64(1) || first["succeeded"] != false {
+			failed := float64(1)
+			if mode == "blocked" {
+				failed = 0
+			}
+			if first["scanned"] != float64(1) || first["apply_pending"] != pending || first["failed"] != failed || first["succeeded"] != (mode == "blocked") {
 				t.Fatalf("delivery gap aggregate = %+v", first)
 			}
 			record, snapshot, err := manager.ResolvedStatus(context.Background(), id, "")

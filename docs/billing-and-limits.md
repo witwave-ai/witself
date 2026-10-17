@@ -1649,6 +1649,11 @@ its existing public `/metrics/probes` endpoint. It sends the same bounded page
 of active accounts to the CP and adds optional monitoring to the same private
 cursor checkpoint. Page counts distinguish `scanned`, `seeded`, `apply_pending`
 and `failed`. Pending and failed overlap: do not sum them as distinct accounts.
+A refused downgrade that is still pending counts as pending and is counted as
+blocked, not failed; the same applies to a restore-recovery reapply that stays
+pending. A refusal on an account that is not pending still counts as failed.
+The `witself_cp_entitlement_apply_blocked_total` counter records blocked account
+visits and exists only when a Stripe provider is configured.
 A failure with no pending bit means delivery could not be established, not that
 an entitlement is healthy. No account identifiers, plan names, cursors, tokens
 or raw error messages appear in these gauges.

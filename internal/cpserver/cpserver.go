@@ -1802,6 +1802,9 @@ func webhook(cfg Config, name string, p billing.Provider) http.HandlerFunc {
 			return
 		}
 		if err := cfg.Manager.OnEvents(r.Context(), name, events); err != nil {
+			if name == "stripe" {
+				cfg.LifecycleObserver.observeStripeProcessingFailure()
+			}
 			writeError(w, http.StatusInternalServerError, "could not process events")
 			return
 		}
