@@ -175,10 +175,16 @@ run_state() (
     # - test-agent-email-receipt-proof: reads no cells or generator output.
     # - internal/backupevidence: reads no cells or generator output.
     # - internal/client: reads no cells or generator output.
+    # - local-gate Node tests: establish their own pins/fixtures; the direct
+    #   test-roll-cell-gate invocation runs them once outside this matrix.
     run_check go-tests go test -count=1 ./internal/gitopsvalues/... ./internal/gitopscheck/... \
       ./internal/cmd/gitops-cell-values/...
     for suite in test-helm-rollout test-roll-cell-gate test-gitops-cell-values; do
-      run_check "$suite" bash "scripts/$suite.sh"
+      if [[ "$suite" == test-roll-cell-gate ]]; then
+        run_check "$suite" bash "scripts/$suite.sh" --cell-derived-only
+      else
+        run_check "$suite" bash "scripts/$suite.sh"
+      fi
     done
     for suite in test-monitoring-memory-alerts test-monitoring-collector-alerts; do
       run_check "$suite" ruby "scripts/testdata/$suite.rb" "$fixture"

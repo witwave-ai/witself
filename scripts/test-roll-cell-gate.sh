@@ -2,11 +2,16 @@
 set -euo pipefail
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-# The same full local, CI and release jobs already run this contract suite.
-# Test local-only selection here without changing any GitHub job's eligibility.
-node --test "$SOURCE_ROOT/scripts/local-roll-scope.test.mjs" \
-  "$SOURCE_ROOT/scripts/check-local-roll.test.mjs" \
-  "$SOURCE_ROOT/scripts/check-local.test.mjs"
+# Full local, CI and release jobs run the invariant local-gate tests once.
+# The roll-state matrix repeats only the original cell-derived contracts below.
+if [[ $# -eq 0 ]]; then
+  node --test "$SOURCE_ROOT/scripts/local-roll-scope.test.mjs" \
+    "$SOURCE_ROOT/scripts/check-local-roll.test.mjs" \
+    "$SOURCE_ROOT/scripts/check-local.test.mjs"
+elif [[ $# -ne 1 || $1 != --cell-derived-only ]]; then
+  printf 'usage: test-roll-cell-gate.sh [--cell-derived-only]\n' >&2
+  exit 2
+fi
 TEST_ROOT_RAW="$(mktemp -d "${TMPDIR:-/tmp}/witself-roll-cell-gate-test.XXXXXX")"
 TEST_ROOT="$(cd "$TEST_ROOT_RAW" && pwd -P)"
 

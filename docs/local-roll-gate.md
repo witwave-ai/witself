@@ -60,7 +60,10 @@ The exact implementation is in [the selector](../scripts/check-local.mjs),
 [scope classifier](../scripts/local-roll-scope.mjs), and
 [focused verifier](../scripts/check-local-roll.mjs). Their regression tests run
 inside the existing roll-cell contract suite in full local, CI, and release
-checks. The selector is a local command, not a mandatory Git hook. Repository
+checks. The generated roll-state matrix uses that suite's `--cell-derived-only`
+mode to repeat all original cell-dependent contracts without repeating the
+local-gate tests, which establish their own fixtures. The selector is a local
+command, not a mandatory Git hook. Repository
 policy directs humans and agents to use it; GitHub continues enforcing its full
 checks independently.
 

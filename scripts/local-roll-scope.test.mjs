@@ -55,12 +55,18 @@ test('complete one-cell forward update qualifies in working, staged, or committe
 });
 
 test('real generated Civo values qualify without touching unrelated pins or settings', t => {
-  const body = readFileSync(new URL('../.gitops/cells/civo-sandbox-use1-serving/values.yaml', import.meta.url), 'utf8');
+  const generated = readFileSync(new URL('../.gitops/cells/civo-sandbox-use1-serving/values.yaml', import.meta.url), 'utf8');
+  // The roll-state matrix also supplies unpinned generated values. Establish a
+  // complete previous release in this disposable fixture before testing a roll;
+  // every unrelated generated setting and pin remains exactly as supplied.
+  const withPins = (body, version, digest) => {
+    const block = /(  witselfServer:\n[\s\S]*?    chartVersion: )[^\n]+\n    imageTag: [^\n]+\n(?:    imageDigest: [^\n]*\n)?/;
+    assert.ok(block.test(body), 'generated Civo values must contain the server version pins');
+    return body.replace(block, (_, prefix) => `${prefix}${version}\n    imageTag: ${version}\n    imageDigest: ${digest}\n`);
+  };
+  const body = withPins(generated, '1.2.3', oldDigest);
   const f = fixture(t, {body});
-  const updated = body.replace(/(  witselfServer:\n[\s\S]*?    chartVersion: )[0-9]+\.[0-9]+\.[0-9]+/, (_, prefix) => `${prefix}999.0.0`)
-    .replace(/(^    imageTag: )[0-9]+\.[0-9]+\.[0-9]+$/m, '$1999.0.0')
-    .replace(/(^    imageDigest: )sha256:[a-f0-9]{64}$/m, `$1${newDigest}`);
-  f.write(path, updated);
+  f.write(path, withPins(body, '1.2.4', newDigest));
   assert.equal(f.classify().roll_only, true);
 });
 
