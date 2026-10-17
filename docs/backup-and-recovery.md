@@ -680,7 +680,7 @@ environment name is `civo-sandbox-use1-serving`, while its registered name is
 `civo-sandbox-usw2-dev`. The control plane sends that registered name in
 `X-Witself-Backup-Cell`, alongside `X-Witself-Backup-ID`, and requires the cell
 to echo both exactly before accepting the archive stream. A missing or different
-cell echo cancels the stream and produces a retryable dispatch failure.
+cell echo cancels the stream and produces a retryable export failure.
 
 Roll out this protocol change to **cells first, control plane second**. An old
 cell does not echo `X-Witself-Backup-Cell`, so a new control plane rejects its
@@ -745,8 +745,27 @@ Omitting `scheduled_at` in a later minute selects a different generation.
 Invalid `account_id` or unparseable `scheduled_at` retains HTTP 400.
 Poll `GET /v1/backups/status?account_id=...`, checking `current_job.status`
 and `last_committed_at`, until the selected id appears in the committed
-catalog. Acceptance alone is not a completed backup. Scheduled scans retain
-their synchronous execution and existing retry acknowledgements.
+catalog. Acceptance alone is not a completed backup.
+
+Scheduled scans use the same asynchronous Durable Object `/start` path as
+manual backups. A cron tick waits for dispatch acknowledgements, then records
+its page and returns without waiting for exports. An acknowledgement must be
+an OK HTTP response with `schema_version: "witself.v0"`, the requested
+`account_id` and `backup_id`, and status `accepted`, `committed`, `busy`, or
+`failed`. Only `accepted` and `committed` count toward `scan.accepted`;
+`busy`, `failed`, and invalid acknowledgements count toward `scan.failed`.
+The gauge `witself_control_plane_account_backup_pass_failed_accounts` exposes
+that recorded pass's `scan.failed`: it counts dispatches without acceptance,
+not backup execution failures. A missing acknowledgement does not prove that
+the job failed or was never created; inspect its per-account status and catalog.
+Exports and retries continue through the Durable Object's existing alarm
+policy. The synchronous internal `/run` endpoint remains available for older
+control planes, but the scheduler no longer uses it.
+
+Health and previous-slot terminal-failure accounting still read each account's
+status before dispatch. The current pass's acceptance does not attest a fresh
+commit or clear stale health; check the selected generation in the committed
+catalog after its alarm executor finishes.
 
 The Durable Object catalog is a bounded operational index, not the retention
 authority. Cataloged R2 objects are not deleted when old catalog entries age

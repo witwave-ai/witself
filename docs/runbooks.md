@@ -4042,8 +4042,14 @@ through at least one complete directory pass. A pass resumes from its cursor in
 directory order across intervals, so a slot change never discards an unfinished
 tail. `scan.pass_started_slot` identifies its starting interval; `scan.slot` is
 the latest tick's interval. `scan.scanned`, `scan.accepted`, `scan.failed` and
-`scan.failure_sample` reset only when a new pass starts. `scan.accepted` counts
-dispatch acceptance, not completion; `scan.failed` remains dispatch failures. Inspect
+`scan.failure_sample` reset only when a new pass starts. Scheduled dispatch uses
+the Durable Object's asynchronous `/start` path: the tick records each immediate
+acknowledgement while alarms execute exports and retries. `scan.accepted` counts
+matching `accepted` or `committed` acknowledgements, not new completions;
+`scan.failed` counts dispatches without acceptance, including `busy`, `failed`,
+and invalid acknowledgements. A failed dispatch does not prove a failed backup:
+the job may already be running or committed. Read the account's status and check
+the selected backup id in its committed catalog. Inspect
 `scan.previous_slot_terminal_failures` for accounts with a terminal failure
 in the immediately preceding scheduled slot, and
 `scan.previous_slot_status_unavailable` for accounts whose state could not be
@@ -4127,10 +4133,14 @@ consuming page slots. An overrun that persists while `pass_scanned_accounts`
 does not move points at a stuck cursor. Delete `config:account_backup_scan` to
 reset it; the next tick starts a new pass, and health reads unavailable until
 that pass completes or publishes an available overrun snapshot.
-`pass_failed_accounts` above zero for several passes points
-at accounts whose dispatch keeps failing. No rule pages on that gauge yet;
-an account reached but rejected before its Durable Object saves a job may still
-have no age-based stale evidence.
+`pass_failed_accounts` exposes the recorded pass's `scan.failed`, so a value
+above zero for several passes points at accounts whose dispatch is not accepted.
+Inspect `scan.failure_sample` and per-account status to distinguish a busy
+generation, terminal job failure, or missing/invalid acknowledgement; the gauge
+alone does not prove a backup failed. Conversely, zero means every recorded
+dispatch was accepted, not that every export has committed. No rule pages on
+that gauge yet; an account reached but rejected before its Durable Object
+saves a job may still have no age-based stale evidence.
 
 Set the secret to `false` (or delete
 it, since absence is disabled) to stop future periodic scans. Do not

@@ -902,54 +902,168 @@ test("scheduled scan preserves bounded failures across later successful pages", 
   assert.deepEqual(retried.failure_sample, []);
 });
 
-test("scheduled scan rejects terminal and busy acknowledgements as missing generations", async () => {
-  const directoryBinding = new KV();
-  const statuses = new Map([
-    ["acct_committed", "committed"],
-    ["acct_retrying", "retrying"],
-    ["acct_failed", "failed"],
-    ["acct_busy", "busy"],
-  ]);
-  const env = {
+function scheduledEnv(fetch, directoryBinding = new KV(), bucket = {}) {
+  return {
     CP_ACCOUNT_BACKUPS_ENABLED: "true",
-    CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES: "1440",
+    CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES: "5",
+    CP_ACCOUNT_BACKUPS_MAX_ATTEMPTS: "3",
+    CP_ACCOUNT_BACKUPS_CATALOG_LIMIT: "8",
     DIRECTORY: directoryBinding,
     ACCOUNT_BACKUP: {
       idFromName: (name) => ({ name }),
-      get: (id) => ({
-        fetch: async (request) => {
-          const job = await request.json();
-          return Response.json({
-            schema_version: "witself.v0",
-            account_id: id.name,
-            backup_id: job.backup_id,
-            status: statuses.get(id.name),
-          });
-        },
-      }),
+      get: (id) => ({ fetch: (request) => fetch(request, id.name) }),
     },
-    BACKUPS: {},
+    BACKUPS: bucket,
   };
+}
 
-  const result = await runScheduledAccountBackups(
-    env,
-    SCHEDULED_AT,
-    {
-      activeAccountPage: async () => ({
-        account_ids: [...statuses.keys()],
-        next_cursor: null,
-      }),
+const scheduledPage = async () => ({ account_ids: [ACCOUNT], next_cursor: null });
+const emptyScheduledStatus = async () => ({
+  backups: { current_job: null, failures: [], catalog: [] },
+  last_committed_at: null,
+});
+
+for (const scenario of [
+  { name: "accepted", status: "accepted", http: 202, accepted: true },
+  { name: "committed", status: "committed", accepted: true },
+  { name: "busy", status: "busy", failure: "busy" },
+  { name: "failed", status: "failed", failure: "failed" },
+  { name: "legacy retrying", status: "retrying", http: 202 },
+  { name: "non-OK", http: 503 },
+  { name: "invalid JSON", invalidJSON: true },
+  { name: "mismatched account id", overrides: { account_id: "acct_other" } },
+  { name: "mismatched backup id", overrides: { backup_id: "backup_20260725T123500Z" } },
+  { name: "mismatched schema", overrides: { schema_version: "witself.v1" } },
+]) {
+  test(`scheduled dispatch uses /start and validates ${scenario.name} acknowledgement`, async () => {
+    const requests = [];
+    const job = backupJobIdentity(ACCOUNT, SCHEDULED_AT, 5);
+    const env = scheduledEnv(async (request, accountID) => {
+      requests.push({
+        accountID, path: new URL(request.url).pathname, method: request.method,
+        contentType: request.headers.get("Content-Type"), body: await request.json(),
+      });
+      const options = { status: scenario.http ?? 200 };
+      if (scenario.invalidJSON) return new Response("not JSON", options);
+      return Response.json({
+        schema_version: "witself.v0", account_id: ACCOUNT, backup_id: job.backup_id,
+        status: scenario.status ?? "accepted", ...scenario.overrides,
+      }, options);
+    });
+    env.CP_ACCOUNT_BACKUPS_MAX_ATTEMPTS = "5";
+    env.CP_ACCOUNT_BACKUPS_CATALOG_LIMIT = "12";
+    const result = await runScheduledAccountBackups(env, SCHEDULED_AT, {
+      activeAccountPage: scheduledPage, status: emptyScheduledStatus,
+    });
+
+    assert.deepEqual(requests, [{
+      accountID: ACCOUNT, path: "/start", method: "POST", contentType: "application/json",
+      body: { ...job, max_attempts: 5, catalog_limit: 12 },
+    }]);
+    assert.equal(result.complete, true);
+    assert.equal(result.scanned, 1);
+    assert.equal(result.accepted, scenario.accepted ? 1 : 0);
+    assert.equal(result.failed, scenario.accepted ? 0 : 1);
+    assert.deepEqual(result.failure_sample, scenario.accepted ? [] : [{
+      account_id: ACCOUNT, status: scenario.failure ?? "dispatch_failed",
+    }]);
+    assert.equal(env.DIRECTORY.value(ACCOUNT_BACKUP_SCAN_KEY).failed, result.failed);
+  });
+}
+
+test("scheduled tick resolves after a 202 start acknowledgement while the executor stays pending", { timeout: 10_000 }, async (t) => {
+  const executor = deferred();
+  t.after(() => executor.resolve());
+  let executorFinished = false;
+  const executing = executor.promise.then(() => { executorFinished = true; });
+  const paths = [];
+  const env = scheduledEnv(async (request) => {
+    const path = new URL(request.url).pathname;
+    paths.push(path);
+    const job = await request.json();
+    // A synchronous dispatch would remain blocked on the unfinished export.
+    if (path === "/run") await executing;
+    return Response.json({
+      schema_version: "witself.v0", account_id: ACCOUNT,
+      backup_id: job.backup_id, status: "accepted",
+    }, { status: 202 });
+  });
+  try {
+    const result = await runScheduledAccountBackups(env, SCHEDULED_AT, {
+      activeAccountPage: scheduledPage, status: emptyScheduledStatus,
+    });
+    assert.deepEqual(paths, ["/start"]);
+    assert.equal(executorFinished, false, "the tick must finish before the export");
+    assert.equal(result.complete, true);
+    assert.equal(result.scanned, 1);
+    assert.equal(result.accepted, result.scanned);
+    assert.equal(result.failed, 0);
+  } finally {
+    executor.resolve();
+    await executing;
+  }
+});
+
+test("scheduled pass accepts a running alarm export and the next status read sees its commit", { timeout: 10_000 }, async (t) => {
+  const exporting = deferred();
+  const finishExport = deferred();
+  t.after(() => finishExport.resolve());
+  const job = backupJobIdentity(ACCOUNT, SCHEDULED_AT, 5);
+  const h = runtime({
+    fetch: async (_url, options) => {
+      exporting.resolve();
+      await finishExport.promise;
+      return new Response("archive", { headers: exportResponseHeaders(options) });
     },
-  );
+    validateArchive: () => validVerification(job),
+  });
+  const acknowledgements = [];
+  const paths = [];
+  let execution;
+  const env = scheduledEnv(async (request) => {
+    const path = new URL(request.url).pathname;
+    paths.push(path);
+    const response = await h.instance.fetch(request);
+    if (path === "/start") {
+      acknowledgements.push({ http: response.status, body: await response.clone().json() });
+      h.storage.alarm = null; // The platform consumes the executor alarm.
+      execution = h.instance.alarm();
+      await exporting.promise;
+    }
+    return response;
+  }, h.directory, h.bucket);
+  try {
+    const result = await runScheduledAccountBackups(env, SCHEDULED_AT, {
+      activeAccountPage: scheduledPage,
+    });
+    assert.deepEqual(paths, ["/status", "/start"]);
+    assert.deepEqual(acknowledgements, [{ http: 202, body: {
+      schema_version: "witself.v0", account_id: ACCOUNT, backup_id: job.backup_id,
+      status: "accepted", scheduled_at: job.scheduled_at,
+    } }]);
+    assert.equal(result.complete, true);
+    assert.equal(result.scanned, 1);
+    assert.equal(result.accepted, result.scanned);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(result.failure_sample, []);
+    assert.equal(result.previous_slot_status_unavailable, 0);
+    const running = (await accountBackupStatus(env, ACCOUNT)).account;
+    assert.equal(running.backups.current_job.status, "running");
+    assert.equal(running.last_committed_at, null);
+    assert.deepEqual(running.backups.catalog, []);
 
-  assert.equal(result.complete, true);
-  assert.equal(result.scanned, 4);
-  assert.equal(result.accepted, 2);
-  assert.equal(result.failed, 2);
-  assert.deepEqual(result.failure_sample, [
-    { account_id: "acct_failed", status: "failed" },
-    { account_id: "acct_busy", status: "busy" },
-  ]);
+    finishExport.resolve();
+    assert.equal((await execution).status, "committed");
+    const committed = (await accountBackupStatus(env, ACCOUNT)).account;
+    assert.equal(committed.backups.current_job.status, "committed");
+    assert.equal(committed.backups.current_job.attempts, 1);
+    assert.equal(committed.backups.catalog[0].backup_id, job.backup_id);
+    assert.equal(committed.last_committed_at, NOW.toISOString());
+    assert.equal(h.storage.alarm, null);
+  } finally {
+    finishExport.resolve();
+    await execution;
+  }
 });
 
 test("manifest purpose mismatch never enters the catalog and is removed on retry", async () => {
