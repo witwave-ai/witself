@@ -706,3 +706,9 @@ control-plane policy; it never truncates individual entries, and evidence or
 curation provenance holds defer deletion. See
 [transcript-retention.md](transcript-retention.md) for tier defaults, admin
 exceptions, worker bounds, and the separation from memory retention.
+The partial `transcript_entries_by_reply_to` index, built concurrently in
+migration 0099, supports reply-reference checks during retention, evacuation,
+and account purge, avoiding a scan of the whole entries table for each deleted
+entry. Migration 0099 checkpoints this index and the two hot memory-curation
+mutation cascade indexes before the remaining foreign-key indexes in 0100,
+so retrying 0100 preserves the completed reply-reference index.

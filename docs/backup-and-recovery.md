@@ -166,6 +166,32 @@ the index from imported tickets, and Down removes only the index. The release
 must follow the schema-change backup and migration procedure and cannot use a
 `--no-schema-change` attestation.
 
+Migrations `0099_index_foreign_key_delete_paths_hot.sql` and
+`0100_index_foreign_key_delete_paths.sql` build 38 supporting indexes for
+foreign-key deletion checks. Migration 0099 contains the transcript reply
+index and the two memory-curation mutation cascade indexes; migration 0100
+contains the other 35 fact, memory, avatar, vault, and email indexes. These
+indexes locate referencing rows without scanning the child tables for every
+deleted parent row. Each file runs outside a transaction and builds each index
+`CONCURRENTLY`, allowing writes during the build. Each build first drops its
+index `CONCURRENTLY`, so a retry rebuilds every index of the interrupted file,
+including its completed indexes. Goose records each file only after its last
+statement succeeds; the split checkpoints the three hot builds so a retry of
+0100 preserves the completed 0099 indexes. Down drops only these indexes, also
+`CONCURRENTLY`. The migrations advance the schema to 100 without changing
+account rows, constraints, or archive streams; the release train requires
+schema-change handling and `--backup-evidence`.
+
+The train carrying 0099 and 0100 must not overlap a pre-migration backup, the
+nightly 00:00Z backup export, a restore drill, or an in-flight evacuation import,
+because concurrent builds wait for older snapshots. Before the train, the
+dispatcher times both migrations on a restored copy of the serving cell. Store
+migrations run at server and worker startup, before the health listener, so the
+startup probe bounds each migration file: the chart allows 600 s
+(`probes.startup` and `worker.probes.startup`, 5 s x 120). The apps chart does
+not forward probe settings, so a cell cannot raise this for one roll; a file
+whose measured time approaches half the budget needs a code change first.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -662,9 +688,10 @@ export. A new cell with an old control plane keeps the previous behavior: when
 the header is absent, it stamps and echoes `WITSELF_CELL_NAME`. Manifest source
 checks on commit and restore drills remain exact.
 
-Export-order indexes are built concurrently at startup, so a cell roll carrying
-them must not overlap a pre-migration backup or the nightly periodic backup slot
-around 00:00Z because concurrent builds wait for older snapshots.
+For every migration that builds indexes concurrently at startup, the cell roll
+must not overlap a pre-migration backup, the nightly 00:00Z backup export, a
+restore drill, or an in-flight evacuation import, because concurrent builds
+wait for older snapshots.
 
 Large accounts stream in bounded NDJSON chunks. Each completed chunk flushes
 both gzip and the HTTP response; the outer gzip stream may contain sync flush
@@ -1619,8 +1646,11 @@ capabilities or archive URL query strings.
 
 ## Evacuation archive transport (protocols 2 and 3)
 
-Deploy the control plane first, then protocol-3 cells with
-`roll-train.sh VERSION --no-schema-change …`; schema remains 98. See
+The protocol-3 transport change itself leaves schema 98 unchanged: deploy the
+control plane first, then protocol-3 cells with
+`roll-train.sh VERSION --no-schema-change …` only when the release contains no
+schema changes. Releases containing migrations 0099/0100 require the schema-change
+procedure described above. See
 [the rollout matrix and mixed-version rules](deployment-cells.md#account-evacuation-transport-rollout).
 
 For protocol-2 and protocol-3 targets, the lifecycle Durable Object issues a
