@@ -19,6 +19,14 @@ Cross-realm and cross-account federation remain planned work rather than a live
 product claim. Witself runs as a multi-cloud-shaped platform of independent
 deployment cells under a thin global control plane.
 
+## Active Research
+
+- [WitSelf running locally](research/local-cell/README.md): the feature research
+  index for the selected but revisable local-cell direction. Includes product
+  requirements, storage/competitor research, the code-backed assessment, native
+  installation and infrastructure reuse, and incremental canary delivery.
+  Research only; no implemented local-mode or synchronization claim.
+
 ## Product And Architecture
 
 - [feature-status.md](feature-status.md): the generated human view of the
