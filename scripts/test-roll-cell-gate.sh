@@ -2,6 +2,11 @@
 set -euo pipefail
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# The same full local, CI and release jobs already run this contract suite.
+# Test local-only selection here without changing any GitHub job's eligibility.
+node --test "$SOURCE_ROOT/scripts/local-roll-scope.test.mjs" \
+  "$SOURCE_ROOT/scripts/check-local-roll.test.mjs" \
+  "$SOURCE_ROOT/scripts/check-local.test.mjs"
 TEST_ROOT_RAW="$(mktemp -d "${TMPDIR:-/tmp}/witself-roll-cell-gate-test.XXXXXX")"
 TEST_ROOT="$(cd "$TEST_ROOT_RAW" && pwd -P)"
 

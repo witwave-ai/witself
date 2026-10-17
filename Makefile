@@ -129,7 +129,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -381,6 +381,9 @@ check-postgres-backup-image: ## Build and smoke-test the backup image; Docker is
 check-postgres-image-mirror: ## Verify digest-preserving local copies; Skopeo is mandatory in CI
 	bash scripts/test-postgres-image-mirror-check.sh
 	bash scripts/check-postgres-image-mirror.sh
+
+check-local: ## Fetch and select the required local pre-push checks; GitHub CI stays unchanged
+	node scripts/check-local.mjs
 
 check-product-site: ## Check brochure output, indexing, screenshots, and deployment without publishing
 	node web/product/check.mjs
