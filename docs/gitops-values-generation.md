@@ -28,7 +28,7 @@ the same composed name as `witself-infra`
 | `gitops.repoURL`, `gitops.targetRevision` | Catalog `gitops` block |
 | `gitops.valuesPath` | Civo only: `.gitops/cells/<cell>/values.yaml` |
 | Cloud-family ingress, secrets, ExternalDNS/ESO, and platform add-on enablement | AWS / Azure / GCP family templates. Chart versions for cert-manager, external-dns, external-secrets, KEDA, and metrics-server come from [`.gitops/charts/platform/values.yaml`](../.gitops/charts/platform/values.yaml) and are **not** per-cell: every overlay emits those fleet defaults. A future per-cell platform chart pin needs a catalog field; it is not expressible in `values.yaml` by hand. Civo Postgres chart version comes from [`.gitops/charts/apps/values.yaml`](../.gitops/charts/apps/values.yaml) |
-| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-use1-serving` overlay; the checked-in switches enable the recovered serving-cell monitoring); `request_budget` (Civo overlays only; refused on a cell without an overlay) |
+| Switches | Catalog `switches`: AWS `aws_zone_type`; GCP managed-HA / worker jobs / fact-deletion / avatar-compaction / dark agent-email receive; Civo `domain_documentation_only` (the documentation-only domain comment); Civo `monitoring` / `collector_alerts` / `sealed_plane_alerts` (the `platform.monitoring` block in the `civo-sandbox-use1-serving` overlay; the checked-in switches enable the recovered serving-cell monitoring); Civo production `control_plane_alerts` (the control-plane probe scrape and rule groups described below); `request_budget` (Civo overlays only; refused on a cell without an overlay) |
 | `unprovisioned` (catalog only, not rendered) | `true` records an onboarded cell that has never been provisioned, the only kind of cell `scripts/roll-cell.sh --first-sync` accepts; absent means provisioned. The generator rejects it together with `domain_documentation_only`, because the first-sync probe needs the cell's real API host. Remove it before the cell's first `witself-infra` preview |
 
 ### Pinned scalars that `scripts/roll-cell.sh` owns
@@ -82,6 +82,15 @@ The checked-in tree is at phase 3 or 4; the helper detects which and reverses th
 later patches first.
 Setting switches on an overlay without a `platform.monitoring` block has
 no effect.
+
+The `control_plane_alerts` switch selects the control-plane probe scrape and
+the synthetic-uptime, Stripe and entitlement rule groups in the
+`civo-prod-use1-serving` overlay. It is committed `false` and has no effect
+while that cell's `monitoring` is off. The sandbox serving overlay still
+hard-codes these gates on when monitoring is enabled. The
+`TestControlPlaneAlertsSingleOwner` guard allows at most one owner, so the PR
+that turns on production monitoring must decide ownership and move it in
+the same change.
 
 To regenerate `scripts/testdata/monitoring-recovery/phase2.patch` (phase 1 to 2)
 or `phase3.patch` (phase 2 to 3) or `phase4.patch` (phase 3 to 4), start from the

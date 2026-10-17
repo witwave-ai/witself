@@ -248,9 +248,9 @@ platform:
     argocd:
       enabled: true
     uptimeProbes:
-      enabled: false
+      enabled: {{.ControlPlaneAlerts}}
     entitlementDelivery:
-      enabled: false
+      enabled: {{.ControlPlaneAlerts}}
     receiver:
       kind: pagerduty
       secretName: witself-monitoring-pagerduty-v2

@@ -52,6 +52,7 @@ cells:
       sealed_plane_alerts: false
       postgres_backup: false
       memory_alerts: false
+      control_plane_alerts: false
   civo-sandbox-use1-backup:
     cloud: civo
     region: nyc1
