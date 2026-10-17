@@ -63,6 +63,8 @@ printf '%s\n' "$EDGE" > "$SECRET_DIR/edge"
 printf '%s\n' "$CF_FILE" > "$SECRET_DIR/cf"
 printf '%s\n' "$CF_ENV" > "$SECRET_DIR/cf-env"
 printf '%s\n' "$FLEET" > "$SECRET_DIR/fleet"
+# A pattern file keeps the audit values off argv and makes whole-tree scans fast.
+printf '%s\n' "$EDGE" "$CF_FILE" "$CF_ENV" "$FLEET" "$INHERITED_EDGE" "$INHERITED_FLEET" "$CF_OLD" "$HEX" > "$SECRET_DIR/audit-fixtures"
 cat > "$SECRET_DIR/deploy-env" <<'ENV'
 # Four fake, non-secret identifiers.
 CLOUDFLARE_ACCOUNT_ID=fixture-account
@@ -170,7 +172,10 @@ case "$name" in
         [ "$scenario" != downgrade ] || version=1.2.5
         [ "$scenario" != equal-version ] || version=1.2.4
         [ "$scenario" != bad-version ] || version=unknown
-        printf '{"version":"%s","commit":"12345678abcdef"}\n' "$version" ;;
+        [ "${RO_TEST_CHAIN:-false}" != true ] || version=1.2.4
+        [ "$scenario" != chain-serving-stale ] || version=1.2.3
+        [ "$scenario" != chain-serving-fail ] || exit 22
+        printf '{"version":"%s","commit":"12345678abcdef","store_schema_version":%s}\n' "$version" "${RO_TEST_SCHEMA:-2}" ;;
       *'/v1/backups/status?'*)
         count records
         state=idle; id=drill-fixture; finished='"2026-10-10T08:02:00Z"'
@@ -222,27 +227,126 @@ case "$name" in
       [ "$scenario" != kube-fail ] || exit 1
       if [ "$scenario" = rows ]; then printf '1\n'; else printf '0\n'; fi
     else exit 97; fi ;;
+  tee)
+    if [ "$scenario" = logger-fail ]; then "$RO_TEST_ROOT/real/tee" "$@"; exit 17; fi
+    exec "$RO_TEST_ROOT/real/tee" "$@" ;;
   sed)
     if [ "$scenario" = redaction-fail ]; then
       count redactions
       [ "$n" -ne 2 ] || exit 19
     fi
     exec "$RO_TEST_ROOT/real/$name" "$@" ;;
-  gh|node|witself|witself-admin) exit 98 ;;
+  gh)
+    case "$1 $2" in
+      'pr view')
+        case " $* " in
+          *' mergeable '*)
+            count mergeable
+            value=MERGEABLE
+            [ "$n" -ne 1 ] || value=UNKNOWN
+            [ "$scenario" != conflicting ] || value=CONFLICTING
+            [ "$scenario" != unknown-mergeable ] || value=UNKNOWN
+            printf '{"mergeable":"%s"}\n' "$value" ;;
+          *' headRefOid '*)
+            if [ "$scenario" = wrong-head ]; then printf '%s\n' "$RO_TEST_MERGE"; else printf '%s\n' "$RO_TEST_HEAD"; fi ;;
+          *' mergeCommit '*)
+            count merge_oid
+            if [ "$n" = 1 ] || [ "$scenario" = missing-merge ]; then printf 'null\n'; else printf '%s\n' "$RO_TEST_MERGE"; fi ;;
+          *) exit 97 ;;
+        esac ;;
+      'pr checks')
+        count checks
+        case "$scenario" in
+          checks-read-error) printf 'transport refused\n' >&2; exit 4 ;;
+          checks-empty) printf "no checks reported on the 'fixture' branch\n" >&2; exit 1 ;;
+          checks-empty-json) printf '[]\n'; exit 0 ;;
+          checks-fail) printf '[{"name":"fixture-check","bucket":"fail","state":"FAILURE","link":""}]\n'; exit 1 ;;
+          checks-cancel) printf '[{"name":"fixture-check","bucket":"cancel","state":"CANCELLED","link":""}]\n'; exit 1 ;;
+          checks-fail-json) printf '[{"name":"fixture-check","bucket":"fail","state":"FAILURE","link":""}]\n'; exit 0 ;;
+          checks-cancel-json) printf '[{"name":"fixture-check","bucket":"cancel","state":"CANCELLED","link":""}]\n'; exit 0 ;;
+          checks-malformed) printf '{}\n'; exit 0 ;;
+        esac
+        if [ "$n" = 1 ] || [ "$scenario" = checks-pending ]; then
+          printf '[{"name":"fixture-check","bucket":"pending","state":"PENDING","link":""}]\n'; exit 8
+        fi
+        printf '[{"name":"fixture-check","bucket":"pass","state":"SUCCESS","link":""},{"name":"optional-check","bucket":"skipping","state":"SKIPPED","link":""}]\n' ;;
+      'pr merge') printf 'merged\n' ;;
+      'run list')
+        if [[ " $* " == *' release.yml '* ]]; then
+          count release_lists
+          if [ "$scenario" = no-release-run ]; then printf '[]\n'; exit 0; fi
+          printf '[{"databaseId":70,"headBranch":"v9.9.9","event":"push","status":"completed","conclusion":"success"},{"databaseId":71,"headBranch":"v1.2.4","event":"workflow_dispatch","status":"completed","conclusion":"success"},{"databaseId":72,"headBranch":"v1.2.4","event":"push","status":"completed","conclusion":"success"}]\n'
+        else
+          count ci_lists
+          status=completed; conclusion=success
+          case "$scenario" in
+            ci-failure|post-failure) conclusion=failure ;;
+            ci-cancelled|post-cancelled) conclusion=cancelled ;;
+            ci-pending) status=in_progress; conclusion='' ;;
+          esac
+          if [ "${RO_TEST_MERGING:-false}" = true ]; then
+            if [ "$scenario" = post-failure ] || { [ "$scenario" = post-cancelled ] && [ "$n" = 1 ]; }; then
+              printf '[{"databaseId":63,"headSha":"%s","status":"completed","conclusion":"%s"}]\n' "$RO_TEST_MERGE" "$conclusion"
+            elif [ "$scenario" = post-unrelated ]; then
+              printf '[{"databaseId":64,"headSha":"%s","status":"completed","conclusion":"success"}]\n' "$RO_TEST_OLDER"
+            else
+              printf '[{"databaseId":64,"headSha":"%s","status":"completed","conclusion":"success"}]\n' "$RO_TEST_HEAD"
+            fi
+          else
+            printf '[{"databaseId":60,"headSha":"%s","status":"completed","conclusion":"success"},{"databaseId":61,"headSha":"%s","status":"%s","conclusion":"%s"}]\n' "$RO_TEST_HEAD" "$RO_TEST_MERGE" "$status" "$conclusion"
+          fi
+        fi ;;
+      'run view')
+        if [[ " $* " == *' jobs '* ]]; then
+          printf '{"jobs":[{"name":"release-build-fixture","conclusion":"failure"},{"name":"success-job","conclusion":"success"}]}\n'
+        else
+          count release_polls
+          status=completed; conclusion=success
+          [ "$scenario" != release-fail ] || conclusion=failure
+          if [ "$scenario" = release-pending ]; then status=in_progress; conclusion=''; fi
+          printf '{"status":"%s","conclusion":"%s"}\n' "$status" "$conclusion"
+        fi ;;
+      'release view')
+        draft=false; prerelease=false
+        [ "$scenario" != draft ] || draft=true
+        [ "$scenario" != prerelease ] || prerelease=true
+        printf '{"isDraft":%s,"isPrerelease":%s,"assets":[{"name":"fixture-a"},{"name":"fixture-b"}]}\n' "$draft" "$prerelease" ;;
+      *) exit 98 ;;
+    esac ;;
+  witself-admin)
+    printf 'preflight\n' >> "$RO_TEST_OUT/order"
+    case "$scenario" in
+      production-registered) printf '{"cell":{"name":"civo-prod-use1-serving"}}\n' ;;
+      registry-fail) printf 'registry unavailable\n' >&2; exit 1 ;;
+      registry-extra) printf 'witself-admin cells: cell is not registered with the control plane\nextra\n' >&2; exit 1 ;;
+      *) printf 'witself-admin cells: cell is not registered with the control plane\n' >&2; exit 1 ;;
+    esac ;;
+  node|witself|yq|shasum) exit 98 ;;
   *) exec "$RO_TEST_ROOT/real/$name" "$@" ;;
 esac
 STUB
 chmod 755 "$BIN/dispatch"
 mkdir "$TEST_ROOT/real"
-for name in sed awk env cat jq grep tr printf head tail cut xargs dirname stat wc mktemp chmod rm; do
+for name in sed awk env cat jq grep tr printf head tail cut xargs tee dirname stat wc mktemp chmod rm; do
   real=$(PATH=$ORIGINAL_PATH type -P "$name")
   ln -s "$real" "$TEST_ROOT/real/$name"
   ln -s dispatch "$BIN/$name"
 done
-for name in git date sleep gh curl npm node kubectl witself witself-admin; do ln -s dispatch "$BIN/$name"; done
+for name in git date sleep gh curl npm node kubectl witself witself-admin yq shasum; do ln -s dispatch "$BIN/$name"; done
 export PATH=$BIN:$ORIGINAL_PATH
 DEPLOY=$REPO/scripts/release-deploy-control-plane.sh
 DRILL=$REPO/scripts/release-drill-proof.sh
+SCHEMA=$REPO/scripts/release-schema-check.sh
+TAG=$REPO/scripts/release-tag.sh
+MERGE=$REPO/scripts/release-merge-pr.sh
+CHAIN=$REPO/scripts/release-chain.sh
+RO_TEST_HEAD=$("$REAL_GIT" -C "$REPO" rev-parse HEAD)
+export RO_TEST_HEAD
+export RO_TEST_MERGE=$TAG_COMMIT
+RO_TEST_OLDER=$("$REAL_GIT" -C "$REPO" rev-parse v1.2.2)
+export RO_TEST_OLDER
+chain_args=(1.2.4 --serving-url https://serving.example.invalid --edge-token-file "$SECRET_DIR/edge" --cloudflare-token-file "$SECRET_DIR/cf" --deploy-env-file "$SECRET_DIR/deploy-env" --fleet-token-file "$SECRET_DIR/fleet" --drill-account-id fixture_account)
+chain_env_args=(1.2.4 --serving-url https://serving.example.invalid --edge-token-file "$SECRET_DIR/edge" --deploy-env-file "$SECRET_DIR/deploy-env" --fleet-token-file "$SECRET_DIR/fleet" --drill-account-id fixture_account)
 deploy_args=(1.2.4 --edge-token-file "$SECRET_DIR/edge" --cloudflare-token-file "$SECRET_DIR/cf" --deploy-env-file "$SECRET_DIR/deploy-env")
 drill_args=(--account-id fixture_account --fleet-token-file "$SECRET_DIR/fleet" --max-wait-min 3)
 reset_case() {
@@ -255,6 +359,7 @@ reset_case() {
   RO_TEST_INHERITED=false
   RO_TEST_CF_VALUE=$CF_ENV
   RO_TEST_CWD=''
+  export RO_TEST_CHAIN=false RO_TEST_MERGING=false RO_TEST_SCHEMA=2 RO_TEST_FAIL_STAGE='' RO_TEST_NO_PASS='' RO_TEST_STAGE_DELAY='' RO_TEST_GATE=--no-schema-change
 }
 run() {
   set +e
@@ -262,6 +367,9 @@ run() {
     if [ -n "$RO_TEST_CWD" ]; then cd "$RO_TEST_CWD"; fi
     if [ "$RO_TEST_INHERITED" = true ]; then
       export CONTROL_PLANE_EDGE_TOKEN=$INHERITED_EDGE WITSELF_FLEET_TOKEN=$INHERITED_FLEET
+      # These exported sentinels intentionally belong only to the test child.
+      # shellcheck disable=SC2030
+      export RO_REDACT_EDGE=$INHERITED_EDGE RO_REDACT_CF=$CF_OLD
     fi
     if [ "$RO_TEST_WITH_CF" = true ] || [ "$RO_TEST_INHERITED" = true ]; then
       export CP_DEPLOY_CANONICAL_EMAIL_ACTIVE=true CP_DEPLOY_SIGNUP_OPEN_ACTIVE=true
@@ -280,17 +388,13 @@ no_action() {
   if grep -E '^(gh|curl|npm|node|kubectl|witself|witself-admin) |^git .*<(fetch|push|tag|worktree)>' "$OUT/calls" >/dev/null; then fail "$CASE acted during validation"; fi
 }
 secret_audit() {
-  local file line key
-  # Fixture inputs are the only persistent files allowed to retain fake secrets.
+  local file line matches
+  # All matches must be synthetic fixture inputs; grep reports only filenames.
+  matches=$(grep -rlF -f "$SECRET_DIR/audit-fixtures" "$TEST_ROOT") || fail "$CASE cannot scan fixture artifacts"
   while IFS= read -r file; do
     case "$file" in "$SECRET_DIR"/*) continue ;; esac
-    # Read each file once; use builtin matching so the audit puts no secret on argv.
-    while IFS= read -r line || [ -n "$line" ]; do
-      for key in "$EDGE" "$CF_FILE" "$CF_ENV" "$FLEET" "$INHERITED_EDGE" "$INHERITED_FLEET" "$CF_OLD" "$HEX"; do
-        [[ "$line" != *"$key"* ]] || fail "$CASE raw fixture escaped into a file"
-      done
-    done < "$file"
-  done < <(find "$TEST_ROOT" -type f)
+    fail "$CASE raw fixture escaped into a file"
+  done <<< "$matches"
   while IFS= read -r line; do
     [[ "$line" != *'RO_REDACT_EDGE=set'* && "$line" != *'RO_REDACT_CF=set'* && "$line" != *'CLOUDFLARE_API_TOKEN_OLD=set'* && "$line" != *'WITSELF_FLEET_TOKEN=set'* ]] || fail "$CASE exported forbidden secret"
     case "$line" in 'npm <run> <deploy>'*) ;;
@@ -327,6 +431,10 @@ for script in "$REPO"/scripts/release-*.sh; do
   case "$name" in
     release-deploy-control-plane) run "$script" "${deploy_args[@]}" ;;
     release-drill-proof) run "$script" "${drill_args[@]}" ;;
+    release-schema-check) run "$script" 1.2.4 --serving-url https://serving.example.invalid ;;
+    release-tag) run "$script" 1.2.4 ;;
+    release-merge-pr) run "$script" 12 --expect-head "$RO_TEST_HEAD" ;;
+    release-chain) run "$script" "${chain_args[@]}" --order cp-first ;;
     *) fail "T1 needs a valid-argument row for $name" ;;
   esac
   expect_rc 0
@@ -633,6 +741,475 @@ for scenario in already-running protocol gateway no-header mismatched deadline p
 done
 pass T12
 
+# 125A2: real local commit ancestry with entirely offline GitHub responses.
+CASE=T3
+reset_case
+RO_TEST_MERGING=true
+RO_TEST_INHERITED=true
+run "$MERGE" 12 --expect-head "$RO_TEST_HEAD" --execute
+expect_rc 0
+contains "$OUT/calls" "gh <pr> <merge> <12> <--repo> <witwave-ai/witself> <--squash> <--match-head-commit> <$RO_TEST_HEAD> <--delete-branch>"
+contains "$OUT/stdout" 'post-merge CI run 64 success'
+merge_call=$(grep '^gh <pr> <merge>' "$OUT/calls")
+[ "${merge_call%% CONTROL_PLANE_EDGE_TOKEN=*}" = "gh <pr> <merge> <12> <--repo> <witwave-ai/witself> <--squash> <--match-head-commit> <$RO_TEST_HEAD> <--delete-branch>" ] || fail 'T3 merge argv is not exact'
+contains "$OUT/calls" 'sleep <20>'; contains "$OUT/calls" 'sleep <10>'; contains "$OUT/calls" 'sleep <60>'
+[ "$(cat "$OUT/checks")" = 2 ] || fail 'T3 did not wait for settled checks'
+contains "$OUT/calls" "<merge-base> <--is-ancestor> <$RO_TEST_MERGE> <$RO_TEST_HEAD>"
+secret_audit
+pass T3
+
+for scenario in conflicting checks-fail checks-cancel checks-fail-json checks-cancel-json wrong-head checks-empty checks-empty-json checks-read-error checks-malformed checks-pending unknown-mergeable; do
+  CASE="T4 $scenario"
+  reset_case "$scenario"
+  RO_TEST_MERGING=true
+  limit=3
+  case "$scenario" in checks-empty*) limit=20 ;; esac
+  run "$MERGE" 12 --expect-head "$RO_TEST_HEAD" --ci-timeout-min "$limit" --execute
+  expect_rc 1
+  contains "$OUT/stdout" 'release-merge-pr: FAIL'
+  absent "$OUT/calls" 'gh <pr> <merge>'
+  case "$scenario" in
+    checks-empty*) [ "$(cat "$OUT/checks")" = 15 ] || fail 'T4 empty checks bound' ;;
+    checks-read-error) [ "$(cat "$OUT/checks")" = 3 ] || fail 'T4 consecutive read error bound' ;;
+    checks-fail|checks-fail-json) contains "$OUT/stdout" $'fixture-check\tfail' ;;
+    checks-cancel|checks-cancel-json) contains "$OUT/stdout" $'fixture-check\tcancel' ;;
+  esac
+done
+for scenario in post-failure post-cancelled post-unrelated missing-merge; do
+  CASE="T4 $scenario"
+  reset_case "$scenario"
+  RO_TEST_MERGING=true
+  run "$MERGE" 12 --expect-head "$RO_TEST_HEAD" --ci-timeout-min 3 --execute
+  contains "$OUT/calls" 'gh <pr> <merge>'
+  if [ "$scenario" = post-cancelled ]; then
+    expect_rc 0; [ "$(cat "$OUT/ci_lists")" = 2 ] || fail 'T4 cancelled run not ignored'
+  else expect_rc 1; contains "$OUT/stdout" 'release-merge-pr: FAIL'; fi
+  if [ "$scenario" = post-failure ]; then
+    contains "$OUT/stdout" 'release-merge-pr: FAIL post-merge CI failed on the merge commit'
+    [ "$(cat "$OUT/ci_lists")" = 1 ] || fail 'T4 post-failure did not stop at the first CI list'
+  fi
+done
+pass T4
+
+# Keep deploy's earlier v1.2.4 fixture intact until all 125A1 cases have run.
+"$REAL_GIT" -C "$REPO" tag -d v1.2.4 >/dev/null
+CASE=T5
+reset_case
+RO_TEST_INHERITED=true
+run "$TAG" 1.2.4 --commit "$TAG_COMMIT" --execute
+expect_rc 0
+contains "$OUT/calls" "<tag> <-a> <v1.2.4> <-m> <v1.2.4> <$TAG_COMMIT>"
+contains "$OUT/calls" '<push> <origin> <refs/tags/v1.2.4>'
+contains "$OUT/calls" 'gh <run> <view> <72>'
+absent "$OUT/calls" 'gh <run> <view> <71>'
+contains "$OUT/stdout" 'release run 72 success; assets=2'
+secret_audit
+pass T5
+"$REAL_GIT" -C "$REPO" tag -d v1.2.4 >/dev/null
+for scenario in ci-failure ci-cancelled ci-pending; do
+  CASE="T6 $scenario"
+  reset_case "$scenario"
+  run "$TAG" 1.2.4 --commit "$TAG_COMMIT" --ci-timeout-min 3 --execute
+  expect_rc 1
+  absent "$OUT/calls" '<tag> <-a>'
+  absent "$OUT/calls" '<push>'
+  [ "$scenario" != ci-cancelled ] || contains "$OUT/stdout" 'gh run rerun 61 --repo witwave-ai/witself'
+  if [ "$scenario" = ci-pending ]; then [ "$(cat "$OUT/ci_lists")" -le 4 ] || fail 'T6 unbounded CI'; fi
+done
+CASE='T6 highest tag'
+reset_case
+"$REAL_GIT" -C "$REPO" tag v2.0.0 "$TAG_COMMIT"
+run "$TAG" 1.2.4 --commit "$TAG_COMMIT" --execute
+expect_rc 1; absent "$OUT/calls" '<tag> <-a>'; absent "$OUT/calls" '<push>'
+"$REAL_GIT" -C "$REPO" tag -d v2.0.0 >/dev/null
+CASE='T6 existing different commit'
+reset_case
+"$REAL_GIT" -C "$REPO" tag v1.2.4 "$TAG_COMMIT"
+run "$TAG" 1.2.4 --commit "$RO_TEST_HEAD" --execute
+expect_rc 1
+contains "$OUT/stdout" 'existing release tag differs from --commit'
+absent "$OUT/calls" 'gh '; absent "$OUT/calls" '<push>'
+"$REAL_GIT" -C "$REPO" tag -d v1.2.4 >/dev/null
+for scenario in release-fail release-pending draft prerelease no-release-run; do
+  CASE="T6 $scenario"
+  reset_case "$scenario"
+  run "$TAG" 1.2.4 --commit "$TAG_COMMIT" --release-timeout-min 3 --execute
+  expect_rc 1
+  contains "$OUT/stdout" 'release-tag: FAIL'
+  case "$scenario" in
+    release-fail|release-pending) contains "$OUT/stdout" $'release-build-fixture\tfailure'; absent "$OUT/stdout" 'success-job' ;;
+    no-release-run) [ "$(cat "$OUT/release_lists")" = 12 ] || fail 'T6 release discovery bound' ;;
+  esac
+  "$REAL_GIT" -C "$REPO" tag -d v1.2.4 >/dev/null
+done
+"$REAL_GIT" -C "$REPO" tag v1.2.4 "$TAG_COMMIT"
+CASE='T6 existing tag default'
+reset_case
+run "$TAG" 1.2.4 --execute
+expect_rc 0
+absent "$OUT/calls" '<tag> <-a>'; absent "$OUT/calls" '<push>'
+contains "$OUT/stdout" "v1.2.4 at ${TAG_COMMIT:0:8}"
+contains "$OUT/stdout" 'not re-tagging'
+absent "$OUT/calls" '<--workflow> <ci.yml>'
+pass T6
+
+# Both existing and requested commits must belong to the fetched main history.
+CASE='T6 commit ancestry'
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main "$RO_TEST_OLDER"
+for version in 1.2.4 1.2.5; do
+  reset_case
+  run "$TAG" "$version" --commit "$TAG_COMMIT" --execute
+  expect_rc 1; absent "$OUT/calls" 'gh '; absent "$OUT/calls" '<tag> <-a>'; absent "$OUT/calls" '<push>'
+  CASE='T14 commit ancestry'
+  reset_case
+  run "$SCHEMA" "$version" --commit "$TAG_COMMIT" --serving-url https://serving.example.invalid --execute
+  expect_rc 1; absent "$OUT/calls" 'curl '
+  CASE='T6 commit ancestry'
+done
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main HEAD
+pass 'T6 T14 commit ancestry'
+
+CASE=T14
+for live in 2 1 3; do
+  reset_case
+  RO_TEST_SCHEMA=$live
+  RO_TEST_INHERITED=true
+  run "$SCHEMA" 1.2.4 --serving-url https://serving.example.invalid --execute
+  if [ "$live" = 3 ]; then
+    expect_rc 1; contains "$OUT/stdout" "live schema 3 is ahead of v1.2.4's 2"
+  else
+    expect_rc 0
+    contains "$OUT/stdout" 'previous=v1.2.3 changed=false'
+    if [ "$live" = 2 ]; then contains "$OUT/stdout" 'gate=--no-schema-change'; else contains "$OUT/stdout" 'gate=--backup-evidence'; fi
+  fi
+  secret_audit
+done
+reset_case
+run "$SCHEMA" 1.2.4 --commit "$RO_TEST_HEAD" --serving-url https://serving.example.invalid --execute
+expect_rc 1
+# Advance only the disposable repository; source checkout and refs stay untouched.
+printf 'select 3;\n' > "$REPO/internal/store/migrations/0003_c.sql"
+"$REAL_GIT" -C "$REPO" add internal/store/migrations/0003_c.sql
+"$REAL_GIT" -C "$REPO" commit -qm third-migration
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main HEAD
+reset_case
+RO_TEST_SCHEMA=3
+run "$SCHEMA" 1.2.5 --serving-url https://serving.example.invalid --execute
+expect_rc 0; contains "$OUT/stdout" 'gate=--backup-evidence'; contains "$OUT/stdout" 'changed=true live=3 tag=3'
+printf 'select 10;\n' > "$REPO/internal/store/migrations/0010_d.sql"
+"$REAL_GIT" -C "$REPO" add internal/store/migrations/0010_d.sql
+"$REAL_GIT" -C "$REPO" commit -qm decimal-migration
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main HEAD
+reset_case
+RO_TEST_SCHEMA=10
+run "$SCHEMA" 1.2.5 --serving-url https://serving.example.invalid --execute
+expect_rc 0; contains "$OUT/stdout" 'tag=10'
+pass 'T14 schema'
+
+# Refuse xtrace before even dirname for all four new entry points.
+CASE='T8 A2 xtrace'
+for script in "$MERGE" "$TAG" "$SCHEMA" "$CHAIN"; do
+  for trace in flag shellopts sourced; do
+    reset_case
+    RO_TEST_INHERITED=true
+    case "$trace" in
+      flag) run -x "$script" --help ;;
+      shellopts) run -c 'exec env SHELLOPTS=xtrace "$BASH" "$@"' trace "$script" --help ;;
+      sourced) run -c 'set -x; source "$@"' trace "$script" --help ;;
+    esac
+    expect_rc 2
+    name=${script##*/}; name=${name%.sh}
+    last_line "$name: FAIL xtrace must be disabled"
+    if grep -v '^env ' "$OUT/calls" | grep -q .; then fail "$CASE started a child before refusing tracing"; fi
+    # The explicit test launcher precedes the script; it is not its child.
+    if [ "$trace" = shellopts ]; then
+      sed '/^env /d' "$OUT/calls" > "$OUT/calls.audit"
+      mv "$OUT/calls.audit" "$OUT/calls"
+    fi
+    secret_audit
+  done
+done
+pass "$CASE"
+
+# Child stand-ins isolate orchestration from the already-tested stage programs.
+mkdir "$TEST_ROOT/original-children"
+for child in release-schema-check release-tag release-deploy-control-plane release-drill-proof; do
+  cp "$REPO/scripts/$child.sh" "$TEST_ROOT/original-children/"
+done
+cat > "$TEST_ROOT/chain-child" <<'CHILD'
+#!/usr/bin/env bash
+set -euo pipefail
+name=${0##*/}; name=${name%.sh}
+case "$name" in
+  release-schema-check) stage=schema ;;
+  release-tag) stage=tag ;;
+  release-deploy-control-plane) stage=cp ;;
+  roll-train) stage=train ;;
+  release-drill-proof) stage=drill ;;
+  *) exit 99 ;;
+esac
+log="child-$stage"
+for arg in "$@"; do log="$log <$arg>"; done
+exported=$(export -p)
+for key in CONTROL_PLANE_EDGE_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_API_TOKEN_OLD WITSELF_FLEET_TOKEN RO_REDACT_EDGE RO_REDACT_CF; do
+  if [[ "$exported" == *" $key="* ]]; then log="$log $key=set"; else log="$log $key=unset"; fi
+done
+printf '%s\n' "$log" >> "$RO_TEST_OUT/calls"
+unset exported CONTROL_PLANE_EDGE_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_API_TOKEN_OLD WITSELF_FLEET_TOKEN RO_REDACT_EDGE RO_REDACT_CF
+# The dry-run preflight may validate a child. It must never record a stage.
+if [ "${RO_TEST_CHAIN:-false}" != true ]; then exit 96; fi
+printf '%s\n' "$stage" >> "$RO_TEST_OUT/order"
+IFS= read -r clock < "$RO_TEST_OUT/clock"
+printf '%s %s\n' "$stage" "$clock" >> "$RO_TEST_OUT/starts"
+if [ "${RO_TEST_STAGE_DELAY%%:*}" = "$stage" ]; then sleep "${RO_TEST_STAGE_DELAY#*:}"; fi
+if [ "$stage" = tag ]; then
+  git -C "${0%/scripts/*}" tag --list v1.2.4 >/dev/null
+  git -C "${0%/scripts/*}" push origin refs/tags/v1.2.4
+fi
+[ "$RO_TEST_NO_PASS" != "$stage" ] || { printf 'no verdict\n'; exit 0; }
+case "$stage" in
+  schema) printf '%s: PASS gate=%s previous=v1.2.3 changed=false live=2 tag=3 commit=12345678\n' "$name" "$RO_TEST_GATE" ;;
+  train)
+    if [ "$RO_TEST_SCENARIO" = wrong-train-verdict ]; then printf 'roll-train: Both waves verified at 1.2.3.\n'
+    else printf 'roll-train: Both waves verified at 1.2.4.\n'; fi ;;
+  *) printf '%s: PASS fixture\n' "$name" ;;
+esac
+[ "$RO_TEST_FAIL_STAGE" != "$stage" ] || exit 1
+CHILD
+for child in release-schema-check release-tag release-deploy-control-plane roll-train release-drill-proof; do
+  cp "$TEST_ROOT/chain-child" "$REPO/scripts/$child.sh"
+done
+chain_reset() { reset_case "${1:-normal}"; RO_TEST_CHAIN=true; }
+check_order() {
+  local actual
+  actual=$(tr '\n' ' ' < "$OUT/order")
+  [ "$actual" = "$1 " ] || fail "$CASE wrong stage order: $actual"
+}
+for scenario in production-registered registry-fail registry-extra normal; do
+  CASE="T21 $scenario"
+  chain_reset "$scenario"
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+  contains "$OUT/calls" "witself-admin <cells> <show> <civo-prod-use1-serving> <--token-file> <$SECRET_DIR/fleet> <--json>"
+  if [ "$scenario" = normal ]; then expect_rc 0; else
+    expect_rc 1; last_line 'release-chain: FAIL preflight v1.2.4'
+    absent "$OUT/calls" 'child-'; absent "$OUT/calls" '<tag>'; absent "$OUT/calls" 'npm '
+    if [ "$scenario" = production-registered ]; then contains "$OUT/stderr" 'this chain covers only the sandbox pair'; else contains "$OUT/stderr" 'registry read failed'; fi
+  fi
+done
+pass T21
+
+for mode in file env; do
+  CASE="T8 chain $mode"
+  chain_reset
+  RO_TEST_INHERITED=true
+  if [ "$mode" = file ]; then args=("${chain_args[@]}"); else args=("${chain_env_args[@]}"); fi
+  run "$CHAIN" "${args[@]}" --order cp-first --execute
+  expect_rc 0
+  while IFS= read -r line; do
+    case "$line" in
+      child-cp*)
+        if [ "$mode" = env ]; then
+          [[ "$line" == *'CLOUDFLARE_API_TOKEN=set'* ]] || fail 'T8 env token missing from deploy child'
+          continue
+        fi ;;
+    esac
+    [[ "$line" != *'CLOUDFLARE_API_TOKEN=set'* ]] || fail 'T8 Cloudflare token inherited outside deploy child'
+  done < "$OUT/calls"
+  # Allow the intentional chain-to-deploy handoff, then reuse the strict audit.
+  sed 's/^child-cp /npm <run> <deploy> /' "$OUT/calls" > "$OUT/calls.audit"
+  mv "$OUT/calls.audit" "$OUT/calls"
+  secret_audit
+done
+pass 'T8 chain'
+
+CASE='T14 chain missing evidence'
+chain_reset
+RO_TEST_GATE=--backup-evidence
+run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+expect_rc 1; last_line 'release-chain: FAIL schema v1.2.4'
+contains "$OUT/stderr" 'schema advances from 2 to 3'
+check_order 'preflight schema'
+absent "$OUT/calls" '<tag>'; absent "$OUT/calls" '<push>'; absent "$OUT/calls" 'gh <run> <list>'
+mkdir "$TEST_ROOT/evidence-backup" "$TEST_ROOT/evidence-serving"
+for gate in --backup-evidence --no-schema-change; do
+  CASE='T14 chain evidence forwarding'
+  chain_reset
+  RO_TEST_GATE=$gate
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --backup-evidence "$TEST_ROOT/evidence-backup" --backup-evidence "$TEST_ROOT/evidence-serving" --execute
+  expect_rc 0
+  line=$(grep '^child-train ' "$OUT/calls")
+  [[ "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-backup>"* && "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-serving>"* && "$line" != *'<--no-schema-change>'* ]] || fail 'T14 train evidence argv'
+done
+pass 'T14 chain'
+
+for order in cp-first cells-first; do
+  CASE="T13 $order"
+  chain_reset
+  run "$CHAIN" "${chain_args[@]}" --order "$order" --execute
+  expect_rc 0
+  if [ "$order" = cp-first ]; then check_order 'preflight schema tag cp train drill'; else check_order 'preflight schema tag train cp drill'; fi
+  last_line "release-chain: PASS v1.2.4 (order $order; train gate --no-schema-change; drill validated)"
+  contains "$OUT/stdout" 'next: brew upgrade witself witself-admin witself-infra'
+  contains "$OUT/calls" "child-tag <1.2.4> <--commit> <$TAG_COMMIT>"
+  for stage in preflight schema tag cp train drill; do contains "$OUT/stdout" "release-chain: STAGE $stage PASS"; done
+  secret_audit
+done
+CASE='T13 fresh release commit'
+chain_reset
+"$REAL_GIT" -C "$REPO" tag -d v1.2.4 >/dev/null
+fresh_commit=$("$REAL_GIT" -C "$REPO" rev-parse origin/main)
+run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+expect_rc 0
+check_order 'preflight schema tag cp train drill'
+for child in schema tag; do
+  contains "$OUT/calls" "child-$child <1.2.4> <--commit> <$fresh_commit>"
+done
+last_line 'release-chain: PASS v1.2.4 (order cp-first; train gate --no-schema-change; drill validated)'
+secret_audit
+"$REAL_GIT" -C "$REPO" tag v1.2.4 "$TAG_COMMIT"
+for failed in schema tag cp train drill; do
+  for reason in exit verdict; do
+    CASE="T13 $failed $reason"
+    chain_reset
+    if [ "$reason" = exit ]; then RO_TEST_FAIL_STAGE=$failed; else RO_TEST_NO_PASS=$failed; fi
+    run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+    expect_rc 1
+    last_line "release-chain: FAIL $failed v1.2.4"
+    contains "$OUT/stdout" "release-chain: STAGE $failed FAIL"
+    case "$failed" in
+      schema) check_order 'preflight schema' ;;
+      tag) check_order 'preflight schema tag' ;;
+      cp) check_order 'preflight schema tag cp' ;;
+      train) check_order 'preflight schema tag cp train' ;;
+      drill) check_order 'preflight schema tag cp train drill' ;;
+    esac
+  done
+done
+CASE='T13 checkout head'
+chain_reset
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main "$TAG_COMMIT"
+run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+expect_rc 1; last_line 'release-chain: FAIL preflight v1.2.4'; absent "$OUT/calls" 'child-'
+"$REAL_GIT" -C "$REPO" update-ref refs/remotes/origin/main HEAD
+pass T13
+
+# Refuse malformed preflight inputs before any action; preserve stage logs safely.
+CASE='T1 cells-first plan'
+chain_reset
+run "$CHAIN" "${chain_args[@]}" --order cells-first
+expect_rc 0; no_action
+plan_order=''
+while IFS= read -r line; do
+  case "$line" in
+    *'/scripts/roll-train.sh '*) plan_order="${plan_order}train " ;;
+    *'/scripts/release-deploy-control-plane.sh '*) plan_order="${plan_order}cp " ;;
+  esac
+done < "$OUT/stdout"
+[ "$plan_order" = 'train cp ' ] || fail 'T1 cells-first plan prints the wrong child order'
+last_line 'release-chain: DRY-RUN (no action taken; add --execute)'
+CASE='T13 chain preflight validation'
+for invalid in 'https://[::1]' 'https://serving.example.invalid/path'; do
+  chain_reset
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --serving-url "$invalid" --execute
+  expect_rc 2; no_action
+done
+chain_reset
+printf 'UNKNOWN=fixture\n' > "$SECRET_DIR/invalid-env"
+run "$CHAIN" "${chain_args[@]}" --order cp-first --deploy-env-file "$SECRET_DIR/invalid-env" --execute
+expect_rc 2; no_action
+chain_reset
+chmod 644 "$SECRET_DIR/fleet"
+run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+chmod 600 "$SECRET_DIR/fleet"
+[ "$RC" = 1 ] || [ "$RC" = 2 ] || fail 'T13 chain accepted an unsafe fleet input'
+no_action
+
+for scenario in chain-serving-stale chain-serving-fail wrong-train-verdict logger-fail; do
+  CASE="T13 $scenario"
+  chain_reset "$scenario"
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+  expect_rc 1
+  if [ "$scenario" = logger-fail ]; then
+    last_line 'release-chain: FAIL schema v1.2.4'; check_order 'preflight schema'
+  else
+    last_line 'release-chain: FAIL train v1.2.4'; check_order 'preflight schema tag cp train'
+  fi
+done
+CASE='T13 forwarded options and private logs'
+chain_reset
+mkdir "$TEST_ROOT/chain-logs"
+run "$CHAIN" "${chain_args[@]}" --order cells-first --workdir "$TEST_ROOT/chain-logs" --repo fixture/project --drill-cell fixture-drill --attest-canonical-email-active --attest-signup-open-active --execute
+expect_rc 0
+contains "$OUT/calls" 'child-tag <1.2.4>'
+contains "$OUT/calls" '<--repo> <fixture/project>'
+for stage in cp train; do
+  line=$(grep "^child-$stage " "$OUT/calls")
+  [[ "$line" == *"<--workdir> <$TEST_ROOT/chain-logs>"* ]] || fail 'T13 missing forwarded workdir'
+done
+line=$(grep '^child-cp ' "$OUT/calls")
+for pair in "<--edge-token-file> <$SECRET_DIR/edge>" "<--cloudflare-token-file> <$SECRET_DIR/cf>" "<--deploy-env-file> <$SECRET_DIR/deploy-env>"; do
+  [[ "$line" == *"$pair"* ]] || fail 'T13 missing deploy file forwarding'
+done
+[[ "$line" == *'<--attest-canonical-email-active>'* && "$line" == *'<--attest-signup-open-active>'* ]] || fail 'T13 missing deploy attestations'
+line=$(grep '^child-drill ' "$OUT/calls")
+for pair in '<--account-id> <fixture_account>' "<--fleet-token-file> <$SECRET_DIR/fleet>" '<--drill-cell> <fixture-drill>'; do
+  [[ "$line" == *"$pair"* ]] || fail 'T13 missing drill forwarding'
+done
+line=$(grep '^child-schema ' "$OUT/calls")
+[[ "$line" == *"<--commit> <$TAG_COMMIT>"* && "$line" == *'<--serving-url> <https://serving.example.invalid>'* ]] || fail 'T13 missing schema input forwarding'
+line=$(grep '^child-train ' "$OUT/calls")
+[[ "$line" == *'<--serving-url> <https://serving.example.invalid>'* && "$line" == *'<--no-schema-change>'* ]] || fail 'T13 missing train input forwarding'
+for stage in schema tag cp train drill; do [ -s "$TEST_ROOT/chain-logs/$stage.log" ] || fail 'T13 missing stage log'; done
+secret_audit
+CASE='T13 symbolic stage log'
+chain_reset
+rm "$TEST_ROOT/chain-logs/schema.log"
+printf 'preserve\n' > "$OUT/log-target"
+ln -s "$OUT/log-target" "$TEST_ROOT/chain-logs/schema.log"
+run "$CHAIN" "${chain_args[@]}" --order cp-first --workdir "$TEST_ROOT/chain-logs" --execute
+expect_rc 1; last_line 'release-chain: FAIL schema v1.2.4'; check_order 'preflight'
+[ "$(cat "$OUT/log-target")" = preserve ] || fail 'T13 overwritten symbolic log target'
+pass 'T13 preflight and stage safeguards'
+
+for row in 'cp-first 83100 none cp 89100' 'cp-first 72000 cp:4200 train 89100' 'cells-first 79200 none train 89100' 'cells-first 28800 none train 28800' 'cp-first 28800 train:54600 drill 89100'; do
+  CASE="T15 stage $row"
+  chain_reset
+  read -r order start delay stage expected <<< "$row"
+  printf '%s\n' "$start" > "$OUT/clock"
+  RO_TEST_STAGE_DELAY=$delay
+  run "$CHAIN" "${chain_args[@]}" --order "$order" --execute
+  expect_rc 0
+  contains "$OUT/starts" "$stage $expected"
+  if [ "$expected" = 28800 ]; then absent "$OUT/calls" 'sleep <300>'; fi
+done
+# Exercise each stage's own clearance edge. The train delay reaches the drill
+# boundary after the earlier guards have passed; later waits cannot hide a
+# premature cp start because we check the selected stage's exact timestamp.
+for row in \
+  'cp 23:00Z cp-first 82800 none 89100' \
+  'cp 22:59Z cp-first 82740 none 82740' \
+  'drill 23:00Z cp-first 28800 train:54000 89100' \
+  'drill 22:59Z cp-first 28800 train:53940 82740' \
+  'train 21:00Z cells-first 75600 none 89100' \
+  'train 20:59Z cells-first 75540 none 75540'; do
+  read -r stage boundary order start delay expected <<< "$row"
+  CASE="T15 $stage clearance $boundary"
+  chain_reset
+  printf '%s\n' "$start" > "$OUT/clock"
+  RO_TEST_STAGE_DELAY=$delay
+  run "$CHAIN" "${chain_args[@]}" --order "$order" --execute
+  expect_rc 0
+  grep -Fxq "$stage $expected" "$OUT/starts" || fail "$CASE wrong stage start; expected $expected"
+done
+CASE='T15 frozen clock'
+chain_reset frozen-clock
+printf '83100\n' > "$OUT/clock"
+run "$CHAIN" "${chain_args[@]}" --order cp-first --execute
+expect_rc 1; last_line 'release-chain: FAIL cp v1.2.4'
+[ "$(grep -c '^sleep <300>' "$OUT/calls")" = 48 ] || fail 'T15 maximum wait not 240 minutes'
+check_order 'preflight schema tag'
+pass 'T15 stages'
+
 CASE=T15
 reset_case
 # shellcheck source=scripts/lib/release-ops.sh
@@ -674,4 +1251,4 @@ done
 sed -n '/^## Ship a fix and close signups without an AI agent$/,/^## K3s minor upgrade (Civo)$/p' "$SOURCE_ROOT/docs/runbooks.md" > "$OUT/runbook-section"
 if grep -nE '/Users/|\$HOME|~/\.witself|acc_[a-z0-9]|sec_[a-z0-9]|k8s\.civo\.com|[0-9a-f]{32}|\.gitops/cells' "$OUT/runbook-section" >/dev/null; then fail 'T19 runbook operator values'; fi
 pass 'T16 T19 T20'
-printf 'release ops test: PASS all 125A1 contracts\n'
+printf 'release ops test: PASS all 125A1 and 125A2 contracts\n'
