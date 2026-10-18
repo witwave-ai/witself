@@ -2374,3 +2374,9 @@ and static checks; request execution and the two runtime phases belong to 122b.
   deliberately consistent declaration while T6 fails on the real
   no-credential HTTP 401. A class/kind mismatch is not the intended MB5
   evidence.
+
+The runtime matrix starts the production server against two seeded accounts in an
+isolated PostgreSQL schema. For each active route it checks the refusal, identical
+answers for real and never-issued IDs, no leaked values, and no change to the
+other account's rows. Routes listed in `tenantRuntimePending` are not yet run.
+The control-plane Worker is not covered yet.

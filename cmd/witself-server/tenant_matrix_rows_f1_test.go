@@ -92,7 +92,7 @@ func tenantRowsF1() []tenantRow {
 		tenantF1OwnFresh("POST /v1/self/avatar:generation-failed", "agent.self.failure", "Records failure only on the authenticated profile; no referenced object.", `{"expected_profile_revision":${avatar.profile.revision},"reason_code":"render_failed"}`),
 
 		tenantF1Own("GET /v1/facts:status", credAgent, "Returns capacity for the authenticated owner; no referenced object.", ""),
-		tenantF1Own("POST /v1/facts", credAgent, "Subject keys name the authenticated agent's namespace; set creates a local fact, not a foreign object lookup.", `{"subject":"${name.subject.create}","predicate":"matrix/value","value":"${canary.fact.value}","source_kind":"self"}`),
+		tenantF1Own("POST /v1/facts", credAgent, "Subject keys name the authenticated agent's namespace; set creates a local fact, not a foreign object lookup.", `{"subject":"${name.subject.create}","predicate":"matrix/value","value":"${canary.fact.value}","source_kind":"agent"}`),
 		{Pattern: "DELETE /v1/facts", Class: tenant, Probes: []tenantProbe{{Name: "address-preview", Kind: foreign, Cred: credAgent, NoIdempotencyKey: true, NoIdempotencyKeyWhy: "internal/server/fact.go:413-425 rejects idempotency keys on dry-run fact previews.", Build: tenantBuild("DELETE", "/v1/facts", "dry_run=true&subject=${fact.subject}&predicate=matrix/value", "")}}},
 		{Pattern: "DELETE /v1/facts/{fact}", Class: tenant, Probes: []tenantProbe{{Name: "id-preview", Kind: foreign, Cred: credAgent, NoIdempotencyKey: true, NoIdempotencyKeyWhy: "internal/server/fact.go:413-425 rejects idempotency keys on dry-run fact previews.", Build: tenantBuild("DELETE", "/v1/facts/${fact}", "dry_run=true", "")}}},
 		{Pattern: "GET /v1/facts", Class: tenant, Probes: []tenantProbe{
@@ -128,6 +128,17 @@ func tenantRowsF1() []tenantRow {
 		}},
 		tenantF1TranscriptAppend(false),
 		tenantF1TranscriptAppend(true),
+	}
+	// Positive list witnesses are seeded before the first fingerprint.
+	for i := range rows {
+		switch rows[i].Pattern {
+		case "GET /v1/facts", "GET /v1/fact-subjects", "GET /v1/fact-candidates", "GET /v1/transcripts", "GET /v1/support/tickets", "GET /v1/fact-occurrences":
+			for j := range rows[i].Probes {
+				if rows[i].Probes[j].Kind == own {
+					rows[i].Probes[j].ShowsOwn = true
+				}
+			}
+		}
 	}
 	return rows
 }
