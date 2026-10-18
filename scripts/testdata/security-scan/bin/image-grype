@@ -1,0 +1,16 @@
+#!/bin/bash
+set -eu
+printf '%s\n' "$0" >> "$SECURITY_SCAN_CASE/grype-executable.log"
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/grype.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+printf '%s|%s\n' "${GRYPE_CHECK_FOR_APP_UPDATE:-unset}" "${GRYPE_DB_CACHE_DIR:-unset}" >> "$SECURITY_SCAN_CASE/grype-env.log"
+printf 'CVE-stub-private-diagnostic\n' >&2
+fixture=$SECURITY_SCAN_FIXTURES/images/clean.json
+code=0
+if [ -f "$SECURITY_SCAN_CASE/grype-map.tsv" ]; then
+  while IFS=$'\t' read -r ref candidate status; do
+    if [ "$ref" = "$1" ]; then fixture=$candidate; code=$status; break; fi
+  done < "$SECURITY_SCAN_CASE/grype-map.tsv"
+fi
+cat "$fixture"
+exit "$code"

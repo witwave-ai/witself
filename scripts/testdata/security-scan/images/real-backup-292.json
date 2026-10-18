@@ -1,0 +1,437 @@
+{
+  "descriptor": {
+    "name": "grype",
+    "version": "0.120.1"
+  },
+  "source": {
+    "type": "image"
+  },
+  "matches": [
+    {
+      "artifact": {
+        "name": "py3-jmespath",
+        "version": "1.0.1-r6",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2022-32511",
+        "severity": "Critical",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "py3-jmespath",
+        "version": "1.0.1-r6",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-54133",
+        "severity": "Critical",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "golang.org/x/crypto",
+        "version": "v0.45.0",
+        "type": "go-module"
+      },
+      "vulnerability": {
+        "id": "GHSA-w879-237q-wc7r",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "0.52.0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "0.52.0",
+              "date": "2026-07-07",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-17084",
+        "severity": "Medium",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-17084",
+        "severity": "Medium",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-17084",
+        "severity": "Medium",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pycache-pyc0",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-17084",
+        "severity": "Medium",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19445",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19445",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19445",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pycache-pyc0",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19445",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "libcrypto3",
+        "version": "3.5.8-r0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-54873",
+        "severity": "High",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "libssl3",
+        "version": "3.5.8-r0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-54873",
+        "severity": "High",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "libexpat",
+        "version": "2.8.4-r0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-93990",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "2.8.5-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "2.8.5-r0",
+              "date": "2026-09-24",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "libcrypto3",
+        "version": "3.5.8-r0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-84782",
+        "severity": "High",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "libssl3",
+        "version": "3.5.8-r0",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-84782",
+        "severity": "High",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19553",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19553",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pyc",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19553",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artifact": {
+        "name": "python3-pycache-pyc0",
+        "version": "3.14.7-r1",
+        "type": "apk"
+      },
+      "vulnerability": {
+        "id": "CVE-2026-19553",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "3.14.8-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "3.14.8-r0",
+              "date": "2026-10-02",
+              "kind": "first-observed"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

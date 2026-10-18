@@ -5,6 +5,9 @@ set -uo pipefail
 GOVULNCHECK_VERSION=v1.7.0
 NPM_PROD_AUDIT_LEVEL=moderate
 NPM_TOOLCHAIN_AUDIT_LEVEL=high
+LIVE_CELLS="civo-sandbox-use1-serving civo-sandbox-use1-backup"
+IMAGE_FAIL_SEVERITIES="Critical High"
+IMAGE_GO_MODULE_INFORMATIONAL_REPOSITORIES="ghcr.io/witwave-ai/images/witself-server"
 
 export LC_ALL=C
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -13,6 +16,15 @@ REPORT=''
 SCAN_TMP=''
 RUN_GO=0
 RUN_NPM=0
+RUN_IMAGES=0
+TARGETS_ONLY=0
+RELEASE_VERSION=''
+REPO=witwave-ai/witself
+GRYPE_PATH=''
+IMAGE_COUNT=0
+IMAGE_INFO=0
+IMAGE_SCANNED=0
+IMAGE_PLANNED=0
 GO_COUNT=0
 GO_INFO=0
 GO_SCANNED=0
@@ -33,22 +45,26 @@ usage_error() {
 }
 
 help() {
-  printf '%s\n' 'Usage: bash scripts/security-scan.sh <all|go,npm> [--root DIR] [--report FILE]' \
-    'Scopes may select go or npm individually; duplicates are ignored.' \
+  printf '%s\n' 'Usage: bash scripts/security-scan.sh <all|go,npm,images|targets> [--root DIR] [--report FILE]' \
+    'Scopes select go, npm or images; duplicates are ignored. targets must be used alone.' \
+    'Images/targets: --release-version X.Y.Z --repo OWNER/NAME; images: --grype PATH.' \
     'Exit: 0 clean, 1 findings, 2 usage error, 3 incomplete. Scanning uses the network.'
 }
 
 if [[ $# -eq 1 && ( $1 == --help || $1 == -h ) ]]; then help; exit 0; fi
 [[ $# -gt 0 ]] || usage_error 'a scope is required'
 scope=$1
+original_scope=$scope
 shift
 [[ -n $scope && $scope != ,* && $scope != *, && $scope != *,,* ]] || usage_error 'empty scope element'
 while :; do
   element=${scope%%,*}
   case "$element" in
-    all) [[ $scope == all && $RUN_GO -eq 0 && $RUN_NPM -eq 0 ]] || usage_error 'all must be used alone'; RUN_GO=1; RUN_NPM=1 ;;
+    all) [[ $original_scope == all ]] || usage_error 'all must be used alone'; RUN_GO=1; RUN_NPM=1; RUN_IMAGES=1 ;;
     go) RUN_GO=1 ;;
     npm) RUN_NPM=1 ;;
+    images) RUN_IMAGES=1 ;;
+    targets) [[ $original_scope == targets ]] || usage_error 'targets must be used alone'; TARGETS_ONLY=1 ;;
     *) usage_error 'unknown scope element' ;;
   esac
   [[ $scope == *,* ]] || break
@@ -56,9 +72,15 @@ while :; do
 done
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root|--report)
+    --root|--report|--release-version|--repo|--grype)
       [[ $# -ge 2 && -n $2 && $2 != --* ]] || usage_error 'option requires a value'
-      if [[ $1 == --root ]]; then ROOT=$2; else REPORT=$2; fi
+      case "$1" in
+        --root) ROOT=$2 ;;
+        --report) REPORT=$2 ;;
+        --release-version) [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage_error 'invalid release version'; RELEASE_VERSION=$2 ;;
+        --repo) [[ $2 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage_error 'invalid repository'; REPO=$2 ;;
+        --grype) [[ -f $2 && -x $2 ]] || usage_error 'grype must be an executable file'; GRYPE_PATH=$2; [[ $GRYPE_PATH == /* ]] || GRYPE_PATH=$PWD/$GRYPE_PATH ;;
+      esac
       shift 2 ;;
     -h|--help) help; exit 0 ;;
     *) usage_error 'unknown option' ;;
@@ -72,12 +94,12 @@ render_header() {
   commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || commit=unknown
   # SHA-256 repositories must not put a full object id into the report.
   if [[ ! $commit =~ ^[0-9a-f]{40}$ ]]; then commit=unknown; fi
-  printf '<!-- witself-security-scan v1 status=%s go=%s npm_prod=%s npm_toolchain=%s images=0 incomplete=%s -->\n' "$STATUS" "$GO_COUNT" "$NPM_PROD_COUNT" "$NPM_TOOLCHAIN_COUNT" "$INCOMPLETE"
+  printf '<!-- witself-security-scan v1 status=%s go=%s npm_prod=%s npm_toolchain=%s images=%s incomplete=%s -->\n' "$STATUS" "$GO_COUNT" "$NPM_PROD_COUNT" "$NPM_TOOLCHAIN_COUNT" "$IMAGE_COUNT" "$INCOMPLETE"
   printf '# Witself security scan\n\nTime: %s\nCommit: %s\nTools: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$commit" "${1:-}"
 }
 
 print_summary() {
-  printf 'security-scan: status=%s go=%s npm_prod=%s npm_toolchain=%s images=0 incomplete=%s\n' "$STATUS" "$GO_COUNT" "$NPM_PROD_COUNT" "$NPM_TOOLCHAIN_COUNT" "$INCOMPLETE" >&2
+  printf 'security-scan: status=%s go=%s npm_prod=%s npm_toolchain=%s images=%s incomplete=%s\n' "$STATUS" "$GO_COUNT" "$NPM_PROD_COUNT" "$NPM_TOOLCHAIN_COUNT" "$IMAGE_COUNT" "$INCOMPLETE" >&2
 }
 
 # A signal can interrupt a child before its output can be validated. Report only
@@ -92,7 +114,11 @@ interrupted() {
       INCOMPLETE=$((INCOMPLETE + 1))
     fi
   fi
-  print_summary
+  if [[ $TARGETS_ONLY -eq 1 ]]; then
+    printf 'security-scan: targets incomplete: scanner failed\n' >&2
+  else
+    print_summary
+  fi
   exit 3
 }
 trap interrupted HUP INT TERM
@@ -105,10 +131,14 @@ cleanup() {
 trap cleanup EXIT
 umask 077
 SCAN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/witself-security-scan.XXXXXX" 2>/dev/null) || {
-  printf 'security-scan: status=incomplete go=0 npm_prod=0 npm_toolchain=0 images=0 incomplete=1\n' >&2
+  if [[ $TARGETS_ONLY -eq 1 ]]; then
+    printf 'security-scan: targets incomplete: scanner failed\n' >&2
+  else
+    printf 'security-scan: status=incomplete go=0 npm_prod=0 npm_toolchain=0 images=0 incomplete=1\n' >&2
+  fi
   exit 3
 }
-for file in go.rows go.versions npm_prod.rows npm_toolchain.rows incomplete.rows; do
+for file in go.rows go.versions npm_prod.rows npm_toolchain.rows incomplete.rows images.rows images.targets images.versions; do
   : > "$SCAN_TMP/$file"
 done
 
@@ -276,6 +306,202 @@ scan_npm() {
   done
 }
 
+discover_images() {
+  local tag cell reason
+  missing_tools jq ruby
+  if [[ -n $MISSING ]]; then incomplete images "missing tool: $MISSING"; return; fi
+  if [[ -z $RELEASE_VERSION ]]; then
+    missing_tools gh
+    if [[ -n $MISSING ]]; then
+      incomplete release 'missing tool: gh'
+    elif ! gh release view --repo "$REPO" --json tagName --jq .tagName > "$SCAN_TMP/release.stdout" 2> "$SCAN_TMP/release.stderr"; then
+      incomplete release 'release lookup failed'
+    else
+      tag=$(cat "$SCAN_TMP/release.stdout")
+      if [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        RELEASE_VERSION=${tag#v}
+      else
+        incomplete release 'release lookup failed'
+      fi
+    fi
+  fi
+  # Full refs remain private. Ruby parses data, never evaluates cell content.
+  if ! ruby -E UTF-8:UTF-8 -ryaml -rjson - "$ROOT" "$LIVE_CELLS" "$RELEASE_VERSION" > "$SCAN_TMP/images.plan" 2> "$SCAN_TMP/images.plan.stderr" <<'RUBY'
+root, cells, version = ARGV
+server_repo = 'ghcr.io/witwave-ai/images/witself-server'
+backup_repo = 'ghcr.io/witwave-ai/images/witself-postgres-backup'
+targets, errors, pinned_tags, refs = [], [], [], []
+def entry(source, repository, tag, digest)
+  raise 'invalid repository' unless repository.is_a?(String) && repository.match?(/\A[a-z0-9][a-z0-9._\/-]*\z/)
+  raise 'invalid tag' unless tag.is_a?(String) && tag.match?(/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\z/)
+  raise 'invalid digest' unless digest.nil? || digest == '' || (digest.is_a?(String) && digest.match?(/\Asha256:[0-9a-f]{64}\z/))
+  digest = '-' if digest.nil? || digest == ''
+  [source, repository, tag, digest]
+end
+cells.split.each do |cell|
+  begin
+    values = YAML.safe_load(File.read(File.join(root, '.gitops/cells', cell, 'values.yaml'), encoding: 'UTF-8'), aliases: false)
+    apps = values.fetch('apps')
+    candidates = []
+    server = apps.fetch('witselfServer', {})
+    if server['enabled'] == true
+      candidates << entry("cell:#{cell}", server_repo, server['imageTag'], server['imageDigest'])
+    end
+    backup = apps.fetch('civoPostgres', {}).fetch('backup', {})
+    if backup['enabled'] == true
+      image = backup['image']
+      if image.nil?
+        errors << ["cell:#{cell} backup", 'unpinned backup image']
+      else
+        # A bad backup image must not discard the cell's server target.
+        begin
+          if image.is_a?(String)
+            repository, separator, tag = image.rpartition(':')
+            raise 'invalid backup image' if separator.empty?
+            candidates << entry("cell:#{cell}", repository, tag, nil)
+          elsif image.is_a?(Hash)
+            candidates << entry("cell:#{cell}", image['repository'], image['tag'], image['digest'])
+          else
+            raise 'invalid backup image'
+          end
+        rescue StandardError
+          errors << ["cell:#{cell} backup", 'invalid backup image']
+        end
+      end
+    end
+    candidates.each do |candidate|
+      _, repository, tag, digest = candidate
+      pinned_tags << "#{repository}:#{tag}"
+      ref = digest == '-' ? "#{repository}:#{tag}" : "#{repository}@#{digest}"
+      next if refs.include?(ref)
+      refs << ref
+      targets << candidate
+    end
+  rescue StandardError
+    errors << ["cell:#{cell}", 'missing values']
+  end
+end
+unless version.empty?
+  [server_repo, backup_repo].each do |repository|
+    next if pinned_tags.include?("#{repository}:#{version}")
+    targets << entry('release', repository, version, nil)
+  end
+end
+puts JSON.generate({targets: targets, errors: errors})
+RUBY
+  then incomplete images 'invalid output'; return; fi
+  while IFS=$'\t' read -r cell reason; do
+    incomplete "$cell" "$reason"
+  done < <(jq -r '.errors[] | @tsv' "$SCAN_TMP/images.plan")
+  jq -r '.targets[] | @tsv' "$SCAN_TMP/images.plan" > "$SCAN_TMP/images.refs"
+  jq -r '.targets[] | .[3] |= (if . == "-" then . else .[0:19] end) | @tsv' "$SCAN_TMP/images.plan" > "$SCAN_TMP/images.targets"
+  IMAGE_PLANNED=$(jq '.targets | length' "$SCAN_TMP/images.plan")
+  if [[ $IMAGE_PLANNED -eq 0 && $INCOMPLETE -eq 0 ]]; then incomplete images 'no targets'; fi
+}
+
+read_grype_pin() {
+  local line versions=0 linux=0 darwin=0
+  GRYPE_VERSION=''
+  GRYPE_LINUX_PIN=''
+  GRYPE_DARWIN_PIN=''
+  [[ -f $SCRIPT_DIR/security-scan-grype.env && -r $SCRIPT_DIR/security-scan-grype.env ]] || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ ^GRYPE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      GRYPE_VERSION=${line#*=}; versions=$((versions + 1))
+    elif [[ $line =~ ^GRYPE_LINUX_AMD64_SHA256=[0-9a-f]{64}$ ]]; then
+      GRYPE_LINUX_PIN=${line#*=}; linux=$((linux + 1))
+    elif [[ $line =~ ^GRYPE_DARWIN_ARM64_SHA256=[0-9a-f]{64}$ ]]; then
+      GRYPE_DARWIN_PIN=${line#*=}; darwin=$((darwin + 1))
+    else
+      return 1
+    fi
+  done < "$SCRIPT_DIR/security-scan-grype.env"
+  [[ $versions -eq 1 && $linux -eq 1 && $darwin -eq 1 ]]
+}
+
+prepare_grype() {
+  local system architecture asset expected archive actual checksum_tool
+  GRYPE_ERROR=''
+  if ! read_grype_pin; then GRYPE_ERROR='missing tool: grype (invalid pin file)'; return; fi
+  if [[ -n $GRYPE_PATH ]]; then GRYPE_BIN=$GRYPE_PATH; return; fi
+  missing_tools uname curl tar
+  if [[ -n $MISSING ]]; then GRYPE_ERROR="missing tool: $MISSING"; return; fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    checksum_tool=sha256sum
+  elif command -v shasum >/dev/null 2>&1; then
+    checksum_tool=shasum
+  else
+    GRYPE_ERROR='missing tool: sha256sum or shasum'; return
+  fi
+  system=$(uname -s 2> "$SCAN_TMP/uname.stderr") || system=''
+  architecture=$(uname -m 2>> "$SCAN_TMP/uname.stderr") || architecture=''
+  case "$system $architecture" in
+    'Linux x86_64') asset=linux_amd64; expected=$GRYPE_LINUX_PIN ;;
+    'Darwin arm64') asset=darwin_arm64; expected=$GRYPE_DARWIN_PIN ;;
+    *) GRYPE_ERROR='missing tool: grype (unsupported platform; pass --grype PATH)'; return ;;
+  esac
+  archive="$SCAN_TMP/grype_${GRYPE_VERSION}_${asset}.tar.gz"
+  if ! curl --fail --silent --show-error --location --output "$archive" "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_${asset}.tar.gz" > "$SCAN_TMP/curl.stdout" 2> "$SCAN_TMP/curl.stderr"; then
+    GRYPE_ERROR='scanner failed'; return
+  fi
+  if [[ $checksum_tool == sha256sum ]]; then
+    sha256sum "$archive" > "$SCAN_TMP/checksum" 2> "$SCAN_TMP/checksum.stderr" || { GRYPE_ERROR='checksum mismatch'; return; }
+  else
+    shasum -a 256 "$archive" > "$SCAN_TMP/checksum" 2> "$SCAN_TMP/checksum.stderr" || { GRYPE_ERROR='checksum mismatch'; return; }
+  fi
+  IFS=' ' read -r actual _ < "$SCAN_TMP/checksum"
+  if [[ $actual != "$expected" ]]; then GRYPE_ERROR='checksum mismatch'; return; fi
+  if ! tar -xzf "$archive" -C "$SCAN_TMP" grype > "$SCAN_TMP/tar.stdout" 2> "$SCAN_TMP/tar.stderr"; then
+    GRYPE_ERROR='scanner failed'; return
+  fi
+  GRYPE_BIN=$SCAN_TMP/grype
+  if [[ ! -f $GRYPE_BIN || ! -x $GRYPE_BIN || -L $GRYPE_BIN ]]; then GRYPE_ERROR='scanner failed'; fi
+}
+
+scan_images() {
+  local source repository tag digest ref display count info version supplied=''
+  discover_images
+  [[ $IMAGE_PLANNED -gt 0 ]] || return
+  prepare_grype
+  while IFS=$'\t' read -r source repository tag digest; do
+    if [[ -n $GRYPE_ERROR ]]; then incomplete "$source $repository:$tag" "$GRYPE_ERROR"; continue; fi
+    ref=$repository:$tag
+    display=$ref
+    if [[ $digest != - ]]; then ref=$repository@$digest; display="$display@${digest:0:19}"; fi
+    if ! GRYPE_CHECK_FOR_APP_UPDATE=false GRYPE_DB_CACHE_DIR="${GRYPE_DB_CACHE_DIR-$SCAN_TMP}" \
+      "$GRYPE_BIN" "registry:$ref" --platform linux/amd64 --output json --quiet > "$SCAN_TMP/grype.stdout" 2> "$SCAN_TMP/grype.stderr"; then
+      incomplete "$source $repository:$tag" 'scanner failed'; continue
+    fi
+    if ! jq -es --arg source "$source" --arg image "$display" --arg repository "$repository" \
+      --arg severities "$IMAGE_FAIL_SEVERITIES" --arg informational "$IMAGE_GO_MODULE_INFORMATIONAL_REPOSITORIES" '
+      if length == 1 then .[0] else error("invalid output") end
+      | if .descriptor.name == "grype" and .source.type == "image" and (.matches | type == "array")
+        then . else error("invalid output") end
+      | def finding:
+          (.vulnerability.severity as $severity | $severities | split(" ") | index($severity)) != null
+          and .vulnerability.fix.state == "fixed"
+          and ((.artifact.type == "go-module" and ($informational | split(" ") | index($repository)) != null) | not);
+        {version: (.descriptor.version // "unknown"),
+         info: ([.matches[] | select(finding | not)] | length),
+         rows: [.matches[] | select(finding)
+           | [$source, $image, .vulnerability.id, .vulnerability.severity,
+              .artifact.name, .artifact.version, .artifact.type, ((.vulnerability.fix.versions // []) | join(","))]]}
+    ' "$SCAN_TMP/grype.stdout" > "$SCAN_TMP/grype.parsed" 2> "$SCAN_TMP/grype.parse.stderr"; then
+      incomplete "$source $repository:$tag" 'invalid output'; continue
+    fi
+    count=$(jq '.rows | length' "$SCAN_TMP/grype.parsed")
+    info=$(jq '.info' "$SCAN_TMP/grype.parsed")
+    jq -r '.rows[] | map(tostring) | @tsv' "$SCAN_TMP/grype.parsed" >> "$SCAN_TMP/images.rows"
+    jq -r '.version | tostring' "$SCAN_TMP/grype.parsed" >> "$SCAN_TMP/images.versions"
+    IMAGE_COUNT=$((IMAGE_COUNT + count))
+    IMAGE_INFO=$((IMAGE_INFO + info))
+    IMAGE_SCANNED=$((IMAGE_SCANNED + 1))
+  done < "$SCAN_TMP/images.refs"
+  version=$(sort -u "$SCAN_TMP/images.versions" | tr '\n' ',')
+  if [[ -n $GRYPE_PATH ]]; then supplied=' (caller-supplied)'; fi
+  TOOLS="${TOOLS}${TOOLS:+; }Grype ${version%,}$supplied"
+}
+
 # Only selected fields enter the report. Escape Markdown/control characters,
 # remove private paths and token-shaped text, and bound even hostile field values.
 safe_text() {
@@ -293,17 +519,17 @@ safe_text() {
 # Later scanners can use the same table renderer without exceeding the bound.
 ROW_BYTES=0
 render_table() {
-  local file=$1 header=$2 separator=$3 count=$4 row rendered printed=0
+  local file=$1 header=$2 separator=$3 count=$4 width=${5:-64} row rendered printed=0
   if [[ $count -eq 0 ]]; then printf 'None.\n'; return; fi
   printf '%s\n%s\n' "$header" "$separator"
   while IFS= read -r row; do
     if [[ $printed -ge 50 ]]; then break; fi
     # Sanitize before truncating so a long private value cannot leave a prefix.
     # TSV escapes embedded control characters; only our delimiters remain tabs.
-    rendered=$(safe_text "$row" | awk -F '\t' '{
+    rendered=$(safe_text "$row" | awk -v width="$width" -F '\t' '{
       for (i = 1; i <= NF; i++) {
         if (i > 1) printf " | ";
-        if (length($i) > 64) printf "%s...", substr($i, 1, 61);
+        if (length($i) > width) printf "%s...", substr($i, 1, width - 3);
         else printf "%s", $i;
       }
     }')
@@ -330,18 +556,36 @@ render_report() {
     render_table "$SCAN_TMP/npm_toolchain.rows" '| Directory | Package | Severity | Advisories | Fix available |' '| --- | --- | --- | --- | --- |' "$NPM_TOOLCHAIN_COUNT"
     printf '\nFindings: %s. Informational: %s. Scanned: %s of %s.\n' "$NPM_TOOLCHAIN_COUNT" "$NPM_TOOLCHAIN_INFO" "$NPM_TOOLCHAIN_SCANNED" "$NPM_PLANNED"
   fi
+  if [[ $RUN_IMAGES -eq 1 ]]; then
+    printf '\n## Images (Critical or High with a fix)\n\n<!-- targets:begin -->\n'
+    render_table "$SCAN_TMP/images.targets" '| Source | Image | Tag | Digest |' '| --- | --- | --- | --- |' "$IMAGE_PLANNED"
+    printf '<!-- targets:end -->\n\n'
+    render_table "$SCAN_TMP/images.rows" '| Source | Image | ID | Severity | Package | Version | Type | Fixed in |' '| --- | --- | --- | --- | --- | --- | --- | --- |' "$IMAGE_COUNT" 128
+    printf '\nFindings: %s. Informational: %s. Scanned: %s of %s.\n' "$IMAGE_COUNT" "$IMAGE_INFO" "$IMAGE_SCANNED" "$IMAGE_PLANNED"
+  fi
   if [[ $INCOMPLETE -gt 0 ]]; then
     printf '\n## Incomplete\n\n'
-    render_table "$SCAN_TMP/incomplete.rows" '| Target | Reason |' '| --- | --- |' "$INCOMPLETE"
+    render_table "$SCAN_TMP/incomplete.rows" '| Target | Reason |' '| --- | --- |' "$INCOMPLETE" 128
     printf '\nIncomplete targets: %s.\n' "$INCOMPLETE"
   fi
 }
 
+if [[ $TARGETS_ONLY -eq 1 ]]; then
+  discover_images
+  if [[ $INCOMPLETE -gt 0 ]]; then
+    IFS=$'\t' read -r _ reason < "$SCAN_TMP/incomplete.rows"
+    printf 'security-scan: targets incomplete: %s\n' "$reason" >&2
+    exit 3
+  fi
+  while IFS= read -r target; do safe_text "$target"; printf '\n'; done < "$SCAN_TMP/images.targets"
+  exit 0
+fi
 if [[ $RUN_GO -eq 1 ]]; then scan_go; fi
 if [[ $RUN_NPM -eq 1 ]]; then scan_npm; fi
+if [[ $RUN_IMAGES -eq 1 ]]; then scan_images; fi
 STATUS=clean
 EXIT_CODE=0
-if [[ $((GO_COUNT + NPM_PROD_COUNT + NPM_TOOLCHAIN_COUNT)) -gt 0 ]]; then STATUS=findings; EXIT_CODE=1; fi
+if [[ $((GO_COUNT + NPM_PROD_COUNT + NPM_TOOLCHAIN_COUNT + IMAGE_COUNT)) -gt 0 ]]; then STATUS=findings; EXIT_CODE=1; fi
 if [[ $INCOMPLETE -gt 0 ]]; then STATUS=incomplete; EXIT_CODE=3; fi
 render_report > "$SCAN_TMP/report.md"
 if [[ -n $REPORT ]]; then

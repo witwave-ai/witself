@@ -1,0 +1,11 @@
+#!/bin/bash
+set -eu
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/curl.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; shift; fi
+  shift
+done
+[ -n "$out" ] || exit 97
+cat "$SECURITY_SCAN_CASE/archive.tar.gz" > "$out"
