@@ -58,10 +58,13 @@ the paths below identify reuse seams, not finished local-mode implementations.
 |---|---|---|
 | Connection and installed identity | [CLI resolution](../../../cmd/witself/main.go), [local bindings](../../../internal/local/local.go), [MCP](../../../cmd/witself/mcp.go) | Explicit local, connected-local, and remote-only profiles; offline local resolution without changing existing directory-based routing |
 | Application and database | [server startup](../../../cmd/witself-server/main.go), [store](../../../internal/store/store.go), [migrations](../../../internal/store/migrate.go) | Private runtime configuration, durable bootstrap identity, serialized lifecycle and authenticated database-backed health |
+| Temporary archives | [startup spool sweep](../../../internal/server/spool_sweep.go), [self-export](../../../internal/server/export_self.go) | Private temporary directories owned by one active server lifecycle; never sweep host-global temporary files or another cell's archives |
 | Background jobs | [worker startup](../../../cmd/witself-worker/main.go), [runtime](../../../internal/worker/runtime.go) | Explicit job eligibility for standalone data versus synchronized projections; prevent copied remote work from executing |
 | Native delivery | [release targets](../../../.goreleaser.yaml), [Unix installer](../../../install.sh), [Windows installer](../../../install.ps1), [Homebrew generator](../../../tools/homebrew-formula/main.go) | Deliver compatible cell components separately from the lean client and invoke one shared lifecycle |
 | Infrastructure management | [infra module](../../../infra/pulumi/README.md), [protected preview](../../../infra/pulumi/cmd/witself-infra/deletion_plan.go) | Reuse inventory, preview, identity, and recovery concepts without introducing Pulumi/cloud dependencies into local or remote-only installs |
 | Synchronization | [transcripts](../../../internal/store/transcript.go), [memory versions](../../../internal/store/memory.go), [export](../../../internal/store/export.go), [import](../../../internal/store/import.go) | Stable operation/evidence identities, transactional change capture, consistent snapshot plus catch-up, resumable application |
+| Remote account movement and recovery | [evacuation finalization](../../../internal/store/finalize_evacuation.go), [import leases](../../../internal/store/account_import_lease.go), [account purge](../../../internal/store/account_purge.go) | Carry or explicitly invalidate sync state during move, restore and purge; bind cursors and receipts to a proven authority incarnation |
+| Usage and audit provenance | [usage rollups](../../../internal/store/usage.go), [activity context](../../../internal/activity/context.go), [fact reads](../../../internal/store/fact.go) | Separate logical actions, replica application, local utilization and derived counters before sync activation |
 | Deletion and sealed data | [fact deletion](../../../internal/store/fact_delete.go), [memory deletion](../../../internal/store/memory_delete.go), [vault associated data](../../../internal/sealed/aad.go) | Non-resurrection rules, retained deletion knowledge, stable account/realm/agent identities, separately held client keys |
 
 Current native server/worker release targets cover macOS and Linux; the CLI also
@@ -82,11 +85,11 @@ in parallel once their interfaces agree. All rows start **not started**.
 | M1 | Inactive local runtime and lifecycle foundation | M0 runtime contract | Private authenticated cell, isolated state, repeatable lifecycle, unchanged hosted path |
 | M2 | Standalone local operations and explicit routing | M1; M0 identity contract | Durable offline CLI/MCP use, retrieval comparison, restart and concurrency proof |
 | M3 | Native installers, updates, and restore | M1; M2 acceptance fixtures | Clean-machine and interruption matrix on macOS, Windows, Linux; lean remote package |
-| M4 | Synchronization journal and failure simulator | M0 sync contract | Atomic capture/apply, stable identities, duplicate-safe recovery including remote-only writers |
-| M5 | Enrollment and authorized snapshot plus catch-up | M4; M1 isolation | Correct account/device admission, restartable snapshot, read-only convergence without side effects |
+| M4 | Synchronization journal and failure simulator | M0 capture, authority-continuity and accounting contracts | Atomic capture/apply, mixed-version writer coverage, duplicate-safe move/restore and replay accounting |
+| M5 | Enrollment and authorized snapshot plus catch-up | M4 capture barrier and recovery proof; M1 isolation; M0 destination policy | Authorized admission, restartable snapshot, proven authority continuity and read-only convergence without side effects |
 | M6 | Writable domain synchronization | M5; M2; deletion/conflict rules in M0 | Two local writers plus remote-only writer converge under the failure matrix |
-| M7 | Connected authority, vault coverage, and account transitions | M5/M6 as appropriate | No copied delivery authority; tested revocation, capacity, key and lifecycle behavior |
-| M8 | Usage reporting and product state visibility | M0 reporting decisions; M2/M5 state contracts | Disclosed payload and bounded failure behavior; accurate non-promotional UI |
+| M7 | Connected authority, vault coverage, and account transitions | M5/M6 as appropriate; M0 destination and accounting contracts | No copied delivery authority; tested revocation, capacity, key and lifecycle behavior |
+| M8 | Usage reporting and product state visibility | M0 reporting decisions; M2/M5 state contracts | Disclosed payload, retrievable aggregates, retention and bounded failure behavior; accurate non-promotional UI |
 | M9 | Opt-in canaries and supported offering | Applicable evidence from M0–M8 | Platform, security, recovery, sync, support and compatibility exit gates met |
 
 M3 and M4 can advance in parallel after M1/M0 respectively; do not postpone
@@ -113,6 +116,30 @@ platform's recovery checks, then expand only as each additional capability passe
   version/causal basis, schema/protocol version, authorization context, durable
   receipt, and explicit rejected/conflicting outcomes. Decide per-domain rules;
   do not choose blanket last-write-wins or wall-clock ordering.
+- Define a capture activation barrier for every server and worker version that
+  can write the account. Either capture below incompatible application writers
+  or prove they are drained/blocked before enrollment and snapshot creation.
+  Include transactions begun before the barrier that commit after it; observing
+  no old processes is insufficient. Define capability checks and rollback
+  behavior; an ordinary remote client using a new server does not prove that
+  old writers are covered.
+- Define the authoritative account's incarnation and cutover contract for
+  evacuation and backup restore. Specify which journals, receipts, deletion
+  knowledge and device enrollment records move with it, which are invalidated,
+  and how cursors authenticate continuity. Set recovery limits for an older
+  remote backup; do not assume that accepted operations absent from it can be
+  recovered without retained evidence or surviving replicas.
+- Set accounting and audit semantics before replication: stable logical-action
+  identity/origin independent of transport batches, local utilization, hosted
+  work, sync overhead, and derived rollups/index state. Distinguish new user
+  reads from replay and preserve event
+  provenance without counting an action twice. Nonbilling activity and billable
+  usage are different concepts; pricing decisions need not be settled here.
+- Define authoritative enrollment, authorization and feature-entitlement policy
+  for both SaaS and self-managed destinations before M5. Do not assume a
+  self-managed service requires a SaaS subscription, or trust a local plan row.
+  Record intentional feature differences as testable policy, not exceptions
+  inferred during enrollment.
 - Define account/device enrollment, offline authorization lifetime, deletion
   knowledge retention and retired-device rebootstrap, plus authority for local
   curation versus shared curation. Stable transcript/evidence identity is a
@@ -141,6 +168,12 @@ schemas the eventual enrollment design cannot preserve or migrate.
 - Construct local process configuration from an explicit allowlist. An existing
   shell's database, provision, dispatch, or cloud credentials must not redirect
   local startup to hosted resources or activate external jobs.
+- Give every active server lifecycle a private archive/spool directory, including
+  overlapping upgrades and multiple cells. Configure the applicable
+  `TMPDIR`/`TEMP`/`TMP` before launching the process; protect permissions/ACLs and
+  verify ownership before cleanup. Current startup sweeps matching archive names
+  in the process-default temporary directory assuming exclusive ownership. Never
+  point that sweep at host-global temp or share it between active servers.
 - Bind API, PostgreSQL, health and metrics privately, avoid port collisions,
   protect files/Windows ACLs, and authenticate local clients. Loopback alone is
   not an authorization boundary against other users or untrusted browser requests.
@@ -154,14 +187,19 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 **Exit:** repeated install/start/stop and crash restart preserve synthetic data;
 parallel lifecycle calls serialize; unrelated processes remain untouched;
-listeners are private; disabled local support changes no existing install,
-account endpoint, background service, or hosted job behavior.
+starting or restarting a second cell leaves the first cell's active and retained
+archives and foreign temporary files intact. Listeners are private; disabled
+local support changes no existing install, account endpoint, background service,
+or hosted job behavior.
 
 ### M2 Make standalone use complete enough for a canary
 
 - Add explicit profiles without changing named hosted-account resolution by
   default. Local resolution must survive a blocked directory/control-plane
   connection; a local failure must never silently reroute writes remotely.
+- Stage and atomically activate profile/credential bindings, with recovery from
+  interruption. Define how running MCP clients and hooks adopt a changed profile;
+  a partial switch must not combine one cell's identity with another's endpoint.
 - Bootstrap a standalone account and its operator/agent permissions without
   granting hosted entitlements. Retain identity verification through CLI, MCP,
   hooks, console and TUI. Avoid automatic identity remapping on later enrollment.
@@ -178,6 +216,8 @@ account endpoint, background service, or hosted job behavior.
 paths, restart offline, and recover committed data. A blocked reporting or hosted
 endpoint does not delay core operations. No copied vault keys or provider
 credentials are needed for a canary using synthetic transcripts and memories.
+Interrupted profile activation and concurrently running clients preserve correct
+identity/routing and recover to an explicit, usable state.
 
 ### M3 Deliver and update the cell through native installation
 
@@ -211,27 +251,53 @@ Restore is demonstrated, not inferred from successful backup creation.
 
 ### M4 Prove the synchronization mechanics in isolation
 
-- Build a deterministic harness with two local cells, one remote cell, and an
-  ordinary remote-only client. Use real stores and synthetic accounts; inject
-  partitions, duplicate/reordered delivery, crashes, delayed acknowledgements,
-  expired history and incompatible versions without touching production.
+- Build a deterministic harness with two local cells, a remote authority and a
+  second remote move/restore destination, plus an ordinary remote-only client.
+  Use real stores and synthetic accounts; inject partitions, duplicate/reordered
+  delivery, crashes, delayed acknowledgements, expired history and incompatible
+  versions without touching production.
 - Capture accepted local writes and their outbound operations in one database
   transaction. Commit inbound mutations and their deduplication/receipt state
   atomically. Acknowledge only after durable commit; bound queues and batches.
 - Include writes made by remote-only clients and relevant background jobs in
   the remote change stream. A journal inside only the new desktop client misses
   existing write paths. Applied inbound records must not create replication loops.
+- Prove the M0 capture barrier using mixed old/new server and worker binaries.
+  Exercise writes before and after snapshot creation, activation, and rollback.
+  Include in-flight transactions crossing the barrier and maintenance writers.
+  Either all accepted writes enter the stream or incompatible writers are
+  fenced/drained. Losing coverage suspends sync readiness explicitly, preserves
+  pending work, and requires a safe catch-up/rebootstrap before resuming.
 - Make snapshot watermarks, cursor scope, retry semantics, retention and
   resnapshot/rebase behavior explicit. Never lose pending local operations when
   rebuilding a replica; old backups and cloned devices need new session rules.
+- Integrate new sync tables with export/import, evacuation fencing/finalization,
+  backup/restore and purge registries. Exercise remote cutover with a committed
+  operation whose ACK was lost, a stale endpoint, pending local work and deletion
+  knowledge. Repeating a snapshot alone does not repair lost acceptance receipts.
+  Test older remote restores and rollback against the declared recovery boundary:
+  detect missing history, reconcile surviving acceptance evidence, and surface
+  unresolved loss/conflicts rather than silently duplicating or dropping work.
+  An ambiguous accepted operation must not be silently retried as a new action.
+- Apply the M0 accounting contract to snapshot and incremental replay. Prove
+  expected usage/audit outcomes for capture, new user reads, duplicates, lost
+  ACKs, retry and rebuilding a replica before M5/M6 activation. Imported audit
+  provenance, local sync diagnostics and derived rollups must not masquerade as
+  repeated user actions; sync diagnostics can still record actual sync work.
+  Split/regroup batches during retry and verify both stored events and rollups:
+  suppressing every event is not a substitute for recording each required action.
 - Define ordering/identity independently from timestamps and database-assigned
   sequence numbers. Carry enough evidence to distinguish retries, competing
   changes, explicit recreation, and stale resurrection after deletion.
 
-**Exit:** injected failures cannot lose an acknowledged operation, apply a retry
-twice, cross an account boundary, loop indefinitely, or skip changes at a
-snapshot boundary. Demonstrate both committing-before-ACK and crashing-before-
-commit. Preserve a reproducible failure seed and minimized fixture for defects.
+**Exit:** within the declared durability/recovery contract, injected failures
+cannot lose an acknowledged operation, apply a retry twice, cross an account
+boundary, loop indefinitely, or skip changes at a snapshot boundary. Demonstrate
+both committing-before-ACK and crashing-before-commit. For an older authoritative
+backup, prove detection and bounded recovery with available evidence; an
+unrecoverable gap blocks a claim of convergence.
+Mixed-version capture and move/restore tests must pass, with expected accounting
+counts. Preserve a reproducible failure seed and minimized fixture for defects.
 
 ### M5 Enroll a device and synchronize an authorized read replica
 
@@ -241,7 +307,13 @@ commit. Preserve a reproducible failure seed and minimized fixture for defects.
   agent; the OS owner can access downloaded open-plane data.
 - Negotiate protocol/schema/features and use authoritative destination policy.
   A modified local row cannot set a paid plan, provider route, ownership, or
-  credential authority. Test the same protocol against self-managed destinations.
+  credential authority. Use M0's explicit SaaS and self-managed policy fixtures;
+  enrollment cannot pass while either destination's admission contract is open.
+- Block enrollment/snapshot activation until M4's complete-writer capture
+  barrier is satisfied. Bind continuation to the authenticated account authority
+  incarnation. After relocation or restore, prove continuity or enter explicit
+  rebootstrap/reconciliation that preserves pending local work and acceptance
+  evidence; a copied cursor or matching account ID alone is insufficient.
 - Preflight capacity in both directions and enforce admission during transfer.
   Resume or refuse coherently; never trim data or label a partial copy synchronized.
 - Tie the initial consistent snapshot to a durable change-stream watermark,
@@ -255,7 +327,10 @@ commit. Preserve a reproducible failure seed and minimized fixture for defects.
 **Exit:** remote writes during bootstrap are present exactly once; interrupted
 transfer resumes safely; an unauthorized/shared device cannot enroll; capacity
 refusal preserves both sides; mirrored email/messages remain read-only and
-produce zero delivery, claim, acknowledgement or billing effects.
+produce zero delivery, claim, acknowledgement or billing effects. Old-writer
+rollback cannot falsely report caught-up status, and authority move/restore
+cannot silently reuse invalid cursors or erase pending work. Snapshot/replay and
+new reads have the distinct accounting outcomes established in M4.
 
 ### M6 Add writable domains with deletion and conflicts together
 
@@ -305,9 +380,11 @@ latency and convergence bounds use the budgets agreed in M0.
 - Exercise oversized local/remote accounts and growth while offline. Preserve
   unsynchronized changes and provide a visible recovery path; never silently
   convert whole-account sync into selective sync to fit a plan.
-- Define metering once per logical action. Replica application and retries must
-  not double-count billable usage or create duplicate audit activity; distinguish
-  actual remote work from local utilization and synchronization overhead.
+- Verify connected product policy against the M0/M4 accounting mechanics already
+  required by M5/M6. Replica application and retries must not double-count
+  billable usage or logical audit events; distinguish actual remote work from
+  local utilization and sync overhead. Resolve any remaining pricing policy
+  before enabling the affected feature, rather than redefining replay semantics.
 
 **Exit:** authority and identity tests pass across local, connected-local and
 remote-only clients for SaaS and a self-managed test service. The supported
@@ -319,6 +396,12 @@ user-visible behavior. Product decisions still open cannot be treated as passed.
 - Settle disclosed fields, purpose, identity/account linkage, retention and
   controls before enabling reporting. Define a modification indicator narrowly;
   no source diffs, transcripts, memories, secrets or content-bearing paths.
+- Assign an owner for the receiving service and its operator interface. Implement
+  bounded intake/validation, permitted storage and aggregation, retention/removal,
+  and an authorized query/report path. Define report identity, retry deduplication
+  and partial-report semantics so a lost response does not inflate totals.
+  Report observed installations and coverage accurately; offline or modified
+  clients make reporting incomplete, and installation counts are not people.
 - Keep reporting independent from sync and license enforcement. Use bounded
   buffering, asynchronous short deadlines, backoff and expiry/drop behavior.
   Blackholed networks and a full telemetry queue must not stall local work.
@@ -330,6 +413,11 @@ user-visible behavior. Product decisions still open cannot be treated as passed.
 
 **Exit:** inspect exact payloads and disclosure; prove reporting failure within
 the agreed CPU/disk/network budgets and unaffected core operation latency.
+Send synthetic permitted counters end to end, lose a response and retry, then
+retrieve the expected aggregate through the authorized operator path. Verify
+retention/removal and bounded rejection of malformed, oversized or abusive input.
+Collector unavailability still cannot interrupt local use; no collection is
+enabled before the disclosure/control contract passes.
 UI acceptance includes misleading-success cases, not just screenshots.
 
 ### M9 Expand canaries and meet the support gate
@@ -338,6 +426,10 @@ Keep separate controls for shipping components, installing a cell, routing to it
 enrolling sync, enabling each writable family, reporting, and changing defaults.
 Each cohort has an owner, exact component/protocol versions, enabled operations,
 evidence location, rollback procedure and next review point.
+Before activating sync, record complete server/worker capture coverage, the
+current authority incarnation, destination policy and replay-accounting proof.
+Recheck coverage after version changes or rollback; pause sync on loss of the
+barrier until safe recovery passes, without deleting pending local work.
 
 Start with synthetic accounts and explicitly enrolled machines. For each stage,
 verify the old remote path and the new path together. Read comparison is allowed
@@ -369,8 +461,9 @@ slices, after agreement on their contracts:
    eligibility and database-backed identity/health checks. Keep existing
    defaults unchanged; prove that copied remote work cannot run locally.
 3. **Disposable native lifecycle proof:** isolated managed PostgreSQL and server
-   with repeatable start/stop/restart/repair, ownership protection and native
-   smoke execution on all three OSes. No routing change on ordinary installs.
+   with repeatable start/stop/restart/repair, process/data/temp ownership protection
+   and native smoke execution on all three OSes. Test concurrent cells' archive
+   isolation. No routing change on ordinary installs.
 4. **Explicit local connection profile:** a deliberately selected test profile
    uses that cell through CLI/MCP while directory access is blocked; remote-only
    profiles continue through existing contracts.
@@ -422,10 +515,14 @@ Resolve these before their dependent milestones:
 | Supported OS/architecture versions and PostgreSQL packaging/extensions | M1/M3 | Native proof, footprint and distribution/maintenance assessment |
 | Startup/service ownership and lifecycle command/module placement | M1/M3 | Compare user/system scope and infra frontend without dependency inflation |
 | Identity adoption, device trust, at-rest protection and offline access horizon | Durable enrollment in M5 | Threat scenarios and existing account/vault constraints |
+| Capture activation and rollback barrier across server/worker versions | M4 proof; any M5 snapshot/enrollment | Mixed-version writes, verified capture or drain, explicit recovery after coverage loss |
+| Remote authority incarnation, cutover and restore continuity | M4 proof; M5 enrollment | Lost-ACK relocation, portable receipt/deletion state, stale endpoints and older-backup recovery limits |
+| Logical usage/audit identity, replay and derived-state accounting | M4; before M5/M6 activation | Expected counts for user actions, snapshot, retry and replica application; separate pricing policy |
+| Self-managed and SaaS admission, authorization and feature entitlements | M5 enrollment; M7 feature activation | Authoritative policy fixtures for both destinations; no assumed SaaS billing rule for self-managed |
 | Conflict rules, stable transcript evidence and deletion/history horizon | M4/M6 | Executable multi-writer and stale-device counterexamples |
-| Reporting fields, linkage, disclosure and controls | Enabling M8 | Payload/resource contract and product/privacy review |
+| Reporting fields, linkage, disclosure, controls and receiver ownership | Enabling M8 | Payload/resource contract, operator aggregate and retention proof, product/privacy review |
 | Resource/retrieval budgets, canary duration and expansion thresholds | Enrolling the relevant M9 cohort | Named fixtures, baselines and pass/fail values |
-| Existing free users, default installation and self-managed entitlements | Product transition after M9 | Separate proposed product decisions from implementation mechanics |
+| Existing free users and default installation | Product transition after M9 | Separate proposed product transitions from earlier destination admission contracts |
 
 For each milestone, append a record using `ID / owner / state / PR or decision /
 evidence / unresolved gate / next action`. Use proposed, in progress, blocked, or
