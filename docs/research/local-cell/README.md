@@ -9,6 +9,7 @@ to adversarial review and revision. Implementation has not started in this effor
 
 | Document | Purpose |
 |---|---|
+| [Implementation plan](implementation-plan.md) | Draft milestones, dependencies, first implementation batch, acceptance criteria and open decisions for Claude to refine. |
 | [Code assessment and rollout plan](local-mode-code-assessment.md) | Recommendation, source-backed findings, infra CLI reuse, native installation, effort, staged canaries and grounds to revise the decision. |
 | [Product requirements and decisions](local-first-mode.md) | Discussion record, required behavior, authority, identity, capacity and open product questions. |
 | [Storage and competitor research](local-storage-and-sync-patterns.md) | Database and packaging alternatives, retrieval quality, comparable products and synchronization patterns. |
@@ -24,7 +25,8 @@ avoid requiring Kubernetes or containers where possible.
 Distinguish recorded decisions from proposed mechanisms, inspected code from
 runtime proof, and canary readiness from complete product support. Keep the
 requirements and assessment consistent when accepting a design revision. All
-source observations currently use revision `adc6f186`; refresh affected evidence
-as implementation evolves.
+historical research observations use revision `adc6f186`; the implementation
+plan identifies its newer source checkpoint. Refresh affected evidence as
+implementation evolves.
 
 [All WitSelf documentation](../../README.md)

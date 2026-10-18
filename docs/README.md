@@ -24,7 +24,9 @@ deployment cells under a thin global control plane.
 - [WitSelf running locally](research/local-cell/README.md): the feature research
   index for the selected but revisable local-cell direction. Includes product
   requirements, storage/competitor research, the code-backed assessment, native
-  installation and infrastructure reuse, and incremental canary delivery.
+  installation and infrastructure reuse, and incremental canary delivery. The
+  [draft implementation plan](research/local-cell/implementation-plan.md) adds
+  milestones, dependencies, acceptance gates and review points for Claude.
   Research only; no implemented local-mode or synchronization claim.
 
 ## Product And Architecture
