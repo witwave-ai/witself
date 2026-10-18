@@ -1719,6 +1719,7 @@ overall; verification-only ticks disarm the idle timer. Each alarm invocation
 still faces the platform's 15-minute cap. Up to six cut attempts can therefore
 leave the source suspended for about 90 minutes, plus scheduling overhead and
 any wait for a lingering cell-side export before abort is acknowledged.
+The cell bounds that wait to about 150 seconds after writes stop draining.
 
 The 2026-09-27/28 measurements below are **BACKUP exports**, using a read-only
 snapshot with no account row lock; they are not evacuation rehearsal evidence.

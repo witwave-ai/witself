@@ -4252,10 +4252,17 @@ running, the next export waits on that transaction's account row lock without
 headers. After 120 seconds the watchdog raises `export_idle_timeout`; abort
 needs the same row and its request times out after 15 seconds. The operation
 remains `abort_requested`, retried every 60 seconds until the earlier export ends
-and source reactivation is acknowledged. Use `GET /v1/directory/ID` to determine
-the routed outcome; a client timeout alone does not prove failure. The existing
-alarm failure line may include upstream error details; handle it as sensitive
-operator diagnostics, unlike the new timing lines.
+and source reactivation is acknowledged. When the consumer's connection closes,
+the cell ends the export at once. If the connection stays open but stops draining,
+the cell ends the export when a single write or flush fails to finish within
+150 seconds, releasing the snapshot and account row lock. A lingering export
+therefore delays the next export or abort by about 150 seconds at most after its
+writes stop draining. Each write call carries up to about 64 KiB of compressed
+archive and must finish within 150 seconds, so a reader slower than about
+440 bytes per second is cut. A slow database read between writes does not count.
+Use `GET /v1/directory/ID` to determine the routed outcome; a client timeout alone
+does not prove failure. The existing alarm failure line may include upstream error
+details; handle it as sensitive operator diagnostics, unlike the new timing lines.
 
 For protocol-3 import, inspect pending rows (`attempts`/`retryable`) from
 `witself-admin cells restore`, and the cell's value-free start and finish stderr
