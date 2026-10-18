@@ -86,6 +86,10 @@ func whoamiCellCore(ctx context.Context, cellName, configPath string, bgSSO bool
 var civoAPIBaseURL = "https://api.civo.com"
 var civoHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
+func normalizeCivoAccountID(accountID string) string {
+	return strings.TrimSpace(accountID)
+}
+
 func whoamiCivo(ctx context.Context, entry cellEntry) (identity, error) {
 	tokenFile := ""
 	if sc := entry.SecurityContext; sc != nil && sc.Civo != nil && sc.Civo.TokenFile != nil {
@@ -119,7 +123,7 @@ func whoamiCivoWithToken(ctx context.Context, entry cellEntry, token string) (id
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&exchange); err != nil {
 		return identity{}, fmt.Errorf("decode Civo identity response: %w", err)
 	}
-	exchange.AccountID = strings.TrimSpace(exchange.AccountID)
+	exchange.AccountID = normalizeCivoAccountID(exchange.AccountID)
 	if exchange.AccountID == "" {
 		return identity{}, fmt.Errorf("civo identity response did not include account_id")
 	}
@@ -136,7 +140,7 @@ func whoamiCivoWithToken(ctx context.Context, entry cellEntry, token string) (id
 		Notes:   []string{"API token accepted"},
 	}
 	if sc := entry.SecurityContext; sc != nil && sc.Civo != nil && sc.Civo.ExpectedAccountID != nil {
-		want := strings.TrimSpace(*sc.Civo.ExpectedAccountID)
+		want := normalizeCivoAccountID(*sc.Civo.ExpectedAccountID)
 		if want != id.Account {
 			id.OK = false
 			id.Notes = append(id.Notes, fmt.Sprintf("expected Civo account %s, but the token identifies as %s", want, id.Account))

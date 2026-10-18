@@ -249,6 +249,10 @@ func Program(ctx *pulumi.Context) error {
 		if nodeSize == "" {
 			nodeSize = "g4s.kube.medium"
 		}
+		nodeCount, err := civoNodeCountFromConfig(profile, w.Get("civoNodeCount"))
+		if err != nil {
+			return err
+		}
 		return provisionCivo(ctx, civoCell{
 			name:              cellName,
 			region:            cv.Get("region"),
@@ -257,7 +261,7 @@ func Program(ctx *pulumi.Context) error {
 			accountAlias:      w.Get("accountAlias"),
 			role:              w.Get("role"),
 			nodeSize:          nodeSize,
-			nodeCount:         civoNodeProfileFor(profile),
+			nodeCount:         nodeCount,
 			adminCIDR:         w.Get("civoAdminCIDR"),
 			ingress:           w.Get("civoIngress"),
 			dns:               w.Get("civoDNS"),

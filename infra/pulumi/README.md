@@ -272,8 +272,8 @@ custom host name and a DNS record; see
 [Civo load balancer and custom host name](#civo-load-balancer-and-custom-host-name-opt-in).
 
 The managed production fleet currently uses two Civo cells in NYC1:
-`civo-sandbox-use1-serving` is the serving cell and runs the fixed two-node
-`prod` profile; `civo-sandbox-use1-backup` is the non-accepting,
+`civo-sandbox-use1-serving` is the serving cell and runs the `prod` profile
+(two nodes by default); `civo-sandbox-use1-backup` is the non-accepting,
 rollback-only backup-restore drill target. Both are production-operated cells;
 the latter is deliberately excluded from customer placement. See the
 [recovery note](../../docs/deployment-cells.md) for the retained registry name.
@@ -332,14 +332,18 @@ cloud-side backend work.
 A Civo cell can keep its state in Cloudflare R2 instead; see
 [Cloudflare R2 state backend](#cloudflare-r2-state-backend-civo-cells).
 
-The Civo `minimal` profile (and the default when `-profile` is omitted) uses one
-K3s node. The `prod` profile uses a fixed two-node K3s pool; no cluster
-autoscaler is wired. This fixed two-node production default reflects the Civo
-provider's inline pool model, which exposes a literal `NodeCount` rather than
-the min/max range available on AKS. Changing an existing cell from `minimal` to
-`prod` is intended to update only that inline pool's `NodeCount` in place.
+The Civo `minimal` profile (and the default when `-profile` is omitted) defaults
+to one K3s node. The `prod` profile defaults to a two-node K3s pool;
+`civo_node_count` can change the count, and no cluster autoscaler is wired.
+The Civo provider's inline pool model exposes a literal `NodeCount` rather than
+the min/max range available on AKS. Changing the count, or changing an existing
+cell from `minimal` to `prod`, is intended to update only that inline pool's
+`NodeCount` in place.
 Before applying the change, run `pulumi preview` and verify that it reports a
 pool update with no cluster, pool, network, firewall, or PVC replacement.
+Follow the preconditions in
+[Change a Civo cell's node count](../../docs/runbooks.md#change-a-civo-cells-node-count)
+before using the setting.
 
 Inputs split two ways: **functional** (`-cloud`, `-region`, `-profile`) drive
 behavior; **labels** (`-account-alias`, `-role`) are free text used only in the
@@ -365,8 +369,9 @@ settings change that. A cell that sets none of them keeps the default shape.
 `cells.witself.witwave.ai`). For a Civo cell `-domain` is accepted only
 together with `-civo-ingress loadbalancer`. The three keys are per-cell only:
 the `defaults:` block must not set them. `-civo-node-size` accepts
-`g4s.kube.medium` and `g4s.kube.large`. The node count still comes from the
-profile: one node for `minimal`, two for `prod`.
+`g4s.kube.medium` and `g4s.kube.large`. The profile sets the default node count:
+one node for `minimal`, two for `prod`. The per-cell `civo_node_count` setting
+can change it; see [Civo node count and core quota](#civo-node-count-and-core-quota-opt-in).
 
 A `witself-infra` older than the release that introduced these keys rejects an
 inventory that contains them, for every cell. Install the new binary before
@@ -544,6 +549,80 @@ key, every `up` opens it. Open the cell with
 `witself-admin cells undrain <cell>` and remove `register_draining` from the
 cell record in the same step, before the next `up`.
 
+### Civo node count and core quota (opt-in)
+
+An absent node-count setting keeps the profile's current resource inputs. A
+count above the profile default adds monthly spend and needs the owner's
+approval. `config add-cell` refuses both flags below: record the keys by hand
+only after satisfying the
+[node-count runbook's preconditions](../../docs/runbooks.md#change-a-civo-cells-node-count).
+
+| Inventory key | Flag | Scope and values |
+|---|---|---|
+| `civo_node_count` | `-civo-node-count` | Per cell only; from the profile default (1 for `minimal`, 2 for `prod`) to 5. Leave the key out for the default; the loader refuses 0. Only the flag treats 0 as the profile default. With `-cell`, an explicit `-civo-node-count 0` overrides the record and returns the pool to the profile default. |
+| `civo_core_quota` | `-civo-core-quota` | Under `defaults:` only: an account setting, refused on a cell. From 1 to 1024; default 16, the account's quota on 2026-09-29. |
+
+The guard uses these CPU core counts:
+
+| Node size | Cores per node |
+|---|---|
+| `g4s.kube.medium` | 2 |
+| `g4s.kube.large` | 4 |
+
+| Nodes | Medium cores | Large cores |
+|---|---|---|
+| 1 | 2 | 4 |
+| 2 | 4 | 8 |
+| 3 | 6 | 12 |
+| 4 | 8 | 16 |
+| 5 | 10 | 20 |
+
+The following arithmetic is **planned, after the production cell is provisioned
+with two large nodes**: backup 1 × medium = 2 cores, sandbox serving 2 × medium =
+4 cores, and production 2 × large = 8 cores, for 14 of 16 cores. A third large
+node on production makes 18 and is refused until the sandbox serving cell is
+destroyed and removed from the inventory with `config remove-cell`. Then the
+total is 2 + 12 = 14 cores. A fourth large production node makes 18 again and
+needs a larger quota from Civo first.
+
+The guard runs only on `up` and `preview`, and only when the count is above the
+profile default. It counts the planned Civo cells in the inventory with the
+same or no account pin; a cell is excluded for its account only when both pins
+are present and differ. Without `-cell`, only this cell is counted. A total
+equal to the quota passes, but a full quota leaves no room for a scratch or
+rehearsal cell. This is a check of planned inventory, not live usage. Civo still
+enforces the quota at apply time; memory, disk and instance quotas are not
+checked.
+
+Once a cell is above its profile default, every `up` and `preview` of it runs
+the guard. If a retired cell remains recorded, or a new cell makes the planned
+inventory exceed the quota, even a routine `up` is refused. This includes the
+`up` that records `deletion_protection: false` before a destroy. Remove retired
+cells with `config remove-cell`. Never record `civo_core_quota` above Civo's
+real quota to get past the guard.
+
+Deletion protection does not currently cover the Civo cluster. A
+provider-forced replacement would delete the in-cluster PostgreSQL volumes.
+Before first use, the plan review must refuse a replacement of
+`civo:index/kubernetesCluster:KubernetesCluster`, and a read-only preview
+must have confirmed that changing `pools.nodeCount` is an in-place update
+in the pinned provider.
+Mocks cannot establish that safety; follow the runbook and stop on any
+replacement or unrelated change.
+
+A decrease is enforced only by review, not by code: every machine that may
+run `up -cell` for a scaled cell must carry the same recorded count, or an
+`up` from a machine without it shrinks the pool, so run the runbook's
+backup-first step before any decrease.
+
+A `witself-infra` older than the release that adds these keys rejects an
+inventory containing either key, for every cell and every command. That
+includes `witself-infra health`, which `scripts/roll-train.sh` runs for both
+cells at the end of a train. Upgrade every machine that runs a train or the
+dashboard to that release before recording the first key. Verify the installed
+release with `witself-infra version`; a dispatcher build from `main` alone is
+not sufficient.
+
 ## State backend
 
 State is stored in a cloud object-storage backend for real cells — shared,
@@ -597,7 +676,7 @@ For the autoscaling hyperscaler paths, the intended Kubernetes node envelope is
 on the system node pool. AWS EKS Auto Mode and GKE Autopilot are currently left
 in their managed scaling modes; literal node-count min/max controls will require
 custom EKS Auto Mode NodePools and/or a future GKE Standard node-pool path. Civo
-uses the fixed node counts described above instead of this autoscaling envelope.
+uses the node counts described above instead of this autoscaling envelope.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default

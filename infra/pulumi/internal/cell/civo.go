@@ -3,11 +3,32 @@ package cell
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/pulumi/pulumi-civo/sdk/v2/go/civo"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
+
+// CivoMaxNodeCount is the maximum configurable Civo pool node count.
+const CivoMaxNodeCount = 5
+
+// CivoDefaultNodeCount returns the Civo pool node count for a profile.
+func CivoDefaultNodeCount(profile string) int {
+	return civoNodeProfileFor(profile)
+}
+
+// civoNodeCountFromConfig resolves the profile default or validates an explicit count.
+func civoNodeCountFromConfig(profile, configured string) (int, error) {
+	if configured == "" {
+		return civoNodeProfileFor(profile), nil
+	}
+	count, err := strconv.Atoi(configured)
+	if err != nil || count < CivoDefaultNodeCount(profile) || count > CivoMaxNodeCount {
+		return 0, fmt.Errorf("witself:civoNodeCount %q must be a whole number from %d to %d for profile %q", configured, CivoDefaultNodeCount(profile), CivoMaxNodeCount, profile)
+	}
+	return count, nil
+}
 
 // provisionCivo is the cost-optimized Civo production substrate. It is
 // deliberately separate from the AWS/GCP/Azure programs: Civo supplies the

@@ -185,6 +185,11 @@ flags:
                   Civo's latest stable when omitted)
   -db-version     PostgreSQL major version                     (default "18")
   -civo-node-size Civo node size: g4s.kube.medium|g4s.kube.large (default "g4s.kube.medium")
+  -civo-node-count Civo node count, up to 5; 0 keeps the profile's default
+                  (1 for minimal, 2 for prod). Above the default adds monthly
+                  spend. With -cell an explicit 0 overrides civo_node_count
+  -civo-core-quota Civo account CPU core quota for the node-count check
+                  (default 16; inventory key defaults.civo_core_quota)
   -civo-admin-cidr CIDR allowed to reach Civo's Kubernetes API (required for Civo)
   -civo-ingress   Civo ingress: nodeport|loadbalancer          (default "nodeport")
                   loadbalancer adds one Civo load balancer and the host
@@ -356,6 +361,8 @@ func run(args []string) error {
 	civoTokenFile := fs.String("civo-token-file", "", "Civo API token file (default: CIVO_TOKEN environment)")
 	civoExpectedAccountID := fs.String("civo-expected-account-id", "", "expected Civo account UUID safety pin")
 	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size: g4s.kube.medium|g4s.kube.large")
+	civoNodeCount := fs.Int("civo-node-count", 0, "Civo node count, up to 5; 0 keeps the profile's default (with -cell, an explicit 0 overrides civo_node_count)")
+	civoCoreQuota := fs.Int("civo-core-quota", civoDefaultCoreQuota, "Civo account CPU core quota for the node-count check (inventory key defaults.civo_core_quota)")
 	civoAdminCIDR := fs.String("civo-admin-cidr", "", "CIDR allowed to reach the Civo Kubernetes API, normally your public IP /32")
 	civoIngress := fs.String("civo-ingress", "nodeport", "Civo ingress: nodeport|loadbalancer (loadbalancer adds one Civo load balancer and the host api.<cell>.<domain>)")
 	civoDNS := fs.String("civo-dns", "none", "record of a Civo load balancer host: none|cloudflare (cloudflare reads CLOUDFLARE_API_TOKEN)")
@@ -548,6 +555,9 @@ func run(args []string) error {
 	if *cloud != "civo" && (*civoIngress != "nodeport" || *civoDNS != "none") {
 		return fmt.Errorf("-civo-ingress and -civo-dns apply only to -cloud civo")
 	}
+	if *cloud != "civo" && (operatorExplicit["civo-node-count"] || operatorExplicit["civo-core-quota"]) {
+		return fmt.Errorf("-civo-node-count and -civo-core-quota apply only to -cloud civo")
+	}
 	if *cloud == "civo" {
 		if *backendFlag != "local" && *backendFlag != "r2" {
 			return fmt.Errorf("-cloud civo requires -backend local or r2")
@@ -576,6 +586,16 @@ func run(args []string) error {
 			NodeSize: *civoNodeSize,
 			CellName: strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-"),
 		}); err != nil {
+			return err
+		}
+		var inventory func() (*infraConfig, error)
+		if *cellSelector != "" {
+			inventory = func() (*infraConfig, error) {
+				cfg, _, err := loadInfraConfig(*configPath)
+				return cfg, err
+			}
+		}
+		if err := civoNodeCountFlagsError(cmd, strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-"), *civoExpectedAccountID, *profile, *civoNodeSize, *civoNodeCount, *civoCoreQuota, inventory); err != nil {
 			return err
 		}
 		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" && cmd != "bootstrap" && cmd != "state-check" {
@@ -948,6 +968,9 @@ func run(args []string) error {
 			if err := stack.RemoveConfig(ctx, key); err != nil {
 				return fmt.Errorf("clear inapplicable Civo config %s: %w", key, err)
 			}
+		}
+		if err := applyCivoNodeCount(ctx, &stack, cmd, *civoNodeCount); err != nil {
+			return err
 		}
 	}
 	switch *cloud {

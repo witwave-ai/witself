@@ -1666,6 +1666,72 @@ validate it, and then coordinate routing/reclassification. Record the possible
 loss of writes since the backup and retain the failed cluster until recovery
 is accepted. The isolated backup cell is not an automatic serving failover.
 
+## Change a Civo cell's node count
+
+The `minimal` profile defaults to one node and `prod` to two. A per-cell
+`civo_node_count` can raise that count to at most five; leaving the key out
+keeps the profile default. A count above the default adds monthly spend.
+See [Civo node count and core quota](../infra/pulumi/README.md#civo-node-count-and-core-quota-opt-in)
+for the supported sizes and planned core arithmetic.
+
+A decrease is enforced only by review, not by code: every machine that may
+run `up -cell` for a scaled cell must carry the same recorded count, or an
+`up` from a machine without it shrinks the pool, so run the backup-first
+step before any decrease.
+
+**Preconditions — stop if any fails:**
+
+1. The owner approved the spend.
+2. `witself-infra version` on every machine that runs `scripts/roll-train.sh`
+   or the dashboard reports a release that knows `civo_node_count` and
+   `civo_core_quota`. Upgrade the installed release before recording either
+   key: older binaries reject the inventory, including the `health` command
+   that runs for both cells at the end of a train. A dispatcher build from
+   `main` alone is not sufficient.
+3. The deletion-protection plan review refuses a replacement of
+   `civo:index/kubernetesCluster:KubernetesCluster`. Today
+   [the review](../infra/pulumi/cmd/witself-infra/deletion_plan.go) protects
+   only database and secret-store types, so **this procedure is not yet
+   approved for use**. A provider-forced Civo cluster replacement would
+   delete the in-cluster PostgreSQL volumes.
+4. A read-only `preview` has shown, once, that a node-count change is an
+   in-place `pools.nodeCount` update of `civo-cluster` in the pinned
+   `pulumi-civo` v2.4.8 provider. Mocks cannot establish this.
+
+**Steps:**
+
+1. Check the planned inventory arithmetic and the account's quota page.
+   `civo_core_quota` belongs only under `defaults:` and defaults to 16.
+   The guard counts planned Civo cells with the same or no account pin;
+   without `-cell`, it counts only the target. A total equal to the quota
+   passes and leaves no room for a scratch or rehearsal cell. Civo still
+   enforces its quota at apply time.
+2. Before scaling down, back up first using
+   [Back up both reviewed Civo databases before a migration](#back-up-both-reviewed-civo-databases-before-a-migration).
+3. Record `civo_node_count` in the cell's inventory entry. It must be from
+   the profile default to five; the inventory loader refuses zero.
+4. Run `witself-infra preview -cell CELL`. The only change must be an
+   **update** of `civo-cluster` whose diff is `pools.nodeCount`. Stop on a
+   replace or on any other change, and remove the record line.
+5. Run `witself-infra up -cell CELL`.
+6. With the intended cell's kubeconfig and context selected, verify that
+   `kubectl get nodes` shows the new count and every node is `Ready`.
+7. To go back, remove the `civo_node_count` line (or pass
+   `-civo-node-count 0` explicitly to both commands), then preview and
+   continue to `up` only on an in-place `pools.nodeCount` update of
+   `civo-cluster`; stop on a replace or any other change, as in step 4.
+   With `-cell`, an explicit zero overrides the recorded count and returns
+   the pool to its profile default. Follow the backup-first step before
+   any decrease.
+
+Every `up` and `preview` of an already scaled cell runs the quota guard.
+A retired cell left in the inventory, or a newly recorded cell, can therefore
+make even a routine `up` fail, including the `up` that sets
+`deletion_protection: false` before a destroy. Remove retired cells with
+`config remove-cell`; never record a quota above Civo's real quota to bypass
+the refusal. If the remaining planned cells still exceed it, the account
+needs a real quota increase from Civo or a smaller reviewed plan.
+
 ## Move and stage the `witmail.net` managed-email domain
 
 This is the retained registrar and edge-foundation procedure, not an email
