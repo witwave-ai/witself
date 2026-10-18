@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -27,6 +28,7 @@ type tenantRuntime struct {
 	schema, dsn       string
 	creds             map[tenantSide]map[tenantCred]string
 	freshCreds        map[tenantSide]map[string]string
+	freshProfileCreds map[tenantSide]map[string]map[tenantCred]string
 	scratchCreds      map[string]string
 	probeValues       map[tenantSide]map[string]map[string]string
 	urls              map[routeinventory.Listener]string
@@ -49,6 +51,9 @@ func (rt *tenantRuntime) credential(side tenantSide, p tenantProbe) string {
 	}
 	if p.Cred == credScratchOperator {
 		return rt.scratchCreds[p.Scratch]
+	}
+	if credential := rt.freshProfileCreds[side][p.Fresh][p.Cred]; p.Fresh != "" && credential != "" {
+		return credential
 	}
 	if p.Cred == credAgent && p.Fresh != "" && rt.freshCreds[side][p.Fresh] != "" {
 		return rt.freshCreds[side][p.Fresh]
@@ -137,7 +142,7 @@ func tenantStatusIn(status int, allowed []int) bool {
 	return false
 }
 
-func tenantSubstitutions(f *tenantFixture, req tenantRequest) map[string]string {
+func tenantSubstitutions(f *tenantFixture, req, missing tenantRequest) map[string]string {
 	subst := map[string]string{}
 	for key, value := range f.bySide[sideB] {
 		// Local revisions, versions and dates are not owner identities (A8).
@@ -145,7 +150,7 @@ func tenantSubstitutions(f *tenantFixture, req tenantRequest) map[string]string 
 		if shape == "number" || shape == "version" || shape == "time" {
 			continue
 		}
-		if tenantRequestContains(req, value) && f.bySide[sideMissing][key] != "" {
+		if tenantRequestContains(req, value) && f.bySide[sideMissing][key] != "" && tenantRequestContains(missing, f.bySide[sideMissing][key]) {
 			subst[value] = f.bySide[sideMissing][key]
 			bCanary := tenantCanary.FindAllString(value, -1)
 			mCanary := tenantCanary.FindAllString(f.bySide[sideMissing][key], -1)
@@ -157,14 +162,34 @@ func tenantSubstitutions(f *tenantFixture, req tenantRequest) map[string]string 
 	return subst
 }
 
+// Fresh request fixtures replace role slots, but those replacements must never
+// remove the base account's identities, credentials or sealed values from the
+// response scan. Keep request construction scoped and leak detection cumulative.
+func (rt *tenantRuntime) leakValues(f *tenantFixture) []string {
+	seen := map[string]bool{}
+	for _, source := range []*tenantFixture{rt.f, f} {
+		for _, value := range source.values(sideB) {
+			seen[value] = true
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
 func (rt *tenantRuntime) noLeak(t *testing.T, f *tenantFixture, resp *capturedResponse, req tenantRequest) {
 	t.Helper()
-	if found := leaks(resp, req, f.values(sideB)); len(found) > 0 {
+	if found := leaks(resp, req, rt.leakValues(f)); len(found) > 0 {
 		kinds := map[string]bool{}
-		for key, value := range f.bySide[sideB] {
-			for _, leaked := range found {
-				if strings.Contains(value, leaked) {
-					kinds[key] = true
+		for _, source := range []*tenantFixture{rt.f, f} {
+			for key, value := range source.bySide[sideB] {
+				for _, leaked := range found {
+					if strings.Contains(value, leaked) {
+						kinds[key] = true
+					}
 				}
 			}
 		}
@@ -225,7 +250,7 @@ func TestTenantIsolationMatrixPostgres(t *testing.T) {
 	tenantSeedAvatars(t, rt)
 	tenantSeedObjects(t, rt)
 	rows := tenantRows()
-	t.Logf("runtime pending rows=%d (122c)", len(tenantRuntimePending))
+	t.Logf("runtime pending rows=%d", len(tenantRuntimePending))
 	before := tenantFingerprint(t, rt)
 	statuses := map[string]int{}
 	// Phases remain sequential even under -shuffle; selection still seeds and
@@ -271,7 +296,7 @@ func TestTenantIsolationMatrixPostgres(t *testing.T) {
 							if p.ConfigBound == "" {
 								missing := rt.send(t, row, p, p.Build(f, sideMissing), credential)
 								rt.noLeak(t, f, missing, p.Build(f, sideMissing))
-								if err := sameRefusal(resp, missing, tenantSubstitutions(f, req)); err != nil {
+								if err := sameRefusal(resp, missing, tenantSubstitutions(f, req, p.Build(f, sideMissing))); err != nil {
 									rt.isolationDetected = true
 									t.Errorf("ISOLATION CANDIDATE: existence comparison: %v", err)
 								}
@@ -284,7 +309,11 @@ func TestTenantIsolationMatrixPostgres(t *testing.T) {
 							} else if !tenantStatusIn(resp.Status, p.Want) {
 								t.Errorf("own status=%d want=%v", resp.Status, p.Want)
 							}
-							if p.ShowsOwn {
+							if p.ShowsOwn && row.Pattern == "GET /v1/export" {
+								if err := tenantExportOwnError(f, resp); err != nil {
+									t.Error(err)
+								}
+							} else if p.ShowsOwn {
 								var canaries []string
 								for _, v := range f.values(sideA) {
 									canaries = append(canaries, tenantCanary.FindAllString(v, -1)...)
@@ -298,7 +327,7 @@ func TestTenantIsolationMatrixPostgres(t *testing.T) {
 								b, m := rt.send(t, row, p, br, credential), rt.send(t, row, p, mr, credential)
 								rt.noLeak(t, f, b, br)
 								rt.noLeak(t, f, m, mr)
-								if err := sameRefusal(tenantNamespaceResponse(b), tenantNamespaceResponse(m), tenantSubstitutions(f, br)); err != nil {
+								if err := sameRefusal(tenantNamespaceResponse(b), tenantNamespaceResponse(m), tenantSubstitutions(f, br, mr)); err != nil {
 									rt.isolationDetected = true
 									t.Errorf("ISOLATION CANDIDATE: caller namespace comparison: %v", err)
 								}
@@ -342,14 +371,16 @@ func TestTenantIsolationMatrixPostgres(t *testing.T) {
 						if tenantStatusIn(resp.Status, []int{401, 403, 404, 405}) || isMuxFallback(resp) {
 							t.Errorf("owner control status=%d does not reach owned object", resp.Status)
 						}
+						prior, ran := statuses[tenantProbeID(row, p)]
+						if !ran {
+							// Includes EmptyList: phase2-only selection is never proof.
+							t.Error("phase-1 refusal not recorded; select phase1 too")
+						}
 						if p.EmptyList {
 							if !tenantBodyHas(resp, f.values(sideB)) {
 								t.Error("empty-list control contains no B id or canary")
 							}
-						} else if prior, ran := statuses[tenantProbeID(row, p)]; !ran {
-							// A phase2-only -run selection must not pass this check vacuously.
-							t.Error("phase-1 refusal not recorded; select phase1 too")
-						} else if prior == resp.Status {
+						} else if ran && prior == resp.Status {
 							t.Errorf("owner control status=%d equals foreign refusal", resp.Status)
 						}
 					})
@@ -416,13 +447,76 @@ func TestTenantMatrixRuntimeSubstitution(t *testing.T) {
 	f.bySide[sideB]["avatar.version"] = "1"
 	f.bySide[sideB]["avatar.style.version"] = "1"
 	req := tenantBuild("POST", "/v1/agents/${agent.avatar.rollback}/avatar:rollback", "", tenantF1AvatarVersionMutation)(f, sideB)
-	subst := tenantSubstitutions(f, req)
+	missing := tenantBuild("POST", "/v1/agents/${agent.avatar.rollback}/avatar:rollback", "", tenantF1AvatarVersionMutation)(f, sideMissing)
+	subst := tenantSubstitutions(f, req, missing)
 	if len(subst) != 1 || subst[f.value(sideB, "agent.avatar.rollback")] != f.value(sideMissing, "agent.avatar.rollback") {
 		t.Fatal("substitution must contain only the carried foreign identity")
 	}
 	a := &capturedResponse{Status: 404, Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"error":"not found"}`)}
 	if err := sameRefusal(a, a, subst); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Runtime seeds can give multiple role aliases one actual ID. Only the alias
+// carried by the missing request may choose that ID's replacement.
+func TestTenantMatrixSubstitutionUsesRequestSlots(t *testing.T) {
+	f := syntheticTenantFixture()
+	f.bySide[sideB]["curation_run_renew"] = f.bySide[sideB]["curation_run"]
+	for i := range 8 {
+		key := "substitution.alias." + strconv.Itoa(i)
+		f.bySide[sideB][key] = f.bySide[sideB]["curation_run"]
+		f.bySide[sideMissing][key] = "missing-alias-" + strconv.Itoa(i)
+	}
+	build := tenantBuild("POST", "/v1/memory-curation-runs/${curation_run_renew}/renew", "", "")
+	owner, missing := build(f, sideB), build(f, sideMissing)
+	for range 64 {
+		subst := tenantSubstitutions(f, owner, missing)
+		if len(subst) != 1 || subst[f.value(sideB, "curation_run_renew")] != f.value(sideMissing, "curation_run_renew") {
+			t.Fatal("substitution selected an alias absent from the missing request")
+		}
+	}
+}
+
+func TestTenantMatrixLeakInventoryKeepsBaseValues(t *testing.T) {
+	base := syntheticTenantFixture()
+	// A8 excludes shared sequence numbers and dates from identity scans. Every
+	// remaining base slot must survive even a complete Fresh overlay, on every
+	// row/probe, including own and exempt routes.
+	for key := range base.bySide[sideB] {
+		switch tenantSyntheticShapes[key] {
+		case "number", "version", "time":
+			delete(base.bySide[sideB], key)
+		}
+	}
+	base.bySide[sideB]["seed.runtime.token"] = "base-runtime-token"
+	rt := &tenantRuntime{f: base, probeValues: map[tenantSide]map[string]map[string]string{sideB: {}}}
+	for _, row := range tenantRows() {
+		for _, p := range row.Probes {
+			t.Run(tenantProbeID(row, p), func(t *testing.T) {
+				overlay := tenantSyntheticValues(sideB, "inventory-overlay:"+tenantProbeID(row, p))
+				overlay["seed.runtime.token"] = "overlay-runtime-token"
+				rt.probeValues[sideB][tenantProbeID(row, p)] = overlay
+				f := rt.fixture(row, p, false)
+				inventory := map[string]bool{}
+				for _, value := range rt.leakValues(f) {
+					inventory[value] = true
+				}
+				for key, value := range base.bySide[sideB] {
+					if !inventory[value] {
+						t.Errorf("leak inventory lost base fixture key %s", key)
+					}
+				}
+				for _, value := range f.values(sideB) {
+					if !inventory[value] {
+						t.Error("leak inventory lost an overlaid fixture value")
+					}
+				}
+				if f.bySide[sideB]["token.full"] != overlay["token.full"] {
+					t.Error("request fixture lost its overlay")
+				}
+			})
+		}
 	}
 }
 

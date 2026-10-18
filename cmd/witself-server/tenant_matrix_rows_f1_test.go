@@ -31,7 +31,7 @@ func tenantRowsF1() []tenantRow {
 		tenantF1Exempt("POST /v1/auth/bootstrap", exemptBootstrap, credAgent, "/v1/auth/bootstrap", `{"bootstrap_token":"${cred}"}`, "Login exchanges a one-time bootstrap token; server.go:3140. The probe uses an agent token instead."),
 		tenantF1Exempt("POST /v1/accounts", exemptNotMounted, credNone, "/v1/accounts", `{}`, "Production wires ProvisionAccountExact only; cmd/witself-server/main.go:1889-1895 leaves legacy ProvisionAccount nil."),
 
-		tenantF1Own("GET /v1/export", credOperator, "Exports only the authenticated operator's account; no foreign account selector.", ""),
+		tenantF1Export(),
 		tenantF1Own("GET /v1/whoami", credOperator, "Identity comes solely from the operator bearer.", ""),
 		tenantF1Own("GET /v1/auth/whoami", credOperator, "Identity comes solely from the operator bearer.", ""),
 		tenantF1Own("POST /v1/realms", credOperator, "Creates a named realm within the authenticated account; no referenced object.", `{"name":"${name.realm.create}"}`),
@@ -51,7 +51,7 @@ func tenantRowsF1() []tenantRow {
 		tenantF1Foreign("POST /v1/tokens/", credOperator, "/v1/tokens/${token.revoke}:revoke", "", "token.revoke"),
 		tenantF1Scratch("POST /v1/account:close", "S-close", `{"reason":"${canary.account.close}"}`),
 		tenantF1Own("GET /v1/account", credOperator, "Account identity comes solely from the authenticated operator.", ""),
-		tenantF1Own("GET /v1/account/close-eligibility", credOperator, "Close eligibility and owner identity come solely from the authenticated operator.", ""),
+		tenantF1CloseEligibility(),
 		tenantF1Scratch("POST /v1/account:rename", "S-rename", `{"display_name":"${name.account.rename}"}`),
 		tenantF1Own("GET /v1/account/placement-policy", credOperator, "Reads the authenticated account's placement policy.", ""),
 		tenantF1Scratch("PATCH /v1/account/placement-policy", "S-placement", `{"preferred_clouds":[],"preferred_regions":[],"preferred_channels":[],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":[]}`),
@@ -203,6 +203,18 @@ func tenantF1SubjectUpsert() tenantRow {
 	return row
 }
 
+// tenantF1CloseEligibility answers the close-eligibility check for the own
+// account. The F2 vault seed (tenant_matrix_seed_vault_test.go) leaves an open
+// key rotation on every seeded account, and internal/store/close.go refuses to
+// close while a rotation or enrollment is active, so the own control is the
+// lifecycle 409 (writeAccountCloseError), never 2xx. A 2xx here would mean the
+// vault lifecycle fence is gone. Identity still comes solely from the operator.
+func tenantF1CloseEligibility() tenantRow {
+	row := tenantF1Own("GET /v1/account/close-eligibility", credOperator, "Close eligibility and owner identity come solely from the authenticated operator.", "")
+	row.Probes[0].Want = []int{409}
+	return row
+}
+
 func tenantF1SelfVersionRead() tenantRow {
 	row := tenantF1OwnFresh("GET /v1/self/avatar/versions/{version}", "agent.self.read", "internal/store/avatar_query.go:179-184 resolves numeric versions only through the authenticated agent; avatar_query.go:497-502 scopes its profile.", "")
 	p := &row.Probes[0]
@@ -307,4 +319,14 @@ func tenantF1ProposalBodyBuild(path, bodyTemplate string) func(*tenantFixture, t
 		req.Body = encoded
 		return req
 	}
+}
+
+// ExportAccount refuses an entire account with an open vault lifecycle
+// (internal/store/export.go:303-324). F2 requires those A/B prerequisites, so
+// export gets a dedicated populated account with terminal vault lifecycles.
+// ShowsOwn requires its object canaries, not merely the account display name.
+func tenantF1Export() tenantRow {
+	row := tenantF1Scratch("GET /v1/export", "S-export", "")
+	row.Probes[0].ShowsOwn = true
+	return row
 }

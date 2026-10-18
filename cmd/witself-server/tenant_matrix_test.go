@@ -335,17 +335,8 @@ func TestTenantMatrixCoversEveryRoute(t *testing.T) {
 			}
 		}
 	}
-	for _, row := range rows {
-		pending, exists := tenantRuntimePending[row.Pattern]
-		want := row.Class == tenant && tenantFamily(row.Pattern) == "F2"
-		if exists != want || (exists && pending != "122c") {
-			t.Errorf("runtime pending boundary differs for %q: want F2 only, part 122c", row.Pattern)
-		}
-	}
 	for pattern := range tenantRuntimePending {
-		if !seen[pattern] {
-			t.Errorf("stale runtime pending pattern %q", pattern)
-		}
+		t.Errorf("runtime pending must be empty after 122c; found %q", pattern)
 	}
 	checkTenantPolicySets(t, rows)
 	if exemptCount != 18 {

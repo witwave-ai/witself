@@ -19,23 +19,16 @@ func tenantSeedObjects(t *testing.T, rt *tenantRuntime) {
 		tenantSeedFacts(t, rt, side)
 		tenantSeedTranscripts(t, rt, side)
 		tenantSeedTickets(t, rt, side)
+		tenantSeedEmailControls(t, rt, side)
+		tenantSeedVault(t, rt, side)
+		tenantSeedMessages(t, rt, side)
+		tenantSeedMemories(t, rt, side)
 	}
 	// A-own path objects accompany exactly one foreign body reference. They
 	// are separate from the never-issued slots used by ordinary own probes.
 	for key, value := range rt.f.bySide[sideA] {
-		if tenantDomainObjectKey(key) {
-			rt.f.ownValues[key] = value
-		}
+		rt.f.ownValues[key] = value
 	}
-}
-
-func tenantDomainObjectKey(key string) bool {
-	for _, prefix := range []string{"fact", "transcript", "ticket", "canary.seed."} {
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
-			return true
-		}
-	}
-	return false
 }
 
 // tenantSeedFacts follows TestFactSubjectRoutes (internal/server/fact_subject_test.go)

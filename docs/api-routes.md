@@ -2378,7 +2378,7 @@ and static checks; request execution and the two runtime phases belong to 122b.
 The runtime matrix starts the production server against two seeded accounts in an
 isolated PostgreSQL schema. For each active route it checks the refusal, identical
 answers for real and never-issued IDs, no leaked values, and no change to the
-other account's rows. Routes listed in `tenantRuntimePending` are not yet run.
+other account's rows.
 The control-plane Worker is not covered yet.
 
 MCP tools are pinned to the first route they call, with the installed binding's

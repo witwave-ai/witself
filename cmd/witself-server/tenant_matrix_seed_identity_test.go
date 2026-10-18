@@ -155,9 +155,13 @@ func tenantSeedIdentities(t *testing.T, rt *tenantRuntime) {
 		v["token.revoke"], v["seed.token.revoke.plaintext"] = revokeID, revokeToken
 		rt.secrets = append(rt.secrets, revokeToken)
 	}
-	for _, key := range []string{"S-close", "S-suspend", "S-resume", "S-rename", "S-placement", "S-optoken"} {
-		account, token := tenantSeedAccount(t, rt, strings.ToLower(key)+"-matrix@example.invalid", key+" tenant matrix", plan)
+	for _, key := range []string{"S-close", "S-suspend", "S-resume", "S-rename", "S-placement", "S-optoken", "S-export"} {
+		display := key + " tenant matrix"
+		account, token := tenantSeedAccount(t, rt, strings.ToLower(key)+"-matrix@example.invalid", display, plan)
 		rt.scratchCreds[key] = token
+		if key == "S-export" {
+			tenantSeedExportAccount(t, rt, account)
+		}
 		if key == "S-resume" {
 			tenantSeedCheck(t, rt.st.SuspendAccountOwner(ctx, account.AccountID, account.OperatorID, "matrix-resume-control"), "suspend resume scratch account")
 		}
