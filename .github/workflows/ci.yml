@@ -790,6 +790,12 @@ jobs:
       - name: security scan image offline contract checks
         timeout-minutes: 5
         run: bash scripts/test-security-scan-images.sh
+      - name: security scan issue offline contract checks
+        timeout-minutes: 5
+        run: bash scripts/test-security-scan-issue.sh
+      - name: security scan workflow contract checks
+        timeout-minutes: 5
+        run: bash scripts/test-security-scan-workflow.sh
 
       - name: monitoring rollout capability checks
         run: |

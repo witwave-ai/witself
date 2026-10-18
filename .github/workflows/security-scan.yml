@@ -1,0 +1,90 @@
+name: security-scan
+
+# Weekly vulnerability scan of main and the latest release. It never runs on
+# pull requests, so a new advisory cannot block unrelated work, and it is not
+# a required check. Findings fail the run and keep one tracking issue current.
+on:
+  schedule:
+    - cron: "17 13 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan
+  cancel-in-progress: false
+
+env:
+  # Founder decision at merge: counts, no-cells or full (docs/release-and-build.md).
+  SECURITY_SCAN_PUBLIC_DETAIL: counts
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Resolve latest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "unexpected latest release tag" >&2
+            exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: Scan
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: bash scripts/security-scan.sh all --release-version "$RELEASE_VERSION" --report "$RUNNER_TEMP/security-scan/report.md"
+      - name: Render public report
+        if: ${{ !cancelled() }}
+        run: bash scripts/security-scan-issue.sh render --detail "$SECURITY_SCAN_PUBLIC_DETAIL" --report "$RUNNER_TEMP/security-scan/report.md" --out "$RUNNER_TEMP/security-scan-public/report.md"
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        run: cat "$RUNNER_TEMP/security-scan-public/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: security-scan-report
+          path: ${{ runner.temp }}/security-scan-public/report.md
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    needs: scan
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: security-scan-report
+          path: ${{ runner.temp }}/security-scan-public
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/security-scan-issue.sh sync --report "$RUNNER_TEMP/security-scan-public/report.md" --scan-result "$SCAN_RESULT" --run-url "$RUN_URL" --repo "$GITHUB_REPOSITORY"
