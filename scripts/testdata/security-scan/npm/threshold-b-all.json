@@ -1,0 +1,53 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "dev-high-b": {
+      "name": "dev-high-b",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        {
+          "url": "https://github.com/advisories/GHSA-high-bbbb-cccc"
+        }
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": [
+        "node_modules/dev-high-b"
+      ],
+      "fixAvailable": false
+    },
+    "dev-moderate-b": {
+      "name": "dev-moderate-b",
+      "severity": "moderate",
+      "isDirect": true,
+      "via": [
+        "transitive-parent"
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": [
+        "node_modules/dev-moderate-b"
+      ],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 1,
+      "high": 1,
+      "critical": 0,
+      "total": 2
+    },
+    "dependencies": {
+      "prod": 2,
+      "dev": 3,
+      "optional": 0,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 5
+    }
+  }
+}

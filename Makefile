@@ -129,7 +129,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -371,6 +371,9 @@ check-go-mod-tidy: ## Verify both Go modules are tidy without modifying them
 govulncheck: ## Scan the root Go module with the CI-pinned vulnerability scanner
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+security-scan: ## On-demand vulnerability scan (network; not part of check)
+	bash scripts/security-scan.sh all
+
 check-cell-secrets: ## Reject plaintext or invalid cell Secret artifacts without a decryption identity
 	bash scripts/cell-secrets.sh check
 
@@ -443,6 +446,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-provider-contract-workflow.sh
 	node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs
 	bash scripts/test-workflow-runner-labels.sh
+	bash scripts/test-security-scan.sh
 	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-capture-billing-rollout-inventory.sh
 	bash scripts/test-monitoring-rollout.sh

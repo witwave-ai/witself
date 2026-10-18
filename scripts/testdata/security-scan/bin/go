@@ -1,0 +1,12 @@
+#!/bin/bash
+set -eu
+printf '%s|%s\n' "$PWD" "$*" >> "$SECURITY_SCAN_CASE/go.argv"
+printf '%s|%s|%s\n' "$GOPROXY" "${https_proxy:?}" "${npm_config_offline:?}" >> "$SECURITY_SCAN_CASE/env.log"
+printf 'go\n' >> "$SECURITY_SCAN_CASE/tool-order.log"
+printf 'GO-stub-private-diagnostic\n' >&2
+fixture=$SECURITY_SCAN_FIXTURES/go/clean.json
+[ ! -f .scan-go.json ] || fixture=$PWD/.scan-go.json
+cat "$fixture"
+code=0
+[ ! -f .scan-go-exit ] || code=$(cat .scan-go-exit)
+exit "$code"

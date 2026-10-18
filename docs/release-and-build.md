@@ -341,6 +341,58 @@ CI should use minimal permissions by default:
 
 Use concurrency cancellation so superseded pushes do not leave stale CI running.
 
+## Vulnerability Scans
+
+`make security-scan` runs the on-demand Go and npm vulnerability scans. It needs
+network access and must not run beside a local gate. It is not part of `make
+check` or `make check-infra`. Those gates and CI's required `helm` check run only
+the offline contract tests in `scripts/test-security-scan.sh`. The existing
+required root-module govulncheck step in CI, its release counterpart, and
+`make govulncheck` are unchanged.
+
+The Go scanner discovers `go.mod` files throughout the repository, including
+`infra/pulumi`, and runs govulncheck `v1.7.0` in each module. At a Git worktree
+root it includes tracked and non-ignored untracked files without descending
+into nested repositories; other roots use filesystem discovery. It excludes
+`testdata`, `node_modules`, `.git`, and `.claude` path components. Only
+vulnerabilities with a called function are findings; module-only and
+package-only matches are informational. Standard-library results use the Go
+toolchain that runs the scanner. This checks source reachability, not released
+binaries or container images.
+
+The npm scanner audits each `infra/cloudflare/*/package.json` directory from its
+lockfile, without installing dependencies. Production dependencies fail at
+moderate or above. A second full-tree audit fails at high or above, excluding
+packages already reported by the production audit. The higher toolchain
+threshold includes Wrangler and its dependencies because deployment tooling
+runs with Cloudflare credentials. Lower-severity entries are informational.
+Other npm projects, including the dashboard acceptance harness, are not scanned.
+A Worker directory without a lockfile makes the scan incomplete.
+
+For a local report that keeps finding detail off the console, use:
+
+```sh
+bash scripts/security-scan.sh go,npm --report ~/.witself/handoff/security-scan-local.md
+```
+
+The report's parent directory is created as needed. Without `--report`, the
+Markdown report goes to standard output. Scanner output stays in a private
+temporary directory that is removed on exit; standard error receives one
+status-and-counts summary. Reports contain relative paths, at most 50 rows per
+section, and at most 60,000 bytes. Their first line has this machine-readable
+shape (counts include rows beyond the display cap):
+
+```text
+<!-- witself-security-scan v1 status=<clean|findings|incomplete> go=<n> npm_prod=<n> npm_toolchain=<n> images=0 incomplete=<n> -->
+```
+
+Exit `0` means every planned target validated and no finding met a threshold;
+`1` means findings; `2` means invalid usage; `3` means an incomplete scan, such
+as a missing tool, missing lockfile, failed scanner, invalid output, or no
+targets. Incomplete takes precedence over findings, and the report retains
+findings from targets that completed. Image scanning and scheduled reporting
+are not included in this first part.
+
 ## Hosted Runner Images And Required Check Names
 
 Every hosted Linux job requests `ubuntu-24.04` or `ubuntu-24.04-arm`, spelled
