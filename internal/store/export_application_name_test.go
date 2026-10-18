@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,6 +15,15 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+// TestExportTransactionApplicationNamePostgres checks this classification against
+// the real account-row lock held by each export kind.
+var exportNamesLockingAccountRow = map[string]bool{
+	"witself-export-account":    true,
+	"witself-export-backup":     false,
+	"witself-export-evacuation": true,
+	"witself-export-self":       false,
+}
 
 func TestExportApplicationNamesMatchPostgreSQLAlertRules(t *testing.T) {
 	body, err := os.ReadFile("../../.gitops/charts/platform/files/postgresql.rules.yaml")
@@ -31,67 +41,168 @@ func TestExportApplicationNamesMatchPostgreSQLAlertRules(t *testing.T) {
 	if err := yaml.Unmarshal(body, &rules); err != nil {
 		t.Fatal(err)
 	}
-
-	const prefix = "witself-export-"
-	names := make(map[string]bool, len(exportApplicationNames))
-	var suffixes []string
-	for _, name := range exportApplicationNames {
-		if !strings.HasPrefix(name, prefix) || strings.TrimPrefix(name, prefix) == "" {
-			t.Fatalf("invalid export application name %q", name)
+	expression := func(t *testing.T, name string) string {
+		t.Helper()
+		var expressions []string
+		for _, group := range rules.Groups {
+			for _, candidate := range group.Rules {
+				if candidate.Alert == name {
+					expressions = append(expressions, candidate.Expr)
+				}
+			}
 		}
-		if names[name] {
-			t.Fatalf("duplicate export application name %q", name)
+		if len(expressions) != 1 {
+			t.Fatalf("found %d %s rules, want exactly one", len(expressions), name)
 		}
-		names[name] = true
-		suffixes = append(suffixes, strings.TrimPrefix(name, prefix))
+		return expressions[0]
 	}
-	sort.Strings(suffixes)
-	wantMatcher := prefix + "(" + strings.Join(suffixes, "|") + ")"
-	for _, rule := range []struct {
-		name     string
-		operator string
+	matcherForNames := func(prefix string, names []string) string {
+		var suffixes []string
+		seen := make(map[string]bool)
+		for _, name := range names {
+			if !strings.HasPrefix(name, prefix) || strings.TrimPrefix(name, prefix) == "" {
+				t.Fatalf("invalid application name %q for prefix %q", name, prefix)
+			}
+			if seen[name] {
+				t.Fatalf("duplicate application name %q", name)
+			}
+			seen[name] = true
+			suffixes = append(suffixes, strings.TrimPrefix(name, prefix))
+		}
+		sort.Strings(suffixes)
+		return prefix + "(" + strings.Join(suffixes, "|") + ")"
+	}
+
+	// Keep selectors as sets of triples: matcher order is immaterial, but
+	// missing, extra, duplicate or malformed matchers must fail the guard.
+	type matcher struct{ label, op, value string }
+	type matcherSet map[matcher]bool
+	selectorRE := regexp.MustCompile(`pg_stat_activity_max_tx_duration\s*\{([^}]*)\}`)
+	matcherRE := regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*("(?:[^"\\]|\\.)*")\s*`)
+	selectors := func(t *testing.T, expr string) []matcherSet {
+		t.Helper()
+		var sets []matcherSet
+		for _, selector := range selectorRE.FindAllStringSubmatch(expr, -1) {
+			set := matcherSet{}
+			remaining := selector[1]
+			for strings.TrimSpace(remaining) != "" {
+				parts := matcherRE.FindStringSubmatch(remaining)
+				if parts == nil {
+					t.Fatalf("malformed selector matchers %q", remaining)
+				}
+				value, err := strconv.Unquote(parts[3])
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry := matcher{parts[1], parts[2], value}
+				if set[entry] {
+					t.Fatalf("duplicate selector matcher %v", entry)
+				}
+				set[entry] = true
+				remaining = remaining[len(parts[0]):]
+				if remaining == "" {
+					break
+				}
+				if !strings.HasPrefix(remaining, ",") {
+					t.Fatalf("missing matcher separator in %q", remaining)
+				}
+				remaining = remaining[1:]
+			}
+			sets = append(sets, set)
+		}
+		return sets
+	}
+	base := func(extra ...matcher) matcherSet {
+		set := matcherSet{
+			{"namespace", "=", "witself"}:                  true,
+			{"service", "=", "witself-postgresql-metrics"}: true,
+		}
+		for _, entry := range extra {
+			set[entry] = true
+		}
+		return set
+	}
+
+	families := []struct {
+		prefix, file, rule string
+		names              []string
+		matcher            string
 	}{
-		{"WitselfPostgreSQLTransactionAgeHigh", "!~"},
-		{"WitselfPostgreSQLExportTransactionAgeHigh", "=~"},
-	} {
-		t.Run(rule.name, func(t *testing.T) {
-			var expressions []string
-			for _, group := range rules.Groups {
-				for _, candidate := range group.Rules {
-					if candidate.Alert == rule.name {
-						expressions = append(expressions, candidate.Expr)
+		{prefix: "witself-export-", file: "export.go", rule: "WitselfPostgreSQLExportTransactionAgeHigh", names: exportApplicationNames[:]},
+		{prefix: "witself-import-", file: "import.go", rule: "WitselfPostgreSQLImportTransactionAgeHigh", names: importApplicationNames[:]},
+	}
+	allNames := make(map[string]bool)
+	for i := range families {
+		family := &families[i]
+		family.matcher = matcherForNames(family.prefix, family.names)
+		for _, name := range family.names {
+			allNames[name] = true
+		}
+	}
+	for _, family := range families {
+		t.Run(family.rule, func(t *testing.T) {
+			expr := expression(t, family.rule)
+			got := selectors(t, expr)
+			want := []matcherSet{base(matcher{"application_name", "=~", family.matcher})}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("family rule selectors = %v, want %v", got, want)
+			}
+			shape := selectorRE.ReplaceAllString(expr, "SERIES")
+			if !regexp.MustCompile(`^\s*max\s+by\s*\(\s*namespace\s*,\s*job\s*,\s*instance\s*,\s*application_name\s*\)\s*\(\s*SERIES\s*\)\s*>\s*2700\s*$`).MatchString(shape) {
+				t.Error("family rule must directly aggregate its single selector by namespace, job, instance, application_name and compare > 2700")
+			}
+			// Prometheus fully anchors its RE2 matchers; Go's regexp uses RE2 syntax.
+			re := regexp.MustCompile("^(?:" + family.matcher + ")$")
+			for _, name := range family.names {
+				if !re.MatchString(name) {
+					t.Errorf("matcher excludes application name %q", name)
+				}
+			}
+			for _, other := range families {
+				if other.prefix == family.prefix {
+					continue
+				}
+				for _, name := range other.names {
+					if re.MatchString(name) {
+						t.Errorf("matcher includes other family's name %q", name)
 					}
 				}
 			}
-			if len(expressions) != 1 {
-				t.Fatalf("found %d rules, want exactly one", len(expressions))
-			}
-			matcherRE := regexp.MustCompile(`application_name\s*` + rule.operator + `\s*"([^"\\]*(?:\\.[^"\\]*)*)"`)
-			matches := matcherRE.FindAllStringSubmatch(expressions[0], -1)
-			if len(matches) != 1 {
-				t.Fatalf("found %d application_name%s matchers, want exactly one", len(matches), rule.operator)
-			}
-			matcher := matches[0][1]
-			if matcher != wantMatcher {
-				t.Errorf("matcher set = %q, want %q", matcher, wantMatcher)
-			}
-			// Prometheus fully anchors its RE2 matchers; Go's regexp uses RE2 syntax.
-			re, err := regexp.Compile("^(?:" + matcher + ")$")
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range exportApplicationNames {
-				if !re.MatchString(name) {
-					t.Errorf("matcher excludes export application name %q", name)
-				}
-			}
-			for _, name := range []string{"", "witself-server", "witself-export-other", "witself-export-backup-old", "pg_dump", "pg_dumpall"} {
+			for _, name := range []string{"", "witself-server", "witself-export-other", "witself-export-backup-old", "pg_dump", "pg_dumpall", "witself-import", "witself-import-", "witself-import-other", "witself-import-evacuation-old", "witself-export-import"} {
 				if re.MatchString(name) {
-					t.Errorf("matcher includes non-export application name %q", name)
+					t.Errorf("matcher includes non-family application name %q", name)
 				}
 			}
 		})
 	}
+
+	if len(exportNamesLockingAccountRow) != len(exportApplicationNames) {
+		t.Fatal("account-row lock classification does not cover exactly the export names")
+	}
+	for _, name := range exportApplicationNames {
+		_, ok := exportNamesLockingAccountRow[name]
+		if !ok {
+			t.Fatalf("missing account-row lock classification for %q", name)
+		}
+	}
+	t.Run("WitselfPostgreSQLTransactionAgeHigh", func(t *testing.T) {
+		expr := expression(t, "WitselfPostgreSQLTransactionAgeHigh")
+		exportExclusion := matcher{"application_name", "!~", families[0].matcher}
+		importExclusion := matcher{"application_name", "!~", families[1].matcher}
+		want := []matcherSet{base(exportExclusion, importExclusion)}
+		got := selectors(t, expr)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("general rule selectors = %v, want %v", got, want)
+		}
+		// The closed export/import sets have distinct prefixes. Their exact
+		// positive family selectors and this single complementary selector
+		// partition every in-scope series, including missing application names
+		// and every wait_event_type. No other series can suppress a Lock waiter.
+		shape := selectorRE.ReplaceAllString(expr, "SERIES")
+		if !regexp.MustCompile(`^\s*max\s+by\s*\(\s*namespace\s*,\s*job\s*,\s*instance\s*\)\s*\(\s*SERIES\s*\)\s*>\s*300\s*$`).MatchString(shape) {
+			t.Error("general rule must directly aggregate its single selector by namespace, job, instance and compare > 300")
+		}
+	})
 
 	t.Run("selector", func(t *testing.T) {
 		for bits := 0; bits < 8; bits++ {
@@ -109,11 +220,28 @@ func TestExportApplicationNamesMatchPostgreSQLAlertRules(t *testing.T) {
 				want = "witself-export-evacuation"
 			}
 			got := exportApplicationName(options)
-			if !names[got] {
-				t.Errorf("combination %03b returned unlisted name %q", bits, got)
+			if !allNames[got] || got != want {
+				t.Errorf("combination %03b = %q, want listed name %q", bits, got, want)
 			}
-			if got != want {
-				t.Errorf("combination %03b = %q, want %q", bits, got, want)
+			if exportNamesLockingAccountRow[got] != (!options.backup && !options.self) {
+				t.Errorf("combination %03b account-row lock classification differs from export options", bits)
+			}
+		}
+	})
+	t.Run("importApplicationName", func(t *testing.T) {
+		for bits := 0; bits < 4; bits++ {
+			options := accountImportOptions{backupValidation: bits&1 != 0}
+			if bits&2 != 0 {
+				options.evacuationID = "test-evacuation"
+			}
+			want := "witself-import-account"
+			if options.backupValidation {
+				want = "witself-import-validation"
+			} else if options.evacuationID != "" {
+				want = "witself-import-evacuation"
+			}
+			if got := importApplicationName(options); !allNames[got] || got != want {
+				t.Errorf("combination %02b = %q, want listed name %q", bits, got, want)
 			}
 		}
 	})
@@ -142,12 +270,14 @@ func TestExportApplicationNamesMatchPostgreSQLAlertRules(t *testing.T) {
 					t.Errorf("%s: %v", fset.Position(literal.Pos()), err)
 					return true
 				}
-				if strings.HasPrefix(value, prefix) {
-					if !names[value] {
-						t.Errorf("%s: unlisted export application name %q", fset.Position(literal.Pos()), value)
-					}
-					if path != "export.go" {
-						t.Errorf("%s: export application name literal belongs only in export.go", fset.Position(literal.Pos()))
+				for _, family := range families {
+					if strings.HasPrefix(value, family.prefix) {
+						if !allNames[value] {
+							t.Errorf("%s: unlisted application name %q", fset.Position(literal.Pos()), value)
+						}
+						if path != family.file {
+							t.Errorf("%s: %s application name literal belongs only in %s", fset.Position(literal.Pos()), family.prefix, family.file)
+						}
 					}
 				}
 				return true

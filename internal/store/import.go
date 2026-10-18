@@ -6491,6 +6491,24 @@ type accountImportOptions struct {
 	backupValidation bool
 }
 
+// Keep this closed list aligned with the PostgreSQL transaction-age alert rules.
+var importApplicationNames = [...]string{
+	"witself-import-account",
+	"witself-import-evacuation",
+	"witself-import-validation",
+}
+
+func importApplicationName(options accountImportOptions) string {
+	switch {
+	case options.backupValidation:
+		return importApplicationNames[2]
+	case options.evacuationID != "":
+		return importApplicationNames[1]
+	default:
+		return importApplicationNames[0]
+	}
+}
+
 func (s *Store) importAccount(
 	ctx context.Context,
 	beginner txBeginner,
@@ -6526,6 +6544,14 @@ func (s *Store) importAccountWithTracker(
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// PostgreSQL Functions, "Configuration Settings Functions": set_config with
+	// is_local=true is equivalent to SET LOCAL. SQL Commands, SET: the local
+	// value ends at commit or rollback, restoring the pooled session default.
+	// TestImportTransactionApplicationNamePostgres proves pg_stat_activity sees
+	// the local value during the transaction and the default after it ends.
+	if _, err := tx.Exec(ctx, `SELECT set_config('application_name', $1, true)`, importApplicationName(options)); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("set import application name: %w", err)
+	}
 	if options.evacuationID != "" {
 		var locked bool
 		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(`+AccountImportAdvisoryKeySQL+`)`, expectedAccountID, options.evacuationID).Scan(&locked); err != nil {

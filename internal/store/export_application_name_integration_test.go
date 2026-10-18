@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/witwave-ai/witself/internal/testenv"
 )
 
@@ -142,6 +143,17 @@ func TestExportTransactionApplicationNamePostgres(t *testing.T) {
 			}
 			if !openTransaction {
 				t.Error("paused export has no open transaction")
+			}
+
+			var lockedRow int
+			lockErr := obs.QueryRow(ctx, `SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE NOWAIT`, account.AccountID).Scan(&lockedRow)
+			if exportNamesLockingAccountRow[exportApplicationNames[test.nameIndex]] {
+				var postgresError *pgconn.PgError
+				if !errors.As(lockErr, &postgresError) || postgresError.Code != "55P03" {
+					t.Errorf("paused export account-row NOWAIT probe = %v, want PostgreSQL 55P03", lockErr)
+				}
+			} else if lockErr != nil || lockedRow != 1 {
+				t.Errorf("paused export account-row NOWAIT probe = %d / %v, want 1 / nil", lockedRow, lockErr)
 			}
 
 			if test.cancel {
