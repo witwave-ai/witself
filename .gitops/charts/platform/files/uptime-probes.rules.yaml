@@ -108,3 +108,37 @@ groups:
         annotations:
           summary: The control-plane billing reconciliation backlog is over fifteen minutes old and reconciliation is failing.
           runbook: docs/observability-and-operations.md#synthetic-uptime-probes
+      - alert: WitselfStripeWebhookProcessingFailures
+        # Fires while three or more verified deliveries failed to fold within
+        # the trailing six hours. One or two can be a receipt-lease race or a
+        # transient store error that Stripe's redelivery repairs. Clears once
+        # fewer than three remain in the window: six hours after the earliest
+        # of them, if no more failures arrive.
+        expr: sum(increase(witself_cp_stripe_webhook_events_total{outcome="processing_failed"}[6h])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane-stripe
+          witself_alert: "true"
+        annotations:
+          summary: Verified Stripe webhook deliveries are failing to fold into billing state.
+          runbook: docs/runbooks.md#billing-failure-alerts
+      - alert: WitselfBillingMutationRecoveryFailing
+        # Ten of about twelve hourly lifecycle batches failed. When a backlog
+        # older than 900 seconds is known, WitselfBillingReconciliationStalled
+        # pages instead. As a young backlog ages past 900 seconds this alert
+        # resolves and Stalled opens: treat both as one incident.
+        # Require the batch series to remain live: retained range samples
+        # must not page after rollback or scrape loss makes lag stale.
+        expr: |
+          (increase(witself_cp_billing_mutation_batch_failures_total[1h]) >= 10)
+            and on(job, instance) witself_cp_billing_mutation_batch_failures_total
+            unless on(job, instance) (witself_cp_billing_reconciliation_lag_seconds > 900)
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane-stripe
+          witself_alert: "true"
+        annotations:
+          summary: Billing-mutation recovery batches keep failing and no old backlog is observed.
+          runbook: docs/runbooks.md#billing-failure-alerts
