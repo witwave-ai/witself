@@ -846,6 +846,22 @@
               "resource.ignoreResourceUpdatesEnabled": "false"
             }
           },
+          "controller": {
+            "env": [
+              {
+                "name": "GOMEMLIMIT",
+                "value": "614MiB"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "memory": "768Mi"
+              },
+              "requests": {
+                "memory": "256Mi"
+              }
+            }
+          },
           "server": {
             "service": {
               "type": "ClusterIP"

@@ -16,7 +16,12 @@ const (
 	argocdChart        = "argo-cd"
 	argocdChartRepo    = "https://argoproj.github.io/argo-helm"
 	argocdChartVersion = "10.0.1"
-	argocdNamespace    = "argocd"
+
+	// Argo CD application controller memory bounds (see argocdReleaseValues).
+	argocdControllerMemoryRequest = "256Mi"
+	argocdControllerMemoryLimit   = "768Mi"
+	argocdControllerGoMemLimit    = "614MiB" // 80 percent of the limit
+	argocdNamespace               = "argocd"
 
 	// Default GitOps source Argo reconciles, overridable via the -gitops-* flags
 	// so a self-hoster can point Argo at their own fork / config repo. The repo is
@@ -49,6 +54,21 @@ func argocdReleaseValues() pulumi.Map {
 				// chart's global /status ignore can leave those updates stale in the
 				// parent cache, so use Argo's supported switch to keep them observable.
 				"resource.ignoreResourceUpdatesEnabled": pulumi.String("false"),
+			},
+		},
+		// The application controller's cache grows for weeks without a bound: on
+		// the serving cell it reached about 820 MiB after 30 days and fell to
+		// 246 MiB on restart (2026-10-19), on nodes with 2.25 GiB allocatable.
+		// GOMEMLIMIT makes the Go runtime collect well before the hard limit, the
+		// request lets the scheduler account for it, and the limit bounds the worst
+		// case; the StatefulSet restarts the controller if it is ever reached.
+		"controller": pulumi.Map{
+			"resources": pulumi.Map{
+				"requests": pulumi.Map{"memory": pulumi.String(argocdControllerMemoryRequest)},
+				"limits":   pulumi.Map{"memory": pulumi.String(argocdControllerMemoryLimit)},
+			},
+			"env": pulumi.Array{
+				pulumi.Map{"name": pulumi.String("GOMEMLIMIT"), "value": pulumi.String(argocdControllerGoMemLimit)},
 			},
 		},
 		"server": pulumi.Map{
