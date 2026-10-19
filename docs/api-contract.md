@@ -285,6 +285,29 @@ flag rather than treating every limit response or CLI exit `7` as retryable:
   State is bounded by the configured account capacity; an evicted account
   starts with full buckets.
 
+  Optional `WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS` selects read and write
+  budgets by the account's snapshot plan id (`PlanSnapshotRecord.Plan`).
+  These are operator-set, per-cell protections, not entitlements; they are
+  not published in the catalog or snapshot. This is an exception to migration
+  0017's statement that enforcement reads only `plan_limits` and
+  `plan_features`. Tier 0 (the cell-wide values) covers unlisted plan ids,
+  including `enterprise`, and lookup failures with nothing cached. An account
+  with no applied snapshot, including a new pending account (which is
+  budgeted), is on `free` and uses the `free` tier when one is configured.
+
+  Each replica caches resolved plan ids separately from the request buckets,
+  re-reading at most once a minute per account while cached. Idle bucket
+  sweeps do not discard plans; the separate plan LRU is bounded by the same
+  account capacity as the buckets, `WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS`.
+  Capacity eviction or concurrent lookups (on first contact or after the cache
+  entry expires) can cause additional reads. Lookups have a two-second timeout
+  and ignore client cancellation. A failed lookup preserves the last resolved
+  tier, or uses tier 0 if none is cached, and retries after five seconds. A plan
+  lookup that changes the selected tier refills both of that account's buckets;
+  re-resolving to the same tier preserves them. With no configured plans the
+  budget never reads the account plan. PLANS is ignored when the budget is
+  disabled.
+
   A refusal returns HTTP 429 with `Retry-After: 1`,
   `Content-Type: application/json`, and `Cache-Control: private, no-store`
   for this example (the actual retry delay is rounded up to whole seconds,

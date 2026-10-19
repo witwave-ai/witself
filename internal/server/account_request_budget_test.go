@@ -547,7 +547,7 @@ func TestAccountRequestBudgetOffByDefaultIsInert(t *testing.T) {
 	t.Run("empty-environment", func(t *testing.T) {
 		var keys []string
 		got, err := ParseAccountRequestBudgetConfig(func(key string) (string, bool) { keys = append(keys, key); return "", false })
-		if err != nil || got != (AccountRequestBudgetConfig{}) {
+		if err != nil || !reflect.DeepEqual(got, AccountRequestBudgetConfig{}) {
 			t.Fatalf("empty environment = %+v, %v", got, err)
 		}
 		if !reflect.DeepEqual(keys, []string{"WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED"}) {
@@ -578,7 +578,7 @@ func TestParseAccountRequestBudgetConfig(t *testing.T) {
 			env[prefix+name] = "junk"
 		}
 		cfg, keys, err := parse(env)
-		if err != nil || cfg != (AccountRequestBudgetConfig{}) || !reflect.DeepEqual(keys, []string{prefix + "ENABLED"}) {
+		if err != nil || !reflect.DeepEqual(cfg, AccountRequestBudgetConfig{}) || !reflect.DeepEqual(keys, []string{prefix + "ENABLED"}) {
 			t.Fatalf("disabled parse = %+v, %v, %v", cfg, keys, err)
 		}
 	})
@@ -595,7 +595,7 @@ func TestParseAccountRequestBudgetConfig(t *testing.T) {
 		got, keys, err := parse(valid())
 		want := budgetTestConfig(10, 10, 10, 10)
 		want.MaxTrackedAccounts = 10000
-		if err != nil || got != want {
+		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("parse = %+v, %v; want %+v", got, err, want)
 		}
 		wantKeys := []string{prefix + "ENABLED", prefix + rates[0], prefix + rates[1], prefix + rates[2], prefix + rates[3], prefix + "MAX_ACCOUNTS"}
@@ -651,7 +651,7 @@ func TestParseAccountRequestBudgetConfig(t *testing.T) {
 		env := valid()
 		env[prefix+"MAX_ACCOUNTS"] = "100"
 		cfg, _, err := parse(env)
-		if err != nil || cfg != budgetTestConfig(10, 10, 10, 10) {
+		if err != nil || !reflect.DeepEqual(cfg, budgetTestConfig(10, 10, 10, 10)) {
 			t.Fatalf("parse = %+v, %v", cfg, err)
 		}
 	})
@@ -1011,5 +1011,659 @@ func TestAccountRequestBudgetNeverWritesUnderItsLock(t *testing.T) {
 	m.writePrometheus(mw)
 	if mw.checks == 0 || mw.failures != 0 {
 		t.Errorf("metrics writer checks=%d locked=%d", mw.checks, mw.failures)
+	}
+}
+
+func TestParseAccountRequestBudgetPlans(t *testing.T) {
+	const name = "WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS"
+	const objectError = name + " must be a JSON object of plan ids to read and write budgets"
+	const countError = name + " must name 1 to 16 plans"
+	const idError = name + " has a plan id that is not 1-32 lowercase letters, digits or underscores starting with a letter"
+	const keyError = name + " plan \"free\" must set exactly read_per_minute, read_burst, write_per_minute and write_burst"
+	const validBudget = `{"read_per_minute":300,"read_burst":5,"write_per_minute":60,"write_burst":2}`
+	parse := func(raw string, present bool) (map[string]AccountRequestBudgetTier, error) {
+		t.Helper()
+		return ParseAccountRequestBudgetPlans(func(key string) (string, bool) {
+			if key != name {
+				t.Fatalf("unexpected environment lookup %q", key)
+			}
+			return raw, present
+		})
+	}
+	t.Run("absent", func(t *testing.T) {
+		got, err := parse("", false)
+		if err != nil || got != nil {
+			t.Fatalf("absent plans = %v, %v; want nil, nil", got, err)
+		}
+	})
+	t.Run("disabled-ignores-invalid-plans", func(t *testing.T) {
+		var keys []string
+		cfg, err := ParseAccountRequestBudgetConfig(func(key string) (string, bool) {
+			keys = append(keys, key)
+			if key == "WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED" {
+				return "false", true
+			}
+			return "invalid JSON", true
+		})
+		if err != nil || cfg.Enabled || !reflect.DeepEqual(keys, []string{"WITSELF_ACCOUNT_REQUEST_BUDGET_ENABLED"}) {
+			t.Fatalf("disabled plans = enabled %v, lookups %v, error %v", cfg.Enabled, keys, err)
+		}
+	})
+	t.Run("three-valid-plans", func(t *testing.T) {
+		got, err := parse(`{"team":{"read_per_minute":1000000,"read_burst":1,"write_per_minute":200,"write_burst":4},"free":`+validBudget+`,"standard":{"read_per_minute":600,"read_burst":10,"write_per_minute":120,"write_burst":3}}`, true)
+		want := map[string]AccountRequestBudgetTier{
+			"free":     {ReadPerMinute: 300, ReadBurst: 5, WritePerMinute: 60, WriteBurst: 2},
+			"standard": {ReadPerMinute: 600, ReadBurst: 10, WritePerMinute: 120, WriteBurst: 3},
+			"team":     {ReadPerMinute: 1000000, ReadBurst: 1, WritePerMinute: 200, WriteBurst: 4},
+		}
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("plans = %#v, %v; want %#v", got, err, want)
+		}
+	})
+	cases := []struct{ name, raw, want string }{
+		{"array", `[]`, objectError}, {"null", `null`, objectError}, {"string", `"plans"`, objectError},
+		{"invalid-json", `{`, objectError}, {"trailing-json", `{} {}`, objectError}, {"empty", `{}`, countError},
+		{"missing-key", `{"free":{"read_per_minute":300,"read_burst":5,"write_per_minute":60}}`, keyError},
+		{"extra-key", `{"free":{"read_per_minute":300,"read_burst":5,"write_per_minute":60,"write_burst":2,"unknown":1}}`, keyError},
+		{"null-budget", `{"free":null}`, keyError}, {"array-budget", `{"free":[]}`, keyError},
+	}
+	tooMany := make(map[string]json.RawMessage)
+	for i := range 17 {
+		tooMany[fmt.Sprintf("p%d", i)] = json.RawMessage(validBudget)
+	}
+	manyJSON, err := json.Marshal(tooMany)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases = append(cases, struct{ name, raw, want string }{"seventeen-plans", string(manyJSON), countError})
+	for _, id := range []string{"Free", "a-b", "9a", strings.Repeat("a", 33), "9zz_canary_741"} {
+		cases = append(cases, struct{ name, raw, want string }{"invalid-id-" + id, fmt.Sprintf(`{%q:%s}`, id, validBudget), idError})
+	}
+	for _, key := range []string{"read_per_minute", "read_burst", "write_per_minute", "write_burst"} {
+		for _, value := range []string{"0", "1000001", "1.5", "1e3", `"300"`, "-1", "987654321", "null", "true"} {
+			budget := map[string]json.RawMessage{"read_per_minute": json.RawMessage("300"), "read_burst": json.RawMessage("5"), "write_per_minute": json.RawMessage("60"), "write_burst": json.RawMessage("2")}
+			budget[key] = json.RawMessage(value)
+			raw, marshalErr := json.Marshal(map[string]any{"free": budget})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			cases = append(cases, struct{ name, raw, want string }{key + "/" + value, string(raw), name + " plan \"free\" " + key + " must be an integer from 1 to 1000000"})
+		}
+	}
+	// Sorting applies to ids, but each id's key-set check precedes its numeric checks.
+	cases = append(cases,
+		struct{ name, raw, want string }{"sorted-id-order", `{"z":{},"a":{"read_per_minute":0,"read_burst":1,"write_per_minute":1,"write_burst":1}}`, name + " plan \"a\" read_per_minute must be an integer from 1 to 1000000"},
+		struct{ name, raw, want string }{"key-set-before-ranges", `{"free":{"read_per_minute":0}}`, keyError},
+		struct{ name, raw, want string }{"range-key-order", `{"free":{"read_per_minute":0,"read_burst":0,"write_per_minute":0,"write_burst":0}}`, name + " plan \"free\" read_per_minute must be an integer from 1 to 1000000"},
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parse(tc.raw, true)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			for _, canary := range []string{"9zz_canary_741", "zz_canary_741", "987654321"} {
+				if strings.Contains(err.Error(), canary) {
+					t.Error("error contains a supplied private canary")
+				}
+			}
+		})
+	}
+}
+
+func budgetTestPlanConfig() AccountRequestBudgetConfig {
+	cfg := budgetTestConfig(60, 3, 60, 3)
+	cfg.Plans = map[string]AccountRequestBudgetTier{
+		"free": {ReadPerMinute: 60, ReadBurst: 1, WritePerMinute: 60, WriteBurst: 1},
+		"team": {ReadPerMinute: 60, ReadBurst: 5, WritePerMinute: 60, WriteBurst: 2},
+	}
+	return cfg
+}
+
+func budgetTestPlanRequest(ctx context.Context, b *accountRequestBudget, accountID, class string) *httptest.ResponseRecorder {
+	method := http.MethodGet
+	if class == "write" {
+		method = http.MethodPost
+	}
+	h := accountRequestBudgetMux(b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if admitAccountRequest(w, r, accountID) {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(method, "/", nil).WithContext(ctx))
+	return w
+}
+
+func budgetTestPlanStatus(t *testing.T, b *accountRequestBudget, accountID, class string, want int) {
+	t.Helper()
+	if got := budgetTestPlanRequest(context.Background(), b, accountID, class); got.Code != want {
+		t.Fatalf("account %q class %q status = %d, want %d", accountID, class, got.Code, want)
+	}
+}
+
+func budgetTestAwait[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for request-budget test goroutine")
+		var zero T
+		return zero
+	}
+}
+
+func TestAccountRequestBudgetPlanTiers(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	b.getAccountPlan = func(_ context.Context, accountID string) (PlanSnapshotRecord, error) {
+		if accountID == "err" {
+			return PlanSnapshotRecord{}, errors.New("lookup failed")
+		}
+		return PlanSnapshotRecord{Plan: map[string]string{"free": "free", "team": "team", "ent": "enterprise"}[accountID]}, nil
+	}
+	for _, tc := range []struct {
+		account    string
+		readBurst  int
+		writeBurst int
+	}{{"free", 1, 1}, {"team", 5, 2}, {"ent", 3, 3}, {"err", 3, 3}} {
+		t.Run(tc.account, func(t *testing.T) {
+			for _, class := range []string{"read", "write"} {
+				burst := tc.readBurst
+				if class == "write" {
+					burst = tc.writeBurst
+				}
+				for range burst {
+					budgetTestPlanStatus(t, b, tc.account, class, http.StatusNoContent)
+				}
+				budgetTestPlanStatus(t, b, tc.account, class, http.StatusTooManyRequests)
+			}
+		})
+	}
+	// The original helper remains explicitly cell-wide even with plans configured.
+	for range 3 {
+		budgetTestAdmit(t, b, "direct", "read", true, 0)
+	}
+	budgetTestAdmit(t, b, "direct", "read", false, 1)
+}
+
+func TestAccountRequestBudgetPlanCache(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lookup-error-%v", failed), func(t *testing.T) {
+			clock := newBudgetTestClock()
+			b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+			calls := 0
+			b.getAccountPlan = func(context.Context, string) (PlanSnapshotRecord, error) {
+				calls++
+				if failed {
+					return PlanSnapshotRecord{}, errors.New("lookup unavailable")
+				}
+				return PlanSnapshotRecord{Plan: "free"}, nil
+			}
+			budgetTestPlanRequest(context.Background(), b, "a", "read")
+			if calls != 1 {
+				t.Fatalf("initial reader calls = %d, want 1", calls)
+			}
+			if failed {
+				clock.Advance(4 * time.Second)
+			} else {
+				clock.Advance(59 * time.Second)
+			}
+			for range 100 {
+				budgetTestPlanRequest(context.Background(), b, "a", "read")
+			}
+			if calls != 1 {
+				t.Fatalf("cached reader calls = %d, want 1", calls)
+			}
+			clock.Advance(2 * time.Second)
+			budgetTestPlanRequest(context.Background(), b, "a", "read")
+			if calls != 2 {
+				t.Fatalf("expired reader calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
+func TestAccountRequestBudgetPlanCacheSurvivesSweep(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	calls := map[string]int{}
+	b.getAccountPlan = func(_ context.Context, accountID string) (PlanSnapshotRecord, error) {
+		calls[accountID]++
+		return PlanSnapshotRecord{Plan: "free"}, nil
+	}
+	for i := range 26 {
+		account, other := "a", "b"
+		if i%2 != 0 {
+			account, other = other, account
+		}
+		budgetTestPlanStatus(t, b, account, "read", http.StatusNoContent)
+		if b.entries[other] != nil {
+			t.Fatalf("idle bucket %q was not swept at request %d", other, i)
+		}
+		if i != 25 {
+			clock.Advance(2 * time.Second)
+		}
+	}
+	if !reflect.DeepEqual(calls, map[string]int{"a": 1, "b": 1}) {
+		t.Fatalf("reader calls during 50s of bucket sweeping = %v", calls)
+	}
+}
+
+func TestAccountRequestBudgetPlanCacheBoundedLRU(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	calls := map[string]int{}
+	b.getAccountPlan = func(_ context.Context, accountID string) (PlanSnapshotRecord, error) {
+		calls[accountID]++
+		return PlanSnapshotRecord{Plan: "free"}, nil
+	}
+	for i := range b.maxAccounts {
+		budgetTestPlanRequest(context.Background(), b, fmt.Sprintf("account-%d", i), "read")
+	}
+	budgetTestPlanRequest(context.Background(), b, "account-0", "read")
+	budgetTestPlanRequest(context.Background(), b, "overflow", "read")
+	if len(b.tierCache) != b.maxAccounts || b.tierLRU.Len() != b.maxAccounts {
+		t.Fatalf("tier cache map/list sizes = %d/%d, want %d", len(b.tierCache), b.tierLRU.Len(), b.maxAccounts)
+	}
+	if b.tierCache["account-0"] == nil || b.tierCache["account-1"] != nil {
+		t.Fatal("tier cache did not preserve the recently used entry and evict the LRU tail")
+	}
+	budgetTestPlanRequest(context.Background(), b, "account-0", "read")
+	budgetTestPlanRequest(context.Background(), b, "account-1", "read")
+	if calls["account-0"] != 1 || calls["account-1"] != 2 {
+		t.Fatalf("reader calls after eviction: hot=%d evicted=%d", calls["account-0"], calls["account-1"])
+	}
+}
+
+func TestAccountRequestBudgetPlanLookupIgnoresClientCancel(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	entered := make(chan context.Context, 1)
+	release := make(chan struct{})
+	calls := 0
+	b.getAccountPlan = func(ctx context.Context, _ string) (PlanSnapshotRecord, error) {
+		calls++
+		entered <- ctx
+		<-release
+		if errors.Is(ctx.Err(), context.Canceled) {
+			t.Error("plan lookup inherited client cancellation")
+			return PlanSnapshotRecord{}, ctx.Err()
+		}
+		return PlanSnapshotRecord{Plan: "free"}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- budgetTestPlanRequest(ctx, b, "a", "read") }()
+	lookupCtx := budgetTestAwait(t, entered)
+	cancel()
+	if errors.Is(lookupCtx.Err(), context.Canceled) {
+		t.Error("lookup context canceled with client before reader returned")
+	}
+	close(release)
+	if got := budgetTestAwait(t, done); got.Code != http.StatusNoContent {
+		t.Fatalf("initial canceled-client request status = %d", got.Code)
+	}
+	budgetTestPlanStatus(t, b, "a", "read", http.StatusTooManyRequests)
+	if calls != 1 || !b.tierCache["a"].resolved {
+		t.Fatalf("canceled-client lookup was not cached: calls=%d resolved=%v", calls, b.tierCache["a"].resolved)
+	}
+}
+
+func TestAccountRequestBudgetPlanErrorKeepsLastTier(t *testing.T) {
+	clock := newBudgetTestClock()
+	cfg := budgetTestPlanConfig()
+	cfg.Plans["free"] = AccountRequestBudgetTier{ReadPerMinute: 1, ReadBurst: 1, WritePerMinute: 1, WriteBurst: 1}
+	b := newAccountRequestBudget(cfg, clock.Now)
+	calls := 0
+	b.getAccountPlan = func(context.Context, string) (PlanSnapshotRecord, error) {
+		calls++
+		if calls > 1 {
+			return PlanSnapshotRecord{}, errors.New("reader unavailable")
+		}
+		return PlanSnapshotRecord{Plan: "free"}, nil
+	}
+	budgetTestPlanStatus(t, b, "a", "read", http.StatusNoContent)
+	clock.Advance(59 * time.Second)
+	budgetTestPlanStatus(t, b, "a", "write", http.StatusNoContent)
+	clock.Advance(2 * time.Second)
+	budgetTestPlanStatus(t, b, "a", "write", http.StatusTooManyRequests)
+	if calls != 2 || !b.tierCache["a"].resolved || b.tierCache["a"].tier != b.planIndex["free"] {
+		t.Fatalf("failed refresh lost resolved tier or calls: calls=%d entry=%+v", calls, b.tierCache["a"])
+	}
+	clock.Advance(4 * time.Second)
+	budgetTestPlanStatus(t, b, "a", "write", http.StatusTooManyRequests)
+	if calls != 2 {
+		t.Fatalf("retried before failure TTL: calls=%d", calls)
+	}
+	clock.Advance(2 * time.Second)
+	budgetTestPlanStatus(t, b, "a", "write", http.StatusTooManyRequests)
+	if calls != 3 {
+		t.Fatalf("did not retry after failure TTL: calls=%d", calls)
+	}
+}
+
+func TestAccountRequestBudgetPlanOlderLookupDoesNotOverwrite(t *testing.T) {
+	for _, olderError := range []bool{false, true} {
+		t.Run(fmt.Sprintf("older-error-%v", olderError), func(t *testing.T) {
+			clock := newBudgetTestClock()
+			b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+			entered := make(chan int, 2)
+			releases := []chan struct{}{make(chan struct{}), make(chan struct{})}
+			var mu sync.Mutex
+			calls := 0
+			b.getAccountPlan = func(context.Context, string) (PlanSnapshotRecord, error) {
+				mu.Lock()
+				index := calls
+				calls++
+				mu.Unlock()
+				entered <- index
+				<-releases[index]
+				if index == 0 {
+					if olderError {
+						return PlanSnapshotRecord{}, errors.New("older lookup failed")
+					}
+					return PlanSnapshotRecord{Plan: "free"}, nil
+				}
+				return PlanSnapshotRecord{Plan: "team"}, nil
+			}
+			done := make(chan *httptest.ResponseRecorder, 2)
+			for i := range 2 {
+				go func() { done <- budgetTestPlanRequest(context.Background(), b, "a", "read") }()
+				if index := budgetTestAwait(t, entered); index != i {
+					t.Fatalf("lookup order = %d, want %d", index, i)
+				}
+			}
+			close(releases[1])
+			if got := budgetTestAwait(t, done); got.Code != http.StatusNoContent {
+				t.Fatalf("newer request status = %d", got.Code)
+			}
+			close(releases[0])
+			if got := budgetTestAwait(t, done); got.Code != http.StatusNoContent {
+				t.Fatalf("older request status = %d", got.Code)
+			}
+			if entry := b.tierCache["a"]; entry == nil || entry.tier != b.planIndex["team"] || !entry.resolved {
+				t.Fatalf("newer team lookup overwritten: %+v", entry)
+			}
+			for range 3 {
+				budgetTestPlanStatus(t, b, "a", "read", http.StatusNoContent)
+			}
+			budgetTestPlanStatus(t, b, "a", "read", http.StatusTooManyRequests)
+		})
+	}
+}
+
+func TestAccountRequestBudgetPlanLookupTimesOut(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	const timeout = 50 * time.Millisecond
+	b.planLookupTimeout = timeout
+	lookupError := make(chan error, 1)
+	calls := 0
+	b.getAccountPlan = func(ctx context.Context, _ string) (PlanSnapshotRecord, error) {
+		calls++
+		<-ctx.Done()
+		lookupError <- ctx.Err()
+		return PlanSnapshotRecord{}, ctx.Err()
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	start := time.Now()
+	go func() { done <- budgetTestPlanRequest(context.Background(), b, "a", "read") }()
+	select {
+	case got := <-done:
+		if got.Code != http.StatusNoContent {
+			t.Fatalf("timed-out lookup request status = %d", got.Code)
+		}
+	case <-time.After(100 * timeout):
+		t.Fatal("plan lookup did not respect its bounded timeout")
+	}
+	if elapsed := time.Since(start); elapsed < timeout {
+		t.Fatalf("lookup returned after %v, before timeout %v", elapsed, timeout)
+	}
+	if err := budgetTestAwait(t, lookupError); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reader error = %v, want deadline exceeded", err)
+	}
+	for range 2 {
+		budgetTestPlanStatus(t, b, "a", "read", http.StatusNoContent)
+	}
+	budgetTestPlanStatus(t, b, "a", "read", http.StatusTooManyRequests)
+	if calls != 1 {
+		t.Fatalf("timeout retried within frozen retry TTL: calls=%d", calls)
+	}
+}
+
+func TestAccountRequestBudgetPlanLookupOutsideLock(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestPlanConfig(), clock.Now)
+	// Keep the test's release channel, rather than the production timeout, in control.
+	b.planLookupTimeout = time.Hour
+	entered := make(chan bool, 1)
+	release := make(chan struct{})
+	defer close(release)
+	b.getAccountPlan = func(_ context.Context, accountID string) (PlanSnapshotRecord, error) {
+		if accountID == "a" {
+			unlocked := b.mu.TryLock()
+			if unlocked {
+				b.mu.Unlock()
+			}
+			entered <- unlocked
+			<-release
+		}
+		return PlanSnapshotRecord{Plan: "team"}, nil
+	}
+	budgetTestPlanStatus(t, b, "b", "read", http.StatusNoContent)
+	aDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { aDone <- budgetTestPlanRequest(context.Background(), b, "a", "read") }()
+	if unlocked := budgetTestAwait(t, entered); !unlocked {
+		t.Error("reader called while budget mutex is held")
+	}
+	bDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { bDone <- budgetTestPlanRequest(context.Background(), b, "b", "read") }()
+	if got := budgetTestAwait(t, bDone); got.Code != http.StatusNoContent {
+		t.Fatalf("cached account B status = %d while A lookup blocked", got.Code)
+	}
+	select {
+	case <-aDone:
+		t.Error("account A completed before its reader was released")
+	default:
+	}
+}
+
+func TestAccountRequestBudgetPlanChangeRefills(t *testing.T) {
+	for _, nextPlan := range []string{"free", "team"} {
+		t.Run(nextPlan, func(t *testing.T) {
+			clock := newBudgetTestClock()
+			cfg := budgetTestPlanConfig()
+			cfg.Plans["free"] = AccountRequestBudgetTier{ReadPerMinute: 2, ReadBurst: 1, WritePerMinute: 2, WriteBurst: 1}
+			b := newAccountRequestBudget(cfg, clock.Now)
+			calls := 0
+			b.getAccountPlan = func(context.Context, string) (PlanSnapshotRecord, error) {
+				calls++
+				if calls > 1 {
+					return PlanSnapshotRecord{Plan: nextPlan}, nil
+				}
+				return PlanSnapshotRecord{Plan: "free"}, nil
+			}
+			for _, class := range []string{"read", "write"} {
+				budgetTestPlanStatus(t, b, "a", class, http.StatusNoContent)
+				budgetTestPlanStatus(t, b, "a", class, http.StatusTooManyRequests)
+			}
+			// Refill naturally at 59s and exhaust again while the plan is still cached.
+			// At 61s neither class can refill naturally, but the plan must refresh.
+			clock.Advance(59 * time.Second)
+			for _, class := range []string{"read", "write"} {
+				budgetTestPlanStatus(t, b, "a", class, http.StatusNoContent)
+				budgetTestPlanStatus(t, b, "a", class, http.StatusTooManyRequests)
+			}
+			clock.Advance(2 * time.Second)
+			for _, class := range []string{"read", "write"} {
+				if nextPlan == "team" {
+					burst := 5
+					if class == "write" {
+						burst = 2
+					}
+					for range burst {
+						budgetTestPlanStatus(t, b, "a", class, http.StatusNoContent)
+					}
+				}
+				budgetTestPlanStatus(t, b, "a", class, http.StatusTooManyRequests)
+			}
+			if calls != 2 {
+				t.Fatalf("reader calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
+func TestAccountRequestBudgetNoPlansNeverLooksUp(t *testing.T) {
+	clock := newBudgetTestClock()
+	b := newAccountRequestBudget(budgetTestConfig(60, 3, 60, 3), clock.Now)
+	calls := 0
+	b.getAccountPlan = func(context.Context, string) (PlanSnapshotRecord, error) {
+		calls++
+		return PlanSnapshotRecord{Plan: "free"}, nil
+	}
+	for i := range 50 {
+		budgetTestPlanRequest(context.Background(), b, fmt.Sprintf("account-%d", i%5), "read")
+	}
+	if calls != 0 {
+		t.Fatalf("reader called %d times without plans", calls)
+	}
+}
+
+func TestAccountRequestBudgetPlansNeedPlanReader(t *testing.T) {
+	t.Run("run", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := Run(ctx, Config{APIAddr: "127.0.0.1:0", HealthAddr: "127.0.0.1:0", MetricsAddr: "127.0.0.1:0", AccountRequestBudget: budgetTestPlanConfig()})
+		if err == nil || err.Error() != "account request budget: per-plan budgets need the account plan reader" {
+			t.Fatalf("Run error = %v, want missing account plan reader error", err)
+		}
+	})
+	t.Run("api-mux", func(t *testing.T) {
+		defer func() {
+			if got := recover(); got != "invalid account request budget configuration" {
+				t.Fatalf("panic = %v, want invalid budget configuration", got)
+			}
+		}()
+		apiMux(Config{AccountRequestBudget: budgetTestPlanConfig()})
+	})
+	t.Run("validate", func(t *testing.T) {
+		cfg := budgetTestPlanConfig()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid programmatic plans rejected: %v", err)
+		}
+		for _, id := range []string{"Free", "9zz_canary_741", "a-b", strings.Repeat("a", 33)} {
+			cfg := budgetTestPlanConfig()
+			cfg.Plans = map[string]AccountRequestBudgetTier{id: cfg.Plans["free"]}
+			const want = "WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS has a plan id that is not 1-32 lowercase letters, digits or underscores starting with a letter"
+			if err := cfg.Validate(); err == nil || err.Error() != want {
+				t.Fatalf("invalid programmatic plan id error = %v", err)
+			}
+		}
+		for i, key := range []string{"read_per_minute", "read_burst", "write_per_minute", "write_burst"} {
+			for _, value := range []int{0, -1, 1000001} {
+				cfg := budgetTestPlanConfig()
+				tier := cfg.Plans["free"]
+				fields := []*int{&tier.ReadPerMinute, &tier.ReadBurst, &tier.WritePerMinute, &tier.WriteBurst}
+				*fields[i] = value
+				cfg.Plans["free"] = tier
+				want := "WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS plan \"free\" " + key + " must be an integer from 1 to 1000000"
+				if err := cfg.Validate(); err == nil || err.Error() != want {
+					t.Fatalf("invalid programmatic plan bound error = %v, want %s", err, want)
+				}
+			}
+		}
+		cfg = budgetTestPlanConfig()
+		for i := range 17 {
+			cfg.Plans[fmt.Sprintf("p%d", i)] = cfg.Plans["free"]
+		}
+		if err := cfg.Validate(); err == nil || err.Error() != "WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS must name 1 to 16 plans" {
+			t.Fatalf("too many programmatic plans error = %v", err)
+		}
+		cfg.Enabled = false
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("disabled programmatic plans rejected: %v", err)
+		}
+	})
+}
+
+func TestAccountRequestBudgetPlansHTTP(t *testing.T) {
+	clock := newBudgetTestClock()
+	budget := budgetTestConfig(60, 10, 60, 10)
+	budget.Plans = map[string]AccountRequestBudgetTier{
+		"zz_plan_canary_a": {ReadPerMinute: 60, ReadBurst: 1, WritePerMinute: 60, WriteBurst: 1},
+		"zz_plan_canary_b": {ReadPerMinute: 60, ReadBurst: 3, WritePerMinute: 60, WriteBurst: 2},
+	}
+	cfg, _ := newBudgetTestServerConfig(t, budget, clock, false)
+	cfg.GetAccountPlan = func(_ context.Context, accountID string) (PlanSnapshotRecord, error) {
+		if accountID == budgetTestAccountA {
+			return PlanSnapshotRecord{Plan: "zz_plan_canary_a"}, nil
+		}
+		return PlanSnapshotRecord{Plan: "zz_plan_canary_b"}, nil
+	}
+	cfg.metrics = newRuntimeMetrics()
+	srv := httptest.NewServer(apiMux(cfg))
+	defer srv.Close()
+	request := func(method, tok string, want int) (http.Header, []byte) {
+		t.Helper()
+		var requestBody io.Reader
+		if method == http.MethodPost {
+			requestBody = strings.NewReader(`{"name":"budget-plan-test"}`)
+		}
+		r, err := http.NewRequest(method, srv.URL+"/v1/realms", requestBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer "+tok)
+		response, err := srv.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("response body read=%v close=%v", readErr, closeErr)
+		}
+		if response.StatusCode != want {
+			t.Fatalf("HTTP status = %d, want %d", response.StatusCode, want)
+		}
+		return response.Header, body
+	}
+	request(http.MethodGet, "tok-a", http.StatusOK)
+	headers, body := request(http.MethodGet, "tok-a", http.StatusTooManyRequests)
+	want := httptest.NewRecorder()
+	writeAccountRequestBudgetError(want, "read", 1)
+	if !bytes.Equal(body, want.Body.Bytes()) {
+		t.Fatalf("plan refusal changed envelope: %s", body)
+	}
+	for _, key := range []string{"Retry-After", "Content-Type", "Cache-Control"} {
+		if headers.Get(key) != want.Header().Get(key) {
+			t.Errorf("plan refusal header %s = %q, want %q", key, headers.Get(key), want.Header().Get(key))
+		}
+	}
+	for range 3 {
+		request(http.MethodGet, "tok-b", http.StatusOK)
+	}
+	scrape := budgetTestScrape(t, cfg.metrics)
+	budgetTestMetrics(t, scrape, 1, 0, 2, 0)
+	request(http.MethodGet, "tok-b", http.StatusTooManyRequests)
+	for _, tc := range []struct {
+		token string
+		burst int
+	}{{"tok-a", 1}, {"tok-b", 2}} {
+		for range tc.burst {
+			request(http.MethodPost, tc.token, http.StatusCreated)
+		}
+		request(http.MethodPost, tc.token, http.StatusTooManyRequests)
+	}
+	scrape = budgetTestScrape(t, cfg.metrics)
+	budgetTestMetrics(t, scrape, 2, 2, 2, 0)
+	for _, canary := range []string{"zz_plan_canary_a", "zz_plan_canary_b"} {
+		if strings.Contains(scrape, canary) {
+			t.Error("metrics contain a plan-id canary")
+		}
 	}
 }

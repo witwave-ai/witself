@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/witwave-ai/witself/internal/server"
@@ -50,6 +53,46 @@ func TestConfigureAccountRequestBudget(t *testing.T) {
 			want:    prior,
 			wantErr: prefix + "READ_PER_MINUTE must be an integer from 1 to 1000000",
 		},
+		{
+			name: "enabled-with-plans-sorted",
+			env: map[string]string{
+				prefix + "ENABLED": "true", prefix + "READ_PER_MINUTE": "600",
+				prefix + "READ_BURST": "60", prefix + "WRITE_PER_MINUTE": "120",
+				prefix + "WRITE_BURST": "20", prefix + "MAX_ACCOUNTS": "500",
+				prefix + "PLANS": `{"team":{"read_per_minute":300,"read_burst":5,"write_per_minute":120,"write_burst":4},"standard":{"read_per_minute":180,"read_burst":3,"write_per_minute":90,"write_burst":3},"free":{"read_per_minute":60,"read_burst":1,"write_per_minute":30,"write_burst":2}}`,
+			},
+			want: server.AccountRequestBudgetConfig{
+				Enabled: true, ReadPerMinute: 600, ReadBurst: 60,
+				WritePerMinute: 120, WriteBurst: 20, MaxTrackedAccounts: 500,
+				Plans: map[string]server.AccountRequestBudgetTier{
+					"free":     {ReadPerMinute: 60, ReadBurst: 1, WritePerMinute: 30, WriteBurst: 2},
+					"standard": {ReadPerMinute: 180, ReadBurst: 3, WritePerMinute: 90, WriteBurst: 3},
+					"team":     {ReadPerMinute: 300, ReadBurst: 5, WritePerMinute: 120, WriteBurst: 4},
+				},
+			},
+			wantLog: "witself-server: account request budget enabled read_per_minute=600 read_burst=60 write_per_minute=120 write_burst=20 max_tracked_accounts=500\n" +
+				"witself-server: account request budget plan=free read_per_minute=60 read_burst=1 write_per_minute=30 write_burst=2\n" +
+				"witself-server: account request budget plan=standard read_per_minute=180 read_burst=3 write_per_minute=90 write_burst=3\n" +
+				"witself-server: account request budget plan=team read_per_minute=300 read_burst=5 write_per_minute=120 write_burst=4\n",
+		},
+		{
+			name: "disabled-ignores-invalid-plans",
+			env:  map[string]string{prefix + "ENABLED": "false", prefix + "PLANS": "invalid"},
+		},
+		{
+			name: "absent-enable-ignores-invalid-plans",
+			env:  map[string]string{prefix + "PLANS": "invalid"},
+		},
+		{
+			name: "invalid-plans-preserves-configuration-and-log",
+			env: map[string]string{
+				prefix + "ENABLED": "true", prefix + "READ_PER_MINUTE": "600",
+				prefix + "READ_BURST": "60", prefix + "WRITE_PER_MINUTE": "120",
+				prefix + "WRITE_BURST": "20", prefix + "PLANS": "[]",
+			},
+			want:    prior,
+			wantErr: prefix + "PLANS must be a JSON object of plan ids to read and write budgets",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := server.Config{AccountRequestBudget: prior}
@@ -65,7 +108,7 @@ func TestConfigureAccountRequestBudget(t *testing.T) {
 			} else if err == nil || err.Error() != tc.wantErr {
 				t.Fatalf("error = %v, want %q", err, tc.wantErr)
 			}
-			if cfg.AccountRequestBudget != tc.want {
+			if !reflect.DeepEqual(cfg.AccountRequestBudget, tc.want) {
 				t.Errorf("configuration = %+v, want %+v", cfg.AccountRequestBudget, tc.want)
 			}
 			if got := output.String(); got != tc.wantLog {
@@ -73,6 +116,63 @@ func TestConfigureAccountRequestBudget(t *testing.T) {
 			}
 		})
 	}
+	t.Run("plan-log-iteration-is-explicitly-sorted", func(t *testing.T) {
+		// Parsing rebuilds the plan map in sorted insertion order, so JSON order
+		// alone cannot deterministically expose an unsorted map iteration.
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "account_request_budget.go", nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var configure *ast.FuncDecl
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "configureAccountRequestBudget" {
+				configure = fn
+				break
+			}
+		}
+		if configure == nil {
+			t.Fatal("configureAccountRequestBudget declaration not found")
+		}
+		var planLogRanges []*ast.RangeStmt
+		ast.Inspect(configure.Body, func(node ast.Node) bool {
+			loop, ok := node.(*ast.RangeStmt)
+			if !ok {
+				return true
+			}
+			ast.Inspect(loop.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || len(call.Args) < 2 {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "Fprintf" {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if !ok || pkg.Name != "fmt" {
+					return true
+				}
+				if literal, ok := call.Args[1].(*ast.BasicLit); ok && literal.Kind == token.STRING &&
+					strings.Contains(literal.Value, "witself-server: account request budget plan=") {
+					planLogRanges = append(planLogRanges, loop)
+				}
+				return true
+			})
+			return true
+		})
+		if len(planLogRanges) != 1 {
+			t.Fatalf("configureAccountRequestBudget has %d plan log ranges, want 1", len(planLogRanges))
+		}
+		var expression bytes.Buffer
+		if err := format.Node(&expression, fset, planLogRanges[0].X); err != nil {
+			t.Fatal(err)
+		}
+		const want = "slices.Sorted(maps.Keys(budget.Plans))"
+		if got := expression.String(); got != want {
+			t.Fatalf("plan log iteration = %s, want %s", got, want)
+		}
+	})
 }
 
 func TestServeConfiguresAccountRequestBudgetBeforeRun(t *testing.T) {
