@@ -12,6 +12,8 @@ at commit `9dc2f3d` by runs `mra_2dqbqpx7rfbjkd65` and
 `mra_pbqlmrwvoguyj322`, respectively. The Cursor and Grok Build legs remain, so
 the four-runtime gate stays open.
 
+Until those legs pass, Cursor, Grok Build and DeepSeek Harness are labeled preview in the README and in `witself integrations`.
+
 This is a live-client test, not a backend simulation. `witself` prepares
 isolated synthetic fixtures and exact prompts, the operator gives each prompt
 to the real authenticated AI client, and `witself` verifies the resulting

@@ -67,12 +67,13 @@ avatars, and secrets. Witself is the default narrative destination;
 native-provider memory is an optional second destination used only when
 explicitly requested. See the
 [narrative-memory design](docs/narrative-memory-and-curation.md).
+Codex and Claude Code have passed Witself's live runtime acceptance; Grok Build, Cursor and DeepSeek Harness are previews until their acceptance legs run (see [live runtime acceptance](docs/memory-runtime-acceptance.md)).
 
 - Codex: `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`)
 - Claude Code: `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md` (normally
   `~/.claude/rules/witself-memory-routing.md`)
-- Grok Build: `$GROK_HOME/AGENTS.md` (normally `~/.grok/AGENTS.md`)
-- Cursor: `~/.cursor/rules/witself-memory-routing.mdc`
+- Grok Build preview: `$GROK_HOME/AGENTS.md` (normally `~/.grok/AGENTS.md`)
+- Cursor preview: `~/.cursor/rules/witself-memory-routing.mdc`
 - OpenClaw preview: `AGENTS.md` in the sole default agent's configured
   workspace
 - Antigravity preview: an exact-owned, automatically discovered rules plugin at

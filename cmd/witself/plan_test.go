@@ -423,6 +423,48 @@ func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 	}
 }
 
+func TestPlanContactMessagesPointToSupportTicket(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		print func()
+		want  string
+	}{
+		{
+			name: "pending status",
+			print: func() {
+				printPlanStatus(client.PlanStatus{
+					Plan:     "standard",
+					PlanName: "Professional",
+					Pending: &client.PlanPending{
+						Kind: "contact", Plan: "team", PlanName: "Team",
+					},
+				}, false)
+			},
+			want: "plan:     Professional (standard)\napplied:  none   (converging — retry or wait)\n\npending:  interest in Team (team) recorded — we'll be in touch; on a paid plan, open a ticket with 'witself account support open' to arrange it\n",
+		},
+		{
+			name: "contact outcome",
+			print: func() {
+				printPlanOutcome(client.PlanOutcome{Kind: "contact", Plan: "team"}, "Team")
+			},
+			want: "interest in Team (team) recorded — we'll be in touch; on a paid plan, open a ticket with 'witself account support open' to arrange it\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := capturePlanCLI(t, func() int {
+				tc.print()
+				return 0
+			})
+			if code != 0 || stderr != "" {
+				t.Fatalf("print contact = %d stderr=%q", code, stderr)
+			}
+			if stdout != tc.want {
+				t.Errorf("contact output = %q; want %q", stdout, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlanHumanOutputNeutralizesTerminalControls(t *testing.T) {
 	status := client.PlanStatus{
 		Plan:         "standard\x1b[2J\nforged",

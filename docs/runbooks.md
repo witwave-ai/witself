@@ -5,6 +5,8 @@ a time. Commands here use the `default` account — what every command picks whe
 `--account` is omitted and `WITSELF_ACCOUNT` is unset. To juggle several
 accounts, add `--name NAME` at create and `--account NAME` everywhere after.
 
+**Unrehearsed runbooks:** [Move a Professional account to Team by hand](runbook-professional-to-team.md) — not rehearsed.
+
 ## Create an account on Witself Cloud
 
 Open self-service signup is live. An invite-less signup records acceptance of

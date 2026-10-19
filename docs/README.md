@@ -252,6 +252,8 @@ deployment cells under a thin global control plane.
 
 - [runbooks.md](runbooks.md): hand-testing and operator recipes for the live
   CLI, account lifecycle, integrations, billing, retention, and recovery paths.
+- Unrehearsed runbooks:
+  - [Move a Professional account to Team by hand](runbook-professional-to-team.md): not rehearsed.
 - [workflow-scripts.md](workflow-scripts.md): shipped CLI workflows, with unimplemented targets marked separately
   for account onboarding, billing, memories, facts, messaging, client-held
   secrets, MCP, transcripts, the dashboard, and self-hosted bootstrap.

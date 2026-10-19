@@ -614,7 +614,7 @@ func printPlanStatus(s client.PlanStatus, full bool) {
 			}
 			fmt.Println("  resume paid plan (undo this scheduled downgrade): witself plan cancel --idempotency-key KEY --yes")
 		case "contact":
-			fmt.Printf("pending:  interest in %s recorded — we'll be in touch\n",
+			fmt.Printf("pending:  interest in %s recorded — we'll be in touch; on a paid plan, open a ticket with 'witself account support open' to arrange it\n",
 				formatPlanIdentity(p.Plan, p.PlanName))
 		}
 	}
@@ -795,7 +795,7 @@ func printPlanOutcome(out client.PlanOutcome, targetName string) {
 		fmt.Printf("downgrade to %s scheduled for %s\n", plan, out.Effective.Format(time.RFC3339))
 		fmt.Println("no further charges will occur; to undo and resume the paid plan before then: witself plan cancel --idempotency-key KEY --yes")
 	case "contact":
-		fmt.Printf("interest in %s recorded — we'll be in touch\n", plan)
+		fmt.Printf("interest in %s recorded — we'll be in touch; on a paid plan, open a ticket with 'witself account support open' to arrange it\n", plan)
 	default:
 		fmt.Printf("%s (kind=%s)\n", plan, planCLIColumn(out.Kind))
 	}

@@ -73,7 +73,9 @@ read/setup contract includes status, actual provider next charge, redacted
 payment-method summary, bounded invoice/payment history, and provider-hosted
 setup/portal actions. Personal, Professional, and Team are available; Enterprise
 contracting, paid-to-paid changes, refund mutations, and crypto payment rails
-remain outside the implemented customer surface. The exclusive `v0.0.254`
+remain outside the implemented customer surface.
+A Professional account that wants Team opens a support ticket; the change is made by hand ([procedure](runbook-professional-to-team.md)).
+The exclusive `v0.0.254`
 cutover and forward-fix procedure is retained as historical context in
 [billing-transition-rollout.md](billing-transition-rollout.md). The metered
 payload spans identity usage and credential usage; sealed-plane dimensions count
