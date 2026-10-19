@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
@@ -14,6 +15,10 @@ import (
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
+
+// MigrationFiles exposes the immutable embedded SQL used by startup migrations
+// to local development tools. Paths are rooted at migrations/.
+func MigrationFiles() fs.FS { return migrationsFS }
 
 const (
 	factDeletionCompatibilitySchema = int64(27)

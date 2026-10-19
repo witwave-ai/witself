@@ -19,6 +19,7 @@ GOLANGCI_LINT_VERSION := v2.14.0
 GOVULNCHECK_VERSION := v1.7.0
 
 DASHBOARD_ACCEPTANCE_OUT ?= evidence/dashboard-acceptance
+REHEARSAL_ARGS ?=
 
 # Operators may override the timeout for store integration tests and the full
 # root-module test run, where Go applies the limit to every package.
@@ -129,7 +130,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -164,6 +165,9 @@ build: ## Build every ./cmd/... binary into ./bin, including the server and work
 
 test: ## Run the Go tests
 	go test ./...
+
+rehearse-migrations: ## Rehearse store migrations in disposable capped PostgreSQL (set REHEARSAL_ARGS)
+	GOROOT="$$(go env GOROOT)" bash scripts/rehearse-store-migrations.sh $(REHEARSAL_ARGS)
 
 dashboard-acceptance: ## Run the release's headless Agent Console acceptance on this host (Node 22)
 	@set -eu; \
@@ -442,6 +446,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-roll-cell-gate.sh
 	bash scripts/test-roll-train.sh
 	bash scripts/test-release-ops.sh
+	bash scripts/test-rehearse-store-migrations.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
 	node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs

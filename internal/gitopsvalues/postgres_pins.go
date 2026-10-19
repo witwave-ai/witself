@@ -57,6 +57,12 @@ func readPostgresImagePins(path string) (*PostgresImagePins, error) {
 	return pins, nil
 }
 
+// ReadPostgresImagePins reads the validated PostgreSQL image selection from a
+// generated cell values file. It does not contact the registry or the cluster.
+func ReadPostgresImagePins(path string) (*PostgresImagePins, error) {
+	return readPostgresImagePins(path)
+}
+
 func parsePostgresImagePins(body []byte) (*PostgresImagePins, error) {
 	var doc struct {
 		Apps struct {
