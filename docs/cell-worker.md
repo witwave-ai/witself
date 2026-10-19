@@ -46,7 +46,8 @@ Worker jobs must be:
 
 The registered jobs are transcript retention, message retention, agent-email
 retention, closed-account purge, outbound agent-email dispatch, avatar-style
-rollout, message-rate bucket cleanup, and agent-email-rate bucket cleanup. Both
+rollout, transcript storage reconciliation, message-rate bucket cleanup, and
+agent-email-rate bucket cleanup. Both
 cleanup jobs are enabled whenever the worker runs unless an operator explicitly
 disables one. Closed-account purge and outbound dispatch are independently
 default-off; when enabled, closed-account purge defaults to preview. New job
@@ -55,6 +56,79 @@ types must opt in explicitly; the worker is not an arbitrary command runner.
 Asynchronous evacuation imports run in `witself-server`, not worker jobs: the
 worker has no provision token or archive origin, cannot see another pod's
 ephemeral spool, and cannot reuse the request-scoped single-use capability.
+
+## Transcript storage reconciliation
+
+The `transcript_storage_reconcile` job is off by default. It reconciles pending
+cell-local counters one account/shard at a time under the session advisory lease,
+using `application_name = 'witself-transcript-storage-reconcile'`. One worker
+holds the lease per cell. Other replicas still read and publish status every pass.
+The measurement uses a read-only REPEATABLE READ snapshot, pages entry bytes,
+and sleeps inside that transaction to pace query duty. An autocommit epoch
+compare-and-set adds the measured difference without losing concurrent writes.
+Evacuation sources and closed, unpurged accounts are deferred. Orphan rows left
+by finalized accounts are not picked. The job never scans exact shards.
+
+Enable it later per cell with `worker.transcriptStorageReconcile.enabled: true`
+(or the `apps.witselfServer.worker` prefix in GitOps). Pause it with `enabled: false`;
+the config checksum restarts workers. No cell enables it by default. The settings
+are also available directly through these environment variables:
+
+| Variable suffix after `WITSELF_TRANSCRIPT_STORAGE_RECONCILE_` | Default | Bounds |
+| --- | --- | --- |
+| `ENABLED` | `false` | Boolean |
+| `INTERVAL` | `5m` | `10s`–`1h` |
+| `DUTY_CYCLE` | `0.5` | `0.05`–`1.0` |
+| `PAGE_ENTRIES` | `1000` | `1`–`10000` |
+| `UNIT_TIMEOUT` | `240s` | `10s`–`280s` |
+
+A pass stops starting units once it reaches Interval of wall time, including
+connection acquisition. Lease acquisition, the pre-pick status read and picks
+inherit this deadline. Each unit started before Interval runs with its own
+UnitTimeout under the caller's cancellation context, so a pass can run for up to
+Interval plus UnitTimeout before bounded cleanup and the independently bounded
+final status read. It then releases the lease and publishes its result; another
+working pass starts after one second. Idle and lease-held worker
+passes wait Interval. Every pass publishes status before its first pick (or before
+releasing a lease-held connection), and a working pass also publishes its final
+status. Failed status reads leave the previous observation intact.
+
+The value-free metrics are
+`witself_worker_transcript_storage_reconcile_units_total{result}` (corrected,
+confirmed, raced, busy, anomaly, timeout, error, skipped),
+`witself_worker_transcript_storage_reconcile_entries_total`,
+`witself_worker_transcript_storage_unverified_shards{state="eligible"|"deferred"}`,
+and `witself_worker_transcript_storage_reconcile_stuck_units`. They exist only for
+a registered job; the unverified gauge emits no sample until a successful status
+read. It is per replica and lags by at most one pass, so read it with
+`max by (state) (witself_worker_transcript_storage_unverified_shards)`.
+Timeout, error and anomaly outcomes count one job failure per pass; busy, raced
+and a lease held by another worker do not. A pass-level error (lease unavailable
+or lost, status read failure, or pick failure) also counts a job failure, even
+when no unit ran. A pick cut off by Interval while the caller remains active is
+a clean stop and does not count a job failure.
+
+Three consecutive unit timeouts mark that unit stuck in that runner. It clears
+on a success, or when the unit leaves the eligible non-exact set (observed on the
+runner's next full cycle); restarting the runner resets this in-memory history. For query time W,
+a unit can converge only when `W / dutyCycle <= unitTimeout`, and never with
+`W > 280s`. Raise `dutyCycle` toward `1.0` and `unitTimeout` up to `280s` to help
+stuck units. Interval only limits when a pass stops starting units; it does not
+shorten a unit's timeout. Beyond that the account stays non-exact, A2 fails open for it, and a
+follow-up design is required. Pacing sleeps are split into statements no longer
+than `min(10s, statement_timeout / 2)` and reserve deadline time for the next query.
+
+Before flipping A2 enforcement, also run the operator status query; a cached
+replica gauge alone is insufficient:
+
+```sql
+SELECT count(*) FILTER (WHERE a.evacuation_id IS NULL
+                          AND NOT (a.status = 'closed' AND a.purged_at IS NULL)) AS eligible,
+       count(*) FILTER (WHERE a.evacuation_id IS NOT NULL
+                          OR (a.status = 'closed' AND a.purged_at IS NULL)) AS deferred
+  FROM transcript_storage_usage u JOIN accounts a ON a.id = u.account_id
+ WHERE NOT u.exact;
+```
 
 ## Cooperative Scaling
 

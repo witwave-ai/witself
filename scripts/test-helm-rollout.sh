@@ -37,6 +37,10 @@ portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
 agent_email_rate_cleanup_apps_render="$render_dir/agent-email-rate-cleanup-apps.yaml"
+transcript_storage_reconcile_gate_version="0.0.338"
+transcript_storage_reconcile_apps_render="$render_dir/transcript-storage-reconcile-apps.yaml"
+transcript_storage_reconcile_old_apps_render="$render_dir/transcript-storage-reconcile-old-apps.yaml"
+transcript_storage_reconcile_render="$render_dir/transcript-storage-reconcile.yaml"
 civo_apps_render="$render_dir/civo-apps.yaml"
 civo_backup_apps_render="$render_dir/civo-backup-apps.yaml"
 civo_legacy_apps_render="$render_dir/civo-legacy-apps.yaml"
@@ -101,6 +105,23 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_profile" \
   --set apps.witselfServer.chartVersion=0.0.226 \
   --set apps.witselfServer.imageTag=0.0.226 >"$agent_email_rate_cleanup_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion="$transcript_storage_reconcile_gate_version" \
+  --set apps.witselfServer.imageTag="$transcript_storage_reconcile_gate_version" >"$transcript_storage_reconcile_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion=0.0.337 \
+  --set apps.witselfServer.imageTag=0.0.337 >"$transcript_storage_reconcile_old_apps_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.transcriptStorageReconcile.enabled=true \
+  --set worker.transcriptStorageReconcile.interval=30s \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=0.25 \
+  --set worker.transcriptStorageReconcile.pageEntries=50 \
+  --set worker.transcriptStorageReconcile.unitTimeout=120s >"$transcript_storage_reconcile_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" >"$civo_apps_render"
 helm template witself-apps "$apps_chart" \
@@ -686,6 +707,13 @@ reject_line "          messageRateBucketCleanup:" "$civo_legacy_server_applicati
 # The email-specific cleanup contract first belongs to the v0.0.226 chart.
 # Both provisioned Civo cells have advanced past v0.0.226. The older GCP and
 # synthetic Civo render remain compatibility checks for omission.
+# Synthetic chart pins prove the gate independently of current roll state.
+# Do not assert this block on civo_server_application, civo_backup_server_application,
+# or live_server_application: their chartVersion advances independently on each roll.
+require_line "          transcriptStorageReconcile:" "$transcript_storage_reconcile_apps_render"
+reject_line "          transcriptStorageReconcile:" "$transcript_storage_reconcile_old_apps_render"
+reject_line "          transcriptStorageReconcile:" "$apps_render"
+reject_line "          transcriptStorageReconcile:" "$civo_legacy_server_application"
 require_line "          agentEmailRateBucketCleanup:" "$agent_email_rate_cleanup_server_application"
 reject_line "          agentEmailRateBucketCleanup:" "$live_server_application"
 require_line "          agentEmailRateBucketCleanup:" "$civo_server_application"
@@ -971,6 +999,12 @@ require_line '  WITSELF_HEALTH_ADDR: ":8081"' "$gcp_worker_config"
 require_line '  WITSELF_METRICS_ADDR: ":9090"' "$gcp_worker_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$gcp_worker_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$gcp_worker_config"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_ENABLED: "false"' "$gcp_worker_config"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_ENABLED: "true"' "$transcript_storage_reconcile_render"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_INTERVAL: "30s"' "$transcript_storage_reconcile_render"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_DUTY_CYCLE: "0.25"' "$transcript_storage_reconcile_render"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_PAGE_ENTRIES: "50"' "$transcript_storage_reconcile_render"
+require_line '  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_UNIT_TIMEOUT: "120s"' "$transcript_storage_reconcile_render"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$gcp_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$gcp_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$gcp_worker_config"
@@ -1185,6 +1219,49 @@ expect_server_template_failure \
   "oversized avatar style batch timeout" \
   --values "$gcp_profile" \
   --set worker.avatarStyleRollout.batchTimeout=6m
+expect_server_template_failure \
+  "transcript storage reconcile short interval" \
+  --set worker.transcriptStorageReconcile.interval=9s
+expect_server_template_failure \
+  "transcript storage reconcile long interval" \
+  --set worker.transcriptStorageReconcile.interval=61m
+expect_server_template_failure \
+  "transcript storage reconcile low duty" \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=0.04
+expect_server_template_failure \
+  "transcript storage reconcile high duty" \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=1.01
+expect_server_template_failure \
+  "transcript storage reconcile invalid duty" \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=abc
+expect_server_template_failure \
+  "transcript storage reconcile zero page" \
+  --set worker.transcriptStorageReconcile.pageEntries=0
+expect_server_template_failure \
+  "transcript storage reconcile large page" \
+  --set worker.transcriptStorageReconcile.pageEntries=10001
+expect_server_template_failure \
+  "transcript storage reconcile short unit" \
+  --set worker.transcriptStorageReconcile.unitTimeout=9s
+expect_server_template_failure \
+  "transcript storage reconcile long unit" \
+  --set worker.transcriptStorageReconcile.unitTimeout=281s
+expect_server_template_failure \
+  "transcript storage reconcile unknown key" \
+  --set worker.transcriptStorageReconcile.unknown=true
+# Exercise all Validate lower and upper bounds with actual child renders.
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.transcriptStorageReconcile.interval=10s \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=0.05 \
+  --set worker.transcriptStorageReconcile.pageEntries=1 \
+  --set worker.transcriptStorageReconcile.unitTimeout=10s >"$render_dir/transcript-storage-lower.yaml"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.transcriptStorageReconcile.interval=1h \
+  --set-string worker.transcriptStorageReconcile.dutyCycle=1.0 \
+  --set worker.transcriptStorageReconcile.pageEntries=10000 \
+  --set worker.transcriptStorageReconcile.unitTimeout=280s >"$render_dir/transcript-storage-upper.yaml"
 expect_server_template_failure \
   "zero message-rate bucket cleanup batch" \
   --values "$gcp_profile" \

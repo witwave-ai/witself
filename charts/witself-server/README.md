@@ -447,7 +447,7 @@ for validation. Most-used: `image.tag`, `image.digest`, `replicaCount`, `backend
 `requestBudget.plans`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
-`worker.messageRateBucketCleanup.*`,
+`worker.messageRateBucketCleanup.*`, `worker.transcriptStorageReconcile.*`,
 `worker.agentEmailRateBucketCleanup.*`,
 `worker.transcriptRetention.*`, `worker.messageRetention.*`,
 `worker.agentEmailRetention.*`, `worker.supportTicketAgeOut.*`, `worker.resources`,
@@ -463,3 +463,16 @@ lowercase hexadecimal characters to pin both server and worker to
 `image.repository@image.digest`. A digest takes precedence over `image.tag`.
 Without a digest, the chart keeps rendering `image.repository:image.tag`, with
 an empty tag defaulting to the chart's `appVersion`.
+
+### Transcript storage reconciliation
+
+`worker.transcriptStorageReconcile` ships disabled. Defaults are `interval: 5m`,
+`dutyCycle: "0.5"`, `pageEntries: 1000`, and `unitTimeout: 240s`. Its strict schema
+allows interval 10s–1h, string dutyCycle 0.05–1.0, integer pageEntries 1–10000,
+and unitTimeout 10s–280s, with no unknown keys. All five keys render as quoted
+`WITSELF_TRANSCRIPT_STORAGE_RECONCILE_*` worker environment variables. The worker
+config checksum restarts pods when changed. Set `enabled: true` in a later
+per-cell rollout; `false` pauses the work. A session advisory lease elects one
+reconciler per cell while all replicas publish status. Increase dutyCycle toward
+1.0 and unitTimeout up to 280s for stuck shards; see
+[worker operations](../../docs/cell-worker.md#transcript-storage-reconciliation).

@@ -610,3 +610,15 @@ See [release-and-build.md](release-and-build.md).
 - [requirements.md](requirements.md)
 - [implementation-plan.md](implementation-plan.md)
 - [threat-model.md](threat-model.md)
+
+### Transcript storage reconciliation
+
+`worker.transcriptStorageReconcile` defaults to `enabled: false`, `interval: 5m`,
+`dutyCycle: "0.5"`, `pageEntries: 1000`, and `unitTimeout: 240s`. The schema rejects
+unknown keys and requires interval 10s–1h, dutyCycle 0.05–1.0 as a string,
+pageEntries 1–10000, and unitTimeout 10s–280s. All five values become quoted
+`WITSELF_TRANSCRIPT_STORAGE_RECONCILE_*` variables in the worker ConfigMap; its
+checksum restarts the Deployment on change. The apps chart forwards the block
+only to child charts at least `0.0.338`; enabling it is a later per-cell GitOps
+change. See [cell-worker.md](cell-worker.md#transcript-storage-reconciliation)
+for pacing, status and stuck-unit remedies.

@@ -352,3 +352,9 @@ changes do not establish live scrape, alert-delivery, or scheduling acceptance.
   into the cluster by the External Secrets Operator from the cell's cloud secret
   store: AWS Secrets Manager, GCP Secret Manager, or Azure Key Vault. `.gitops/`
   only references them by name.
+
+The app-of-apps renderer withholds `worker.transcriptStorageReconcile` from child
+charts below `0.0.338` (`>=0.0.338-0` is the compatibility gate). It ships with
+`enabled: false`, interval `5m`, dutyCycle `"0.5"`, pageEntries `1000`, and
+unitTimeout `240s`. Enabling it is a later per-cell GitOps change after the
+post-roll window; no overlay or cell values enable it in this change.

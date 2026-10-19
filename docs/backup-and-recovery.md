@@ -192,6 +192,34 @@ startup probe bounds each migration file: the chart allows 600 s
 not forward probe settings, so a cell cannot raise this for one roll; a file
 whose measured time approaches half the budget needs a code change first.
 
+Migration `0101_add_transcript_storage_usage.sql` adds the cell-local
+`transcript_storage_usage` table, which is excluded from account archives;
+it performs no entry backfill and takes no explicit lock on `accounts`. Its only
+contended strong lock is SHARE ROW EXCLUSIVE on `transcript_entries`. Bounded
+attempts can stall new entry writers for at most 1 s each for the first three
+attempts, then 2–4 s each according to `deadlock_timeout`. A refreshed holder
+probe avoids queuing behind conflicting client transactions older than 10 s;
+autovacuum workers and transactions whose start time is not visible are excluded
+from that probe. After 20 attempts or the 90 s retry deadline, contention fails
+with SQLSTATE 55P03, the migration rolls back, and the pod exits and restarts.
+Plain reads and traffic on other tables continue while it waits.
+
+At T0, accounts with entries receive 16 zero-byte, non-exact counter rows. Signed
+entry triggers maintain subsequent deltas, and the separately enabled, paced
+reconcile job makes eligible rows exact without a migration-time recount.
+Logical import likewise resets all 16 account rows to zero and non-exact with
+fresh epochs; evacuation imports remain deferred until evacuation completes.
+A physical whole-database restore preserves the triggers and each counter row's
+exact or non-exact state, so an enabled reconciler continues pending work. See
+[transcript-ledger.md](transcript-ledger.md#storage-usage-counter) for the drift
+reset requirements and [cell-worker.md](cell-worker.md) for worker operation.
+
+The release must follow the schema-change backup procedure and cannot use
+`--no-schema-change`. Production is forward-only once schema 101 is recorded.
+Down is for tests only: it first takes ACCESS EXCLUSIVE NOWAIT on
+`transcript_entries`, then drops the counter's triggers, functions, table, and
+owned epoch sequence; the 0099/0100 indexes remain.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -1671,7 +1699,7 @@ capabilities or archive URL query strings.
 The protocol-3 transport change itself leaves schema 98 unchanged: deploy the
 control plane first, then protocol-3 cells with
 `roll-train.sh VERSION --no-schema-change …` only when the release contains no
-schema changes. Releases containing migrations 0099/0100 require the schema-change
+schema changes. Releases containing migrations 0099/0100/0101 require the schema-change
 procedure described above. See
 [the rollout matrix and mixed-version rules](deployment-cells.md#account-evacuation-transport-rollout).
 

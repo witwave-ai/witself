@@ -243,6 +243,12 @@ apps:
         batchSize: 100
         interval: 2s
         batchTimeout: 30s
+      transcriptStorageReconcile:
+        enabled: false
+        interval: 5m
+        dutyCycle: "0.5"
+        pageEntries: 1000
+        unitTimeout: 240s
       messageRateBucketCleanup:
         enabled: true
         batchSize: 10000
