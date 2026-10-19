@@ -84,6 +84,8 @@ const (
 )
 
 type jobConfig struct {
+	transcriptStorageReconcileEnabled  bool
+	transcriptStorageReconcile         store.TranscriptStorageReconcileConfig
 	avatarEnabled                      bool
 	avatar                             store.AvatarStyleRolloutWorkerConfig
 	messageRateBucketCleanupEnabled    bool
@@ -190,6 +192,10 @@ func serve() int {
 	}
 	if err := registerSupportTicketAgeOut(registry, st, jobs); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: register support ticket age-out: %v\n", err)
+		return 1
+	}
+	if err := registerTranscriptStorageReconcile(registry, st, jobs, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-worker: register transcript storage reconcile: %v\n", err)
 		return 1
 	}
 	if jobs.messageRateBucketCleanupEnabled {
@@ -865,7 +871,13 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 	if err != nil {
 		return jobConfig{}, err
 	}
+	transcriptStorageReconcileEnabled, transcriptStorageReconcile, err := transcriptStorageReconcileFromEnv(lookup)
+	if err != nil {
+		return jobConfig{}, err
+	}
 	return jobConfig{
+		transcriptStorageReconcileEnabled:  transcriptStorageReconcileEnabled,
+		transcriptStorageReconcile:         transcriptStorageReconcile,
 		avatarEnabled:                      avatarEnabled,
 		avatar:                             avatar,
 		messageRateBucketCleanupEnabled:    messageRateBucketCleanupEnabled,

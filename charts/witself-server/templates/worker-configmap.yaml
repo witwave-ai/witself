@@ -12,6 +12,11 @@ data:
   WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.worker.avatarStyleRollout.batchSize | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: {{ .Values.worker.avatarStyleRollout.interval | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: {{ .Values.worker.avatarStyleRollout.batchTimeout | quote }}
+  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_ENABLED: {{ .Values.worker.transcriptStorageReconcile.enabled | quote }}
+  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_INTERVAL: {{ .Values.worker.transcriptStorageReconcile.interval | quote }}
+  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_DUTY_CYCLE: {{ .Values.worker.transcriptStorageReconcile.dutyCycle | quote }}
+  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_PAGE_ENTRIES: {{ .Values.worker.transcriptStorageReconcile.pageEntries | quote }}
+  WITSELF_TRANSCRIPT_STORAGE_RECONCILE_UNIT_TIMEOUT: {{ .Values.worker.transcriptStorageReconcile.unitTimeout | quote }}
   WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: {{ .Values.worker.messageRateBucketCleanup.enabled | quote }}
   WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: {{ .Values.worker.messageRateBucketCleanup.batchSize | quote }}
   WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: {{ .Values.worker.messageRateBucketCleanup.interval | quote }}

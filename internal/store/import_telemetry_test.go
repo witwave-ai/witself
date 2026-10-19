@@ -247,10 +247,11 @@ func (scan importTelemetryScan) Scan(dest ...any) error { return scan(dest...) }
 
 type importTelemetryPanicTx struct {
 	pgx.Tx
-	t          *testing.T
-	now        time.Time
-	panicValue any
-	rolledBack bool
+	t           *testing.T
+	now         time.Time
+	panicValue  any
+	rolledBack  bool
+	bulkEnabled bool
 }
 
 func (tx *importTelemetryPanicTx) Begin(context.Context) (pgx.Tx, error) { return tx, nil }
@@ -272,14 +273,24 @@ func (tx *importTelemetryPanicTx) QueryRow(_ context.Context, sql string, _ ...a
 		}
 	})
 }
-func (tx *importTelemetryPanicTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+func (tx *importTelemetryPanicTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	// The import labels its transaction (transaction-local application_name)
 	// before the first row insert; that statement is not the row callback.
 	if strings.HasPrefix(sql, "SELECT set_config('application_name'") {
 		return pgconn.CommandTag{}, nil
 	}
+	if sql == `SELECT set_config($1, 'on', true)` {
+		if len(args) != 1 || args[0] != transcriptStorageUsageBulkSetting || tx.bulkEnabled {
+			tx.t.Fatal("unexpected transcript bulk-mode setup before row insert")
+		}
+		tx.bulkEnabled = true
+		return pgconn.NewCommandTag("SELECT 1"), nil
+	}
 	if !strings.HasPrefix(sql, "INSERT INTO accounts ") {
 		tx.t.Fatal("unexpected statement before row insert")
+	}
+	if !tx.bulkEnabled {
+		tx.t.Fatal("row insert preceded transaction-local transcript bulk mode")
 	}
 	panic(tx.panicValue)
 }
@@ -309,6 +320,9 @@ func TestImportTelemetryRowPanicFinishesWithError(t *testing.T) {
 	}()
 	if len(tracker.outcomes) != 1 || tracker.outcomes[0] != "error" {
 		t.Fatalf("panic finish outcomes = %v, want [error]", tracker.outcomes)
+	}
+	if !tx.bulkEnabled {
+		t.Fatal("panicking import did not enable transaction-local transcript bulk mode")
 	}
 	if !tx.rolledBack {
 		t.Fatal("panicking import did not roll back its transaction")

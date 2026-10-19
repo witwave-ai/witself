@@ -50,7 +50,8 @@ func TestTranscriptStorageUsageSQLStaysInOneFile(t *testing.T) {
 				t.Fatalf("decode string at %s: %v", fset.Position(literal.Pos()), err)
 			}
 			if !strings.Contains(value, "transcript_storage_usage") &&
-				!strings.Contains(value, "witself_transcript_entry_storage_bytes") {
+				!strings.Contains(value, "witself_transcript_entry_storage_bytes") &&
+				!strings.Contains(value, "witself_transcript_storage_shard") {
 				return true
 			}
 			if path != "transcript_storage_usage.go" && literal != archiveKey {
@@ -112,7 +113,7 @@ func transcriptStorageArchiveKey(t *testing.T, file *ast.File) *ast.BasicLit {
 
 func assertTranscriptStorageImportPlacement(t *testing.T, fn *ast.FuncDecl) {
 	t.Helper()
-	var enable, recompute, read []*ast.CallExpr
+	var enable, pending, read []*ast.CallExpr
 	var unreplayedBodies []*ast.BlockStmt
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		switch n := node.(type) {
@@ -122,8 +123,8 @@ func assertTranscriptStorageImportPlacement(t *testing.T, fn *ast.FuncDecl) {
 				switch called.Name {
 				case "enableTranscriptStorageUsageBulkTx":
 					enable = append(enable, n)
-				case "recomputeTranscriptStorageUsageTx":
-					recompute = append(recompute, n)
+				case "markImportedTranscriptStorageUsagePendingTx":
+					pending = append(pending, n)
 				}
 			case *ast.SelectorExpr:
 				pkg, ok := called.X.(*ast.Ident)
@@ -147,22 +148,36 @@ func assertTranscriptStorageImportPlacement(t *testing.T, fn *ast.FuncDecl) {
 		}
 		return true
 	})
-	if len(enable) != 1 || len(recompute) != 1 || len(read) != 1 {
-		t.Fatalf("import calls: bulk=%d recompute=%d export.Read=%d; want one each",
-			len(enable), len(recompute), len(read))
+	if len(enable) != 1 || len(pending) != 1 || len(read) != 1 {
+		t.Fatalf("import calls: bulk=%d pending=%d export.Read=%d; want one each",
+			len(enable), len(pending), len(read))
 	}
 	if enable[0].End() >= read[0].Pos() {
 		t.Error("bulk setting must precede export.Read")
 	}
-	if recompute[0].Pos() <= read[0].End() {
-		t.Error("counter recompute must follow the complete export.Read call")
+	if pending[0].Pos() <= read[0].End() {
+		t.Error("counter pending must follow the complete export.Read call")
 	}
 	for _, body := range unreplayedBodies {
-		if body.Pos() < recompute[0].Pos() && recompute[0].End() < body.End() {
+		if body.Pos() < pending[0].Pos() && pending[0].End() < body.End() {
 			return
 		}
 	}
-	t.Error("counter recompute must be inside if !disposition.AlreadyImported")
+	t.Error("counter pending must be inside if !disposition.AlreadyImported")
+}
+
+// Strip ordinary full-line comments, retaining Goose directives so structural
+// checks cannot mistake documentation for executable SQL.
+func transcriptStorageMigrationContractText(s string) string {
+	var lines []string
+	for line := range strings.SplitSeq(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") && !strings.HasPrefix(strings.ToLower(trimmed), "-- +goose") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.ToLower(strings.Join(lines, "\n"))
 }
 
 func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
@@ -170,30 +185,79 @@ func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	migration := string(raw)
-	const fences = "LOCK TABLE accounts IN EXCLUSIVE MODE NOWAIT;\n" +
-		"LOCK TABLE transcript_entries IN SHARE ROW EXCLUSIVE MODE NOWAIT;"
-	fenceIndex := strings.Index(migration, fences)
-	if fenceIndex < 0 || strings.Count(migration, fences) != 1 {
-		t.Fatal("migration 101 must have exactly one adjacent account-first NOWAIT fence pair")
+	upRaw, downRaw, ok := strings.Cut(string(raw), "-- +goose Down")
+	if !ok {
+		t.Fatal("migration has no Down directive")
 	}
-	firstCreate := regexp.MustCompile(`(?im)^\s*CREATE\s`).FindStringIndex(migration)
-	if firstCreate == nil || fenceIndex+len(fences) > firstCreate[0] {
-		t.Error("migration 101 fences must precede the first CREATE")
+	up := transcriptStorageMigrationContractText(upRaw)
+	down := transcriptStorageMigrationContractText(downRaw)
+	first := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(up), "-- +goose up"))
+	settings, _, ok := strings.Cut(first, ";")
+	if !ok || !strings.HasPrefix(settings, "select set_config(") {
+		t.Fatal("first Up statement must be the settings SELECT")
 	}
-	if strings.Contains(strings.ToLower(migration), "md5(") {
-		t.Error("migration 101 must use a FIPS-safe shard hash")
+	for _, setting := range []string{
+		"set_config('statement_timeout', '120s', true)",
+		"set_config('lock_timeout', '2s', true)",
+		"set_config('idle_in_transaction_session_timeout', '5s', true)",
+		"set_config('client_connection_check_interval', '1s', true)",
+	} {
+		if !strings.Contains(settings, setting) {
+			t.Errorf("first SELECT missing %s", setting)
+		}
 	}
-	if strings.Contains(strings.ToUpper(migration), "NO TRANSACTION") {
-		t.Error("migration 101 must be transactional")
+	for _, banned := range []string{"lock table accounts", "references", "nowait", "no transaction", "md5("} {
+		if strings.Contains(up, banned) {
+			t.Errorf("Up contains prohibited token %q", banned)
+		}
 	}
-	_, down, ok := strings.Cut(migration, "-- +goose Down")
-	if !ok || !strings.Contains(down, "DROP TABLE transcript_storage_usage") {
-		t.Error("migration 101 Down must drop transcript_storage_usage")
+	const lock = "lock table transcript_entries in share row exclusive mode"
+	if strings.Count(up, lock) != 1 {
+		t.Fatal("Up must contain exactly one transcript_entries strong lock")
 	}
-	const downFences = "LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE NOWAIT;\n" +
-		"LOCK TABLE transcript_entries IN ACCESS EXCLUSIVE MODE NOWAIT;"
-	if !strings.HasPrefix(strings.TrimSpace(down), downFences) || strings.Count(down, downFences) != 1 {
-		t.Error("migration 101 Down must begin with adjacent account-first ACCESS EXCLUSIVE NOWAIT fences")
+	do := regexp.MustCompile(`(?s)-- \+goose statementbegin\s+do \$\$.*?-- \+goose statementend`).FindString(up)
+	if do == "" || !strings.Contains(do, lock) {
+		t.Fatal("strong lock must be inside the first DO block")
+	}
+	firstCreate := regexp.MustCompile(`(?m)^\s*create\s`).FindStringIndex(up)
+	if firstCreate == nil || strings.Index(up, do)+len(do) > firstCreate[0] {
+		t.Fatal("lock loop must precede every CREATE")
+	}
+	for _, required := range []string{
+		"lock_timeout", "deadlock_timeout", "2000), 4000)",
+		"current_setting('witself.migration_0101_lock_attempts', true), '')::int, 20)",
+		"current_setting('witself.migration_0101_long_holder_ms', true), '')::int, 10000)",
+		"backend_type", "xact_start", "clock_timestamp() + interval '90 seconds'",
+		"migration 0101: transcript_entries stayed busy for %s lock attempts",
+	} {
+		if !strings.Contains(do, required) {
+			t.Errorf("DO block missing %q", required)
+		}
+	}
+	loop := strings.Index(do, "\n    loop")
+	refresh := strings.Index(do, "perform pg_stat_clear_snapshot();")
+	probe := strings.Index(do, "if exists (")
+	if loop < 0 || refresh <= loop || probe <= refresh {
+		t.Error("each loop must refresh pg_stat_activity immediately before its EXISTS probe")
+	}
+	for _, suffix := range []string{"insert", "delete", "update"} {
+		pattern := `(?s)-- \+goose statementbegin\s+create function witself_transcript_storage_usage_` + suffix + `\(\).*?-- \+goose statementend`
+		body := regexp.MustCompile(pattern).FindString(up)
+		if body == "" {
+			t.Errorf("missing %s trigger function body", suffix)
+		} else if strings.Contains(body, "greatest(") {
+			t.Errorf("%s trigger clamps its signed delta", suffix)
+		}
+	}
+	if !regexp.MustCompile(`reconcile_epoch\s+bigint\s+not null\s+default nextval\('transcript_storage_usage_epoch_seq'\)`).MatchString(up) {
+		t.Error("row incarnations need a fresh default epoch")
+	}
+	if strings.Count(up, "from transcript_entries") != 1 ||
+		!strings.Contains(up, "where exists (select 1 from transcript_entries e where e.account_id = a.id)") {
+		t.Error("only the T0 EXISTS may read transcript_entries in Up")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(down), "lock table transcript_entries in access exclusive mode nowait;") ||
+		strings.Contains(down, "lock table accounts") || !strings.Contains(down, "drop table transcript_storage_usage;") {
+		t.Error("Down must lock only transcript_entries first and remove the counter")
 	}
 }

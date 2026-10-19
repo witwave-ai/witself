@@ -339,6 +339,8 @@ Initial metric families should include:
 | `witself_worker_agent_email_outbound_batches_total`, `witself_worker_agent_email_outbound_items_total`, `witself_worker_agent_email_outbound_last_success_timestamp_seconds` | Durable outbound worker health and value-free closed outcomes. No sender, recipient, message, provider id, or error text is a label. |
 | `witself_worker_agent_email_retention_batches_total`, `witself_worker_agent_email_retention_items_total`, `witself_worker_agent_email_retention_last_success_timestamp_seconds` | Preview/enforce batch results, bounded inbound/outbound/provider-event/suppression item kinds, and last successful attempt. An errored multi-pass attempt records one error batch with any already-committed counts and does not refresh last-success. |
 | `witself_worker_agent_email_rate_bucket_cleanup_batches_total`, `witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total`, `witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds` | Cooperative cleanup across the three physical inbound/outbound limiter tables with bounded result labels and no tenant-derived labels. |
+| `witself_worker_transcript_storage_reconcile_units_total{result}`, `witself_worker_transcript_storage_reconcile_entries_total` | Registered, default-off counter reconciliation: bounded corrected/confirmed/raced/busy/anomaly/timeout/error/skipped outcomes and entries measured. No account or transcript labels. |
+| `witself_worker_transcript_storage_unverified_shards{state}`, `witself_worker_transcript_storage_reconcile_stuck_units` | Eligible/deferred non-exact shards and runner-local units with three consecutive timeouts. Unverified samples begin only after a successful status read, including lease-held passes. Read per-replica status with `max by (state)`; it lags at most one pass. |
 | `witself_message_delivery_duration_seconds` | Send-to-delivery latency histogram by recipient kind. |
 | `witself_conversations_total` | Cross-realm conversation/task lifecycle transitions by `conversation_state` (`submitted`, `working`, `input_required`, `auth_required`, `completed`, `failed`, `canceled`) and result. Counts state transitions only; it never carries the `conversation_id`, participant handles, or message content (see [agent-collaboration.md](agent-collaboration.md)). |
 | `witself_relay_envelopes_total` | Blind-relay envelope throughput by `direction` (`inbound`, `outbound`), `relay_action` (`routed`, `dropped`, `quarantined`), and `result`. The relay sees only routing metadata, so this metric carries no envelope body, signature, or peer realm handle. |
@@ -1868,3 +1870,15 @@ The closed label vocabulary is `event` (`started`, `provisioned`,
 invite code appears anywhere in the observation document, singleton counter
 storage or metrics. Edge `SIGNUP_IP_LIMITER` rejections are deliberately
 uncounted to avoid waking the singleton for each rejected edge request.
+
+### Transcript storage counter operations
+
+The reconcile backend is identifiable by application name
+`witself-transcript-storage-reconcile`; the independent operator/test verifier
+uses `witself-transcript-storage-verify`. Enable or pause the default-off worker
+with `worker.transcriptStorageReconcile.enabled`. For a stuck unit, increase
+`dutyCycle` toward `1.0` and `unitTimeout` up to `280s`; a larger query needs a
+follow-up design and remains non-exact, with A2 failing open. See
+[cell-worker.md](cell-worker.md#transcript-storage-reconciliation) for all bounds,
+the eligible/deferred operator SQL status query, and tuning. Run that query before
+any A2 enforcement flip, even when all replicas report zero eligible shards.

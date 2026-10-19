@@ -7000,9 +7000,9 @@ func (s *Store) importAccountWithTracker(
 			return export.Manifest{}, AccountImportDisposition{},
 				fmt.Errorf("%w: imported account is missing for agent-email attachment recompute", ErrArchiveContent)
 		}
-		if err := recomputeTranscriptStorageUsageTx(ctx, tx, m.AccountID); err != nil {
+		if err := markImportedTranscriptStorageUsagePendingTx(ctx, tx, m.AccountID); err != nil {
 			return export.Manifest{}, AccountImportDisposition{},
-				fmt.Errorf("recompute imported transcript storage usage: %w", err)
+				fmt.Errorf("mark imported transcript storage usage pending: %w", err)
 		}
 	}
 	if disposition.AlreadyImported {

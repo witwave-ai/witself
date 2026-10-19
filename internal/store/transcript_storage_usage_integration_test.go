@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -108,9 +109,12 @@ func TestTranscriptStorageUsageTracksEveryWritePathPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	used, err := transcriptStorageUsedTx(ctx, tx, a.AccountID)
+	used, exact, err := transcriptStorageUsageTx(ctx, tx, a.AccountID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !exact {
+		t.Fatal("new account counter is not exact")
 	}
 	if want := transcriptStorageRecount(t, st, a.AccountID); used != want {
 		t.Fatalf("used helper = %d, recount = %d", used, want)
@@ -164,7 +168,7 @@ func TestTranscriptStorageUsageTracksEveryWritePathPostgres(t *testing.T) {
 	}
 }
 
-func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
+func TestTranscriptStorageUsageImportMarksPendingPostgres(t *testing.T) {
 	st, schemaDSN := newMigrationTestStore(t, testenv.RequirePostgres(t))
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -176,7 +180,6 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	appendTranscriptStorageTestEntry(t, st, p, first, AppendTranscriptEntryInput{ExternalID: "one", Role: TranscriptRoleUser, Body: "first conversation"})
 	appendTranscriptStorageTestEntry(t, st, p, second, AppendTranscriptEntryInput{ExternalID: "two", Role: TranscriptRoleAssistant, Body: "second conversation"})
 	assertTranscriptStorageUsageMatchesRecount(t, st, p.AccountID)
-	original := transcriptStorageUsageRows(t, st, p.AccountID)
 	const evacuationID = "evac_transcript_storage_replay"
 	if _, err := st.BeginAccountEvacuation(ctx, p.AccountID, evacuationID, "transcript storage test"); err != nil {
 		t.Fatal(err)
@@ -191,8 +194,8 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	if err := deleteAccountForIntegrationTest(ctx, st, p.AccountID); err != nil {
 		t.Fatal(err)
 	}
-	if len(transcriptStorageUsageRows(t, st, p.AccountID)) != 0 {
-		t.Fatal("account cascade left counter rows")
+	if len(transcriptStorageUsageRows(t, st, p.AccountID)) == 0 {
+		t.Fatal("account deletion unexpectedly removed orphan counter rows")
 	}
 	if strings.HasPrefix(schemaDSN, "postgres://") || strings.HasPrefix(schemaDSN, "postgresql://") {
 		u, err := url.Parse(schemaDSN)
@@ -218,10 +221,11 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	if disposition.AlreadyImported {
 		t.Fatal("first evacuation import reported a replay")
 	}
-	assertTranscriptStorageUsageMatchesRecount(t, destination, p.AccountID)
-	imported := transcriptStorageUsageRows(t, destination, p.AccountID)
-	if !reflect.DeepEqual(imported, original) {
-		t.Fatal("imported counter rows differ from source")
+	assertTranscriptStoragePending(t, destination, p.AccountID)
+	imported := transcriptStorageStateRows(t, destination, p.AccountID)
+	summary, err := destination.ReconcileTranscriptStorageUsageUntilDone(ctx, transcriptStorageFastConfig())
+	if err != nil || summary.UnverifiedEligible != 0 || summary.UnverifiedDeferred != 16 || summary.Entries != 0 {
+		t.Fatalf("deferred import reconcile: %+v, error %v", summary, err)
 	}
 	_, disposition, err = destination.ImportAccountEvacuation(ctx, p.AccountID, evacuationID, bytes.NewReader(archive.Bytes()))
 	if err != nil {
@@ -230,7 +234,7 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	if !disposition.AlreadyImported {
 		t.Fatal("same evacuation replay was not marked AlreadyImported")
 	}
-	if !reflect.DeepEqual(imported, transcriptStorageUsageRows(t, destination, p.AccountID)) {
+	if !reflect.DeepEqual(imported, transcriptStorageStateRows(t, destination, p.AccountID)) {
 		t.Fatal("already-imported replay changed counter rows")
 	}
 	// Import preserves the destination's evacuation write fence. Complete the
@@ -243,12 +247,13 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	if !completed.Completed {
 		t.Fatal("destination evacuation did not complete")
 	}
+	transcriptStorageReconcileAndVerify(t, destination, p.AccountID)
 	var removed int64
 	if err := destination.pool.QueryRow(ctx, `SELECT sum(witself_transcript_entry_storage_bytes(external_id,role,body,payload,model,reply_to_entry_id,artifacts))::bigint
 		FROM transcript_entries WHERE account_id=$1 AND transcript_id=$2`, p.AccountID, first.ID).Scan(&removed); err != nil {
 		t.Fatal(err)
 	}
-	before := transcriptStorageTestRowsSum(imported)
+	before := transcriptStorageTestRowsSum(transcriptStorageUsageRows(t, destination, p.AccountID))
 	if _, err := destination.pool.Exec(ctx, `DELETE FROM transcript_conversations WHERE account_id=$1 AND id=$2`, p.AccountID, first.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -256,72 +261,125 @@ func TestTranscriptStorageUsageEvacuationReplayPostgres(t *testing.T) {
 	if got := transcriptStorageTestRowsSum(transcriptStorageUsageRows(t, destination, p.AccountID)); got != before-removed {
 		t.Fatalf("post-import deletion retained %d bytes, want %d", got, before-removed)
 	}
+	// A second evacuation round trip must invalidate the prior incarnation, too.
+	previous := transcriptStorageStateRows(t, destination, p.AccountID)
+	if err := deleteAccountForIntegrationTest(ctx, destination, p.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	if len(transcriptStorageStateRows(t, destination, p.AccountID)) == 0 {
+		t.Fatal("round trip lost orphan counter rows")
+	}
+	_, disposition, err = destination.ImportAccountEvacuation(ctx, p.AccountID, evacuationID, bytes.NewReader(archive.Bytes()))
+	if err != nil || disposition.AlreadyImported {
+		t.Fatalf("round-trip import replay=%t, error=%v", disposition.AlreadyImported, err)
+	}
+	assertTranscriptStoragePending(t, destination, p.AccountID)
+	for shard, row := range transcriptStorageStateRows(t, destination, p.AccountID) {
+		if previous[shard].Epoch == row.Epoch {
+			t.Fatal("round-trip import reused an old epoch")
+		}
+	}
+	if _, err := destination.CompleteAccountEvacuation(ctx, p.AccountID, evacuationID); err != nil {
+		t.Fatal(err)
+	}
+	transcriptStorageReconcileAndVerify(t, destination, p.AccountID)
+	// An older binary imports without the bulk bypass or pending reset. Its
+	// ordinary inserts must create exact rows through the installed triggers.
+	legacy := newTranscriptStorageTestPrincipal(t, destination, "legacy-import")
+	legacyTranscript := createTranscriptStorageTestConversation(t, destination, legacy, "legacy-import")
+	if _, err := destination.pool.Exec(ctx, `INSERT INTO transcript_entries
+		(id,account_id,transcript_id,realm_id,recorded_by_agent_id,sequence,role,body)
+		VALUES ('legacy-import-entry',$1,$2,$3,$4,1,'user','legacy imported bytes')`,
+		legacy.AccountID, legacyTranscript.ID, legacy.RealmID, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertTranscriptStorageUsageMatchesRecount(t, destination, legacy.AccountID)
 }
 
-func TestTranscriptStorageUsageDriftClampsPostgres(t *testing.T) {
-	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+func TestTranscriptStorageUsageDriftSelfHealsPostgres(t *testing.T) {
+	st, dsn := newMigrationTestStore(t, testenv.RequirePostgres(t))
+	migrationTestUpTo(t, dsn, 101)
 	ctx := context.Background()
-	p := newTranscriptStorageTestPrincipal(t, st, "drift")
-	first := createTranscriptStorageTestConversation(t, st, p, "drifted")
-	second := createTranscriptStorageTestConversation(t, st, p, "retention")
-	second = transcriptStorageTestMoveToOtherShard(t, st, second, first.ID)
-	driftedEntry := appendTranscriptStorageTestEntry(t, st, p, first, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "drifted entry"})
-	appendTranscriptStorageTestEntry(t, st, p, second, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "retained entry"})
-	if _, err := st.pool.Exec(ctx, `UPDATE transcript_storage_usage SET retained_bytes=0 WHERE account_id=$1 AND shard=witself_transcript_storage_shard($2)`, p.AccountID, first.ID); err != nil {
+	for _, missing := range []bool{false, true} {
+		p := newTranscriptStorageTestPrincipal(t, st, fmt.Sprintf("drift-%t", missing))
+		tr := createTranscriptStorageTestConversation(t, st, p, "drift")
+		appendTranscriptStorageTestEntry(t, st, p, tr, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "drifted entry"})
+		statement := `UPDATE transcript_storage_usage SET retained_bytes=0 WHERE account_id=$1`
+		if missing {
+			statement = `DELETE FROM transcript_storage_usage WHERE account_id=$1`
+		}
+		if _, err := st.pool.Exec(ctx, statement, p.AccountID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.SetAccountPlan(ctx, p.AccountID, 0, "", "free", map[string]int64{}, map[string]int64{TranscriptRetentionDaysPolicy: 30}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `UPDATE transcript_conversations SET updated_at=statement_timestamp()-interval '31 days' WHERE id=$1`, tr.ID); err != nil {
+			t.Fatal(err)
+		}
+		result, err := st.ProcessTranscriptRetentionBatch(ctx, 10)
+		if err != nil || result.Deleted != 1 {
+			t.Fatalf("drift retention: %+v, %v", result, err)
+		}
+		states := transcriptStorageStateRows(t, st, p.AccountID)
+		if len(states) != 1 {
+			t.Fatalf("drift row count=%d", len(states))
+		}
+		for _, row := range states {
+			if row.Bytes >= 0 || row.Exact {
+				t.Fatalf("drift did not create a negative, non-exact row: %+v", row)
+			}
+		}
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		used, exact, err := transcriptStorageUsageTx(ctx, tx, p.AccountID)
+		_ = tx.Rollback(ctx)
+		if err != nil || used != 0 || exact {
+			t.Fatalf("drift read=%d,%t,%v", used, exact, err)
+		}
+		transcriptStorageReconcileAndVerify(t, st, p.AccountID)
+	}
+	// The correction can exceed the stored counter's bound while both the
+	// measured total and corrected result remain valid.
+	p := newTranscriptStorageTestPrincipal(t, st, "large-negative-drift")
+	tr := createTranscriptStorageTestConversation(t, st, p, "large-negative-drift")
+	appendTranscriptStorageTestEntry(t, st, p, tr, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "positive measured bytes"})
+	if _, err := st.pool.Exec(ctx, `UPDATE transcript_storage_usage SET retained_bytes=$2,exact=false WHERE account_id=$1`, p.AccountID, -transcriptStorageReconcileLimit); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.pool.Exec(ctx, `UPDATE transcript_entries SET body='x' WHERE account_id=$1 AND id=$2`, p.AccountID, driftedEntry.ID); err != nil {
-		t.Fatalf("drift blocked shrinking entry update: %v", err)
-	}
-	var clamped int64
-	if err := st.pool.QueryRow(ctx, `SELECT retained_bytes FROM transcript_storage_usage WHERE account_id=$1 AND shard=witself_transcript_storage_shard($2)`, p.AccountID, first.ID).Scan(&clamped); err != nil {
+	transcriptStorageReconcileAndVerify(t, st, p.AccountID)
+	// A purge also succeeds after drift and leaves a tombstone whose remaining
+	// negative rows can be reconciled to exact zero.
+	appendTranscriptStorageTestEntry(t, st, p, tr, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "purge drift"})
+	if _, err := st.pool.Exec(ctx, `UPDATE transcript_storage_usage SET retained_bytes=0 WHERE account_id=$1`, p.AccountID); err != nil {
 		t.Fatal(err)
 	}
-	if clamped != 0 {
-		t.Fatalf("shrinking update left drifted shard at %d bytes, want 0", clamped)
-	}
-	if _, err := st.pool.Exec(ctx, `DELETE FROM transcript_entries WHERE account_id=$1 AND witself_transcript_storage_shard(transcript_id)=witself_transcript_storage_shard($2)`, p.AccountID, first.ID); err != nil {
-		t.Fatalf("drift blocked entry deletion: %v", err)
-	}
-	if err := st.pool.QueryRow(ctx, `SELECT retained_bytes FROM transcript_storage_usage WHERE account_id=$1 AND shard=witself_transcript_storage_shard($2)`, p.AccountID, first.ID).Scan(&clamped); err != nil {
+	var owner string
+	if err := st.pool.QueryRow(ctx, `SELECT id FROM operators WHERE account_id=$1 AND role='account_owner' LIMIT 1`, p.AccountID).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
-	if clamped != 0 {
-		t.Fatalf("drifted shard retained %d bytes, want 0", clamped)
-	}
-	assertTranscriptStorageUsageMatchesRecount(t, st, p.AccountID)
-	missingShardEntry := appendTranscriptStorageTestEntry(t, st, p, first, AppendTranscriptEntryInput{Role: TranscriptRoleUser, Body: "missing shard entry"})
-	if _, err := st.pool.Exec(ctx, `DELETE FROM transcript_storage_usage WHERE account_id=$1 AND shard=witself_transcript_storage_shard($2)`, p.AccountID, first.ID); err != nil {
+	if err := st.CloseAccount(ctx, p.AccountID, owner, "drift purge fixture"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.pool.Exec(ctx, `DELETE FROM transcript_entries WHERE account_id=$1 AND id=$2`, p.AccountID, missingShardEntry.ID); err != nil {
-		t.Fatalf("missing shard blocked entry deletion: %v", err)
-	}
-	var shardRows int
-	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM transcript_storage_usage WHERE account_id=$1 AND shard=witself_transcript_storage_shard($2)`, p.AccountID, first.ID).Scan(&shardRows); err != nil {
+	if _, err := st.pool.Exec(ctx, `UPDATE accounts SET closed_at=statement_timestamp()-interval '31 days' WHERE id=$1`, p.AccountID); err != nil {
 		t.Fatal(err)
 	}
-	if shardRows != 0 {
-		t.Fatalf("entry deletion recreated %d missing shard rows, want 0", shardRows)
+	purged, err := st.ProcessAccountPurgeBatch(ctx, 10, 30*24*time.Hour)
+	if err != nil || purged.PurgedAccounts != 1 {
+		t.Fatalf("drift purge: %+v, %v", purged, err)
 	}
-	assertTranscriptStorageUsageMatchesRecount(t, st, p.AccountID)
-	if _, err := st.SetAccountPlan(ctx, p.AccountID, 0, "", "free", map[string]int64{}, map[string]int64{TranscriptRetentionDaysPolicy: 30}, nil); err != nil {
-		t.Fatal(err)
+	purgedRows := transcriptStorageStateRows(t, st, p.AccountID)
+	if len(purgedRows) == 0 {
+		t.Fatal("purge removed every drifted counter row")
 	}
-	if _, err := st.pool.Exec(ctx, `UPDATE transcript_conversations SET updated_at=statement_timestamp()-interval '31 days' WHERE id=$1`, second.ID); err != nil {
-		t.Fatal(err)
+	for _, row := range purgedRows {
+		if row.Bytes >= 0 || row.Exact {
+			t.Fatalf("purge did not retain negative non-exact drift: %+v", row)
+		}
 	}
-	result, err := st.ProcessTranscriptRetentionBatch(ctx, 10)
-	if err != nil {
-		t.Fatalf("drift blocked retention: %v", err)
-	}
-	if result.Deleted != 1 {
-		t.Fatalf("retention deleted %d conversations, want 1", result.Deleted)
-	}
-	assertTranscriptStorageUsageMatchesRecount(t, st, p.AccountID)
+	transcriptStorageReconcileAndVerify(t, st, p.AccountID)
 }
 
 func TestTranscriptStorageUsageBulkSettingSkipsTriggersPostgres(t *testing.T) {
@@ -501,6 +559,13 @@ func assertTranscriptStorageTestQueryMatchesRecount(t *testing.T, q transcriptSt
 	}
 	if drift != 0 {
 		t.Fatalf("counter differs from recount in %d shards", drift)
+	}
+	var pending int
+	if err := q.QueryRow(context.Background(), `SELECT count(*) FROM transcript_storage_usage WHERE account_id=$1 AND (NOT exact OR retained_bytes<0)`, accountID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("counter has %d non-exact or negative shards", pending)
 	}
 }
 

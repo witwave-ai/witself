@@ -62,11 +62,17 @@ func TestTranscriptStorageUsageBulkTimingPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Seed before the counter migration so its real backfill processes the same
-	// payload-bearing rows as the subsequent recompute measurement.
+	// Seed before the migration; pending rows are reconciled outside its lock.
 	started := time.Now()
 	migrationTestUpTo(t, migrationDSN, 101)
-	backfill := time.Since(started)
+	migration := time.Since(started)
+	// Exercise production pacing and page size at the requested benchmark scale.
+	// The tiny interleaving fixtures use page size one and a short test deadline;
+	// neither is appropriate for this operator-selected workload.
+	cfg := DefaultTranscriptStorageReconcileConfig()
+	if _, err := st.ReconcileTranscriptStorageUsageUntilDone(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
 	assertTranscriptStorageUsageMatchesRecount(t, st, x.AccountID, y.AccountID)
 	var payloadRows, payloadMinBytes, payloadMaxBytes int
 	if err := st.pool.QueryRow(ctx, `
@@ -168,20 +174,28 @@ func TestTranscriptStorageUsageBulkTimingPostgres(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	started = time.Now()
-	if err := recomputeTranscriptStorageUsageTx(ctx, tx, x.AccountID); err != nil {
+	if err := markImportedTranscriptStorageUsagePendingTx(ctx, tx, x.AccountID); err != nil {
 		t.Fatal(err)
 	}
-	recompute := time.Since(started)
-	assertTranscriptStorageTimingRecount(t, tx, x.AccountID)
+	markPending := time.Since(started)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	summary, err := st.ReconcileTranscriptStorageUsageUntilDone(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertTranscriptStorageUsageMatchesRecount(t, st, x.AccountID)
+	verification, err := st.VerifyTranscriptStorageUsage(ctx, x.AccountID)
+	if err != nil || !verification.Exact || verification.Mismatches != 0 {
+		t.Fatalf("timing verify: %+v, %v", verification, err)
+	}
+	t.Logf("reconcile: entries=%d elapsed=%s entries_per_second=%.2f", summary.Entries, summary.Elapsed, float64(summary.Entries)/summary.Elapsed.Seconds())
 
-	t.Logf("transcript storage timing: entries_per_account=%d conversations_per_account=%d body_bytes=%d payload_rows_per_account=%d payload_min_bytes=%d payload_max_bytes=%d migration_101_payload_backfill=%s insert_statements=%d insert_enabled=%s insert_disabled=%s insert_enabled_per_statement=%s insert_disabled_per_statement=%s payload_bearing_recompute=%s delete_enabled_rows=%d delete_enabled=%s delete_disabled_rows=%d delete_disabled=%s",
-		n, conversations, bodyBytes, payloadRows, payloadMinBytes, payloadMaxBytes, backfill,
+	t.Logf("transcript storage timing: entries_per_account=%d conversations_per_account=%d body_bytes=%d payload_rows_per_account=%d payload_min_bytes=%d payload_max_bytes=%d migration_101_pending_rows=%s insert_statements=%d insert_enabled=%s insert_disabled=%s insert_enabled_per_statement=%s insert_disabled_per_statement=%s mark_pending=%s delete_enabled_rows=%d delete_enabled=%s delete_disabled_rows=%d delete_disabled=%s",
+		n, conversations, bodyBytes, payloadRows, payloadMinBytes, payloadMaxBytes, migration,
 		insertStatements, insertEnabled, insertDisabled, insertEnabled/insertStatements, insertDisabled/insertStatements,
-		recompute, deleteSample, deleteEnabled, deleteSample, deleteDisabled)
+		markPending, deleteSample, deleteEnabled, deleteSample, deleteDisabled)
 }
 
 func assertTranscriptStorageTimingRecount(t *testing.T, tx pgx.Tx, accountID string) {

@@ -630,19 +630,50 @@ realm/account aggregation and billing conversion remain deferred.
 ### Storage usage counter
 
 Schema 101 adds the cell-local `transcript_storage_usage` counter, which measures
-retained entry bytes: the entry half of `transcript_storage_byte`, including external ids, roles,
-visible bodies, JSON payload/artifact bytes, model labels, and reply ids. It
-excludes conversation titles and metadata, the entry's own generated id, and
-storage engine overhead. Sixteen shards per account, chosen by transcript, are kept
-current by statement triggers on every entry insert, update, and delete.
-UPDATE applies the net byte change for each account/shard. Decreases clamp at
-zero and leave missing shards absent, so counter undercount drift cannot block
-retention or purge.
+retained entry bytes: the entry half of `transcript_storage_byte`, including
+external ids, roles, visible bodies, JSON payload/artifact bytes, model labels,
+and reply ids. It excludes conversation titles and metadata, the entry's own
+generated id, and storage engine overhead. Sixteen shards per account are chosen
+by transcript. Statement triggers apply signed, linear byte deltas in the same
+transaction as each entry insert, update, or delete; UPDATE applies the net
+change for each account/shard. There is no subtraction clamp. A positive delta
+that creates a row starts it as `exact = true`; a decrease that creates a missing
+row, or drives an existing row below zero, leaves it non-exact for reconciliation.
 
-Import sets the transaction-local `witself.transcript_storage_usage_bulk` setting
-to skip grouped trigger updates, then recomputes the account once from its
-imported entries. The counter is cell-local and never archived. Nothing enforces
-a transcript storage cap yet.
+At migration time (T0), every account with existing entries gets all 16 rows at
+zero bytes with `exact = false`; the migration does no entry backfill. Import
+sets the transaction-local `witself.transcript_storage_usage_bulk` setting to
+skip trigger accounting, then resets all 16 account rows to zero and non-exact
+with fresh `reconcile_epoch` values, without recounting entries. This also resets
+rows left from an earlier incarnation of the account. An already-imported replay
+leaves those rows and epochs unchanged.
+
+The `transcript_storage_reconcile` worker job is off by default. One advisory
+lease permits one reconciler per cell. For each pending shard it measures the
+entries and counter together in a bounded, read-only REPEATABLE READ snapshot,
+paging entries and pacing queries with bounded sleeps inside the transaction.
+It then adds the measured difference to the latest counter value with an epoch
+compare-and-set. This preserves concurrent trigger deltas and rejects a stale
+measurement after an import reset, row recreation, or another reconcile. A
+successful non-negative result becomes exact. The worker defers accounts with
+an evacuation id and closed accounts awaiting purge, and checks eligibility
+again when applying. Purged tombstones can reconcile to zero. See
+[cell-worker.md](cell-worker.md) for enablement, pacing, and operator status.
+
+The exact flag detects drift only when a write drives a row below zero; it does
+not detect arbitrary out-of-band changes. Any future change to either
+`witself_transcript_entry_storage_bytes` or `witself_transcript_storage_shard`,
+any table rewrite or TRUNCATE that bypasses the triggers, and any bulk untracked
+write must, in the same transaction, set every affected counter row to
+`exact = false, reconcile_epoch = nextval('transcript_storage_usage_epoch_seq')`.
+A shard-function change must also insert all 16 rows for every account that has
+entries.
+
+There is no account foreign key: finalization leaves harmless orphan counter
+rows, excluded by the reconciler's join to accounts; this job does not sweep
+them. The counter is cell-local and never archived. Nothing enforces a transcript
+storage cap yet. Future A2 enforcement must fail open for an account unless all
+its counter rows are exact and non-negative.
 
 ## Structured Objects And File Artifacts
 

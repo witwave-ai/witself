@@ -62,6 +62,54 @@ func TestSchema93AccountConsentColumnsPreserveArchivedRows(t *testing.T) {
 	}
 }
 
+func TestSchema100TranscriptStorageCounterPreservesPortableRows(t *testing.T) {
+	upgrade := UpgraderFor(100)
+	if upgrade == nil {
+		t.Fatal("schema 100 identity upgrader is not registered")
+	}
+	for table, input := range map[string]map[string]any{
+		"accounts": {
+			"id": "acc_1", "plan": "enterprise", "status": "active",
+			"plan_revision": json.Number("15"),
+		},
+		"transcript_conversations": {
+			"id": "tr_1", "account_id": "acc_1", "owner_agent_id": "agent_1",
+			"next_sequence": json.Number("3"), "external_id": nil,
+			"metadata": map[string]any{"source": "fixture"},
+		},
+		"transcript_entries": {
+			"id": "te_1", "account_id": "acc_1", "transcript_id": "tr_1",
+			"sequence": json.Number("2"), "role": "assistant", "body": "portable transcript",
+			"payload": map[string]any{"complete": true}, "artifacts": []any{},
+		},
+	} {
+		t.Run(table, func(t *testing.T) {
+			// Snapshot before invoking the upgrader so mutations to nested maps
+			// cannot silently change both the actual and expected row.
+			want, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := upgrade(table, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(encoded, want) {
+				t.Fatalf("schema 100 identity upgrade changed portable %s row: got %s, want %s", table, encoded, want)
+			}
+			for _, field := range []string{"retained_bytes", "shard", "exact", "verified_at", "reconcile_epoch"} {
+				if _, exists := got[field]; exists {
+					t.Fatalf("schema 100 identity upgrade invented derived %s on %s", field, table)
+				}
+			}
+		})
+	}
+}
+
 func TestSchema25FactIdempotencyUpgrade(t *testing.T) {
 	upgrade := UpgraderFor(25)
 	if upgrade == nil {

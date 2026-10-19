@@ -266,6 +266,13 @@ worker:
   tolerations: []
   affinity: {}
   topologySpreadConstraints: []
+  # One cell-wide reconciler measures pending storage shards without locking writers.
+  transcriptStorageReconcile:
+    enabled: false
+    interval: 5m
+    dutyCycle: "0.5"
+    pageEntries: 1000
+    unitTimeout: 240s
   avatarStyleRollout:
     enabled: true
     batchSize: 100

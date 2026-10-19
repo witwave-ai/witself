@@ -137,7 +137,8 @@ type retentionItemLabels struct {
 
 // Metrics is a dependency-free, privacy-bounded process registry.
 type Metrics struct {
-	mu sync.Mutex
+	mu                         sync.Mutex
+	transcriptStorageReconcile transcriptStorageReconcileMetrics
 
 	jobs                                   map[string]*jobMetric
 	retentionBatches                       map[retentionBatchLabels]uint64
@@ -936,6 +937,7 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 		"witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds %.0f\n",
 		agentEmailRateBucketCleanupLastSuccess,
 	)
+	m.writeTranscriptStorageReconcilePrometheus(w)
 }
 
 func sortedRetentionBatchLabels(values map[retentionBatchLabels]uint64) []retentionBatchLabels {
