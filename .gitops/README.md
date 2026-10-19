@@ -313,8 +313,10 @@ the server. Remove the catalog block first, in its own PR, then roll back.
 ## Serving-cell monitoring extensions
 
 The platform chart's monitoring extensions are default off. The replacement
-serving cell `civo-sandbox-use1-serving` keeps monitoring disabled in its values
-file. All controls below are under `platform.monitoring` and require its
+serving cell `civo-sandbox-use1-serving` enables monitoring, incident alerting,
+`uptimeProbes`, `entitlementDelivery` and every extension in the table below in
+its checked-in values file.
+All controls below are under `platform.monitoring` and require its
 `enabled` switch. Alert rules also require `alerting.enabled`.
 
 | Knob | Shared default | Effect |

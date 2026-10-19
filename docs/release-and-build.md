@@ -133,7 +133,8 @@ both generated-config and deployed-version verification. It is omitted from
 results and metrics while disabled. The serving cell's scrape job and alert
 rules arrive through normal GitOps sync when monitoring is enabled, with
 `platform.monitoring.uptimeProbes.enabled` default off. The replacement serving
-cell `civo-sandbox-use1-serving` keeps monitoring disabled in its values file.
+cell `civo-sandbox-use1-serving` enables monitoring, incident alerting,
+`uptimeProbes` and `entitlementDelivery` in its checked-in values file.
 No probe-specific `deploy:plans` step is needed. See
 [Synthetic uptime probes](observability-and-operations.md#synthetic-uptime-probes)
 for targets, result fields, alert routing, and the existing-plan cost rationale.

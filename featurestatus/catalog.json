@@ -1024,9 +1024,13 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist. The accepted serving-cell PagerDuty/dead-man path is live; the rule pack still has no billing-specific rule, and provider-event dashboards and billing escalation integration remain open.",
+          "summary": "Value-free billing, webhook processing-failure, mutation-recovery and entitlement-delivery metrics exist. Tested serving-cell rules page on webhook rejections and processing failures, stalled or failing reconciliation, and stuck delivery; provider-event dashboards and billing escalation remain open.",
           "evidence": [
+            ".gitops/charts/platform/files/entitlement-delivery.rules.yaml",
             ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            ".gitops/charts/platform/files/uptime-probes.rules.yaml",
+            ".gitops/charts/platform/testdata/entitlement-delivery.rules.test.yaml",
+            ".gitops/charts/platform/testdata/uptime-probes.rules.test.yaml",
             "docs/billing-and-limits.md",
             "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
@@ -1072,7 +1076,7 @@
         {
           "id": "billing-operations",
           "gate_ids": ["observability", "recovery"],
-          "summary": "Connect billing-specific metrics, alerts, provider-event dashboards, and support escalation; retain restore reconciliation and a forward-fix drill on the current provider-target lineage.",
+          "summary": "Add provider-event dashboards and support escalation, and retain restore reconciliation and a forward-fix drill on the current provider-target lineage; billing metrics and tested failure alerts exist.",
           "ref": "docs/billing-and-limits.md"
         },
         {

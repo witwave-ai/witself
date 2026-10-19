@@ -1683,8 +1683,9 @@ The monitor does not provide exactly-once traversal or cross-isolate CAS.
 
 The separate `platform.monitoring.entitlementDelivery.enabled` alert capability
 is **false by default**. It additionally requires monitoring, alerting and the
-existing public probe scrape to be enabled. Existing serving-cell values are
-unchanged. Its rules report unavailable data after 15 minutes, no page
+existing public probe scrape to be enabled. The checked-in values for
+`civo-sandbox-use1-serving` enable monitoring, alerting, the public probe scrape
+and this capability. Its rules report unavailable data after 15 minutes, no page
 acknowledgement for 15 minutes sustained for another 10 minutes, and pending or
 unverified deliveries persisting across completed traversal observations for
 30 minutes. A measured first traversal or an old completed traversal receives
@@ -1697,9 +1698,21 @@ measure the age of a particular account's change. Explicit disablement
 suppresses these delivery alerts; a missing enablement metric is unknown,
 not disabled. Existing probe rules cover endpoint scrape failures.
 
-This is implemented monitoring capability, not evidence of deployment or rule
-activation. A later authorized rollout must establish readable, complete CP
-observations before enabling the new rules. See the
+`WitselfEntitlementDeliveryStuck` is critical when completed traversal results
+retain failures throughout a six-hour window, with at least two results: the
+result in force at the window's start and a completion inside it. The failed
+gauge must be present for at least 300 of 360 one-minute samples, and the
+condition must persist for ten minutes. A new series with only failing samples
+can reach that floor after five hours. With the 130a classification, a refused
+downgrade that remains pending counts as blocked and cannot fire this rule;
+a refusal on an account that is not pending still counts as failed. A control
+plane below 130a counts refused downgrades as failed again, so this rule can
+page during such a rollback. A healthy completed traversal clears it. At 100
+directory entries per five-minute tick, a traversal above about 7,200 entries
+outgrows the six-hour window and this rule can stay silent;
+`WitselfEntitlementDeliveryCycleIncomplete` warns instead.
+
+These rules are active on `civo-sandbox-use1-serving`. See the
 [entitlement monitoring runbook](runbooks.md#entitlement-delivery-monitoring)
 for diagnosis and the [metric reference](observability-and-operations.md#entitlement-delivery-observations)
 for the public projection.
