@@ -346,6 +346,12 @@ ConfigMap receives none of these keys:
 | `requestBudget.writePerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE` | `0` |
 | `requestBudget.writeBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST` | `0` |
 | `requestBudget.maxTrackedAccounts` | `WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS` | `10000` |
+| `requestBudget.plans` | `WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS` | `{}` |
+
+`plans` optionally maps 1–16 snapshot plan ids to `readPerMinute`, `readBurst`,
+`writePerMinute`, and `writeBurst`, each an integer from 1–1,000,000. Plan ids
+match `^[a-z][a-z0-9_]{0,31}$`. The map renders only when non-empty and the
+budget is enabled; unlisted plans use the cell-wide values above.
 
 The four rate/burst values are integers from 0–1,000,000 while disabled and
 1–1,000,000 when enabled. `maxTrackedAccounts` is always an integer from
@@ -438,6 +444,7 @@ for validation. Most-used: `image.tag`, `image.digest`, `replicaCount`, `backend
 `support.ticketRateLimit`, `support.ticketRateWindow`,
 `requestBudget.enabled`, `requestBudget.readPerMinute`, `requestBudget.readBurst`,
 `requestBudget.writePerMinute`, `requestBudget.writeBurst`, `requestBudget.maxTrackedAccounts`,
+`requestBudget.plans`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
 `worker.messageRateBucketCleanup.*`,

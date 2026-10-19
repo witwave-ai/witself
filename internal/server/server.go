@@ -2337,6 +2337,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := cfg.AccountRequestBudget.Validate(); err != nil {
 		return fmt.Errorf("account request budget: %w", err)
 	}
+	if cfg.AccountRequestBudget.Enabled && len(cfg.AccountRequestBudget.Plans) != 0 && cfg.GetAccountPlan == nil {
+		return fmt.Errorf("account request budget: per-plan budgets need the account plan reader")
+	}
 	metrics := newRuntimeMetrics()
 	instrumentedConfig := metrics.instrumentConfig(cfg)
 	jobs := newAccountImportJobs(ctx, cfg.AccountImportJobConcurrency)
@@ -3150,10 +3153,11 @@ func apiMux(cfg Config) http.Handler {
 	}
 	handler := securityResponseHeaders(activityContextMux(agentEmailNoStoreMux(avatarNoStoreMux(messageRequestsNoStoreMux(messagingNoStoreMux(mux))))))
 	if cfg.AccountRequestBudget.Enabled {
-		if err := cfg.AccountRequestBudget.Validate(); err != nil {
+		if err := cfg.AccountRequestBudget.Validate(); err != nil || (len(cfg.AccountRequestBudget.Plans) != 0 && cfg.GetAccountPlan == nil) {
 			panic("invalid account request budget configuration")
 		}
 		budget := newAccountRequestBudget(cfg.AccountRequestBudget, cfg.accountRequestBudgetNow)
+		budget.getAccountPlan = cfg.GetAccountPlan
 		if cfg.metrics != nil {
 			cfg.metrics.accountRequestBudget.Store(budget)
 		}

@@ -221,4 +221,11 @@ data:
   WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE: {{ printf "%d" (int64 .Values.requestBudget.writePerMinute) | quote }}
   WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST: {{ printf "%d" (int64 .Values.requestBudget.writeBurst) | quote }}
   WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS: {{ printf "%d" (int64 .Values.requestBudget.maxTrackedAccounts) | quote }}
+{{- if .Values.requestBudget.plans }}
+{{- $plans := dict }}
+{{- range $id, $tier := .Values.requestBudget.plans }}
+{{- $_ := set $plans $id (dict "read_per_minute" $tier.readPerMinute "read_burst" $tier.readBurst "write_per_minute" $tier.writePerMinute "write_burst" $tier.writeBurst) }}
+{{- end }}
+  WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS: {{ $plans | toJson | quote }}
+{{- end }}
 {{- end }}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +19,25 @@ import (
 type AccountRequestBudgetConfig struct {
 	Enabled                                                                  bool
 	ReadPerMinute, ReadBurst, WritePerMinute, WriteBurst, MaxTrackedAccounts int
+	Plans                                                                    map[string]AccountRequestBudgetTier
 }
 
-const accountRequestBudgetEnvPrefix = "WITSELF_ACCOUNT_REQUEST_BUDGET_"
+// AccountRequestBudgetTier supplies the read and write budgets for one plan id.
+type AccountRequestBudgetTier struct {
+	ReadPerMinute, ReadBurst, WritePerMinute, WriteBurst int
+}
+
+const (
+	accountRequestBudgetEnvPrefix         = "WITSELF_ACCOUNT_REQUEST_BUDGET_"
+	accountRequestBudgetPlanTTL           = time.Minute
+	accountRequestBudgetPlanRetryTTL      = 5 * time.Second
+	accountRequestBudgetPlanLookupTimeout = 2 * time.Second
+)
+
+var (
+	accountRequestBudgetPlanIDPattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+	accountRequestBudgetIntegerPattern = regexp.MustCompile(`^[0-9]+$`)
+)
 
 // ParseAccountRequestBudgetConfig only reads numeric settings when enabled.
 // Errors contain configuration names and ranges, never supplied values.
@@ -55,6 +73,85 @@ func ParseAccountRequestBudgetConfig(lookup func(string) (string, bool)) (Accoun
 	return cfg, nil
 }
 
+// ParseAccountRequestBudgetPlans reads only the optional plan map. Callers must
+// invoke it only when the account request budget is enabled.
+func ParseAccountRequestBudgetPlans(lookup func(string) (string, bool)) (map[string]AccountRequestBudgetTier, error) {
+	raw, present := lookup(accountRequestBudgetEnvPrefix + "PLANS")
+	if !present {
+		return nil, nil
+	}
+	var plans map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &plans); err != nil || plans == nil {
+		return nil, fmt.Errorf("WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS must be a JSON object of plan ids to read and write budgets")
+	}
+	if err := validateAccountRequestBudgetPlanCount(len(plans)); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(plans))
+	for id := range plans {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	parsed := make(map[string]AccountRequestBudgetTier, len(plans))
+	for _, id := range ids {
+		if err := validateAccountRequestBudgetPlanID(id); err != nil {
+			return nil, err
+		}
+		var values map[string]json.RawMessage
+		var tier AccountRequestBudgetTier
+		settings := accountRequestBudgetTierSettings(&tier)
+		if err := json.Unmarshal(plans[id], &values); err != nil || len(values) != len(settings) {
+			return nil, accountRequestBudgetPlanKeysError(id)
+		}
+		for _, setting := range settings {
+			if _, ok := values[setting.name]; !ok {
+				return nil, accountRequestBudgetPlanKeysError(id)
+			}
+		}
+		for _, setting := range settings {
+			token := strings.TrimSpace(string(values[setting.name]))
+			value, err := strconv.Atoi(token)
+			if !accountRequestBudgetIntegerPattern.MatchString(token) || err != nil || value < 1 || value > 1000000 {
+				return nil, accountRequestBudgetPlanRangeError(id, setting.name)
+			}
+			*setting.value = value
+		}
+		parsed[id] = tier
+	}
+	return parsed, nil
+}
+
+func validateAccountRequestBudgetPlanCount(count int) error {
+	if count < 1 || count > 16 {
+		return fmt.Errorf("WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS must name 1 to 16 plans")
+	}
+	return nil
+}
+
+func validateAccountRequestBudgetPlanID(id string) error {
+	if !accountRequestBudgetPlanIDPattern.MatchString(id) {
+		return fmt.Errorf("WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS has a plan id that is not 1-32 lowercase letters, digits or underscores starting with a letter")
+	}
+	return nil
+}
+
+func accountRequestBudgetPlanKeysError(id string) error {
+	return fmt.Errorf("WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS plan %q must set exactly read_per_minute, read_burst, write_per_minute and write_burst", id)
+}
+
+func accountRequestBudgetPlanRangeError(id, key string) error {
+	return fmt.Errorf("WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS plan %q %s must be an integer from 1 to 1000000", id, key)
+}
+
+func accountRequestBudgetTierSettings(tier *AccountRequestBudgetTier) []accountRequestBudgetSetting {
+	return []accountRequestBudgetSetting{
+		{"read_per_minute", &tier.ReadPerMinute, 1},
+		{"read_burst", &tier.ReadBurst, 1},
+		{"write_per_minute", &tier.WritePerMinute, 1},
+		{"write_burst", &tier.WriteBurst, 1},
+	}
+}
+
 type accountRequestBudgetSetting struct {
 	name  string
 	value *int
@@ -85,7 +182,32 @@ func (c AccountRequestBudgetConfig) Validate() error {
 			return setting.rangeError()
 		}
 	}
+	if c.Plans != nil {
+		if err := validateAccountRequestBudgetPlanCount(len(c.Plans)); err != nil {
+			return err
+		}
+		for _, id := range accountRequestBudgetPlanIDs(c.Plans) {
+			if err := validateAccountRequestBudgetPlanID(id); err != nil {
+				return err
+			}
+			tier := c.Plans[id]
+			for _, setting := range accountRequestBudgetTierSettings(&tier) {
+				if *setting.value < 1 || *setting.value > 1000000 {
+					return accountRequestBudgetPlanRangeError(id, setting.name)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+func accountRequestBudgetPlanIDs(plans map[string]AccountRequestBudgetTier) []string {
+	ids := make([]string, 0, len(plans))
+	for id := range plans {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // accountRequestBudget is a bounded, per-account GCRA: each replica keeps its own
@@ -97,8 +219,13 @@ type accountRequestBudget struct {
 	mu                sync.Mutex
 	entries           map[string]*accountRequestBudgetEntry
 	lru               list.List
-	interval          [2]time.Duration
-	tolerance         [2]time.Duration
+	tiers             []tierLimits
+	planIndex         map[string]int
+	tierCache         map[string]*accountRequestBudgetTierEntry
+	tierLRU           list.List
+	tierSeq           uint64
+	planLookupTimeout time.Duration
+	getAccountPlan    func(context.Context, string) (PlanSnapshotRecord, error)
 	maxAccounts       int
 	now               func() time.Time
 	rejections        [2]uint64
@@ -109,8 +236,31 @@ type accountRequestBudget struct {
 // occupy under about 2.5 MB (excluding map and account-string allocation overhead).
 type accountRequestBudgetEntry struct {
 	accountID string
+	tier      int
 	tat       [2]time.Time
 	element   *list.Element
+}
+
+type tierLimits struct {
+	interval  [2]time.Duration
+	tolerance [2]time.Duration
+}
+
+type accountRequestBudgetTierEntry struct {
+	accountID string
+	tier      int
+	resolved  bool
+	expires   time.Time
+	seq       uint64
+	element   *list.Element
+}
+
+func newAccountRequestBudgetTierLimits(tier AccountRequestBudgetTier) tierLimits {
+	limits := tierLimits{
+		interval: [2]time.Duration{time.Minute / time.Duration(tier.ReadPerMinute), time.Minute / time.Duration(tier.WritePerMinute)},
+	}
+	limits.tolerance = [2]time.Duration{time.Duration(tier.ReadBurst-1) * limits.interval[0], time.Duration(tier.WriteBurst-1) * limits.interval[1]}
+	return limits
 }
 
 func newAccountRequestBudget(cfg AccountRequestBudgetConfig, now func() time.Time) *accountRequestBudget {
@@ -118,12 +268,21 @@ func newAccountRequestBudget(cfg AccountRequestBudgetConfig, now func() time.Tim
 		now = time.Now
 	}
 	b := &accountRequestBudget{
-		entries:     make(map[string]*accountRequestBudgetEntry),
-		maxAccounts: cfg.MaxTrackedAccounts,
-		now:         now,
-		interval:    [2]time.Duration{time.Minute / time.Duration(cfg.ReadPerMinute), time.Minute / time.Duration(cfg.WritePerMinute)},
+		entries:           make(map[string]*accountRequestBudgetEntry),
+		maxAccounts:       cfg.MaxTrackedAccounts,
+		now:               now,
+		planIndex:         make(map[string]int, len(cfg.Plans)),
+		tierCache:         make(map[string]*accountRequestBudgetTierEntry),
+		planLookupTimeout: accountRequestBudgetPlanLookupTimeout,
+		tiers: []tierLimits{newAccountRequestBudgetTierLimits(AccountRequestBudgetTier{
+			ReadPerMinute: cfg.ReadPerMinute, ReadBurst: cfg.ReadBurst,
+			WritePerMinute: cfg.WritePerMinute, WriteBurst: cfg.WriteBurst,
+		})},
 	}
-	b.tolerance = [2]time.Duration{time.Duration(cfg.ReadBurst-1) * b.interval[0], time.Duration(cfg.WriteBurst-1) * b.interval[1]}
+	for _, id := range accountRequestBudgetPlanIDs(cfg.Plans) {
+		b.planIndex[id] = len(b.tiers)
+		b.tiers = append(b.tiers, newAccountRequestBudgetTierLimits(cfg.Plans[id]))
+	}
 	return b
 }
 
@@ -138,8 +297,81 @@ func (b *accountRequestBudget) admit(accountID, class string) (bool, int64) {
 	return b.admitLocked(accountID, class)
 }
 
+// admitForRequest resolves a plan outside the mutex, then selects and debits its
+// tier under one lock. The separate tier LRU survives bucket idle sweeps.
+func (b *accountRequestBudget) admitForRequest(r *http.Request, accountID, class string) (bool, int64) {
+	b.mu.Lock()
+	if len(b.planIndex) == 0 {
+		admitted, retryAfter := b.admitLocked(accountID, class)
+		b.mu.Unlock()
+		return admitted, retryAfter
+	}
+	now := b.now()
+	if entry := b.tierCache[accountID]; entry != nil && now.Before(entry.expires) {
+		b.tierLRU.MoveToFront(entry.element)
+		admitted, retryAfter := b.admitTierLocked(accountID, class, entry.tier)
+		b.mu.Unlock()
+		return admitted, retryAfter
+	}
+	b.tierSeq++
+	seq := b.tierSeq
+	b.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), b.planLookupTimeout)
+	record, err := b.getAccountPlan(ctx, accountID)
+	cancel()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cur := b.tierCache[accountID]
+	tier := 0
+	if err == nil {
+		tier = b.planIndex[record.Plan]
+		if cur == nil || seq > cur.seq {
+			cur = b.cacheTierLocked(accountID, tier, true, now.Add(accountRequestBudgetPlanTTL), seq)
+		} else {
+			tier = cur.tier
+		}
+	} else if cur != nil && cur.resolved {
+		// A failed refresh preserves a successful resolution, even when the
+		// refresh was started before that successful lookup completed.
+		tier = cur.tier
+		if seq > cur.seq {
+			cur.expires = now.Add(accountRequestBudgetPlanRetryTTL)
+			cur.seq = seq
+		}
+	} else if cur == nil || seq > cur.seq {
+		cur = b.cacheTierLocked(accountID, 0, false, now.Add(accountRequestBudgetPlanRetryTTL), seq)
+	}
+	b.tierLRU.MoveToFront(cur.element)
+	return b.admitTierLocked(accountID, class, tier)
+}
+
+func (b *accountRequestBudget) cacheTierLocked(accountID string, tier int, resolved bool, expires time.Time, seq uint64) *accountRequestBudgetTierEntry {
+	entry := b.tierCache[accountID]
+	if entry == nil {
+		if len(b.tierCache) >= b.maxAccounts {
+			oldest := b.tierLRU.Back()
+			delete(b.tierCache, oldest.Value.(*accountRequestBudgetTierEntry).accountID)
+			b.tierLRU.Remove(oldest)
+		}
+		entry = &accountRequestBudgetTierEntry{accountID: accountID}
+		entry.element = b.tierLRU.PushFront(entry)
+		b.tierCache[accountID] = entry
+	}
+	entry.tier = tier
+	entry.resolved = resolved
+	entry.expires = expires
+	entry.seq = seq
+	return entry
+}
+
 // admitLocked only decides and updates state; callers write after unlocking mu.
 func (b *accountRequestBudget) admitLocked(accountID, class string) (bool, int64) {
+	return b.admitTierLocked(accountID, class, 0)
+}
+
+func (b *accountRequestBudget) admitTierLocked(accountID, class string, tier int) (bool, int64) {
 	now := b.now()
 	back := b.lru.Back()
 	for examined := 0; examined < 2 && back != nil; examined++ {
@@ -164,6 +396,11 @@ func (b *accountRequestBudget) admitLocked(accountID, class string) (bool, int64
 		// Refusals are activity too: keep a continuously calling account hot.
 		b.lru.MoveToFront(entry.element)
 	}
+	if entry.tier != tier {
+		entry.tat = [2]time.Time{}
+		entry.tier = tier
+	}
+	limits := b.tiers[tier]
 	index := 1
 	if class == "read" {
 		index = 0
@@ -172,11 +409,11 @@ func (b *accountRequestBudget) admitLocked(accountID, class string) (bool, int64
 	if tat.Before(now) {
 		tat = now
 	}
-	if wait := tat.Sub(now) - b.tolerance[index]; wait > 0 {
+	if wait := tat.Sub(now) - limits.tolerance[index]; wait > 0 {
 		b.rejections[index]++
 		return false, messageRateLimitRetryAfterSeconds(wait)
 	}
-	entry.tat[index] = tat.Add(b.interval[index])
+	entry.tat[index] = tat.Add(limits.interval[index])
 	return true, 0
 }
 
@@ -220,10 +457,8 @@ func admitAccountRequest(w http.ResponseWriter, r *http.Request, accountID strin
 	if !ok || ticket.debited || strings.TrimSpace(accountID) == "" {
 		return true
 	}
-	ticket.b.mu.Lock()
-	admitted, retryAfter := ticket.b.admitLocked(accountID, ticket.class)
+	admitted, retryAfter := ticket.b.admitForRequest(r, accountID, ticket.class)
 	ticket.debited = true
-	ticket.b.mu.Unlock()
 	if !admitted {
 		writeAccountRequestBudgetError(w, ticket.class, retryAfter)
 	}

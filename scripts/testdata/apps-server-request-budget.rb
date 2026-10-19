@@ -174,7 +174,14 @@ class RequestBudgetChecks
   def case_d(serving_path, dir)
     apps = read_values(File.join(@apps_chart, "values.yaml"), "D1", SERVING_CELL)
     server = read_values(File.join(@server_chart, "values.yaml"), "D1", SERVING_CELL)
-    check("D1", SERVING_CELL, "apps and server chart requestBudget defaults must match", apps.dig("apps", "witselfServer", "requestBudget") == server["requestBudget"])
+    server_budget = server["requestBudget"].dup
+    # Slice 143a adds the server chart's per-plan tiers (requestBudget.plans,
+    # default {}). The apps chart forwards them only from slice 143b, behind its
+    # own version gate, and 143b restores exact parity here. Until then every
+    # other default must match and the server default must stay the empty map.
+    server_plans = server_budget.delete("plans")
+    check("D1", SERVING_CELL, "server chart requestBudget.plans default must be the empty map", server_plans == {})
+    check("D1", SERVING_CELL, "apps and server chart requestBudget defaults must match", apps.dig("apps", "witselfServer", "requestBudget") == server_budget)
     null = nested_values(budget_render(nil, dir, serving_path), "D2", SERVING_CELL)
     check("D2", SERVING_CELL, "explicit null must forward no requestBudget key", !null.key?("requestBudget"))
     disabled = budget_render({"enabled" => false}, dir, serving_path)

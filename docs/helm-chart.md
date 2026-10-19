@@ -161,6 +161,12 @@ Its values map to API ConfigMap environment keys only when enabled:
 | `requestBudget.writePerMinute` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_PER_MINUTE` | `0` |
 | `requestBudget.writeBurst` | `WITSELF_ACCOUNT_REQUEST_BUDGET_WRITE_BURST` | `0` |
 | `requestBudget.maxTrackedAccounts` | `WITSELF_ACCOUNT_REQUEST_BUDGET_MAX_ACCOUNTS` | `10000` |
+| `requestBudget.plans` | `WITSELF_ACCOUNT_REQUEST_BUDGET_PLANS` | `{}` |
+
+`plans` optionally maps 1–16 snapshot plan ids to `readPerMinute`, `readBurst`,
+`writePerMinute`, and `writeBurst`, each an integer from 1–1,000,000. Plan ids
+match `^[a-z][a-z0-9_]{0,31}$`. The map renders only when non-empty and the
+budget is enabled; unlisted plans use the cell-wide values above.
 
 The four rate/burst integers accept 0–1,000,000 while disabled and require
 1–1,000,000 when enabled; `maxTrackedAccounts` always requires 100–1,000,000.

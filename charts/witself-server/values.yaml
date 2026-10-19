@@ -83,6 +83,10 @@ requestBudget:
   writePerMinute: 0
   writeBurst: 0
   maxTrackedAccounts: 10000
+  # Optional budgets by account plan id.
+  # Any other plan uses the values above.
+  # Rendered only when the budget is enabled and the map is non-empty.
+  plans: {}
 
 backup:
   existingSecret:
