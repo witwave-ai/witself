@@ -1,6 +1,6 @@
 # Witself Data Processing Addendum
 
-**Version 2026-09-21 · Effective 2026-09-21**
+**Version 2026-10-19 · Effective 2026-10-19**
 
 This DPA applies where Witwave LLC processes personal data in your content
 on your behalf. It is incorporated into the
@@ -28,7 +28,7 @@ contact legal@witwave.ai.
   audited in an append-style audit ledger with access controls. Open-plane
   content is stored on managed provider infrastructure.
 - **Deletion on termination**: on account closure, stored content is
-  deleted within 30 days as described in the
+  deleted starting 30 days after closure, as described in the
   [Privacy Policy](privacy-policy.md); encrypted backups expire on the
   backup retention schedule (up to 90 days).
 - **Breach notice**: we notify affected customers without undue delay after
