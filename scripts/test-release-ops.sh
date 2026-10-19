@@ -30,6 +30,220 @@ ORIGINAL_PATH=$PATH
 REAL_GIT=$(command -v git)
 REAL_DATE=$(command -v date)
 export REAL_GIT REAL_DATE
+
+# Read only the two bounded public additions (B1 and B2). Run this before fixture
+# setup so a documentation mutation fails without unrelated release scenarios.
+check_runbook_contract() {
+  local runbook section prose paragraph block recovery line previous command script flag
+  local heading_count next_heading brew_line plans_line chain_line block_end
+  local timing_line hold_line close_line
+  runbook=$SOURCE_ROOT/docs/runbooks.md
+  section=$OUT/runbook-section
+  prose=$OUT/runbook-prose
+  paragraph=$OUT/plans-paragraph
+  block=$OUT/plans-block
+  recovery=$OUT/recovery-block
+  heading_count=$(grep -c '^## Ship a fix and close signups without an AI agent$' "$runbook" || true)
+  [ "$heading_count" = 1 ] || fail 'T18 runbook heading must occur exactly once'
+  next_heading=$(awk '
+    /^## Ship a fix and close signups without an AI agent$/ { active=1; next }
+    active && /^## / { print; exit }
+  ' "$runbook")
+  [ "$next_heading" = '## K3s minor upgrade (Civo)' ] || fail 'T18 K3s must immediately follow B1'
+  awk '
+    /^## Ship a fix and close signups without an AI agent$/ { active=1; print; next }
+    active && /^## / { exit }
+    active { print }
+  ' "$runbook" > "$section"
+  [ "$(awk 'NR > 1 && NF { print; exit }' "$section")" = 'Status: DRAFT; not rehearsed.' ] \
+    || fail 'T18 draft status line'
+  awk '{ for (i=1; i<=NF; i++) { if (seen++) printf " "; printf "%s", $i } } END { print "" }' "$section" > "$prose"
+  awk 'BEGIN { RS="" } { gsub(/[[:space:]]+/, " "); print }' "$section" > "$OUT/runbook-paragraphs"
+
+  cat > "$OUT/plans-expected" <<'PLANS'
+PLANS_WT=$(mktemp -d)/plans
+git fetch origin --tags && git worktree add --detach "$PLANS_WT" "v$VERSION"
+git -C "$PLANS_WT" describe --tags --exact-match   # must print v$VERSION
+test -z "$(git -C "$PLANS_WT" status --porcelain)"
+(cd "$PLANS_WT/infra/cloudflare/control-plane" && umask 022 && set -a && . "$DEPLOY_ENV_FILE" && set +a \
+  && if [ -n "${CLOUDFLARE_TOKEN_FILE:-}" ]; then CLOUDFLARE_API_TOKEN=$(cat "$CLOUDFLARE_TOKEN_FILE"); fi \
+  && export CLOUDFLARE_API_TOKEN && npm ci && npm run deploy:plans)
+git worktree remove --force "$PLANS_WT"
+PLANS
+  # These independent commands are not release-script options. Keep exact
+  # spellings so a broad command-name exception cannot conceal an added flag.
+  cat > "$OUT/non-release-commands" <<'COMMANDS'
+witself secret reveal "$EDGE_TOKEN_SECRET" token --json | jq -j .value > "$SECRETS_DIR/edge.token"
+SERVING_URL=$(witself-admin cells show civo-sandbox-use1-serving --token-file "$FLEET_TOKEN_FILE" --json | jq -r .cell.endpoint)
+git switch main && git pull --ff-only
+scripts/roll-train.sh "$VERSION" --no-schema-change --serving-url "$SERVING_URL"
+witself-admin cells list --token-file "$ADMIN_TOKEN_FILE" --json | jq -r '.cells[] | select(.accepting == true) | .name'
+witself-admin cells drain "$CELL" --token-file "$FLEET_TOKEN_FILE" --json | jq -e '.cell.accepting == false'
+sleep 60; witself-admin cells list --token-file "$ADMIN_TOKEN_FILE" --json | jq -e '[.cells[] | select(.accepting == true)] | length == 0'
+COMMANDS
+  # Check physical lines so a missing continuation cannot hide an orphan flag.
+  # Known non-release commands have their own flags; only release scripts are
+  # invoked here, with --help as their sole input. Reset ownership at every fence.
+  awk '
+    FILENAME != ARGV[3] { known[$0]=1; next }
+    /^[[:space:]]*```/ { fenced=!fenced; script=""; next }
+    !fenced || /^[[:space:]]*#/ { next }
+    {
+      if (match($0, /scripts\/release-[a-z-]+\.sh([[:space:]]|$)/)) {
+        script=substr($0, RSTART, RLENGTH); sub(/[[:space:]]$/, "", script)
+      }
+      line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+      if (line in known) next
+      if ($0 ~ /^[[:space:]]*--/ || $0 ~ /--[A-Za-z0-9][A-Za-z0-9-]*/) {
+        if (script == "") exit 1
+        print script "\t" $0
+      }
+    }
+  ' "$OUT/plans-expected" "$OUT/non-release-commands" "$section" > "$OUT/runbook-commands" || fail 'T18 flag has no preceding release script in its block'
+  [ -s "$OUT/runbook-commands" ] || fail 'T18 no release commands found'
+  while IFS=$'\t' read -r script command; do
+    [ -f "$SOURCE_ROOT/$script" ] || fail 'T18 documented release script is missing'
+    "$BASH" "$SOURCE_ROOT/$script" --help > "$OUT/runbook-help" \
+      || fail "T18 $script --help failed"
+    # Only the first option token is advertised. Descriptions can mention flags
+    # accepted by a child (for example, the drill-account-id description).
+    awk '/^[[:space:]]+--[A-Za-z0-9][A-Za-z0-9-]*/ { print $1 }' "$OUT/runbook-help" > "$OUT/runbook-help-flags"
+    [ -s "$OUT/runbook-help-flags" ] || fail "T18 $script advertises no flags"
+    printf '%s\n' "$command" | grep -oE -- '--[A-Za-z0-9][A-Za-z0-9-]*' > "$OUT/runbook-command-flags" || true
+    while IFS= read -r flag; do
+      grep -Fxq -- "$flag" "$OUT/runbook-help-flags" || fail "T18 $script does not advertise $flag"
+    done < "$OUT/runbook-command-flags"
+  done < "$OUT/runbook-commands"
+  awk '
+    /^[[:space:]]*```/ { fenced=!fenced; next }
+    fenced && !/^[[:space:]]*#/ { print }
+  ' "$section" > "$OUT/runbook-fenced-commands"
+  if grep -Eq -- '(^|[^A-Za-z0-9_-])--backup-evidence([^A-Za-z0-9_-]|$)' "$OUT/runbook-fenced-commands"; then
+    fail 'T18 schema-release recovery path is forbidden'
+  fi
+  previous=''
+  while IFS= read -r line; do
+    case "$line" in
+      *--no-schema-change*)
+        [[ "$line" == *gate=--no-schema-change* || "$previous" == *gate=--no-schema-change* ]] \
+          || fail 'T18 no-schema-change command lacks its immediately preceding gate' ;;
+    esac
+    previous=$line
+  done < "$section"
+  for line in 'cells drain' 'cells undrain' '-register-draining' 'register_draining' 'civo-prod-use1-serving' 'gate=--no-schema-change'; do
+    grep -Fq -- "$line" "$prose" || fail "T18 missing runbook contract: $line"
+  done
+  if grep -Fq 'roll the control plane back' "$prose"; then fail 'T18 forbidden control-plane rollback'; fi
+  awk '
+    /^Since the production-receive rollout installed the two$/ { active=1 }
+    active && !NF { exit }
+    active { print }
+  ' "$runbook" > "$OUT/runbook-attestations"
+  for line in 'CP_DEPLOY_CANONICAL_EMAIL_ACTIVE=true' 'CP_DEPLOY_SIGNUP_OPEN_ACTIVE=true'; do
+    grep -Fq "$line" "$OUT/runbook-attestations" || fail "T18 missing B2 attestation: $line"
+  done
+  if grep -Fq 'signup-Turnstile activation' "$runbook"; then fail 'T18 stale signup attestation description'; fi
+
+  brew_line=$(grep -n '^brew upgrade witself witself-admin witself-infra$' "$section" || true)
+  plans_line=$(grep -n '^The chain does not deploy the public plans page' "$section" || true)
+  chain_line=$(grep -n '^The chain, in order:$' "$section" || true)
+  brew_line=${brew_line%%:*}; plans_line=${plans_line%%:*}; chain_line=${chain_line%%:*}
+  [ -n "$brew_line" ] && [ -n "$plans_line" ] && [ -n "$chain_line" ] \
+    && [ "$brew_line" -lt "$plans_line" ] && [ "$plans_line" -lt "$chain_line" ] \
+    || fail 'T18 plans paragraph must follow brew and precede chain stages'
+  awk '
+    /^The chain does not deploy the public plans page/ { active=1 }
+    active && !NF { exit }
+    active { for (i=1; i<=NF; i++) { if (seen++) printf " "; printf "%s", $i } }
+    END { print "" }
+  ' "$section" > "$paragraph"
+  for line in 'release-chain: STAGE cp PASS' 'or, when you recover by hand,' \
+    '`scripts/release-deploy-control-plane.sh` prints its `release-deploy-control-plane: PASS control plane at` line' \
+    'from a clean worktree at the same tag' 'If it fails, the cells still roll'; do
+    grep -Fq "$line" "$paragraph" || fail "T18 missing plans deployment trigger or recovery: $line"
+  done
+  awk '
+    /^The chain does not deploy the public plans page/ { active=1 }
+    active && /^```sh$/ { fenced=1; next }
+    fenced && /^```$/ { exit }
+    fenced { print }
+  ' "$section" > "$block"
+  block_end=$(awk -v start="$plans_line" 'NR > start && /^```/ { if (++fences == 2) { print NR; exit } }' "$section")
+  [ -n "$block_end" ] && [ "$block_end" -lt "$chain_line" ] || fail 'T18 plans fenced block must precede chain stages'
+  "$BASH" -n "$block" > "$OUT/plans-syntax" 2>&1 || fail 'T18 plans block is not valid shell syntax'
+  cmp -s "$block" "$OUT/plans-expected" || fail 'T18 plans block must contain the exact commands in order'
+
+  awk '
+    /^If a stage fails, fix the cause\./ { active=1 }
+    active && /^```sh$/ { fenced=1; next }
+    fenced && /^```$/ { exit }
+    fenced { print }
+  ' "$section" > "$recovery"
+  # Collapse only the recovery command continuations to find the physical line
+  # immediately after the complete control-plane command, including its flags.
+  awk '
+    {
+      line=$0
+      if (sub(/\\[[:space:]]*$/, "", line)) { pending=pending line " "; next }
+      line=pending line; pending=""
+      if (previous ~ /^scripts\/release-deploy-control-plane\.sh[[:space:]]/) {
+        if (line != "# Then deploy the plans page from the same tag, as described above.") exit 1
+        found++
+      }
+      previous=line
+    }
+    END { if (found != 1) exit 1 }
+  ' "$recovery" || fail 'T18 plans reminder must immediately follow the recovery deploy command'
+  awk '
+    /^[[:space:]]*scripts\/roll-train\.sh[[:space:]]/ {
+      count++
+      if (previous != "# Only when release-schema-check printed gate=--no-schema-change:") exit 1
+      if ($0 !~ /[[:space:]]--no-schema-change([[:space:]]|$)/) exit 1
+    }
+    { previous=$0 }
+    END { if (count != 1) exit 1 }
+  ' "$recovery" || fail 'T18 recovery must contain exactly one gated no-schema-change roll-train command'
+
+  for line in 'This section is for releases without a schema change.' \
+    '#back-up-both-reviewed-civo-databases-before-a-migration' '#two-wave-roll-automated' \
+    'window and database settings that the founder approves' 'Do not run it from this section;' \
+    'stops before tagging if the schema advances;' 'do not pass `--backup-evidence`' \
+    'If release-schema-check printed gate=--backup-evidence, stop: this is a schema release.'; do
+    grep -Fq -- "$line" "$prose" || fail "T18 missing schema-release boundary: $line"
+  done
+  for line in '## Back up both reviewed Civo databases before a migration' '## Two-wave roll (automated)'; do
+    grep -Fxq "$line" "$runbook" || fail "T18 schema-release link target is missing: $line"
+  done
+  for line in 'run the chain again with `--backup-evidence' 'without backup evidence'; do
+    if grep -Fq -- "$line" "$prose"; then fail 'T18 schema-release recovery path is forbidden'; fi
+  done
+  grep -Fq 'cell as "Two-wave roll (automated)" describes for the production pair. This section is for releases without a schema change.' "$OUT/runbook-paragraphs" \
+    || fail 'T18 A5 must directly follow the production-pair sentence'
+  timing_line=$(grep -n 'a stage that is running continues\.$' "$OUT/runbook-paragraphs" || true)
+  hold_line=$(grep -n '^Once weekly scheduled restore drills are switched on' "$OUT/runbook-paragraphs" || true)
+  close_line=$(grep -n '^### Close signups$' "$OUT/runbook-paragraphs" || true)
+  timing_line=${timing_line%%:*}; hold_line=${hold_line%%:*}; close_line=${close_line%%:*}
+  [ -n "$timing_line" ] && [ -n "$hold_line" ] && [ -n "$close_line" ] \
+    && [ "$timing_line" -lt "$hold_line" ] && [ "$hold_line" -lt "$close_line" ] \
+    || fail 'T18 weekly drill hold must follow timing and precede Close signups'
+  grep '^Once weekly scheduled restore drills are switched on' "$OUT/runbook-paragraphs" > "$OUT/weekly-hold"
+  for line in 'Once weekly scheduled restore drills are switched on' \
+    'default Wednesday, 16:00-20:00Z' 'from 13:30Z' 'from 15:30Z' 'until 21:32Z' \
+    'witself_control_plane_account_backup_restore_drill_running' 'on the control plane' \
+    '/metrics/probes' 'is 0. An absent gauge is not zero.' 'shift these times with it.'; do
+    grep -Fq "$line" "$OUT/weekly-hold" || fail "T18 missing weekly drill hold: $line"
+  done
+  pass 'T18 the runbook section matches the scripts'
+  # B1 and B2 are the complete documentation footprint of this slice. Scan both
+  # after merge too, without depending on an uncommitted Git diff or its context.
+  cat "$section" "$OUT/runbook-attestations" > "$OUT/runbook-public-additions"
+  if grep -nE '/Users/|\$HOME|~/\.witself|acc_[a-z0-9]|sec_[a-z0-9]|k8s\.civo\.com|[0-9a-f]{32}|\.gitops/cells|/private/tmp|~/\.dsh|\$\{HOME\}|(agent|realm|cell|adm)_[a-z0-9]{8,}|[A-F0-9]{32,}|workers\.dev' "$OUT/runbook-public-additions" > "$OUT/static"; then
+    fail 'T19 runbook operator values'
+  fi
+  pass 'T19 runbook has no operator values'
+}
+check_runbook_contract
+
 cp "$SOURCE_ROOT/scripts/lib/release-ops.sh" "$REPO/scripts/lib/"
 for script in "$SOURCE_ROOT"/scripts/release-*.sh; do cp "$script" "$REPO/scripts/"; done
 printf 'fixture\n' > "$REPO/infra/cloudflare/control-plane/package.json"
@@ -1247,8 +1461,5 @@ for script in "$SOURCE_ROOT/scripts/lib/release-ops.sh" "$SOURCE_ROOT"/scripts/r
   if grep -nE '/Users/|\$HOME|~/\.witself|acc_[a-z0-9]|sec_[a-z0-9]|k8s\.civo\.com|[0-9a-f]{32}|\.gitops/cells' "$script" > "$OUT/static"; then fail 'T19 operator values'; fi
   if tail -n +2 "$script" | grep -nE '(^|[^A-Za-z0-9_])/(usr/)?(local/)?s?bin/' > "$OUT/static"; then fail 'T20 absolute binaries'; fi
 done
-# The future runbook section is optional until 125B, and is read in isolation.
-sed -n '/^## Ship a fix and close signups without an AI agent$/,/^## K3s minor upgrade (Civo)$/p' "$SOURCE_ROOT/docs/runbooks.md" > "$OUT/runbook-section"
-if grep -nE '/Users/|\$HOME|~/\.witself|acc_[a-z0-9]|sec_[a-z0-9]|k8s\.civo\.com|[0-9a-f]{32}|\.gitops/cells' "$OUT/runbook-section" >/dev/null; then fail 'T19 runbook operator values'; fi
 pass 'T16 T19 T20'
-printf 'release ops test: PASS all 125A1 and 125A2 contracts\n'
+printf 'release ops test: PASS all 125A1, 125A2 and 125B contracts\n'

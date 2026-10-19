@@ -1509,6 +1509,246 @@ and then runs the six `scripts/test-roll-train-*.sh` suites. It needs `git`,
 `jq`, Mike Farah's `yq`, `go` and `shasum` on `PATH`. Both `make check-infra`
 and the CI `helm` job run it.
 
+## Ship a fix and close signups without an AI agent
+
+Status: DRAFT; not rehearsed.
+
+These commands need no AI agent. Every `scripts/release-*.sh` script is a
+dry run by default: it checks its inputs, prints its plan and contacts
+nothing. Add `--execute` to act. Each script ends with one line,
+`<script>: PASS ...` or `<script>: FAIL ...`, and exits nonzero on failure.
+Read that line, not a wrapper's exit code.
+
+This path covers the sandbox pair only: `civo-sandbox-use1-backup` and
+`civo-sandbox-use1-serving`. `release-chain.sh` stops at preflight while
+`civo-prod-use1-serving` is registered with the control plane. Roll that
+cell as "Two-wave roll (automated)" describes for the production pair.
+This section is for releases without a schema change. A release that adds
+migrations needs the backups of [Back up both reviewed Civo databases before a migration](runbooks.md#back-up-both-reviewed-civo-databases-before-a-migration).
+It also needs a window and database settings that the founder approves for
+that release and that no script applies. Do not run it from this section;
+the founder runs that release with the [two-wave roll](runbooks.md#two-wave-roll-automated).
+Control-plane rollback is not covered here.
+
+### What the machine needs
+
+- `bash`, `git`, `gh` (authenticated: `gh auth status`), `jq`, Mike Farah's
+  `yq`, `kubectl`, `curl`, `shasum`, `node`, `npm`, `witself`,
+  `witself-admin` and Homebrew.
+- A Git identity that may push tags and branches to `witwave-ai/witself`.
+  `release-tag.sh` creates an annotated tag, and `roll-train.sh` commits
+  with `Signed-off-by`.
+- Kube contexts `witself-civo-sandbox-use1-backup` and
+  `witself-civo-sandbox-use1-serving` (see "Two-wave roll (automated)").
+- A terminal that stays open, on a machine that does not sleep. On macOS,
+  start the chain under `caffeinate -i`.
+- Time. A train usually takes 1.5 to 2.5 hours and a restore drill about
+  20 minutes. CI, the release run and the deploy add to that. With every
+  wait at its bound, the chain can run for more than 14 hours.
+
+### Prepare the inputs
+
+Keep every token file mode 0600, in a directory only you can open, outside
+every Git checkout:
+
+```sh
+umask 077
+SECRETS_DIR=$(mktemp -d)
+```
+
+1. Edge token. Witself must be up. Set `EDGE_TOKEN_SECRET` to the vault
+   secret id of the control-plane edge token, from the founder's record,
+   and add your usual agent connection flags:
+
+   ```sh
+   witself secret reveal "$EDGE_TOKEN_SECRET" token --json | jq -j .value > "$SECRETS_DIR/edge.token"
+   EDGE_TOKEN_FILE="$SECRETS_DIR/edge.token"
+   ```
+
+   If Witself is down, use the founder's escrow copy. Without one, this
+   path stops here.
+2. Fleet and admin tokens. Use the managed token files that `witself-admin`
+   already reads (see "Connection, credentials, and output" in
+   `docs/witself-admin.md`). Set `FLEET_TOKEN_FILE` and `ADMIN_TOKEN_FILE`
+   to their absolute paths.
+3. Cloudflare API token for the production account. Either write it to a
+   0600 file and set `CLOUDFLARE_TOKEN_FILE`, or keep it in
+   `CLOUDFLARE_API_TOKEN` and leave out `--cloudflare-token-file`. When both
+   exist, the file wins. Either way the scripts read the token once and
+   hide it from every child except `npm run deploy`.
+4. Deploy identifiers. Write `DEPLOY_ENV_FILE` (0600) with exactly four
+   `NAME=VALUE` lines, for `CLOUDFLARE_ACCOUNT_ID`, `EMAIL_DIRECTORY_KV_ID`,
+   `AGENT_EMAIL_ROUTE_SIGNING_KEY_ID` and
+   `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. The values come from
+   the founder's record. No repository command prints them. Without that
+   record, this path stops here.
+5. Serving URL:
+
+   ```sh
+   SERVING_URL=$(witself-admin cells show civo-sandbox-use1-serving --token-file "$FLEET_TOKEN_FILE" --json | jq -r .cell.endpoint)
+   ```
+
+6. `DRILL_ACCOUNT_ID`: the account whose nightly backup the drill restores,
+   from the founder's record.
+
+When you finish, run `rm -rf "$SECRETS_DIR"`.
+
+### Ship a fix
+
+Start with the fix pushed to a branch and an open PR, after
+`scripts/run-gate.sh --log /tmp/check.log check` passed. Set `PR` to the PR
+number and `VERSION` to the next release without the `v`. It must be higher
+than every existing tag; the chain's dry run prints the highest one.
+
+From the fix branch's checkout, merge, then move to an up-to-date `main`:
+
+```sh
+scripts/release-merge-pr.sh "$PR" --expect-head "$(git rev-parse HEAD)" --execute
+git switch main && git pull --ff-only
+```
+
+The merge happens only at a settled green: every check passed, the PR head
+is the commit you have, and the post-merge CI run succeeds.
+
+Read the chain's plan:
+
+```sh
+scripts/release-chain.sh "$VERSION" --order cp-first --serving-url "$SERVING_URL" \
+  --edge-token-file "$EDGE_TOKEN_FILE" --cloudflare-token-file "$CLOUDFLARE_TOKEN_FILE" \
+  --deploy-env-file "$DEPLOY_ENV_FILE" \
+  --attest-canonical-email-active --attest-signup-open-active \
+  --fleet-token-file "$FLEET_TOKEN_FILE" --drill-account-id "$DRILL_ACCOUNT_ID"
+```
+
+Then run the same command with `--execute` added at the end (on macOS,
+prefixed with `caffeinate -i`). This changes production. When it ends with
+`release-chain: PASS`, upgrade the local tools:
+
+```sh
+brew upgrade witself witself-admin witself-infra
+```
+
+The chain does not deploy the public plans page, a separate Worker. As soon
+as the chain prints `release-chain: STAGE cp PASS`, or, when you recover by
+hand, `scripts/release-deploy-control-plane.sh` prints its
+`release-deploy-control-plane: PASS control plane at` line, deploy it in a
+second terminal from a clean worktree at the same tag. If it fails, the
+cells still roll; redeploy the plans page from the same tag. Rolling it
+back to an earlier release is the founder's decision.
+
+```sh
+PLANS_WT=$(mktemp -d)/plans
+git fetch origin --tags && git worktree add --detach "$PLANS_WT" "v$VERSION"
+git -C "$PLANS_WT" describe --tags --exact-match   # must print v$VERSION
+test -z "$(git -C "$PLANS_WT" status --porcelain)"
+(cd "$PLANS_WT/infra/cloudflare/control-plane" && umask 022 && set -a && . "$DEPLOY_ENV_FILE" && set +a \
+  && if [ -n "${CLOUDFLARE_TOKEN_FILE:-}" ]; then CLOUDFLARE_API_TOKEN=$(cat "$CLOUDFLARE_TOKEN_FILE"); fi \
+  && export CLOUDFLARE_API_TOKEN && npm ci && npm run deploy:plans)
+git worktree remove --force "$PLANS_WT"
+```
+
+The chain, in order:
+
+1. checks that your checkout is `origin/main` and that the production cell
+   is not registered;
+2. checks the schema of the commit it will tag against the live serving
+   cell, and stops before tagging if the schema advances;
+3. waits for green CI on that commit, tags `v$VERSION` and waits for the
+   release run;
+4. deploys the control plane and rolls both cells with
+   `scripts/roll-train.sh`, in the order you chose;
+5. proves a restore drill: validated, and no rows left in the drill
+   database.
+
+It does not start the deploy or the drill in the 30 minutes before 23:30Z,
+nor the train in the 150 minutes before 23:30Z, and none of them before
+00:45Z. Only stage starts are guarded: a stage that is running continues.
+
+Once weekly scheduled restore drills are switched on, the chain does not
+know their window. On the drill weekday (default Wednesday, 16:00-20:00Z),
+do not start the chain, or a train, from 13:30Z, and do not start a
+control-plane deploy by hand from 15:30Z, until 21:32Z (92 minutes after
+the window ends). Before any drill, including the chain's, confirm that
+`witself_control_plane_account_backup_restore_drill_running` on the control
+plane's `/metrics/probes` is 0. An absent gauge is not zero. If the founder
+moved the window, shift these times with it.
+
+- `--order`: use `cp-first` unless a PR in the release says to roll cells
+  first. Releases that change a cell-to-control-plane protocol say which
+  side goes first.
+- The two `--attest-...` flags state the live production state: canonical
+  realm email and open signup are both active. Leave a flag out only if that
+  state has changed; the deploy then refuses while the matching secrets
+  exist.
+- If the chain stops at stage schema because the schema advances, do not
+  pass `--backup-evidence`, whatever the chain's message says. Stop, and run
+  the schema train with the founder as the sentence above describes.
+
+If a stage fails, fix the cause. Then run the schema check, and the failed
+stage's script and every later one by hand, in the chain's order (with
+`cp-first`, the deploy comes before the train):
+
+```sh
+scripts/release-schema-check.sh "$VERSION" --serving-url "$SERVING_URL" --execute
+scripts/release-tag.sh "$VERSION" --execute
+scripts/release-deploy-control-plane.sh "$VERSION" --edge-token-file "$EDGE_TOKEN_FILE" \
+  --cloudflare-token-file "$CLOUDFLARE_TOKEN_FILE" --deploy-env-file "$DEPLOY_ENV_FILE" \
+  --attest-canonical-email-active --attest-signup-open-active --execute
+# Then deploy the plans page from the same tag, as described above.
+# Only when release-schema-check printed gate=--no-schema-change:
+scripts/roll-train.sh "$VERSION" --no-schema-change --serving-url "$SERVING_URL"
+scripts/release-drill-proof.sh --account-id "$DRILL_ACCOUNT_ID" \
+  --fleet-token-file "$FLEET_TOKEN_FILE" --execute
+```
+
+If release-schema-check printed gate=--backup-evidence, stop: this is a schema release.
+
+Without `--commit`, `release-tag.sh` reuses the commit of an existing
+`v$VERSION`. If CI on that commit was cancelled, it prints the
+`gh run rerun` command to run first. For a train that stopped after wave 1
+merged, see `--resume` above. `release-deploy-control-plane.sh` may deploy
+the live version again but refuses a lower one: control-plane rollback is
+not covered here.
+
+### Close signups
+
+This is a live change.
+
+```sh
+witself-admin cells list --token-file "$ADMIN_TOKEN_FILE" --json | jq -r '.cells[] | select(.accepting == true) | .name'
+witself-admin cells drain "$CELL" --token-file "$FLEET_TOKEN_FILE" --json | jq -e '.cell.accepting == false'
+sleep 60; witself-admin cells list --token-file "$ADMIN_TOKEN_FILE" --json | jq -e '[.cells[] | select(.accepting == true)] | length == 0'
+```
+
+The first command prints every cell that accepts new accounts. Write the
+names down. Run the second once for each name, with `CELL` set to it. It
+exits 0 only when the control plane confirms the cell no longer accepts.
+The third waits a minute, because signup placement reads a registry copy
+that can lag, then exits 0 only when no cell accepts.
+
+New signups are then refused at cell placement with HTTP 503. The message
+is `no capacity: no accepting cells`, or a variant that names an invite's
+pinned cell or region. The refusal comes after the signup's abuse checks
+and its invite reservation. Whether a refused attempt still counts against
+the signup quota, or keeps its invite reserved, has not been checked.
+Existing accounts keep working. Moves and restores into a drained cell are
+refused with HTTP 409.
+
+To reopen, run `witself-admin cells undrain "$CELL" --token-file
+"$FLEET_TOKEN_FILE" --json` for each name you wrote down.
+
+A `witself-infra up` with `-control-plane` registers the cell again, as
+accepting unless `-register-draining` is passed or the cell record sets
+`register_draining`. Do not run one while signups must stay closed.
+
+`cells list` shows `accepting` as false for an entry that has no such
+field, while placement treats that entry as accepting. Entries written by
+registration or by `drain` and `undrain` always carry the field.
+
+Switching to invite-only signup instead (`CP_SIGNUP_OPEN=false`) is not a
+quick lever: the deploy verifier pins the committed value, so it needs a
+reviewed code change, a release and a control-plane deploy.
+
 ## K3s minor upgrade (Civo)
 
 Keep the desired K3s version in each cell's `k8s_version` field in the
@@ -3354,9 +3594,11 @@ Since the production-receive rollout installed the two
 `CP_REALM_EMAIL_CANONICAL_*` activation secrets, every control-plane deploy
 must additionally attest that reviewed live state with the exact literal
 `CP_DEPLOY_CANONICAL_EMAIL_ACTIVE=true`; without it the dark guard refuses
-(fail closed) because an activation secret is present. The attestation frees
-only the canonical pair — custom-domain and signup-Turnstile activation
-secrets are still refused unconditionally.
+(fail closed) because an activation secret is present. Since open signup
+installed the three `CP_SIGNUP_TURNSTILE_*` secrets, every deploy must also
+pass the exact literal `CP_DEPLOY_SIGNUP_OPEN_ACTIVE=true`. Each attestation
+frees only its own secrets; custom-domain activation secrets are still
+refused unconditionally.
 
 `npm run deploy` renders `wrangler.generated.jsonc`, deploys the Worker and its
 existing Durable Object class set, and runs deployment verification. Do not run
