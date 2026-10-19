@@ -787,6 +787,15 @@ func integrationDisplayName(runtimeName string) string {
 	}
 }
 
+var previewIntegrationRuntimes = map[string]struct{}{
+	transcriptcapture.RuntimeCursor:      {},
+	transcriptcapture.RuntimeGrokBuild:   {},
+	transcriptcapture.RuntimeOpenClaw:    {},
+	transcriptcapture.RuntimeAntigravity: {},
+	transcriptcapture.RuntimeCopilot:     {},
+	transcriptcapture.RuntimeDSH:         {},
+}
+
 func writeIntegrationsTable(w io.Writer, report integrationsReport) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	if report.VerificationSummary != nil {
@@ -850,6 +859,11 @@ func writeIntegrationsTable(w io.Writer, report integrationsReport) {
 		}
 		if !status.Platform.SupportedOnPlatform {
 			_, _ = fmt.Fprintf(w, "\n%s platform note: %s\n", status.Runtime, status.Platform.Reason)
+		}
+	}
+	for _, status := range report.Runtimes {
+		if _, preview := previewIntegrationRuntimes[status.Runtime]; preview {
+			_, _ = fmt.Fprintf(w, "\n%s is a preview integration: Witself's live memory acceptance has not run for it\n", status.Runtime)
 		}
 	}
 	_, _ = fmt.Fprintf(w, "\n%d supported, %d detected, %d installed, %d need attention\n",

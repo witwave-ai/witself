@@ -1197,3 +1197,99 @@ func captureIntegrationsCLI(t *testing.T, command func() int) (stdout, stderr st
 	}
 	return string(outBytes), string(errBytes), code
 }
+
+func integrationsPreviewTestReport() integrationsReport {
+	report := integrationsReport{
+		SchemaVersion: integrationsSchemaVersion,
+		Summary:       integrationsSummary{Supported: 6, Detected: 6, Installed: 6},
+	}
+	for _, runtimeName := range []string{
+		transcriptcapture.RuntimeCodex,
+		transcriptcapture.RuntimeClaudeCode,
+		transcriptcapture.RuntimeCursor,
+		transcriptcapture.RuntimeGrokBuild,
+		transcriptcapture.RuntimeOpenClaw,
+		transcriptcapture.RuntimeDSH,
+	} {
+		report.Runtimes = append(report.Runtimes, integrationRuntimeStatus{
+			Runtime:      runtimeName,
+			DisplayName:  integrationDisplayName(runtimeName),
+			Detection:    integrationDetection{State: integrationDetectionAvailable, Version: "test-version"},
+			Integration:  integrationBindingStatus{State: integrationStateInstalled, HookMode: "none"},
+			Capabilities: integrationCapabilities{MCP: true, ManagedRouting: true},
+			Platform:     integrationPlatformStatus{SupportedOnPlatform: true, SupportLevel: integrationPlatformNative},
+		})
+	}
+	return report
+}
+
+func TestIntegrationsTableMarksPreviewRuntimes(t *testing.T) {
+	report := integrationsPreviewTestReport()
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden, err := os.ReadFile("testdata/integrations-report-golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(append(data, '\n'), golden) {
+		t.Fatal("integrations report JSON changed from the pre-preview golden fixture")
+	}
+
+	otherPreviews := integrationsReport{
+		SchemaVersion: integrationsSchemaVersion,
+		Summary:       integrationsSummary{Supported: 2, Detected: 2, Installed: 2},
+	}
+	for _, runtimeName := range []string{transcriptcapture.RuntimeCopilot, transcriptcapture.RuntimeAntigravity} {
+		status := report.Runtimes[0]
+		status.Runtime = runtimeName
+		status.DisplayName = integrationDisplayName(runtimeName)
+		otherPreviews.Runtimes = append(otherPreviews.Runtimes, status)
+	}
+	for _, test := range []struct {
+		name        string
+		report      integrationsReport
+		wantPreview []string
+		wantSummary string
+	}{
+		{
+			name:   "reported runtimes",
+			report: report,
+			wantPreview: []string{
+				"cursor is a preview integration: Witself's live memory acceptance has not run for it",
+				"grok-build is a preview integration: Witself's live memory acceptance has not run for it",
+				"openclaw is a preview integration: Witself's live memory acceptance has not run for it",
+				"dsh is a preview integration: Witself's live memory acceptance has not run for it",
+			},
+			wantSummary: "6 supported, 6 detected, 6 installed, 0 need attention",
+		},
+		{
+			name:   "other previews in report order",
+			report: otherPreviews,
+			wantPreview: []string{
+				"copilot is a preview integration: Witself's live memory acceptance has not run for it",
+				"antigravity is a preview integration: Witself's live memory acceptance has not run for it",
+			},
+			wantSummary: "2 supported, 2 detected, 2 installed, 0 need attention",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			writeIntegrationsTable(&out, test.report)
+			lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+			var previews []string
+			for _, line := range lines {
+				if strings.Contains(line, "is a preview integration:") {
+					previews = append(previews, line)
+				}
+			}
+			if !reflect.DeepEqual(previews, test.wantPreview) {
+				t.Errorf("preview lines = %q, want exactly %q", previews, test.wantPreview)
+			}
+			if last := lines[len(lines)-1]; last != test.wantSummary {
+				t.Errorf("last line = %q, want summary %q", last, test.wantSummary)
+			}
+		})
+	}
+}

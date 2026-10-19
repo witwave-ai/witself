@@ -2,7 +2,9 @@
 
 Status: portable fact, direct narrative-memory, automatic-recall, and foreground
 checkpoint guidance is implemented for Codex, Claude Code, Grok Build, and
-Cursor. OpenClaw, Antigravity, and GitHub Copilot phase 1 are previews with the
+Cursor. Codex and Claude Code have passed live runtime acceptance; Grok Build,
+Cursor, and DeepSeek Harness remain previews until their acceptance legs run.
+OpenClaw, Antigravity, and GitHub Copilot phase 1 are previews with the
 same managed routing contract over stdio MCP and static runtime guidance, but
 without transcript hooks or automatic prompt-context injection. Provider aggregation remains an agent behavior
 contract, not a new Witself API. Witself narrative memory is the portable
@@ -27,8 +29,8 @@ classifier.
 |---|---|---|
 | Codex | `$CODEX_HOME/AGENTS.md`, normally `~/.codex/AGENTS.md` | The full Codex-specific policy is prepended to the implemented Witself protocol. |
 | Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A high-salience Claude-specific synopsis plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
-| Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
-| Cursor | `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
+| Grok Build preview | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
+| Cursor preview | `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 | OpenClaw preview | `AGENTS.md` in the sole default agent's configured workspace | OpenClaw exposes the full configured stdio MCP catalog under its own transformed names; the managed workspace block carries its safety and routing contract because no Witself prompt hook injects it automatically. |
 | Antigravity preview | A rules-only plugin at `~/.gemini/config/plugins/witself-managed-<binding-id>/` with `plugin.json` and `rules/witself.md`, plus one exact server entry in `~/.gemini/config/mcp_config.json` | Antigravity loads the native plugin's always-on rule and the collision-resistant shared MCP entry. The rule uses names such as `mcp_ws-<server-id>_witself.memory.recall`; the server entry pins the absolute Witself binary and identity. |
 | GitHub Copilot preview | `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`, normally `~/.copilot/instructions/witself-memory-routing.instructions.md`, plus one exact `witself-managed-<24-hex>` server entry in `$COPILOT_HOME/mcp-config.json` | Copilot loads the dedicated global instruction file and collision-resistant user MCP entry. The server entry pins the absolute Witself binary and identity; phase 1 uses guided MCP fallback. |
