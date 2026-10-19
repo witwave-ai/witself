@@ -62,3 +62,34 @@ func (m *captureArgoReleaseMocks) NewResource(args pulumi.MockResourceArgs) (str
 func (*captureArgoReleaseMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
 	return args.Args, nil
 }
+
+func TestArgoCDReleaseValuesBoundControllerMemory(t *testing.T) {
+	values := argocdReleaseValues()
+	controller, ok := values["controller"].(pulumi.Map)
+	if !ok {
+		t.Fatal("Argo CD values contain no controller map")
+	}
+	resources, ok := controller["resources"].(pulumi.Map)
+	if !ok {
+		t.Fatal("Argo CD controller values contain no resources map")
+	}
+	requests, _ := resources["requests"].(pulumi.Map)
+	limits, _ := resources["limits"].(pulumi.Map)
+	if requests["memory"] != pulumi.String("256Mi") || limits["memory"] != pulumi.String("768Mi") {
+		t.Fatalf("controller memory request/limit = %v/%v, want 256Mi/768Mi", requests["memory"], limits["memory"])
+	}
+	if _, ok := limits["cpu"]; ok {
+		t.Fatal("controller must not get a CPU limit (throttling slows reconciliation)")
+	}
+	env, ok := controller["env"].(pulumi.Array)
+	if !ok || len(env) != 1 {
+		t.Fatalf("controller env = %v, want exactly GOMEMLIMIT", controller["env"])
+	}
+	entry, _ := env[0].(pulumi.Map)
+	if entry["name"] != pulumi.String("GOMEMLIMIT") || entry["value"] != pulumi.String("614MiB") {
+		t.Fatalf("controller GOMEMLIMIT = %v, want 614MiB", entry)
+	}
+	if _, ok := values["server"].(pulumi.Map); !ok {
+		t.Fatal("server values must stay present")
+	}
+}
