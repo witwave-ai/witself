@@ -145,7 +145,10 @@ func TestTranscriptFenceCommandStartsNormalFlush(t *testing.T) {
 	if code := transcriptFence([]string{"--runtime", "codex", "--session", "delegated", "--run", prompt.RunID, "--turn", prompt.TurnID}); code != 0 {
 		t.Fatalf("fence exit = %d", code)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	// The fence starts the flush as a detached child process. Under -race on a
+	// loaded machine that start can take several seconds, so the deadline only
+	// bounds a flush that never starts; a passing run returns within milliseconds.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		raw, err := os.ReadFile(marker)
 		if err == nil && bytes.Equal(raw, []byte("transcript\nflush\n--runtime\ncodex\n")) {
