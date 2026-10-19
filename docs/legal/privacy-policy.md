@@ -1,6 +1,6 @@
 # Witself Privacy Policy
 
-**Version 2026-10-14 · Effective 2026-10-14**
+**Version 2026-10-19 · Effective 2026-10-19**
 
 **Controller:** Witwave LLC for account, billing, and operational data. For
 content your agents store, you are the controller and Witwave processes it
@@ -76,7 +76,7 @@ Closing an account **immediately and permanently disables all access** —
 closure is irreversible, and credentials are revoked at closure, so request
 any export before you close. After closure, the account's stored content is
 deleted and the account record is reduced to a value-free tombstone;
-deletion completes within 30 days of closure. Stripe retains financial
+deletion begins 30 days after closure and normally completes shortly after. Stripe retains financial
 records independently as required by law. Copies in encrypted service
 backups expire on the backup retention schedule (up to 90 days).
 
