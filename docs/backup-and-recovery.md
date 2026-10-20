@@ -1141,7 +1141,8 @@ serving cell through the generator:
    writes them together. It updates the server release pin as well as the
    backup pin; it does not enable the backup switch. No cell overlay edit is
    needed. Existing backup pins survive normal regeneration and ordinary
-   server rolls; repeat `--backup-image` when upgrading the backup tools.
+   server rolls; see **Keeping the backup image pin current** below for when
+   to repeat `--backup-image`.
 4. Review the serving cell's generated diff: the server release pin and
    `apps.civoPostgres.backup.image` should be the only changes. Keep the
    schedule, switches, and Secret references unchanged. Follow the normal
@@ -1152,6 +1153,61 @@ serving cell through the generator:
    and successful telemetry, and passes a disposable restore. If backups are
    disabled, complete the separate activation steps below first. An image pin
    alone is not backup acceptance.
+
+**Keeping the backup image pin current.**
+`TestCommittedBackupImagePinsCarryReleasedTools` fails when a cell's release
+backup pin carries older `age` on either `x86_64` or `aarch64`, older `aws-cli`,
+or a different PostgreSQL base than its own server release builds. The
+append-only ledger records each distinct tool set at its first release. The
+Dockerfile selects an exact `age_version` for each architecture in its
+`case "$(apk --print-arch)"` block, rejects unsupported architectures, and
+installs `"age=$age_version"` with one pinned `aws-cli` revision. Release
+0.0.337 pins `age=1.3.2-r1` on both architectures and `aws-cli=2.34.63-r0`;
+0.0.336 still used `age=1.3.2-r0` on `x86_64`. With
+`backupImageMaxPatchLag` set to 20, the test also refuses pins
+more than 20 patch releases behind that server, or from an older minor or major
+release. The rules live in `internal/gitopsvalues/backup_image_tools.go`.
+Cells with backup off are checked too (`backupImageCheckBackupOff = true`).
+
+The test runs in `go-rest` in CI and in the release workflow. A stale committed
+pin blocks every PR's `go` check and publication of any tagged release, including
+a security release, until it is re-pinned. Only age and aws-cli are pinned in the Dockerfile;
+the rest of the image is whatever Alpine served on the build day. The distance
+limit refreshes those packages even when the tool pins are unchanged. The
+weekly security scan (`scripts/security-scan.sh`, run by
+`.github/workflows/security-scan.yml`; see
+[Weekly scheduled run](release-and-build.md#weekly-scheduled-run)) scans the
+committed backup pin of each live cell with backups enabled and reports known
+vulnerabilities in it.
+The guard trusts the pin's tag; its match to the digest comes only from
+`scripts/roll-cell.sh`'s resolver.
+
+To re-pin at the cell's current release, set `CURRENT` to the cell's
+`apps.witselfServer.imageTag`, then run:
+
+```sh
+scripts/roll-cell.sh CELL "$CURRENT" --backup-image --no-schema-change
+```
+
+The server pins do not change, so the no-schema-change attestation holds. The
+diff must change only `backup.image.tag` and `backup.image.digest`; at the same
+release the tag may already match. Then follow step 5 above. Re-pinning ahead
+of the limit keeps trains green. If a train's serving wave would break a rule,
+that wave's PR checks fail. Close that PR, roll the cell by hand with
+`--backup-image` and the same gate arguments, and finish the wave as a
+hand-finished wave. Production's roll from 0.0.321 to a release at or after
+0.0.330 must add `--backup-image`.
+
+If only the backup image must roll back while the server stays put, revert the
+standalone re-pin change when that is how the pin moved. If the pin moved
+together with the server, restore only the three
+`apps.civoPostgres.backup.image` lines from the values file before the roll
+(`git show <commit>:.gitops/cells/<cell>/values.yaml`). This is the one sanctioned
+edit of a generated file until FU134-8 supplies a generator path. Run
+`bash scripts/gitops-cell-values.sh --check`; it still passes because generation
+keeps an existing pin. In the same change, add a reviewed entry to
+`backupImagePinExceptions` with the cell, the exact restored tag and the reason.
+Remove the entry when the cell is re-pinned at a fixed release.
 
 For operator activation on a provisioned cell:
 
