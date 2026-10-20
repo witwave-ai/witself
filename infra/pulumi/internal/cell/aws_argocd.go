@@ -19,8 +19,8 @@ const (
 
 	// Argo CD application controller memory bounds (see argocdReleaseValues).
 	argocdControllerMemoryRequest = "256Mi"
-	argocdControllerMemoryLimit   = "768Mi"
-	argocdControllerGoMemLimit    = "614MiB" // 80 percent of the limit
+	argocdControllerMemoryLimit   = "1Gi"
+	argocdControllerGoMemLimit    = "614MiB" // about 60 percent of the limit
 	argocdNamespace               = "argocd"
 
 	// Default GitOps source Argo reconciles, overridable via the -gitops-* flags
@@ -56,12 +56,18 @@ func argocdReleaseValues() pulumi.Map {
 				"resource.ignoreResourceUpdatesEnabled": pulumi.String("false"),
 			},
 		},
-		// The application controller's cache grows for weeks without a bound: on
-		// the serving cell it reached about 820 MiB after 30 days and fell to
-		// 246 MiB on restart (2026-10-19), on nodes with 2.25 GiB allocatable.
-		// GOMEMLIMIT makes the Go runtime collect well before the hard limit, the
-		// request lets the scheduler account for it, and the limit bounds the worst
-		// case; the StatefulSet restarts the controller if it is ever reached.
+		// Bound the application controller's memory. Measured on the serving cell
+		// over 2026-10-12 to 2026-10-19 (a 30-day-old pod, nodes with 2.25 GiB
+		// allocatable): the cgroup charge averaged about 610 MiB with daily peaks
+		// of 750-906 MiB, Go's retained memory peaked near 600 MiB, and the live
+		// heap stayed under 240 MiB; a restarted controller settles near 450 MiB
+		// within half an hour. The charge runs up to about 300 MiB above what Go
+		// accounts for (transparent huge pages and kernel memory), so GOMEMLIMIT
+		// cannot hold it under a tight limit. The 1 GiB limit therefore sits above
+		// the observed peak and only stops runaway growth; the StatefulSet restarts
+		// the controller if it is ever reached. GOMEMLIMIT trims Go heap peaks
+		// without GC thrash, and the request still fits the single-node backup
+		// cell, which keeps about 228 MiB of request headroom after it.
 		"controller": pulumi.Map{
 			"resources": pulumi.Map{
 				"requests": pulumi.Map{"memory": pulumi.String(argocdControllerMemoryRequest)},

@@ -75,8 +75,8 @@ func TestArgoCDReleaseValuesBoundControllerMemory(t *testing.T) {
 	}
 	requests, _ := resources["requests"].(pulumi.Map)
 	limits, _ := resources["limits"].(pulumi.Map)
-	if requests["memory"] != pulumi.String("256Mi") || limits["memory"] != pulumi.String("768Mi") {
-		t.Fatalf("controller memory request/limit = %v/%v, want 256Mi/768Mi", requests["memory"], limits["memory"])
+	if requests["memory"] != pulumi.String("256Mi") || limits["memory"] != pulumi.String("1Gi") {
+		t.Fatalf("controller memory request/limit = %v/%v, want 256Mi/1Gi", requests["memory"], limits["memory"])
 	}
 	if _, ok := limits["cpu"]; ok {
 		t.Fatal("controller must not get a CPU limit (throttling slows reconciliation)")

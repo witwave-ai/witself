@@ -855,7 +855,7 @@
             ],
             "resources": {
               "limits": {
-                "memory": "768Mi"
+                "memory": "1Gi"
               },
               "requests": {
                 "memory": "256Mi"
