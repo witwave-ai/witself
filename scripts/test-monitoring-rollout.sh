@@ -388,18 +388,21 @@ ruby -ryaml -e '
     abort "expected exactly one group #{group_name} in #{path}" unless groups.length == 1
     rules = groups[0]["rules"]
     abort "#{group_name}: rendered rules differ from source in #{path}" unless rules == source_rules
-    abort "#{group_name}: unexpected alert inventory" unless rules.map { |rule| rule["alert"] } == %w[WitselfServerOOMKilled WitselfWorkerOOMKilled]
-    server, worker = rules
-    rules.zip(%w[witself-server witself-worker]).each do |rule, service|
+    abort "#{group_name}: unexpected alert inventory" unless rules.map { |rule| rule["alert"] } == %w[WitselfServerOOMKilled WitselfWorkerOOMKilled WitselfArgoCDControllerOOMKilled]
+    server, worker, controller = rules
+    rules.zip(%w[witself-server witself-worker argocd]).each do |rule, service|
       expected_labels = {"severity" => "warning", "service" => service, "witself_alert" => "true"}
       abort "#{group_name}: unexpected labels for #{service}" unless rule["labels"] == expected_labels
       abort "#{group_name}: unexpected hold for #{service}" unless rule["for"] == "0m" && rule["keep_firing_for"] == "5m"
     end
     abort "#{group_name}: server and worker expressions differ" unless worker["expr"] == server["expr"].gsub("witself-server", "witself-worker")
-    abort "#{group_name}: labels differ beyond service" unless server["labels"].reject { |key, _| key == "service" } == worker["labels"].reject { |key, _| key == "service" }
+    abort "#{group_name}: worker and controller expressions differ" unless controller["expr"] == worker["expr"].gsub(%q{namespace="witself"}, %q{namespace="argocd"}).gsub(%q{container="witself-worker"}, %q{container="application-controller"})
+    abort "#{group_name}: labels differ beyond service" unless rules.map { |rule| rule["labels"].reject { |key, _| key == "service" } }.uniq.length == 1
     %w[summary description].each do |key|
       annotation = worker.dig("annotations", key).to_s
       abort "#{group_name}: worker #{key} names the wrong service" unless annotation.include?("witself-worker") && !annotation.include?("witself-server")
+      annotation = controller.dig("annotations", key).to_s
+      abort "#{group_name}: controller #{key} names the wrong service" unless annotation.match?(/Argo CD|argocd/) && !annotation.include?("witself-worker") && !annotation.include?("witself-server")
     end
 
     monitors = docs.select { |doc| doc["kind"] == "ServiceMonitor" && doc.dig("metadata", "name").to_s.include?("kube-state-metrics") }
@@ -440,10 +443,14 @@ ruby -ryaml -e '
       abort "#{group_name}: kube-state-metrics resources omit pods" unless arg.delete_prefix("--resources=").split(",").include?("pods")
     end
     args.select { |arg| arg.start_with?("--namespaces=") }.each do |arg|
-      abort "#{group_name}: kube-state-metrics namespaces omit witself" unless arg.delete_prefix("--namespaces=").split(",").include?("witself")
+      %w[witself argocd].each do |namespace|
+        abort "#{group_name}: kube-state-metrics namespaces omit #{namespace}" unless arg.delete_prefix("--namespaces=").split(",").include?(namespace)
+      end
     end
     args.select { |arg| arg.start_with?("--namespaces-denylist=") }.each do |arg|
-      abort "#{group_name}: kube-state-metrics namespaces deny witself" if arg.delete_prefix("--namespaces-denylist=").split(",").include?("witself")
+      %w[witself argocd].each do |namespace|
+        abort "#{group_name}: kube-state-metrics namespaces deny #{namespace}" if arg.delete_prefix("--namespaces-denylist=").split(",").include?(namespace)
+      end
     end
     abort "#{group_name}: kube-state-metrics custom-resource-state-only excludes pod metrics" if args.include?("--custom-resource-state-only=true")
   end
