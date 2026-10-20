@@ -1082,7 +1082,7 @@ The `witself-container-oom` group in `founder-open-plane.rules.yaml` renders
 wherever monitoring alerting is enabled. Its kube-state-metrics v2.19.1 series
 join `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1`
 with an increase in `kube_pod_container_status_restarts_total` over 30 minutes.
-Both rules aggregate away pod identity and raise a warning alert on the existing
+The three rules aggregate away pod identity and raise a warning alert on the existing
 incident route. Today they cover only `civo-sandbox-use1-serving`: production
 has monitoring disabled and the backup cell runs no Prometheus, so a drill OOM
 on the backup cell raises no alert. Enabling monitoring elsewhere is a separate
@@ -1092,6 +1092,7 @@ decision.
 | --- | --- | --- |
 | `WitselfServerOOMKilled` | A `witself-server` container in `witself` last terminated with `OOMKilled`, and its restart count increased within 30 minutes. | warning |
 | `WitselfWorkerOOMKilled` | A `witself-worker` container in `witself` last terminated with `OOMKilled`, and its restart count increased within 30 minutes. | warning |
+| `WitselfArgoCDControllerOOMKilled` | The `application-controller` container in `argocd` last terminated with `OOMKilled`, and its restart count increased within 30 minutes. | warning |
 
 The alert fires at the first evaluation that sees the restart and normally stays
 active until about five minutes after the 30-minute increase window stops

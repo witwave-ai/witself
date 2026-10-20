@@ -2101,6 +2101,133 @@ tests:
         alertname: WitselfServerOOMKilled
         exp_alerts: []
 
+  - name: Argo CD controller OOM fires at the first evaluation with both signals
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+    alert_rule_test:
+      - eval_time: 10m30s
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: argocd
+              witself_alert: "true"
+            exp_annotations:
+              summary: The Argo CD application controller was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as the argocd application-controller container's last termination reason and its restart count rose within 30 minutes. GitOps reconciliation paused while it restarted. Check the pod's restartCount and lastState, read the previous container's logs, and compare its memory with the limit set by witself-infra.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+
+  - name: Argo CD controller Error restart does not alert
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080",reason="Error"}
+        values: '_x11 1+0x119'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+
+  - name: Argo CD controller stale OOM reason without a recent restart does not alert
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080"}
+        values: '1+0x130'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '1+0x130'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+
+  - name: application controller OOM in witself namespace does not alert for Argo CD
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="witself",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="witself",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+
+  # The last pre-restart sample leaves the range at 40m. Keep firing for
+  # five more minutes, then resolve even though OOMKilled remains the last reason.
+  - name: an OOM in another argocd container does not alert for the application controller
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="argocd",pod="argocd-repo-server-abc",uid="argocd-repo-server-abc-uid",container="repo-server",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="argocd",pod="argocd-repo-server-abc",uid="argocd-repo-server-abc-uid",container="repo-server",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+  - name: Argo CD controller OOM resolves after the restart window and five minute hold
+    interval: 1m
+    input_series:
+      - series: kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080"}
+        values: '0+0x10 1+0x119'
+      - series: kube_pod_container_status_last_terminated_reason{job="kube-state-metrics",namespace="argocd",pod="argocd-application-controller-0",uid="argocd-application-controller-0-uid",container="application-controller",instance="kube-state-metrics:8080",reason="OOMKilled"}
+        values: '_x11 1+0x119'
+    alert_rule_test:
+      - eval_time: 39m30s
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: argocd
+              witself_alert: "true"
+            exp_annotations:
+              summary: The Argo CD application controller was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as the argocd application-controller container's last termination reason and its restart count rose within 30 minutes. GitOps reconciliation paused while it restarted. Check the pod's restartCount and lastState, read the previous container's logs, and compare its memory with the limit set by witself-infra.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 44m30s
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: argocd
+              witself_alert: "true"
+            exp_annotations:
+              summary: The Argo CD application controller was OOM-killed and restarted within the last 30 minutes.
+              description: kube-state-metrics reports OOMKilled as the argocd application-controller container's last termination reason and its restart count rose within 30 minutes. GitOps reconciliation paused while it restarted. Check the pod's restartCount and lastState, read the previous container's logs, and compare its memory with the limit set by witself-infra.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - eval_time: 45m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: WitselfArgoCDControllerOOMKilled
+        exp_alerts: []
+
   - name: two server replicas killed in one window produce one aggregate alert
     interval: 1m
     input_series:
