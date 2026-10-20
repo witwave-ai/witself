@@ -15,18 +15,46 @@ import (
 // applies to each published procedure.
 var runbookDocsFiles = []string{
 	"runbook-professional-to-team.md",
+	"runbook-control-plane-rollback.md",
+}
+
+// runbookDocsVerified records, for each listed runbook, the main commit (its
+// first 12 hex digits) and the date its facts were checked against; the
+// not-rehearsed banner must name both.
+var runbookDocsVerified = map[string][2]string{
+	"runbook-professional-to-team.md":   {"1209a8c0ecf9", "2026-10-18"},
+	"runbook-control-plane-rollback.md": {"8f5545dc6548", "2026-10-19"},
 }
 
 func TestRunbookDocsBanner(t *testing.T) {
 	runbookDocsRequireFiles(t)
-	const want = "Status: not rehearsed. No step below has been run as a drill or timed end to end. Verified against `main` at `1209a8c0ecf9` on 2026-10-18; re-check every command against the current tree before relying on it."
+	commitPattern := regexp.MustCompile(`^[0-9a-f]{12}$`)
+	datePattern := regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+	listed := make(map[string]bool, len(runbookDocsFiles))
 	for _, file := range runbookDocsFiles {
+		listed[file] = true
 		t.Run(file, func(t *testing.T) {
+			verified, ok := runbookDocsVerified[file]
+			if !ok {
+				t.Fatal("missing runbook verification entry")
+			}
+			if !commitPattern.MatchString(verified[0]) {
+				t.Fatal("runbook verification commit must be exactly 12 lowercase hex digits")
+			}
+			if !datePattern.MatchString(verified[1]) {
+				t.Fatal("runbook verification date must be YYYY-MM-DD")
+			}
+			want := "Status: not rehearsed. No step below has been run as a drill or timed end to end. Verified against `main` at `" + verified[0] + "` on " + verified[1] + "; re-check every command against the current tree before relying on it."
 			lines := strings.Split(runbookDocsRead(t, "docs", file), "\n")
 			if len(lines) < 3 || lines[2] != want {
 				t.Error("paragraph immediately after the H1 must equal the required not-rehearsed banner")
 			}
 		})
+	}
+	for file := range runbookDocsVerified {
+		if !listed[file] {
+			t.Errorf("runbook verification entry %s is not listed in runbookDocsFiles", file)
+		}
 	}
 }
 
