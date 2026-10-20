@@ -46,6 +46,8 @@ witself account recover --id acc_ID --code CODE --name work
 
 Recovery revokes all prior owner tokens. See
 [Recover a lost owner token](runbooks.md#recover-a-lost-owner-token).
+The account email is therefore the root of trust; see
+[security-policy.md](security-policy.md#account-email-is-the-root-of-trust).
 
 To bind an existing account and operator credential on another machine:
 

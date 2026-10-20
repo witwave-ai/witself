@@ -1,7 +1,10 @@
 # Witself Security Policy
 
-Status: draft. This document describes the intended vulnerability reporting,
-security response, and supported-surface policy before implementation.
+Status: published. This policy covers Witself Cloud and the released `witself`
+CLI, `witself-server` and worker binaries, container images and Helm chart.
+Witself has been in general self-service production since 2026-08-31
+([launch-readiness.md](launch-readiness.md)). The response targets below are
+goals, not a contractual service level.
 
 Narrative-memory amendment (accepted 2026-07-14): memory inference and vector
 generation are client-side. Security scope now includes curator credentials,
@@ -43,7 +46,10 @@ Initial reporting channel:
 - Email: `security@witwave.ai`
 
 If that address changes, update this document and the repository-level
-`SECURITY.md` before the first public release.
+`SECURITY.md` in the same change.
+
+Report abuse of the service, such as spam sent through agent email, to
+`legal@witwave.ai`, as the [Acceptable Use Policy](legal/acceptable-use.md) says.
 
 Reports should include:
 
@@ -89,15 +95,76 @@ ceremony are meant to keep sealed.
 
 These targets may change once Witself has a formal security operations process.
 
+## Account email is the root of trust
+
+On Witself Cloud, control of the account's email inbox is control of the
+account.
+
+- **Activation.** A new account stays pending until someone opens the
+  verification link sent to the account email. Signup returns the owner
+  credential at once, but a pending account cannot create or use agents or
+  change account data until it is verified; its owner can check status,
+  request a new verification link, export or close it.
+- **Recovery.** `witself account recover` asks for a code, which goes to the
+  account email. Requesting a code does not change the account or its
+  credentials; a new request replaces any earlier unused code. Requests are
+  rate-limited. Redeeming the code revokes every owner token and issues a new
+  one. No other factor is asked for. Agents and other operators keep their
+  tokens. Recovery works only for an active account.
+- **Email change.** Moving the account to a new address needs a live owner
+  token and a code sent to the new address. The old address gets a warning
+  at once and, after the change, a link that reverts it for 48 hours.
+
+So whoever controls the inbox can take the owner credential, and with it
+export the account's open-plane data and close the account. The inbox does
+not unlock sealed-plane values: they stay encrypted under keys that only
+clients hold.
+
+Protect the account email with a strong password and a second factor at your
+email provider.
+
+- If you get an email-change warning you did not expect, run
+  `witself account recover`, then redeem the code with
+  `witself account recover --code CODE`. Redeeming the code revokes every
+  owner token, so a change that has not yet been submitted cannot commit
+  with the old token. If the change has already committed, open the revert
+  link sent to the old address within 48 hours, then recover.
+- If you get a recovery code you did not ask for, do not use it. Nothing
+  changes in the account or its credentials until someone redeems it.
+  Check that your inbox is still yours.
+- If you have lost the inbox itself, regain it with your email provider
+  first. Then recover, and write to `security@witwave.ai`.
+
+After recovering from a suspected compromise, review operators with
+`witself operator list`, delete unknown ones with
+`witself operator delete --yes OPERATOR`, and revoke agent tokens you did not
+mint with `witself token revoke --token TOKEN_ID --yes`. See
+[Recover a lost owner token](runbooks.md#recover-a-lost-owner-token).
+
+Any way to do one of these without the proof described below is an in-scope
+vulnerability:
+
+- activate a pending account without the emailed verification link;
+- recover an account's owner credential, or mint a new one, without either
+  the emailed recovery code or a live owner token;
+- commit an email change without a live owner token and the code sent to the
+  new address.
+
+Three paths are by design and not such a way: the service's own provisioning
+credentials, which the control plane uses to reach cells; the owner
+credential that signup returns before verification; and the revert link
+sent to the old address, valid for 48 hours after a committed change, which
+restores the old address.
+
 ## Supported Surfaces
 
 Security support applies to:
 
 - Public `witself` CLI releases.
-- Public `witself-server` releases once available.
+- Public `witself-server` releases.
 - Published container images.
 - Published Helm charts.
-- Published Terraform modules and examples.
+- Terraform modules and examples, once published.
 - Managed Witself Cloud.
 - Production-supported self-hosted versions.
 

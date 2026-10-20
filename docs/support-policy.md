@@ -97,7 +97,8 @@ tools, and anything on the self-hosted side (see
   Security reports through support are treated as `urgent` and
   human-escalated.
 - **Data deletion** — human-escalated by rule; the erasure posture is
-  documented in the [data-retention policy](data-retention-policy.md).
+  documented in the [data-retention policy](data-retention-policy.md), and
+  operators follow [Handle a data-subject request](runbooks.md#handle-a-data-subject-request).
 
 ## Incident communications
 
