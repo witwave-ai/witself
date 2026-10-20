@@ -1,4 +1,4 @@
-import { ACCOUNT_BACKUP_SCAN_KEY, accountBackupConfig, accountBackupHealthSnapshot, accountBackupPassSnapshot } from "./account-backup-runtime.mjs";
+import { ACCOUNT_BACKUP_SCAN_KEY, RESTORE_DRILL_FRESHNESS_KEY, accountBackupConfig, accountBackupHealthSnapshot, accountBackupPassSnapshot, restoreDrillFreshnessSnapshot } from "./account-backup-runtime.mjs";
 import { signupObservationLines } from "./signup-observation.mjs";
 import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
 
@@ -347,10 +347,22 @@ async function accountBackupLines(env) {
   const enabled = String(env.CP_ACCOUNT_BACKUPS_ENABLED ?? "").trim().toLowerCase() === "true";
   const values = { enabled: Number(enabled), health_available: 0 };
   if (enabled) {
-    const scan = await bounded(
-      () => env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" }),
-      SNAPSHOT_TIMEOUT_MS,
-    );
+    const [scan, freshness] = await Promise.all([
+      bounded(
+        () => env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" }),
+        SNAPSHOT_TIMEOUT_MS,
+      ),
+      // This extra KV read is independently bounded and failure-isolated.
+      // The scan read retains its existing scrape-failure behavior.
+      bounded(async () => {
+        const text = await env.DIRECTORY.get(RESTORE_DRILL_FRESHNESS_KEY, { type: "text" });
+        try {
+          return restoreDrillFreshnessSnapshot(JSON.parse(text), Date.now());
+        } catch {
+          return null;
+        }
+      }, SNAPSHOT_TIMEOUT_MS).catch(() => null),
+    ]);
     const health = accountBackupHealthSnapshot(scan);
     const pass = accountBackupPassSnapshot(scan);
     if (pass !== null) {
@@ -370,6 +382,18 @@ async function accountBackupLines(env) {
       values.never_committed_accounts = health.never_committed_accounts;
       // Prometheus has no null; zero means no committed catalog exists.
       values.oldest_committed_age_seconds = health.oldest_committed_age_seconds ?? 0;
+    }
+    values.restore_drill_freshness_available = Number(freshness !== null);
+    if (freshness !== null) {
+      for (const field of ["last_started", "last_finished", "last_validated"]) {
+        if (freshness[`${field}_at`] !== null) {
+          values[`restore_drill_${field}_timestamp_seconds`] = Date.parse(freshness[`${field}_at`]) / 1000;
+        }
+      }
+      if (freshness.last_state !== null) {
+        values.restore_drill_last_result = Number(freshness.last_state === "validated");
+      }
+      values.restore_drill_running = freshness.running;
     }
   }
   return Object.entries(values).flatMap(([suffix, value]) => {

@@ -4,6 +4,13 @@ import { register } from "node:module";
 import test from "node:test";
 import { uptimeProbeMetricsResponse } from "../src/uptime-probes.mjs";
 import { streamToR2Multipart } from "../src/account-lifecycle-runtime.mjs";
+import {
+  RESTORE_DRILL_FRESHNESS_KEY,
+  RESTORE_DRILL_FRESHNESS_SCHEMA,
+  nextRestoreDrillFreshness,
+  restoreDrillFreshnessSnapshot,
+  validRestoreDrillFreshness,
+} from "../src/account-backup-runtime.mjs";
 
 import {
   ACCOUNT_BACKUP_SCAN_KEY,
@@ -5030,5 +5037,396 @@ test("T15: early overrun health retains never-committed progress and adds unreac
     assert.equal(early.scan.health.stale_accounts, progress.stale_accounts + early.scan.unreached_entries);
     assert.equal(f.kv.value().health_progress.never_committed_accounts, 4);
     assert.deepEqual(f.kv.value().health, early.scan.health);
+  }
+});
+
+// Freshness has its own KV so these counters cannot include catalog or driver work.
+class RateLimitedKV extends KV {
+  constructor(entries, clock) {
+    super(entries);
+    this.clock = clock;
+    this.lastPut = new Map();
+    this.putAttempts = new Map();
+    this.successfulPuts = new Map();
+  }
+
+  async put(key, value) {
+    this.putAttempts.set(key, (this.putAttempts.get(key) ?? 0) + 1);
+    const now = this.clock();
+    if (this.lastPut.has(key) && now - this.lastPut.get(key) < 1_000) {
+      throw new Error("KV PUT failed: 429 Too Many Requests");
+    }
+    await super.put(key, value);
+    this.lastPut.set(key, now);
+    this.successfulPuts.set(key, (this.successfulPuts.get(key) ?? 0) + 1);
+  }
+}
+
+const freshnessKeys = ["schema_version", "last_started_at", "last_finished_at", "last_validated_at", "last_state", "running", "updated_at"];
+const freshnessID = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const freshnessRecord = (overrides = {}) => ({
+  schema_version: RESTORE_DRILL_FRESHNESS_SCHEMA,
+  last_started_at: null, last_finished_at: null, last_validated_at: null,
+  last_state: null, running: [], updated_at: NOW.toISOString(), ...overrides,
+});
+const freshnessReceipt = (f, validated_at) => ({
+  ...f.input, validated_at, status: f.record.status, archive_schema_version: f.record.archive_schema_version,
+});
+function invalidFreshnessRecords() {
+  const entry = { drill_id: freshnessID(1), deadline_at: NOW.toISOString() };
+  return [
+    null, [], {}, freshnessRecord({ schema_version: "witself.restore-drill-freshness.v0" }),
+    freshnessRecord({ account_id: ACCOUNT }), freshnessRecord({ last_started_at: "not-a-date" }),
+    freshnessRecord({ last_finished_at: 123 }), freshnessRecord({ last_validated_at: "not-a-date" }),
+    freshnessRecord({ updated_at: null }), freshnessRecord({ running: [{ ...entry, drill_id: "bad" }] }),
+    freshnessRecord({ running: [{ ...entry, deadline_at: "not-a-date" }] }),
+    freshnessRecord({ running: [{ ...entry, account_id: ACCOUNT }] }),
+    freshnessRecord({ running: Array(1) }),
+    freshnessRecord({ running: Array.from({ length: 9 }, (_, n) => ({ ...entry, drill_id: freshnessID(n) })) }),
+    freshnessRecord({ running: {} }), freshnessRecord({ last_state: "running" }),
+  ];
+}
+
+test("restore drill freshness records starts and finishes without account data", async () => {
+  const f = drillEnv();
+  let kvClock = NOW.getTime();
+  const kv = new RateLimitedKV({}, () => kvClock);
+  const sleeps = [];
+  f.durable.env.DIRECTORY = kv;
+  f.durable.sleep = async (ms) => { sleeps.push(ms); kvClock += ms; };
+  const first = (await (await f.start()).json()).restore_drill;
+  const failure = "private restore drill fixture failure";
+  assert.equal((await f.call("/restore-drill:finish", { drill_id: first.drill_id, state: "failed", error: failure })).status, 200);
+  const failed = kv.value(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.equal(failed.last_state, "failed");
+  assert.equal(validRestoreDrillFreshness(failed), true);
+  assert.deepEqual(Object.keys(failed).sort(), [...freshnessKeys].sort());
+  const failedSerialized = kv.values.get(RESTORE_DRILL_FRESHNESS_KEY);
+  for (const privateValue of [ACCOUNT, f.record.backup_id, TARGET, failure]) assert.equal(failedSerialized.includes(privateValue), false);
+  assert.deepEqual(sleeps, [1_100]);
+
+  kvClock += 5_000;
+  f.durable.now = () => new Date("2026-07-25T12:36:00.000Z");
+  const second = (await (await f.start()).json()).restore_drill;
+  const started = kv.value(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.deepEqual(Object.keys(started).sort(), [...freshnessKeys].sort());
+  assert.equal(started.last_started_at, second.started_at);
+  assert.deepEqual(started.running, [{ drill_id: second.drill_id, deadline_at: second.deadline_at }]);
+  assert.equal(Date.parse(second.deadline_at) - Date.parse(second.started_at), 30 * 60_000);
+
+  const beforeRefusals = kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.equal((await f.start()).status, 409);
+  assert.equal((await f.call("/restore-drill:finish", { drill_id: "another", state: "failed" })).status, 409);
+  assert.equal((await f.call("/restore-drill:finish", { drill_id: second.drill_id, state: "running" })).status, 400);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), beforeRefusals);
+
+  const validated = "2026-07-25T12:37:00.000Z";
+  f.durable.now = () => new Date(validated);
+  const beforeReceipt = kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY);
+  const receiptClock = kvClock;
+  assert.equal((await f.call("/validation-verified", freshnessReceipt(f, validated))).status, 200);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), beforeReceipt, "receipts never attempt freshness writes");
+  assert.equal(kvClock, receiptClock);
+  const finishedAt = "2026-07-25T12:38:00.000Z";
+  f.durable.now = () => new Date(finishedAt);
+  const finishResponse = await f.call("/restore-drill:finish", { drill_id: second.drill_id, state: "validated", validated_at: validated });
+  assert.equal(finishResponse.status, 200);
+  const finished = (await finishResponse.json()).restore_drill;
+  assert.equal(finished.validated_at, validated);
+  assert.equal(finished.finished_at, finishedAt);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), beforeReceipt + 2, "a finish at the start's KV instant must retry once");
+  assert.deepEqual(sleeps, [1_100, 1_100]);
+  const summary = kv.value(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.equal(summary.last_state, "validated");
+  assert.equal(summary.last_validated_at, validated);
+  assert.equal(summary.last_finished_at, finishedAt);
+  assert.deepEqual(summary.running, []);
+  assert.equal(kv.successfulPuts.get(RESTORE_DRILL_FRESHNESS_KEY), 4);
+
+  const older = "2026-07-25T12:36:30.000Z";
+  const serialized = kv.values.get(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.equal((await f.call("/validation-verified", freshnessReceipt(f, older))).status, 200);
+  assert.equal(kv.values.get(RESTORE_DRILL_FRESHNESS_KEY), serialized);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), beforeReceipt + 2);
+  for (const privateValue of [ACCOUNT, f.record.backup_id, TARGET]) assert.equal(serialized.includes(privateValue), false);
+
+  // An older finish from another drill must not roll the validation clock back.
+  kvClock += 5_000;
+  const third = (await (await f.start()).json()).restore_drill;
+  assert.equal((await f.call("/restore-drill:finish", { drill_id: third.drill_id, state: "validated", validated_at: older })).status, 200);
+  assert.equal(kv.value(RESTORE_DRILL_FRESHNESS_KEY).last_validated_at, validated);
+});
+
+test("alarm restore drill claims and finishes note freshness once each and replays write nothing", async (t) => {
+  const f = alarmDrillEnv(t);
+  let kvClock = NOW.getTime();
+  const kv = new RateLimitedKV({ [RESTORE_DRILL_FRESHNESS_KEY]: freshnessRecord({
+    last_finished_at: new Date(NOW.getTime() - 60_000).toISOString(), last_state: "failed",
+  }) }, () => kvClock);
+  f.durable.env.DIRECTORY = kv;
+  const sleeps = [];
+  f.durable.sleep = async (ms) => { sleeps.push(ms); kvClock += ms; };
+  fakeCell(t, { start: () => cellAck(f.record) });
+  const record = await startedAlarm(f);
+  assert.deepEqual(kv.value(RESTORE_DRILL_FRESHNESS_KEY).running, [{ drill_id: record.drill_id, deadline_at: record.deadline_at }]);
+  assert.equal(Date.parse(record.deadline_at) - Date.parse(record.started_at), 90 * 60_000);
+  const claim = callsTo(f, "/restore-drill:start")[0].input;
+  assert.deepEqual((await (await f.start(claim)).json()).restore_drill, record);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), 1, "claim replay writes nothing");
+  const validated = new Date(f.driverStorage.alarm).toISOString();
+  const finishedAt = new Date(Date.parse(validated) + 60_000).toISOString();
+  f.intercept = async (entry, forward) => {
+    const response = await forward();
+    if (entry.path === "/validation-verified") f.advance(60_000);
+    return response;
+  };
+  await f.next();
+  const receipt = callsTo(f, "/validation-verified")[0].input;
+  assert.equal(receipt.validated_at, validated);
+  const finished = f.storage.values.get("restore-drill");
+  assert.equal(finished.validated_at, validated);
+  assert.equal(finished.finished_at, finishedAt);
+  const summary = kv.value(RESTORE_DRILL_FRESHNESS_KEY);
+  assert.equal(summary.last_state, "validated");
+  assert.deepEqual(summary.running, []);
+  assert.equal(summary.last_validated_at, validated);
+  assert.equal(summary.last_finished_at, finishedAt);
+  assert.equal(kv.successfulPuts.get(RESTORE_DRILL_FRESHNESS_KEY), 2);
+  assert.equal(kv.putAttempts.get(RESTORE_DRILL_FRESHNESS_KEY), 3);
+  assert.deepEqual(sleeps, [1_100]);
+});
+
+test("restore drill freshness failures never change the drill answer or hold the export fence", { timeout: 10_000 }, async (t) => {
+  const logs = [];
+  for (const method of ["error", "warn", "log"]) t.mock.method(console, method, (...args) => {
+    const line = args.map(String).join(" ");
+    // Node can deliver loader deprecation warnings asynchronously during this test.
+    // Keep every other diagnostic, excluding only this observed loader warning.
+    if (!/^\(node:\d+\) \[DEP0205\] DeprecationWarning: `module\.register\(\)` is deprecated\./.test(line)) logs.push(line);
+  });
+  t.mock.method(crypto, "randomUUID", () => freshnessID(1));
+  const exercise = async (directory) => {
+    const f = drillEnv();
+    if (directory !== undefined) f.durable.env.DIRECTORY = directory;
+    f.durable.sleep = async () => {};
+    const start = await f.start();
+    assert.equal(start.status, 200, "freshness failure must never change the start answer");
+    const started = await start.json();
+    const finish = await f.call("/restore-drill:finish", { drill_id: started.restore_drill.drill_id, state: "failed", error: "fixture failure" });
+    return { start: { status: start.status, body: started }, finish: { status: finish.status, body: await finish.json() }, stored: f.storage.values.get("restore-drill") };
+  };
+  const control = await exercise();
+  assert.deepEqual(logs, [], "an object without DIRECTORY does not log");
+  let attempts = 0;
+  assert.deepEqual(await exercise({ get: async () => null, put: async () => { attempts += 1; throw new Error("private KV error"); } }), control);
+  assert.equal(attempts, 4, "two attempts per start and finish, never a third");
+  assert.deepEqual(logs, Array(2).fill("account-backup: restore drill freshness was not recorded"));
+  logs.length = 0;
+  let failedReads = 0;
+  assert.deepEqual(await exercise({ get: async () => { failedReads += 1; throw new Error("private KV read error"); }, put: async () => assert.fail("failed reads must never put") }), control);
+  assert.equal(failedReads, 4, "two read attempts per event, never a third");
+  assert.deepEqual(logs, Array(2).fill("account-backup: restore drill freshness was not recorded"));
+  logs.length = 0;
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const driver of ["request", "alarm"]) {
+    const hung = drillEnv();
+    let reads = 0;
+    const lateRead = deferred();
+    let latePuts = 0;
+    hung.durable.env.DIRECTORY = { get: () => { reads += 1; return lateRead.promise; }, put: async () => { latePuts += 1; } };
+    let answered = false;
+    const claim = driver === "alarm" ? {
+      driver, drill_id: freshnessID(1), claim_by: new Date(NOW.getTime() + RESTORE_DRILL_CLAIM_WINDOW_MS).toISOString(),
+    } : {};
+    const pending = hung.start(claim).then((response) => { answered = true; return response; });
+    await flush();
+    assert.equal(reads, 1);
+    assert.equal(hung.storage.values.get("restore-drill").driver, claim.driver);
+    assert.equal(answered, false, `${driver} start awaits freshness I/O`);
+    let receiptAnswered = false;
+    const receipt = hung.call("/validation-verified", freshnessReceipt(hung, NOW.toISOString())).then((response) => { receiptAnswered = true; return response; });
+    await flush();
+    assert.equal(receiptAnswered, true, "freshness I/O must never hold the receipt export fence");
+    assert.equal((await receipt).status, 200);
+    assert.equal(reads, 1, "the receipt must not even read freshness");
+    assert.equal(answered, false, `${driver} start still awaits freshness I/O after the receipt`);
+    t.mock.timers.tick(4_999);
+    await flush();
+    assert.equal(answered, false, `${driver} start awaits the full freshness deadline`);
+    t.mock.timers.tick(1);
+    assert.equal((await pending).status, 200);
+    assert.deepEqual(logs, ["account-backup: restore drill freshness was not recorded"]);
+    lateRead.resolve(null);
+    await flush();
+    assert.equal(latePuts, 0, "a read completing after the deadline cannot begin a put");
+    assert.equal(reads, 1, "a timed-out operation cannot retry");
+    assert.deepEqual(logs, ["account-backup: restore drill freshness was not recorded"], "a late completion does not log twice");
+    logs.length = 0;
+  }
+
+  const malformed = drillEnv();
+  const kv = new KV();
+  kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, "{not json");
+  malformed.durable.env.DIRECTORY = kv;
+  const response = await malformed.start();
+  assert.equal(response.status, 200);
+  const record = (await response.json()).restore_drill;
+  assert.deepEqual(kv.value(RESTORE_DRILL_FRESHNESS_KEY), nextRestoreDrillFreshness(null, { kind: "started", ...record }, NOW.getTime()));
+  assert.equal(validRestoreDrillFreshness(kv.value(RESTORE_DRILL_FRESHNESS_KEY)), true);
+  assert.deepEqual(logs, []);
+
+  // A transient read error also retries by re-reading, rather than discarding an older success.
+  const retry = drillEnv();
+  const seed = freshnessRecord({ last_validated_at: NOW.toISOString(), last_state: "validated" });
+  const retryKV = new KV({ [RESTORE_DRILL_FRESHNESS_KEY]: seed });
+  const get = retryKV.get.bind(retryKV);
+  let getAttempts = 0;
+  retryKV.get = (...args) => { if (++getAttempts === 1) throw new Error("private read error"); return get(...args); };
+  retry.durable.env.DIRECTORY = retryKV;
+  retry.durable.sleep = async (ms) => assert.equal(ms, 1_100);
+  assert.equal((await retry.start()).status, 200);
+  assert.equal(getAttempts, 2);
+  assert.equal(retryKV.value(RESTORE_DRILL_FRESHNESS_KEY).last_validated_at, seed.last_validated_at);
+  assert.deepEqual(logs, []);
+});
+
+test("the freshness record is bounded, prunes expired drills and compares times as instants", () => {
+  const now = Date.parse("2026-10-14T16:30:00.000Z");
+  const started = (n) => ({ kind: "started", drill_id: freshnessID(n), started_at: new Date(now).toISOString(), deadline_at: new Date(now + n * 60_000).toISOString() });
+  let record = null;
+  for (let n = 1; n <= 9; n += 1) record = nextRestoreDrillFreshness(record, started(n), now);
+  assert.equal(validRestoreDrillFreshness(record), true);
+  assert.deepEqual(record.running.map((entry) => entry.drill_id).sort(), Array.from({ length: 8 }, (_, n) => freshnessID(n + 2)).sort());
+  record = nextRestoreDrillFreshness(record, { ...started(9), deadline_at: new Date(now + 20 * 60_000).toISOString() }, now);
+  assert.equal(record.running.length, 8, "a repeated start replaces rather than duplicates its entry");
+  assert.equal(record.running.find((entry) => entry.drill_id === freshnessID(9)).deadline_at, new Date(now + 20 * 60_000).toISOString());
+
+  for (const invalid of invalidFreshnessRecords()) {
+    assert.equal(validRestoreDrillFreshness(invalid), false);
+    assert.equal(restoreDrillFreshnessSnapshot(invalid, now), null);
+    assert.deepEqual(nextRestoreDrillFreshness(invalid, started(1), now), nextRestoreDrillFreshness(null, started(1), now));
+  }
+  const expired = { drill_id: freshnessID(20), deadline_at: new Date(now - RESTORE_DRILL_FINAL_GRACE_MS).toISOString() };
+  const alive = { drill_id: freshnessID(21), deadline_at: new Date(now - RESTORE_DRILL_FINAL_GRACE_MS + 1).toISOString() };
+  const stored = freshnessRecord({
+    last_started_at: "2026-10-14T17:00:00.000+01:00",
+    last_finished_at: "2026-10-14T17:00:00.000+01:00", last_state: "validated",
+    last_validated_at: "2026-10-14T17:00:00.000+01:00", running: [expired, alive],
+  });
+  const untouched = structuredClone(stored);
+  assert.deepEqual(restoreDrillFreshnessSnapshot(stored, now), {
+    last_started_at: stored.last_started_at, last_finished_at: stored.last_finished_at,
+    last_validated_at: stored.last_validated_at, last_state: "validated", running: 1,
+  });
+  const olderFinish = nextRestoreDrillFreshness(stored, { kind: "finished", drill_id: alive.drill_id, state: "failed", finished_at: "2026-10-14T15:59:00.000Z", validated_at: null }, now);
+  assert.deepEqual(olderFinish.running, [], "expired entries and the finishing drill are removed even for an old event");
+  assert.equal(Date.parse(olderFinish.last_finished_at), Date.parse(stored.last_finished_at));
+  assert.equal(olderFinish.last_state, "validated");
+  const validated = nextRestoreDrillFreshness(stored, { kind: "finished", drill_id: alive.drill_id, state: "validated", finished_at: "2026-10-14T16:31:00.000Z", validated_at: "2026-10-14T16:30:00.000Z" }, now);
+  assert.equal(validated.last_validated_at, "2026-10-14T16:30:00.000Z");
+  assert.equal(validated.last_finished_at, "2026-10-14T16:31:00.000Z");
+  const olderOffset = nextRestoreDrillFreshness(validated, { kind: "finished", drill_id: freshnessID(30), state: "validated", finished_at: "2026-10-14T16:32:00.000Z", validated_at: "2026-10-14T17:00:00.000+01:00" }, now);
+  assert.equal(olderOffset.last_validated_at, "2026-10-14T16:30:00.000Z", "an offset event is compared as an instant too");
+  const laterStart = nextRestoreDrillFreshness(stored, started(1), now);
+  assert.equal(laterStart.last_started_at, "2026-10-14T16:30:00.000Z");
+  assert.equal(laterStart.updated_at, new Date(now).toISOString());
+  const fallback = nextRestoreDrillFreshness(null, { kind: "finished", drill_id: freshnessID(1), state: "validated", finished_at: "2026-10-14T17:30:00.000+01:00", validated_at: null }, now);
+  assert.equal(fallback.last_validated_at, "2026-10-14T16:30:00.000Z");
+  assert.equal(fallback.last_finished_at, "2026-10-14T16:30:00.000Z");
+  assert.deepEqual(stored, untouched, "pure functions never mutate the stored input");
+});
+
+test("scrape exposes value-free drill freshness gauges only with backups enabled", { timeout: 10_000 }, async (t) => {
+  const now = NOW.getTime();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now });
+  const env = healthEnv({});
+  const kv = env.DIRECTORY;
+  kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify({ schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health: {
+    computed_at: NOW.toISOString(), health_available: true, stale_accounts: 2,
+    never_committed_accounts: 3, oldest_committed_age_seconds: 4,
+  } }));
+  const reads = [];
+  const originalGet = kv.get.bind(kv);
+  let freshnessRead = (key, options) => originalGet(key, options);
+  kv.get = (key, options) => { reads.push({ key, options }); return key === RESTORE_DRILL_FRESHNESS_KEY ? freshnessRead(key, options) : originalGet(key, options); };
+  kv.list = () => assert.fail("scrape must not list accounts");
+  env.ACCOUNT_BACKUP.get = () => assert.fail("scrape must not read Durable Objects");
+  const prefix = "witself_control_plane_account_backup_restore_drill_";
+  const otherSuffixes = ["last_started_timestamp_seconds", "last_finished_timestamp_seconds", "last_validated_timestamp_seconds", "last_result", "running"];
+  const scrape = async () => {
+    const before = reads.length;
+    const response = await uptimeProbeMetricsResponse(new Request("https://example/metrics/probes"), env);
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    const currentReads = reads.slice(before);
+    assert.equal(currentReads.filter(({ key }) => key === ACCOUNT_BACKUP_SCAN_KEY).length, env.CP_ACCOUNT_BACKUPS_ENABLED === "true" ? 1 : 0);
+    const freshnessReads = currentReads.filter(({ key }) => key === RESTORE_DRILL_FRESHNESS_KEY);
+    assert.equal(freshnessReads.length, env.CP_ACCOUNT_BACKUPS_ENABLED === "true" ? 1 : 0);
+    if (freshnessReads.length) assert.deepEqual(freshnessReads[0].options, { type: "text" });
+    assert.equal(text.includes(ACCOUNT), false);
+    assert.equal(text.includes(freshnessID(1)), false);
+    assert.equal(text.includes(freshnessID(2)), false);
+    return text;
+  };
+  const expectUnavailable = (text) => {
+    assert.ok(text.includes(`${prefix}freshness_available 0\n`));
+    for (const suffix of otherSuffixes) assert.equal(text.includes(prefix + suffix), false);
+    assert.match(text, /witself_control_plane_account_backup_health_available 1\n/);
+  };
+  const record = freshnessRecord({
+    last_started_at: NOW.toISOString(), last_finished_at: new Date(now - 1_000).toISOString(),
+    last_validated_at: new Date(now - 2_000).toISOString(), last_state: "validated",
+    running: [
+      { drill_id: freshnessID(1), deadline_at: new Date(now - RESTORE_DRILL_FINAL_GRACE_MS).toISOString() },
+      { drill_id: freshnessID(2), deadline_at: new Date(now + 60_000).toISOString() },
+    ],
+  });
+  kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, JSON.stringify(record));
+  let text = await scrape();
+  const expected = { freshness_available: 1, last_started_timestamp_seconds: now / 1000,
+    last_finished_timestamp_seconds: (now - 1000) / 1000, last_validated_timestamp_seconds: (now - 2000) / 1000,
+    last_result: 1, running: 1 };
+  for (const [suffix, value] of Object.entries(expected)) assert.ok(text.includes(`${prefix}${suffix} ${value}\n`), suffix);
+  assert.ok(text.indexOf(`${prefix}freshness_available`) > text.indexOf("witself_control_plane_account_backup_oldest_committed_age_seconds"));
+  kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, JSON.stringify(freshnessRecord({ last_state: "failed" })));
+  text = await scrape();
+  assert.ok(text.includes(`${prefix}last_result 0\n`));
+  for (const suffix of otherSuffixes.filter((suffix) => suffix.endsWith("timestamp_seconds"))) assert.equal(text.includes(prefix + suffix), false);
+  kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, JSON.stringify(freshnessRecord()));
+  text = await scrape();
+  assert.ok(text.includes(`${prefix}running 0\n`));
+  assert.equal(text.includes(`${prefix}last_result`), false);
+  kv.values.delete(RESTORE_DRILL_FRESHNESS_KEY);
+  expectUnavailable(await scrape());
+  for (const invalid of invalidFreshnessRecords()) {
+    kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, JSON.stringify(invalid));
+    expectUnavailable(await scrape());
+  }
+  kv.values.set(RESTORE_DRILL_FRESHNESS_KEY, "{not json");
+  expectUnavailable(await scrape());
+  freshnessRead = () => { throw new Error("private freshness failure"); };
+  expectUnavailable(await scrape());
+  freshnessRead = () => new Promise(() => {});
+  let answered = false;
+  const pending = scrape().then((value) => { answered = true; return value; });
+  await flush();
+  assert.equal(answered, false);
+  t.mock.timers.tick(5_000);
+  expectUnavailable(await pending);
+  env.CP_ACCOUNT_BACKUPS_ENABLED = "false";
+  freshnessRead = () => assert.fail("disabled backups must never read freshness");
+  assert.equal((await scrape()).includes("restore_drill"), false);
+});
+
+test("restore drill freshness docs name the gauges and both alerts", async () => {
+  const { readFile } = await import("node:fs/promises");
+  for (const [file, fragments] of [
+    ["api-routes.md", ["restore_drill_last_validated_timestamp_seconds"]],
+    ["runbooks.md", ["WitselfRestoreDrillStale", "WitselfRestoreDrillFailed"]],
+    ["backup-and-recovery.md", ["restore drill freshness summary"]],
+  ]) {
+    const text = (await readFile(new URL(`../../../../docs/${file}`, import.meta.url), "utf8")).replace(/\s+/g, " ");
+    for (const fragment of fragments) assert.ok(text.includes(fragment), `${file}: missing ${fragment}`);
   }
 });

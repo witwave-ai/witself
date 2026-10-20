@@ -86,6 +86,21 @@ when enabled and snapshot availability is zero or snapshot age exceeds three
 configured intervals, sustained for five minutes. Existing scrape availability
 alerts cover HTTP failures.
 
+When backups are enabled, the scrape also exposes value-free drill gauges with
+that same prefix: `restore_drill_freshness_available`,
+`restore_drill_last_started_timestamp_seconds`,
+`restore_drill_last_finished_timestamp_seconds`,
+`restore_drill_last_validated_timestamp_seconds`, `restore_drill_last_result`,
+and `restore_drill_running`. Their separate five-second KV read runs in parallel
+with the scan read and is failure-isolated: a failed, timed-out, unparsable or
+invalid freshness read sets `restore_drill_freshness_available` to 0 and omits
+the other five gauges; it never causes HTTP 503. With a valid summary,
+availability is 1, non-null timestamps are Unix seconds, the last result is 1
+for validated or 0 for failed (omitted until a drill finishes), and running counts
+drills whose deadlines plus the two-minute final-report grace have not expired.
+Null timestamps are omitted. These six gauges exist only with backups enabled;
+when disabled, the freshness key is not read. They identify no account or drill.
+
 A non-OK cell export records `last_error` as `backup export <status>` without
 the cell's response body text. See
 [periodic account backup operations](runbooks.md#operate-periodic-account-backups)

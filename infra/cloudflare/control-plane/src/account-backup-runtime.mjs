@@ -13,6 +13,11 @@ export const ACCOUNT_BACKUP_STATE_SCHEMA = "witself.account-backup.v1";
 export const ACCOUNT_BACKUP_SCAN_SCHEMA =
   "witself.account-backup-scan.v1";
 export const ACCOUNT_BACKUP_SCAN_KEY = "config:account_backup_scan";
+export const RESTORE_DRILL_FRESHNESS_KEY = "config:restore_drill_freshness";
+export const RESTORE_DRILL_FRESHNESS_SCHEMA = "witself.restore-drill-freshness.v1";
+const RESTORE_DRILL_FRESHNESS_MAX_RUNNING = 8;
+const RESTORE_DRILL_FRESHNESS_TIMEOUT_MS = 5_000;
+const RESTORE_DRILL_FRESHNESS_RETRY_MS = 1_100;
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -148,6 +153,74 @@ export function accountBackupConfig(env) {
 function validDate(value) {
   return typeof value === "string" &&
     Number.isFinite(Date.parse(value));
+}
+
+// Value-free fleet summary: never store account ids, backup ids, cell names,
+// object paths or error text here.
+export function validRestoreDrillFreshness(record) {
+  const keys = ["schema_version", "last_started_at", "last_finished_at",
+    "last_validated_at", "last_state", "running", "updated_at"];
+  return isObject(record) && Object.keys(record).length === keys.length &&
+    keys.every((key) => Object.hasOwn(record, key)) &&
+    record.schema_version === RESTORE_DRILL_FRESHNESS_SCHEMA &&
+    [record.last_started_at, record.last_finished_at, record.last_validated_at]
+      .every((value) => value === null || validDate(value)) &&
+    [null, "validated", "failed"].includes(record.last_state) &&
+    Array.isArray(record.running) && record.running.length <= RESTORE_DRILL_FRESHNESS_MAX_RUNNING &&
+    Array.from(record.running).every((entry) => isObject(entry) && Object.keys(entry).length === 2 &&
+      Object.hasOwn(entry, "drill_id") && Object.hasOwn(entry, "deadline_at") &&
+      typeof entry.drill_id === "string" && RESTORE_DRILL_ID.test(entry.drill_id) &&
+      validDate(entry.deadline_at)) && validDate(record.updated_at);
+}
+
+export function nextRestoreDrillFreshness(stored, event, nowMs) {
+  const iso = (value) => value === null ? null : new Date(Date.parse(value)).toISOString();
+  const later = (previous, value) => iso(previous === null || Date.parse(value) >= Date.parse(previous) ? value : previous);
+  const record = validRestoreDrillFreshness(stored) ? {
+    schema_version: RESTORE_DRILL_FRESHNESS_SCHEMA,
+    last_started_at: iso(stored.last_started_at),
+    last_finished_at: iso(stored.last_finished_at),
+    last_validated_at: iso(stored.last_validated_at),
+    last_state: stored.last_state,
+    running: stored.running.map(({ drill_id, deadline_at }) => ({ drill_id, deadline_at: iso(deadline_at) })),
+    updated_at: iso(stored.updated_at),
+  } : {
+    schema_version: RESTORE_DRILL_FRESHNESS_SCHEMA,
+    last_started_at: null, last_finished_at: null, last_validated_at: null,
+    last_state: null, running: [], updated_at: null,
+  };
+  record.running = record.running.filter((entry) =>
+    Date.parse(entry.deadline_at) + RESTORE_DRILL_FINAL_GRACE_MS > nowMs);
+  if (event.kind === "started") {
+    record.running = record.running.filter((entry) => entry.drill_id !== event.drill_id);
+    record.running.push({ drill_id: event.drill_id, deadline_at: iso(event.deadline_at) });
+    record.running.sort((a, b) => Date.parse(b.deadline_at) - Date.parse(a.deadline_at));
+    record.running = record.running.slice(0, RESTORE_DRILL_FRESHNESS_MAX_RUNNING);
+    record.last_started_at = later(record.last_started_at, event.started_at);
+  } else if (event.kind === "finished") {
+    record.running = record.running.filter((entry) => entry.drill_id !== event.drill_id);
+    if (record.last_finished_at === null || Date.parse(record.last_finished_at) <= Date.parse(event.finished_at)) {
+      record.last_finished_at = iso(event.finished_at);
+      record.last_state = event.state;
+    }
+    if (event.state === "validated") {
+      record.last_validated_at = later(record.last_validated_at, event.validated_at ?? event.finished_at);
+    }
+  }
+  record.updated_at = new Date(nowMs).toISOString();
+  return record;
+}
+
+export function restoreDrillFreshnessSnapshot(record, nowMs) {
+  if (!validRestoreDrillFreshness(record)) return null;
+  return {
+    last_started_at: record.last_started_at,
+    last_finished_at: record.last_finished_at,
+    last_validated_at: record.last_validated_at,
+    last_state: record.last_state,
+    running: record.running.filter((entry) =>
+      Date.parse(entry.deadline_at) + RESTORE_DRILL_FINAL_GRACE_MS > nowMs).length,
+  };
 }
 
 function validR2ETag(value) {
@@ -762,6 +835,60 @@ export class DurableAccountBackup {
     this.validateArchive =
       dependencies.validateArchive ?? validateCommittedAccountArchive;
     this.now = dependencies.now ?? (() => new Date());
+    this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  // KV allows about one write per second per key, so retry once. It is
+  // last-writer-wins and eventually consistent across locations: concurrent
+  // drills on different accounts or a timed-out put landing late can lose an
+  // update or roll a timestamp back. The eight-day threshold and the next
+  // drill bound the effect. A lost started event makes the future scheduler's
+  // guard more permissive for one drill; the per-account 409 still protects
+  // that account. A drill that never reports a finish is not recorded as
+  // failed; WitselfRestoreDrillStale covers it after a recorded validation.
+  // Never hold the export fence.
+  async noteRestoreDrillFreshness(event) {
+    const directory = this.env?.DIRECTORY;
+    if (typeof directory?.get !== "function" || typeof directory?.put !== "function") return;
+    let timer;
+    let stopped = false;
+    const attempt = async () => {
+      const text = await directory.get(RESTORE_DRILL_FRESHNESS_KEY, { type: "text" });
+      if (stopped) return;
+      let stored;
+      try {
+        stored = JSON.parse(text);
+      } catch {
+        // An unparsable record is rebuilt from this event.
+      }
+      const record = nextRestoreDrillFreshness(stored, event, this.now().getTime());
+      await directory.put(RESTORE_DRILL_FRESHNESS_KEY, JSON.stringify(record));
+    };
+    const operation = async () => {
+      try {
+        await attempt();
+      } catch {
+        if (stopped) return;
+        await this.sleep(RESTORE_DRILL_FRESHNESS_RETRY_MS);
+        if (!stopped) await attempt();
+      }
+    };
+    try {
+      await Promise.race([
+        operation(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            stopped = true;
+            reject(new Error("restore drill freshness deadline exceeded"));
+          }, RESTORE_DRILL_FRESHNESS_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      console.error("account-backup: restore drill freshness was not recorded");
+    } finally {
+      stopped = true;
+      clearTimeout(timer);
+    }
   }
 
   async fetch(request) {
@@ -840,6 +967,10 @@ export class DurableAccountBackup {
             finished_at: null, validated_at: null, error: null,
           };
           await this.storage.put(RESTORE_DRILL_KEY, record);
+          await this.noteRestoreDrillFreshness({
+            kind: "started", drill_id: record.drill_id,
+            started_at: record.started_at, deadline_at: record.deadline_at,
+          });
           return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
         }
         if (!(typeof input?.drill_id === "string" && input.drill_id.length >= 1 && input.drill_id.length <= 64 &&
@@ -860,6 +991,10 @@ export class DurableAccountBackup {
           error: input.state === "failed" ? (reason || "backup failed") : null,
         };
         await this.storage.put(RESTORE_DRILL_KEY, record);
+        await this.noteRestoreDrillFreshness({
+          kind: "finished", drill_id: record.drill_id, state: record.state,
+          finished_at: record.finished_at, validated_at: record.validated_at,
+        });
         return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
       });
       this.restoreDrillQueue = operation.catch(() => {});
@@ -997,6 +1132,10 @@ export class DurableAccountBackup {
       driver: "alarm",
     };
     await this.storage.put(RESTORE_DRILL_KEY, record);
+    await this.noteRestoreDrillFreshness({
+      kind: "started", drill_id: record.drill_id,
+      started_at: record.started_at, deadline_at: record.deadline_at,
+    });
     return json({ schema_version: "witself.v0", account_id: this.accountId, restore_drill: record });
   }
 

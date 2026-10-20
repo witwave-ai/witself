@@ -74,6 +74,12 @@
 //                                  opt-in directory pass carried across slots;
 //                                  slot is the most recent write's tick slot,
 //                                  dispatch counts accumulate per pass
+//   config:restore_drill_freshness -> {"schema_version","last_started_at",
+//                                      "last_finished_at","last_validated_at",
+//                                      "last_state","running":[{"drill_id",
+//                                      "deadline_at"}],"updated_at"}
+//                                      value-free drill freshness; written by
+//                                      account backup objects at drill start and finish
 //   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:

@@ -4511,6 +4511,23 @@ inspect scan cursor progress and the scheduler; do not infer fresh health from
 old counts. These metrics contain no account ids, backup ids, object paths, or
 error text.
 
+`WitselfRestoreDrillStale` pages at warning after no restore drill has validated
+a committed account backup for more than eight days, sustained for 30 minutes.
+Run the drill block in this section on any account with a committed backup.
+`WitselfRestoreDrillFailed` pages at warning when the most recent finished drill
+failed, sustained for ten minutes without a later finish. Read
+`account.restore_drill` and the catalog `validations` for the last drill, then run
+the drill once more. Both rules bridge scrape gaps of less than one hour and
+require periodic backups to be enabled. Neither alert can fire before the first
+drill recorded after the deploy; a staleness alert also needs a recorded
+validated finish. Deleting `config:restore_drill_freshness` removes future
+evidence; both alerts go silent after their retained one-hour scrape history
+expires and stay silent until the next drill supplies the relevant evidence.
+A request-driven drill whose finish report is lost does not refresh the
+freshness summary, even when its catalog receipt exists. A drill that never
+reports a finish is not recorded as failed in the summary; the staleness alert
+covers the lack of validation only when an earlier validated finish is recorded.
+
 For an over-capacity fleet, raise `CP_ACCOUNT_BACKUPS_PAGE_SIZE` only with the
 founder's go. The maximum is 20: at one page per five-minute tick, that is 5,760
 directory entries per day, with pending, archived and unrouted entries also
