@@ -923,6 +923,119 @@ explicit existing-object recovery, and requires the matching committed current
 job before drilling. A later `exported_at` alone cannot prove a fresh database
 snapshot.
 
+### Scheduled restore drills (off by default)
+
+The five-minute maintenance cron checks the weekly drill schedule after the
+periodic backup tick settles. It is dark until the operator secret
+`CP_RESTORE_DRILLS_ENABLED` is `true` (case-insensitive, with surrounding
+whitespace ignored). While disabled, the drill tick reads only that switch and
+returns; it touches no binding, creates no alarm and starts no drill. The four
+`CP_RESTORE_DRILLS_*` settings are operator secrets, absent from the committed
+Worker configuration.
+
+The default window is Wednesday 16:00–20:00Z, including its start and excluding
+its end. `CP_RESTORE_DRILLS_WEEKDAY` accepts 0–6 (Sunday–Saturday), default 3;
+`CP_RESTORE_DRILLS_START_HOUR_UTC` accepts 1–18, default 16. The window is always
+four hours and avoids 00:00–01:00Z. The required
+`CP_RESTORE_DRILLS_TARGET_CELL` names the registered isolated validation cell,
+currently `civo-sandbox-use1-backup`; it must match `^[a-z0-9-]{1,64}$`.
+`CP_PUBLIC_ORIGIN` must already be an exact HTTPS origin without a trailing
+slash or path. Invalid settings are refused, never clamped, and no binding is
+touched outside the window.
+
+The cron's `scheduledTime` selects the window, and the scheduler checks the
+current clock again immediately before calling begin. A delayed tick that
+reaches that point at or after the window end holds with `window_closed`.
+
+Each window rotates through live account ids in sorted cyclic order after the
+previous selected account, wrapping at the end. A one-account fleet can drill
+that account each week. The tick lists only `acct:` keys, at most ten pages of
+1,000 keys, then examines at most three candidates. It remembers the last
+examined candidate so later ticks continue the search. Accounts beyond the
+10,000-key listing cap are not covered by this rotation. The selected generation
+is the largest backup id among catalog entries that pass the committed-catalog
+validator.
+
+A start requires all of these guards to clear:
+
+- The directory, account backup and lifecycle objects, backup bucket, and cell
+  coordinator bindings are present.
+- When periodic backups are enabled, the persisted backup pass has
+  `complete: true` and its `pass_started_slot ?? slot` matches the current
+  pass slot. Both ticks calculate that slot with `backupJobIdentity`, the
+  configured backup interval and the cron's `scheduledTime`. An earlier
+  complete pass does not clear the guard. A failed or rejected backup tick
+  also holds the drill tick with `backup_scan_incomplete`. With backups
+  disabled, this scan key is not read.
+- The freshness summary is absent or valid and has no unexpired running drill.
+  A failed, hung, unparsable or invalid freshness read holds the start.
+- The candidate has a valid live route to a cell other than the target, with
+  neither a pending nor an archived directory entry.
+- Its lifecycle status is readable and `operation === null`, so no move,
+  evacuation or close is in progress.
+- Its backup status is readable, has no pending, running or retrying export,
+  has no running restore drill, and contains a valid committed catalog entry.
+
+If a candidate already has a running restore drill, the tick stops with
+`pending`/`drill_running`, keeps the rotation unchanged and starts no other
+account. This account-level guard also holds when the freshness summary has
+not yet recorded that running drill. Other ineligible candidates are skipped
+within the three-candidate limit. Each new window clears the examined cursor
+and resumes from the preserved rotation position.
+
+The existing start checks also require a registered target marked
+`accepting=false` and `backup_validation_target=true`, free of live account
+projections. Scheduled starts always require the alarm driver and backup
+validation protocol 2; there is no request-driven fallback. The scheduler never
+commits restored data. The alarm performs the same rollback-only validation as
+the manual drill and records its outcome in the account's `restore_drill` and
+the value-free freshness summary. Successful validation also writes a catalog
+`validations` receipt.
+
+Fleet-authenticated `GET /v1/backups/status` exposes `restore_drill_schedule`
+only while enabled and when no `account_id` is supplied. Per-account status
+does not read or include this fleet record. Unlike the value-free freshness
+summary, this operational record contains selected account and backup ids,
+rotation cursors and a drill id; do not copy it to logs or public metrics. It
+retains at most eight prior windows with only their window start, state and
+drill id.
+
+| Schedule state | Meaning |
+| --- | --- |
+| `pending` | No accepted start yet; the reason below explains a guard or retryable refusal. |
+| `starting` | The selected candidate and generation were persisted before the start call. |
+| `started` | The alarm drill start was acknowledged; its drill id links to the actual outcome. Later ticks that observe this record do not start in this window. |
+| `start_failed` | The start failed for another reason; a fixed value-free error is retained and the rotation advances for the next window. |
+| `start_unconfirmed` | The start may have happened, or a later tick found `starting` without a recorded outcome. It never retries in that window. |
+| `no_eligible_account` | The bounded candidate list was exhausted without an eligible account. Later ticks that observe this record do not start in this window. |
+
+| Pending reason | Meaning |
+| --- | --- |
+| `backup_scan_incomplete` | The enabled periodic backup pass has no complete record for the current slot, or the preceding backup tick failed or rejected. |
+| `freshness_unavailable` | The existing freshness record could not be read or validated. |
+| `drill_running` | The freshness summary or the candidate's account status shows a running drill, or the start refused because another drill is busy. The tick starts no other account. |
+| `target_unavailable` | The start could not confirm alarm protocol support on the target. |
+| `candidates_exhausted_this_tick` | Three candidates were examined without finding an eligible account; the next tick continues. |
+| `window_closed` | The current clock reached the window end before begin; no start was attempted. |
+
+The reason is null when none applies. Busy and protocol refusals preserve the
+previous rotation position so the next tick can retry the same candidate;
+a busy outcome must also preserve any newer stored rotation position.
+After begin, every outcome write, including its retry, first re-reads the
+schedule with a bounded read. If that window is already `started`,
+`start_failed`, `start_unconfirmed` or `no_eligible_account`, the tick keeps
+the stored record and logs only
+`restore-drill-schedule: state=<stored state> reason=kept`.
+The scheduler writes at most two successful schedule records per tick. Because
+KV limits writes to roughly one per second per key, an outcome write is retried
+once after 1,100 ms. If both attempts fail, the stored state remains `starting`
+and the next tick marks it `start_unconfirmed`, avoiding a duplicate start.
+Logs contain fixed states and reasons, never account, backup or drill ids.
+These re-reads narrow overlapping-tick races, but KV has no compare-and-set;
+the guards do not provide fleet-wide mutual exclusion for overlapping ticks
+or manual drills. Follow the operating hold and manual-drill procedure in the
+[runbook](runbooks.md#operate-periodic-account-backups).
+
 ### Realm email alias authority recovery
 
 Realm email alias claims, permanent tombstones, reserved-name versions,

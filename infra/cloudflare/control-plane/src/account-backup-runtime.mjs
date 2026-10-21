@@ -371,7 +371,7 @@ function validJob(job, accountID) {
     validRouteFence(job.source_route, job.source_cell);
 }
 
-function validCatalogRecord(record, accountID) {
+export function validCatalogRecord(record, accountID) {
   return isObject(record) &&
     record.account_id === accountID &&
     BACKUP_ID.test(record.backup_id ?? "") &&
@@ -2249,7 +2249,7 @@ async function backupStub(env, accountID) {
   return env.ACCOUNT_BACKUP.get(id);
 }
 
-async function readBackupStatus(env, accountID) {
+export async function readBackupStatus(env, accountID) {
   const response = await (await backupStub(env, accountID)).fetch(
     new Request("http://account-backup.internal/status"),
   );
