@@ -129,10 +129,10 @@ func TestMemoryClientVerticalSlice(t *testing.T) {
 			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","items":[{"id":"mem_1","version":1,"content_encoding":"plain","kind":"decision","tags":[],"links":[],"state":"active","evidence":[]}],"next_cursor":"next"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/memories:recall":
 			body := decodeClientMemoryBody(t, r)
-			if body["query"] != "database decision" || body["kind"] != "decision" || body["limit"] != float64(5) || body["cursor"] != "recall" {
+			if body["query_fallback"] != "any_terms" || body["query"] != "database decision" || body["kind"] != "decision" || body["limit"] != float64(5) || body["cursor"] != "recall" {
 				t.Fatalf("recall body = %#v", body)
 			}
-			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","hits":[{"memory":{"id":"mem_1","version":1,"kind":"decision","tags":[],"links":[],"state":"active","evidence":[]},"score":{"lexical":0.8,"salience":0.9,"recency":0.7,"total":0.82}}],"retrieval_mode":"lexical","vector_coverage":0,"degraded":false}`)
+			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","hits":[{"memory":{"id":"mem_1","version":1,"kind":"decision","tags":[],"links":[],"state":"active","evidence":[]},"score":{"lexical":0.8,"salience":0.9,"recency":0.7,"total":0.82}}],"retrieval_mode":"lexical","vector_coverage":0,"degraded":false,"query_fallback":"any_terms"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/memories/mem_1/history":
 			if r.URL.Query().Get("limit") != "10" || r.URL.Query().Get("cursor") != "history" {
 				t.Fatalf("history query = %s", r.URL.RawQuery)
@@ -252,9 +252,9 @@ func TestMemoryClientVerticalSlice(t *testing.T) {
 	}
 
 	recalled, err := RecallMemories(context.Background(), srv.URL, "token", MemoryRecallInput{
-		Query: "database decision", Kind: "decision", Limit: 5, Cursor: "recall",
+		Query: "database decision", Kind: "decision", Limit: 5, Cursor: "recall", QueryFallback: "any_terms",
 	})
-	if err != nil || len(recalled.Hits) != 1 || recalled.Hits[0].Score.Total != .82 || recalled.RetrievalMode != "lexical" {
+	if err != nil || len(recalled.Hits) != 1 || recalled.Hits[0].Score.Total != .82 || recalled.RetrievalMode != "lexical" || recalled.QueryFallback != "any_terms" {
 		t.Fatalf("recall = %#v / %v", recalled, err)
 	}
 

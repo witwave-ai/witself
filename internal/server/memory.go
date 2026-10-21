@@ -269,6 +269,7 @@ type MemoryHistoryPage struct {
 // MemoryRecallRequest is a structured deterministic search. Natural-language
 // time interpretation and optional reranking belong to the client.
 type MemoryRecallRequest struct {
+	QueryFallback    string     `json:"query_fallback,omitempty"`
 	Query            string     `json:"query,omitempty"`
 	Kind             string     `json:"kind,omitempty"`
 	Tags             []string   `json:"tags,omitempty"`
@@ -316,6 +317,7 @@ type MemoryRecallPage struct {
 	CandidateLimit     int               `json:"candidate_limit,omitempty"`
 	Degraded           bool              `json:"degraded"`
 	DegradedReason     string            `json:"degraded_reason,omitempty"`
+	QueryFallback      string            `json:"query_fallback,omitempty"`
 }
 
 // CaptureMemoryRequest is the POST /v1/memories request body. Actor, account,
@@ -681,6 +683,10 @@ func recallMemoriesHandler(auth PrincipalAuthFunc, recall func(context.Context, 
 		}
 		if req.Limit < 0 || req.Limit > 100 {
 			writeJSONError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+			return
+		}
+		if req.QueryFallback != "" && req.QueryFallback != "any_terms" {
+			writeJSONError(w, http.StatusBadRequest, "query_fallback must be empty or any_terms")
 			return
 		}
 		page, err := recall(r.Context(), p, req)

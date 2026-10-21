@@ -1206,18 +1206,31 @@ audit events; read-only recall does neither:
 - `POST /v1/memories:recall` is implemented for the token-bound agent's active
   current heads. The body accepts literal query text plus kind, tags, links,
   origin, capture reason, occurrence/capture ranges, sensitivity, limit, and an
-  opaque filter-bound cursor. PostgreSQL full-text, salience, and recency produce
-  explicit score components and stable ordering; the backend makes no model or
-  embedding call. Supplying both `vector_profile_id` and a compatible
-  `query_vector` enables deterministic hybrid scoring over the bounded candidate
-  universe. Responses expose similarity, per-hit vector use, profile, coverage,
-  candidate counts/limit, truncation, retrieval mode, and degradation reason.
-  With no profile, or zero compatible rows, lexical recall remains the baseline.
+  opaque filter-bound cursor. The optional body input `query_fallback` accepts
+  only an absent/empty value or `any_terms`; other values return HTTP 400.
+  Clients that omit it or send an empty value get strict matching.
+  `query_fallback=any_terms` opts in to the lexical retry described below; the
+  CLI and MCP recall handler send it automatically. It is ignored when
+  `vector_profile_id` is set, and hybrid recall never retries with any-word
+  matching or sets the response's `query_fallback`. Older servers ignore this
+  body input and continue strict matching. PostgreSQL full-text, salience, and
+  recency produce explicit score components and stable ordering; the backend
+  makes no model or embedding call. Supplying both `vector_profile_id` and a
+  compatible `query_vector` enables deterministic hybrid scoring over the
+  bounded candidate universe. Responses expose similarity, per-hit vector use,
+  profile, coverage, candidate counts/limit, truncation, retrieval mode,
+  degradation reason, and `query_fallback`. With no profile, or zero compatible
+  rows, lexical recall remains the baseline.
   Cross-agent/group recall remains future work.
   Without a vector profile, every query word must appear in the memory content
   in exactly that form (PostgreSQL `websearch_to_tsquery`, `simple`
   configuration); use two to four distinctive keywords or join alternatives
   with `OR`.
+  Without a vector profile, if no memory contains every word of a plain query
+  of two or more words, recall retries once with any-word matching (common
+  words dropped) and reports query_fallback=any_terms; queries with double
+  quotes, a leading minus, OR, a single word, or only common words are not
+  retried. For example, `the a` and `migration` are not retried.
 - `POST /v1/memory-vector-profiles` creates or exactly replays one immutable
   agent-owned profile declaring provider/model/recipe identity, dimensions,
   distance metric, and normalization. `GET /v1/memory-vector-profiles` returns

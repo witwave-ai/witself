@@ -358,7 +358,7 @@ func memoryRecall(args []string) int {
 	fs := flag.NewFlagSet("memory recall", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
-	queryFlag := fs.String("query", "", "literal full-text query; natural date interpretation is client-side; without a vector profile every word of the query (flag or positional QUERY) must appear in the memory content in exactly that form, so use two to four keywords or join alternatives with OR")
+	queryFlag := fs.String("query", "", "literal full-text query; natural date interpretation is client-side; without a vector profile every word of the query (flag or positional QUERY) must appear in the memory content in exactly that form, so use two to four keywords or join alternatives with OR. Without a vector profile, if no memory contains every word of a plain query of two or more words, recall retries once with any-word matching (common words dropped) and reports query_fallback=any_terms; queries with double quotes, a leading minus, OR, a single word, or only common words are not retried. Older servers never retry: if query_fallback is absent, no any-word retry ran, so zero hits still means re-query with fewer keywords.")
 	kind := fs.String("kind", "", "exact memory kind filter")
 	var tags, links csvListFlag
 	fs.Var(&tags, "tag", "required tag (repeatable or comma-separated)")
@@ -428,7 +428,8 @@ func memoryRecall(args []string) int {
 		return 1
 	}
 	page, err := client.RecallMemories(ctx, conn.Endpoint, conn.Token, client.MemoryRecallInput{
-		Query: query, Kind: *kind, Tags: tags, Links: links,
+		QueryFallback: "any_terms",
+		Query:         query, Kind: *kind, Tags: tags, Links: links,
 		Origin: *origin, CaptureReason: *captureReason,
 		IncludeSensitive: *includeSensitive,
 		OccurredFrom:     occurredFrom, OccurredUntil: occurredUntil,
@@ -445,6 +446,9 @@ func memoryRecall(args []string) int {
 	}
 	if *jsonOut {
 		return printJSON(page)
+	}
+	if page.QueryFallback == "any_terms" {
+		fmt.Fprintln(os.Stderr, "note: no memory matched every word; showing memories that match any word")
 	}
 	if len(page.Hits) == 0 {
 		fmt.Fprintln(os.Stderr, "no matching memories")

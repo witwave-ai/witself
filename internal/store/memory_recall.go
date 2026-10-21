@@ -21,6 +21,7 @@ const maxMemoryRecallPageSize = 100
 // resolve those into these filters before calling it.
 type MemoryRecallOptions struct {
 	Query            string
+	QueryFallback    string
 	Kind             string
 	Tags             []string
 	Links            []string
@@ -82,10 +83,12 @@ type MemoryRecallPage struct {
 	CandidateLimit     int    `json:"candidate_limit,omitempty"`
 	Degraded           bool   `json:"degraded"`
 	DegradedReason     string `json:"degraded_reason,omitempty"`
+	QueryFallback      string `json:"query_fallback,omitempty"`
 }
 
 type memoryRecallCursor struct {
 	Version                    int       `json:"v"`
+	AnyTerms                   bool      `json:"any_terms,omitempty"`
 	QueryHash                  string    `json:"query_hash"`
 	AsOf                       time.Time `json:"as_of"`
 	SnapshotChangeSeq          int64     `json:"snapshot_change_seq"`
@@ -97,6 +100,7 @@ type memoryRecallCursor struct {
 
 type memoryRecallCursorBinding struct {
 	Query            string     `json:"query"`
+	QueryFallback    string     `json:"query_fallback,omitempty"`
 	Kind             string     `json:"kind,omitempty"`
 	Tags             []string   `json:"tags,omitempty"`
 	Links            []string   `json:"links,omitempty"`
@@ -131,11 +135,17 @@ func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryReca
 	if err != nil {
 		return MemoryRecallPage{}, err
 	}
+	fallbackQuery, fallbackEligible := memoryRecallAnyTermsQuery(opts.Query)
+	anyTerms := false
 	if opts.Cursor != "" {
 		cursor, err := decodeMemoryRecallCursor(opts.Cursor)
 		if err != nil {
 			return MemoryRecallPage{}, err
 		}
+		if cursor.AnyTerms && (opts.QueryFallback != "any_terms" || opts.VectorProfileID != "" || !fallbackEligible) {
+			return MemoryRecallPage{}, fmt.Errorf("%w: any-terms recall cursor requires an opted-in eligible lexical query", ErrMemoryInputInvalid)
+		}
+		anyTerms = cursor.AnyTerms
 		if cursor.QueryHash != bindingHash {
 			return MemoryRecallPage{}, fmt.Errorf("%w: recall cursor does not match filters", ErrMemoryInputInvalid)
 		}
@@ -197,7 +207,107 @@ func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryReca
 		return page, nil
 	}
 
-	args := []any{p.AccountID, p.RealmID, p.ID, opts.Query, *opts.AsOf, *opts.SnapshotChangeSeq}
+	query := opts.Query
+	if anyTerms {
+		query = fallbackQuery
+	}
+	ranked, err := queryMemoryRecallRanked(ctx, tx, p, opts, query)
+	if err != nil {
+		return MemoryRecallPage{}, err
+	}
+	if opts.QueryFallback == "any_terms" && opts.Cursor == "" && opts.Query != "" && len(ranked) == 0 && fallbackEligible {
+		anyTerms = true
+		ranked, err = queryMemoryRecallRanked(ctx, tx, p, opts, fallbackQuery)
+		if err != nil {
+			return MemoryRecallPage{}, err
+		}
+	}
+
+	page := MemoryRecallPage{
+		Hits: []MemoryRecallHit{}, RetrievalMode: "lexical",
+		VectorCoverage: 0, Degraded: false,
+	}
+	cursorVersion := 2
+	if anyTerms {
+		page.QueryFallback = "any_terms"
+		cursorVersion = 3
+	}
+	if len(ranked) > opts.Limit {
+		ranked = ranked[:opts.Limit]
+		last := ranked[len(ranked)-1]
+		page.NextCursor, err = encodeMemoryRecallCursor(memoryRecallCursor{
+			Version: cursorVersion, AnyTerms: anyTerms, QueryHash: bindingHash, AsOf: *opts.AsOf,
+			SnapshotChangeSeq:          *opts.SnapshotChangeSeq,
+			SnapshotDeletedMemoryCount: *opts.SnapshotDeletedMemoryCount,
+			AfterScore:                 last.score.Total, UpdatedAt: last.updatedAt, MemoryID: last.id,
+		})
+		if err != nil {
+			return MemoryRecallPage{}, err
+		}
+	}
+	if len(ranked) == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return MemoryRecallPage{}, fmt.Errorf("commit memory recall snapshot: %w", err)
+		}
+		return page, nil
+	}
+	ids := make([]string, len(ranked))
+	versions := make([]int64, len(ranked))
+	for i := range ranked {
+		ids[i] = ranked[i].id
+		versions[i] = ranked[i].version
+	}
+	payloadRows, err := tx.Query(ctx, memorySelectSQL+`
+		JOIN unnest($1::text[],$2::bigint[]) AS selected(memory_id,memory_version)
+		  ON selected.memory_id=m.id AND selected.memory_version=v.version
+		WHERE m.account_id=$3 AND m.realm_id=$4
+		  AND m.owner_kind='agent' AND m.owner_id=$5`,
+		ids, versions, p.AccountID, p.RealmID, p.ID)
+	if err != nil {
+		return MemoryRecallPage{}, fmt.Errorf("load recalled memories: %w", err)
+	}
+	memories := make(map[string]Memory, len(ids))
+	for payloadRows.Next() {
+		memory, err := scanMemory(payloadRows)
+		if err != nil {
+			payloadRows.Close()
+			return MemoryRecallPage{}, err
+		}
+		if memory.Sensitive && !opts.IncludeSensitive {
+			redactMemoryForBroadRead(&memory)
+		}
+		memory.Evidence = nil
+		memories[memory.ID] = memory
+	}
+	if err := payloadRows.Err(); err != nil {
+		payloadRows.Close()
+		return MemoryRecallPage{}, fmt.Errorf("load recalled memories: %w", err)
+	}
+	payloadRows.Close()
+	page.Hits = make([]MemoryRecallHit, 0, len(ranked))
+	for _, item := range ranked {
+		memory, ok := memories[item.id]
+		if !ok {
+			return MemoryRecallPage{}, fmt.Errorf("recall snapshot lost memory version %s/%d", item.id, item.version)
+		}
+		memory.UpdatedAt = item.updatedAt
+		page.Hits = append(page.Hits, MemoryRecallHit{Memory: memory, Score: item.score})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MemoryRecallPage{}, fmt.Errorf("commit memory recall snapshot: %w", err)
+	}
+	return page, nil
+}
+
+type rankedMemory struct {
+	id        string
+	version   int64
+	score     MemoryRecallScore
+	updatedAt time.Time
+}
+
+func queryMemoryRecallRanked(ctx context.Context, tx pgx.Tx, p Principal, opts MemoryRecallOptions, query string) ([]rankedMemory, error) {
+	args := []any{p.AccountID, p.RealmID, p.ID, query, *opts.AsOf, *opts.SnapshotChangeSeq}
 	where := []string{
 		"h.state='active'",
 		"(q.query IS NULL OR h.search_document @@ q.query)",
@@ -297,104 +407,37 @@ func (s *Store) RecallMemories(ctx context.Context, p Principal, opts MemoryReca
 		ORDER BY total_score DESC, updated_at DESC, memory_id DESC
 		LIMIT `+limitArg, args...)
 	if err != nil {
-		return MemoryRecallPage{}, fmt.Errorf("recall memories: %w", err)
+		return nil, fmt.Errorf("recall memories: %w", err)
 	}
-	type rankedMemory struct {
-		id        string
-		version   int64
-		score     MemoryRecallScore
-		updatedAt time.Time
-	}
+
 	ranked := make([]rankedMemory, 0, opts.Limit+1)
 	for rows.Next() {
 		var item rankedMemory
 		if err := rows.Scan(&item.id, &item.version, &item.score.Lexical, &item.score.Salience,
 			&item.score.Recency, &item.score.Total, &item.updatedAt); err != nil {
 			rows.Close()
-			return MemoryRecallPage{}, err
+			return nil, err
 		}
 		ranked = append(ranked, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return MemoryRecallPage{}, fmt.Errorf("recall memories: %w", err)
+		return nil, fmt.Errorf("recall memories: %w", err)
 	}
 	rows.Close()
 
-	page := MemoryRecallPage{
-		Hits: []MemoryRecallHit{}, RetrievalMode: "lexical",
-		VectorCoverage: 0, Degraded: false,
-	}
-	if len(ranked) > opts.Limit {
-		ranked = ranked[:opts.Limit]
-		last := ranked[len(ranked)-1]
-		page.NextCursor, err = encodeMemoryRecallCursor(memoryRecallCursor{
-			Version: 2, QueryHash: bindingHash, AsOf: *opts.AsOf,
-			SnapshotChangeSeq:          *opts.SnapshotChangeSeq,
-			SnapshotDeletedMemoryCount: *opts.SnapshotDeletedMemoryCount,
-			AfterScore:                 last.score.Total, UpdatedAt: last.updatedAt, MemoryID: last.id,
-		})
-		if err != nil {
-			return MemoryRecallPage{}, err
-		}
-	}
-	if len(ranked) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return MemoryRecallPage{}, fmt.Errorf("commit memory recall snapshot: %w", err)
-		}
-		return page, nil
-	}
-	ids := make([]string, len(ranked))
-	versions := make([]int64, len(ranked))
-	for i := range ranked {
-		ids[i] = ranked[i].id
-		versions[i] = ranked[i].version
-	}
-	payloadRows, err := tx.Query(ctx, memorySelectSQL+`
-		JOIN unnest($1::text[],$2::bigint[]) AS selected(memory_id,memory_version)
-		  ON selected.memory_id=m.id AND selected.memory_version=v.version
-		WHERE m.account_id=$3 AND m.realm_id=$4
-		  AND m.owner_kind='agent' AND m.owner_id=$5`,
-		ids, versions, p.AccountID, p.RealmID, p.ID)
-	if err != nil {
-		return MemoryRecallPage{}, fmt.Errorf("load recalled memories: %w", err)
-	}
-	memories := make(map[string]Memory, len(ids))
-	for payloadRows.Next() {
-		memory, err := scanMemory(payloadRows)
-		if err != nil {
-			payloadRows.Close()
-			return MemoryRecallPage{}, err
-		}
-		if memory.Sensitive && !opts.IncludeSensitive {
-			redactMemoryForBroadRead(&memory)
-		}
-		memory.Evidence = nil
-		memories[memory.ID] = memory
-	}
-	if err := payloadRows.Err(); err != nil {
-		payloadRows.Close()
-		return MemoryRecallPage{}, fmt.Errorf("load recalled memories: %w", err)
-	}
-	payloadRows.Close()
-	page.Hits = make([]MemoryRecallHit, 0, len(ranked))
-	for _, item := range ranked {
-		memory, ok := memories[item.id]
-		if !ok {
-			return MemoryRecallPage{}, fmt.Errorf("recall snapshot lost memory version %s/%d", item.id, item.version)
-		}
-		memory.UpdatedAt = item.updatedAt
-		page.Hits = append(page.Hits, MemoryRecallHit{Memory: memory, Score: item.score})
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return MemoryRecallPage{}, fmt.Errorf("commit memory recall snapshot: %w", err)
-	}
-	return page, nil
+	return ranked, nil
 }
 
 func normalizeMemoryRecallOptions(opts MemoryRecallOptions) (MemoryRecallOptions, error) {
 	opts.Query = strings.TrimSpace(opts.Query)
 	opts.VectorProfileID = strings.TrimSpace(opts.VectorProfileID)
+	if opts.QueryFallback != "" && opts.QueryFallback != "any_terms" {
+		return MemoryRecallOptions{}, fmt.Errorf("%w: invalid recall query_fallback", ErrMemoryInputInvalid)
+	}
+	if opts.VectorProfileID != "" {
+		opts.QueryFallback = ""
+	}
 	if len(opts.Query) > 4096 {
 		return MemoryRecallOptions{}, fmt.Errorf("%w: recall query is too large", ErrMemoryInputInvalid)
 	}
@@ -496,7 +539,7 @@ func memoryRecallBindingHash(opts MemoryRecallOptions) (string, error) {
 		queryVectorHash = hex.EncodeToString(sum[:])
 	}
 	return memoryRequestHash(memoryRecallCursorBinding{
-		Query: opts.Query, Kind: opts.Kind, Tags: opts.Tags, Links: opts.Links,
+		Query: opts.Query, QueryFallback: opts.QueryFallback, Kind: opts.Kind, Tags: opts.Tags, Links: opts.Links,
 		Origin: opts.Origin, CaptureReason: opts.CaptureReason,
 		IncludeSensitive: opts.IncludeSensitive, ExcludeSensitive: opts.ExcludeSensitive,
 		OccurredFrom: opts.OccurredFrom, OccurredUntil: opts.OccurredUntil,
@@ -506,7 +549,7 @@ func memoryRecallBindingHash(opts MemoryRecallOptions) (string, error) {
 }
 
 func encodeMemoryRecallCursor(cursor memoryRecallCursor) (string, error) {
-	if cursor.Version != 2 || !isSHA256Hex(cursor.QueryHash) || cursor.AsOf.IsZero() ||
+	if !validMemoryRecallCursorVersion(cursor) || !isSHA256Hex(cursor.QueryHash) || cursor.AsOf.IsZero() ||
 		cursor.SnapshotChangeSeq < 1 || cursor.SnapshotDeletedMemoryCount < 0 ||
 		cursor.UpdatedAt.IsZero() || !validMemoryID(cursor.MemoryID) ||
 		math.IsNaN(cursor.AfterScore) || math.IsInf(cursor.AfterScore, 0) {
@@ -525,7 +568,7 @@ func decodeMemoryRecallCursor(raw string) (memoryRecallCursor, error) {
 		return memoryRecallCursor{}, fmt.Errorf("%w: invalid recall cursor", ErrMemoryInputInvalid)
 	}
 	var cursor memoryRecallCursor
-	if err := json.Unmarshal(data, &cursor); err != nil || cursor.Version != 2 ||
+	if err := json.Unmarshal(data, &cursor); err != nil || !validMemoryRecallCursorVersion(cursor) ||
 		!isSHA256Hex(cursor.QueryHash) || cursor.AsOf.IsZero() || cursor.UpdatedAt.IsZero() ||
 		cursor.SnapshotChangeSeq < 1 || cursor.SnapshotDeletedMemoryCount < 0 ||
 		!validMemoryID(cursor.MemoryID) ||
@@ -533,4 +576,8 @@ func decodeMemoryRecallCursor(raw string) (memoryRecallCursor, error) {
 		return memoryRecallCursor{}, fmt.Errorf("%w: invalid recall cursor", ErrMemoryInputInvalid)
 	}
 	return cursor, nil
+}
+
+func validMemoryRecallCursorVersion(cursor memoryRecallCursor) bool {
+	return cursor.Version == 2 && !cursor.AnyTerms || cursor.Version == 3 && cursor.AnyTerms
 }

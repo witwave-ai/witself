@@ -65,37 +65,11 @@ func configureMemory(cfg *server.Config, st *store.Store) {
 		return server.MemoryPage{Items: items, NextCursor: page.NextCursor}, nil
 	}
 	cfg.RecallMemories = func(ctx context.Context, p server.DomainPrincipal, in server.MemoryRecallRequest) (server.MemoryRecallPage, error) {
-		page, err := st.RecallMemories(ctx, toStorePrincipal(p), store.MemoryRecallOptions{
-			Query: in.Query, Kind: in.Kind, Tags: in.Tags, Links: in.Links,
-			Origin: in.Origin, CaptureReason: in.CaptureReason,
-			IncludeSensitive: in.IncludeSensitive,
-			OccurredFrom:     in.OccurredFrom, OccurredUntil: in.OccurredUntil,
-			CapturedFrom: in.CapturedFrom, CapturedUntil: in.CapturedUntil,
-			Limit: in.Limit, Cursor: in.Cursor,
-			VectorProfileID: in.VectorProfileID, QueryVector: in.QueryVector,
-		})
+		page, err := st.RecallMemories(ctx, toStorePrincipal(p), toStoreMemoryRecallOptions(in))
 		if err != nil {
 			return server.MemoryRecallPage{}, mapMemoryError(err)
 		}
-		hits := make([]server.MemoryRecallHit, len(page.Hits))
-		for i := range page.Hits {
-			hits[i] = server.MemoryRecallHit{
-				Memory: toServerMemory(page.Hits[i].Memory, p),
-				Score: server.MemoryRecallScore{
-					Similarity: page.Hits[i].Score.Similarity, VectorUsed: page.Hits[i].Score.VectorUsed,
-					Lexical: page.Hits[i].Score.Lexical, Salience: page.Hits[i].Score.Salience,
-					Recency: page.Hits[i].Score.Recency, Total: page.Hits[i].Score.Total,
-				},
-			}
-		}
-		return server.MemoryRecallPage{
-			Hits: hits, NextCursor: page.NextCursor, RetrievalMode: page.RetrievalMode,
-			VectorCoverage: page.VectorCoverage, Degraded: page.Degraded,
-			DegradedReason:  page.DegradedReason,
-			VectorProfileID: page.VectorProfileID, VectorCandidates: page.VectorCandidates,
-			VectorMatches:      page.VectorMatches,
-			CandidateTruncated: page.CandidateTruncated, CandidateLimit: page.CandidateLimit,
-		}, nil
+		return toServerMemoryRecallPage(page, p), nil
 	}
 	cfg.CreateMemoryVectorProfile = func(ctx context.Context, p server.DomainPrincipal, in server.CreateMemoryVectorProfileRequest) (server.MemoryVectorProfile, error) {
 		profile, err := st.CreateMemoryVectorProfile(ctx, toStorePrincipal(p), store.CreateMemoryVectorProfileInput{
@@ -604,4 +578,42 @@ func memorySnippet(content string) string {
 	}
 	runes := []rune(content)
 	return strings.TrimSpace(string(runes[:selfMemorySnippetRunes])) + "…"
+}
+
+// toStoreMemoryRecallOptions maps a validated recall request to store options.
+// It is the only path by which the query_fallback opt-in reaches the store.
+func toStoreMemoryRecallOptions(in server.MemoryRecallRequest) store.MemoryRecallOptions {
+	return store.MemoryRecallOptions{
+		QueryFallback: in.QueryFallback,
+		Query:         in.Query, Kind: in.Kind, Tags: in.Tags, Links: in.Links,
+		Origin: in.Origin, CaptureReason: in.CaptureReason,
+		IncludeSensitive: in.IncludeSensitive,
+		OccurredFrom:     in.OccurredFrom, OccurredUntil: in.OccurredUntil,
+		CapturedFrom: in.CapturedFrom, CapturedUntil: in.CapturedUntil,
+		Limit: in.Limit, Cursor: in.Cursor,
+		VectorProfileID: in.VectorProfileID, QueryVector: in.QueryVector,
+	}
+}
+
+func toServerMemoryRecallPage(page store.MemoryRecallPage, p server.DomainPrincipal) server.MemoryRecallPage {
+	hits := make([]server.MemoryRecallHit, len(page.Hits))
+	for i := range page.Hits {
+		hits[i] = server.MemoryRecallHit{
+			Memory: toServerMemory(page.Hits[i].Memory, p),
+			Score: server.MemoryRecallScore{
+				Similarity: page.Hits[i].Score.Similarity, VectorUsed: page.Hits[i].Score.VectorUsed,
+				Lexical: page.Hits[i].Score.Lexical, Salience: page.Hits[i].Score.Salience,
+				Recency: page.Hits[i].Score.Recency, Total: page.Hits[i].Score.Total,
+			},
+		}
+	}
+	return server.MemoryRecallPage{
+		Hits: hits, NextCursor: page.NextCursor, RetrievalMode: page.RetrievalMode,
+		VectorCoverage: page.VectorCoverage, Degraded: page.Degraded,
+		DegradedReason:  page.DegradedReason,
+		QueryFallback:   page.QueryFallback,
+		VectorProfileID: page.VectorProfileID, VectorCandidates: page.VectorCandidates,
+		VectorMatches:      page.VectorMatches,
+		CandidateTruncated: page.CandidateTruncated, CandidateLimit: page.CandidateLimit,
+	}
 }

@@ -332,9 +332,11 @@ flag rather than treating every limit response or CLI exit `7` as retryable:
   Read refusals use `account_request_read` and
   `account_request_read_per_account_minute`. The response contains no account,
   realm, agent, token, or request identity, and no per-replica limit, usage,
-  or window values. Current clients surface the generic
-  `APIError{Code:"rate_limited", Retryable:true}`; preserving its retry delay
-  in that client error is tracked in FU123-3.
+  or window values. The Witself API client retries an account-request 429 at
+  most twice when the server's `Retry-After` is 5 seconds or less, waiting that
+  long each time (at least 1 second); otherwise, and after the last retry, it
+  reports `APIError` with `RetryAfter` set (its message ends
+  "(retry after <n> s)"). The account console's dashboard reads do not retry.
 - `limit_exceeded` is a plan/quota hard cap or a rate debit that cannot fit the
   effective bucket even when empty. It is HTTP 403 with `retryable: false`.
   For message-producing routes, an effective limit of zero or an attempted

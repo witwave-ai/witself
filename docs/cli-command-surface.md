@@ -2478,12 +2478,22 @@ filters and recall falls back to lexical scoring when no candidate has a
 compatible vector. Hyphenated identifiers can tokenize differently from their
 spaced form (`slice-85` indexes as `slice` and `-85`), so search the word part
 alone or join both forms with `OR`.
+Without a vector profile, if no memory contains every word of a plain query of
+two or more words, recall retries once with any-word matching (common words
+dropped) and reports query_fallback=any_terms; queries with double quotes, a
+leading minus, OR, a single word, or only common words are not retried.
+For example, `the a` and `migration` are not retried. Older servers never
+retry: if query_fallback is absent, no any-word retry ran, so zero hits still
+means re-query with fewer keywords.
 
 Results show total, similarity/vector-use, lexical, salience, and recency score
 components. JSON also reports retrieval mode, profile, vector coverage and
-candidate/match counts, candidate budget/truncation, degradation reason, and an
-opaque next cursor when another page exists. Sensitive content is redacted
-unless the exact intentional request uses `--include-sensitive`.
+candidate/match counts, candidate budget/truncation, degradation reason,
+`query_fallback`, and an opaque next cursor when another page exists. Sensitive
+content is redacted unless the exact intentional request uses
+`--include-sensitive`. When `query_fallback=any_terms`, human output prints one
+stderr note even when the retry finds no hits; `--json` carries the field
+without the note.
 
 ```sh
 witself memory recall "outage OR incident OR postmortem"
@@ -2498,7 +2508,7 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--query TEXT` | Literal full-text query; mutually exclusive with positional `QUERY`. Without a vector profile every word must appear in the memory content in exactly that form; use two to four keywords or join alternatives with `OR`. |
+| `--query TEXT` | Literal full-text query; mutually exclusive with positional `QUERY`. Without a vector profile every word must appear in the memory content in exactly that form; use two to four keywords or join alternatives with `OR`. Without a vector profile, if no memory contains every word of a plain query of two or more words, recall retries once with any-word matching (common words dropped) and reports query_fallback=any_terms; queries with double quotes, a leading minus, OR, a single word, or only common words are not retried. Older servers never retry: if query_fallback is absent, no any-word retry ran, so zero hits still means re-query with fewer keywords. |
 | `--kind KIND` | Exact memory-kind filter. |
 | `--tag TAG` | Require a tag; repeatable or comma-separated. |
 | `--link REF` | Require an identity link; repeatable or comma-separated. |
