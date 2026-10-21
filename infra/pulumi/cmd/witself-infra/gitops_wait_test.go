@@ -20,6 +20,130 @@ import (
 
 const testGitopsRevision = "main"
 
+func TestArgoListerApplicationListResponses(t *testing.T) {
+	if argoApplicationListMaxBytes != 64<<20 {
+		t.Fatalf("argoApplicationListMaxBytes = %d, want %d (64 MiB)", argoApplicationListMaxBytes, int64(64<<20))
+	}
+	small := `{"items":[{"metadata":{"name":"apps"}},{"metadata":{"name":"platform"}}]}`
+	largeMessage := strings.Repeat("x", 1<<20)
+	large, err := json.Marshal(argoApplicationList{Items: []argoApplication{
+		mkArgoApp("apps", "Synced", "Healthy", largeMessage),
+		mkArgoApp("platform", "Synced", "Healthy", ""),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(large) <= 1<<20 {
+		t.Fatalf("large response is only %d bytes", len(large))
+	}
+	exactLimit := small + strings.Repeat(" ", (1<<20)-len(small))
+	originalLimit := argoApplicationListMaxBytes
+	t.Cleanup(func() { argoApplicationListMaxBytes = originalLimit })
+	for _, implementation := range []struct {
+		name string
+		new  func(*httptest.Server) argoApplicationLister
+	}{
+		{
+			name: "token",
+			new: func(srv *httptest.Server) argoApplicationLister {
+				return &tokenArgoLister{baseURL: srv.URL, client: srv.Client(), token: "test-token"}
+			},
+		},
+		{
+			name: "gcp",
+			new: func(srv *httptest.Server) argoApplicationLister {
+				return &gcpArgoLister{
+					baseURL: srv.URL,
+					client:  srv.Client(),
+					tokenCmd: func(context.Context, string) (string, error) {
+						return "test-token", nil
+					},
+				}
+			},
+		},
+	} {
+		t.Run(implementation.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name          string
+				body          string
+				contentLength int
+				status        int
+				limit         int64
+				wantMessage   string
+				wantErr       string
+			}{
+				{name: "small list", body: small, status: http.StatusOK, limit: originalLimit},
+				{name: "over one MiB", body: string(large), status: http.StatusOK, limit: originalLimit, wantMessage: largeMessage},
+				{name: "exact limit", body: exactLimit, status: http.StatusOK, limit: 1 << 20},
+				{
+					name: "one byte over limit", body: exactLimit + " ", status: http.StatusOK, limit: 1 << 20,
+					wantErr: "list Argo CD applications: response exceeds 1 MiB",
+				},
+				{
+					name: "oversized status", body: string(large), status: http.StatusOK, limit: 1 << 20,
+					wantErr: "list Argo CD applications: response exceeds 1 MiB",
+				},
+				{
+					name: "truncated body", body: small[:20], contentLength: len(small), status: http.StatusOK, limit: originalLimit,
+					wantErr: "read Argo CD applications: unexpected EOF",
+				},
+				{
+					name: "malformed list", body: `{"items":`, status: http.StatusOK, limit: originalLimit,
+					wantErr: "decode Argo CD applications: unexpected end of JSON input",
+				},
+				{
+					name: "HTTP error", body: "  unavailable\n", status: http.StatusServiceUnavailable, limit: originalLimit,
+					wantErr: "query Argo CD applications: HTTP 503: unavailable",
+				},
+				{
+					name: "HTTP error body cap", body: strings.Repeat(" ", (1<<20)-1) + "xignored", status: http.StatusServiceUnavailable, limit: originalLimit,
+					wantErr: "query Argo CD applications: HTTP 503: x",
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					argoApplicationListMaxBytes = tc.limit
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != http.MethodGet || r.URL.Path != "/apis/argoproj.io/v1alpha1/namespaces/argocd/applications" {
+							t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						}
+						if r.Header.Get("Authorization") != "Bearer test-token" {
+							t.Error("missing test authorization")
+						}
+						if tc.contentLength > 0 {
+							w.Header().Set("Content-Length", fmt.Sprint(tc.contentLength))
+						}
+						w.WriteHeader(tc.status)
+						_, _ = io.WriteString(w, tc.body)
+					}))
+					defer srv.Close()
+					apps, err := implementation.new(srv).ListArgoApplications(context.Background(), "argocd")
+					if tc.wantErr != "" {
+						if err == nil || err.Error() != tc.wantErr {
+							t.Fatalf("error = %v, want %q", err, tc.wantErr)
+						}
+						if apps != nil {
+							t.Fatal("failed list returned applications")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("ListArgoApplications: %v", err)
+					}
+					if len(apps) != 2 {
+						t.Fatalf("application count = %d, want 2", len(apps))
+					}
+					if apps[0].Metadata.Name != "apps" || apps[1].Metadata.Name != "platform" {
+						t.Fatal("application names were not preserved")
+					}
+					if apps[0].Status.Health.Message != tc.wantMessage {
+						t.Fatal("application status message was not preserved")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestExpectedBootstrapArgoApplications(t *testing.T) {
 	got := expectedBootstrapArgoApplications("release-2026-09-04")
 	want := []argoApplicationExpectation{
