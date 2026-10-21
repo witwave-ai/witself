@@ -5,7 +5,7 @@ a time. Commands here use the `default` account — what every command picks whe
 `--account` is omitted and `WITSELF_ACCOUNT` is unset. To juggle several
 accounts, add `--name NAME` at create and `--account NAME` everywhere after.
 
-**Unrehearsed runbooks:** [Move a Professional account to Team by hand](runbook-professional-to-team.md) — not rehearsed; [Roll the control plane back to the previous release](runbook-control-plane-rollback.md) — not rehearsed; [Serving cell lost](runbook-serving-cell-lost.md) — not rehearsed.
+**Unrehearsed runbooks:** [Move a Professional account to Team by hand](runbook-professional-to-team.md) — not rehearsed; [Roll the control plane back to the previous release](runbook-control-plane-rollback.md) — not rehearsed; [Serving cell lost](runbook-serving-cell-lost.md) — not rehearsed; [The onboarding push: invite waves, then the open push](runbook-onboarding-push.md) — not rehearsed.
 
 ## Create an account on Witself Cloud
 
