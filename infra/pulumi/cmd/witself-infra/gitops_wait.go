@@ -29,6 +29,9 @@ import (
 // instead of retrying the same doomed call until maxWait.
 var errLocalAuth = errors.New("local cloud credentials unavailable")
 
+// Application status histories can make the list much larger than other API responses.
+var argoApplicationListMaxBytes int64 = 64 << 20
+
 const awsEKSTokenRefreshBefore = time.Minute
 
 type argoApplicationSource struct {
@@ -402,9 +405,16 @@ func (l *gcpArgoLister) ListArgoApplications(ctx context.Context, namespace stri
 		return nil, fmt.Errorf("query Argo CD applications: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("query Argo CD applications: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, argoApplicationListMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Argo CD applications: %w", err)
+	}
+	if int64(len(raw)) > argoApplicationListMaxBytes {
+		return nil, fmt.Errorf("list Argo CD applications: response exceeds %d MiB", argoApplicationListMaxBytes>>20)
 	}
 	var out argoApplicationList
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -847,9 +857,16 @@ func (l *tokenArgoLister) ListArgoApplications(ctx context.Context, namespace st
 		return nil, fmt.Errorf("query Argo CD applications: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("query Argo CD applications: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, argoApplicationListMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Argo CD applications: %w", err)
+	}
+	if int64(len(raw)) > argoApplicationListMaxBytes {
+		return nil, fmt.Errorf("list Argo CD applications: response exceeds %d MiB", argoApplicationListMaxBytes>>20)
 	}
 	var out argoApplicationList
 	if err := json.Unmarshal(raw, &out); err != nil {
