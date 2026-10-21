@@ -5068,6 +5068,42 @@ Tickets arriving less than 30 minutes apart hold one
 many are waiting. Production renders these rules only once its alerting is
 enabled.
 
+### Signup funnel alerts
+
+The `witself-uptime-probes` group includes four warning alerts for the public
+control-plane scrape target (`job="witself-probes"`). The existing
+`platform.monitoring.uptimeProbes.enabled` switch renders them only in the
+current sandbox serving cell. Production's uptime-probe switch remains disabled. These
+rules consume the five-minute observations described in
+[Signup funnel and verification email observations](observability-and-operations.md#signup-funnel-and-verification-email-observations);
+the counters are best-effort observations, not a ledger.
+
+| Alert | Meaning and first read-only checks |
+| --- | --- |
+| `WitselfSignupGlobalQuotaDenied` | Any observed global-quota denial in the last 15 minutes fires immediately. Inspect `increase(witself_signup_denials_total{job="witself-probes",reason="quota_global"}[15m])` and the current control-plane quota variables. Daily quotas reset at 00:00Z. Raising the ceiling or returning to invite-only requires a reviewed change to `infra/cloudflare/control-plane/wrangler.template.jsonc` with Scott's go; an alert does not authorize that change. |
+| `WitselfSignupProvisioningFailureRatioHigh` | More than 20% of provisioning attempts failed over 30 minutes, with at least three observed failures, for five minutes. Check the target cell's probe alerts, the Worker's `signup:` log lines, placement configuration and serving-cell PostgreSQL memory. Completed-provision replay failures and user/abuse refusals are excluded. |
+| `WitselfVerificationEmailFailureRatioHigh` | More than 20% of verification-email attempts failed over 30 minutes, with at least two observed failures, for five minutes. Signup and resend contexts are summed. Check the two contexts' sent/failed counters and the Worker's neutral email failure reason codes. Cloudflare Email Service is in public beta; signups still succeed when delivery fails, and users can recover with resend. A sent observation records dispatch success, not inbox delivery. |
+| `WitselfSignupMetricsUnavailable` | For 15 minutes, a reachable scrape target has missing or invalid signup observations, or a valid observation is older than 30 minutes. Check the five-minute maintenance cron and the `/metrics/probes` body for `witself_signup_metrics_up`, observation time, the twelve counter samples and pending scan completeness. Check `up{job="witself-probes"}` first: `WitselfProbeScrapeDown` owns a wholly unavailable scrape. A failed singleton read preserves the old document so it can age rather than replacing totals with zeros. |
+
+The ratio rules use reset-aware increases for their ratios and raw in-window
+counter differences for their minimum counts, so extrapolation on young
+series cannot turn two provisioning failures into three. The global rule
+does not detect a denial already present in the first-ever sample after a
+Prometheus restart. Pending age, Turnstile and per-IP counters remain exported
+without paging rules; recovery-failure signals and continuous dashboards are
+still follow-up work. Keep diagnostic evidence value-free.
+
+Deploy and live-check the observation capability before merging these rules.
+Within 15 minutes of the control-plane deployment, confirm metrics-up is 1,
+the observation is less than 600 seconds old, all twelve counters and pending
+gauges are present, and two scrapes six minutes apart have no decreasing
+counter. Confirm no email or account markers appear; do not create accounts
+for this check. Before the rules merge, inspect the global-denial increase and
+tell Scott if it predicts an immediate page. Public aggregate exposure and
+all four warning severities have founder approval; Part B still waits for
+Part A's successful live acceptance. Merge rules outside a release train,
+then check all four rule names and their alert state in Prometheus.
+
 ## Incident communications
 
 The public incident log is the GitHub `incident` label on

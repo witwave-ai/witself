@@ -1040,3 +1040,438 @@ tests:
       - eval_time: 128m
         alertname: WitselfBillingMutationRecoveryFailing
         exp_alerts: []
+  - name: signup (a) global quota denial fires immediately and ages out of the fifteen-minute window
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_denials_total{job="witself-probes",instance="self.witwave.ai:443",reason="quota_global"}'
+        values: 0+0x10 1+0x24
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: The open-signup global daily quota denied at least one signup in the last 15 minutes.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 24m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: The open-signup global daily quota denied at least one signup in the last 15 minutes.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 26m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+  - name: signup (b) per-IP quota denials never trigger the global quota alert
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_denials_total{job="witself-probes",instance="self.witwave.ai:443",reason="quota_per_ip"}'
+        values: 0+0x10 1+0x24
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WitselfSignupGlobalQuotaDenied
+        exp_alerts: []
+  - name: signup (c) three provisioning failures and one success require five sustained minutes
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provision_failed"}'
+        values: 0+0x10 1+0x4 2+0x4 3+0x39
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provisioned"}'
+        values: 0+0x10 1+0x49
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: More than 20% of signup provisioning attempts failed over 30 minutes (at least three failures).
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 30m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: More than 20% of signup provisioning attempts failed over 30 minutes (at least three failures).
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 60m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+  - name: signup (d) two provisioning failures without successes stay below the minimum count
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provision_failed"}'
+        values: 0+0x10 1+0x4 2+0x44
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provisioned"}'
+        values: 0+0x60
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+  - name: signup (e) three provisioning failures with twenty successes stay below the ratio
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provision_failed"}'
+        values: 0+0x10 1+0x4 2+0x4 3+0x39
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provisioned"}'
+        values: 0+0x10 20+0x49
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+  - name: signup (f) email failures and successes aggregate across signup and resend contexts
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="signup",outcome="failed"}'
+        values: 0+0x10 1+0x4 2+0x44
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="resend",outcome="sent"}'
+        values: 0+0x10 2+0x49
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: More than 20% of verification email sends failed over 30 minutes (at least two failures).
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 30m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: More than 20% of verification email sends failed over 30 minutes (at least two failures).
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 60m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+  - name: signup (g) one email failure without successes stays below the minimum count
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="signup",outcome="failed"}'
+        values: 0+0x10 1+0x49
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="resend",outcome="sent"}'
+        values: 0+0x60
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+  - name: signup (h) two email failures with ten successes stay below the ratio
+    interval: 1m
+    input_series:
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="signup",outcome="failed"}'
+        values: 0+0x10 1+0x4 2+0x44
+      - series: 'witself_signup_verification_email_total{job="witself-probes",instance="self.witwave.ai:443",context="resend",outcome="sent"}'
+        values: 0+0x10 10+0x49
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfVerificationEmailFailureRatioHigh
+        exp_alerts: []
+  - name: signup (i) invalid observations require fifteen minutes while the scrape stays healthy
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x30
+      - series: 'witself_signup_metrics_up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x30
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 30m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+  - name: signup (j) absent observations require fifteen minutes while the scrape stays healthy
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x30
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 30m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+  - name: signup (k) an unavailable scrape belongs to the existing scrape-down alert
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x60
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+  - name: signup (l) a frozen observation timestamp must exceed thirty minutes then wait fifteen
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x60
+      - series: 'witself_signup_metrics_up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x60
+      - series: 'witself_signup_observed_timestamp_seconds{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+0x60
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 46m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+      - eval_time: 60m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: witself-probes
+              instance: self.witwave.ai:443
+              severity: warning
+              service: control-plane-signup
+              witself_alert: "true"
+            exp_annotations:
+              summary: Signup funnel observations are missing, invalid or older than 30 minutes for a control-plane scrape target.
+              runbook: docs/runbooks.md#signup-funnel-alerts
+  - name: signup (m) fresh observations do not trigger the unavailable alert
+    interval: 1m
+    input_series:
+      - series: 'up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x60
+      - series: 'witself_signup_metrics_up{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 1+0x60
+      - series: 'witself_signup_observed_timestamp_seconds{job="witself-probes",instance="self.witwave.ai:443"}'
+        values: 0+60x60
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 46m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfSignupMetricsUnavailable
+        exp_alerts: []
+  - name: signup (n) two failures in a young series cannot satisfy the raw minimum count
+    interval: 1m
+    input_series:
+      # The first two observations arrive at 20m and 21m; later missing scrapes
+      # leave them in the range window. increase() extrapolates two real failures
+      # to at least three long enough to page, but max_over_time - min_over_time is 2.
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provision_failed"}'
+        values: _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 5 7 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+      - series: 'witself_signup_events_total{job="witself-probes",instance="self.witwave.ai:443",event="provisioned"}'
+        values: _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 1 1 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 49m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WitselfSignupProvisioningFailureRatioHigh
+        exp_alerts: []
