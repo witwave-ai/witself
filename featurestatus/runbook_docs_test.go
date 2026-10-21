@@ -17,6 +17,7 @@ var runbookDocsFiles = []string{
 	"runbook-professional-to-team.md",
 	"runbook-control-plane-rollback.md",
 	"runbook-serving-cell-lost.md",
+	"runbook-onboarding-push.md",
 }
 
 // runbookDocsVerified records, for each listed runbook, the main commit (its
@@ -26,6 +27,7 @@ var runbookDocsVerified = map[string][2]string{
 	"runbook-professional-to-team.md":   {"1209a8c0ecf9", "2026-10-18"},
 	"runbook-control-plane-rollback.md": {"8f5545dc6548", "2026-10-19"},
 	"runbook-serving-cell-lost.md":      {"bc2d5a5bb990", "2026-10-21"},
+	"runbook-onboarding-push.md":        {"c165480b8564", "2026-10-21"},
 }
 
 func TestRunbookDocsBanner(t *testing.T) {
