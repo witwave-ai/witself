@@ -168,7 +168,7 @@ live=$(curl -fsS -m 20 https://self.witwave.ai/v1/version 2>/dev/null | jq -r '.
   || ro_die 'cannot read the live control-plane version'
 ro_valid_version "$live" || ro_die 'cannot read the live control-plane version'
 if ro_version_lower "$VERSION" "$live"; then
-  ro_die "refusing to deploy $VERSION below the live $live; control-plane rollback is not covered (readiness row 25)"
+  ro_die "refusing to deploy $VERSION below the live $live; to roll back, follow docs/runbook-control-plane-rollback.md"
 fi
 git -C "$ROOT" fetch -q origin --tags 2>/dev/null || ro_die 'cannot fetch release tags'
 git -C "$ROOT" rev-parse --verify "refs/tags/v$VERSION^{commit}" >/dev/null 2>&1 || ro_die 'release tag does not exist'

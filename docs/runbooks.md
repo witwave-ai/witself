@@ -1806,9 +1806,11 @@ that can lag, then exits 0 only when no cell accepts.
 New signups are then refused at cell placement with HTTP 503. The message
 is `no capacity: no accepting cells`, or a variant that names an invite's
 pinned cell or region. The refusal comes after the signup's abuse checks
-and its invite reservation. Whether a refused attempt still counts against
-the signup quota, or keeps its invite reserved, has not been checked.
-Existing accounts keep working. Moves and restores into a drained cell are
+and its invite reservation, so a refused attempt still counts against the
+daily signup quotas (per IP and global) for that UTC day, and an invite
+attempt keeps its invite use reserved. A retry that reuses the attempt's
+provision ID replays both instead of counting again; a new attempt counts
+again. Existing accounts keep working. Moves and restores into a drained cell are
 refused with HTTP 409.
 
 To reopen, run `witself-admin cells undrain "$CELL" --token-file
