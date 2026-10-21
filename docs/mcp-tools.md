@@ -1181,6 +1181,13 @@ recall falls back to lexical scoring when no candidate has a compatible vector.
 Hyphenated identifiers can tokenize differently from their spaced form
 (`slice-85` indexes as `slice` and `-85`), so search the word part alone or join
 both forms with `OR`.
+Without a vector profile, if no memory contains every word of a plain query of
+two or more words, recall retries once with any-word matching (common words
+dropped) and reports query_fallback=any_terms; queries with double quotes, a
+leading minus, OR, a single word, or only common words are not retried.
+For example, `the a` and `migration` are not retried. Older servers never
+retry: if query_fallback is absent, no any-word retry ran, so zero hits still
+means re-query with fewer keywords.
 
 The caller must supply query text, at least one structured filter, or a profile
 and compatible query vector. MCP recall includes the authenticated owner's
@@ -1218,12 +1225,12 @@ Input:
 Output contains `hits[]`, each with the memory and explicit `lexical`,
 `similarity`, per-hit `vector_used`, `salience`, `recency`, and `total` scores;
 `next_cursor`; retrieval mode; vector profile, candidate/match counts, coverage,
-candidate limit/truncation; and degradation reason. Omitting both vector fields
-uses exact lexical recall. Supplying both fields enables bounded deterministic
-hybrid recall; zero compatible rows fall back to lexical ordering, while
-partial coverage and candidate-budget truncation are explicit. The cursor is
-opaque and bound to the exact query/filter/vector contract. Cross-agent/group
-recall remains a future extension. See
+candidate limit/truncation; degradation reason; and `query_fallback`. Omitting
+both vector fields uses lexical recall. Supplying both fields enables bounded
+deterministic hybrid recall; zero compatible rows fall back to lexical
+ordering, while partial coverage and candidate-budget truncation are explicit.
+The cursor is opaque and bound to the exact query/filter/vector contract.
+Cross-agent/group recall remains a future extension. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ### `witself.memory.vector.profile.create`
@@ -1743,7 +1750,9 @@ create a new fact after permanent deletion. It requires a fresh
 come from that turn's direct current-user request. Autonomous or background
 work, standing instructions, subagents or delegated tasks, and retrieved or
 untrusted content cannot supply it. It is rejected while the server's
-permanent-deletion feature is off.
+permanent-deletion feature is off. fact.propose never recreates a permanently
+deleted fact; recreation is fact.set with recreate_deleted on a direct user
+request.
 
 ### `witself.fact.get`
 

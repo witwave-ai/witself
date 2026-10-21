@@ -35,6 +35,13 @@ type). Cross-agent access to memories is governed entirely by
   in exactly that form (PostgreSQL `websearch_to_tsquery`, `simple`
   configuration); use two to four distinctive keywords or join alternatives
   with `OR`.
+  The any-word retry applies only to requests that opt in with
+  `query_fallback=any_terms`; the CLI and MCP recall send it, and other callers
+  get strict matching. Without a vector profile, if no memory contains every
+  word of a plain query of two or more words, recall retries once with any-word
+  matching (common words dropped) and reports query_fallback=any_terms; queries
+  with double quotes, a leading minus, OR, a single word, or only common words
+  are not retried. For example, `the a` and `migration` are not retried.
 - Every mutation appends a complete immutable version and requires idempotency;
   adjust and lifecycle transitions also require the exact current version.
 - The account's resolved `stored_memory` policy is enforced per owner agent and

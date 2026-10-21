@@ -112,16 +112,21 @@ func (e *MessageRateLimitError) Unwrap() error { return ErrMessageRateLimited }
 // have a richer domain-specific client type. HTTP status wrappers still carry
 // the broad forbidden/not-found/conflict classification.
 type APIError struct {
-	Code      string
-	Retryable bool
-	Message   string
+	Code       string
+	Retryable  bool
+	RetryAfter time.Duration
+	Message    string
 }
 
 func (e *APIError) Error() string {
+	message := "API request failed"
 	if e != nil && strings.TrimSpace(e.Message) != "" {
-		return e.Message
+		message = e.Message
 	}
-	return "API request failed"
+	if e != nil && e.Code == "rate_limited" && e.RetryAfter > 0 {
+		message += fmt.Sprintf(" (retry after %d s)", e.RetryAfter/time.Second)
+	}
+	return message
 }
 
 // SecretLimitError preserves the server's value-free capacity snapshot.
@@ -361,6 +366,17 @@ func doJSONWithHeaders(ctx context.Context, method, url, token string, headers m
 	return doJSONWithHeadersTimeout(ctx, method, url, token, headers, body, out, 15*time.Second)
 }
 
+var accountRateLimitWait = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, headers map[string]string, body []byte, out any, timeout time.Duration) error {
 	var rdr io.Reader
 	if body != nil {
@@ -399,14 +415,40 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	// subdomain redirects, and it does not make an HTTPS-to-HTTP downgrade an
 	// authorization error. The caller must rediscover and revalidate a changed
 	// endpoint explicitly.
-	resp, err := (&http.Client{
+	httpClient := &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	}).Do(req)
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+	}
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		request := req.Clone(ctx)
+		if body != nil {
+			request.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		resp, err = httpClient.Do(request)
+		if err != nil {
+			return fmt.Errorf("connect: %w", err)
+		}
+		if resp.StatusCode != http.StatusTooManyRequests {
+			break
+		}
+		delay, retry := accountRequestRateLimitDelay(resp)
+		if !retry || attempt >= 2 || delay > 5*time.Second {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("wait for account request budget: %w", err)
+		}
+		// Two waits of at most five seconds bound total waiting to ten seconds.
+		delay = max(delay, time.Second)
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < delay+time.Second {
+			break
+		}
+		if err := accountRateLimitWait(ctx, delay); err != nil {
+			return fmt.Errorf("wait for account request budget: %w", err)
+		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
@@ -440,6 +482,49 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 		}
 	}
 	return nil
+}
+
+// accountRequestRateLimitDelay bounds and closes the refused response before a
+// retry. Preserve the bytes for the existing domain-specific error mapping.
+func accountRequestRateLimitDelay(resp *http.Response) (time.Duration, bool) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return 0, false
+	}
+	var out struct {
+		Code       string               `json:"code"`
+		RetryAfter int64                `json:"retry_after"`
+		Details    responseErrorDetails `json:"details"`
+		Error      json.RawMessage      `json:"error"`
+	}
+	if json.Unmarshal(body, &out) != nil {
+		return 0, false
+	}
+	var nested nestedResponseError
+	if json.Unmarshal(out.Error, &nested) == nil {
+		if out.Code == "" {
+			out.Code = nested.Code
+		}
+		if out.RetryAfter == 0 {
+			out.RetryAfter = nested.RetryAfter
+		}
+		if out.Details == (responseErrorDetails{}) {
+			out.Details = nested.Details
+		}
+	}
+	if out.Code != "rate_limited" || out.Details.Scope != "account" ||
+		(out.Details.LimitDimension != "account_request_read" && out.Details.LimitDimension != "account_request_write") {
+		return 0, false
+	}
+	return rateLimitRetryAfter(resp, out.RetryAfter), true
+}
+
+func rateLimitRetryAfter(resp *http.Response, seconds int64) time.Duration {
+	headerSeconds, _ := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Retry-After")), 10, 64)
+	// If the hints disagree, never retry before either advertised window ends.
+	return durationFromSeconds(max(seconds, headerSeconds))
 }
 
 type responseErrorDetails struct {
@@ -627,8 +712,12 @@ func responseError(resp *http.Response, fallback string) error {
 			}
 		}
 		if strings.TrimSpace(out.Code) != "" {
+			retryAfter := durationFromSeconds(out.RetryAfter)
+			if out.Code == "rate_limited" {
+				retryAfter = rateLimitRetryAfter(resp, out.RetryAfter)
+			}
 			return &APIError{
-				Code: out.Code, Retryable: out.Retryable, Message: message,
+				Code: out.Code, Retryable: out.Retryable, RetryAfter: retryAfter, Message: message,
 			}
 		}
 		return fmt.Errorf("%s", message)

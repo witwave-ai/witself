@@ -884,6 +884,18 @@ Rules:
 - `retrieval_mode` is `lexical` when no vector contract is requested or no
   compatible rows are usable, and `hybrid` when compatible rows participate.
   Missing coverage is data coverage, never backend-provider health.
+- The optional recall request body input `query_fallback` accepts an absent or
+  empty value for strict matching, or `any_terms` to opt in to a lexical retry.
+  Other values return HTTP 400. Clients that omit the input get strict matching;
+  the CLI and MCP recall handler send `any_terms` automatically. Older servers
+  ignore this body input and continue strict matching. When `vector_profile_id`
+  is set, the opt-in is ignored and hybrid recall never uses the retry.
+- `query_fallback` is omitted for strict and hybrid recall. It is `any_terms`
+  whenever an opted-in eligible first-page lexical query returned no strict hits
+  and retried with any-word matching, even when that retry found no hits. Every
+  later page of that traversal retains the field. Fallback cursors use version
+  3, require the opt-in, and bind the original query and filters; strict cursors
+  remain version 2.
 - Hybrid recall reports `vector_profile_id`, candidates, matches, coverage,
   candidate limit/truncation, `degraded`, and `degraded_reason`. Stable reasons
   include `no_compatible_vectors`, `partial_vector_coverage`, and

@@ -233,6 +233,7 @@ type MemoryHistoryPage struct {
 // MemoryRecallInput is a structured lexical/time/tag retrieval request. The
 // client may resolve natural-language dates before sending this shape.
 type MemoryRecallInput struct {
+	QueryFallback    string     `json:"query_fallback,omitempty"`
 	Query            string     `json:"query,omitempty"`
 	Kind             string     `json:"kind,omitempty"`
 	Tags             []string   `json:"tags,omitempty"`
@@ -281,6 +282,7 @@ type MemoryRecallPage struct {
 	CandidateLimit     int               `json:"candidate_limit,omitempty"`
 	Degraded           bool              `json:"degraded"`
 	DegradedReason     string            `json:"degraded_reason,omitempty"`
+	QueryFallback      string            `json:"query_fallback,omitempty"`
 }
 
 // CaptureMemoryInput carries a client-authored narrative capsule.

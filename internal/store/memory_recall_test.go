@@ -2,8 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +21,17 @@ func TestMemoryRecallOptionsAndCursor(t *testing.T) {
 	}
 	if _, err := normalizeMemoryRecallOptions(MemoryRecallOptions{Query: "database", Limit: 101}); !errors.Is(err, ErrMemoryInputInvalid) {
 		t.Fatalf("oversized recall error = %v", err)
+	}
+	for _, fallback := range []string{"all_terms", "ANY_TERMS", " any_terms", " "} {
+		if _, err := normalizeMemoryRecallOptions(MemoryRecallOptions{Query: "database", QueryFallback: fallback}); !errors.Is(err, ErrMemoryInputInvalid) {
+			t.Fatalf("invalid query fallback %q error = %v", fallback, err)
+		}
+	}
+	hybrid, err := normalizeMemoryRecallOptions(MemoryRecallOptions{
+		Query: "alpha delta", QueryFallback: "any_terms", VectorProfileID: "profile", QueryVector: []float64{1, 0},
+	})
+	if err != nil || hybrid.QueryFallback != "" {
+		t.Fatalf("hybrid opt-in was not ignored: fallback=%q error=%v", hybrid.QueryFallback, err)
 	}
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	hash, err := memoryRequestHash(map[string]string{"query": "database"})
@@ -45,6 +61,80 @@ func TestMemoryRecallOptionsAndCursor(t *testing.T) {
 	decoded.SnapshotChangeSeq = 0
 	if _, err := encodeMemoryRecallCursor(decoded); !errors.Is(err, ErrMemoryInputInvalid) {
 		t.Fatalf("missing-watermark cursor error = %v", err)
+	}
+}
+
+func TestMemoryRecallBindingHashMatchesLegacyWithoutOptIn(t *testing.T) {
+	// This is the binding shape from HEAD 8f5545dc6548, including field order.
+	type legacyMemoryRecallCursorBinding struct {
+		Query            string     `json:"query"`
+		Kind             string     `json:"kind,omitempty"`
+		Tags             []string   `json:"tags,omitempty"`
+		Links            []string   `json:"links,omitempty"`
+		Origin           string     `json:"origin,omitempty"`
+		CaptureReason    string     `json:"capture_reason,omitempty"`
+		IncludeSensitive bool       `json:"include_sensitive"`
+		ExcludeSensitive bool       `json:"exclude_sensitive,omitempty"`
+		OccurredFrom     *time.Time `json:"occurred_from,omitempty"`
+		OccurredUntil    *time.Time `json:"occurred_until,omitempty"`
+		CapturedFrom     *time.Time `json:"captured_from,omitempty"`
+		CapturedUntil    *time.Time `json:"captured_until,omitempty"`
+		VectorProfileID  string     `json:"vector_profile_id,omitempty"`
+		QueryVectorHash  string     `json:"query_vector_hash,omitempty"`
+	}
+	start := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	for _, opts := range []MemoryRecallOptions{
+		{Query: "alpha delta"},
+		{
+			Query: "alpha delta", Kind: "decision", Tags: []string{"architecture"}, Links: []string{"fixture:recall"},
+			Origin: "agent", CaptureReason: "test", IncludeSensitive: true,
+			OccurredFrom: &start, OccurredUntil: &end, CapturedFrom: &start, CapturedUntil: &end,
+		},
+		{Query: "alpha delta", ExcludeSensitive: true, VectorProfileID: "profile", QueryVector: []float64{1, 0}},
+	} {
+		queryVectorHash := ""
+		if len(opts.QueryVector) > 0 {
+			raw, err := json.Marshal(opts.QueryVector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(raw)
+			queryVectorHash = hex.EncodeToString(sum[:])
+		}
+		want, err := memoryRequestHash(legacyMemoryRecallCursorBinding{
+			Query: opts.Query, Kind: opts.Kind, Tags: opts.Tags, Links: opts.Links,
+			Origin: opts.Origin, CaptureReason: opts.CaptureReason,
+			IncludeSensitive: opts.IncludeSensitive, ExcludeSensitive: opts.ExcludeSensitive,
+			OccurredFrom: opts.OccurredFrom, OccurredUntil: opts.OccurredUntil,
+			CapturedFrom: opts.CapturedFrom, CapturedUntil: opts.CapturedUntil,
+			VectorProfileID: opts.VectorProfileID, QueryVectorHash: queryVectorHash,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := memoryRecallBindingHash(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatal("recall binding without opt-in differs from the legacy binding")
+		}
+		opts.QueryFallback = "any_terms"
+		opts, err = normalizeMemoryRecallOptions(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		optedIn, err := memoryRecallBindingHash(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.VectorProfileID == "" && optedIn == want {
+			t.Fatal("recall binding does not include query_fallback")
+		}
+		if opts.VectorProfileID != "" && optedIn != want {
+			t.Fatal("hybrid recall binding did not ignore query_fallback")
+		}
 	}
 }
 
@@ -92,24 +182,36 @@ func TestMemoryRecallQuerySemanticsPostgres(t *testing.T) {
 	b := capture("recall-semantics-b", "Fixture alpha gamma.")
 	t.Logf("fixture IDs: A=%s B=%s", a.ID, b.ID)
 
+	t.Run("omitted_opt_in_keeps_strict_matching", func(t *testing.T) {
+		page, err := st.RecallMemories(ctx, p, MemoryRecallOptions{Query: "alpha delta", Limit: 10})
+		if err != nil || len(page.Hits) != 0 || page.QueryFallback != "" {
+			t.Fatalf("recall without opt-in: hits=%d fallback=%q error=%v", len(page.Hits), page.QueryFallback, err)
+		}
+	})
+
 	for _, tt := range []struct {
-		query string
-		want  []string
+		query    string
+		want     []string
+		fallback string
 	}{
 		{query: "alpha beta", want: []string{a.ID}},
-		{query: "alpha delta"},
+		{query: "alpha delta", want: []string{a.ID, b.ID}, fallback: "any_terms"},
 		{query: "beta OR gamma", want: []string{a.ID, b.ID}},
 		{query: "beta or gamma", want: []string{a.ID, b.ID}},
 		{query: "beta or alpha gamma", want: []string{a.ID, b.ID}},
 		{query: "alpha -gamma", want: []string{a.ID}},
 		{query: `"alpha beta"`, want: []string{a.ID}},
 		{query: `"beta alpha"`},
-		{query: "alpha AND beta"},
+		{query: "alpha AND beta", want: []string{a.ID, b.ID}, fallback: "any_terms"},
+		{query: "zeta eta", fallback: "any_terms"},
 	} {
 		t.Run(tt.query, func(t *testing.T) {
-			page, err := st.RecallMemories(ctx, p, MemoryRecallOptions{Query: tt.query, Limit: 10})
+			page, err := st.RecallMemories(ctx, p, MemoryRecallOptions{Query: tt.query, QueryFallback: "any_terms", Limit: 10})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if page.QueryFallback != tt.fallback {
+				t.Fatalf("query fallback = %q, want %q", page.QueryFallback, tt.fallback)
 			}
 			got := make(map[string]bool, len(page.Hits))
 			for _, hit := range page.Hits {
@@ -125,6 +227,16 @@ func TestMemoryRecallQuerySemanticsPostgres(t *testing.T) {
 			}
 		})
 	}
+	t.Run("compound_version_keeps_its_lexeme", func(t *testing.T) {
+		version := capture("recall-version", "Fixture v0.0.337 deployed.")
+		capture("recall-version-fragment", "Fixture v0 deployed.")
+		page, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+			Query: "v0.0.337 unrelatedword", QueryFallback: "any_terms",
+		})
+		if err != nil || page.QueryFallback != "any_terms" || len(page.Hits) != 1 || page.Hits[0].Memory.ID != version.ID {
+			t.Fatalf("compound version recall: hits=%d fallback=%q error=%v", len(page.Hits), page.QueryFallback, err)
+		}
+	})
 }
 
 func TestMemoryRecallPostgres(t *testing.T) {
@@ -359,5 +471,177 @@ func TestMemoryRecallPostgres(t *testing.T) {
 		Query: "Snapshot deletion sentinel", Limit: 1, Cursor: deletePage.NextCursor,
 	}); !errors.Is(err, ErrMemoryDeleted) {
 		t.Fatalf("deleted-snapshot cursor error = %v", err)
+	}
+}
+
+func TestMemoryRecallAnyTermsFallbackPagingPostgres(t *testing.T) {
+	dsn := testenv.RequirePostgres(t)
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, dsn)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := st.ProvisionAccount(ctx, "memory-recall-fallback@witwave.ai", "memory recall fallback", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deleteFactTestAccount(ctx, st, provisioned.AccountID) }()
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %v / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID, RealmID: realm.ID, AccountStatus: "active"}
+	for i, content := range []string{"Fixture alpha beta.", "Fixture alpha gamma.", "Sensitive fixture alpha beta."} {
+		_, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
+			Content: content, Kind: "note", CaptureReason: "test", Sensitive: i == 2,
+			Evidence:       []MemoryEvidenceInput{{ResolutionState: MemoryEvidenceUnavailable, TerminalReasonCode: "test_fixture"}},
+			IdempotencyKey: content,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", Limit: 1})
+	if err != nil || len(first.Hits) != 1 || first.NextCursor == "" || first.QueryFallback != "any_terms" {
+		t.Fatalf("first fallback page: hits=%d has_cursor=%v fallback=%q error=%v", len(first.Hits), first.NextCursor != "", first.QueryFallback, err)
+	}
+	issued, err := decodeMemoryRecallCursor(first.NextCursor)
+	if err != nil || issued.Version != 3 || !issued.AnyTerms {
+		t.Fatalf("fallback cursor: version=%d any_terms=%v error=%v", issued.Version, issued.AnyTerms, err)
+	}
+	seen := map[string]bool{first.Hits[0].Memory.ID: true}
+	for page := first; page.NextCursor != ""; {
+		page, err = st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", Limit: 1, Cursor: page.NextCursor})
+		if err != nil || len(page.Hits) != 1 || page.QueryFallback != "any_terms" {
+			t.Fatalf("later fallback page: hits=%d fallback=%q error=%v", len(page.Hits), page.QueryFallback, err)
+		}
+		id := page.Hits[0].Memory.ID
+		if seen[id] {
+			t.Fatal("fallback traversal repeated a memory")
+		}
+		seen[id] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("fallback traversal has %d hits, want 3", len(seen))
+	}
+	if _, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha epsilon", Cursor: first.NextCursor}); !errors.Is(err, ErrMemoryInputInvalid) || !strings.Contains(err.Error(), "does not match filters") {
+		t.Fatalf("changed-query cursor error = %v", err)
+	}
+	for _, tt := range []struct {
+		name     string
+		version  int
+		anyTerms bool
+	}{
+		{name: "v3_without_any_terms", version: 3},
+		{name: "v2_with_any_terms", version: 2, anyTerms: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			forged := issued
+			forged.Version, forged.AnyTerms = tt.version, tt.anyTerms
+			if _, err := encodeMemoryRecallCursor(forged); !errors.Is(err, ErrMemoryInputInvalid) {
+				t.Fatalf("invalid cursor encoding error = %v", err)
+			}
+			raw, err := json.Marshal(forged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cursor := base64.RawURLEncoding.EncodeToString(raw)
+			if _, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", Cursor: cursor}); !errors.Is(err, ErrMemoryInputInvalid) {
+				t.Fatalf("invalid cursor decoding error = %v", err)
+			}
+		})
+	}
+	strict, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha", Limit: 1})
+	if err != nil || strict.NextCursor == "" || strict.QueryFallback != "" {
+		t.Fatalf("strict cursor setup: has_cursor=%v fallback=%q error=%v", strict.NextCursor != "", strict.QueryFallback, err)
+	}
+	strictCursor, err := decodeMemoryRecallCursor(strict.NextCursor)
+	if err != nil || strictCursor.Version != 2 || strictCursor.AnyTerms {
+		t.Fatalf("strict cursor: version=%d any_terms=%v error=%v", strictCursor.Version, strictCursor.AnyTerms, err)
+	}
+	// Bind forged cursors to the exact normalized request, so rejection cannot
+	// accidentally rely on the unrelated filter-hash mismatch check.
+	forge := func(base memoryRecallCursor, opts MemoryRecallOptions, score float64) string {
+		t.Helper()
+		normalized, err := normalizeMemoryRecallOptions(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.QueryHash, err = memoryRecallBindingHash(normalized)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.AfterScore = score
+		cursor, err := encodeMemoryRecallCursor(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cursor
+	}
+	t.Run("fallback_cursor_requires_opt_in", func(t *testing.T) {
+		opts := MemoryRecallOptions{Query: "alpha delta"}
+		opts.Cursor = forge(issued, opts, 2)
+		page, err := st.RecallMemories(ctx, p, opts)
+		if !errors.Is(err, ErrMemoryInputInvalid) || strings.Contains(err.Error(), "does not match filters") || len(page.Hits) != 0 {
+			t.Fatalf("fallback cursor without opt-in: hits=%d error=%v", len(page.Hits), err)
+		}
+	})
+	t.Run("strict_cursor_never_starts_fallback", func(t *testing.T) {
+		opts := MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta"}
+		opts.Cursor = forge(strictCursor, opts, -1)
+		page, err := st.RecallMemories(ctx, p, opts)
+		if err != nil || len(page.Hits) != 0 || page.QueryFallback != "" {
+			t.Fatalf("strict cursor started fallback: hits=%d fallback=%q error=%v", len(page.Hits), page.QueryFallback, err)
+		}
+	})
+	profile, err := st.CreateMemoryVectorProfile(ctx, p, CreateMemoryVectorProfileInput{
+		Provider: "fixture", Model: "two-axis", Recipe: "content-v1", RecipeVersion: "1",
+		Dimensions: 2, DistanceMetric: MemoryVectorMetricCosine, Normalization: MemoryVectorNormalizationL2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hybrid, err := st.RecallMemories(ctx, p, MemoryRecallOptions{
+		QueryFallback: "any_terms", Query: "alpha delta", VectorProfileID: profile.ID, QueryVector: []float64{1, 0},
+	})
+	if err != nil || hybrid.QueryFallback != "" {
+		t.Fatalf("hybrid recall fallback = %q, error = %v", hybrid.QueryFallback, err)
+	}
+	for _, tt := range []struct {
+		name string
+		opts MemoryRecallOptions
+	}{
+		{name: "vector_profile_rejects_fallback_cursor", opts: MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", VectorProfileID: profile.ID, QueryVector: []float64{1, 0}}},
+		{name: "quoted_query_rejects_fallback_cursor", opts: MemoryRecallOptions{QueryFallback: "any_terms", Query: `"beta alpha"`}},
+		{name: "minus_query_rejects_fallback_cursor", opts: MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha -gamma"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := tt.opts
+			opts.Cursor = forge(issued, opts, 2)
+			page, err := st.RecallMemories(ctx, p, opts)
+			if !errors.Is(err, ErrMemoryInputInvalid) || strings.Contains(err.Error(), "does not match filters") || len(page.Hits) != 0 {
+				t.Fatalf("ineligible fallback cursor: hits=%d error=%v", len(page.Hits), err)
+			}
+		})
+	}
+	filtered, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", Kind: "decision"})
+	if err != nil || len(filtered.Hits) != 0 || filtered.QueryFallback != "any_terms" {
+		t.Fatalf("kind-filtered fallback: hits=%d fallback=%q error=%v", len(filtered.Hits), filtered.QueryFallback, err)
+	}
+	excluded, err := st.RecallMemories(ctx, p, MemoryRecallOptions{QueryFallback: "any_terms", Query: "alpha delta", ExcludeSensitive: true})
+	if err != nil || len(excluded.Hits) != 2 || excluded.QueryFallback != "any_terms" {
+		t.Fatalf("sensitivity-filtered fallback: hits=%d fallback=%q error=%v", len(excluded.Hits), excluded.QueryFallback, err)
+	}
+	for _, hit := range excluded.Hits {
+		if hit.Memory.Sensitive || hit.Memory.Redacted {
+			t.Fatal("sensitive memory survived fallback ExcludeSensitive filter")
+		}
 	}
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,63 @@ import (
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 )
+
+func TestMemoryRecallAdapterPreservesQueryFallback(t *testing.T) {
+	for _, fallback := range []string{"", "any_terms"} {
+		page := toServerMemoryRecallPage(store.MemoryRecallPage{
+			Hits: []store.MemoryRecallHit{}, RetrievalMode: "lexical", QueryFallback: fallback,
+		}, server.DomainPrincipal{Kind: server.PrincipalKindAgent, ID: "agent_1"})
+		if page.QueryFallback != fallback {
+			t.Fatalf("query fallback = %q, want %q", page.QueryFallback, fallback)
+		}
+		raw, err := json.Marshal(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := fields["query_fallback"]; present != (fallback != "") {
+			t.Fatalf("query_fallback presence = %t for %q", present, fallback)
+		}
+	}
+}
+
+func TestMemoryRecallAdapterForwardsEveryRequestField(t *testing.T) {
+	at := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	in := server.MemoryRecallRequest{
+		QueryFallback: "any_terms", Query: "alpha delta", Kind: "decision",
+		Tags: []string{"tag_1"}, Links: []string{"link_1"},
+		Origin: "agent", CaptureReason: "explicit", IncludeSensitive: true,
+		OccurredFrom: &at, OccurredUntil: &at, CapturedFrom: &at, CapturedUntil: &at,
+		Limit: 7, Cursor: "cursor_1", VectorProfileID: "mvp_1", QueryVector: []float64{0.5},
+	}
+	opts := toStoreMemoryRecallOptions(in)
+	if opts.QueryFallback != "any_terms" {
+		t.Fatalf("query fallback = %q, want any_terms", opts.QueryFallback)
+	}
+	src, dst := reflect.ValueOf(in), reflect.ValueOf(opts)
+	for i := 0; i < src.NumField(); i++ {
+		name := src.Type().Field(i).Name
+		if src.Field(i).IsZero() {
+			t.Fatalf("request field %s is zero in the fixture; populate it", name)
+		}
+		got := dst.FieldByName(name)
+		if !got.IsValid() {
+			t.Fatalf("store.MemoryRecallOptions has no field %s", name)
+		}
+		if !reflect.DeepEqual(got.Interface(), src.Field(i).Interface()) {
+			t.Fatalf("%s = %#v, want %#v", name, got.Interface(), src.Field(i).Interface())
+		}
+	}
+	for i := 0; i < dst.NumField(); i++ {
+		name := dst.Type().Field(i).Name
+		if _, shared := src.Type().FieldByName(name); !shared && !dst.Field(i).IsZero() {
+			t.Fatalf("store-only field %s is set by the request mapping", name)
+		}
+	}
+}
 
 func TestMemoryAdapterPreservesAuthorityAndEvidence(t *testing.T) {
 	p := server.DomainPrincipal{Kind: server.PrincipalKindAgent, ID: "agent_1", AgentName: "scott"}

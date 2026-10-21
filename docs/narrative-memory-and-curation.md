@@ -1097,12 +1097,14 @@ request/response fields are required:
   explicit confirmation, and same-turn direct-current-user authority. Preview
   or apply never belongs to a curator credential.
 - List/history/recall use an opaque page cursor and bounded limit. Implemented
-  recall accepts literal full-text query, occurrence/capture ranges,
-  kind/tags/links, sensitivity, origin, and capture-reason filters. It returns
-  lexical, similarity/vector-use, salience, recency, and total score components,
-  `retrieval_mode`, profile/coverage/candidate fields, truncation, and degraded
-  reason. Supplying both an immutable profile id and compatible query vector
-  enables the implemented bounded hybrid ranker; omitting both uses lexical.
+  recall accepts literal full-text query, the `query_fallback=any_terms` opt-in,
+  occurrence/capture ranges, kind/tags/links, sensitivity, origin, and
+  capture-reason filters. It returns lexical, similarity/vector-use, salience,
+  recency, and total score components, `retrieval_mode`,
+  profile/coverage/candidate fields, truncation, degraded reason, and
+  `query_fallback`. Supplying both an immutable profile id and compatible query
+  vector enables the implemented bounded hybrid ranker; omitting both uses
+  lexical.
   Without a vector profile, query words are ANDed: recall uses PostgreSQL
   `websearch_to_tsquery` with the `simple` configuration over memory content
   only (not tags, kind, or links), so a memory matches only if its content
@@ -1121,6 +1123,15 @@ request/response fields are required:
   identifiers can tokenize differently from their spaced form (`slice-85`
   indexes as `slice` and `-85`), so search the word part alone or join both
   forms with `OR`.
+  The any-word retry applies only to requests that opt in with
+  `query_fallback=any_terms`; the CLI and MCP recall send it, and other callers
+  get strict matching. Without a vector profile, if no memory contains every
+  word of a plain query of two or more words, recall retries once with any-word
+  matching (common words dropped) and reports query_fallback=any_terms; queries
+  with double quotes, a leading minus, OR, a single word, or only common words
+  are not retried. For example, `the a` and `migration` are not retried. Older
+  servers never retry: if query_fallback is absent, no any-word retry ran, so
+  zero hits still means re-query with fewer keywords.
 - Curation request accepts owner lane, bounded scope, coalescing key, trigger
   reason/generation, and idempotency key.
 - Authenticated curation preflight returns the presented token's agent identity,

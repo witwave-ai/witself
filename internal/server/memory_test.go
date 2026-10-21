@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/client"
 )
 
 func TestMemoryRequestBodyCeilingsDelegateStoreBoundaryPayloads(t *testing.T) {
@@ -593,7 +595,7 @@ func TestMemoryRecallContractAndRedaction(t *testing.T) {
 	srv := httptest.NewServer(apiMux(Config{
 		AuthenticatePrincipal: auth,
 		RecallMemories: func(_ context.Context, p DomainPrincipal, in MemoryRecallRequest) (MemoryRecallPage, error) {
-			if p.ID != "agent_1" || in.Query != "database decision" || in.Kind != "decision" || in.Limit != 5 || in.Cursor != "opaque" {
+			if p.ID != "agent_1" || in.QueryFallback != "any_terms" || in.Query != "database decision" || in.Kind != "decision" || in.Limit != 5 || in.Cursor != "opaque" {
 				t.Fatalf("recall input = %#v / %#v", p, in)
 			}
 			memory := memoryTestRecord(now)
@@ -608,12 +610,12 @@ func TestMemoryRecallContractAndRedaction(t *testing.T) {
 			memory.Evidence = []MemoryEvidence{{ID: "private-evidence"}}
 			return MemoryRecallPage{
 				Hits:       []MemoryRecallHit{{Memory: memory, Score: MemoryRecallScore{Lexical: .8, Salience: .9, Recency: .7, Total: .82}}},
-				NextCursor: "next", RetrievalMode: "lexical",
+				NextCursor: "next", RetrievalMode: "lexical", QueryFallback: "any_terms",
 			}, nil
 		},
 	}))
 	defer srv.Close()
-	resp := memoryTestRequest(t, srv.URL, http.MethodPost, "/v1/memories:recall", "agent-token", "", `{"query":"database decision","kind":"decision","limit":5,"cursor":"opaque"}`)
+	resp := memoryTestRequest(t, srv.URL, http.MethodPost, "/v1/memories:recall", "agent-token", "", `{"query":"database decision","kind":"decision","limit":5,"cursor":"opaque","query_fallback":"any_terms"}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("recall status = %d", resp.StatusCode)
 	}
@@ -622,7 +624,7 @@ func TestMemoryRecallContractAndRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeBody(t, resp)
-	if out.SchemaVersion != "witself.v0" || out.RetrievalMode != "lexical" || len(out.Hits) != 1 || out.NextCursor != "next" {
+	if out.SchemaVersion != "witself.v0" || out.RetrievalMode != "lexical" || len(out.Hits) != 1 || out.NextCursor != "next" || out.QueryFallback != "any_terms" {
 		t.Fatalf("recall response = %#v", out)
 	}
 	if hit := out.Hits[0]; hit.Score.Total != .82 {
@@ -959,4 +961,106 @@ func memoryTestRawRequest(t *testing.T, base, method, path, token, idempotencyKe
 		t.Fatal(err)
 	}
 	return resp
+}
+
+// Frozen request shape from 8f5545dc6548. HEAD uses decodeLimitedJSON, which
+// ignores unknown JSON fields and does not inspect recall query parameters.
+type legacyMemoryRecallRequest struct {
+	Query            string     `json:"query,omitempty"`
+	Kind             string     `json:"kind,omitempty"`
+	Tags             []string   `json:"tags,omitempty"`
+	Links            []string   `json:"links,omitempty"`
+	Origin           string     `json:"origin,omitempty"`
+	CaptureReason    string     `json:"capture_reason,omitempty"`
+	IncludeSensitive bool       `json:"include_sensitive,omitempty"`
+	OccurredFrom     *time.Time `json:"occurred_from,omitempty"`
+	OccurredUntil    *time.Time `json:"occurred_until,omitempty"`
+	CapturedFrom     *time.Time `json:"captured_from,omitempty"`
+	CapturedUntil    *time.Time `json:"captured_until,omitempty"`
+	Limit            int        `json:"limit,omitempty"`
+	Cursor           string     `json:"cursor,omitempty"`
+	VectorProfileID  string     `json:"vector_profile_id,omitempty"`
+	QueryVector      []float64  `json:"query_vector,omitempty"`
+}
+
+func TestMemoryRecallClientOptInAcceptedByLegacyParser(t *testing.T) {
+	for _, fallback := range []string{"", "any_terms"} {
+		t.Run("fallback_"+fallback, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/memories:recall" {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				var req legacyMemoryRecallRequest
+				// Same size ceiling and decoder used by HEAD's recall handler.
+				if err := decodeLimitedJSON(w, r, &req, 96*1024); err != nil {
+					t.Errorf("legacy parser rejected request: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if req.Query != "alpha delta" || req.Kind != "decision" || req.Limit != 5 {
+					t.Errorf("legacy request lost known fields: %#v", req)
+				}
+				if req.Limit < 0 || req.Limit > 100 {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(MemoryRecallPage{Hits: []MemoryRecallHit{}, RetrievalMode: "lexical"})
+			}))
+			defer srv.Close()
+			page, err := client.RecallMemories(context.Background(), srv.URL, "synthetic-token", client.MemoryRecallInput{
+				Query: "alpha delta", Kind: "decision", Limit: 5, QueryFallback: fallback,
+			})
+			if err != nil {
+				t.Fatalf("new client against legacy parser: %v", err)
+			}
+			if calls != 1 || len(page.Hits) != 0 || page.QueryFallback != "" {
+				t.Fatalf("legacy response: calls=%d hits=%d fallback=%q", calls, len(page.Hits), page.QueryFallback)
+			}
+		})
+	}
+}
+
+func TestMemoryRecallQueryFallbackInput(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		fallback string
+		status   int
+	}{
+		{name: "omitted", body: `{"query":"alpha delta"}`, status: http.StatusOK},
+		{name: "empty", body: `{"query":"alpha delta","query_fallback":""}`, status: http.StatusOK},
+		{name: "opt_in", body: `{"query":"alpha delta","query_fallback":"any_terms"}`, fallback: "any_terms", status: http.StatusOK},
+		{name: "unknown", body: `{"query":"alpha delta","query_fallback":"all_terms"}`, status: http.StatusBadRequest},
+		{name: "case", body: `{"query":"alpha delta","query_fallback":"ANY_TERMS"}`, status: http.StatusBadRequest},
+		{name: "space", body: `{"query":"alpha delta","query_fallback":" any_terms"}`, status: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(apiMux(Config{
+				AuthenticatePrincipal: memoryTestAuth(),
+				RecallMemories: func(_ context.Context, _ DomainPrincipal, in MemoryRecallRequest) (MemoryRecallPage, error) {
+					calls++
+					if in.QueryFallback != tc.fallback {
+						t.Errorf("opt-in = %q, want %q", in.QueryFallback, tc.fallback)
+					}
+					return MemoryRecallPage{}, nil
+				},
+			}))
+			defer srv.Close()
+			resp := memoryTestRequest(t, srv.URL, http.MethodPost, "/v1/memories:recall", "agent-token", "", tc.body)
+			closeBody(t, resp)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			wantCalls := 0
+			if tc.status == http.StatusOK {
+				wantCalls = 1
+			}
+			if calls != wantCalls {
+				t.Fatalf("backend calls = %d, want %d", calls, wantCalls)
+			}
+		})
+	}
 }

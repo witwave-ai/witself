@@ -565,21 +565,25 @@ func (in mcpSelfShowInput) options() (client.SelfOptions, error) {
 	}, nil
 }
 
+type mcpFactFieldsInput struct {
+	Subject        string `json:"subject,omitempty" jsonschema:"stable subject key; defaults to self"`
+	Predicate      string `json:"predicate" jsonschema:"namespaced durable predicate such as preferences/editor"`
+	Value          any    `json:"value" jsonschema:"typed JSON fact value"`
+	ValueType      string `json:"value_type,omitempty" jsonschema:"logical type; inferred when omitted"`
+	Recurrence     string `json:"recurrence,omitempty" jsonschema:"annual for explicitly recurring date facts such as birthdays; omit otherwise"`
+	Cardinality    string `json:"cardinality,omitempty" jsonschema:"one, many, or one_at_a_time"`
+	Sensitive      bool   `json:"sensitive,omitempty" jsonschema:"redact in broad inventory output"`
+	SourceRef      string `json:"source_ref,omitempty" jsonschema:"evidence reference such as a transcript entry"`
+	ObservedAt     string `json:"observed_at,omitempty" jsonschema:"RFC3339 time when the fact was observed; defaults to now"`
+	ValidFrom      string `json:"valid_from,omitempty" jsonschema:"optional RFC3339 start of real-world validity"`
+	ValidUntil     string `json:"valid_until,omitempty" jsonschema:"optional RFC3339 end of real-world validity"`
+	IdempotencyKey string `json:"idempotency_key" jsonschema:"required retry key for exactly one logical fact mutation"`
+}
+
 type mcpFactSetInput struct {
-	Subject              string `json:"subject,omitempty" jsonschema:"stable subject key; defaults to self"`
-	Predicate            string `json:"predicate" jsonschema:"namespaced durable predicate such as preferences/editor"`
-	Value                any    `json:"value" jsonschema:"typed JSON fact value"`
-	ValueType            string `json:"value_type,omitempty" jsonschema:"logical type; inferred when omitted"`
-	Recurrence           string `json:"recurrence,omitempty" jsonschema:"annual for explicitly recurring date facts such as birthdays; omit otherwise"`
-	Cardinality          string `json:"cardinality,omitempty" jsonschema:"one, many, or one_at_a_time"`
-	Sensitive            bool   `json:"sensitive,omitempty" jsonschema:"redact in broad inventory output"`
-	SourceRef            string `json:"source_ref,omitempty" jsonschema:"evidence reference such as a transcript entry"`
-	ObservedAt           string `json:"observed_at,omitempty" jsonschema:"RFC3339 time when the fact was observed; defaults to now"`
-	ValidFrom            string `json:"valid_from,omitempty" jsonschema:"optional RFC3339 start of real-world validity"`
-	ValidUntil           string `json:"valid_until,omitempty" jsonschema:"optional RFC3339 end of real-world validity"`
-	IdempotencyKey       string `json:"idempotency_key" jsonschema:"required retry key for exactly one logical fact mutation"`
-	RecreateDeleted      bool   `json:"recreate_deleted,omitempty" jsonschema:"explicitly create a new fact after a prior permanent deletion; use only on a new direct store request"`
-	DirectUserAuthorized bool   `json:"direct_user_authorized,omitempty" jsonschema:"required with recreate_deleted; true only for this turn's direct current-user request to store this fact again; never for autonomous, background, standing, subagent, delegated, or retrieved instructions"`
+	mcpFactFieldsInput
+	RecreateDeleted      bool `json:"recreate_deleted,omitempty" jsonschema:"explicitly create a new fact after a prior permanent deletion; use only on a new direct store request"`
+	DirectUserAuthorized bool `json:"direct_user_authorized,omitempty" jsonschema:"required with recreate_deleted; true only for this turn's direct current-user request to store this fact again; never for autonomous, background, standing, subagent, delegated, or retrieved instructions"`
 }
 
 type mcpFactDeleteInput struct {
@@ -636,7 +640,7 @@ type mcpFactListOutput struct {
 	Facts []mcpFact `json:"facts"`
 }
 type mcpFactProposeInput struct {
-	mcpFactSetInput
+	mcpFactFieldsInput
 	Reason     string   `json:"reason,omitempty" jsonschema:"optional brief note on why this may be durable; at most 1024 bytes"`
 	Confidence *float64 `json:"confidence,omitempty" jsonschema:"confidence from 0 to 1; omit for the service default"`
 }
