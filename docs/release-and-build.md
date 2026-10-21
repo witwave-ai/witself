@@ -335,8 +335,8 @@ WITSELF_TEST_REHEARSAL=1 go test ./internal/tools/migrationrehearsal -run '^Test
 ### Cloudflare Worker Dependencies
 
 Wrangler is pinned once in
-[`infra/cloudflare/wrangler-version.json`](../infra/cloudflare/wrangler-version.json)
-(currently `4.128.0`). Every Worker's gate checks its installed Wrangler and all
+[`infra/cloudflare/wrangler-version.json`](../infra/cloudflare/wrangler-version.json).
+Every Worker's gate checks its installed Wrangler and all
 four exact manifest pins against that file. To bump, update the shared version
 and run `npm install --save-dev --save-exact wrangler@<version>` in each of
 `infra/cloudflare/{control-plane,agent-email,agent-email-send,support-email-intake}`;
