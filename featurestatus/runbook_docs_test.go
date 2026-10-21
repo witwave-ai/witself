@@ -60,6 +60,231 @@ func TestRunbookDocsBanner(t *testing.T) {
 	}
 }
 
+func TestRunbookDocsListComplete(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(repoRoot(t), "docs"))
+	if err != nil {
+		t.Fatal("docs:1 runbook-read-dir")
+	}
+	listed := make(map[string]bool, len(runbookDocsFiles))
+	for _, file := range runbookDocsFiles {
+		listed[file] = true
+	}
+	matched := make(map[string]bool)
+	for _, entry := range entries {
+		match, err := filepath.Match("runbook-*.md", entry.Name())
+		if err != nil {
+			t.Fatal("docs:1 runbook-match")
+		}
+		if entry.IsDir() || !match {
+			continue
+		}
+		matched[entry.Name()] = true
+		if !listed[entry.Name()] {
+			t.Errorf("docs/%s:1 runbook-list-complete", entry.Name())
+		}
+	}
+	for _, file := range runbookDocsFiles {
+		if !matched[file] {
+			t.Errorf("docs/%s:1 runbook-list-complete", file)
+		}
+	}
+}
+
+func TestRunbookDocsStructure(t *testing.T) {
+	runbookDocsRequireFiles(t)
+	reference := regexp.MustCompile(`\bG([0-9]+)\b`)
+	definition := regexp.MustCompile(`^\s*(?:[-*]|[0-9]+[.)])\s+\*\*(?:\[GAP\] )?G([0-9]+)\.?\*\*`)
+	unbracketed := regexp.MustCompile(`FOUNDER CHECKPOINT|GAP`)
+	for _, file := range runbookDocsFiles {
+		body := runbookDocsRead(t, "docs", file)
+		lines := runbookDocsUnfencedLines(body)
+		h1Count, h1Line := 0, 1
+		lastH2 := runbookDocsLine{number: 1}
+		definitions := make(map[string]bool)
+		inGaps := false
+		for _, line := range lines {
+			if strings.HasPrefix(line.text, "# ") {
+				h1Count++
+				h1Line = line.number
+			}
+			if strings.HasPrefix(line.text, "## ") {
+				lastH2 = line
+				inGaps = line.text == "## Gaps"
+			}
+			if match := definition.FindStringSubmatch(line.text); inGaps && match != nil {
+				id := match[1]
+				if definitions[id] {
+					t.Errorf("docs/%s:%d gap-definition-duplicate", file, line.number)
+				} else if id != strconv.Itoa(len(definitions)+1) {
+					t.Errorf("docs/%s:%d gap-definition-sequence", file, line.number)
+				}
+				definitions[id] = true
+			}
+		}
+		if h1Count != 1 {
+			t.Errorf("docs/%s:%d single-h1", file, h1Line)
+		}
+		if lastH2.text != "## Gaps" {
+			t.Errorf("docs/%s:%d last-h2-gaps", file, lastH2.number)
+		}
+		for _, line := range lines {
+			for _, match := range reference.FindAllStringSubmatch(line.text, -1) {
+				if !definitions[match[1]] {
+					t.Errorf("docs/%s:%d gap-reference-defined", file, line.number)
+				}
+			}
+		}
+		masked, unnumbered := runbookDocsMaskMarkers(lines)
+		for _, line := range unnumbered {
+			t.Errorf("docs/%s:%d gap-marker-numbered", file, line)
+		}
+		for _, line := range masked {
+			if unbracketed.MatchString(line.text) {
+				t.Errorf("docs/%s:%d bracketed-marker", file, line.number)
+			}
+		}
+		for _, line := range runbookDocsJoinedMarkerResidue(body, masked, unbracketed) {
+			t.Errorf("docs/%s:%d bracketed-marker", file, line)
+		}
+	}
+}
+
+// Mask only exact markers, retaining byte lengths for paragraph source offsets.
+// A gap number may follow closing bold markup or wrap onto the next prose line.
+func runbookDocsMaskMarkers(lines []runbookDocsLine) ([]runbookDocsLine, []int) {
+	marker := regexp.MustCompile(`\[FOUNDER CHECKPOINT\]|\[GAP\]`)
+	number := regexp.MustCompile(`^(?:\*\*)?[ \t\r]+G[0-9]+\b`)
+	wrap := regexp.MustCompile(`^(?:\*\*)?[ \t\r]*$`)
+	wrappedNumber := regexp.MustCompile(`^[ \t\r]*G[0-9]+\b`)
+	masked := make([]runbookDocsLine, len(lines))
+	var unnumbered []int
+	definitions := 0
+	for i, line := range lines {
+		text := []byte(line.text)
+		for _, match := range marker.FindAllStringIndex(line.text, -1) {
+			if line.text[match[0]:match[1]] == "[GAP]" {
+				tail := line.text[match[1]:]
+				switch {
+				case strings.HasPrefix(tail, "`"):
+					// The literal inline-code token is exempt from numbering.
+				case match[0] == 0 && strings.HasPrefix(tail, " Gn:") && definitions == 0:
+					// Only the one legend line, which starts with "[GAP] Gn:", may use the placeholder.
+					definitions++
+					match[1] += len(" Gn")
+				case number.MatchString(tail):
+					match[1] += number.FindStringIndex(tail)[1]
+				case wrap.MatchString(tail) && i+1 < len(lines) && lines[i+1].number == line.number+1 && wrappedNumber.MatchString(lines[i+1].text):
+					// Contiguity prevents looking through a fence or blank line.
+				default:
+					unnumbered = append(unnumbered, line.number)
+					continue
+				}
+			}
+			for offset := match[0]; offset < match[1]; offset++ {
+				text[offset] = ' '
+			}
+		}
+		masked[i] = runbookDocsLine{number: line.number, text: string(text)}
+	}
+	return masked, unnumbered
+}
+
+// runbookDocsJoinedMarkerResidue returns the source line of every marker residue
+// left in a joined unfenced paragraph, so a marker wrapped across lines is caught.
+func runbookDocsJoinedMarkerResidue(body string, masked []runbookDocsLine, unbracketed *regexp.Regexp) []int {
+	maskedText := make(map[int]string, len(masked))
+	for _, line := range masked {
+		maskedText[line.number] = line.text
+	}
+	var residue []int
+	for _, paragraph := range runbookDocsParagraphs(body) {
+		if _, unfenced := maskedText[paragraph[0].number]; !unfenced {
+			continue
+		}
+		for i := range paragraph {
+			paragraph[i].text = maskedText[paragraph[i].number]
+		}
+		joined, sourceLines := runbookDocsJoinParagraph(paragraph)
+		// A bracketed token that hard-wraps at its inner space is still exact once joined;
+		// blank it at the same length so offsets keep mapping to source lines.
+		const founder = "[FOUNDER CHECKPOINT]"
+		joined = strings.ReplaceAll(joined, founder, strings.Repeat(" ", len(founder)))
+		for _, match := range unbracketed.FindAllStringIndex(joined, -1) {
+			residue = append(residue, sourceLines[match[0]])
+		}
+	}
+	return residue
+}
+
+func TestRunbookDocsJoinedMarkers(t *testing.T) {
+	unbracketed := regexp.MustCompile(`FOUNDER CHECKPOINT|GAP`)
+	for i, check := range []struct {
+		body    string
+		residue []int
+	}{
+		{"The founder signs at the **[FOUNDER\nCHECKPOINT]** below.", nil},
+		{"This step is a FOUNDER\nCHECKPOINT: do it.", []int{1}},
+		{"- item\n  a FOUNDER\n  CHECKPOINT", []int{2}},
+		{"x [FOUNDER\nCHECKPOINT run it", []int{1}},
+		{"```\nFOUNDER\nCHECKPOINT\n```", nil},
+	} {
+		masked, _ := runbookDocsMaskMarkers(runbookDocsUnfencedLines(check.body))
+		got := runbookDocsJoinedMarkerResidue(check.body, masked, unbracketed)
+		same := len(got) == len(check.residue)
+		for j := 0; same && j < len(got); j++ {
+			same = got[j] == check.residue[j]
+		}
+		if !same {
+			t.Errorf("fixture %d joined marker residue differs", i)
+		}
+	}
+}
+
+func TestRunbookDocsMarkers(t *testing.T) {
+	for i, check := range []struct {
+		body       string
+		unnumbered int
+		residue    bool
+	}{
+		{"**[FOUNDER CHECKPOINT]** Proceed.", 0, false},
+		{"**[GAP] G1**", 0, false},
+		{"**[GAP]** G1", 0, false},
+		{"[GAP] Gn: definition.", 0, false},
+		{"Use `[GAP]` in the legend.", 0, false},
+		{"**[GAP]\nG1**", 0, false},
+		{"**[GAP]**\r\n  G1", 0, false},
+		{"**[GAP]** No funnel.", 1, true},
+		{"[GAP] G1x", 1, true},
+		{"[GAP] Gnonsense", 1, true},
+		{"[GAP]\n\nG1", 1, true},
+		{"[GAP]\n```\nexample\n```\nG1", 1, true},
+		{"[GAP] Gn: definition with GAP", 0, true},
+		{"Text **[GAP] Gn** here.", 1, true},
+		{"[GAP] Gn: one.\n\n[GAP] Gn: two.", 1, true},
+		{"  [GAP] Gn: indented.", 1, true},
+		{"**[GAP: no rule]**", 0, true},
+		{"**[GAP G3**", 0, true},
+		{"[FOUNDER CHECKPOINT run it", 0, true},
+		{"```\n[GAP]\nFOUNDER CHECKPOINT\n```", 0, false},
+	} {
+		lines := runbookDocsUnfencedLines(check.body)
+		masked, unnumbered := runbookDocsMaskMarkers(lines)
+		if len(unnumbered) != check.unnumbered || len(masked) != len(lines) {
+			t.Fatalf("fixture %d marker count differs", i)
+		}
+		residue := false
+		for j, line := range masked {
+			if line.number != lines[j].number || len(line.text) != len(lines[j].text) {
+				t.Errorf("fixture %d marker offsets differ", i)
+			}
+			residue = residue || strings.Contains(line.text, "GAP") || strings.Contains(line.text, "FOUNDER CHECKPOINT")
+		}
+		if residue != check.residue {
+			t.Errorf("fixture %d marker residue differs", i)
+		}
+	}
+}
+
 func TestRunbookDocsPublicSafety(t *testing.T) {
 	runbookDocsRequireFiles(t)
 	patterns := []struct {
@@ -73,6 +298,7 @@ func TestRunbookDocsPublicSafety(t *testing.T) {
 		{"private-temporary-path", `/private/tmp`},
 		{"private-user-home-path", `/Users/`},
 		{"private-home-environment-path", `\$\{HOME\}`},
+		{"private-home-witself-path", `\$HOME/\.witself`},
 		{"dispatcher-directory", `dispatcher-scripts`},
 		{"private-pr-ledger", `PR-LEDGER`},
 		{"private-readiness-document", `READINESS`},
@@ -113,15 +339,29 @@ func TestRunbookDocsPublicSafety(t *testing.T) {
 	}
 	email := regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
 	for _, file := range runbookDocsFiles {
-		for i, line := range strings.Split(runbookDocsRead(t, "docs", file), "\n") {
+		body := runbookDocsRead(t, "docs", file)
+		for i, line := range strings.Split(body, "\n") {
 			for j, pattern := range patterns {
 				if matchers[j].MatchString(line) {
-					t.Errorf("docs/%s:%d: forbidden pattern %s", file, i+1, pattern.name)
+					t.Errorf("docs/%s:%d %s", file, i+1, pattern.name)
 				}
 			}
 			for _, address := range email.FindAllString(line, -1) {
 				if !runbookDocsAllowedEmail(address) {
-					t.Errorf("docs/%s:%d: forbidden pattern email-address", file, i+1)
+					t.Errorf("docs/%s:%d email-address", file, i+1)
+				}
+			}
+		}
+		for _, paragraph := range runbookDocsParagraphs(body) {
+			joined, sourceLines := runbookDocsJoinParagraph(paragraph)
+			for j, pattern := range patterns {
+				for _, match := range matchers[j].FindAllStringIndex(joined, -1) {
+					t.Errorf("docs/%s:%d %s", file, sourceLines[match[0]], pattern.name)
+				}
+			}
+			for _, match := range email.FindAllStringIndex(joined, -1) {
+				if !runbookDocsAllowedEmail(joined[match[0]:match[1]]) {
+					t.Errorf("docs/%s:%d email-address", file, sourceLines[match[0]])
 				}
 			}
 		}
@@ -234,18 +474,6 @@ func TestRunbookDocsProfessionalToTeamProcedure(t *testing.T) {
 			t.Errorf("docs/%s: missing procedure command %q", file, command)
 		}
 	}
-	// Ruling 1: the file ends with its Gaps list. Check the last unfenced
-	// level-two heading, not a substring: the marker definition near the top
-	// mentions "## Gaps" inside a code span.
-	lastH2 := ""
-	for _, line := range runbookDocsUnfencedLines(body) {
-		if strings.HasPrefix(line.text, "## ") {
-			lastH2 = strings.TrimSpace(line.text)
-		}
-	}
-	if lastH2 != "## Gaps" {
-		t.Errorf("docs/%s: last level-two heading is %q, want %q", file, lastH2, "## Gaps")
-	}
 	numberedStep := regexp.MustCompile(`^\s*[0-9]+[.)]\s`)
 	steps := map[string]int{"## Procedure": 0, "## Exit": 0}
 	var section string
@@ -308,32 +536,152 @@ type runbookDocsLine struct {
 	text   string
 }
 
+type runbookDocsFence struct {
+	mark  byte
+	width int
+}
+
+// Contains includes both fence delimiters and every line between them. After a
+// closing delimiter, mark is zero so adjacent fenced blocks stay separate.
+func (f *runbookDocsFence) contains(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
+		mark := trimmed[0]
+		n := 0
+		for n < len(trimmed) && trimmed[n] == mark {
+			n++
+		}
+		if n >= 3 && f.mark == 0 {
+			f.mark, f.width = mark, n
+			return true
+		}
+		if mark == f.mark && n >= f.width && strings.TrimSpace(trimmed[n:]) == "" {
+			f.mark, f.width = 0, 0
+			return true
+		}
+	}
+	return f.mark != 0
+}
+
 func runbookDocsUnfencedLines(body string) []runbookDocsLine {
 	var result []runbookDocsLine
-	var fence byte
-	var width int
+	var fence runbookDocsFence
 	for i, line := range strings.Split(body, "\n") {
-		trimmed := strings.TrimLeft(line, " ")
-		if len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
-			mark := trimmed[0]
-			n := 0
-			for n < len(trimmed) && trimmed[n] == mark {
-				n++
-			}
-			if n >= 3 && fence == 0 {
-				fence, width = mark, n
-				continue
-			}
-			if mark == fence && n >= width && strings.TrimSpace(trimmed[n:]) == "" {
-				fence, width = 0, 0
-				continue
-			}
-		}
-		if fence == 0 {
+		if !fence.contains(line) {
 			result = append(result, runbookDocsLine{number: i + 1, text: line})
 		}
 	}
 	return result
+}
+
+// Blank lines separate prose paragraphs; each fenced block is scanned on its
+// own, including its delimiters, without joining it to surrounding prose.
+func runbookDocsParagraphs(body string) [][]runbookDocsLine {
+	var result [][]runbookDocsLine
+	var paragraph []runbookDocsLine
+	flush := func() {
+		if len(paragraph) > 0 {
+			result = append(result, paragraph)
+			paragraph = nil
+		}
+	}
+	var fence runbookDocsFence
+	for i, text := range strings.Split(body, "\n") {
+		wasFenced := fence.mark != 0
+		fenced := fence.contains(text)
+		if fenced && !wasFenced {
+			flush()
+		}
+		if !fenced && strings.TrimSpace(text) == "" {
+			flush()
+			continue
+		}
+		paragraph = append(paragraph, runbookDocsLine{number: i + 1, text: text})
+		if fenced && fence.mark == 0 {
+			flush()
+		}
+	}
+	flush()
+	return result
+}
+
+// Keep a source line for every byte, because regexp match offsets are bytes.
+// Replacement bytes inherit the first matched byte's source line.
+func runbookDocsJoinParagraph(paragraph []runbookDocsLine) (string, []int) {
+	var text strings.Builder
+	var sourceLines []int
+	for i, line := range paragraph {
+		if i > 0 {
+			text.WriteByte('\n')
+			sourceLines = append(sourceLines, paragraph[i-1].number)
+		}
+		text.WriteString(line.text)
+		for range len(line.text) {
+			sourceLines = append(sourceLines, line.number)
+		}
+	}
+	joined := text.String()
+	for _, rewrite := range []struct {
+		re          *regexp.Regexp
+		replacement byte
+	}{
+		{regexp.MustCompile(`\b-[ \t\r]*\n[ \t\r]*`), '-'},
+		{regexp.MustCompile(`\s+`), ' '},
+	} {
+		var normalized []byte
+		var normalizedLines []int
+		start := 0
+		for _, match := range rewrite.re.FindAllStringIndex(joined, -1) {
+			normalized = append(normalized, joined[start:match[0]]...)
+			normalizedLines = append(normalizedLines, sourceLines[start:match[0]]...)
+			normalized = append(normalized, rewrite.replacement)
+			normalizedLines = append(normalizedLines, sourceLines[match[0]])
+			start = match[1]
+		}
+		normalized = append(normalized, joined[start:]...)
+		normalizedLines = append(normalizedLines, sourceLines[start:]...)
+		joined, sourceLines = string(normalized), normalizedLines
+	}
+	return joined, sourceLines
+}
+
+func TestRunbookDocsParagraphs(t *testing.T) {
+	body := "é\t prefix\n  continued\nPHX1 had 31 days of\nnotice and 2026- \n\t09-05\n\nabout\n\n21 h\n```text\n6 h\n20\n```\nafter\n~~~~\n31 days of\nnotice\n~~~~\n```\nseparate\n```\nlast\n\nrole address --\nlegal@witwave.ai\n\n2026-\r\n09-05\n\nPR-\nLEDGER\n\n```\nx-\n\ny\n```"
+	paragraphs := runbookDocsParagraphs(body)
+	want := []string{
+		"é prefix continued PHX1 had 31 days of notice and 2026-09-05",
+		"about", "21 h", "```text 6 h 20 ```", "after",
+		"~~~~ 31 days of notice ~~~~", "``` separate ```", "last",
+		"role address -- legal@witwave.ai", "2026-09-05", "PR-LEDGER",
+		"``` x- y ```",
+	}
+	if len(paragraphs) != len(want) {
+		t.Fatal("paragraph boundaries differ")
+	}
+	for i, paragraph := range paragraphs {
+		joined, sourceLines := runbookDocsJoinParagraph(paragraph)
+		if joined != want[i] || len(joined) != len(sourceLines) {
+			t.Errorf("paragraph %d normalization differs", i)
+		}
+	}
+	for _, check := range []struct {
+		paragraph int
+		match     string
+		line      int
+	}{
+		{0, "continued", 2}, {0, "31 days of notice", 3},
+		{0, "2026-09-05", 4}, {0, "09-05", 5},
+		{3, "6 h 20", 11}, {5, "31 days of notice", 16},
+		{6, "separate", 20}, {7, "last", 22},
+		{8, "legal@witwave.ai", 25}, {9, "2026-09-05", 27},
+		{9, "09-05", 28}, {10, "PR-LEDGER", 30}, {10, "LEDGER", 31},
+	} {
+		joined, sourceLines := runbookDocsJoinParagraph(paragraphs[check.paragraph])
+		offset := strings.Index(joined, check.match)
+		if offset < 0 || sourceLines[offset] != check.line {
+			t.Errorf("paragraph %d source line differs", check.paragraph)
+		}
+	}
 }
 
 func runbookDocsHeadingSlugs(body string) map[string]bool {
