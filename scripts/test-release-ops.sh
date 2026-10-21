@@ -887,6 +887,8 @@ for scenario in npm-fail stale-version downgrade equal-version bad-version redac
       [ "$(cat "$OUT/versions")" = 11 ] || fail 'T10 not exactly ten post-deploy polls' ;;
     downgrade)
       contains "$OUT/stdout" 'refusing to deploy 1.2.4 below the live 1.2.5'
+      contains "$OUT/stdout" 'follow docs/runbook-control-plane-rollback.md'
+      absent "$OUT/stdout" 'readiness row'
       absent "$OUT/calls" '<worktree> <add>'; absent "$OUT/calls" 'npm ' ;;
     redaction-fail)
       contains "$OUT/stdout" 'redaction pipeline exited'
