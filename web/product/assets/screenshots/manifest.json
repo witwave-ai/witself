@@ -1,8 +1,8 @@
 {
   "schema": "witself.product-screenshots.v1",
   "fixture": "synthetic-demo-only",
-  "source_digest": "ed224373dc33f0f5056cfbdbbb339bc230606e58c3810176f553ec93ffe2d428",
-  "captured_at": "2026-10-14T05:16:19.660Z",
+  "source_digest": "22c03a80f9bf43cb575d6e844e4a0c0d2a9ee3b5e9d94f971f7b8ac573777e1e",
+  "captured_at": "2026-10-21T05:46:15.779Z",
   "renderer": {
     "browser": "153.0.8010.12",
     "terminal": "xterm 6.0.0",
@@ -12,7 +12,7 @@
     "agent-console.png": {
       "width": 1440,
       "height": 1000,
-      "sha256": "78444f9bbdc22cf2b750708857fc383d86d5d85fb5193bdc1d96a901bad2c2f0"
+      "sha256": "e09beb2325082965bcc4646206d9a7d7c51d8775cffe326f67bebeb2aa6cda2a"
     },
     "agent-tui.png": {
       "width": 1196,
