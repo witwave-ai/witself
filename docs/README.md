@@ -255,6 +255,7 @@ deployment cells under a thin global control plane.
 - Unrehearsed runbooks:
   - [Move a Professional account to Team by hand](runbook-professional-to-team.md): not rehearsed.
   - [Roll the control plane back to the previous release](runbook-control-plane-rollback.md): not rehearsed.
+  - [Serving cell lost](runbook-serving-cell-lost.md): not rehearsed.
 - [workflow-scripts.md](workflow-scripts.md): shipped CLI workflows, with unimplemented targets marked separately
   for account onboarding, billing, memories, facts, messaging, client-held
   secrets, MCP, transcripts, the dashboard, and self-hosted bootstrap.

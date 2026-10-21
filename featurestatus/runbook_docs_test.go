@@ -16,6 +16,7 @@ import (
 var runbookDocsFiles = []string{
 	"runbook-professional-to-team.md",
 	"runbook-control-plane-rollback.md",
+	"runbook-serving-cell-lost.md",
 }
 
 // runbookDocsVerified records, for each listed runbook, the main commit (its
@@ -24,6 +25,7 @@ var runbookDocsFiles = []string{
 var runbookDocsVerified = map[string][2]string{
 	"runbook-professional-to-team.md":   {"1209a8c0ecf9", "2026-10-18"},
 	"runbook-control-plane-rollback.md": {"8f5545dc6548", "2026-10-19"},
+	"runbook-serving-cell-lost.md":      {"bc2d5a5bb990", "2026-10-21"},
 }
 
 func TestRunbookDocsBanner(t *testing.T) {
@@ -98,6 +100,12 @@ func TestRunbookDocsPublicSafety(t *testing.T) {
 		{"private-serving-register-script", `register-use1-serving\.sh`},
 		{"ipv4-address", `\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`},
 		{"source-line-anchor", `[A-Za-z0-9_./-]+\.(?:go|mjs|js|jsonc|json|ya?ml|sh|md|sql|toml|tf)(?::[0-9]+|#L[0-9]+)`},
+		{"phx1-core-service-duration", `(?i)\b6 h 20\b`},
+		{"phx1-full-service-duration", `(?i)about 21 h`},
+		{"phx1-recovery-point-relative", `(?i)after 09-05`},
+		{"phx1-recovery-point-date", `2026-09-05`},
+		{"phx1-notice-length", `(?i)31 days of notice`},
+		{"phx1-recovery-point-age", `(?i)\b14 days\b`},
 	}
 	matchers := make([]*regexp.Regexp, len(patterns))
 	for i, pattern := range patterns {
