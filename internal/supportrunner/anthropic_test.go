@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestAnthropicRequestShapeAndDecisionParse(t *testing.T) {
@@ -74,6 +77,81 @@ func TestAnthropicRequestShapeAndDecisionParse(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("decision = %+v, want %+v", got, want)
+	}
+}
+
+func TestAnthropicSendsNoTraceContext(t *testing.T) {
+	t.Setenv("ANTHROPIC_OPEN_TELEMETRY", "")
+	t.Setenv("ANTHROPIC_OPEN_TELEMETRY_PROPAGATION", "")
+	t.Setenv("ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE", "")
+
+	previousPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(previousPropagator) })
+
+	traceID := trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: trace.FlagsSampled,
+	}))
+
+	traceParents := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceParents <- r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"msg_trace",
+  "type":"message",
+  "role":"assistant",
+  "model":"test-model",
+  "content":[{
+    "type":"tool_use",
+    "id":"toolu_trace",
+    "name":"submit_support_decision",
+    "input":{
+      "action":"reply",
+      "reply_body":"Use the documented verification command.",
+      "retriage":{"category":"technical","priority":"normal"},
+      "escalate_reason":""
+    }
+  }],
+  "stop_reason":"tool_use",
+  "stop_sequence":null,
+  "usage":{"input_tokens":10,"output_tokens":10}
+}`))
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name          string
+		enableTracing bool
+	}{
+		{name: "default"},
+		{name: "tracing enabled control", enableTracing: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options := []option.RequestOption{option.WithBaseURL(server.URL), option.WithMaxRetries(0)}
+			if test.enableTracing {
+				options = append(options, option.WithOpenTelemetryTraces(true))
+			}
+			model := newAnthropicLLMWithOptions("test-api-key", "test-model", options...)
+			_, err := model.Decide(ctx, runnerThread(
+				"tkt_1", "acc_1",
+				[]ticketMessage{{ID: "tkm_1", AuthorKind: authorKindOwner, Body: "How?"}},
+			))
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			got := <-traceParents
+			if test.enableTracing {
+				if got == "" || !strings.Contains(got, traceID.String()) {
+					t.Fatalf("control traceparent = %q, want non-empty header containing trace ID %s", got, traceID)
+				}
+			} else if got != "" {
+				t.Fatalf("default client sent traceparent = %q, want empty header", got)
+			}
+		})
 	}
 }
 

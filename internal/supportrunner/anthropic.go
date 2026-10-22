@@ -24,7 +24,11 @@ func newAnthropicLLM(apiKey, model string) llm {
 }
 
 func newAnthropicLLMWithOptions(apiKey, model string, options ...option.RequestOption) *anthropicLLM {
-	options = append([]option.RequestOption{option.WithAPIKey(apiKey)}, options...)
+	options = append([]option.RequestOption{
+		option.WithAPIKey(apiKey),
+		// Support mail must never enter spans or trace headers, regardless of the global provider, propagator, or ANTHROPIC_OPEN_TELEMETRY* settings.
+		option.WithoutOpenTelemetry(),
+	}, options...)
 	return &anthropicLLM{
 		client: anthropic.NewClient(options...),
 		model:  model,
