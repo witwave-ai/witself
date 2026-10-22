@@ -365,8 +365,9 @@ the server configuration checksum and roll API pods; disabled values leave
 the default render and checksum unchanged. The apps chart forwards
 `requestBudget` only when `apps.witselfServer.requestBudget.enabled` is true
 and both chart and image are `v0.0.334` or newer; cells set it through the
-catalog switch `request_budget`. Per-plan values remain a founder decision
-(FU123-2).
+catalog switch `request_budget`. Catalog `switches.request_budget.plans` is
+forwarded by the apps chart only when the budget is enabled and both chart
+and image are `v0.0.338` or newer; live values remain a founder decision.
 
 `worker.supportTicketAgeOut` renders `WITSELF_SUPPORT_TICKET_AGE_OUT_*` into
 the worker ConfigMap. Defaults are `enabled: false`, `after: 720h`,

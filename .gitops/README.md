@@ -289,17 +289,34 @@ change.
 
 The per-account request budget is off by default and is not forwarded. A cell
 turns it on only by adding `switches.request_budget` to its catalog entry,
-directly after the cell's `switches:` line. All five integer keys are required:
+after the cell's last existing switch entry. The serving cell's
+monitoring-recovery patches
+(`scripts/testdata/monitoring-recovery/phase4.patch`) use `switches:` and its
+first entries as context, so a block inserted directly after `switches:` breaks
+them.
+All five integer keys are required:
 `read_per_minute`, `read_burst`, `write_per_minute` and `write_burst` must each
 be from 1 to 1,000,000; `max_tracked_accounts` must be from 100 to 1,000,000.
 An empty or null block is refused. Remove the block to turn the budget off.
 
+The optional `switches.request_budget.plans` mapping accepts 1–16 plan ids
+matching `^[a-z][a-z0-9_]{0,31}$`. Each plan requires `read_per_minute`,
+`read_burst`, `write_per_minute` and `write_burst`, each an integer from 1 to
+1,000,000; unknown keys are refused. An empty or null `plans` mapping is
+refused: remove the key to use the cell-wide values for every plan. Quote any
+plan id that YAML would otherwise read as null, a boolean or a number (for
+example `"null"`, `"true"` or `"false"`); an unquoted one is refused as an
+invalid plan id.
+
 The generator renders `apps.witselfServer.requestBudget` with `enabled: true`
 through the three Civo overlays. The apps chart forwards it only when enabled
 and when both the server chart and image are at least `v0.0.334`; an enabled
-budget with either pin below that version fails the render. Values are
-cell-wide and per replica, so N replicas admit up to N× the configured
-allowance. Per-plan values remain FU123-2.
+budget with either pin below that version fails the render. Non-empty `plans`
+are forwarded only when the budget is enabled and both chart and image are
+`v0.0.338` or newer; an enabled budget with plans and either pin below that
+version fails the render. Unlisted plans use the five top-level cell-wide
+values. Values are per replica, so N replicas admit up to N× the configured
+allowance. Live per-plan values remain a founder decision.
 
 The enabling PR also adds the cell to `requestBudgetCells` in
 `internal/gitopsvalues/request_budget_test.go` and `REQUEST_BUDGET_CELLS` in
@@ -309,6 +326,8 @@ run `ruby scripts/testdata/test-monitoring-recovery.rb "$PWD"` as well.
 **An enabled cell cannot be rolled below `v0.0.334`.** The apps render fails,
 Argo stops syncing that cell's `witself-apps`, and the rollback never reaches
 the server. Remove the catalog block first, in its own PR, then roll back.
+**Remove `plans` in its own PR before rolling an enabled cell below
+`v0.0.338`.** The cell-wide budget can remain enabled at `v0.0.334` or newer.
 
 ## Serving-cell monitoring extensions
 

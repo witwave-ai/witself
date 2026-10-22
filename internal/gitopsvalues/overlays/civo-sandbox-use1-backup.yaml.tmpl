@@ -59,6 +59,16 @@ apps:
       writePerMinute: {{ .WritePerMinute }}
       writeBurst: {{ .WriteBurst }}
       maxTrackedAccounts: {{ .MaxTrackedAccounts }}
+{{- with .Plans }}
+      plans:
+{{- range $id, $tier := . }}
+        {{ printf "%q" $id }}:
+          readPerMinute: {{ $tier.ReadPerMinute }}
+          readBurst: {{ $tier.ReadBurst }}
+          writePerMinute: {{ $tier.WritePerMinute }}
+          writeBurst: {{ $tier.WriteBurst }}
+{{- end }}
+{{- end }}
 {{- end }}
     worker:
       enabled: true

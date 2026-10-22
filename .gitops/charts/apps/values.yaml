@@ -117,7 +117,8 @@ apps:
     resources: {}
     # Per-account request budget (server chart from slice 123). Off by default
     # and not forwarded. A cell turns it on only through the catalog switch
-    # request_budget; values are cell-wide and per replica, not per plan.
+    # request_budget; the five top-level values are cell-wide and per replica.
+    # Optional per-plan values come from catalog switches.request_budget.plans.
     requestBudget:
       enabled: false
       readPerMinute: 0
@@ -125,6 +126,8 @@ apps:
       writePerMinute: 0
       writeBurst: 0
       maxTrackedAccounts: 10000
+      # Forwarded only when the budget is enabled, plans is non-empty, and chart and image are v0.0.338 or newer.
+      plans: {}
     # Prometheus Operator discovery is optional and remains disabled until a
     # cell has an intentionally configured monitoring stack.
     metrics:
