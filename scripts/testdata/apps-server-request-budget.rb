@@ -13,6 +13,12 @@ LIVE_CELLS = %w[civo-prod-use1-serving civo-sandbox-use1-backup civo-sandbox-use
 REQUEST_BUDGET_CELLS = [].freeze
 FIXTURE = {"enabled" => true, "readPerMinute" => 600, "readBurst" => 60,
            "writePerMinute" => 120, "writeBurst" => 20, "maxTrackedAccounts" => 1000000}.freeze
+PLANS_FIXTURE = {
+  "free" => {"readPerMinute" => 60, "readBurst" => 1, "writePerMinute" => 30, "writeBurst" => 2},
+  "team" => {"readPerMinute" => 600, "readBurst" => 5, "writePerMinute" => 120, "writeBurst" => 10}
+}.freeze
+# The canonical JSON asserted by slice 143a's child-chart case C6.
+PLANS_JSON = '{"free":{"read_burst":1,"read_per_minute":60,"write_burst":2,"write_per_minute":30},"team":{"read_burst":5,"read_per_minute":600,"write_burst":10,"write_per_minute":120}}'.freeze
 OFF_WITH_VALUES = {"enabled" => false, "readPerMinute" => 5, "readBurst" => 5,
                    "writePerMinute" => 5, "writeBurst" => 5, "maxTrackedAccounts" => 500}.freeze
 RATE_KEYS = %w[readPerMinute readBurst writePerMinute writeBurst].freeze
@@ -174,14 +180,7 @@ class RequestBudgetChecks
   def case_d(serving_path, dir)
     apps = read_values(File.join(@apps_chart, "values.yaml"), "D1", SERVING_CELL)
     server = read_values(File.join(@server_chart, "values.yaml"), "D1", SERVING_CELL)
-    server_budget = server["requestBudget"].dup
-    # Slice 143a adds the server chart's per-plan tiers (requestBudget.plans,
-    # default {}). The apps chart forwards them only from slice 143b, behind its
-    # own version gate, and 143b restores exact parity here. Until then every
-    # other default must match and the server default must stay the empty map.
-    server_plans = server_budget.delete("plans")
-    check("D1", SERVING_CELL, "server chart requestBudget.plans default must be the empty map", server_plans == {})
-    check("D1", SERVING_CELL, "apps and server chart requestBudget defaults must match", apps.dig("apps", "witselfServer", "requestBudget") == server_budget)
+    check("D1", SERVING_CELL, "apps and server chart requestBudget defaults must match", apps.dig("apps", "witselfServer", "requestBudget") == server["requestBudget"])
     null = nested_values(budget_render(nil, dir, serving_path), "D2", SERVING_CELL)
     check("D2", SERVING_CELL, "explicit null must forward no requestBudget key", !null.key?("requestBudget"))
     disabled = budget_render({"enabled" => false}, dir, serving_path)
@@ -237,14 +236,37 @@ class RequestBudgetChecks
       starts = lines.each_index.select { |index| lines[index].chomp == "{{- with .RequestBudget }}" }
       check("F", cell, "overlay must have exactly one request budget block", starts.length == 1)
       first = starts.first + 1
-      last = (first...lines.length).find { |index| lines[index].chomp == "{{- end }}" }
-      check("F", cell, "overlay request budget block must terminate", !last.nil?)
-      block = lines[first...last]
-      check("F", cell, "overlay request budget block must contain eight lines", block.length == 8)
-      block.join
+      last = (first...lines.length).find do |index|
+        lines[index].chomp == "{{- end }}" && lines[index + 1]&.chomp == "    worker:"
+      end
+      check("F", cell, "overlay request budget block must terminate immediately before worker", !last.nil?)
+      lines[first...last].join
     end
     check("F", "live cells", "overlay request budget blocks must be byte-identical", blocks.uniq.length == 1)
-    block = blocks.first.dup
+    lines = blocks.first.lines
+    plans_starts = lines.each_index.select { |index| lines[index].chomp == "{{- with .Plans }}" }
+    check("F", "live cells", "overlay request budget block must contain exactly one plans sub-block", plans_starts.length == 1)
+    plans_first = plans_starts.first
+    depth = 0
+    plans_last = (plans_first...lines.length).find do |index|
+      depth += 1 if lines[index].match?(/\A\{\{- (?:with|range|if)\b/)
+      depth -= 1 if lines[index].chomp == "{{- end }}"
+      depth.zero?
+    end
+    check("F", "live cells", "overlay plans sub-block must terminate", !plans_last.nil?)
+    lines.slice!(plans_first..plans_last)
+    expected = <<~BLOCK.lines.map { |line| "    " + line }.join
+      # From catalog switches.request_budget: per account, per minute, per replica.
+      requestBudget:
+        enabled: true
+        readPerMinute: {{ .ReadPerMinute }}
+        readBurst: {{ .ReadBurst }}
+        writePerMinute: {{ .WritePerMinute }}
+        writeBurst: {{ .WriteBurst }}
+        maxTrackedAccounts: {{ .MaxTrackedAccounts }}
+    BLOCK
+    check("F", "live cells", "overlay without plans must retain the original eight lines", lines.join == expected)
+    block = lines.join
     {"ReadPerMinute" => "readPerMinute", "ReadBurst" => "readBurst", "WritePerMinute" => "writePerMinute",
      "WriteBurst" => "writeBurst", "MaxTrackedAccounts" => "maxTrackedAccounts"}.each do |field, key|
       block.gsub!("{{ .#{field} }}", FIXTURE.fetch(key).to_s)
@@ -262,27 +284,103 @@ class RequestBudgetChecks
     end
   end
 
+  def case_g(serving_path, dir)
+    budget = FIXTURE.merge("plans" => PLANS_FIXTURE)
+    version = version_file(dir, READY_PLANS, READY_PLANS)
+    nested = nested_values(budget_render(budget, dir, serving_path, "--values", version), "G1", SERVING_CELL)
+    check("G1", SERVING_CELL, "nested requestBudget must equal the complete plans fixture", nested["requestBudget"] == budget)
+    docs = child_render(nested, dir, "G1", SERVING_CELL)
+    expected = {"ENABLED" => "true", "READ_PER_MINUTE" => "600", "READ_BURST" => "60",
+                "WRITE_PER_MINUTE" => "120", "WRITE_BURST" => "20", "MAX_ACCOUNTS" => "1000000",
+                "PLANS" => PLANS_JSON}.map { |key, value| [ENV_PREFIX + key, value] }.to_h
+    check("G1", SERVING_CELL, "server ConfigMap must contain seven budget keys and the exact C6 plans JSON", configmap_budget(docs, "witself-server", "G1", SERVING_CELL) == expected)
+    check("G1", SERVING_CELL, "worker ConfigMap must contain no account request budget keys", configmap_budget(docs, "witself-worker", "G1", SERVING_CELL).empty?)
+    rc = "#{READY_PLANS}-rc.1"
+    prerelease = nested_values(budget_render(budget, dir, serving_path, "--values", version_file(dir, rc, rc)), "G1-prerelease", SERVING_CELL)
+    check("G1-prerelease", SERVING_CELL, "prerelease chart and image must forward the complete plans fixture", prerelease["requestBudget"] == budget)
+
+    below_budget = budget_render(budget, dir, serving_path, "--values", version_file(dir, BELOW, BELOW))
+    expected = "apps.witselfServer.requestBudget requires chart and image v#{READY} or newer"
+    check("G2", SERVING_CELL, "plans below the budget floor must fail the original budget gate first: #{below_budget[1]}", !below_budget[2].success? && below_budget[1].include?(expected))
+
+    below_plans = "0.0.#{READY_PLANS.split('.').last.to_i - 1}"
+    old_versions = [READY]
+    old_versions << below_plans if below_plans.split('.').last.to_i >= READY.split('.').last.to_i
+    old_versions.uniq.each do |old|
+      [[old, READY_PLANS], [READY_PLANS, old], [old, old]].each do |chart, image|
+        result = budget_render(budget, dir, serving_path, "--values", version_file(dir, chart, image))
+        expected = "apps.witselfServer.requestBudget.plans requires chart and image v#{READY_PLANS} or newer"
+        check("G2", SERVING_CELL, "plans with chart #{chart} and image #{image} must fail the plans version gate: #{result[1]}", !result[2].success? && result[1].include?(expected))
+      end
+    end
+
+    no_plans = nested_values(budget_render(FIXTURE, dir, serving_path, "--values", version_file(dir)), "G3", SERVING_CELL)
+    check("G3", SERVING_CELL, "enabled budget without plans must forward exactly the six fixture keys and no plans", no_plans["requestBudget"] == FIXTURE && !no_plans["requestBudget"].key?("plans"))
+    [BELOW, READY_PLANS].each do |disabled_version|
+      disabled = nested_values(budget_render(budget.merge("enabled" => false), dir, serving_path,
+                                             "--values", version_file(dir, disabled_version, disabled_version)), "G4", SERVING_CELL)
+      check("G4", SERVING_CELL, "disabled plans at #{disabled_version} must forward no requestBudget", !disabled.key?("requestBudget"))
+    end
+
+    tier = PLANS_FIXTURE.fetch("free")
+    invalid = {
+      "plans array" => [],
+      "plans string" => "free",
+      "seventeen plans" => (1..17).map { |index| ["plan_#{index}", tier] }.to_h,
+      "tier array" => {"free" => []},
+      "tier string" => {"free" => "budget"},
+      "unknown tier key" => {"free" => tier.merge("unknown" => 1)}
+    }
+    ["Free", "1free", "_free", "free-plan", "", "a" * 33].each do |id|
+      invalid["invalid plan id #{id.inspect}"] = {id => tier}
+    end
+    RATE_KEYS.each do |key|
+      invalid["missing #{key}"] = {"free" => tier.reject { |field, _| field == key }}
+      [0, 1000001, 1.5, "1", true, nil].each do |value|
+        invalid["#{key}=#{value.inspect}"] = {"free" => tier.merge(key => value)}
+      end
+    end
+    invalid.each do |name, plans|
+      _, errors, status = budget_render(FIXTURE.merge("plans" => plans), dir, serving_path, "--values", version)
+      check("G5", SERVING_CELL, "#{name}: schema must reject the value", !status.success?)
+      check("G5", SERVING_CELL, "#{name}: refusal must identify requestBudget.plans: #{errors}", errors.match?(/requestBudget[.\/]plans/))
+      check("G5", SERVING_CELL, "#{name}: refusal must be schema validation: #{errors}", errors.match?(/schema|specification/i))
+    end
+    # Both field bounds, the longest id and the maximum map size are valid.
+    boundary_plans = (1..15).map do |index|
+      ["plan_#{index}", RATE_KEYS.map { |key| [key, 1] }.to_h]
+    end.to_h.merge("a" * 32 => RATE_KEYS.map { |key| [key, 1000000] }.to_h)
+    boundary = FIXTURE.merge("plans" => boundary_plans)
+    actual = nested_values(budget_render(boundary, dir, serving_path, "--values", version), "G5", SERVING_CELL)
+    check("G5", SERVING_CELL, "schema bounds must preserve the complete plans map", actual["requestBudget"] == boundary)
+  end
+
   def run
     paths = Dir.glob(File.join(@root, ".gitops/cells/*/values.yaml")).sort
     cells = paths.map { |path| File.basename(File.dirname(path)) }
     serving_path = File.join(@root, ".gitops/cells", SERVING_CELL, "values.yaml")
     Dir.mktmpdir("apps-server-request-budget-") do |dir|
+      neutral_values = read_values(serving_path, "setup", SERVING_CELL)
+      neutral_values.fetch("apps").fetch("witselfServer").delete("requestBudget")
+      neutral_path = File.join(dir, "serving-neutral.yaml")
+      File.write(neutral_path, YAML.dump(neutral_values))
       case_a(paths, cells, dir) if @cases.include?("A")
-      case_b(serving_path, dir) if @cases.include?("B")
-      case_c(serving_path, dir) if @cases.include?("C")
+      case_b(neutral_path, dir) if @cases.include?("B")
+      case_c(neutral_path, dir) if @cases.include?("C")
       case_d(serving_path, dir) if @cases.include?("D")
-      case_e(serving_path, dir) if @cases.include?("E")
+      case_e(neutral_path, dir) if @cases.include?("E")
       case_f(dir) if @cases.include?("F")
+      case_g(neutral_path, dir) if @cases.include?("G")
     end
     puts "apps server request budget: PASS (cases #{@cases.join(',')}; #{cells.length} catalog cells; #{@helm_processes} helm processes)"
   end
 end
 
 unless ARGV.length.between?(1, 2)
-  abort "case setup / cell all: usage: apps-server-request-budget.rb ROOT [A,B,C,D,E,F]"
+  abort "case setup / cell all: usage: apps-server-request-budget.rb ROOT [A,B,C,D,E,F,G]"
 end
-cases = ARGV.fetch(1, "A,B,C,D,E,F").split(",", -1).uniq
-unknown = cases - %w[A B C D E F]
+cases = ARGV.fetch(1, "A,B,C,D,E,F,G").split(",", -1).uniq
+unknown = cases - %w[A B C D E F G]
 unless unknown.empty?
   abort "case selector / cell all: unknown cases #{unknown.inspect}".gsub(/[a-fA-F0-9]{64}/, "<digest-redacted>")
 end
@@ -294,4 +392,10 @@ unless version_lines.length == 1 && version && version[2].to_i.positive?
 end
 READY = version[1].freeze
 BELOW = "0.0.#{version[2].to_i - 1}".freeze
+plans_version_lines = File.readlines(File.join(root, ".gitops/charts/apps/templates/witself-server.yaml")).grep(/\$requestBudgetPlansMinVersion\s*:=/)
+plans_version = plans_version_lines.first&.match(/\A\{\{- \$requestBudgetPlansMinVersion := "(0\.0\.(\d+))" -\}\}\r?\n?\z/)
+unless plans_version_lines.length == 1 && plans_version && plans_version[2].to_i >= version[2].to_i
+  abort "case setup / cell all: expected exactly one requestBudgetPlansMinVersion assignment at least requestBudgetMinVersion"
+end
+READY_PLANS = plans_version[1].freeze
 RequestBudgetChecks.new(root, cases).run

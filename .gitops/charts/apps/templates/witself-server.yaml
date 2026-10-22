@@ -227,6 +227,7 @@
 {{- end -}}
 {{- /* requestBudgetMinVersion is a placeholder: it must equal the first release whose server chart and image carry slice 123. */ -}}
 {{- $requestBudgetMinVersion := "0.0.334" -}}
+{{- $requestBudgetPlansMinVersion := "0.0.338" -}}
 {{- $requestBudget := default dict .Values.apps.witselfServer.requestBudget -}}
 {{- if $requestBudget.enabled -}}
 {{- $requestBudgetReady := and
@@ -235,7 +236,16 @@
 {{- if not $requestBudgetReady -}}
 {{- fail (printf "apps.witselfServer.requestBudget requires chart and image v%s or newer" $requestBudgetMinVersion) -}}
 {{- end -}}
-{{- $_ := set $serverValues "requestBudget" $requestBudget -}}
+{{- $_ := set $serverValues "requestBudget" (omit $requestBudget "plans") -}}
+{{- with $requestBudget.plans -}}
+{{- $requestBudgetPlansReady := and
+      (semverCompare (printf ">=%s-0" $requestBudgetPlansMinVersion) $.Values.apps.witselfServer.chartVersion)
+      (semverCompare (printf ">=%s-0" $requestBudgetPlansMinVersion) $.Values.apps.witselfServer.imageTag) -}}
+{{- if not $requestBudgetPlansReady -}}
+{{- fail (printf "apps.witselfServer.requestBudget.plans requires chart and image v%s or newer" $requestBudgetPlansMinVersion) -}}
+{{- end -}}
+{{- $_ := set $serverValues.requestBudget "plans" . -}}
+{{- end -}}
 {{- end -}}
 {{- if gt (len .Values.apps.witselfServer.networkPolicy.metricsFrom) 0 -}}
 {{- $_ := set $serverValues "networkPolicy" (dict "enabled" true "metricsFrom" .Values.apps.witselfServer.networkPolicy.metricsFrom) -}}

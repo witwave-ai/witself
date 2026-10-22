@@ -464,3 +464,311 @@ func TestOldPinCivoRendersPinRequestBudgetOff(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadCatalogRequestBudgetPlans(t *testing.T) {
+	const cell = "civo-sandbox-use1-serving"
+	keys := []string{"read_per_minute", "read_burst", "write_per_minute", "write_burst"}
+	fixture := RequestBudgetTier{ReadPerMinute: 60, ReadBurst: 10, WritePerMinute: 12, WriteBurst: 4}
+	values := []int{fixture.ReadPerMinute, fixture.ReadBurst, fixture.WritePerMinute, fixture.WriteBurst}
+	tier := func(id string, overrides map[string]string, omitted string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "          %q:\n", id)
+		for i, key := range keys {
+			if key == omitted {
+				continue
+			}
+			value := strconv.Itoa(values[i])
+			if override, ok := overrides[key]; ok {
+				value = override
+			}
+			fmt.Fprintf(&b, "            %s: %s\n", key, value)
+		}
+		return b.String()
+	}
+	const mappingError = "switches.request_budget.plans must map 1 to 16 plan ids to budgets; remove the key to use the cell-wide values for every plan"
+	rateError := func(id, key string) string {
+		return "switches.request_budget.plans." + id + "." + key + " must be an integer from 1 to 1000000"
+	}
+	idError := func(id string) string {
+		return fmt.Sprintf("switches.request_budget.plans has plan id %q; plan ids are 1-32 lowercase letters, digits or underscores starting with a letter", id)
+	}
+	strictFloatError := func(line int, value string) string {
+		return fmt.Sprintf("yaml: unmarshal errors:\n  line %d: cannot unmarshal !!float `%s` into int", line, value)
+	}
+	type testCase struct {
+		name, plans, errorSuffix, floatKey, parseContains string
+		parseExact                                        string
+		earlierCell                                       bool
+		wantPlans                                         map[string]RequestBudgetTier
+		// topReadPerMinute replaces the cell-wide read_per_minute and schema the
+		// catalog schema, so ordering cases can pair an existing error with plans.
+		topReadPerMinute, schema, exactError string
+	}
+	cases := []testCase{
+		{name: "absent"},
+		{name: "fixture", plans: "        plans:\n" + tier("free", nil, "") + tier("team", nil, ""), wantPlans: map[string]RequestBudgetTier{"free": fixture, "team": fixture}},
+		{name: "null", plans: "        plans: null\n", errorSuffix: mappingError},
+		{name: "implicit null", plans: "        plans:\n", errorSuffix: mappingError},
+		{name: "empty map", plans: "        plans: {}\n", errorSuffix: mappingError},
+		{name: "unknown budget key before empty plans", plans: "        unknown: 1\n        plans: {}\n", parseExact: "yaml: unmarshal errors:\n  line 20: field unknown not found in type gitopsvalues.RequestBudgetSwitch"},
+		{name: "top-level range before empty plans", plans: "        plans: {}\n", topReadPerMinute: "0", errorSuffix: "switches.request_budget.read_per_minute must be an integer from 1 to 1000000"},
+		{name: "unsupported schema before empty plans", plans: "        plans: {}\n", schema: "witself.cells.v0", exactError: "unsupported schema"},
+		{name: "multi-cell/float", plans: "        plans:\n" + tier("free", map[string]string{keys[0]: "1.5"}, ""), floatKey: keys[0], earlierCell: true},
+		{name: "multi-cell/invalid id", plans: "        plans:\n" + tier("Free", nil, ""), errorSuffix: idError("Free"), earlierCell: true},
+		{name: "multi-cell/empty map", plans: "        plans: {}\n", errorSuffix: mappingError, earlierCell: true},
+		{name: "unknown tier key", plans: "        plans:\n" + tier("free", nil, "") + "            unknown: 1\n", parseContains: "field unknown not found in type gitopsvalues.RequestBudgetTier"},
+		{name: "unknown typo replaces required rate", plans: "        plans:\n" + tier("free", nil, "read_per_minute") + "            read_per_minut: 60\n", parseContains: "field read_per_minut not found in type gitopsvalues.RequestBudgetTier"},
+		{name: "unknown tier key with invalid rate", plans: "        plans:\n" + tier("free", map[string]string{"read_per_minute": "0"}, "") + "            unknown: 1\n", parseContains: "field unknown not found in type gitopsvalues.RequestBudgetTier"},
+		{name: "unknown max tracked accounts", plans: "        plans:\n" + tier("free", nil, "") + "            max_tracked_accounts: 100\n", parseContains: "field max_tracked_accounts not found in type gitopsvalues.RequestBudgetTier"},
+		{name: "nonmapping plans", plans: "        plans: true\n", parseContains: "cannot unmarshal"},
+		{name: "nonmapping tier", plans: "        plans:\n          free: true\n", parseContains: "cannot unmarshal"},
+		{name: "null tier", plans: "        plans:\n          free: null\n", errorSuffix: rateError("free", keys[0])},
+		{name: "nonnumeric tier rate", plans: "        plans:\n" + tier("free", map[string]string{keys[0]: "abc"}, ""), parseContains: "cannot unmarshal"},
+		{name: "sorted ids", plans: "        plans:\n" + tier("team", map[string]string{keys[0]: "0"}, "") + tier("free", map[string]string{keys[3]: "0"}, ""), errorSuffix: rateError("free", keys[3])},
+		{name: "sorted invalid ids", plans: "        plans:\n" + tier("Team", nil, "") + tier("Free", nil, ""), errorSuffix: idError("Free")},
+		{name: "strict overflow before sorted ids", plans: "        plans:\n" + tier("team", map[string]string{keys[0]: "1.0e100"}, "") + tier("free", map[string]string{keys[3]: "0"}, ""), parseExact: strictFloatError(22, "1.0e100")},
+	}
+	for _, id := range []string{"null", "~", "true", "1"} {
+		unquoted := strings.Replace(tier(id, nil, ""), fmt.Sprintf("%q:", id), id+":", 1)
+		cases = append(cases, testCase{name: "non-string id/" + id, plans: "        plans:\n" + tier("free", nil, "") + unquoted, errorSuffix: idError(id)})
+	}
+	cases = append(cases, testCase{
+		name: "non-string id/alias",
+		plans: "        plans:\n" + strings.Replace(tier("free", nil, ""), `"free":`, `&id "free":`, 1) +
+			strings.Replace(tier("alias", nil, ""), `"alias":`, `*id:`, 1),
+		errorSuffix: idError("*id"),
+	})
+	for _, id := range []string{"", "Free", "1free", "_free", "free-tier", "frée", strings.Repeat("a", 33)} {
+		cases = append(cases, testCase{name: "invalid id/" + id, plans: "        plans:\n" + tier(id, nil, ""), errorSuffix: idError(id)})
+	}
+	for _, id := range []string{"a", "free_2", "a" + strings.Repeat("2", 31), "null", "true", "on"} {
+		cases = append(cases, testCase{name: "valid id/" + id, plans: "        plans:\n" + tier(id, nil, ""), wantPlans: map[string]RequestBudgetTier{id: fixture}})
+	}
+	for _, count := range []int{16, 17} {
+		var b strings.Builder
+		b.WriteString("        plans:\n")
+		want := make(map[string]RequestBudgetTier, count)
+		for i := range count {
+			id := fmt.Sprintf("plan_%02d", i)
+			b.WriteString(tier(id, nil, ""))
+			want[id] = fixture
+		}
+		tc := testCase{name: fmt.Sprintf("plan count/%d", count), plans: b.String(), wantPlans: want}
+		if count > 16 {
+			tc.errorSuffix = mappingError
+		}
+		cases = append(cases, tc)
+	}
+	for i, key := range keys {
+		for _, value := range []int{-1, 0, 1, 1000000, 1000001} {
+			tc := testCase{name: fmt.Sprintf("%s/%d", key, value), plans: "        plans:\n" + tier("free", map[string]string{key: strconv.Itoa(value)}, "")}
+			if value < 1 || value > 1000000 {
+				tc.errorSuffix = rateError("free", key)
+			} else {
+				want := fixture
+				fields := []*int{&want.ReadPerMinute, &want.ReadBurst, &want.WritePerMinute, &want.WriteBurst}
+				*fields[i] = value
+				tc.wantPlans = map[string]RequestBudgetTier{"free": want}
+			}
+			cases = append(cases, tc)
+		}
+		cases = append(cases, testCase{name: key + "/missing", plans: "        plans:\n" + tier("free", nil, key), errorSuffix: rateError("free", key)})
+		for _, value := range []string{"1.5", "0.5", "1.0", "1.0e100", "-1.0e100", ".nan", ".inf", "!!float 1.0e1000"} {
+			tc := testCase{name: key + "/float " + value, plans: "        plans:\n" + tier("free", map[string]string{key: value}, ""), floatKey: key}
+			switch value {
+			case "1.0e100", ".nan", ".inf":
+				tc.floatKey = ""
+				tc.parseExact = strictFloatError(22+i, value)
+			case "!!float 1.0e1000":
+				tc.floatKey = ""
+				tc.parseExact = "yaml: cannot decode !!str `1.0e1000` as a !!float"
+			}
+			cases = append(cases, tc)
+		}
+		if i+1 < len(keys) {
+			cases = append(cases,
+				testCase{name: key + "/range before later float", plans: "        plans:\n" + tier("free", map[string]string{key: "0", keys[i+1]: "1.5"}, ""), errorSuffix: rateError("free", key)},
+				testCase{name: key + "/float before later range", plans: "        plans:\n" + tier("free", map[string]string{key: "0.5", keys[i+1]: "0"}, ""), floatKey: key},
+				testCase{name: key + "/range before later overflow float", plans: "        plans:\n" + tier("free", map[string]string{key: "0", keys[i+1]: "1.0e100"}, ""), parseExact: strictFloatError(23+i, "1.0e100")},
+				testCase{name: key + "/overflow float before later range", plans: "        plans:\n" + tier("free", map[string]string{key: "1.0e100", keys[i+1]: "0"}, ""), parseExact: strictFloatError(22+i, "1.0e100")},
+			)
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, catalogRelPath)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			schema := catalogSchema
+			if tc.schema != "" {
+				schema = tc.schema
+			}
+			body := "schema: " + schema + "\ngitops:\n  repoURL: https://example.invalid/repo\n  targetRevision: main\ndefaults:\n  domain_parent: example.invalid\ncells:\n  " + cell + ":\n    cloud: civo\n    region: nyc1\n    role: serving\n    overlay: " + cell + ".yaml.tmpl\n    switches:\n      request_budget:\n        read_per_minute: 600\n        read_burst: 60\n        write_per_minute: 120\n        write_burst: 20\n        max_tracked_accounts: 10000\n" + tc.plans
+			if tc.topReadPerMinute != "" {
+				body = strings.Replace(body, "        read_per_minute: 600\n", "        read_per_minute: "+tc.topReadPerMinute+"\n", 1)
+			}
+			if tc.earlierCell {
+				body += "  a-cell:\n    cloud: civo\n    region: nyc1\n    switches: {}\n"
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadCatalog(root)
+			if tc.exactError == "unsupported schema" {
+				want := fmt.Sprintf("%s: unsupported schema %q (want %s)", path, tc.schema, catalogSchema)
+				if err == nil || err.Error() != want {
+					t.Fatalf("schema refusal mismatch: got %v, want %s", err, want)
+				}
+				return
+			}
+			if tc.parseExact != "" {
+				want := "parse " + path + ": " + tc.parseExact
+				if err == nil || err.Error() != want {
+					t.Fatalf("strict catalog parse refusal mismatch: got %v, want %s", err, want)
+				}
+				return
+			}
+			if tc.parseContains != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), "parse "+path+": ") || !strings.Contains(err.Error(), tc.parseContains) {
+					t.Fatalf("strict catalog parse refusal mismatch: %v", err)
+				}
+				return
+			}
+			wantError := ""
+			if tc.errorSuffix != "" {
+				wantError = fmt.Sprintf("%s: cell %q %s", path, cell, tc.errorSuffix)
+			}
+			if tc.floatKey != "" {
+				wantError = fmt.Sprintf("parse %s: cannot unmarshal !!float into int for cell %q switches.request_budget.plans.free.%s", path, cell, tc.floatKey)
+			}
+			if wantError != "" {
+				if err == nil || err.Error() != wantError {
+					t.Fatalf("catalog plans validation mismatch: got %v, want %s", err, wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Cells[cell].Switches.RequestBudget.Plans, tc.wantPlans) {
+				t.Fatal("catalog plans did not decode into the expected nested budgets")
+			}
+		})
+	}
+}
+
+func TestRequestBudgetPlansOverlayTemplates(t *testing.T) {
+	const plansBlock = `      plans:
+        "free":
+          readPerMinute: 60
+          readBurst: 10
+          writePerMinute: 12
+          writeBurst: 4
+        "team":
+          readPerMinute: 6000
+          readBurst: 600
+          writePerMinute: 1200
+          writeBurst: 200
+`
+	plans := map[string]RequestBudgetTier{
+		"free": {ReadPerMinute: 60, ReadBurst: 10, WritePerMinute: 12, WriteBurst: 4},
+		"team": {ReadPerMinute: 6000, ReadBurst: 600, WritePerMinute: 1200, WriteBurst: 200},
+	}
+	for _, name := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup", "civo-prod-use1-serving"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := requestBudgetFixture
+			data := templateData{ChartVersion: "0.0.1", ImageTag: "0.0.1", CivoPostgresChartVersion: "1.0.0", CertManagerChartVersion: "v1.0.0", RequestBudget: &fixture}
+			var without, with bytes.Buffer
+			if err := templates.ExecuteTemplate(&without, name+".yaml.tmpl", data); err != nil {
+				t.Fatal(err)
+			}
+			fixture.Plans = plans
+			if err := templates.ExecuteTemplate(&with, name+".yaml.tmpl", data); err != nil {
+				t.Fatal(err)
+			}
+			const marker = "      maxTrackedAccounts: 10000\n"
+			if bytes.Count(without.Bytes(), []byte(marker)) != 1 {
+				t.Fatal("plans insertion requires exactly one top-level maxTrackedAccounts line")
+			}
+			want := bytes.Replace(without.Bytes(), []byte(marker), []byte(marker+plansBlock), 1)
+			if !bytes.Equal(with.Bytes(), want) {
+				t.Fatal("plans must add exactly the nested free/team budget lines after maxTrackedAccounts")
+			}
+			var values struct {
+				Apps struct {
+					WitselfServer struct {
+						RequestBudget struct {
+							Plans map[string]map[string]int `yaml:"plans"`
+						} `yaml:"requestBudget"`
+					} `yaml:"witselfServer"`
+				} `yaml:"apps"`
+			}
+			if err := yaml.Unmarshal(with.Bytes(), &values); err != nil {
+				t.Fatalf("decode overlay plans: %v", err)
+			}
+			wantPlans := map[string]map[string]int{
+				"free": {"readPerMinute": 60, "readBurst": 10, "writePerMinute": 12, "writeBurst": 4},
+				"team": {"readPerMinute": 6000, "readBurst": 600, "writePerMinute": 1200, "writeBurst": 200},
+			}
+			if !reflect.DeepEqual(values.Apps.WitselfServer.RequestBudget.Plans, wantPlans) {
+				t.Fatal("decoded overlay plans differ from the nested free/team fixture")
+			}
+		})
+	}
+}
+
+func TestRequestBudgetPlansOverlayReservedIDs(t *testing.T) {
+	plans := map[string]RequestBudgetTier{}
+	want := map[string]any{}
+	for _, id := range []string{"null", "true", "false", "on", "off", "yes", "no"} {
+		plans[id] = RequestBudgetTier{ReadPerMinute: 60, ReadBurst: 10, WritePerMinute: 12, WriteBurst: 4}
+		want[id] = map[string]any{"readPerMinute": 60, "readBurst": 10, "writePerMinute": 12, "writeBurst": 4}
+	}
+	for _, name := range []string{"civo-sandbox-use1-serving", "civo-sandbox-use1-backup", "civo-prod-use1-serving"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := requestBudgetFixture
+			fixture.Plans = plans
+			data := templateData{ChartVersion: "0.0.1", ImageTag: "0.0.1", CivoPostgresChartVersion: "1.0.0", CertManagerChartVersion: "v1.0.0", RequestBudget: &fixture}
+			var output bytes.Buffer
+			if err := templates.ExecuteTemplate(&output, name+".yaml.tmpl", data); err != nil {
+				t.Fatal(err)
+			}
+			var values map[string]any
+			if err := yaml.Unmarshal(output.Bytes(), &values); err != nil {
+				t.Fatal(err)
+			}
+			apps, _ := values["apps"].(map[string]any)
+			server, _ := apps["witselfServer"].(map[string]any)
+			budget, _ := server["requestBudget"].(map[string]any)
+			if !reflect.DeepEqual(budget["plans"], want) {
+				t.Fatal("reserved YAML plan ids must decode as exact string map keys")
+			}
+			for id := range plans {
+				if bytes.Count(output.Bytes(), []byte(fmt.Sprintf("        %q:\n", id))) != 1 {
+					t.Fatalf("plan id %q must render exactly once as a quoted mapping key", id)
+				}
+			}
+		})
+	}
+}
+
+func TestRequestBudgetPlansVersionGate(t *testing.T) {
+	body := readRequestBudgetTestFile(t, ".gitops/charts/apps/templates/witself-server.yaml")
+	matches := regexp.MustCompile(`(?m)^\{\{- \$requestBudgetPlansMinVersion := "(0\.0\.[0-9]+)" -\}\}$`).FindAllStringSubmatch(body, -1)
+	if len(matches) != 1 {
+		t.Fatal("apps template must declare requestBudgetPlansMinVersion exactly once")
+	}
+	plansPatch, err := strconv.Atoi(strings.TrimPrefix(matches[0][1], "0.0."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetPatch, err := strconv.Atoi(strings.TrimPrefix(requestBudgetReady(t), "0.0."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plansPatch < budgetPatch {
+		t.Fatal("plans minimum version must be at least the request budget minimum version")
+	}
+}

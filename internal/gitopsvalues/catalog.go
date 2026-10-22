@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -59,15 +60,26 @@ type CellConfig struct {
 }
 
 // RequestBudgetSwitch presence turns the server's per-account request budget on
-// for this cell. Remove the block to turn it off. Values are cell-wide and per
-// replica (slice 123), not per plan.
+// for this cell. Remove the block to turn it off. Values are per replica. The
+// five top-level values apply to every plan without its own entry under plans.
 type RequestBudgetSwitch struct {
-	ReadPerMinute      int `yaml:"read_per_minute"`
-	ReadBurst          int `yaml:"read_burst"`
-	WritePerMinute     int `yaml:"write_per_minute"`
-	WriteBurst         int `yaml:"write_burst"`
-	MaxTrackedAccounts int `yaml:"max_tracked_accounts"`
+	ReadPerMinute      int                          `yaml:"read_per_minute"`
+	ReadBurst          int                          `yaml:"read_burst"`
+	WritePerMinute     int                          `yaml:"write_per_minute"`
+	WriteBurst         int                          `yaml:"write_burst"`
+	MaxTrackedAccounts int                          `yaml:"max_tracked_accounts"`
+	Plans              map[string]RequestBudgetTier `yaml:"plans,omitempty"`
 }
+
+// RequestBudgetTier overrides the four rate values for one plan.
+type RequestBudgetTier struct {
+	ReadPerMinute  int `yaml:"read_per_minute"`
+	ReadBurst      int `yaml:"read_burst"`
+	WritePerMinute int `yaml:"write_per_minute"`
+	WriteBurst     int `yaml:"write_burst"`
+}
+
+var requestBudgetPlanID = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 
 // Switches are per-cell enablement flags that select generated blocks.
 // Large unique YAML still lives in overlay templates.
@@ -166,7 +178,94 @@ func loadCatalog(root string) (*Catalog, error) {
 			return nil, fmt.Errorf("%s: cell %q switches.request_budget.max_tracked_accounts must be an integer from 100 to 1000000", path, name)
 		}
 	}
+	if err := validateRequestBudgetPlans(path, raw); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateRequestBudgetPlans validates raw plan nodes after strict decoding and
+// the existing catalog checks. Scalar tags retain floats truncated by the typed
+// decoder and non-string plan ids that decoding into a string-keyed map can omit.
+func validateRequestBudgetPlans(path string, raw []byte) error {
+	var probe struct {
+		Cells map[string]struct {
+			Switches map[string]yaml.Node `yaml:"switches"`
+		} `yaml:"cells"`
+	}
+	// The branches below that return an error instead of skipping are
+	// unreachable after the strict decode in loadCatalog; they fail closed so
+	// a future decoder change can never silently skip plan validation.
+	if err := yaml.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	names := make([]string, 0, len(probe.Cells))
+	for name := range probe.Cells {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		budgetNode := probe.Cells[name].Switches["request_budget"]
+		var budget map[string]yaml.Node
+		if err := budgetNode.Decode(&budget); err != nil {
+			continue
+		}
+		plansNode, present := budget["plans"]
+		if !present {
+			continue
+		}
+		for plansNode.Kind == yaml.AliasNode {
+			plansNode = *plansNode.Alias
+		}
+		if count := len(plansNode.Content) / 2; count == 0 || count > 16 {
+			return fmt.Errorf("%s: cell %q switches.request_budget.plans must map 1 to 16 plan ids to budgets; remove the key to use the cell-wide values for every plan", path, name)
+		}
+		ids := make([]int, 0, len(plansNode.Content)/2)
+		for i := 0; i < len(plansNode.Content); i += 2 {
+			ids = append(ids, i)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			return plansNode.Content[ids[i]].Value < plansNode.Content[ids[j]].Value
+		})
+		for _, i := range ids {
+			idNode := plansNode.Content[i]
+			id := idNode.Value
+			if idNode.Kind == yaml.AliasNode {
+				id = "*" + id
+			}
+			if idNode.Kind != yaml.ScalarNode || idNode.ShortTag() != "!!str" || !requestBudgetPlanID.MatchString(id) {
+				return fmt.Errorf("%s: cell %q switches.request_budget.plans has plan id %q; plan ids are 1-32 lowercase letters, digits or underscores starting with a letter", path, name, id)
+			}
+			tierNode := plansNode.Content[i+1]
+			var tier map[string]yaml.Node
+			if err := tierNode.Decode(&tier); err != nil {
+				return fmt.Errorf("%s: cell %q switches.request_budget.plans.%s must map read_per_minute, read_burst, write_per_minute and write_burst to integers", path, name, id)
+			}
+			for key := range tier {
+				switch key {
+				case "read_per_minute", "read_burst", "write_per_minute", "write_burst":
+				default:
+					return fmt.Errorf("%s: cell %q switches.request_budget.plans.%s has unknown key %q", path, name, id, key)
+				}
+			}
+			for _, key := range []string{"read_per_minute", "read_burst", "write_per_minute", "write_burst"} {
+				rate, present := tier[key]
+				if rate.ShortTag() == "!!float" {
+					return fmt.Errorf("parse %s: cannot unmarshal !!float into int for cell %q switches.request_budget.plans.%s.%s", path, name, id, key)
+				}
+				var value int
+				if present {
+					if err := rate.Decode(&value); err != nil && rate.ShortTag() != "!!int" {
+						return fmt.Errorf("%s: cell %q switches.request_budget.plans.%s.%s must be an integer from 1 to 1000000", path, name, id, key)
+					}
+				}
+				if value < 1 || value > 1000000 {
+					return fmt.Errorf("%s: cell %q switches.request_budget.plans.%s.%s must be an integer from 1 to 1000000", path, name, id, key)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func listCellDirs(root string) ([]string, error) {
