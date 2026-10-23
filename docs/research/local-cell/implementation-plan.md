@@ -716,3 +716,45 @@ complete deliberately; a merged disabled slice is not an enabled capability.
 Update the feature scorecard through its generator when implementation progresses,
 and keep this plan focused on execution order and decisions rather than a second
 competing readiness ledger.
+
+### Living progress record
+
+Record shape: `ID / owner / state / PR or decision / evidence / unresolved gate /
+next action`. States: proposed, in progress, blocked, complete. A merged but
+disabled slice is not an enabled capability. Edit this section only from the
+branch named in the active review record below, or after that review hands off.
+
+**PLAN-REVIEW-2026-10-23** / Fable 5.1 (planning lead); Codex GPT-6 Astra at
+`ultra` for investigation lanes / in progress / Decision: this pass is review,
+planning and documentation only; it authorizes no implementation, push, merge,
+release, enrollment or live policy change (see [handoff](fable-handoff.md)) /
+Evidence: source revision `88fce5a365c2e1a21d088173c82018f3146edd1d`
+(`origin/main`, 2026-10-23); isolated worktree
+`~/.local/state/witself/worktrees/local-cell-plan-review`, branch
+`fable/local-cell-plan-review`, clean at start; Codex model and effort verified
+from the lanes' session metadata, not only configuration; four read-only Codex
+lanes dispatched from detached worktrees at the same revision (LC-1 runtime,
+lifecycle, workers, delivery, infra CLI; LC-2 identity, console, credentials,
+vault, messaging and requests; LC-3 sync seams, identities, deletion, movement,
+accounting, backup; LC-4 architecture challenge, dependency order, document
+consistency, slice critique), each verifying its share of the documents' 130
+source references and answering numbered assumption checks; reports under
+`~/.witself/handoff/tasks-wave1-2026-09-19/reports/LC-*.md` (outside the
+repository; value-free summaries are folded into this plan) / Unresolved gate:
+lane results, adversarial verification of their top findings, founder decisions
+listed below / Next action: integrate verified findings into the documents,
+rewrite the first implementation batch as resumable slices, name the next safe
+slice, commit on the review branch, hand off without pushing.
+
+| ID | Owner | State | PR or decision | Evidence | Unresolved gate | Next action |
+|---|---|---|---|---|---|---|
+| M0 | vacant | proposed | none | none; contracts drafted only as plan text | which M0 items block M1–M3 versus M4+ (under review) | split into a runtime/lifecycle subset and a synchronization subset after the review |
+| M1 | vacant | proposed | none | none | runtime contract subset of M0 | first inactive-foundation slice after separate authorization |
+| M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
+| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | native lifecycle proof on all three OSes |
+| M4 | vacant | proposed | none | none | capture, authority-continuity and accounting contracts | harness specification after M0 sync subset |
+| M5 | vacant | proposed | none | none | M4 barrier proof; destination admission policy | blocked on M4 |
+| M6 | vacant | proposed | none | none | deletion and conflict rules | blocked on M5 |
+| M7 | vacant | proposed | none | none | request-wide authority and key-custody contracts | blocked on M5/M6 |
+| M8 | vacant | proposed | none | none | reporting disclosure and controls (founder) | UI states may start early; collection stays off |
+| M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
