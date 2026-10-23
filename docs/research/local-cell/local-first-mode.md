@@ -20,11 +20,30 @@ almost entirely on the user's computer. Disclosed, best-effort usage reporting i
 never interrupt local use. Minimize local dependencies and avoid Kubernetes or
 containers if possible; users should not administer the runtime or database.
 
+**Product direction clarified on 2026-10-23:** the default new WitSelf installation
+automatically provisions a usable free local cell on the user's machine, without
+a separate cell deployment or local-mode selection step. This offering replaces
+the hosted free plan. An explicit lightweight remote-only installation remains
+supported for SaaS and self-managed services. This settles the intended product
+model; rollout timing, existing-user migration and live catalog/account changes
+still require a reviewed transition. Ordinary upgrades must not silently change
+an existing user's account home or endpoint.
+
 The paid offering would supply hosted storage and services, with **continuous
 synchronization built into the system**. A prepared local installation should
 keep core operations usable during a WitSelf service outage and reconcile when
 connectivity returns. The same product should make moving between local use and
 paid hosted use straightforward.
+
+**Transition and messaging clarification, 2026-10-23:** upgrading to paid SaaS
+connects the existing local cell to the hosted account through continuous sync.
+Clients keep using the local cell; users do not start over, export/import data
+manually, recreate agents, or reconfigure each integration. Returning to local
+use must preserve the same local data and workflows. Agent messaging is required
+locally and through the paid transition, not a SaaS-only feature. Email is the
+sole hosted-only product feature exception, owing to its infrastructure needs.
+Cross-device delivery still needs a reachable transport, and shared claims need
+coherent authority; neither constraint makes local messaging a hosted-only feature.
 
 Scott has now selected the local-cell direction, while explicitly inviting
 adversarial review and evidence-backed revision. This supersedes the earlier
@@ -35,22 +54,23 @@ can still challenge the decision if it meets the same requirements more simply.
 
 | Topic | Recorded direction | Status |
 |---|---|---|
-| Free personal offering | Standalone local cell; ordinary operations continue without service connectivity, including when reporting fails | Usage reporting is required; registration, reporting identity and controls remain to define |
-| Paid offering | Hosted services plus continuous local/cloud synchronization | Synchronization is a required capability; implementation remains open |
+| Free personal offering | Default new installation automatically provides a usable standalone local cell; this replaces the hosted free plan | Selected product direction; ordinary operations continue without service connectivity, including when reporting fails |
+| Paid offering | Seamlessly connect the existing local cell to hosted services and continuous sync; keep client operations local | No reset, manual transfer, recreated agents or per-integration reconfiguration; protocol remains design work |
+| Return to local use | Retain the same local cell, data, identities and supported workflows | Catch up remote changes for a planned disconnect; subscription and hosted retention remain explicit lifecycle actions |
 | Synchronization scope | Whole account by default, with necessary account/feature exceptions investigated | Working scope from the discussion; no final design |
 | Supported desktop platforms | macOS, Windows, and Linux in the first supported local release | Requested scope to investigate |
 | Local data larger than destination | Explain the mismatch and preserve local data; never silently trim to fit | Scott raised and agreed to this safeguard |
-| Local feature priorities | Transcripts and memories; secrets are a desired possibility, with more features to discuss | Scott's follow-up requirements; precise operation coverage remains open |
+| Local feature coverage | Non-email product features, including transcripts, memories, facts, messaging and vault operations, belong in the local experience | Per-operation safety, key handling and coordination still need design and proof; these are not additional SaaS-only exclusions |
 | Runtime experience | Minimize local dependencies; avoid mandatory Kubernetes and containers if possible | Native application plus managed PostgreSQL is the first packaging baseline to evaluate |
 | Database parity | Reuse hosted search and transactional behavior when evaluating the local cell | Earlier parity concern was not an engine preference; final packaging and version policy remain open |
 | Local cell | Reuse the application and database as a locally managed unit | Selected direction; does not require reproducing cloud topology |
 | Integrated installation scenario | Installing WitSelf also deploys its isolated local cell; no separate user deployment step | Scott clarified this behavior within the local-cell scenario; no engine/stack selection |
-| Operating modes | Standalone local/free offering plus required lightweight remote-service-only mode for containers, remote runtimes and autonomous agents | Local is the intended normal experience; making it the installation default can follow later |
+| Operating modes | Default standalone local/free offering plus required explicit lightweight remote-service-only mode for containers, remote runtimes and autonomous agents | New-install default is selected; activation timing remains gated by rollout readiness |
 | Ordinary local operations | Local searches, reads/writes, transcript access and client-driven memory reconciliation, with sync carrying changes remotely | Target behavior; enumerate authority/coordination exceptions rather than promise 100 percent local execution |
 | Update ownership | The selected installation path should update the whole local cell, including compatible application/database state | Open lifecycle design; Homebrew on macOS is the discussion example |
 | Synchronization timing/destination | Required continuous sync to SaaS or a self-managed remote cell; sequencing may be staged | Sync cannot be omitted from the target; protocol and schedule are undecided |
 | Guided one-time transfer | An alternative/fallback to compare, not the selected main direction | Earlier suggestion superseded by the continuous-sync discussion |
-| Replace today's free SaaS tier | Potential product packaging; existing-user transition still needs a decision | No catalog, billing, signup, or account-policy change authorized |
+| Replace today's free SaaS tier | The free local cell replaces the hosted free plan | Selected product direction; existing-user migration and live catalog/account changes require a reviewed transition |
 | Database, sync protocol, conflict rules, delivery schedule | Still open | Do not treat a candidate design as accepted architecture |
 | Current decision | Local cell is the chosen direction, subject to adversarial challenge and revision | Packaging and sync remain design work; no implementation or effort estimate approved |
 | Usage reporting | Disclosed best-effort utilization, usage and defined modification statistics | Never blocks local operation; payload, identity and controls require design |
@@ -58,7 +78,8 @@ can still challenge the decision if it meets the same requirements more simply.
 | Future opportunities | Native bare-metal/self-managed cells and later decentralized personal cells | Research opportunities, not first-release scope or implemented support |
 | Development and rollout | Deploy inactive components and opt-in canaries while preserving current functionality, then evolve to supported completion | Fast iteration with explicit readiness and recovery gates; no immediate implementation/deployment authorized here |
 | Backup destination alternatives | Consider alternatives separately from the main local-cell/sync work | Secondary research opportunity; basic upgrade/recovery safety remains necessary |
-| Remote service authority | Hosted email, cross-machine messaging and control-plane-managed operations are authoritative at the designated remote service | Local replicas supply read/search views; copied records must not authorize delivery or shared work claims |
+| Agent messaging | Full local messaging and coordination, continuing through paid enrollment and sync | Standalone claims use local authority; connected delivery/claims need a tested coordination protocol, not copied leases |
+| Hosted-only exception | Email receipt/delivery stays hosted because of infrastructure overhead | Local email history may be read/searched; provider routing and billing remain service authority, not local entitlements |
 
 “Free local” concerns WitSelf hosting. An independently chosen AI application or
 model can still have a cost and can still send its prompts/context to its own
@@ -68,10 +89,10 @@ provider. A local WitSelf data store does not make a cloud AI client offline.
 
 The product direction now includes two explicit operating modes with the same
 CLI, MCP tools and AI-client integrations where supported. The local/free mode
-installs its cell as part of software installation. It is the intended normal
-local experience, but Scott clarified it need not be the default in the first
-rollout. A lightweight remote-only
-mode installs no local cell and talks to a selected service; it serves container,
+automatically installs and initializes a usable cell as the default for new
+installations, replacing the hosted free plan. Inactive foundations and opt-in
+canaries may precede activation of that default. An explicit lightweight
+remote-only mode installs no local cell and talks to a selected service; it serves container,
 cluster, remote and autonomous-agent use cases. No silent local-to-remote fallback
 is implied: account identity, destination and read/write authority must remain
 clear. Exact installation flags/profile selection remain open.
@@ -80,25 +101,37 @@ clear. Exact installation flags/profile selection remain open.
   Ordinary core use should not depend on a live WitSelf account directory or a
   recurring license/entitlement check. Required usage reporting has an explicit
   purpose and privacy/resource budget and never gates local functionality.
-- **Paid/connected:** use local state while synchronized with the hosted account
-  and other enrolled devices. Show whether changes are local-only, awaiting sync,
-  synchronized, blocked by capacity, or awaiting conflict resolution.
+  Authorized account-console views and local client inventory also work offline
+  through verified local installation/profile identity. Preserve the separate
+  operator and agent permissions; removing identity/origin checks or promoting an
+  agent credential is not an acceptable way to remove the directory dependency.
+- **Paid/connected:** authorize signup/enrollment once, then let WitSelf attach
+  the existing local cell and synchronize its data automatically in the background.
+  Reads, writes, search, transcripts, memories and messaging keep using the local
+  cell. No manual export/import, new empty workspace or per-agent setup is required.
+  Show whether changes are local-only, awaiting sync, synchronized, blocked by
+  capacity, or awaiting conflict resolution.
 - **Lightweight remote-only:** use a SaaS or self-managed service directly,
   without a replicated local account. This mode depends on that service's
   availability; it does not inherit the local mode's offline guarantee.
 - **Service outage:** continue the declared offline-capable operations against
   already available local state; retain new work durably and synchronize later.
   Clearly distinguish queued work from a completed external action.
-- **Return to personal use:** preserve access to local state. Subscription,
-  hosted retention, remote credentials, and account closure require explicit
-  product rules; disconnecting sync must not imply cancellation or deletion.
+- **Return to personal use:** keep the existing local cell, identities, data and
+  local messaging usable without a manual move. For a planned disconnect, catch
+  up authorized remote changes before declaring the local copy complete; an
+  outage must preserve local work and clearly report pending synchronization.
+  Subscription, hosted retention, email availability, remote credentials and
+  account closure need explicit rules; disconnecting sync is not cancellation.
 
 The free offering should support standalone local data operations without a
 live control-plane dependency. Required synchronization is used when connecting
 to a remote account; it is separate from required best-effort usage reporting.
 “Local” does not mean no outbound traffic. Registration and telemetry identity
 remain to define. A separate AI client may use an external model provider.
-Hosted email and cross-machine messaging remain connected-service features.
+Email receipt/delivery remains hosted. Messaging is supported by the local cell;
+delivery to another machine requires connectivity and the supported transport,
+not a redesignated SaaS-only messaging feature.
 
 See the [reporting and quiet feature-discovery contract](local-mode-code-assessment.md#usage-reporting-and-quiet-feature-discovery).
 The product should report aggregate usage without content collection or blocking
@@ -139,9 +172,9 @@ flowchart LR
     C --> E[Online email and other hosted operations]
 ```
 
-The diagram leaves transport and packaging open. Remote authority for hosted
-email and cross-machine messaging is required; whole-account replication does
-not authorize every device to execute every operation.
+The diagram leaves transport and packaging open. Hosted email retains remote
+authority. Messaging runs through the local cell, with connected coordination
+defined by the sync protocol; replication never grants duplicate claim authority.
 
 ## What the current repository actually provides
 
@@ -238,10 +271,11 @@ states. A lost acknowledgement must not create duplicate records or effects.
 | Transcripts and memory evidence | Capture locally with stable entry identity and origin order | Current integer sequences are assigned under a database row lock; disconnected allocation must not collide or invalidate evidence ranges |
 | Permanent deletion | Record an authoritative deletion operation/tombstone for later propagation | Prevent stale replay from resurrecting data; define acknowledgements, offline-device expiry/rebootstrap, and explicit new recreation |
 | Vault records and TOTP | Cached ciphertext plus matching client keys can support declared local access | Key enrollment/rotation, retired epochs, grants, and revocation need coordinated rules; never sync AVK plaintext to the backend |
-| Same-machine messages/coordination | Could operate through the local service | Distinguish local work from shared work; server-issued claims cannot simply be recreated on every disconnected replica |
-| Cross-machine/autonomous-agent messaging | Read/search synchronized message history locally; retain offline outgoing intent as pending | Remote mailbox/request graph owns delivery, claims, acknowledgements and shared work authority; local replicas cannot execute copied fences |
-| Shared claims and curation plans | Potentially defer shared authority while disconnected | Existing leases/fences depend on one authority; prevent two clients completing the same work with conflicting authority |
-| Email, billing, account administration | Display known state; queue only operations explicitly designed for it | Receiving/sending real email and external effects need online services, idempotency and receipts; queued does not mean sent |
+| Local messages/coordination | Required local send, receive, claims, acknowledgements and request workflows among authorized agents | Local cell owns standalone coordination; preserve stable message/request identity, idempotency and fences through paid enrollment |
+| Cross-machine/autonomous-agent messaging | Same local messaging interface; sync/transport carries authorized messages and outcomes across cells | Specify routing and request-wide coordination as well as unique claim ownership; unreachable delivery remains pending and copied fences are never executable authority |
+| Shared claims and curation plans | Local work uses local authority; connected work follows its declared coordination rules | Prevent two replicas completing the same work; partitioned shared work may wait or use proven delegated ownership without blocking independent local messaging |
+| Email | Read/search available history; receipt and delivery remain hosted | Provider infrastructure, routes, idempotency and delivery receipts remain remote; queued does not mean sent |
+| Hosted billing/account administration | Display known status and initiate explicit service lifecycle actions | Buying or closing hosted service needs its authority; local rows cannot grant paid entitlements or resurrect a closed hosted account |
 | Avatars and other ordinary versioned content | Cache/read locally; evaluate versioned mutation support | Preserve lifecycle revisions, policy, identity, and conflicts |
 
 Relevant seams: [transcript sequence allocation](../../../internal/store/transcript.go#L236),
@@ -253,14 +287,40 @@ Relevant seams: [transcript sequence allocation](../../../internal/store/transcr
 [vault rotation](../../../internal/store/vault_key_rotation_mutation.go#L493).
 These establish constraints, not an existing synchronization implementation.
 
-Scott explicitly requires remote authority for hosted email and cross-machine
-messaging. Remote ingestion, delivery/admission and shared claim/acknowledgement
-state are canonical at the designated service; authorized views synchronize to
-local cells. Do not run a local dispatcher or treat copied leases as authority.
-Any offline outgoing intent needs remote validation before it is called sent,
-delivered or claimed. This does not force ordinary memory/transcript writes to
-require connectivity. A separate same-machine-only messaging facility, if pursued,
-must not masquerade as the shared remote mailbox.
+The 2026-10-23 clarification supersedes the earlier remote-only messaging rule.
+Reuse one messaging feature across standalone and connected local cells. The
+local cell is authoritative for standalone work; design connected routing,
+ownership, claim/acknowledgement reconciliation and cancellation races explicitly.
+Paid enrollment must not replay completed work, reset live requests, or turn one
+claim into several executable claims. A remote coordinator or delegated ownership
+may be part of that protocol, but local messaging cannot require a SaaS account.
+During a partition, retain remote-directed intent and distinguish local acceptance
+from delivery and claim completion. Local email dispatch remains excluded.
+
+The 2026-10-23 source review adds three explicit messaging safeguards:
+
+- **Coordinate the complete request.** Offers/declines, selection generations,
+  sibling reservations, maximum assignees, claim renewal, completion, cancellation
+  and expiry must share one authority or equivalent proven ordering. Different
+  owners for different claims cannot independently decide request-wide capacity
+  or completion. Test simultaneous local/remote selection, completion versus
+  sibling renewal, and stale operations after authority transfer.
+- **Publish compound operations together.** Request notifications and their
+  associated request/candidate/claim records become visible atomically or remain
+  hidden until complete, during both snapshot and incremental sync. Out-of-order
+  fragments must never make a protocol notification ordinary claimable work;
+  retry, crash and concurrent-claim tests must prove that boundary.
+- **Inspect imported requests without changing them.** Current list/show paths
+  can reconcile expiry, cancellation and completion even with workers disabled.
+  Imported read-only views need a projection-only path while standalone local
+  requests keep working. Test mixed local/imported requests with clock skew and
+  delayed sibling updates; inspection cannot mutate imported lifecycle state or
+  create reconciliation audit events.
+
+These are required design and acceptance constraints, not implemented behavior.
+The [implementation milestones](implementation-plan.md#proposed-milestones-and-dependencies)
+and [source-backed assessment](local-mode-code-assessment.md) carry the associated
+work and evidence boundaries.
 
 Whole-account sync is the default **scope**, not an upload grant for every local
 row. The cloud must independently authenticate ownership and assign paid
@@ -304,11 +364,34 @@ been changed by this research.
 
 ## Identity, enrollment, and portability
 
-Use one logical account identity across local and hosted modes where the eventual
-ownership protocol permits it. Vault associated data binds immutable account,
+Preserve logical account, realm, agent and record identities across the seamless
+local/paid transition, including messaging history and pending work. Vault
+associated data binds immutable account,
 realm, agent, secret, and field IDs, while excluding host/cell coordinates.
 Creating a different cloud account and remapping all rows is not a simple
 encrypted-vault migration.
+
+The owner-approved paid signup flow must automate adoption, initial snapshot and
+catch-up while clients continue working against the existing local cell. Journal
+new writes during transfer; interruptions resume without losing or duplicating
+work. Joining an already populated hosted account still needs ownership and
+collision checks rather than a blind merge. Capacity or identity conflicts must
+leave local use intact and explain the specific action needed. Internal snapshot
+machinery is acceptable; user-run export/import or restarting from an empty
+account is not the normal upgrade or return-to-local experience.
+
+The required [populated-account transition acceptance](implementation-plan.md#populated-account-transition-acceptance)
+must start with independently populated local and hosted accounts, including
+sealed secrets and client-held keys, installed clients, message history, pending
+sends and active/completed requests. Authorize ownership and resolve collisions
+without silently overwriting either side or breaking sealed identities. Keep
+local and remote-only clients working through automatic bootstrap, network and
+restart interruptions, retries and authority handoff. Prove usable local data,
+messaging and authorized offline account-console access through hosted quota
+changes, effective cancellation/expiry and return to local use. A stopped sync
+connection is not a cancelled subscription or closed account; partial catch-up
+must remain visibly incomplete. This fixture strengthens the seamless-transition
+requirement; it does not authorize production enrollment or billing actions.
 
 Design safe adoption of local identities into SaaS, collision handling, account
 ownership proof, enrolled-device credentials, token rotation, and atomic changes
@@ -337,9 +420,10 @@ sync or overwrite on return. See [export](../../../internal/store/export.go#L159
 
 Historical email records may travel as account data; that does not move public
 DNS, sender identity, inbound provider routing, or billing relationships. A
-strict local-only instance also cannot receive calls from another computer.
-Same-machine agent collaboration, cross-device synchronization, and future
-cross-realm federation are different features.
+loopback-only cell cannot receive direct connections from another computer;
+connected messaging needs a supported sync/relay transport. Same-machine and
+cross-device messaging share a product interface but have different coordination
+needs. Future cross-realm federation remains separate scope.
 
 ## Research slices and collaboration with Claude
 
@@ -367,8 +451,9 @@ implementation tasks or deadlines. Establish evidence before an end-to-end ETA.
 5. **Conflict and recovery proof.** Exercise two offline writers, deletion versus
    stale upload, schema skew, partial resync, revoked devices, key rotation,
    lost acknowledgements, full disk, crashes, and restoration from backup.
-6. **Hosted-dependent features and product transition.** Specify email/shared
-   work behavior during outages; decide how an existing free hosted account
+6. **Hosted email, connected coordination and product transition.** Specify
+   email and cross-device work behavior during outages while retaining local
+   messaging; decide how an existing free hosted account
    transitions without forced data loss or implied subscription changes.
 
 Claude can challenge the storage comparison, locate any missed local prototype,
@@ -393,8 +478,9 @@ mock documentation or shared PostgreSQL schemas as proof of offline sync.
   deletion propagation, resnapshot, and recovery after a long absence?
 - Who may enroll a device with the complete account replica, and what protection
   is required for open-plane data on personal versus shared computers?
-- How are existing free SaaS users treated if the proposed packaging replaces
-  that tier? No removal, forced migration, or grace period has been decided.
+- How do existing free SaaS users transition when the free local offering replaces
+  that tier? Notice, migration, data retention, grace periods and continuity of
+  hosted-dependent features remain to define; this decision changes no account today.
 - What performance, footprint, restore, and platform acceptance thresholds
   define “simple enough” before selecting a runtime?
 
@@ -444,3 +530,13 @@ mock documentation or shared PostgreSQL schemas as proof of offline sync.
   inactive deployment and opt-in canaries on his or enrolled test machines,
   preserving current functionality until each new capability is ready. Delivery
   must evolve to a complete supported product; default switching remains separate.
+- 2026-10-23: Scott confirmed that the default new installation automatically
+  provides a usable free local cell and that this offering replaces the hosted
+  free plan. Lightweight remote-only installation remains required. Earlier
+  descriptions of replacement as merely potential are superseded; activation
+  timing and the safe transition of existing users remain separate rollout work.
+- 2026-10-23: Scott required seamless local/paid transitions: retain the existing
+  local cell and client workflows, synchronize automatically, and require no reset
+  or manual data move. Messaging must work locally and through paid enrollment;
+  email is the sole hosted-only feature exception. This supersedes earlier
+  hosted-only messaging assumptions while retaining claim, identity and replay safety.

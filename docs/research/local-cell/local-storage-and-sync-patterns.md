@@ -8,6 +8,10 @@ WitSelf source baseline is `adc6f186`; external claims below describe primary
 documentation accessed on 2026-10-17. No competitor installation, performance
 benchmark, storage prototype, or production change was performed.
 
+The 2026-10-23 follow-up adds messaging and offline console constraints checked
+against WitSelf `5380baec`; the dated external-source observations below are
+unchanged. These additions describe required design and acceptance work.
+
 ## Discussion frame and revisable local-cell direction
 
 Scott selected the local-cell direction after considering embedded storage,
@@ -47,19 +51,21 @@ versioned application contracts on top of a proven engine, with portable export.
 
 ## How the requested local features shape storage
 
-The target capabilities below are proposals; none is a claim that a supported
-local-only WitSelf product already exists.
+The target capabilities below distinguish requested behavior from remaining
+design work; none claims that a supported local-only product already exists.
+Email is the only hosted-only feature exception. Coverage and safety still need
+proof for every local domain, rather than using SaaS-only gating as a substitute.
 
 | Feature | Useful local behavior | Storage/design requirement |
 |---|---|---|
 | Transcripts — requested | Durable capture, browsing and search while the service is unavailable | Ordered entries with stable identity, efficient appends, indexes, retention, evidence references and bounded disk growth |
 | Memories — requested | Capture, recall, edit history and provenance locally | Structured versions, links/evidence, lexical search, transactions and concurrent-update checks |
-| Facts — candidate core companion | Store/query typed assertions and subjects | Address uniqueness, provenance, conflicts and deletion/recreation rules |
-| Secrets/TOTP — possible requested scope | Create/use protected local records and generate codes using installed keys | Existing client encryption, separate key custody, encrypted fields excluded from search/logs; recovery and key-epoch policy |
-| Curation — candidate | An active AI client can review local inputs and apply authorized changes | Local fenced operations and policy; paid shared work needs its own authority rules |
-| Same-machine messaging — candidate | Multiple agents on one computer communicate | Atomic mailbox writes, identity checks and claims; distinguish shared cloud jobs |
-| Avatars/settings — candidate | Read/update allowed versioned state | Consistent lifecycle and synchronization rules |
-| Email and other external effects | Known history may be available locally | Live receipt/delivery, billing and cross-device coordination still need their online services |
+| Facts — local capability | Store/query typed assertions and subjects | Address uniqueness, provenance, conflicts and deletion/recreation rules |
+| Secrets/TOTP — local capability | Create/use protected local records and generate codes using installed keys | Existing client encryption, separate key custody, encrypted fields excluded from search/logs; recovery and key-epoch policy |
+| Curation — local capability | An active AI client can review local inputs and apply authorized changes | Local fenced operations and policy; cross-device shared work needs explicit coordination rules |
+| Agent messaging — required | Authorized agents send, receive and coordinate through the local cell, continuing after paid enrollment | Atomic mailbox/request visibility, stable identity, idempotency and fenced claims; authority covers the complete request graph and its sibling capacity/settlement rules |
+| Avatars/settings — local capability | Read/update allowed versioned state | Consistent lifecycle and synchronization rules |
+| Email — sole hosted-only feature exception | Known history may be available locally | Receipt/delivery needs hosted provider infrastructure; replay must never dispatch copied email |
 
 These features need more than a bag of text files, but none requires a remote
 database merely because it stores a transcript or memory. Search indexes can be
@@ -110,6 +116,25 @@ download and reconciliation; the local core should not need the cloud just to
 open its database. Exact offline authority rules remain in the main research
 document.
 
+That atomicity includes visibility of related domain records. Request opening,
+offers and results must become visible with their required request/candidate/claim
+links, or remain staged until those links arrive. Today's ordinary-message guard
+uses the graph links to distinguish protocol notifications from claimable work;
+reordered replication must not temporarily remove that protection. Sources:
+[opening transaction](../../../internal/store/message_request.go#L548),
+[protocol-message guard](../../../internal/store/message.go#L1873).
+
+Connected coordination also needs authority over every request transition:
+open, offer, decline, selection/reservation, claim, renewal, release, completion,
+cancellation, expiry and settlement. Unique ownership of individual claims does
+not enforce a request-wide assignee ceiling or prevent premature completion while
+a sibling remains active. Imported request inspection needs a projection-only
+path: current list/show calls can persist expiry, cancellation and completion.
+Independent local requests must remain usable alongside those inert imported
+views. The [code assessment](local-mode-code-assessment.md#synchronization-and-authority-are-the-largest-new-work)
+records source evidence and the required concurrency, reordering and inspection
+counterexamples.
+
 In local mode, clients should search/read/write the local cell,
 including transcripts and client-driven memory curation. The remote-only client
 is an explicit alternative with no local cell or offline replica. Its writes
@@ -119,6 +144,16 @@ reconciliation are distinct; existing cloud leases cannot simply be duplicated
 on disconnected cells. Enumerate operations requiring shared authority or
 external services. Reduced hosted search/read traffic is plausible, but net
 infrastructure savings require measurement of sync, storage and fan-out costs.
+
+The local UI needs an independently authenticated account-console binding as
+well as an offline agent endpoint. Today's
+[console manager resolution](../../../cmd/witself/account_console.go#L35) excludes
+explicit endpoint profiles and depends on the hosted directory. The local design
+must verify the installation's selected origin and exact account/operator/role
+without that directory, retain separate agent and operator credentials, reject
+stale or mismatched bindings, and preserve remote-only trust checks. A blocked
+directory must not disable local account inspection or recovery; hosted billing
+actions retain their service authority.
 
 ## What could “the entire cell locally” mean?
 
@@ -158,9 +193,11 @@ justify their dependencies against the native baseline.
 
 ## Installation, updates and sync delivery
 
-Installing the local WitSelf offering must deploy its isolated cell as part of
-the same operation, without separate user-run provisioning. This is essentially
-the free product; making it the initial installation default can follow later.
+The default new WitSelf installation must automatically provision and initialize
+a usable isolated local cell as part of the same operation, without separate
+user-run provisioning or local-mode selection. This is the free offering and
+replaces the hosted free plan. The product direction is selected; activation
+timing and the transition of existing free hosted users remain gated rollout work.
 An explicit remote-only installation must remain lightweight and deploy no cell.
 Existing remote users must not silently acquire a new account home or destination
 through an ordinary software update.
@@ -170,6 +207,22 @@ for connected use; delivery may be staged, but sync is not optional target scope
 Standalone local use need not enroll a remote account. Disclosed best-effort
 usage reporting is a separate requirement and cannot block local operation.
 Startup at login, boot or on demand remains a lifecycle decision.
+
+Paid enrollment adds hosted synchronization to the existing local cell; it must
+not replace the user's local workflow or require manual export/import, a new
+empty account, recreated agents or per-integration setup. Storage and sync must
+support automatic resumable bootstrap in both directions, ongoing local writes,
+stable identities and pending messaging work. Returning to local use keeps the
+same cell and data; subscription and hosted retention have explicit lifecycle
+rules. A reachable transport is needed for cross-device delivery, while local
+messaging must remain usable without SaaS connectivity.
+
+Use the plan's single
+[populated-account transition acceptance](implementation-plan.md#populated-account-transition-acceptance)
+scenario for this promise. It joins populated local and hosted sides containing
+secrets, bindings and messaging state while writes continue, then exercises
+interruption, paid-plan changes, cancellation and return to local use. Passing an
+empty-account bootstrap alone does not establish that continuity.
 
 The [infrastructure and native-install assessment](local-mode-code-assessment.md#native-installation-and-updates)
 compares Homebrew/shell installation, Windows installers/WinGet and Linux package
@@ -373,9 +426,10 @@ keeps existing behavior intact while shipping inactive foundations and opt-in
 canaries. Development should evolve through explicit readiness criteria to a
 complete supported offering; a prototype alone is not the intended outcome.
 
-1. Define the required local operations for transcripts, memories and facts;
-   decide whether secrets ship initially and which vault lifecycle actions can
-   wait for connectivity. Keep future features visible without promising them.
+1. Define the required local operations for transcripts, memories, facts,
+   messaging and secrets, including which cross-device vault lifecycle actions
+   need connectivity. Interim canaries may stage coverage; the supported product
+   must not turn unfinished non-email domains into SaaS-only features.
 2. Map current application, database and cell boundaries. Compare what each
    option reuses and changes, including SQL, transactions, indexes, idempotency,
    evidence constraints and operational components.

@@ -8,6 +8,10 @@ Native processes versus containers, component packaging and the synchronization
 protocol remain open. This decision does not authorize implementation or change
 current production behavior. Source baseline: `adc6f186`.
 
+The 2026-10-23 follow-up review checked messaging/request state machines and
+account-console trust at `5380baec`. The additional contracts below remain
+implementation requirements; they do not establish implemented local support.
+
 ## Recommendation and decision
 
 Start the local-cell design with the existing WitSelf application, PostgreSQL and
@@ -36,13 +40,15 @@ See the [product discussion](local-first-mode.md) and
 
 | Requirement | Meaning for the design |
 |---|---|
-| Free local offering | A standalone local cell provides the declared local features. Making it the initial installer default can follow later. |
+| Free local offering | The default new installation provides a usable free local cell that replaces the hosted free plan. This product direction is selected; activation timing and existing-user migration remain rollout work. |
 | Minimal host dependencies | A native cell is the first baseline; avoid requiring Kubernetes or containers if possible. PostgreSQL remains a separate process, not an in-process library. |
-| Integrated installation | Selecting local mode installs and initializes the cell with the software, without a separate manual deployment ceremony. |
+| Integrated installation | Ordinary new installation automatically provisions and initializes a usable local cell with the software, without a separate local-mode selection or deployment step. |
 | Three operating systems | macOS, Windows and Linux are in scope for the first supported local release. Supported versions and architectures still need definition. |
 | Lightweight remote client | An explicit installation connects directly to SaaS or a self-managed service without local database, cell payload or service registration. |
 | Required continuous sync | Whole-account scope by default, with explicit authority exceptions; preserve local work during outages and reconcile on return. Standalone use need not enroll with a remote account. |
-| Remote service authority | Hosted email, cross-machine messaging and control-plane-managed operations remain authoritative remotely. Synced local views support reading and search. |
+| Seamless paid/local transition | Keep the same local cell, identities, data and client workflows; automate enrollment and sync without a reset, manual export/import or per-agent reconfiguration. Returning to local use preserves continuity. |
+| Agent messaging | Required local messaging and coordination, preserved through paid enrollment; connected routing and claims need explicit coordination rather than copied leases. |
+| Hosted-only feature exception | Email receipt/delivery remains hosted because of infrastructure overhead. Local history may be read/searched; billing and provider routing still require service authority. |
 | Capacity preservation | Explain destination limits and retain local data and pending work; never silently trim an account to fit. |
 | Usage reporting | Disclosed, non-intrusive reporting of local utilization and usage, including a carefully defined modification signal; reporting failure never blocks local operation. |
 | Clear product visibility | Console and TUI explain relevant hosted capabilities and why they are unavailable locally, without banners, repeated upgrade prompts or interruption. |
@@ -76,6 +82,20 @@ but a durable offline connection profile is still needed. Sources:
 [startup](../../../cmd/witself-server/main.go#L181),
 [authentication](../../../internal/store/auth.go#L222),
 [connection selection](../../../cmd/witself/main.go#L314).
+
+Account-console access needs its own offline trust path. Today's manager
+resolver refuses explicit endpoint/token profiles and verifies a named account's
+origin against the hosted directory before reading its separate operator bearer.
+Merely pointing an agent client at loopback therefore does not enable the local
+account console. Define a local installation/profile binding that authenticates
+the selected cell and verifies the exact account, operator and current role
+without directory access. Keep agent credentials separate from operator authority,
+reject mismatched or stale bindings, and preserve the existing remote trust path.
+Prove local console bootstrap and restart with the directory blocked; hosted
+billing actions still require their service authority. Sources:
+[manager resolution](../../../cmd/witself/account_console.go#L35),
+[operator verification](../../../internal/client/account_console.go#L87),
+[bound-principal revalidation](../../../internal/client/account_console.go#L115).
 
 Secrets use client-held keys and identity-bound ciphertext. A local API/database
 can serve the backend reads involved in reveal, while encryption and decryption
@@ -182,12 +202,13 @@ and self-managed destinations.
 | Domain | Local role | Coordination requirement |
 |---|---|---|
 | Memories, facts and transcripts | Ordinary local reads/writes and client-driven curation | Durable operation identity, provenance, conflicts, deletion propagation and consistent replay |
-| Hosted email and cross-machine messages | Read/search authorized synchronized views; retain outgoing intent as pending | Remote admission, delivery, claims, acknowledgements and side effects remain authoritative remotely |
+| Agent messages and requests | Full standalone local messaging; same local interface with connected sync/transport | Preserve message/request identity and completed/pending work; fence each delivery and the complete request graph, preserve compound-operation visibility, and distinguish pending cross-device delivery |
+| Hosted email | Read/search authorized synchronized history; retain outgoing intent as pending | Receipt/delivery and provider side effects remain hosted; synchronized records cannot trigger dispatch |
 | Plans, billing and provider routing | Display known status | A modified local database cannot grant hosted entitlement or external authority |
 | Secret ciphertext | Local storage with separately held client keys | Enrollment, recovery, key epochs and rotation need explicit shared rules |
 | Full-account replicas | Owner-authorized device copy | Agent permission alone cannot authorize full-account download; offline revocation is not instantaneous |
 
-Three concrete pitfalls show why generic replication is insufficient:
+Concrete source constraints show why generic replication is insufficient:
 
 1. Transcript entry sequences are allocated under a database lock, and memory
    evidence refers to those sequences. Disconnected allocation can collide;
@@ -199,10 +220,46 @@ Three concrete pitfalls show why generic replication is insufficient:
    [Fact deletion](../../../internal/store/fact_delete.go#L91),
    [memory deletion](../../../internal/store/memory_delete.go#L79).
 3. Mailbox and curation leases derive authority from one database. Copying a
-   claim does not permit two devices to complete it. Local email dispatch must
-   not replay a remote side effect. [Message claims](../../../internal/store/message.go#L504),
+   claim does not permit two devices to complete it. Requests additionally need
+   authority over the whole graph: open, offer, decline, select/reserve, claim,
+   renew, release, complete, cancel, expiry and settlement. Selection counts
+   completed and live sibling reservations against `MaxAssignees` and advances
+   one request-wide generation; completion examines siblings before closing the
+   request. Per-claim ownership alone cannot preserve those invariants. Define a
+   single fenced request authority or prove an equivalent coordination protocol,
+   including across ownership transfer. Local email dispatch must not replay a
+   remote side effect. Sources: [message claims](../../../internal/store/message.go#L504),
+   [selection capacity](../../../internal/store/message_request.go#L1885),
+   [selection generation](../../../internal/store/message_request.go#L1953),
+   [request settlement](../../../internal/store/message_request.go#L1094),
    [curation apply](../../../internal/store/memory_curation_apply.go#L95),
    [email dispatch fencing](../../../internal/store/agent_email_outbound_worker.go#L253).
+4. Opening a request publishes its message, request and candidate rows in one
+   transaction. Ordinary message processing identifies request notifications
+   through their linked graph rows, not their message kind. Sync must atomically
+   publish each compound operation or stage visibility until all required links
+   are present. Otherwise an opening, offer or result arriving ahead of its graph
+   can become ordinary claimable work. Preserve this boundary when splitting
+   batches, resuming snapshots and replaying after crashes. Sources:
+   [opening transaction](../../../internal/store/message_request.go#L548),
+   [protocol-message guard](../../../internal/store/message.go#L1873),
+   [atomic result publication](../../../internal/store/message_request.go#L2466).
+5. Request inspection is not currently a pure read. List/show reconcile lifecycle
+   state, including persisted expiry, claim cancellation and terminal completion,
+   using database time and visible siblings. An imported projection needs a read
+   path that cannot perform those mutations; disabling workers or collaboration
+   mutations is insufficient. Route reconciliation only to the current request
+   authority while independent standalone requests remain operational. Sources:
+   [list reconciliation](../../../internal/store/message_request.go#L669),
+   [show reconciliation](../../../internal/store/message_request.go#L767),
+   [expiry](../../../internal/store/message_request.go#L1027),
+   [settlement](../../../internal/store/message_request.go#L1094).
+
+Acceptance must exercise local and remote-only coordinators selecting concurrently,
+completion racing a sibling renewal, notifications arriving before their graph,
+and list/show over mixed standalone and imported requests with clock skew and
+delayed updates. Imported inspection must produce no lifecycle or lifecycle-audit
+writes. These are protocol gates, not additional hosted-only feature exclusions.
 
 Export/import offers snapshot and validation building blocks. Existing import
 does not merge into a live existing account, and active claims are invalidated.
@@ -211,6 +268,19 @@ durable pending operations, resumable cursors and idempotent receipts.
 [Export](../../../internal/store/export.go#L159),
 [import](../../../internal/store/import.go#L6678),
 [claim normalization](../../backup-and-recovery.md#L521).
+
+These are internal implementation seams, not steps the customer should perform.
+Paid enrollment must automatically attach the populated local cell and catch up
+in the background while existing clients keep using it. Preserve agent identities,
+messaging history, pending operations and work claims across enrollment and return
+to local use; test interrupted transfer and collisions with an existing hosted
+account. Do not present a partially synchronized account as fully ready.
+Use the implementation plan's canonical
+[populated-account transition acceptance](implementation-plan.md#populated-account-transition-acceptance)
+scenario: both sides already contain data, secrets, bindings and messaging work;
+clients continue writing through enrollment, interruption, paid-plan changes,
+cancellation and return to local use. The shared scenario owns the detailed
+assertions so milestone tests do not substitute an empty-account demonstration.
 
 ## Existing synchronization technology worth evaluating
 
@@ -279,8 +349,9 @@ aspiration. Stable identities, origin-aware operations, transport-independent
 sync and per-domain authority would preserve options. Peer discovery, topology,
 trust, availability, partition handling and deletion across peers are additional
 research. Do not require them for the first local-cell delivery or weaken the
-current remote-authority requirement for email and shared messaging in anticipation
-of a possible future design.
+hosted-email authority or messaging claim safety in anticipation of a possible
+future design. Local messaging is required now; peer-to-peer federation remains
+a separate future topology choice.
 
 ## Effort and evidence needed next
 
@@ -324,7 +395,7 @@ package remains independent of the cell payload.
 | 3. Read-only sync projection | Enroll a test account and populate an isolated replica; use retained synthetic fixtures for retrieval comparisons | Complete authorized snapshot/catch-up, resumable transfer, capacity reporting and no claim, dispatch or other side effect from mirrored records |
 | 4. Bounded writable sync | Enable named operation families for an opt-in test cohort, then broaden coverage | Multiple writers, retries, dropped acknowledgements, deletion, evidence references, key lifecycle and remote authority remain correct; pending local work stays durable |
 | 5. Supported local offering | Broaden installer/platform coverage and complete the promised operation matrix | All three OSes meet agreed install/recovery/resource requirements; disclosure and UI states are ready; support and upgrade contracts are usable |
-| 6. Default and existing-user transition | Make local installation the default only through an explicit later product decision | Tested migration/adoption, compatible old/new clients and clear user choice; no forced destination change or silent loss |
+| 6. Default and existing-user transition | Activate the selected free-local default for new installations and replace the hosted free plan through a reviewed transition | Tested migration/adoption, notice and continuity for existing free users, compatible old/new clients and explicit remote-only support; no silent destination change or data loss |
 
 These stages overlap where independent work is safe; they need not become one
 large branch or a final integration event. Keep slices small and releasable under
@@ -343,7 +414,8 @@ disable basic local access simply because a reporting endpoint fails.
 Shadow evaluation may compare authorized read results in an isolated test copy.
 Do not replay production writes, copied leases, provider email delivery, message
 acknowledgements, account closure or billing actions as shadow traffic. The
-remote service stays authoritative for external effects and shared messaging.
+email service stays authoritative for email effects; messaging uses the declared
+standalone or connected coordination authority without replaying copied claims.
 Production customer data is not the default test fixture.
 
 Use additive/version-compatible schema and protocol changes where possible,

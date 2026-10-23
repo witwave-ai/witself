@@ -1,9 +1,28 @@
 # WitSelf running locally
 
-Active research and design for the **local cell**: a free local WitSelf offering,
-required synchronization with SaaS or self-managed services, and a lightweight
-remote-only client. Local cells are the selected direction, explicitly subject
-to adversarial review and revision. Implementation has not started in this effort.
+Active research and design for the **local cell**: the default new installation
+provides a usable free local cell, replacing the hosted free plan. Required
+synchronization with SaaS or self-managed services and an explicit lightweight
+remote-only installation remain supported. Local cells are the selected direction,
+explicitly subject to adversarial review and revision. Implementation has not
+started in this effort.
+
+The product direction is settled; rollout timing and the migration of existing
+free hosted users still need a reviewed transition plan. These documents do not
+change existing installations or accounts.
+
+Upgrading to paid SaaS keeps the same local cell and client workflows, adding
+continuous hosted synchronization without starting over or moving data manually.
+Returning to local use preserves that continuity. Agent messaging is a local
+capability and continues across the transition; email is the sole hosted-only
+feature exception because of its service infrastructure.
+
+The required [populated-account transition acceptance](implementation-plan.md#populated-account-transition-acceptance)
+starts with data on both sides and proves continuity through interrupted sync,
+subscription changes and return to local use, including secrets, installed clients
+and active messaging. The plan also requires request-wide coordination, atomic
+visibility of linked messaging operations, non-mutating imported request views
+and authenticated offline account-console access.
 
 ## Start here
 
@@ -17,8 +36,8 @@ to adversarial review and revision. Implementation has not started in this effor
 ## Review and collaboration
 
 Reviewers should challenge assumptions with code or measured evidence. Preserve
-required remote-only use, remote authority for email/shared messaging, local data
-on capacity mismatch, nonblocking disclosed usage reporting and existing behavior
+required remote-only use, hosted email authority, safe local/connected messaging,
+local data on capacity mismatch, nonblocking disclosed usage reporting and existing behavior
 during incremental rollout. Native packaging should minimize dependencies and
 avoid requiring Kubernetes or containers where possible.
 
