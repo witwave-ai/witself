@@ -1085,7 +1085,8 @@ decision time).
 
 ### `transcript_conversations`
 
-Purpose: own one append-only visible interaction transcript. This is an
+Purpose: own one append-only visible interaction transcript; only the account
+owner can redact entries in place. This is an
 enterprise conversation ledger, not the addressed A2A mailbox. Semantics and
 the private-reasoning boundary live in
 [transcript-ledger.md](transcript-ledger.md).

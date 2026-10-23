@@ -39,6 +39,7 @@ func TestDataSubjectRunbookCommandsExist(t *testing.T) {
 		`witself account change-display-name "New Display Name"`,
 		"witself fact delete --dry-run PREDICATE",
 		"witself memory delete MEM_ID --dry-run",
+		"witself transcript redact TRN_ID --sequence N --dry-run",
 		"witself account close --yes",
 		"witself account recover",
 	}
@@ -64,6 +65,7 @@ func TestDataSubjectRunbookCommandsExist(t *testing.T) {
 		"The export is the whole account and is verified before it is written. Sealed-plane values export only as ciphertext. `account events` is the owner's audit trail.",
 		"`change-email` sends a code to the new address; run it again with `--code` to commit. Agents correct their own facts and memories with their usual write commands. Delete a wrong item as in the next row.",
 		"Preview with `--dry-run`. `fact delete` applies with `--yes`. `memory delete` applies with `--yes --expected-version N --scrub-set-revision SHA256 --idempotency-key KEY`. Take `--expected-version` and `--scrub-set-revision` from the preview. Choose a fresh `--idempotency-key`; reuse it only to retry the same deletion. Deletion is permanent.",
+		"Preview with `--dry-run`. Apply with `--yes --expected-redaction-set-revision SHA256 --idempotency-key KEY`. Take the revision from the preview and choose a fresh key; reuse it only to retry the same redaction. Redaction is permanent.",
 		"See the timing below.",
 	}
 	if !slices.Equal(tableNotes, expectedNotes) {
@@ -71,20 +73,26 @@ func TestDataSubjectRunbookCommandsExist(t *testing.T) {
 	}
 	normalized := strings.Join(strings.Fields(section), " ")
 	for _, fragment := range []string{
-		"--expected-version", "--scrub-set-revision", "--idempotency-key",
+		"--expected-version", "--scrub-set-revision", "--expected-redaction-set-revision", "--idempotency-key",
 		"--code", "--account", "--realm", "--agent", "--token-file",
+		"| Deletion of one item | `witself fact delete`, `witself memory delete` (as the agent) |",
+		"| Redaction of transcript entries | `witself transcript redact` (owner operator token) |",
+		"Transcript entry redaction uses the account owner's operator token (`root` or `account_owner` role)",
+		"Active or suspended accounts may redact.",
+		"a closed account cannot redact.",
+		"An account move returns 409.",
 	} {
 		if !strings.Contains(normalized, fragment) {
 			t.Errorf("%s: data-subject section is missing %q", file, fragment)
 		}
 	}
-	// main.go:3165-3171 factConnectionFlags supplies both deletion commands'
-	// account/realm/agent selectors; factDelete and memoryDelete use it before
-	// parsing their own flags (main.go:3515 and memory.go:235).
+	// factConnectionFlags supplies the item-deletion commands' account/realm/agent
+	// selectors. Transcript redaction instead uses the owner operator connection.
 	extraFlags := map[string][]string{
 		"account change-email": {"code"},
 		"fact delete":          {"yes", "account", "realm", "agent", "token-file"},
 		"memory delete":        {"yes", "expected-version", "scrub-set-revision", "idempotency-key", "account", "realm", "agent", "token-file"},
+		"transcript redact":    {"yes", "from-sequence", "until-sequence", "expected-redaction-set-revision", "idempotency-key", "account", "endpoint", "token-file", "json"},
 		"account recover":      {"code"},
 	}
 	dsrRunbookCheckCommandHelp(t, file, commands, extraFlags)

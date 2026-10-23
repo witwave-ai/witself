@@ -30,6 +30,7 @@ Add first-class Witself narrative memory alongside facts.
 PostgreSQL is authoritative for memory heads, immutable full versions, evidence,
 lineage, curation requests/runs/actions/cursors, and retrieval metadata.
 Transcripts remain immutable evidence rather than memories.
+Amended by [ADR 0005](0005-transcript-entry-redaction.md): owner-authorized redaction may replace entry content with a value-free marker while preserving its id and sequence.
 
 All semantic judgment is client-side. A parent agent, native subagent, or
 separate local/headless client writes an immediate capture or submits an exact

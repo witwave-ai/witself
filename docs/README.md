@@ -104,7 +104,7 @@ deployment cells under a thin global control plane.
   work, with realm/explicit fanout, provider-accurate checkpoint hydration, an
   explicit no-wake boundary, and the canonical completion/follow-on split.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
-  capture, its boundary from A2A messaging and memory, and the structured-object
+  capture with owner-only entry redaction, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.
 - [transcript-release-design.md](transcript-release-design.md): parked
   operator-release reference, safety findings, recovery state machine, and
@@ -304,3 +304,6 @@ deployment cells under a thin global control plane.
   `witself dashboard`, over the same public API, authorization, and redaction
   rules as every other client — distinct from the fleet-admin TUI and deferred
   operator/admin web dashboard.
+- [ADR 0005](decisions/0005-transcript-entry-redaction.md): owner-authorized
+  transcript entry redaction with stable ids and sequences, guarded retries,
+  curation cancellation, and explicit residual-copy limits.

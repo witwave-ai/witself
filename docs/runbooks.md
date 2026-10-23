@@ -370,6 +370,13 @@ credential runs `witself account recover`, then redeems the emailed code with
 `--code`. Managed recovery works only for an active account: a suspended
 owner who lost the credential has no self-service path, so escalate.
 
+Transcript entry redaction uses the account owner's operator token (`root` or
+`account_owner` role); other operators and agent tokens receive 403. Active or
+suspended accounts may redact. Closing revokes every credential, so a closed
+account cannot redact. An account move returns 409. See the Redaction section in
+[the transcript ledger](transcript-ledger.md#redaction) for residual copies and the need
+to redact again after restoring or importing an older copy.
+
 **Someone else's data.** If the requester is not the account holder, for
 example a person named in an agent's memories, the customer is the controller
 of that content (see the Privacy Policy). Tell the requester to contact the
@@ -380,6 +387,7 @@ customer. Do not search customer content.
 | Access and portability | `witself account status`, `witself export --out FILE`, `witself account events` | The export is the whole account and is verified before it is written. Sealed-plane values export only as ciphertext. `account events` is the owner's audit trail. |
 | Correction | `witself account change-email`, `witself account change-display-name` | `change-email` sends a code to the new address; run it again with `--code` to commit. Agents correct their own facts and memories with their usual write commands. Delete a wrong item as in the next row. |
 | Deletion of one item | `witself fact delete`, `witself memory delete` (as the agent) | Preview with `--dry-run`. `fact delete` applies with `--yes`. `memory delete` applies with `--yes --expected-version N --scrub-set-revision SHA256 --idempotency-key KEY`. Take `--expected-version` and `--scrub-set-revision` from the preview. Choose a fresh `--idempotency-key`; reuse it only to retry the same deletion. Deletion is permanent. |
+| Redaction of transcript entries | `witself transcript redact` (owner operator token) | Preview with `--dry-run`. Apply with `--yes --expected-redaction-set-revision SHA256 --idempotency-key KEY`. Take the revision from the preview and choose a fresh key; reuse it only to retry the same redaction. Redaction is permanent. |
 | Deletion of the account | `witself export --out FILE`, then `witself account close --yes` | See the timing below. |
 
 ```sh
@@ -390,6 +398,7 @@ witself account change-email --new-email new@example.com
 witself account change-display-name "New Display Name"
 witself fact delete --dry-run PREDICATE
 witself memory delete MEM_ID --dry-run
+witself transcript redact TRN_ID --sequence N --dry-run
 witself account close --yes
 witself account recover
 ```
