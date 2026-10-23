@@ -432,3 +432,7 @@ resolved-evidence holds through evidence-artifact materialization is a later
 slice; this worker never breaks provenance merely to satisfy a storage
 deadline. Enforce-mode logs also report the count of terminal curation input
 pointers released in each batch.
+
+Owner-authorized [entry redaction](transcript-ledger.md#redaction) is the
+content-removal path for evidence-held conversations; future evidence-artifact
+materialization must skip redacted entries.

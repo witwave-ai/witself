@@ -125,6 +125,9 @@ func (s *Store) ProposeFact(ctx context.Context, p Principal, proposal ProposeFa
 	if err != nil {
 		return FactCandidate{}, err
 	}
+	if err := refuseRedactedTranscriptSourceRefTx(ctx, tx, p, in.SourceRef); err != nil {
+		return FactCandidate{}, err
+	}
 	if in.Confidence == nil {
 		confidence := 0.5
 		in.Confidence = &confidence
@@ -479,6 +482,9 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 			return Fact{}, ErrFactIdempotencyConflict
 		}
 		return Fact{}, ErrFactNotFound
+	}
+	if err := refuseRedactedTranscriptSourceRefTx(ctx, tx, p, c.SourceRef); err != nil {
+		return Fact{}, err
 	}
 	c.Subject, err = resolveFactSubjectCanonicalKey(ctx, tx, p, c.Subject)
 	if err != nil {

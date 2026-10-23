@@ -425,6 +425,8 @@ no current server or CLI implements that rail.
     "memory_recall": { "supported": true },
     "memory_supersede": { "supported": true },
     "memory_permanent_delete": { "supported": true },
+    "transcripts": { "supported": true },
+    "transcript_redaction": { "supported": true },
     "memory_vector_profiles": { "supported": true },
     "client_vector_recall": { "supported": true },
     "semantic_recall": { "supported": true },
@@ -544,6 +546,8 @@ Rules:
   history, and permanent deletion). Route-backed family flags reflect the
   enabled routes; they do not grant account or agent authorization. Individual
   operations still enforce their own policy and entitlement gates.
+- `transcript_redaction` independently reports the owner-operator redaction
+  route; support does not authorize agent tokens or non-owner operators.
 - `field_level_encryption` reflects optional encryption of `sensitive` fact
   values; it is a capability, not the default (see [storage.md](storage.md)).
 - `secrets` and `totp` advertise the **sealed plane** (secrets, TOTP). It is a
@@ -3261,6 +3265,94 @@ An owner-only redaction operation writes this marker; see
 [transcript-ledger.md](transcript-ledger.md). The marker preserves `kind` only
 when it is in the closed capture vocabulary, drops all other original payload
 keys, and uses a UTC timestamp ending in `Z`.
+
+## Transcript Entry Redaction
+
+`POST /v1/transcripts/{transcript_id}/entries:redact` accepts a strict JSON body
+with `from_sequence`, `until_sequence`, and, for apply only,
+`expected_redaction_set_revision`. The inclusive range contains 1–100 entries.
+Unknown fields, including `reason_code`, are refused. Preview adds
+`?dry_run=true` and rejects a revision or `Idempotency-Key`; apply requires both.
+No direct-user header is used. The account's live root or `account_owner`
+operator must hold a full-profile token; agents and other operators receive
+403 before transcript lookup. Active and suspended accounts are accepted;
+pending and closed accounts are refused, and evacuation returns 409. A missing
+or foreign-account transcript returns 404.
+
+The response is an ordinary v0 envelope with `Cache-Control: private, no-store`.
+This preview example uses `<preview revision>` as a placeholder for the returned
+lowercase SHA-256 revision:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "redaction": {
+    "transcript_id": "trn_123",
+    "from_sequence": 3,
+    "until_sequence": 3,
+    "redaction_set_revision": "<preview revision>",
+    "entry_count": 1,
+    "redactable_count": 1,
+    "already_redacted_count": 0,
+    "partial_capture_event": true,
+    "memory_evidence_count": 1,
+    "evidence_memory_ids": ["mem_123"],
+    "curation_runs_to_cancel": 1,
+    "cancelled_curation_run_count": 0,
+    "entries": [
+      {
+        "entry_id": "ent_125",
+        "sequence": 3,
+        "role": "tool",
+        "kind": "tool.result",
+        "redacted": false,
+        "created_at": "2026-10-22T18:00:00Z"
+      }
+    ],
+    "redacted_count": 0,
+    "applied": false,
+    "replayed": false
+  }
+}
+```
+
+Rules:
+
+- The receipt is value-free: no body, payload, artifacts, unknown kind text,
+  byte sizes, raw retry key, or content hash. `kind` is omitted unless recognized.
+- `entry_count`, `redactable_count`, `already_redacted_count`,
+  `memory_evidence_count`, `curation_runs_to_cancel`,
+  `cancelled_curation_run_count`, and `redacted_count` are JSON integer counts.
+  Both curation counts appear even when zero. Evidence count is distinct memory
+  ids; `evidence_memory_ids` contains at most 20 sorted ids.
+- `partial_capture_event` warns when an unredacted boundary entry has valid
+  chunk fields showing that the range omits part of a capture event. It does
+  not expand the selected range.
+- `redaction_set_revision` binds the transcript, range, and ordered entry ids,
+  sequences, and redacted flags with length-prefixed SHA-256 fields. It contains
+  no content, sizes, or impact counts; counts are informational, not guards.
+- Apply adds `receipt_id` and `redacted_at`, sets `applied: true`, and reports
+  every returned entry as redacted. `redacted_count` counts newly changed rows.
+  The receipt echoes the expected revision. Already-redacted rows retain their
+  prior marker and receipt.
+- `receipt_id` is `trd_` plus the first 32 hexadecimal characters of SHA-256
+  over length-prefixed domain `witself.transcript-redact.receipt.v1`, account id,
+  transcript id, decimal range bounds, expected revision, and the trimmed key.
+  Only that id is stored in the markers; the raw key is never stored. Keys must
+  contain 1–512 bytes after trimming. No durable key record exists, so reusing a
+  key for another range is not detected.
+- Exact retry with the same range, revision, and key returns `replayed: true`
+  before checking the current revision when every selected row is redacted.
+  It returns the original receipt time and count, and cancels zero curation
+  runs. A different key with the old revision returns 409; a fresh apply on an
+  entirely redacted range returns 410.
+- Apply abandons covering open/planned curation runs, cancels their claimed
+  requests, and releases the lane in the same transaction. Applied runs stay
+  unchanged. Preview and replay return `cancelled_curation_run_count: 0`.
+- Only successful first apply writes `transcript.entries.redacted`, with actor
+  `operator` and six value-free metadata fields. No usage or activity is written.
+  See [transcript-ledger.md#redaction](transcript-ledger.md#redaction) for the
+  stored marker and residual-copy limits.
 
 ## Message
 

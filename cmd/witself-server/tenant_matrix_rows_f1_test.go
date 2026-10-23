@@ -104,7 +104,7 @@ func tenantRowsF1() []tenantRow {
 			tenantProbeFor("own", own, credAgent, "GET", "/v1/fact-occurrences", ""),
 			{Name: "subject-filter", Kind: foreign, Cred: credAgent, EmptyList: true, EmptyListWhy: "internal/store/fact_temporal.go:79-98 scopes the subject-filtered projection to the authenticated account, realm and owner.", Build: tenantBuild("GET", "/v1/fact-occurrences", "subject=${fact.subject}", "")},
 		}},
-		tenantF1Own("POST /v1/fact-candidates", credAgent, "internal/store/fact_candidate.go:168-183 stores source_ref as opaque provenance without lookup; transcript isolation belongs to GET /v1/transcripts/{transcript}.", `{"subject":"self","predicate":"matrix/proposal","value":"${canary.fact.proposal}","source_ref":"witself://transcript/${transcript}/entry/${transcript.entry}","reason":"${canary.fact.reason}"}`),
+		tenantF1Own("POST /v1/fact-candidates", credAgent, "internal/store/transcript_redaction_fact.go:45-69 refuses redacted entries resolved within the caller scope; foreign, missing and unparseable source_ref provenance stays opaque.", `{"subject":"self","predicate":"matrix/proposal","value":"${canary.fact.proposal}","source_ref":"witself://transcript/${transcript}/entry/${transcript.entry}","reason":"${canary.fact.reason}"}`),
 		tenantF1Own("GET /v1/fact-candidates", credAgent, "Lists candidate facts only for the authenticated owner.", ""),
 		tenantF1Foreign("GET /v1/fact-candidates/{candidate}", credAgent, "/v1/fact-candidates/${fact.candidate}", "", ""),
 		// Both suffixes are selected by server/fact.go:590-594.
@@ -128,6 +128,9 @@ func tenantRowsF1() []tenantRow {
 		}},
 		tenantF1TranscriptAppend(false),
 		tenantF1TranscriptAppend(true),
+		{Pattern: "POST /v1/transcripts/{transcript}/entries:redact", Class: tenant, Probes: []tenantProbe{
+			{Name: "operator-preview", Kind: foreign, Cred: credOperator, NoIdempotencyKey: true, NoIdempotencyKeyWhy: "internal/server/transcript_redaction.go:97-100 rejects mutation guards on dry_run=true previews.", Build: tenantBuild("POST", "/v1/transcripts/${transcript}/entries:redact", "dry_run=true", `{"from_sequence":1,"until_sequence":1}`)},
+		}},
 	}
 	// Positive list witnesses are seeded before the first fingerprint.
 	for i := range rows {

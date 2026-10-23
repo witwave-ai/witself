@@ -322,8 +322,8 @@ func TestTenantMatrixCoversEveryRoute(t *testing.T) {
 			}
 		}
 		if row.Pattern == "POST /v1/fact-candidates" {
-			if hasForeign || !strings.Contains(row.NoForeignWhy, "fact_candidate.go:168-183") {
-				t.Error("fact candidate provenance must remain an own row with its opaque-source citation")
+			if hasForeign || !strings.Contains(row.NoForeignWhy, "transcript_redaction_fact.go:45-69") || !strings.Contains(row.NoForeignWhy, "foreign, missing and unparseable source_ref provenance stays opaque") {
+				t.Error("fact candidate provenance must remain an own row with its scoped redaction check and opaque foreign-source citation")
 			}
 		}
 		if strings.Contains(p, "{action}") {
@@ -385,9 +385,10 @@ var tenantEmptyLists = map[string]string{
 }
 
 var tenantNoIdempotencyKeys = map[string]string{
-	"DELETE /v1/facts/address-preview":     "internal/server/fact.go:413-425",
-	"DELETE /v1/facts/{fact}/id-preview":   "internal/server/fact.go:413-425",
-	"DELETE /v1/memories/{memory}/preview": "internal/server/memory.go:842-845",
+	"DELETE /v1/facts/address-preview":                                  "internal/server/fact.go:413-425",
+	"DELETE /v1/facts/{fact}/id-preview":                                "internal/server/fact.go:413-425",
+	"DELETE /v1/memories/{memory}/preview":                              "internal/server/memory.go:842-845",
+	"POST /v1/transcripts/{transcript}/entries:redact/operator-preview": "internal/server/transcript_redaction.go:97-100",
 }
 
 type tenantReferencePin struct{ Field, Citation string }

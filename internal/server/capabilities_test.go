@@ -40,9 +40,10 @@ func TestCapabilitiesMatchRegisteredRoutes(t *testing.T) {
 			[]string{"GET /v1/memory-curation-preflight", "POST /v1/memory-curation-requests", "GET /v1/memory-curation-requests", "GET /v1/memory-curation-requests/request_1", "POST /v1/memory-curation-requests/request_1/start", "GET /v1/memory-curation-runs/run_1", "GET /v1/memory-curation-runs/run_1/inputs", "GET /v1/memory-curation-runs/run_1/plan", "POST /v1/memory-curation-runs/run_1/renew", "POST /v1/memory-curation-runs/run_1/plan", "POST /v1/memory-curation-runs/run_1/apply", "POST /v1/memory-curation-runs/run_1/cancel", "POST /v1/memory-curation-runs/run_1/abandon", "POST /v1/memory-curation-runs/run_1/rollback", "GET /v1/memory-curation-status"},
 		},
 		"transcripts": {
-			"CreateTranscript AppendTranscriptEntry AppendTranscriptEntries ListTranscripts GetTranscript GetTranscriptPage",
-			[]string{"POST /v1/transcripts", "GET /v1/transcripts", "GET /v1/transcripts/transcript_1", "POST /v1/transcripts/transcript_1/entries", "POST /v1/transcripts/transcript_1/entries:batch"},
+			"CreateTranscript AppendTranscriptEntry AppendTranscriptEntries ListTranscripts GetTranscript GetTranscriptPage RedactTranscriptEntries",
+			[]string{"POST /v1/transcripts", "GET /v1/transcripts", "GET /v1/transcripts/transcript_1", "POST /v1/transcripts/transcript_1/entries", "POST /v1/transcripts/transcript_1/entries:batch", "POST /v1/transcripts/transcript_1/entries:redact"},
 		},
+		"transcript_redaction": {"RedactTranscriptEntries", []string{"POST /v1/transcripts/transcript_1/entries:redact"}},
 		"messaging": {
 			"SendMessage ListMessages ReadMessage PeekMessage AckMessage ReplyMessage ClaimMessage RenewMessageClaim ReleaseMessageClaim CompleteMessage",
 			[]string{"POST /v1/messages", "GET /v1/messages", "POST /v1/messages:listen", "POST /v1/messages/message_1:read", "GET /v1/messages/message_1:peek", "POST /v1/messages/message_1:ack", "POST /v1/messages/message_1:reply", "POST /v1/messages/message_1:claim", "POST /v1/messages/message_1:renew", "POST /v1/messages/message_1:release", "POST /v1/messages/message_1:complete"},

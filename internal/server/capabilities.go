@@ -9,7 +9,7 @@ func configuredCapabilities(cfg Config) map[string]bool {
 	operator := cfg.Authenticate != nil
 	transcripts := principal && (cfg.CreateTranscript != nil || cfg.AppendTranscriptEntry != nil ||
 		cfg.AppendTranscriptEntries != nil || cfg.ListTranscripts != nil ||
-		cfg.GetTranscript != nil || cfg.GetTranscriptPage != nil)
+		cfg.GetTranscript != nil || cfg.GetTranscriptPage != nil || cfg.RedactTranscriptEntries != nil)
 	processing := principal && (cfg.ClaimMessage != nil || cfg.RenewMessageClaim != nil ||
 		cfg.ReleaseMessageClaim != nil || cfg.CompleteMessage != nil)
 	recall := principal && cfg.RecallMemories != nil
@@ -42,8 +42,9 @@ func configuredCapabilities(cfg Config) map[string]bool {
 			cfg.ApplyMemoryCuration != nil || cfg.CancelMemoryCuration != nil ||
 			cfg.AbandonMemoryCuration != nil || cfg.RollbackMemoryCuration != nil ||
 			cfg.GetMemoryCurationStatus != nil),
-		"transcripts":        transcripts,
-		"transcript_capture": transcripts,
+		"transcripts":          transcripts,
+		"transcript_capture":   transcripts,
+		"transcript_redaction": principal && cfg.RedactTranscriptEntries != nil,
 		"messaging": principal && (cfg.SendMessage != nil || cfg.ListMessages != nil ||
 			cfg.ReadMessage != nil || cfg.PeekMessage != nil || cfg.AckMessage != nil || cfg.ReplyMessage != nil || processing),
 		"message_listen":     principal && cfg.ListMessages != nil,

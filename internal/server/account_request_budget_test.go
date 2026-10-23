@@ -891,7 +891,7 @@ func TestAccountRequestBudgetCoversEveryBearerAuthPath(t *testing.T) {
 		}
 	}
 	sort.Strings(accountSites)
-	want := []string{"requireAgentEmailSendOperatorAnyStatus", "requireAgentEmailSendPrincipal", "requireDomainPrincipalAnyProfile", "requireOperatorAnyStatus", "secretAgentSafetyHandler"}
+	want := []string{"requireAgentEmailSendOperatorAnyStatus", "requireAgentEmailSendPrincipal", "requireDomainPrincipalAnyProfile", "requireOperatorAnyStatus", "secretAgentSafetyHandler", "transcriptRedactionSafetyHandler"}
 	if !reflect.DeepEqual(accountSites, want) {
 		t.Errorf("account bearer sites = %v, want %v", accountSites, want)
 	}

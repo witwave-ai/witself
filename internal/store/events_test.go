@@ -51,6 +51,67 @@ func TestConsentRecordedEventIsTransactionInlineOnly(t *testing.T) {
 	}
 }
 
+func TestTranscriptEntriesRedactedEventIsTransactionInlineOnly(t *testing.T) {
+	keys := []string{"transcript_id", "receipt_id", "from_sequence", "until_sequence", "entry_count", "redacted_count"}
+	spec := verbMetadataSchema[VerbTranscriptEntriesRedacted]
+	if !reflect.DeepEqual(spec.requiredKeys, keys) || !reflect.DeepEqual(spec.allowedKeys, keys) {
+		t.Fatal("transcript redaction must allow exactly its six value-free metadata keys")
+	}
+	if !reflect.DeepEqual(spec.allowedActors, []string{ActorOperator}) {
+		t.Fatal("transcript redaction must allow only the operator actor")
+	}
+	if !spec.inlineOnly {
+		t.Fatal("transcript redaction must be transaction-inline only")
+	}
+	in := EventInput{
+		AccountID: "acc_x", ActorKind: ActorOperator, ActorID: "operator_x",
+		Verb: VerbTranscriptEntriesRedacted,
+		Metadata: map[string]any{
+			"transcript_id": "trn_x", "receipt_id": "trd_0123456789abcdef0123456789abcdef",
+			"from_sequence": "3", "until_sequence": "4", "entry_count": "2", "redacted_count": "2",
+		},
+	}
+	if err := checkEventShape(in); err != nil {
+		t.Fatalf("transaction-inline redaction event shape: %v", err)
+	}
+	if err := (&Store{}).LogEvent(context.Background(), in); !errors.Is(err, ErrBadEventMetadata) ||
+		!strings.Contains(err.Error(), "transaction-inline only") {
+		t.Fatalf("standalone redaction event error = %v", err)
+	}
+	bad := in
+	bad.ActorKind = ActorAgent
+	if err := checkEventShape(bad); !errors.Is(err, ErrBadEventMetadata) {
+		t.Fatalf("agent redaction event error = %v", err)
+	}
+	for _, key := range keys {
+		t.Run("missing_"+key, func(t *testing.T) {
+			bad := in
+			bad.Metadata = make(map[string]any, len(keys)-1)
+			for k, v := range in.Metadata {
+				if k != key {
+					bad.Metadata[k] = v
+				}
+			}
+			if err := checkEventShape(bad); !errors.Is(err, ErrBadEventMetadata) {
+				t.Fatalf("missing metadata key error = %v", err)
+			}
+		})
+	}
+	for _, key := range []string{"body", "payload", "artifacts", "kind", "byte_size", "redaction_set_revision", "idempotency_key", "idempotency_key_hash"} {
+		t.Run("forbidden_"+key, func(t *testing.T) {
+			bad := in
+			bad.Metadata = make(map[string]any, len(keys)+1)
+			for k, v := range in.Metadata {
+				bad.Metadata[k] = v
+			}
+			bad.Metadata[key] = "forbidden"
+			if err := checkEventShape(bad); !errors.Is(err, ErrBadEventMetadata) {
+				t.Fatalf("extra metadata key error = %v", err)
+			}
+		})
+	}
+}
+
 // TestMaskEmail pins the exact masking shape the whole event registry
 // depends on. Every event that carries an email in metadata does so via
 // MaskEmail; if this ever changes, every stored event's semantics shift.
@@ -113,7 +174,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbMessageRequestReleased, VerbMessageRequestCompleted,
 		VerbMessageRequestCancelled, VerbMessageRequestExpired,
 		VerbMessageRequestCancelledSystem,
-		VerbFactDeleted,
+		VerbFactDeleted, VerbTranscriptEntriesRedacted,
 		VerbMemoryAdded, VerbMemoryAdjusted, VerbMemorySuperseded,
 		VerbMemoryForgotten, VerbMemoryRestored, VerbMemoryReactivated,
 		VerbMemoryEvidenceResolved, VerbMemoryDeleted,
