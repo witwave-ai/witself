@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
+import {assertGate} from './ci-product-gate.mjs';
+import {classifyChanges} from './ci-product-scope.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const files = ['ci.yml', 'product-site-checks.yml', 'product-site.yml'];
@@ -18,7 +20,7 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
 
 const wrapperDependencies = {
-  go: ['go-rest', 'go-store', 'go-infra', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence'],
+  go: ['go-rest', 'go-store', 'go-infra', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
   'release-config': ['release-config-full'],
   'homebrew-formula': ['homebrew-formula-full'],
   helm: ['helm-full'],
@@ -26,7 +28,7 @@ const wrapperDependencies = {
 };
 const fullJobs = [...new Set(Object.values(wrapperDependencies).flat()), 'provider-integration-contract'];
 const checkNames = ['ubuntu-latest', 'ubuntu-24.04-arm'];
-const testCommand = 'node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs';
+const testCommand = 'node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs';
 const expression = value => String(value ?? '').replace(/^\s*\$\{\{\s*|\s*\}\}\s*$/g, '').trim();
 const list = value => Array.isArray(value) ? value : [value];
 const sorted = value => [...value].sort();
@@ -70,6 +72,31 @@ function assertWebsiteCall(job, label) {
   assert.equal(job.uses, './.github/workflows/product-site-checks.yml');
   assert.equal(job.secrets, undefined, `${label}: no inherited deployment secrets`);
   assert.equal(job['continue-on-error'], undefined);
+}
+
+function assertDocsJob(job) {
+  const label = 'documentation validation';
+  assert(job, 'Missing documentation validation job');
+  needs(job, ['changes'], label);
+  assert.equal(expression(job.if), "needs.changes.outputs.docs == 'true'", 'Positive documentation classification only');
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.equal(job['continue-on-error'], undefined);
+  assert.equal(job.services, undefined, 'Documentation validation needs no database or container service');
+  assert.equal(job.env, undefined, 'Documentation validation needs no database or deployment configuration');
+  assert.equal(job.environment, undefined, 'Documentation validation cannot enter a deployment environment');
+  assert(!JSON.stringify(job).includes('secrets.'), 'Documentation validation receives no deployment secrets');
+  const checkout = action(job, 'actions/checkout@', label);
+  assert.equal(checkout.with['fetch-depth'], 0, 'Local and CI docs runner needs complete comparison history');
+  assert.equal(checkout.with['persist-credentials'], false);
+  assert.equal(action(job, 'actions/setup-node@', label).with['node-version'], 22);
+  const go = action(job, 'actions/setup-go@', label);
+  assert.equal(expression(go.if), "needs.changes.outputs.docs_index == 'true'", 'Only the runbook index guard needs Go');
+  assert.equal(go.with['go-version-file'], 'go.mod');
+  assert.equal(go.with['cache-dependency-path'], 'go.sum');
+  const checks = job.steps.filter(step => step.run !== undefined);
+  assert.deepEqual(checks.map(step => step.run), ['make check-docs'], 'Local and CI documentation checks share one bounded command');
+  assert.equal(checks[0].if, undefined);
+  assert.equal(checks[0]['continue-on-error'], undefined);
 }
 
 // Evaluate only the small expression grammar used by deployment and concurrency.
@@ -151,7 +178,7 @@ function assertCIConcurrency(ci) {
   const pr = {'github.event_name': 'pull_request', 'github.ref': 'refs/pull/42/merge'};
   const firstMain = group({...main, 'github.run_id': '1001'});
   const nextMain = group({...main, 'github.run_id': '1002'});
-  assert.notEqual(firstMain, nextMain, 'A brochure main push must not cancel or queue behind earlier application CI');
+  assert.notEqual(firstMain, nextMain, 'A docs or brochure main push must not cancel or queue behind earlier application CI');
   const firstPR = group({...pr, 'github.run_id': '1003'});
   assert.equal(firstPR, group({...pr, 'github.run_id': '1004'}), 'Updates to one PR must retain their cancellation group');
   assert.notEqual(firstPR, group({...pr, 'github.ref': 'refs/pull/43/merge', 'github.run_id': '1005'}), 'Different PRs must run independently');
@@ -165,15 +192,17 @@ function assertWorkflowContracts(sources) {
   assert.deepEqual(Object.keys(ci.on).sort(), ['pull_request', 'push']);
   assert.deepEqual(ci.on.push, {branches: ['main']}, 'CI main push cannot have a path filter');
   assert.equal(ci.on.pull_request, null, 'CI PR cannot have a path filter');
+  assert.deepEqual(ci.permissions, {contents: 'read'});
   assertCIConcurrency(ci);
-  assertClassifier(ci.jobs.changes, ['application', 'website', 'website_only'], 'ci changes');
+  assertClassifier(ci.jobs.changes, ['application', 'docs', 'docs_index', 'docs_only', 'website', 'website_only'], 'ci changes');
   assertWebsiteCall(ci.jobs.website, 'ci website');
+  assertDocsJob(ci.jobs.docs);
 
   for (const [id, dependencies] of Object.entries(wrapperDependencies)) {
     const job = ci.jobs[id];
     assert(job, `Missing required wrapper: ${id}`);
     assert.equal(expression(job.if), 'always()', `${id}: required check must report despite failed or skipped dependencies`);
-    needs(job, ['changes', 'website', ...dependencies], id);
+    needs(job, ['changes', 'website', 'docs', ...dependencies], id);
     assert.equal(job['continue-on-error'], undefined, `${id}: required gate cannot ignore failure`);
     const guard = job.steps.filter(step => step.run === 'node scripts/ci-product-gate.mjs');
     assert.equal(guard.length, 1, `${id}: strict helper runs exactly once`);
@@ -278,12 +307,64 @@ function assertWorkflowContracts(sources) {
   assert.equal(currentMain['continue-on-error'], undefined);
 }
 
-test('website lanes preserve required checks, application gates, and deployment boundaries', () => {
+test('documentation and website lanes preserve required checks, application gates, and deployment boundaries', () => {
   assertWorkflowContracts(workflows);
 });
 
 test('main push runs remain independent while newer updates cancel only their own PR checks', () => {
   assertCIConcurrency(workflows['ci.yml']);
+});
+
+test('classified docs, mixed, and checker changes preserve every required wrapper and publication fence', () => {
+  const research = 'docs/research/local-cell/notes.md';
+  const cases = [
+    {paths: [research], application: false, docs: true, docs_index: false, docs_only: true, website: false, website_only: false},
+    {paths: ['docs/README.md'], application: false, docs: true, docs_index: true, docs_only: true, website: false, website_only: false},
+    {paths: [research, 'web/product/content.mjs'], application: true, docs: true, docs_index: false, docs_only: false, website: true, website_only: false},
+    {paths: [research, 'internal/store/transcripts.go'], application: true, docs: true, docs_index: false, docs_only: false, website: false, website_only: false},
+    {paths: ['web/product/content.mjs'], application: false, docs: false, docs_index: false, docs_only: false, website: true, website_only: true},
+    ...['scripts/check-docs.mjs', 'scripts/run-docs-check.mjs'].map(path => ({
+      paths: [path], application: true, docs: false, docs_index: false, docs_only: false, website: false, website_only: false,
+    })),
+    {paths: ['docs/README.md', '.github/workflows/ci.yml'], application: true, docs: true, docs_index: true, docs_only: false, website: true, website_only: false},
+  ];
+  for (const {paths, ...expected} of cases) {
+    const {reason, ...scope} = classifyChanges(paths.map(path => ({
+      path, status: 'M', oldMode: '100644', newMode: '100644',
+      oldOID: 'a'.repeat(40), newOID: 'b'.repeat(40),
+    })));
+    assert.deepEqual(scope, expected, paths.join(', '));
+    const outputs = Object.fromEntries(Object.entries(scope).map(([key, flag]) => [key, String(flag)]));
+    const context = Object.fromEntries(Object.entries(outputs).map(([key, flag]) => [`needs.changes.outputs.${key}`, flag]));
+    assert.equal(evaluateExpression(workflows['ci.yml'].jobs.docs.if, context), scope.docs);
+    assert.equal(evaluateExpression(workflows['ci.yml'].jobs.website.if, context), scope.website);
+    for (const id of fullJobs) {
+      assert.equal(evaluateExpression(expression(workflows['ci.yml'].jobs[id].if).replace(/^always\(\) && /, ''), context), scope.application, `${paths}: ${id}`);
+    }
+    for (const [id, dependencies] of Object.entries(wrapperDependencies)) {
+      const results = {
+        changes: {result: 'success', outputs},
+        docs: {result: scope.docs ? 'success' : 'skipped'},
+        website: {result: scope.website ? 'success' : 'skipped'},
+        ...Object.fromEntries(dependencies.map(name => [name, {result: scope.application ? 'success' : 'skipped'}])),
+      };
+      assert.equal(assertGate(results), scope.docs_only ? 'docs-only' : scope.website_only ? 'brochure-only' : 'application', `${paths}: ${id}`);
+      for (const status of ['failure', 'cancelled', undefined]) {
+        assert.throws(() => assertGate({...results, docs: {result: status}}), `${paths}: ${id} cannot hide documentation ${status}`);
+      }
+      assert.throws(() => {
+        const missing = {...results};
+        delete missing.docs;
+        assertGate(missing);
+      }, `${paths}: ${id} cannot omit documentation result`);
+    }
+    assert.equal(evaluateExpression(workflows['product-site.yml'].jobs.deploy.if, {
+      ...context,
+      'github.event_name': 'push', 'github.ref': 'refs/heads/main',
+      'vars.WITSELF_PRODUCT_PUBLISH_ENABLED': 'true',
+      'needs.validate.result': 'success', 'inputs.publish': false,
+    }), scope.website_only, `${paths}: automatic publication remains brochure-only`);
+  }
 });
 
 test('exact launch shell guard rejects disabled, case-changed, and non-main settings', () => {
@@ -304,6 +385,22 @@ const mutations = [
   ['concurrency cancellation disabled', data => { data['ci.yml'].concurrency['cancel-in-progress'] = false; }],
   ['missing Go application dependency', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'go-store'); }],
   ['missing required website dependency', data => { data['ci.yml'].jobs.helm.needs = data['ci.yml'].jobs.helm.needs.filter(id => id !== 'website'); }],
+  ...Object.keys(wrapperDependencies).map(id => [
+    `missing required documentation dependency from ${id}`,
+    data => { data['ci.yml'].jobs[id].needs = data['ci.yml'].jobs[id].needs.filter(dependency => dependency !== 'docs'); },
+  ]),
+  ['missing static analysis dependency', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'static-analysis'); }],
+  ['wrong docs output forwarding', data => { data['ci.yml'].jobs.changes.outputs.docs = '${{ steps.scope.outputs.website }}'; }],
+  ['missing docs-only output', data => { delete data['ci.yml'].jobs.changes.outputs.docs_only; }],
+  ['wrong docs index output forwarding', data => { data['ci.yml'].jobs.changes.outputs.docs_index = '${{ steps.scope.outputs.docs }}'; }],
+  ['mixed documentation validation skipped', data => { data['ci.yml'].jobs.docs.if = "needs.changes.outputs.docs_only == 'true'"; }],
+  ['different local and CI documentation gate', data => { data['ci.yml'].jobs.docs.steps.at(-1).run = 'echo passed'; }],
+  ['documentation failure ignored', data => { data['ci.yml'].jobs.docs.steps.at(-1)['continue-on-error'] = true; }],
+  ['documentation check skipped', data => { data['ci.yml'].jobs.docs.steps.at(-1).if = 'false'; }],
+  ['documentation job failure ignored', data => { data['ci.yml'].jobs.docs['continue-on-error'] = true; }],
+  ['research-only docs installs Go', data => { delete data['ci.yml'].jobs.docs.steps.find(step => step.uses?.startsWith('actions/setup-go@')).if; }],
+  ['documentation index guard loses Go setup', data => { data['ci.yml'].jobs.docs.steps = data['ci.yml'].jobs.docs.steps.filter(step => !step.uses?.startsWith('actions/setup-go@')); }],
+  ['documentation starts a database', data => { data['ci.yml'].jobs.docs.services = {postgres: {image: 'postgres'}}; }],
   ['skipped required wrapper', data => { data['ci.yml'].jobs.go.if = "needs.changes.outputs.application == 'true'"; }],
   ['lost dependency result forwarding', data => { data['ci.yml'].jobs.go.steps.at(-1).env.NEEDS_JSON = '{}'; }],
   ['ignored required gate failure', data => { data['ci.yml'].jobs.helm.steps.at(-1)['continue-on-error'] = true; }],
@@ -314,6 +411,7 @@ const mutations = [
   ['CI workflow path filtering', data => { data['ci.yml'].on.push.paths = ['web/product/**']; }],
   ['shallow classifier history', data => { data['ci.yml'].jobs.changes.steps[0].with['fetch-depth'] = 1; }],
   ['classifier errors ignored', data => { data['ci.yml'].jobs.changes.steps.at(-1)['continue-on-error'] = true; }],
+  ['documentation checker regressions omitted', data => { data['ci.yml'].jobs.changes.steps.find(step => step.run === testCommand).run = testCommand.replace(' scripts/check-docs.test.mjs', ''); }],
   ['reusable validation credential', data => { data['product-site-checks.yml'].jobs.validate.env = {TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'}; }],
   ['different local and CI website gate', data => { data['product-site-checks.yml'].jobs.validate.steps.at(-1).run = 'echo passed'; }],
   ['publication path filtering', data => { data['product-site.yml'].on.push.paths = ['web/product/**']; }],

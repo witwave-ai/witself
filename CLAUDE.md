@@ -10,11 +10,18 @@ make check-local
 
 It fetches `origin`, compares against `origin/main`, and includes the complete
 branch plus staged, unstaged, and untracked files. Do not substitute a narrower
-base or decide eligibility from a short diff. It selects one of three paths:
+base or decide eligibility from a short diff. It selects one of four paths:
 
 - **Brochure only:** the existing positive `website_only` classification installs
   locked website tooling and runs `make check-product-site`. Its exact allowlist
   remains in `scripts/ci-product-scope.mjs`.
+- **Audited research documentation only:** regular, non-executable additions or
+  edits directly under `docs/research/local-cell/*.md`, plus `docs/README.md`,
+  run `make check-docs`. The command validates local links, anchors, source-line
+  bounds, and content; an affected main docs index also runs its existing Go
+  index contract without PostgreSQL. Deletions, renames, mode/type changes,
+  unknown paths, and mixed changes stay on the full path. The same docs gate
+  runs in PR and main CI. See [the docs gate guide](docs/docs-validation.md).
 - **Verified release roll only:** `scripts/local-roll-scope.mjs` must accept an
   existing cell's generated application chart version, image tag, and image
   digest as the only changes. `scripts/check-local-roll.mjs` then verifies the
@@ -34,8 +41,9 @@ not repair bad release evidence; resolve it or use the normal full validation
 and release procedure. See [the rollout gate guide](docs/local-roll-gate.md).
 
 Shared dependencies, hosting, screenshot tools, workflows, check code, and this
-policy always require the full path. This policy change itself requires the full
-path. GitHub CI classification, required PR checks, exact post-merge checks,
+policy always require the full path. Changes to this policy or any gate
+implementation require the full path. Required PR check names, exact post-merge
+checks,
 backup-first rollout order, schema/backup obligations, and live convergence are
 unchanged. The command does not push, merge, tag, deploy, or authorize a rollout.
 It is not a Git hook and cannot prevent someone from bypassing local checks.
@@ -109,9 +117,11 @@ Commit locally per logical change; push, run CI, and tag once per feature
 batch. Merge only at a settle-verified green: confirm the local head matches
 the PR head, wait until every check has reported and none is failing, then
 squash-merge with `--match-head-commit` and verify post-merge CI against the
-new commit. The six required check names remain successful checks in both
-lanes: for a positively classified brochure-only change, they require passed
+new commit. The six required check names remain real, successful checks in every
+lane: for a positively classified brochure-only change, they require passed
 website validation and confirm application jobs were intentionally skipped.
+For positively classified research documentation, they require successful docs
+validation and confirm application and website jobs were intentionally skipped.
 For application or mixed changes, every applicable application gate must pass.
 Brochure-only merges publish automatically after the separate website checks;
 mixed changes retain manual website publication after full CI.

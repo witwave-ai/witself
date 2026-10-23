@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: 22
       - name: Test change classification and required gates
-        run: node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs
+        run: node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs
       - name: Classify the complete change set
         id: scope
         run: node scripts/ci-product-scope.mjs

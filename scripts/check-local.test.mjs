@@ -13,6 +13,7 @@ function fixture(overrides = {}) {
     integrityChecker: () => ({safe: true}),
     contextChecker: () => ({safe: true}),
     verifyRoll: async () => { throw new Error('unexpected release verification'); },
+    captureDocsState: () => 'unchanged-fixture',
     log: text => logs.push(text), ...overrides,
   };
   return {options, calls, logs};
@@ -33,6 +34,34 @@ test('brochure-only selection installs locked tooling and runs the existing webs
   assert.deepEqual(f.calls.map(c => [c.file, ...c.args]), [
     ['git', 'fetch', 'origin'], ['npm', 'ci', '--ignore-scripts', '--prefix', 'infra/cloudflare/control-plane'], ['make', 'check-product-site'],
   ]);
+});
+
+test('audited documentation uses its shared gate without database or Worker setup', async () => {
+  const f = fixture({productClassifier: () => ({website_only: false, docs_only: true}), rollClassifier: () => assert.fail('must not inspect release roll')});
+  assert.deepEqual(await runLocalChecks(f.options), {passed: true, gate: 'documentation'});
+  assert.deepEqual(f.calls.map(c => [c.file, ...c.args]), [['git', 'fetch', 'origin'], ['make', 'check-docs']]);
+  assert.deepEqual(f.calls[1].options.env, {MARKER: 'retained', GITHUB_ACTIONS: 'false'});
+});
+
+test('local documentation approval cannot inherit a narrower GitHub event comparison', async () => {
+  const env = {MARKER: 'retained', GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'push', GITHUB_EVENT_PATH: '/unrelated/event.json'};
+  const f = fixture({env, productClassifier: () => ({docs_only: true})});
+  assert.deepEqual(await runLocalChecks(f.options), {passed: true, gate: 'documentation'});
+  assert.deepEqual(f.calls[1].options.env, {...env, GITHUB_ACTIONS: 'false'});
+  assert.equal(env.GITHUB_ACTIONS, 'true', 'Local dispatch must not mutate its caller environment');
+});
+
+test('changed content cannot pass merely because it is still in the documentation lane', async () => {
+  let snapshots = 0;
+  const f = fixture({productClassifier: () => ({docs_only: true}), captureDocsState: () => String(++snapshots)});
+  await assert.rejects(runLocalChecks(f.options), /document validation state changed/);
+  assert.equal(f.logs.some(l => l.includes('PASS')), false);
+});
+
+test('failed documentation validation blocks approval without a fallback pass', async () => {
+  const f = fixture({productClassifier: () => ({docs_only: true}), run: file => { if (file === 'make') throw new Error('broken document link'); }});
+  await assert.rejects(runLocalChecks(f.options), /broken document link/);
+  assert.equal(f.logs.some(l => l.includes('PASS')), false);
 });
 
 test('pin-only selection must pass release verification at the fixed refreshed base', async () => {
@@ -99,5 +128,6 @@ test('check failures never emit a passing verdict', async () => {
 
 test('truthy eligibility and unsupported base overrides cannot grant the shorter path', async () => {
   assert.equal(selectLocalGate('/fixture', () => ({website_only: 'true'}), () => ({roll_only: 1}), () => ({safe: true})), 'application');
+  assert.equal(selectLocalGate('/fixture', () => ({docs_only: 'true'}), () => ({roll_only: false}), () => ({safe: true})), 'application');
   await assert.rejects(main(['--base', 'HEAD']), /usage/);
 });
