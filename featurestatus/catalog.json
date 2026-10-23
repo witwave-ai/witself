@@ -2437,7 +2437,8 @@
             "docs/transcript-retention.md",
             "internal/client/transcript_redaction_test.go",
             "internal/nulsafe/nulsafe.go",
-            "internal/store/transcript_nulsafe_test.go"
+            "internal/store/transcript_nulsafe_test.go",
+            "internal/store/transcript_redaction_integration_test.go"
           ]
         },
         "entitlement_policy": {

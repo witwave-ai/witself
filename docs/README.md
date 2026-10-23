@@ -104,7 +104,7 @@ deployment cells under a thin global control plane.
   work, with realm/explicit fanout, provider-accurate checkpoint hydration, an
   explicit no-wake boundary, and the canonical completion/follow-on split.
 - [transcript-ledger.md](transcript-ledger.md): append-only visible conversation
-  capture, its boundary from A2A messaging and memory, and the structured-object
+  capture with owner-only entry redaction, its boundary from A2A messaging and memory, and the structured-object
   versus file-artifact storage decision.
 - [transcript-release-design.md](transcript-release-design.md): parked
   operator-release reference, safety findings, recovery state machine, and

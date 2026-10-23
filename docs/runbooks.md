@@ -374,7 +374,7 @@ Transcript entry redaction uses the account owner's operator token (`root` or
 `account_owner` role); other operators and agent tokens receive 403. Active or
 suspended accounts may redact. Closing revokes every credential, so a closed
 account cannot redact. An account move returns 409. See the Redaction section in
-[the transcript ledger](transcript-ledger.md) for residual copies and the need
+[the transcript ledger](transcript-ledger.md#redaction) for residual copies and the need
 to redact again after restoring or importing an older copy.
 
 **Someone else's data.** If the requester is not the account holder, for

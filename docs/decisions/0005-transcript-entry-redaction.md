@@ -112,7 +112,7 @@ Redaction does not revoke or rotate a leaked credential; rotate it separately.
 Cell-wide PostgreSQL dumps and pre-migration dumps have no automatic retention; they remain until an operator deletes them.
 
 The operational contract is in the Redaction section of
-[the transcript ledger](../transcript-ledger.md).
+[the transcript ledger](../transcript-ledger.md#redaction).
 
 ## Follow-ups
 

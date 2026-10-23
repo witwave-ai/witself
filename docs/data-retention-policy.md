@@ -179,7 +179,7 @@ out-of-band contractual matter, not an in-product capability.
   403. Active and suspended accounts may redact; closing revokes every credential,
   so a closed account cannot redact. An account move returns 409. It changes only
   live entry content. Redact again after restoring or importing an older copy;
-  see the Redaction section in [the transcript ledger](transcript-ledger.md) for
+  see the Redaction section in [the transcript ledger](transcript-ledger.md#redaction) for
   residual copies and the separate need to rotate a leaked credential.
 - **Memories and facts** are not on an age sweep. Memories can be forgotten and
   restored without a configured age window; permanent memory or fact deletion

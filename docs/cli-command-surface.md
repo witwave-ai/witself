@@ -4065,7 +4065,7 @@ transcript inputs or transcript cursor overlap the selected range; applied runs
 remain intact.
 There is no MCP redaction tool. For the complete residual-copy limits, credential
 rotation requirement, and restore/import procedure, see the Redaction section in
-[the transcript ledger](transcript-ledger.md).
+[the transcript ledger](transcript-ledger.md#redaction).
 
 ## `witself integration`
 

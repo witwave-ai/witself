@@ -507,7 +507,7 @@ Customer export rules:
 - A redacted entry exports only its marker. Copies whose snapshot began before
   redaction can retain the original content; redact again after restoring or
   importing an older copy. See the Redaction section in
-  [the transcript ledger](transcript-ledger.md) for the complete residual-copy
+  [the transcript ledger](transcript-ledger.md#redaction) for the complete residual-copy
   limits.
 
 Sensitivity handling (display-level, not encryption):
