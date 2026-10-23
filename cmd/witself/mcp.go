@@ -780,20 +780,21 @@ type mcpTranscript struct {
 }
 
 type mcpTranscriptEntry struct {
-	ID                string    `json:"id"`
-	AccountID         string    `json:"account_id"`
-	TranscriptID      string    `json:"transcript_id"`
-	RealmID           string    `json:"realm_id"`
-	RecordedByAgentID string    `json:"recorded_by_agent_id"`
-	Sequence          int64     `json:"sequence"`
-	ExternalID        string    `json:"external_id,omitempty"`
-	Role              string    `json:"role"`
-	Body              string    `json:"body,omitempty"`
-	Payload           any       `json:"payload,omitempty"`
-	Model             string    `json:"model,omitempty"`
-	ReplyToEntryID    string    `json:"reply_to_entry_id,omitempty"`
-	Artifacts         any       `json:"artifacts"`
-	CreatedAt         time.Time `json:"created_at"`
+	ID                string                           `json:"id"`
+	AccountID         string                           `json:"account_id"`
+	TranscriptID      string                           `json:"transcript_id"`
+	RealmID           string                           `json:"realm_id"`
+	RecordedByAgentID string                           `json:"recorded_by_agent_id"`
+	Sequence          int64                            `json:"sequence"`
+	ExternalID        string                           `json:"external_id,omitempty"`
+	Role              string                           `json:"role"`
+	Body              string                           `json:"body,omitempty"`
+	Payload           any                              `json:"payload,omitempty"`
+	Model             string                           `json:"model,omitempty"`
+	ReplyToEntryID    string                           `json:"reply_to_entry_id,omitempty"`
+	Artifacts         any                              `json:"artifacts"`
+	CreatedAt         time.Time                        `json:"created_at"`
+	Redaction         *client.TranscriptEntryRedaction `json:"redaction,omitempty"`
 }
 
 type mcpTranscriptReadInput struct {
@@ -1438,6 +1439,9 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 		}
 		if entry.ID == "" || entry.Role != "user" {
 			return nil, mcpFactCandidateOutput{}, fmt.Errorf("fact evidence must be one immutable user transcript entry")
+		}
+		if entry.Redaction != nil {
+			return nil, mcpFactCandidateOutput{}, fmt.Errorf("transcript entry sequence %d is redacted and cannot be fact evidence", in.EntrySequence)
 		}
 		raw, err := json.Marshal(in.Value)
 		if err != nil {
@@ -2557,6 +2561,7 @@ func toMCPTranscriptEntries(rows []client.TranscriptEntry) []mcpTranscriptEntry 
 			Sequence: row.Sequence, ExternalID: row.ExternalID, Role: row.Role, Body: row.Body,
 			Payload: decodeMCPJSON(row.Payload), Model: row.Model, ReplyToEntryID: row.ReplyToEntryID,
 			Artifacts: decodeMCPJSON(row.Artifacts), CreatedAt: row.CreatedAt,
+			Redaction: row.Redaction,
 		}
 	}
 	return out

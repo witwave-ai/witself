@@ -2831,7 +2831,7 @@ func toServerFactSubject(s store.FactSubject) server.FactSubject {
 }
 
 func toServerTranscriptEntry(entry store.TranscriptEntry) server.TranscriptEntry {
-	return server.TranscriptEntry{
+	out := server.TranscriptEntry{
 		ID:                entry.ID,
 		AccountID:         entry.AccountID,
 		TranscriptID:      entry.TranscriptID,
@@ -2847,6 +2847,12 @@ func toServerTranscriptEntry(entry store.TranscriptEntry) server.TranscriptEntry
 		Artifacts:         entry.Artifacts,
 		CreatedAt:         entry.CreatedAt,
 	}
+	if redaction, ok := store.TranscriptEntryRedactionOf(entry); ok {
+		out.Redaction = &server.TranscriptEntryRedaction{
+			ReceiptID: redaction.ReceiptID, RedactedAt: redaction.RedactedAt, ReasonCode: redaction.ReasonCode,
+		}
+	}
+	return out
 }
 
 func toServerUsageReport(report store.UsageReport) server.UsageReport {

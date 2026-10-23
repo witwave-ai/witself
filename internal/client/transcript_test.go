@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestTranscriptBatchAndPageContracts(t *testing.T) {
@@ -61,5 +62,35 @@ func TestTranscriptBatchAndPageContracts(t *testing.T) {
 	}
 	if !sawObservationalPage {
 		t.Fatal("observational transcript page query was not sent")
+	}
+}
+
+func TestGetTranscriptPageRedactionView(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/transcripts/trn_redacted" {
+			t.Error("unexpected transcript page request")
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"transcript":{"id":"trn_redacted","metadata":{}},"entries":[{"id":"ent_redacted","transcript_id":"trn_redacted","sequence":1,"role":"tool","artifacts":[],"redaction":{"receipt_id":"trd_0123456789abcdef0123456789abcdef","redacted_at":"2026-10-22T18:04:05.123456Z","reason_code":"owner_request"}}]}`))
+	}))
+	defer srv.Close()
+
+	page, err := GetTranscriptPage(context.Background(), srv.URL, "test-token", "trn_redacted", TranscriptPageOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 1 {
+		t.Fatalf("transcript page entry count = %d, want 1", len(page.Entries))
+	}
+	redaction := page.Entries[0].Redaction
+	if redaction == nil {
+		t.Fatal("transcript page omitted the redaction view")
+	}
+	if redaction.ReceiptID != "trd_0123456789abcdef0123456789abcdef" ||
+		!redaction.RedactedAt.Equal(time.Date(2026, 10, 22, 18, 4, 5, 123456000, time.UTC)) ||
+		redaction.ReasonCode != "owner_request" {
+		t.Fatalf("transcript page redaction view = %#v", redaction)
 	}
 }

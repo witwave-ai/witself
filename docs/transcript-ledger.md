@@ -87,6 +87,8 @@ an external entry id with identical content returns the existing entry, while
 reusing it for different content is a conflict. An entry may point to an
 earlier runtime event through `reply_to_external_id`; the server resolves that
 reference to the immutable same-transcript entry id.
+A retry of a redacted entry's external id returns the redacted entry when role,
+model, and reply target match; the retried content is never stored.
 
 ## Runtime Installation And Identity
 
@@ -734,7 +736,8 @@ slice.
 The separate `witself.fact.propose_from_transcript` tool lets a supported agent
 turn one explicit durable claim from one exact user entry into a fact candidate.
 It fetches only that sequence, verifies the immutable transcript/entry
-relationship and user role, and stores an evidence reference. It never mutates
+relationship and user role, and refuses an entry that carries a `redaction`
+view. For an eligible entry it stores an evidence reference. It never mutates
 the transcript or promotes the candidate to canonical truth. Semantic
 interpretation stays in the supported agent integration, so transcript capture
 remains provider-neutral and the service gains no model dependency.
