@@ -304,3 +304,6 @@ deployment cells under a thin global control plane.
   `witself dashboard`, over the same public API, authorization, and redaction
   rules as every other client — distinct from the fleet-admin TUI and deferred
   operator/admin web dashboard.
+- [ADR 0005](decisions/0005-transcript-entry-redaction.md): owner-authorized
+  transcript entry redaction with stable ids and sequences, guarded retries,
+  curation cancellation, and explicit residual-copy limits.

@@ -680,7 +680,7 @@ witself
   integrations
   install RUNTIME[,RUNTIME...]|all
   uninstall RUNTIME[,RUNTIME...]|all
-  transcript create|append|list|show|tail|flush|fence|status
+  transcript create|append|list|show|tail|redact|flush|fence|status
   message send|reply|list|listen|read|ack|claim|renew|release|complete
   email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator
   federation peers|card  # target; not implemented
@@ -817,7 +817,8 @@ The current server reports `memory_recall`, `memory_supersede`, and
 `opportunistic_curation` as supported, while `automatic_capture` and
 `scheduled_curation` remain explicitly `not_implemented`. `semantic_recall`
 and `client_vector_recall` are supported when the migration-0032 vector surface
-is wired; lexical recall does not need a provider. Commands should
+is wired; lexical recall does not need a provider. The server reports
+`transcript_redaction` when the redaction route is wired. Commands should
 use the same capability data when returning `unsupported_operation`. These are
 backend capabilities: PostgreSQL can store due curation work, but the server,
 MCP, and runtime hooks cannot launch or schedule inference. Foreground checkpoint
@@ -3895,9 +3896,10 @@ Flags:
 **Family status: implemented.**
 
 Record the visible interaction between a user and an AI system. A transcript is
-an append-only enterprise ledger, not an addressed A2A mailbox. The agent token
-is the token-derived recorder; `role` is recorded data. Account operator tokens
-may list/show for audit but cannot create or append.
+an append-only enterprise ledger (the account owner can redact entries), not an
+addressed A2A mailbox. The agent token is the token-derived recorder; `role` is
+recorded data. Account operator tokens may list/show for audit but cannot create
+or append.
 
 ```sh
 witself transcript create \
@@ -3928,7 +3930,7 @@ witself transcript fence --runtime cursor --session headless-session-id \
 JSON object). `append` requires `--role user|assistant|system|tool` and at least
 one of `--body`, `--body-file`, `--stdin`, or `--payload-file`; it also accepts
 `--external-id` (retry-safe runtime message id), `--model`, and `--reply-to`.
-The interactive commands accept `--endpoint`,
+The create, append, list, show, and tail commands accept `--endpoint`,
 `--token-file`, and `--json`; `WITSELF_ENDPOINT`, `WITSELF_TOKEN_FILE`, and
 `WITSELF_TOKEN` are the unattended equivalents.
 
@@ -4015,6 +4017,55 @@ provider payload is retained; an oversized envelope retains only `raw_omitted`,
 raw prompt payloads for recovered messages. Witself preserves the body
 unchanged when that envelope is malformed, nested, repeated, or has any extra
 bytes; no other runtime uses this normalization.
+
+### `witself transcript redact`
+
+Permanently replace the content of 1-100 entries in an inclusive sequence range
+with value-free markers, keeping their ids, sequences, and transcript continuity.
+Use either `--sequence N` or both `--from-sequence N --until-sequence M`.
+
+```sh
+witself transcript redact TRN_ID --sequence N --dry-run --account NAME
+witself transcript redact TRN_ID --from-sequence N --until-sequence M \
+  --dry-run --endpoint URL --token-file FILE
+witself transcript redact TRN_ID --sequence N --account NAME \
+  --yes --expected-redaction-set-revision SHA256 --idempotency-key KEY
+```
+
+Only the account owner's operator token (`root` or `account_owner` role) may
+preview or apply redaction on any transcript in that account. Other operators
+and agent tokens receive 403. The command uses `--account`'s local operator token
+(with an optional `--endpoint` override), or `--endpoint` plus `--token-file`
+containing an operator token. It ignores `WITSELF_ENDPOINT`, `WITSELF_TOKEN_FILE`,
+and `WITSELF_TOKEN`; a process with access to the owner's local account can use
+that credential. Active and suspended accounts may redact. Closing revokes every
+credential, so a closed account cannot redact. An account move returns 409.
+
+Preview with `--dry-run` first; it accepts no apply guards. The value-free output
+shows the selected range, counts, partial capture-event warning, evidence memory
+ids, curation runs to cancel, and entry sequence/role/kind/redaction state. It
+prints the revision and, when entries remain redactable, an apply command
+retaining the preview's connection selectors, with a placeholder for a fresh
+retry key and, when used, the operator token file. An entirely redacted range
+reports nothing to redact and prints no apply command.
+Review the range and warning, then apply with `--yes`, the exact preview revision,
+and one fresh `--idempotency-key`. The key is trimmed; reuse it only to retry the
+same request. A different key with a stale revision returns 409; applying a fresh
+preview of an entirely redacted range returns 410. Apply reports cancelled
+curation runs. `--json`
+returns the validated receipt. Usage errors exit 2; request or receipt validation
+errors exit 1. If an apply response succeeds but its receipt fails validation,
+or the apply response is lost or unreadable (a transport failure, a server error,
+or an undecodable body), redaction may already be applied: rerun with
+`--dry-run`, or retry the same request with the same `--idempotency-key` to
+replay its receipt. A 400, 401, 403, 404 or 409 refusal applied nothing.
+
+Redaction is irreversible. Apply cancels open or planned curation runs whose
+transcript inputs or transcript cursor overlap the selected range; applied runs
+remain intact.
+There is no MCP redaction tool. For the complete residual-copy limits, credential
+rotation requirement, and restore/import procedure, see the Redaction section in
+[the transcript ledger](transcript-ledger.md).
 
 ## `witself integration`
 

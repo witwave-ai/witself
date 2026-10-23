@@ -930,12 +930,17 @@ Input:
 
 ### `witself.fact.propose_from_transcript`
 
-Create one review candidate from one exact, immutable user transcript entry.
+Create one review candidate from one exact user transcript entry.
 The tool reads only the requested sequence, verifies that it belongs to the
-requested transcript and has role `user`, then stores a canonical evidence
-reference such as `witself://transcript/trn_123/entry/ent_456`. It never changes
+requested transcript, has role `user`, and is not redacted, then stores a
+canonical evidence reference such as
+`witself://transcript/trn_123/entry/ent_456`. It never changes
 the resolved fact. The agent supplies the semantic interpretation; Witself does
 not run a server-side model or infer facts from transcript text.
+
+`witself.fact.propose_from_transcript` refuses redacted entries. No MCP tool
+redacts transcripts; redaction requires the account owner's operator token
+(for example [`witself transcript redact`](cli-command-surface.md#witself-transcript-redact)).
 
 Input:
 

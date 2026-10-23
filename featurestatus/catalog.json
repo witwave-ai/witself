@@ -2430,10 +2430,12 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Append, read, tail, durable hook flush, NUL-safe normalized events (capture sanitizes unstorable content; residual Postgres errors map to typed 400s), usage rollups, retention preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; evidence materialization is still unimplemented.",
+          "summary": "Append, read, tail, owner-authorized entry redaction, durable hook flush, NUL-safe events, usage rollups, retention preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; evidence materialization remains unimplemented.",
           "evidence": [
+            "cmd/witself/transcript_redact_test.go",
             "docs/transcript-ledger.md",
             "docs/transcript-retention.md",
+            "internal/client/transcript_redaction_test.go",
             "internal/nulsafe/nulsafe.go",
             "internal/store/transcript_nulsafe_test.go"
           ]

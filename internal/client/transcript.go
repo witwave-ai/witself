@@ -56,6 +56,88 @@ type TranscriptEntryRedaction struct {
 	ReasonCode string    `json:"reason_code"`
 }
 
+// TranscriptRedactionEntry describes an entry without exposing its content.
+type TranscriptRedactionEntry struct {
+	EntryID   string    `json:"entry_id"`
+	Sequence  int64     `json:"sequence"`
+	Role      string    `json:"role"`
+	Kind      string    `json:"kind,omitempty"`
+	Redacted  bool      `json:"redacted"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TranscriptRedactionReceipt is the value-free preview or result of redaction.
+type TranscriptRedactionReceipt struct {
+	TranscriptID              string                     `json:"transcript_id"`
+	FromSequence              int64                      `json:"from_sequence"`
+	UntilSequence             int64                      `json:"until_sequence"`
+	RedactionSetRevision      string                     `json:"redaction_set_revision"`
+	EntryCount                int64                      `json:"entry_count"`
+	RedactableCount           int64                      `json:"redactable_count"`
+	AlreadyRedactedCount      int64                      `json:"already_redacted_count"`
+	PartialCaptureEvent       bool                       `json:"partial_capture_event"`
+	MemoryEvidenceCount       int64                      `json:"memory_evidence_count"`
+	EvidenceMemoryIDs         []string                   `json:"evidence_memory_ids"`
+	CurationRunsToCancel      int64                      `json:"curation_runs_to_cancel"`
+	CancelledCurationRunCount int64                      `json:"cancelled_curation_run_count"`
+	Entries                   []TranscriptRedactionEntry `json:"entries"`
+	ReceiptID                 string                     `json:"receipt_id,omitempty"`
+	RedactedCount             int64                      `json:"redacted_count"`
+	RedactedAt                *time.Time                 `json:"redacted_at,omitempty"`
+	Applied                   bool                       `json:"applied"`
+	Replayed                  bool                       `json:"replayed"`
+}
+
+// RedactTranscriptEntriesInput selects the exact previewed entry range to redact.
+type RedactTranscriptEntriesInput struct {
+	TranscriptID                 string
+	FromSequence, UntilSequence  int64
+	ExpectedRedactionSetRevision string
+	IdempotencyKey               string
+}
+
+// PreviewRedactTranscriptEntries previews owner-authorized redaction without
+// retrieving entry content or sending mutation guards.
+func PreviewRedactTranscriptEntries(ctx context.Context, endpoint, token, transcriptID string, from, until int64) (*TranscriptRedactionReceipt, error) {
+	body, err := json.Marshal(struct {
+		FromSequence  int64 `json:"from_sequence"`
+		UntilSequence int64 `json:"until_sequence"`
+	}{from, until})
+	if err != nil {
+		return nil, err
+	}
+	requestURL := transcriptsURL(endpoint) + "/" + neturl.PathEscape(transcriptID) + "/entries:redact?dry_run=true"
+	var out struct {
+		Redaction TranscriptRedactionReceipt `json:"redaction"`
+	}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, requestURL, token, nil, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Redaction, nil
+}
+
+// RedactTranscriptEntries permanently replaces entry content with markers using
+// the account owner's operator token and the exact guards returned by a preview.
+func RedactTranscriptEntries(ctx context.Context, endpoint, token string, in RedactTranscriptEntriesInput) (*TranscriptRedactionReceipt, error) {
+	body, err := json.Marshal(struct {
+		FromSequence                 int64  `json:"from_sequence"`
+		UntilSequence                int64  `json:"until_sequence"`
+		ExpectedRedactionSetRevision string `json:"expected_redaction_set_revision"`
+	}{in.FromSequence, in.UntilSequence, in.ExpectedRedactionSetRevision})
+	if err != nil {
+		return nil, err
+	}
+	requestURL := transcriptsURL(endpoint) + "/" + neturl.PathEscape(in.TranscriptID) + "/entries:redact"
+	var out struct {
+		Redaction TranscriptRedactionReceipt `json:"redaction"`
+	}
+	headers := map[string]string{"Idempotency-Key": in.IdempotencyKey}
+	if err := doJSONWithHeaders(ctx, http.MethodPost, requestURL, token, headers, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Redaction, nil
+}
+
 // CreateTranscriptInput carries optional caller metadata for a new transcript.
 type CreateTranscriptInput struct {
 	ExternalID string          `json:"external_id,omitempty"`

@@ -504,6 +504,11 @@ Customer export rules:
   purged row counts, and retry-shield count/digest; no purged version, evidence,
   relation, content-derived hash, locator, or raw retry key may reappear.
 - Export must not include raw tokens.
+- A redacted entry exports only its marker. Copies whose snapshot began before
+  redaction can retain the original content; redact again after restoring or
+  importing an older copy. See the Redaction section in
+  [the transcript ledger](transcript-ledger.md) for the complete residual-copy
+  limits.
 
 Sensitivity handling (display-level, not encryption):
 
