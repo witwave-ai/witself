@@ -1,12 +1,14 @@
 # Witself Transcript Ledger
 
-Status: first implementation slice. Decision: Witself stores an append-only
-ledger of the visible conversation an agent runtime chooses to record. The
-ledger is distinct from addressed inter-agent messaging.
+Status: implemented ledger and owner-authorized entry redaction. Witself stores
+an append-only ledger, except that owner redaction replaces entry content with a
+value-free marker. It records the visible conversation an agent runtime chooses
+to capture and is distinct from addressed inter-agent messaging.
 
-The accepted narrative-memory design uses this ledger as immutable evidence,
-never as memory or instruction. Client-side capture and curation attach exact
-entry/range references as specified in
+The accepted narrative-memory design uses stable entry identities as evidence,
+never as memory or instruction. Content is immutable except owner-authorized
+redaction, which preserves ids and sequences. Client-side capture and curation
+attach exact entry/range references as specified in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
 ## Goal
@@ -15,7 +17,7 @@ Give agent runtimes and enterprise operators a portable record of what crossed
 the model boundary without pretending that Witself can or should capture a
 model's private reasoning.
 
-A normal exchange is two immutable entries in one transcript:
+A normal exchange is two entries with stable identities in one transcript:
 
 1. A `user` entry records the prompt delivered to the model.
 2. An `assistant` entry records the finalized response and points to the prompt
@@ -33,7 +35,8 @@ contract.
 
 ## Boundary From Messaging And Memory
 
-- A **transcript** is an append-only record of visible interaction. The
+- A **transcript** is an append-only record of visible interaction, except
+  owner-authorized content redaction. The
   authenticated agent token identifies the recorder, while `role` describes
   the recorded participant and is treated as asserted data.
 - A **message** is an addressed delivery between authenticated agents. Its
@@ -61,7 +64,8 @@ messages and lets each resource have independent retention and access policy.
   metadata; the token-bound agent id remains authoritative.
 - `next_sequence`, created time, and last-updated time.
 
-`transcript_entries` is append-only:
+`transcript_entries` is append-only; owner redaction may replace an entry's
+content with a marker:
 
 - `ent_` id, transcript id, sequence, and token-derived recorder agent.
 - Optional external message id, unique within the transcript, for idempotent
@@ -80,6 +84,8 @@ payload. At least one of body or payload must be present on an entry.
 Agent tokens may create, append, list, and read their own transcripts. Account
 operator tokens may list and read every transcript in their account for audit
 and compliance, but they cannot manufacture entries on an agent's behalf.
+Only the account's live root or `account_owner` operator may redact entries;
+other operators and all agents are refused before transcript lookup.
 
 Creating a transcript with the same external conversation id is retry-safe and
 returns the existing transcript. Entry batches are also retry-safe: repeating
@@ -629,6 +635,11 @@ verbatim and does not meter the restore itself. `GET /v1/usage` and
 `witself usage` expose only the bearer-token agent's own rollups in this slice;
 realm/account aggregation and billing conversion remain deferred.
 
+Redaction writes no usage events or rollups and does not decrement historical
+`transcript_storage_byte` usage. The retained-bytes counter instead receives the
+exact signed delta from replacing body, payload, and artifacts; a marker may be
+larger than a short original entry, so that counter can increase or decrease.
+
 ### Storage usage counter
 
 Schema 101 adds the cell-local `transcript_storage_usage` counter, which measures
@@ -714,6 +725,7 @@ GET  /v1/transcripts/{transcript_id}?after_sequence=0&limit=100
 GET  /v1/transcripts/{transcript_id}?tail=true&limit=20
 POST /v1/transcripts/{transcript_id}/entries
 POST /v1/transcripts/{transcript_id}/entries:batch
+POST /v1/transcripts/{transcript_id}/entries:redact
 ```
 
 CLI:
@@ -751,7 +763,9 @@ the already-absent conversation and entries; terminal curation inputs retain
 value-free counts and intervals as detached metadata. Bodies and payloads must
 never appear in logs, metrics, errors, or account-event metadata.
 
-Entries have no user-facing edit or delete endpoint. The account-level
+`POST /v1/transcripts/{transcript_id}/entries:redact` lets the account's owner
+operator remove selected entry content; there is no whole-entry deletion or
+general editing endpoint. The account-level
 retention worker may delete an expired whole conversation under the resolved
 control-plane policy; it never truncates individual entries, and evidence or
 curation provenance holds defer deletion. See
@@ -763,3 +777,100 @@ and account purge, avoiding a scan of the whole entries table for each deleted
 entry. Migration 0099 checkpoints this index and the two hot memory-curation
 mutation cascade indexes before the remaining foreign-key indexes in 0100,
 so retrying 0100 preserves the completed reply-reference index.
+
+## Redaction
+
+Only the account owner's operator credential can preview or apply redaction.
+The operator row must be live (`deleted_at IS NULL`) and either root or have
+the `account_owner` role. It may redact any transcript in its account, across
+realms and owners, including transcripts of deleted agents. Agents and other
+operators receive 403 before transcript lookup; a missing or foreign-account
+transcript receives 404. The route requires a full access profile and accepts
+active or suspended accounts only. Pending and closed accounts receive 403;
+an evacuation in progress receives 409 `account move in progress`. No
+direct-user authorization header or MCP redaction tool is used.
+
+Preview uses `POST /v1/transcripts/{transcript_id}/entries:redact?dry_run=true`
+with `from_sequence` and `until_sequence` in its JSON body. The inclusive range
+must contain 1–100 existing entries. It takes no row locks and writes nothing.
+The value-free response contains entry ids, sequences, roles, recognized capture
+kinds, creation times, redaction state, a chunk-boundary warning, distinct
+evidence-memory counts (with at most 20 sorted ids), and covering curation-run
+counts. It never returns content, artifacts, unrecognized kind text, byte sizes,
+or content hashes. Counts are informational and never concurrency guards.
+
+Apply uses the same route without `dry_run`, the same range, the preview's
+`expected_redaction_set_revision`, and an `Idempotency-Key`. Preview rejects the
+revision and key. Unknown body fields, including `reason_code`, are rejected;
+the server fixes the reason to `owner_request`. Responses use
+`Cache-Control: private, no-store`.
+
+The revision is lowercase SHA-256 over length-prefixed fields: the domain
+`witself.transcript-redact.set.v1`, transcript id, decimal range bounds, then
+each entry's id, decimal sequence, and redacted flag (`1` or `0`) in sequence
+order. It contains no content, sizes, or impact counts. Apply checks the revision
+after checking for an exact replay. A stale revision returns 409. A fresh
+preview followed by apply on a fully redacted range returns 410.
+
+The receipt id is `trd_` followed by the first 32 hexadecimal characters of
+SHA-256 over length-prefixed fields: `witself.transcript-redact.receipt.v1`,
+account id, transcript id, decimal range bounds, the expected revision, and the
+trimmed `Idempotency-Key`. The key must contain 1–512 bytes after trimming.
+Only the receipt id is stored, in the marker; the raw key is never stored.
+The exact range, revision, and key replay the prior result when every selected
+entry is now redacted. Reusing the range and old revision with another key
+returns 409. There is no key record, so reusing a key for a different range is
+not detected. Already-redacted entries retain their original markers.
+
+Apply replaces body with
+`entry content redacted at the account owner's request`, artifacts with `[]`,
+and payload with exactly this marker plus `kind` only when it is in the closed
+capture vocabulary:
+
+```json
+{
+  "kind": "tool.result",
+  "witself_redaction": {
+    "schema": "witself.transcript-redaction.v1",
+    "receipt_id": "trd_0123456789abcdef0123456789abcdef",
+    "redacted_at": "2026-10-22T18:04:05.123456Z",
+    "reason_code": "owner_request",
+    "actor_kind": "operator"
+  }
+}
+```
+
+The timestamp comes from the database clock in UTC at microsecond precision.
+No other original payload key survives. Entry id, account, transcript, realm,
+recorder, sequence, external id, role, model, reply link, and creation time stay
+unchanged. The conversation's `updated_at` and `next_sequence` stay unchanged,
+so redaction does not extend retention. The storage trigger maintains retained
+bytes; the operation writes no usage, activity, curation-due marker, or transcript
+read usage. One inline `transcript.entries.redacted` audit event records the
+operator actor, transcript and receipt ids, range bounds, entry count, and newly
+redacted count. Preview, replay, conflicts, and already-redacted refusal emit no
+event.
+
+In the same transaction, covering open or planned curation runs become
+`abandoned` with terminal reason `transcript_redacted`, their claimed requests
+become `cancelled`, and their active lanes are released with a new fencing
+generation. Coverage includes overlapping transcript/transcript-coverage ranges
+and overlapping transcript cursor intervals. Applied and non-overlapping runs
+are unchanged. This emits no separate curation event or mutation receipt.
+Preview reports `curation_runs_to_cancel`; every receipt includes
+`cancelled_curation_run_count`, which is zero for preview and replay. Existing
+memory evidence remains intact. Fact proposal, set, and candidate confirmation
+refuse a source reference resolving to a redacted entry in the caller's own
+scope; opaque, foreign, and missing references retain their existing behavior.
+
+Redaction changes only the live entry rows. Copies made before the redaction committed keep the original content until their own retention removes them:
+
+- per-account archive snapshots in R2 (the initial lifecycle for the `accounts/` prefix is 90 days);
+- cell-wide PostgreSQL dumps and pre-migration dumps, on their own retention;
+- exports and evacuation archives already written or downloaded, including one whose snapshot began before the redaction committed;
+- PostgreSQL's own dead row versions and write-ahead log, until vacuum and log recycling reuse that space.
+
+Restoring or importing one of those copies brings the original content back without the redaction or its audit event, so redact again after any such restore. Redaction also does not reach copies held outside the entry: memories, memory evidence excerpts, facts and fact candidates written from the entry, curation plans, a client's local capture outbox, runtime-native session files, and anything already sent to a model provider.
+
+Redaction does not revoke or rotate a leaked credential; rotate it separately.
+Cell-wide PostgreSQL dumps and pre-migration dumps have no automatic retention; they remain until an operator deletes them.

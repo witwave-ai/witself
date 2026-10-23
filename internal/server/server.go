@@ -518,12 +518,13 @@ type Config struct {
 	// fleet-wide scope is exactly the point.
 	ListAdminEventsAll func(ctx context.Context, filter EventFilter) (EventPage, error)
 
-	// Transcript ledger: append-only visible interaction capture. Agent tokens
+	// Transcript ledger: append-only except owner-authorized redaction. Agent tokens
 	// create/append their own transcripts. Agents read their own; operators read
 	// the whole account. Bodies and payloads are never copied into audit events.
 	CreateTranscript               func(ctx context.Context, p DomainPrincipal, in CreateTranscriptRequest) (Transcript, error)
 	AppendTranscriptEntry          func(ctx context.Context, p DomainPrincipal, transcriptID string, in AppendTranscriptEntryRequest) (TranscriptEntry, error)
 	AppendTranscriptEntries        func(ctx context.Context, p DomainPrincipal, transcriptID string, in []AppendTranscriptEntryRequest) ([]TranscriptEntry, error)
+	RedactTranscriptEntries        func(ctx context.Context, p DomainPrincipal, in RedactTranscriptEntriesRequest) (TranscriptRedactionReceipt, error)
 	ListTranscripts                func(ctx context.Context, p DomainPrincipal) ([]Transcript, error)
 	GetTranscript                  func(ctx context.Context, p DomainPrincipal, transcriptID string) (Transcript, []TranscriptEntry, error)
 	GetTranscriptPage              func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
@@ -2108,6 +2109,9 @@ var ErrFactDeleted = errors.New("fact deleted")
 // memory tombstone (-> 410).
 var ErrMemoryDeleted = errors.New("memory deleted")
 
+// ErrTranscriptEntriesRedacted signals a range whose entries are all redacted (-> 410).
+var ErrTranscriptEntriesRedacted = errors.New("transcript entries already redacted")
+
 // ErrMemoryDependency signals that permanent deletion would silently alter a
 // distinct live memory or active lineage edge (-> 409).
 var ErrMemoryDependency = errors.New("memory has live dependencies")
@@ -3035,6 +3039,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.AppendTranscriptEntries != nil {
 			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries:batch", appendTranscriptEntriesHandler(cfg.AuthenticatePrincipal, cfg.AppendTranscriptEntries))
+		}
+		if cfg.RedactTranscriptEntries != nil {
+			mux.HandleFunc("POST /v1/transcripts/{transcript}/entries:redact", redactTranscriptEntriesHandler(cfg.AuthenticatePrincipal, cfg.RedactTranscriptEntries))
 		}
 		if cfg.SendMessage != nil {
 			mux.HandleFunc("POST /v1/messages", sendMessageHandler(cfg.AuthenticatePrincipal, cfg.SendMessage))

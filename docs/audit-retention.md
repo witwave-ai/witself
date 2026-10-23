@@ -185,6 +185,19 @@ write emits the existing fact mutation event. The client chooses that route;
 the server does not classify prose. A requested native-provider action is
 outside Witself audit except for an optional value-free integration outcome.
 
+### Transcripts
+
+- `transcript.entries.redacted`
+
+This transaction-inline event records the authenticated owner operator with
+actor kind `operator`. Its metadata contains exactly `transcript_id`,
+`receipt_id`, `from_sequence`, `until_sequence`, `entry_count`, and
+`redacted_count`; numeric fields are decimal strings. It never includes body,
+payload, artifacts, kind, byte sizes, revision, retry key, or a separate hash.
+Preview, replay, conflict, and already-redacted refusal produce no event.
+Cancelling covering curation runs during redaction emits no additional curation
+event or mutation receipt. Redaction writes no usage or activity record.
+
 ### Memory Curation
 
 - `memory.curation.requested`

@@ -207,6 +207,9 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err != nil {
 		return Fact{}, err
 	}
+	if err := refuseRedactedTranscriptSourceRefTx(ctx, tx, p, in.SourceRef); err != nil {
+		return Fact{}, err
+	}
 
 	subjectID, err := ensureFactSubject(ctx, tx, p, in.Subject)
 	if err != nil {

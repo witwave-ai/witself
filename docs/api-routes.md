@@ -1032,13 +1032,14 @@ POST /v1/message-requests/{request_id}:renew
 POST /v1/message-requests/{request_id}:release
 POST /v1/message-requests/{request_id}:complete
 
-# Append-only visible conversation ledger. Agent tokens write their own;
-# account operators may read every transcript in their account.
+# Append-only visible conversation ledger, except owner-authorized redaction.
+# Agents write their own; account operators read all; owner operators redact.
 GET  /v1/transcripts
 POST /v1/transcripts
 GET  /v1/transcripts/{transcript_id}
 POST /v1/transcripts/{transcript_id}/entries
 POST /v1/transcripts/{transcript_id}/entries:batch
+POST /v1/transcripts/{transcript_id}/entries:redact
 
 # Token-derived product usage. V0 is deliberately agent-self only.
 GET  /v1/usage
@@ -1100,6 +1101,8 @@ remain stable.
 `features.facts.supported: true` when the fact service is wired. Discovery is
 public and value-free; supported routes still enforce authentication,
 authorization, and operation-specific policy gates.
+`features.transcript_redaction.supported` independently reports the owner
+redaction route when principal authentication and its callback are configured.
 
 `GET /v1/transcripts/{transcript_id}` accepts either forward paging with
 `after_sequence` and `limit` or a bounded newest-page read with `tail=true` and
@@ -1331,6 +1334,23 @@ audit events; read-only recall does neither:
   memory. `reason_code` is server-owned (`direct_user_request`) and a supplied
   query value is rejected. Apply conflicts on stale guards or live incoming
   dependencies and returns an exact replay for the same apply key and guards.
+- `POST /v1/transcripts/{transcript_id}/entries:redact?dry_run=true` previews
+  an inclusive `from_sequence`/`until_sequence` body range of 1–100 entries.
+  Only a live root or `account_owner` operator with a full-profile token may
+  redact any transcript in its account, including a deleted agent's transcript.
+  Active and suspended accounts are accepted; pending and closed accounts are
+  refused. Preview rejects a revision or `Idempotency-Key`; apply omits
+  `dry_run`, supplies `expected_redaction_set_revision` and requires
+  `Idempotency-Key`. There is no direct-user header. Unknown fields, including
+  `reason_code`, are rejected; the server fixes the reason to `owner_request`.
+  A stale revision or different-key retry returns 409, account movement returns
+  409 `account move in progress`, and a fresh apply over an already-redacted
+  range returns 410. A missing or foreign-account transcript returns 404;
+  agents and non-owner operators get 403 before transcript lookup. Both
+  responses use `Cache-Control: private, no-store` and expose only value-free
+  descriptors, counts, and guards. Apply cancels covering open/planned curation
+  work in the same transaction and writes one operator audit event, with no
+  usage or activity write. See [transcript-ledger.md#redaction](transcript-ledger.md#redaction).
 - `GET /v1/facts/{fact_id}/history` returns HTTP 200 with `assertions` (newest
   first, at most 1,000) and `truncated`. A true flag means older assertions remain.
   There is no cursor; traversal remains capped. This successful bounded response
@@ -2372,16 +2392,23 @@ and static checks; request execution and the two runtime phases belong to 122b.
   transcript return 400 (`internal/store/transcript.go:277-289` and
   `internal/server/server.go:3980-3982,4018-4020`); that cited refusal is
   separate from the path-object 403/404 case.
-- **Opaque provenance (A6).** `POST /v1/fact-candidates` is an own row:
-  `source_ref` is stored without looking up its apparent transcript reference
-  (`internal/store/fact_candidate.go:168-183`). The MCP row for
+- **Opaque provenance (A6).** Fact proposal, set, and candidate confirmation
+  check exact `witself://transcript/<transcript>/entry/<entry>` source refs
+  only within the caller's own account, realm, and agent scope. A strict
+  redaction marker returns 400 `transcript entry is redacted and cannot be fact
+  evidence`; unparsable, missing, and foreign refs remain opaque and accepted
+  (`refuseRedactedTranscriptSourceRefTx` in `internal/store/transcript_redaction_fact.go`).
+  A successful proposal's idempotent replay precedes this check. The MCP row for
   `witself.fact.propose_from_transcript` must record
   `GET /v1/transcripts/{transcript}` as its first route; isolation is checked
   by that read before candidate creation.
 - **Idempotency (A7).** Every sent request receives a fresh `Idempotency-Key`
-  except the three `NoIdempotencyKey` previews: `DELETE /v1/facts`,
+  except the four `NoIdempotencyKey` previews: `DELETE /v1/facts`,
   `DELETE /v1/facts/{fact}` (`internal/server/fact.go:413-425`), and
-  `DELETE /v1/memories/{memory}` (`internal/server/memory.go:842-845`). Each
+  `DELETE /v1/memories/{memory}` (`internal/server/memory.go:842-845`), and the
+  foreign-operator `operator-preview` probe of
+  `POST /v1/transcripts/{transcript}/entries:redact`
+  (`internal/server/transcript_redaction.go:97-100`, preview guard). Each
   must include `dry_run=true` and a `NoIdempotencyKeyWhy` citation. Apply
   probes always receive a key.
 - **Local sequences (A8).** Avatar versions, profile revisions and row

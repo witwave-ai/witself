@@ -315,6 +315,7 @@ func serve() int {
 		configureSecrets(&cfg, st)
 		configureDashboardPreferences(&cfg, st)
 		configureSelfPlanEntitlements(&cfg, st)
+		configureTranscriptRedaction(&cfg, st)
 		cfg.CreateTranscript = func(ctx context.Context, p server.DomainPrincipal, in server.CreateTranscriptRequest) (server.Transcript, error) {
 			tr, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID, store.CreateTranscriptInput{
 				ExternalID: in.ExternalID,
@@ -2448,8 +2449,12 @@ func mapTranscriptError(err error) error {
 		return nil
 	case errors.Is(err, store.ErrTranscriptInputInvalid):
 		return wrapAsSentinel(server.ErrBadInput, store.ErrTranscriptInputInvalid, err)
-	case errors.Is(err, store.ErrTranscriptExists):
+	case errors.Is(err, store.ErrTranscriptExists), errors.Is(err, store.ErrTranscriptRedactionConflict):
 		return server.ErrConflict
+	case errors.Is(err, store.ErrTranscriptEntriesAlreadyRedacted):
+		return server.ErrTranscriptEntriesRedacted
+	case errors.Is(err, store.ErrAccountEvacuationInProgress):
+		return server.ErrAccountMoveInProgress
 	case errors.Is(err, store.ErrTranscriptNotFound):
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrTranscriptForbidden), errors.Is(err, store.ErrAgentNotFound), errors.Is(err, store.ErrAccountNotActive):

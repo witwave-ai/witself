@@ -135,6 +135,11 @@ const (
 	// never an assertion/candidate value, source, reason, or retry key.
 	VerbFactDeleted = "fact.deleted"
 
+	// Transcript redaction records only stable ids, sequence bounds, and
+	// counts. Entry content, kind, byte sizes, revisions, and retry keys never
+	// enter the account audit ledger; the owner operator is the actor.
+	VerbTranscriptEntriesRedacted = "transcript.entries.redacted"
+
 	// Narrative-memory lifecycle events contain resource ids, versions, state,
 	// and counts only. Memory/evidence values, locators, query text, hashes, and
 	// raw retry keys never enter the account audit ledger.
@@ -571,6 +576,16 @@ var verbMetadataSchema = map[string]verbSpec{
 			"assertion_count", "candidate_count", "usage_count", "sensitive",
 		},
 		allowedActors: []string{ActorAgent},
+	},
+	VerbTranscriptEntriesRedacted: {
+		requiredKeys: []string{
+			"transcript_id", "receipt_id", "from_sequence", "until_sequence", "entry_count", "redacted_count",
+		},
+		allowedKeys: []string{
+			"transcript_id", "receipt_id", "from_sequence", "until_sequence", "entry_count", "redacted_count",
+		},
+		allowedActors: []string{ActorOperator},
+		inlineOnly:    true,
 	},
 	VerbMemoryAdded:       memoryVersionEventSpec(),
 	VerbMemoryAdjusted:    memoryVersionEventSpec(),

@@ -518,6 +518,8 @@ Examples of feature flags:
 - `opportunistic_curation`
 - `scheduled_curation`
 - `facts`
+- `transcripts`
+- `transcript_redaction`
 - `self_digest`
 - `consolidate`
 - `semantic_recall`
@@ -640,6 +642,7 @@ Idempotency is required for operations that create durable or external effects:
   rollback. Read-only request/run/input/status reads have no key.
 - Fact set, primary promotion, and delete.
 - Fact candidate proposal, confirmation, and rejection.
+- Transcript entry redaction apply; its preview has no key.
 - Policy create and delete.
 - Group create, member add/remove, and delete.
 - Message send and acknowledgement.
@@ -766,6 +769,22 @@ creating a preview resource. Apply uses the same route without `dry_run`, binds
 `Cache-Control: private, no-store` and contain no memory/evidence values, raw
 retry keys, or content-derived hashes.
 
+Transcript entry redaction is an owner-operator-only dry-run exception at
+`POST /v1/transcripts/{transcript_id}/entries:redact?dry_run=true`. Its body
+selects an inclusive `from_sequence`/`until_sequence` range of 1–100 entries;
+preview rejects an `Idempotency-Key` or `expected_redaction_set_revision`.
+Apply omits `dry_run`, adds the preview's `expected_redaction_set_revision`,
+and requires `Idempotency-Key`. The live operator must be root or have the
+`account_owner` role. Full-profile tokens on active or suspended accounts are
+accepted; agent tokens, other operators, and pending or closed accounts are
+refused. Account movement returns 409. No direct-user header is used. The
+server fixes the reason to `owner_request`, and both responses are value-free
+with `Cache-Control: private, no-store`. Apply replaces live content with a
+marker and atomically abandons covering open/planned curation runs; it preserves
+entry identity and immutable usage history. See
+[transcript-ledger.md#redaction](transcript-ledger.md#redaction) for retry,
+concurrency, and residual-copy limits.
+
 ## Pagination And Filtering
 
 List endpoints should use cursor pagination:
@@ -853,7 +872,7 @@ Initial route groups:
 | `/v1/facts`, `/v1/fact-candidates`, `/v1/fact-occurrences` | Agent-owned fact set/get/list/history, candidate review, upcoming lookup, capacity status, and permanent delete. Standalone `:primary` promotion remains target. |
 | `/v1/policies` | Target, not implemented: cross-agent policy create/list/show/delete/test. |
 | `/v1/groups` | Target, not implemented: security group lifecycle and membership. |
-| `/v1/transcripts` | Append-only visible user/assistant/system/tool interaction capture; agent write/own-read and account-operator audit-read. |
+| `/v1/transcripts` | Append-only visible interaction capture except owner-authorized entry redaction; agent write/own-read, account-operator audit-read, and owner-operator redaction. |
 | `/v1/messages` | Implemented same-realm direct, bounded explicit-list, and realm send; recipient-only reply; server-derived causal depth; metadata-only list/listen; observational recipient body peek; read/acknowledgement; and fenced claim/renew/release/atomic-complete processing. Group and cross-realm delivery remain target extensions. |
 | `/v1/message-requests` | Implemented message-backed realm open jobs: create/list/detail plus candidate offer/decline, coordinator client-ranked select/cancel, and selected-agent claim/renew/release/atomic-complete actions. |
 | `/v1/conversations` | Target: cross-realm conversation/task resource. |
