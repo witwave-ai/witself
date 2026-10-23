@@ -7,6 +7,11 @@ remote-only installation remain supported. Local cells are the selected directio
 explicitly subject to adversarial review and revision. Implementation has not
 started in this effort.
 
+Planning review 2026-10-23: see the
+[living progress record](implementation-plan.md#claude-review-and-living-progress-record)
+in the implementation plan for decisions, the next safe slice and founder
+decisions awaiting Scott. Use the plan's [terms](implementation-plan.md#terms).
+
 The product direction is settled; rollout timing and the migration of existing
 free hosted users still need a reviewed transition plan. These documents do not
 change existing installations or accounts.
@@ -44,9 +49,10 @@ avoid requiring Kubernetes or containers where possible.
 
 Distinguish recorded decisions from proposed mechanisms, inspected code from
 runtime proof, and canary readiness from complete product support. Keep the
-requirements and assessment consistent when accepting a design revision. All
-historical research observations use revision `adc6f186`; the implementation
-plan identifies its newer source checkpoint. Refresh affected evidence as
+requirements and assessment consistent when accepting a design revision. The
+original research baseline is `adc6f186`; later checkpoints are `6c55133f1e7c`
+(plan boundaries), `5380baec` (request and console seams) and `88fce5a3`
+(2026-10-23 full reference verification). Refresh affected evidence as
 implementation evolves.
 
 [All WitSelf documentation](../../README.md)

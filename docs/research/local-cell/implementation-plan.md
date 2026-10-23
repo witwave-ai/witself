@@ -71,12 +71,15 @@ the paths below identify reuse seams, not finished local-mode implementations.
 The request-coordination and account-console seams added by the 2026-10-23
 review were rechecked at `5380baec`; their current behavior motivates the gates
 below rather than proving local or synchronized support.
+On 2026-10-23 every source reference in these five documents was re-verified at
+`88fce5a3`: no behavioral statement was contradicted; 18 line anchors were
+corrected.
 
 | Boundary | Existing entry points | Planned adaptation |
 |---|---|---|
-| Connection and installed identity | [CLI resolution](../../../cmd/witself/main.go), [local bindings](../../../internal/local/local.go), [MCP](../../../cmd/witself/mcp.go) | Explicit local, connected-local, and remote-only profiles; offline local resolution without changing existing directory-based routing |
-| Account-console authority | [manager resolution](../../../cmd/witself/account_console.go#L35), [account-view authorization](../../../internal/dashboard/account.go#L97) | Authenticated local profile/installation trust independent of the hosted directory; preserve operator/agent credential separation and origin/identity checks |
-| Application and database | [server startup](../../../cmd/witself-server/main.go), [store](../../../internal/store/store.go), [migrations](../../../internal/store/migrate.go) | Private runtime configuration, durable bootstrap identity, serialized lifecycle and authenticated database-backed health |
+| Connection and installed identity | [CLI resolution](../../../cmd/witself/main.go), [local bindings](../../../internal/local/local.go), [MCP](../../../cmd/witself/mcp.go) | Explicit local, connected-local, and remote-only connection routes; offline local resolution without changing existing directory-based routing |
+| Account-console authority | [manager resolution](../../../cmd/witself/account_console.go#L35), [account-view authorization](../../../internal/dashboard/account.go#L97) | Authenticated local connection route/installation trust independent of the hosted directory; preserve operator/agent credential separation and origin/identity checks |
+| Application and database | [server startup](../../../cmd/witself-server/main.go), [store](../../../internal/store/store.go), [migrations](../../../internal/store/migrate.go) | Private local runtime configuration, durable bootstrap identity, serialized lifecycle and authenticated database-backed health |
 | Temporary archives | [startup spool sweep](../../../internal/server/spool_sweep.go), [self-export](../../../internal/server/export_self.go) | Private temporary directories owned by one active server lifecycle; never sweep host-global temporary files or another cell's archives |
 | Background jobs | [worker startup](../../../cmd/witself-worker/main.go), [runtime](../../../internal/worker/runtime.go) | Explicit job eligibility for standalone data versus synchronized projections; prevent copied remote work from executing |
 | Native delivery | [release targets](../../../.goreleaser.yaml), [Unix installer](../../../install.sh), [Windows installer](../../../install.ps1), [Homebrew generator](../../../tools/homebrew-formula/main.go) | Deliver compatible cell components separately from the lean client and invoke one shared lifecycle |
@@ -102,32 +105,92 @@ in parallel once their interfaces agree. All rows start **not started**.
 | ID | Deliverable | Depends on | Completion evidence |
 |---|---|---|---|
 | M0 | Operation, identity, lifecycle, and compatibility contracts | Existing research | Reviewed decisions and explicit unresolved gates; no assumed sync semantics |
-| M1 | Inactive local runtime and lifecycle foundation | M0 runtime contract | Private authenticated cell, isolated state, repeatable lifecycle, unchanged hosted path |
-| M2 | Standalone local operations and explicit routing | M1; M0 identity contract | Durable offline CLI/MCP and authorized account-console use, retrieval comparison, restart and concurrency proof |
-| M3 | Native installers, updates, and restore | M1; M2 acceptance fixtures | Clean-machine and interruption matrix on macOS, Windows, Linux; lean remote package |
-| M4 | Synchronization journal and failure simulator | M0 capture, authority-continuity and accounting contracts | Atomic capture/apply, mixed-version writer coverage, duplicate-safe move/restore and replay accounting |
-| M5 | Enrollment and authorized snapshot plus catch-up | M4 capture barrier and recovery proof; M1 isolation; M0 destination policy | Authorized admission, restartable snapshot, proven authority continuity and read-only convergence without side effects |
-| M6 | Writable domain synchronization | M5; M2; deletion/conflict rules in M0 | Two local writers plus remote-only writer converge under the failure matrix |
-| M7 | Connected authority, vault coverage, and account transitions | M5/M6 as appropriate; M0 destination and accounting contracts | No copied delivery authority; tested revocation, capacity, key and lifecycle behavior |
-| M8 | Usage reporting and product state visibility | M0 reporting decisions; M2/M5 state contracts | Disclosed payload, retrievable aggregates, retention and bounded failure behavior; accurate non-promotional UI |
+| M1 | Inactive local runtime and lifecycle foundation | M0a | Private authenticated cell, isolated state, repeatable lifecycle, unchanged hosted path |
+| M2 | Standalone local operations and explicit routing | M1; M0b | Durable offline CLI/MCP and authorized account-console use, retrieval comparison, restart and concurrency proof |
+| M3 | Native installers, updates, and restore | M1; M0a packaging and platform decisions; M2 smoke fixtures (not complete M2) | Clean-machine and interruption matrix on macOS, Windows, Linux; lean remote package |
+| M4 | Synchronization journal and failure simulator | M0c capture, authority-continuity and accounting contracts | Atomic capture/apply, mixed-version writer coverage, duplicate-safe move/restore and replay accounting |
+| M5 | Enrollment and authorized snapshot plus catch-up | M4 capture barrier and recovery proof; M1 isolation; M0c destination policy and identity transitions | Authorized admission, restartable snapshot, proven authority continuity and read-only convergence without side effects |
+| M6 | Writable domain synchronization | M5; M2; deletion/conflict rules in M0c | Two local writers plus remote-only writer converge under the failure matrix |
+| M7 | Connected authority, vault coverage, and account transitions | M5/M6 as appropriate; M0c destination and accounting contracts | No copied delivery authority; tested revocation, capacity, key and lifecycle behavior |
+| M8 | Usage reporting and product state visibility | disclosure, control and receiver decisions (founder); M2 for local status states; M5 only for connected-state labels | Disclosed payload, retrievable aggregates, retention and bounded failure behavior; accurate non-promotional UI |
 | M9 | Opt-in canaries and supported offering | Applicable evidence from M0–M8 | Platform, security, recovery, sync, support and compatibility exit gates met |
 
-M3 and M4 can advance in parallel after M1/M0 respectively; do not postpone
-Windows discovery until synchronization is complete. M8 UI design can start
-early, but collection stays disabled until its disclosure/control contract is
-settled. M9 is progressive: enroll a standalone canary after M1/M2 and its
-platform's recovery checks, then expand only as each additional capability passes.
+M1 and M4 start in parallel from different M0 subsets; M3 starts when M1 has a
+lifecycle interface and M2 has smoke fixtures. Do not postpone Windows discovery
+until synchronization is complete. M8 UI design can start early, but collection
+stays disabled until its disclosure/control contract is settled. M9 is progressive.
 
 ### M0 Define the contracts before durable user data
 
-- Complete an operation matrix for every API family: standalone support,
+#### Terms
+
+- **Cell:** one application plus its database, not a deployment topology.
+- **Installation identity:** the identity of one managed local installation,
+  separate from the logical account and its devices.
+- **Device or replica:** an enrolled participant or its synchronized account copy.
+- **Authority incarnation:** the authoritative account's restore/cutover
+  generation, not its ID or software version.
+- **Enrollment**, **adoption**, and **namespace join:** respectively authorizing
+  a device, hosting an existing standalone logical account at a destination,
+  and merging two populated accounts; these are three distinct transitions.
+- **Connection route:** the client-side choice of local, connected-local, or
+  remote-only cell for CLI/MCP/hooks.
+- **Access profile:** MCP's `full`, `read-only`, `curator-preview`, or
+  `curator-apply` permission surface
+  ([current profiles](../../../cmd/witself/mcp.go#L1191)).
+- **Local runtime configuration:** server/worker private listeners, owned paths,
+  child environment, job eligibility and readiness.
+
+#### M0a runtime and lifecycle contract
+
+- Choose process/service ownership, private paths and transport, component
+  manifest format, supported OS/architecture versions, PostgreSQL distribution
+  and version floor, extension requirements, and application/schema/protocol compatibility.
+  Evaluate native processes first; use measured counterevidence to revisit them.
+- Set measurable release budgets for startup, idle CPU/RAM, disk growth, search
+  latency/relevance, and sync recovery. Establish small and large representative
+  synthetic account fixtures and expected answers before measuring alternatives.
+
+#### M0b standalone identity and policy contract
+
+- Define local installation identity separately from account, realm, agent,
+  device, and replica identity; specify local, connected-local and remote-only
+  connection routes.
+- Define offline account-console trust independently of hosted directory access,
+  preserving origin/account verification and separate operator/agent authority.
+- Specify standalone messaging authority: local routing, ownership/delegation,
+  fencing epochs, deduplication, receipts and cancellation. Independent local
+  messaging must continue without SaaS enrollment.
+- Define the standalone columns of the operation matrix for every API family:
+  support, write authority, permissions, conflicts, deletion and retention;
+  explicitly classify unsupported operations.
+- Define the standalone policy snapshot the free local cell runs under. Feature
+  gates read the applied plan/policy snapshot from the database
+  ([mutation gate](../../../internal/store/message.go#L266),
+  [snapshot interpretation](../../../internal/store/message.go#L308)), and the
+  current [hosted Personal plan](../../../web/plans/plans.json#L13) disables
+  messaging and has zero secret capacity. The local cell therefore needs its own
+  explicit standalone policy (messaging enabled, declared vault capacity, no
+  hosted entitlements) rather than any hosted plan row or the unmanaged defaults
+  (seeding applies no catalog, limits and features start empty, legacy messaging
+  is allowed and a missing secret limit means unlimited:
+  [seeding](../../../internal/store/seed.go#L33),
+  [messaging default](../../../internal/store/message.go#L286),
+  [secret limit](../../../internal/store/secret_limit.go#L75)), and connected
+  enrollment must never accept that local snapshot as entitlement.
+
+#### M0c synchronization contract
+
+Nothing in M0c blocks M1–M3.
+
+- Complete the connected columns of the operation matrix for every API family:
   connected offline support, write authority, permissions, conflicts, deletion,
   retention, and required online coordination. Explicitly classify unsupported
   operations rather than relying on missing configuration.
-- Define local installation identity separately from account, realm, agent,
-  device, and replica identity. Specify adoption of a populated local account
-  into a new remote account and joining an already populated remote account.
-  Existing single-home cell moves/imports do not implement either sync flow.
+- Specify adoption of a populated local account at a new remote destination,
+  namespace join with an already populated remote account, and device enrollment
+  as distinct transitions. Existing single-home cell moves/imports do not
+  implement either synchronization flow.
 - Define seamless upgrade/return acceptance: preserve local endpoints and logical
   identities; automate authorized data bootstrap while journaling ongoing writes;
   resume interruptions; preserve local use on capacity or identity conflicts.
@@ -136,7 +199,7 @@ platform's recovery checks, then expand only as each additional capability passe
   fixture: independently populated local and hosted accounts must not be reduced
   to an empty-destination test. Resolve identity/ownership collisions and sealed
   identity continuity before enabling that enrollment path.
-- Specify messaging authority in standalone and connected modes: routing,
+- Specify connected messaging authority alongside M0b standalone authority: routing,
   ownership/delegation, fencing epochs, deduplication, receipts and cancellation.
   Define which cross-device work waits during a partition; independent local
   messaging must continue. SaaS enrollment cannot create two valid claim owners
@@ -151,10 +214,6 @@ platform's recovery checks, then expand only as each additional capability passe
   linked opening/offer/result messages during snapshots and incremental replay.
   Specify projection-only inspection of imported requests; ordinary list/show
   currently reconcile lifecycle state and are not inherently read-only.
-- Choose process/service ownership, private paths and transport, component
-  manifest format, supported OS/architecture versions, PostgreSQL distribution
-  and extension requirements, and application/schema/protocol compatibility.
-  Evaluate native processes first; use measured counterevidence to revisit them.
 - Write the sync envelope and state machine: origin, operation ID, expected
   version/causal basis, schema/protocol version, authorization context, durable
   receipt, and explicit rejected/conflicting outcomes. Decide per-domain rules;
@@ -189,9 +248,6 @@ platform's recovery checks, then expand only as each additional capability passe
   knowledge retention and retired-device rebootstrap, plus authority for local
   curation versus shared curation. Stable transcript/evidence identity is a
   prerequisite, not a later repair by renumbering records.
-- Set measurable release budgets for startup, idle CPU/RAM, disk growth, search
-  latency/relevance, and sync recovery. Establish small and large representative
-  synthetic account fixtures and expected answers before measuring alternatives.
 
 **Exit:** reviewed contract records linked from this plan; each unresolved item
 has an owner and a milestone it blocks. Runtime experiments may use disposable
@@ -200,7 +256,7 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
-- Introduce an explicit runtime profile and a dependency-light lifecycle module
+- Introduce an explicit local runtime configuration and a dependency-light lifecycle module
   or companion executable. Keep its location and command names open until the
   module review; native installers and a possible infra CLI frontend use the
   same implementation. Do not embed the cloud provisioning engine in the client.
@@ -216,19 +272,50 @@ schemas the eventual enrollment design cannot preserve or migrate.
 - Give every active server lifecycle a private archive/spool directory, including
   overlapping upgrades and multiple cells. Configure the applicable
   `TMPDIR`/`TEMP`/`TMP` before launching the process; protect permissions/ACLs and
-  verify ownership before cleanup. Current startup sweeps matching archive names
-  in the process-default temporary directory assuming exclusive ownership. Never
-  point that sweep at host-global temp or share it between active servers.
+  verify ownership before cleanup. Today the sweep removes regular files matching
+  `witself-(backup-validate|account-import|self-export)-<n>.tar.gz` in the process
+  temp directory with no ownership check
+  ([sweep](../../../internal/server/spool_sweep.go#L11)); self-export, backup
+  validation and import all spool there
+  ([self-export](../../../internal/server/export_self.go#L73),
+  [validation](../../../internal/server/server.go#L6104),
+  [import download](../../../internal/server/server.go#L7590)). Never point that
+  sweep at host-global temp or share it between active servers.
 - Bind API, PostgreSQL, health and metrics privately, avoid port collisions,
   protect files/Windows ACLs, and authenticate local clients. Loopback alone is
   not an authorization boundary against other users or untrusted browser requests.
 - Explicitly select allowed worker jobs. Review retention, purge, style rollout,
   and outbound dispatch for each runtime/data role. A local projection must not
-  execute imported remote claims, purge account data, or dispatch mail.
+  execute imported remote claims, purge account data, or dispatch mail. Today
+  [ten configurable job types](../../../cmd/witself-worker/main.go#L177) exist,
+  three enabled by default, and the default `message_rate_bucket_cleanup` also
+  performs [activity retirement](../../../internal/store/message_rate_bucket_cleanup_worker.go#L91)
+  of nonbilling events older than 35 days. Request reconciliation and curation expiry have foreground
+  paths ([requests](../../../internal/store/message_request.go#L669),
+  [curation](../../../internal/store/memory_curation.go#L1532)), and
+  [usage rollups](../../../internal/store/usage.go#L334) update transactionally
+  wherever an event is recorded, including
+  [worker settlement](../../../internal/store/agent_email_outbound_worker.go#L321),
+  so disabling the worker does not make a copy inert.
+- Every configured server startup that reaches
+  [email-capacity configuration](../../../cmd/witself-server/main.go#L193)
+  rewrites the shared singleton; a second cell or an upgrade must not overwrite
+  another cell's limits.
+- [Migration waiting](../../../internal/store/migrate.go#L93) uses a background
+  context with no deadline and the
+  [worker runtime](../../../internal/worker/runtime.go#L118) exits when a job
+  returns, without restarting it; the lifecycle owner needs bounded, cancellable
+  waits and an explicit restart policy.
 - Require database/schema and authenticated operation checks for cell readiness.
-  A bare `/readyz` response is insufficient because current server startup can
-  run without a database. Prove native startup on every intended OS early;
-  cross-compilation alone does not establish Windows runtime support.
+  Today `/readyz` succeeds with no database configured (unless email receive
+  requires one) and otherwise checks only a store ping; `/v1/version` reports the
+  compiled schema version, not the attached database's
+  ([startup](../../../cmd/witself-server/main.go#L2043),
+  [readiness](../../../internal/server/server.go#L7504),
+  [version](../../../internal/server/server.go#L2459)). Startup migrations still
+  verify schema compatibility; these endpoints do not establish cell identity.
+  Prove native startup on every intended OS early; cross-compilation alone does
+  not establish Windows runtime support.
 
 **Exit:** repeated install/start/stop and crash restart preserve synthetic data;
 parallel lifecycle calls serialize; unrelated processes remain untouched;
@@ -239,21 +326,31 @@ or hosted job behavior.
 
 ### M2 Make standalone use complete enough for a canary
 
-- Add explicit profiles without changing named hosted-account resolution by
+- Add explicit connection routes without changing named hosted-account resolution by
   default. Local resolution must survive a blocked directory/control-plane
   connection; a local failure must never silently reroute writes remotely.
-- Stage and atomically activate profile/credential bindings, with recovery from
-  interruption. Define how running MCP clients and hooks adopt a changed profile;
+- Stage and atomically activate connection route/credential bindings, with recovery from
+  interruption. Define how running MCP clients and hooks adopt a changed connection route;
   a partial switch must not combine one cell's identity with another's endpoint.
 - Bootstrap a standalone account and its operator/agent permissions without
   granting hosted entitlements. Retain identity verification through CLI, MCP,
   hooks, console and TUI. Avoid automatic identity remapping on later enrollment.
-- Give account-console management its own authenticated local installation/profile
+- Give account-console management its own authenticated local installation/connection route
   trust path. Adapting ordinary client endpoint resolution is insufficient: the
   current console independently consults the hosted directory before admitting
   operator authority. Preserve origin/account identity verification and distinct
   operator/agent credentials; do not bypass these checks or promote an agent
-  token to account-wide access to make offline views work.
+  token to account-wide access to make offline views work. The directory
+  dependency is in the CLI manager resolver, which also declines account-manager
+  credentials for explicit endpoint/token-file invocations
+  ([resolver](../../../cmd/witself/account_console.go#L35),
+  [directory lookup](../../../cmd/witself/account_console.go#L43)); the lower-level
+  verifier already accepts a trusted loopback origin via `/v1/whoami`
+  ([origin validation](../../../internal/client/account_console.go#L61),
+  [manager verification](../../../internal/client/account_console.go#L90)) and is the reuse
+  seam. Named CLI/agent connections without an explicit endpoint require the
+  directory today ([CLI](../../../cmd/witself/main.go#L338),
+  [agent](../../../cmd/witself/main.go#L390)).
 - Exercise transcripts, narrative memories, facts, their references and recall,
   including client-driven curation for the declared local scope. Define local
   lease ownership; sync must not transplant completed/shared authority later.
@@ -272,7 +369,7 @@ or hosted job behavior.
 paths, restart offline, and recover committed data. A blocked reporting or hosted
 endpoint does not delay core operations. No copied vault keys or provider
 credentials are needed for a canary using synthetic transcripts and memories.
-Interrupted profile activation and concurrently running clients preserve correct
+Interrupted connection route activation and concurrently running clients preserve correct
 identity/routing and recover to an explicit, usable state.
 Local messaging completes with no hosted dependency and no duplicate claim owner.
 With the hosted directory blocked, authorized account views and local client
@@ -280,6 +377,39 @@ inventory work offline. Agent-only credentials and mismatched origin/account
 bindings remain denied; enrollment and return later preserve these boundaries.
 
 ### M3 Deliver and update the cell through native installation
+
+Inspected current behavior: embedded migrations require
+[no PostgreSQL extension](../../self-hosting.md#L233), and startup checks no
+PostgreSQL version floor; [Compose uses 16](../../../compose.yaml#L17) and the
+[fleet configuration uses 18](../../../infra/pulumi/cmd/witself-infra/main.go#L348).
+M0a sets the floor. The installers verify checksums but not the published
+signatures ([Unix](../../../install.sh#L389), [Windows](../../../install.ps1#L520));
+the component manifest needs an explicit trust contract.
+[`install.sh` rejects the worker](../../../install.sh#L63), and
+[Homebrew ships no server or worker](../../../tools/homebrew-formula/main.go#L40).
+None of the three existing backup formats is a native desktop restore
+([pre-migration dump](../../../scripts/civo-pre-migration-backup.sh#L311),
+[scheduled backup](../../../.gitops/charts/apps/files/postgres-backup.sh#L103),
+[archive validation](../../../internal/store/import.go#L7073)), so basic local
+restore is new work.
+
+A successful self-export of an active account is not importable even into an
+empty destination:
+[self-export permits an active account](../../../internal/store/export.go#L279),
+while [ordinary import](../../../internal/store/import.go#L6624) requires a
+suspended or closed manifest and the
+[backup purpose](../../../internal/store/import.go#L6618) is accepted only by the
+[rollback-only validation path](../../../internal/store/import.go#L7073).
+Export [preserves `is_default`](../../../internal/store/export.go#L403) and
+import [rejects `is_default=true`](../../../internal/store/import.go#L1637), so using today's
+bootstrap account as the local cell's account is also a snapshot/restore
+compatibility choice. Vault files require exact 0700/0600 modes, hard-link
+publication and directory sync
+([vault directory](../../../internal/local/vault.go#L346),
+[key publication](../../../internal/local/vault.go#L382)), and the
+[Windows journal adapter](../../../internal/local/account_provision_journal_fs_windows.go#L56)
+already treats mode bits as insufficient; Windows vault custody needs native
+proof. The bullets below are proposed work, not runtime acceptance.
 
 - Prepare the ordinary new-install path to provision and initialize the free
   local cell automatically and verify usable CLI/MCP access without a second
@@ -314,6 +444,41 @@ interrupted migration, unsupported version skew, reboot and offline restart.
 Restore is demonstrated, not inferred from successful backup creation.
 
 ### M4 Prove the synchronization mechanics in isolation
+
+Inspected current behavior: no account-wide change stream, replication journal
+or CDC was found. The
+[outbound-email outbox](../../../internal/store/agent_email_outbound.go#L388) and
+[audit stream](../../../internal/store/events.go#L47) are domain-specific and
+cannot be assumed to capture every account change. `account_events` has no row
+images; [dashboard preferences](../../../internal/store/dashboard_preferences.go#L129)
+write without any event. Memory `change_seq` is an owner-lane counter that
+[permanent deletion](../../../internal/store/memory_delete.go#L162) does not advance.
+[Transcript retention](../../../internal/store/transcript_retention.go#L611) leaves
+no tombstone and frees the conversation
+[`external_id`](../../../internal/store/transcript.go#L124) for reuse;
+[message retention](../../../internal/store/message_retention.go#L1205) removes
+idempotency evidence a receipt horizon would need, and
+[account purge](../../../internal/store/account_purge.go#L581) removes historical
+usage and audit. [Resource IDs](../../../internal/id/id.go#L15) are random, not
+serial; [transcript sequences](../../../internal/store/transcript.go#L239) and
+[memory versions](../../../internal/store/memory.go#L863) are integer coordinates
+disconnected writers can collide on.
+
+Capture must observe database changes, not API outcomes: a failed request
+mutation can still commit lifecycle changes through due-expiry reconciliation
+([reconcile](../../../internal/store/message_request.go#L1308),
+[commit on failure path](../../../internal/store/message_request.go#L1315)), and
+[operator agent deletion](../../../internal/store/agent.go#L242) writes the
+[request graph](../../../internal/store/message_request.go#L1383).
+Self-export refuses while an unexpired vault enrollment is pending or approved,
+a rotation is open or pending keys are orphaned
+([enrollment](../../../internal/store/export.go#L302),
+[rotation and keys](../../../internal/store/export.go#L326)). The control plane
+already keeps a numeric account lifecycle epoch on
+[lifecycle claims](../../../infra/cloudflare/control-plane/src/account-lifecycle-state.mjs#L858)
+and [projections](../../../infra/cloudflare/control-plane/src/account-lifecycle-state.mjs#L221);
+evaluate it as a seam for authority incarnation rather than presuming it
+sufficient. The harness below must supply the runtime evidence.
 
 - Build a deterministic harness with two local cells, a remote authority and a
   second remote move/restore destination, plus an ordinary remote-only client.
@@ -396,7 +561,8 @@ claimable protocol notification at any interruption point.
   catch up while the remote account is changing, and publish readiness only
   when the declared data coverage is available. Exclude executable leases,
   authentication tokens, private vault keys and remote dispatch credentials
-  from materialized views. Approved sealed records follow M7's separate rules.
+  from materialized views. Sealed records are copied as ciphertext only in M5;
+  key enrollment and recovery are asserted in M7.
 - Prove automatic bootstrap in both directions: a populated local cell adopts a
   new hosted destination, and an authorized local replica joins an existing
   hosted account. Include the independently populated local-and-hosted fixture
@@ -512,18 +678,31 @@ during and after the transition, with agent/operator boundaries intact.
 
 #### Populated-account transition acceptance
 
-This is a required end-to-end test specification for M5/M6/M7 and the supported
-M9 release, not an implemented test or permission to use customer accounts.
+This is one required end-to-end specification whose steps are asserted in stages:
+M5 asserts steps 1–4 for read-only continuity (identity preservation, admission,
+interrupted bootstrap, projection-only inspection); M6 adds the writable-domain
+branches of steps 3–4; M7 asserts steps 5–6 plus key custody, authority handoff and
+return; the supported M9 release requires every step. This is not an implemented
+test or permission to use customer accounts.
 Use real stores and synthetic identities, clients and service integrations.
-Cover native installation/profile behavior on macOS, Windows and Linux through
+Cover native installation/connection route behavior on macOS, Windows and Linux through
 the M3 matrix; keep protocol fault cases reproducible in the M4 harness.
 
 1. **Start with two independently populated accounts.** The local cell and an
    existing hosted account each contain realms/agents, transcripts, facts,
    memories with evidence, sealed secrets with their legitimate client-held keys,
    and message history. Include pending sends, completed requests and live request
-   reservations/claims. Keep installed CLI/MCP clients, hooks and an authorized
-   console using the local cell, plus a remote-only client writing to the hosted
+   reservations/claims within their executable lifetime. Request authority ages
+   on database time: requests default to one hour, with a seven-day maximum;
+   offer collection lasts at most 15 minutes, and each reservation/claim lease
+   grant or renewal lasts at most 15 minutes, bounded by request expiry. Renewal
+   retains the same generation
+   ([request bounds](../../../internal/store/message_request.go#L44),
+   [input bounds](../../../internal/store/message_request.go#L284),
+   [renewal](../../../internal/store/message_request.go#L2337),
+   [lease bounds](../../../internal/store/message.go#L58)). Keep installed CLI/MCP
+   clients, hooks and an authorized console using the local cell, plus a
+   remote-only client writing to the hosted
    account. Record expected logical identities, references, permissions and
    message outcomes without recording content or keys in ordinary proof.
 2. **Authorize adoption and prove admission.** Exercise the M0 ownership and
@@ -546,7 +725,10 @@ the M3 matrix; keep protocol fault cases reproducible in the M4 harness.
    specific conflict or pending state without discarding work. Verify evidence
    references and authorized secret decryption, once-only logical effects,
    request-wide capacity/ordering, stale-fence rejection and no replay of completed
-   work. Imported request inspection must remain non-mutating where M5 applies.
+   work. Continuity preserves request state, history and authority epoch, not an
+   executable reservation/claim lease beyond its database-time bound across a
+   sleep or partition. Imported request inspection must remain non-mutating where
+   M5 applies.
 5. **Change paid-service status and return to local use.** Test a lower hosted
    quota, effective subscription cancellation/expiry and deliberate sync disconnect
    as separate cases. Catch up authorized remote changes before marking a planned
@@ -631,30 +813,65 @@ and hosted-feature continuity before changing live policy. These are rollout
 decisions, not an open choice about whether local replaces hosted free. Preserve
 explicit remote-only installation and existing users' data and bindings throughout.
 
-## First implementation batch for Claude to refine
+## First implementation batch
 
-Do not turn this into one long branch. Suggested first independently reviewable
-slices, after agreement on their contracts:
+Each slice records `ID / scope / acceptance / dependencies (satisfied?) /
+evidence class / activation boundary / recovery limit / owner`. These are proposed
+slices, not implementation authorization; do not turn them into one long branch.
 
-1. **Contract and acceptance fixtures:** complete M0's operation/authority table,
-   identity choices and platform matrix; add synthetic fixtures and expected
-   outcomes. Identify blocking decisions without implementing a second store.
-2. **Inactive runtime profile:** private listener configuration, explicit worker
-   eligibility and database-backed identity/health checks. Keep existing
-   defaults unchanged; prove that copied remote work cannot run locally.
-3. **Disposable native lifecycle proof:** isolated managed PostgreSQL and server
-   with repeatable start/stop/restart/repair, process/data/temp ownership protection
-   and native smoke execution on all three OSes. Test concurrent cells' archive
-   isolation. No routing change on ordinary installs.
-4. **Explicit local connection profile:** a deliberately selected test profile
-   uses that cell through CLI/MCP while directory access is blocked; remote-only
-   profiles continue through existing contracts.
+- **LC-S0 contracts** / Scope: M0a and M0b text (this review supplies it);
+  residual synthetic fixture inventory and expected outcomes are folded into
+  LC-S1's first commit / Acceptance: text complete in this review; fixtures
+  pending authorization / Dependencies: none / Evidence: static / Activation:
+  none / Recovery: documentation only; no runtime state / Owner: planning lead
+  for text; vacant for fixtures.
+- **LC-S1 inactive local runtime configuration** / Scope: typed configuration
+  for private listeners, owned data/temp paths, allowlisted child environment,
+  per-job eligibility, authenticated database/schema/account readiness;
+  existing defaults byte-identical when not selected / Acceptance: refuses a
+  missing database, wrong installation identity, public listeners and disallowed
+  jobs; `/readyz` and `/v1/version` under the configuration reflect the attached
+  database / Dependencies: LC-S0 text (satisfied by this review) / Evidence: unit
+  plus real PostgreSQL; one native macOS run / Activation: nothing changes unless
+  explicitly selected / Recovery: remove the configuration; behavior reverts /
+  Owner: vacant. **This is the next safe slice for separate authorization.**
+- **LC-S2 disposable lifecycle core** / Scope: one owner for process, data and
+  temp with an exclusive lock, manifest and interruption journal / Acceptance:
+  inspect/install/start/stop/status/repair/remove on synthetic data /
+  Dependencies: LC-S1 (pending) / Evidence: fixture, real PostgreSQL, native /
+  Activation: explicit harness only / Recovery: synthetic data only / Owner:
+  vacant.
+- **LC-S2-P platform adapters** / Scope: one slice per OS; Windows first because
+  server/worker have no Windows build
+  ([server targets](../../../.goreleaser.yaml#L32),
+  [worker targets](../../../.goreleaser.yaml#L71)) / Acceptance: native lifecycle
+  proof for the selected OS / Dependencies: LC-S2 and the M0a platform decisions
+  (pending) / Evidence: native / Activation: explicit synthetic harness only /
+  Recovery: synthetic data only / Owner: vacant.
+- **LC-S3 explicit local connection route** / Scope: CLI/MCP/hooks select a local
+  cell with the directory blocked / Acceptance: atomic binding activation;
+  fail-closed partial switch / Dependencies: LC-S1, M0b route decision (pending) /
+  Evidence: fixture plus real API / Activation: explicitly selected synthetic
+  local route only / Recovery: restore the prior complete binding; no customer
+  account transition / Owner: vacant.
+- **LC-S4 offline account-console trust** / Scope: independent local manager
+  binding on the existing verifier seam / Acceptance: agent-only, stale and
+  wrong-origin cases denied / Dependencies: LC-S3 (pending) / Evidence: fixture
+  plus real API / Activation: explicitly selected synthetic local manager
+  binding only / Recovery: remove that binding; no privilege promotion / Owner:
+  vacant.
+- **LC-S5 sync model and failure-harness skeleton** / Scope: parallel track from
+  M0c; operation IDs, capture, incarnation, receipts, accounting, deletion
+  knowledge, compound publication; two local stores plus a remote and a move
+  target / Acceptance: failure-harness scaffolding is not synchronization /
+  Dependencies: M0c decisions (pending) / Evidence: fixture plus real PostgreSQL /
+  Activation: synthetic harness only; no account synchronization / Recovery:
+  disposable stores only; no user-data recovery claim / Owner: vacant.
 
-In parallel, specify M4's journal and failure harness using the agreed identities;
-do not enable writes between real accounts. After this batch, use measured
-lifecycle effort, platform gaps and one fault-tested replication slice to size
-the remaining work. Synchronization is the largest uncertainty, followed by
-native upgrades/recovery. Avoid a calendar commitment based only on code reuse.
+Recorded dissent: the LC-4 review lane recommended authorizing LC-S0's fixtures
+as a separate first slice before any runtime code. The planning lead folds those
+fixtures into LC-S1 because the contract text now exists and a fixture-only slice
+would delay the first native evidence; the dissent stands until LC-S1's review.
 
 ## Validation and evidence for each slice
 
@@ -683,7 +900,7 @@ Every completed slice should record:
 
 ## Claude review and living progress record
 
-Claude should first challenge the runtime boundary, identity/adoption design,
+The planning lead should first challenge the runtime boundary, identity/adoption design,
 all-writer change capture, deletion retention, worker eligibility and upgrade
 recovery. Add source-backed findings and measured alternatives. A simpler design
 may replace this proposal if it meets the same requirements; record why and how
@@ -691,24 +908,26 @@ existing local data would survive. The local-cell decision remains revisable.
 
 Resolve these before their dependent milestones:
 
-| Decision | Needed before | Reviewer contribution |
-|---|---|---|
-| Exact standalone/offline operation set and secrets coverage | M0, M2, M7 | Fill the operation matrix; distinguish local curation from shared work |
-| Supported OS/architecture versions and PostgreSQL packaging/extensions | M1/M3 | Native proof, footprint and distribution/maintenance assessment |
-| Startup/service ownership and lifecycle command/module placement | M1/M3 | Compare user/system scope and infra frontend without dependency inflation |
-| Identity adoption, device trust, at-rest protection and offline access horizon | Durable enrollment in M5 | Threat scenarios and existing account/vault constraints |
-| Request-wide authority, handoff and lifecycle ordering | M0 contract; M4/M6/M7 messaging proof | Concurrent selection, sibling renewal/settlement and stale-epoch fixtures; individual claim uniqueness is insufficient |
-| Compound request visibility and projection-only imported inspection | M4 publication; M5 read replicas | Reordered notification/link delivery, interrupted apply, mixed local/imported list/show and no imported reconciliation writes |
-| Offline account-console authority | M2; transition proof in M7 | Directory-blocked account views/inventory, identity/origin checks and distinct agent/operator permissions |
-| Populated-local plus populated-hosted continuity | M5 bootstrap; complete M7/M9 acceptance | Identity/key/collision admission, ongoing writes, interruption, subscription changes and return using the same cell and clients |
-| Capture activation and rollback barrier across server/worker versions | M4 proof; any M5 snapshot/enrollment | Mixed-version writes, verified capture or drain, explicit recovery after coverage loss |
-| Remote authority incarnation, cutover and restore continuity | M4 proof; M5 enrollment | Lost-ACK relocation, portable receipt/deletion state, stale endpoints and older-backup recovery limits |
-| Logical usage/audit identity, replay and derived-state accounting | M4; before M5/M6 activation | Expected counts for user actions, snapshot, retry and replica application; separate pricing policy |
-| Self-managed and SaaS admission, authorization and feature entitlements | M5 enrollment; M7 feature activation | Authoritative policy fixtures for both destinations; no assumed SaaS billing rule for self-managed |
-| Conflict rules, stable transcript evidence and deletion/history horizon | M4/M6 | Executable multi-writer and stale-device counterexamples |
-| Reporting fields, linkage, disclosure, controls and receiver ownership | Enabling M8 | Payload/resource contract, operator aggregate and retention proof, product/privacy review |
-| Resource/retrieval budgets, canary duration and expansion thresholds | Enrolling the relevant M9 cohort | Named fixtures, baselines and pass/fail values |
-| Activation timing and existing free-user transition | Product transition after M9 | Implement the selected free-local default and hosted-free replacement; define notice, migration, retention and continuity without silently switching existing bindings |
+| Decision | Needed before | Reviewer contribution | Owner |
+|---|---|---|---|
+| Exact standalone/offline operation set and secrets coverage | M0, M2, M7 | Fill the operation matrix; distinguish local curation from shared work | planning lead |
+| Supported OS/architecture versions and PostgreSQL packaging/extensions | M1/M3 | Native proof, footprint and distribution/maintenance assessment | founder |
+| Startup/service ownership and lifecycle command/module placement | M1/M3 | Compare user/system scope and infra frontend without dependency inflation | planning lead |
+| Identity adoption, device trust, at-rest protection and offline access horizon | Durable enrollment in M5 | Threat scenarios and existing account/vault constraints | founder |
+| Request-wide authority, handoff and lifecycle ordering | M0 contract; M4/M6/M7 messaging proof | Concurrent selection, sibling renewal/settlement and stale-epoch fixtures; individual claim uniqueness is insufficient | planning lead |
+| Compound request visibility and projection-only imported inspection | M4 publication; M5 read replicas | Reordered notification/link delivery, interrupted apply, mixed local/imported list/show and no imported reconciliation writes | planning lead |
+| Offline account-console authority | M2; transition proof in M7 | Directory-blocked account views/inventory, identity/origin checks and distinct agent/operator permissions | planning lead |
+| Populated-local plus populated-hosted continuity | M5 bootstrap; complete M7/M9 acceptance | Identity/key/collision admission, ongoing writes, interruption, subscription changes and return using the same cell and clients | planning lead |
+| Capture activation and rollback barrier across server/worker versions | M4 proof; any M5 snapshot/enrollment | Mixed-version writes, verified capture or drain, explicit recovery after coverage loss | planning lead |
+| Remote authority incarnation, cutover and restore continuity | M4 proof; M5 enrollment | Lost-ACK relocation, portable receipt/deletion state, stale endpoints and older-backup recovery limits | planning lead |
+| Logical usage/audit identity, replay and derived-state accounting | M4; before M5/M6 activation | Expected counts for user actions, snapshot, retry and replica application; separate pricing policy | planning lead |
+| Self-managed and SaaS admission, authorization and feature entitlements | M5 enrollment; M7 feature activation | Authoritative policy fixtures for both destinations; no assumed SaaS billing rule for self-managed | founder |
+| Conflict rules, stable transcript evidence and deletion/history horizon | M4/M6 | Executable multi-writer and stale-device counterexamples | planning lead |
+| Reporting fields, linkage, disclosure, controls and receiver ownership | Enabling M8 | Payload/resource contract, operator aggregate and retention proof, product/privacy review | founder |
+| Resource/retrieval budgets, canary duration and expansion thresholds | Enrolling the relevant M9 cohort | Named fixtures, baselines and pass/fail values | founder |
+| Activation timing and existing free-user transition | Product transition after M9 | Implement the selected free-local default and hosted-free replacement; define notice, migration, retention and continuity without silently switching existing bindings | founder |
+| PostgreSQL version floor and distribution per OS | M0a before M3 | Candidate distributions per OS, footprint and update cadence; no extension is required today | planning lead |
+| Standalone local policy snapshot | M0b before M2 | Explicit messaging, vault and capacity policy for the free local cell; never uploaded as entitlement | planning lead |
 
 For each milestone, append a record using `ID / owner / state / PR or decision /
 evidence / unresolved gate / next action`. Use proposed, in progress, blocked, or
@@ -725,36 +944,61 @@ disabled slice is not an enabled capability. Edit this section only from the
 branch named in the active review record below, or after that review hands off.
 
 **PLAN-REVIEW-2026-10-23** / Fable 5.1 (planning lead); Codex GPT-6 Astra at
-`ultra` for investigation lanes / in progress / Decision: this pass is review,
-planning and documentation only; it authorizes no implementation, push, merge,
-release, enrollment or live policy change (see [handoff](fable-handoff.md)) /
-Evidence: source revision `88fce5a365c2e1a21d088173c82018f3146edd1d`
-(`origin/main`, 2026-10-23); isolated worktree
-`~/.local/state/witself/worktrees/local-cell-plan-review`, branch
-`fable/local-cell-plan-review`, clean at start; Codex model and effort verified
-from the lanes' session metadata, not only configuration; four read-only Codex
-lanes dispatched from detached worktrees at the same revision (LC-1 runtime,
-lifecycle, workers, delivery, infra CLI; LC-2 identity, console, credentials,
-vault, messaging and requests; LC-3 sync seams, identities, deletion, movement,
-accounting, backup; LC-4 architecture challenge, dependency order, document
-consistency, slice critique), each verifying its share of the documents' 130
-source references and answering numbered assumption checks; reports under
-`~/.witself/handoff/tasks-wave1-2026-09-19/reports/LC-*.md` (outside the
-repository; value-free summaries are folded into this plan) / Unresolved gate:
-lane results, adversarial verification of their top findings, founder decisions
-listed below / Next action: integrate verified findings into the documents,
-rewrite the first implementation batch as resumable slices, name the next safe
-slice, commit on the review branch, hand off without pushing.
+`ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
+M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
+runtime configuration terminology; stage the populated-account acceptance across
+M5/M6/M7; LC-S1 is the next safe slice; the local-cell architecture stays the
+provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
+first, embedded-service challenger retained, remote-cache-only fails the fixed
+requirements, container cell adds a runtime) with measurable budgets required
+before ratification / Evidence: source revision
+`88fce5a365c2e1a21d088173c82018f3146edd1d`; 130 references re-verified (0 contradicted,
+18 anchors corrected); five lane reports and an adversarial re-check of 18 key
+findings (12 confirmed, 4 qualified, 2 refuted and dropped) retained outside the
+repository under the handoff reports directory; Codex model and effort verified
+from session metadata / Unresolved gates: founder decisions listed in the decision
+table; no runtime evidence yet (static review only) / Next action: Scott decides
+whether to authorize LC-S1; the implementing agent claims ownership in this record
+before starting.
 
 | ID | Owner | State | PR or decision | Evidence | Unresolved gate | Next action |
 |---|---|---|---|---|---|---|
-| M0 | vacant | proposed | none | none; contracts drafted only as plan text | which M0 items block M1–M3 versus M4+ (under review) | split into a runtime/lifecycle subset and a synchronization subset after the review |
-| M1 | vacant | proposed | none | none | runtime contract subset of M0 | first inactive-foundation slice after separate authorization |
+| M0 | vacant | in progress | text split into M0a–M0c in this review | static review only | founder rows of the decision table | fixtures with LC-S1 |
+| M1 | vacant | proposed | none | none | LC-S1 authorization | LC-S1 |
 | M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
-| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | native lifecycle proof on all three OSes |
+| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | Windows runtime proof first; native lifecycle proof on all three OSes |
 | M4 | vacant | proposed | none | none | capture, authority-continuity and accounting contracts | harness specification after M0 sync subset |
-| M5 | vacant | proposed | none | none | M4 barrier proof; destination admission policy | blocked on M4 |
+| M5 | vacant | proposed | staged assertions (steps 1–4) | none | M4 barrier proof; destination admission policy | blocked on M4 |
 | M6 | vacant | proposed | none | none | deletion and conflict rules | blocked on M5 |
-| M7 | vacant | proposed | none | none | request-wide authority and key-custody contracts | blocked on M5/M6 |
+| M7 | vacant | proposed | steps 5–6, keys, handoff, return | none | request-wide authority and key-custody contracts | blocked on M5/M6 |
 | M8 | vacant | proposed | none | none | reporting disclosure and controls (founder) | UI states may start early; collection stays off |
 | M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
+| LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
+| LC-S1 | vacant | proposed | next safe slice | none | authorization | claim owner, then implement |
+| LC-S2 | vacant | proposed | lifecycle core | none | LC-S1 | resolve dependency |
+| LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
+| LC-S3 | vacant | proposed | local route | none | LC-S1; M0b | resolve dependencies |
+| LC-S4 | vacant | proposed | console trust | none | LC-S3 | resolve dependency |
+| LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
+
+## Founder decisions awaiting Scott
+
+- **D1 — Authorize LC-S1:** recommend separate authorization for the inactive
+  local runtime configuration and its first-commit fixture inventory.
+- **D2 — Identity adoption, namespace join and collisions:** recommend adoption
+  preserve the account namespace and joins require user-reviewed resolution,
+  never silent remapping.
+- **D3 — Device trust, shared machines and offline access horizon:** recommend
+  owner-authorized personal replicas first, explicit stale state and no promise
+  of remote erasure.
+- **D4 — At-rest protection baseline:** recommend an explicit threat model before
+  whole-account enrollment, with vault keys remaining client-held.
+- **D5 — Usage reporting fields, linkage, retention and controls:** recommend
+  coarse bounded aggregates and a narrow build signal, with failure never gating
+  local work.
+- **D6 — Existing free-hosted user transition:** recommend keeping it deferred
+  until after M9.
+- **D7 — Destination commercial policy:** recommend no SaaS subscription
+  prerequisite for local messaging or self-managed enrollment.
+- **D8 — Supported OS versions/architectures and resource budgets:** recommend
+  the smallest set covering the founder's and enrolled test machines first.

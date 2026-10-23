@@ -10,7 +10,8 @@ benchmark, storage prototype, or production change was performed.
 
 The 2026-10-23 follow-up adds messaging and offline console constraints checked
 against WitSelf `5380baec`; the dated external-source observations below are
-unchanged. These additions describe required design and acceptance work.
+unchanged. These additions describe required design and acceptance work. Use
+the plan's shared [terms](implementation-plan.md#terms).
 
 ## Discussion frame and revisable local-cell direction
 
@@ -63,7 +64,7 @@ proof for every local domain, rather than using SaaS-only gating as a substitute
 | Facts — local capability | Store/query typed assertions and subjects | Address uniqueness, provenance, conflicts and deletion/recreation rules |
 | Secrets/TOTP — local capability | Create/use protected local records and generate codes using installed keys | Existing client encryption, separate key custody, encrypted fields excluded from search/logs; recovery and key-epoch policy |
 | Curation — local capability | An active AI client can review local inputs and apply authorized changes | Local fenced operations and policy; cross-device shared work needs explicit coordination rules |
-| Agent messaging — required | Authorized agents send, receive and coordinate through the local cell, continuing after paid enrollment | Atomic mailbox/request visibility, stable identity, idempotency and fenced claims; authority covers the complete request graph and its sibling capacity/settlement rules |
+| Agent messaging — required | Authorized agents send, receive and coordinate through the local cell, continuing after paid enrollment | Atomic mailbox/request visibility, stable identity, idempotency and fenced claims; authority or equivalent proven coordination covers the complete request graph and its sibling capacity/settlement rules |
 | Avatars/settings — local capability | Read/update allowed versioned state | Consistent lifecycle and synchronization rules |
 | Email — sole hosted-only feature exception | Known history may be available locally | Receipt/delivery needs hosted provider infrastructure; replay must never dispatch copied email |
 
@@ -124,14 +125,15 @@ reordered replication must not temporarily remove that protection. Sources:
 [opening transaction](../../../internal/store/message_request.go#L548),
 [protocol-message guard](../../../internal/store/message.go#L1873).
 
-Connected coordination also needs authority over every request transition:
-open, offer, decline, selection/reservation, claim, renewal, release, completion,
-cancellation, expiry and settlement. Unique ownership of individual claims does
-not enforce a request-wide assignee ceiling or prevent premature completion while
-a sibling remains active. Imported request inspection needs a projection-only
-path: current list/show calls can persist expiry, cancellation and completion.
-Independent local requests must remain usable alongside those inert imported
-views. The [code assessment](local-mode-code-assessment.md#synchronization-and-authority-are-the-largest-new-work)
+Connected coordination also needs authority or equivalent proven coordination
+over every request transition: open, offer, decline, selection/reservation,
+claim, renewal, release, completion, cancellation, expiry and settlement. Unique
+ownership of individual claims does not enforce a request-wide assignee ceiling
+or prevent premature completion while a sibling remains active. Imported request
+inspection needs a projection-only path: current list/show calls can persist
+expiry, cancellation and completion. Independent local requests must remain
+usable alongside those inert imported views. The [code
+assessment](local-mode-code-assessment.md#synchronization-and-authority-are-the-largest-new-work)
 records source evidence and the required concurrency, reordering and inspection
 counterexamples.
 
@@ -148,9 +150,9 @@ infrastructure savings require measurement of sync, storage and fan-out costs.
 The local UI needs an independently authenticated account-console binding as
 well as an offline agent endpoint. Today's
 [console manager resolution](../../../cmd/witself/account_console.go#L35) excludes
-explicit endpoint profiles and depends on the hosted directory. The local design
-must verify the installation's selected origin and exact account/operator/role
-without that directory, retain separate agent and operator credentials, reject
+connection routes with explicit endpoints and depends on the hosted directory.
+The local design must verify the installation's selected origin and exact
+account/operator/role without that directory, retain separate agent and operator credentials, reject
 stale or mismatched bindings, and preserve remote-only trust checks. A blocked
 directory must not disable local account inspection or recovery; hosted billing
 actions retain their service authority.
@@ -232,7 +234,7 @@ Current implementation is narrower: the [Homebrew product list](../../../tools/h
 and [formula template](../../../packaging/homebrew/formula.rb.tmpl#L14) install
 binaries/aliases, with no local-cell service definition. The
 [Unix installer transaction](../../../install.sh#L611) protects binary replacement,
-not a database migration. Existing [schema migration guards](../../../internal/store/migrate.go#L37)
+not a database migration. Existing [schema migration guards](../../../internal/store/migrate.go#L92)
 are reusable but do not upgrade the PostgreSQL engine itself.
 
 | Topic | Benefit or intended behavior | Tradeoff/question to resolve |
@@ -286,7 +288,8 @@ Staging synchronization need not mean deciding all its implementation now.
 It does mean discussing the local record identities, evidence references, key
 custody, deletion/version history and supported schema changes that later sync
 must preserve. Joining two already-populated accounts and handling mixed-version
-devices are explicit future problems, not consequences of both using PostgreSQL.
+devices are prerequisite design work (plan M0c) whose implementation comes
+later, not consequences of both using PostgreSQL.
 
 ## Storage alternatives
 
@@ -316,7 +319,7 @@ Sources: [bbolt](https://github.com/etcd-io/bbolt),
 Important SQLite acceptance work includes Go driver/build distribution on all
 three OSes, busy/retry behavior, atomic outbox writes, schema migration, backup
 and restore, large transcript workloads, and disk-full/crash recovery. Existing
-[PostgreSQL recall](../../../internal/store/memory_recall.go#L252) uses PostgreSQL
+[PostgreSQL recall](../../../internal/store/memory_recall.go#L362) uses PostgreSQL
 text parsing/ranking: FTS5 does not automatically produce equivalent results.
 Define required search semantics and conformance cases. Preserve stable evidence
 identity and exact authorization independently of retrieval ranking.
