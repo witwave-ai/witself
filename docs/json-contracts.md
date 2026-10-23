@@ -3228,10 +3228,39 @@ Rules:
   and streaming chunks are not stored.
 - `payload` is an optional bounded JSON object. `artifacts` is an empty reserved
   array until portable object storage is implemented.
+- The top-level payload key `witself_redaction` is reserved for owner redaction;
+  an append containing that key returns HTTP 400, including an external-id retry.
+- An optional read-only `redaction` object identifies a redacted entry:
+  `{"receipt_id":"trd_0123456789abcdef0123456789abcdef","redacted_at":"2026-10-22T18:04:05.123456Z","reason_code":"owner_request"}`.
+  It is omitted for ordinary entries. This view appears only on transcript get,
+  page, observational page, and append responses, and MCP transcript get/tail
+  outputs. Memory-curation input entries retain the stored shape (placeholder
+  body and marker payload) without a `redaction` view.
 - Agent tokens write/read their own transcripts. Account operators may read all
   transcripts in the account but cannot append as an agent.
 
-See [transcript-ledger.md](transcript-ledger.md).
+Redacted entries keep their id, sequence, and other identity fields. Their body
+is `entry content redacted at the account owner's request`, their artifacts are
+`[]`, and their payload contains only the following marker and an optional
+recognized capture `kind`:
+
+```json
+{
+  "kind": "tool.result",
+  "witself_redaction": {
+    "schema": "witself.transcript-redaction.v1",
+    "receipt_id": "trd_0123456789abcdef0123456789abcdef",
+    "redacted_at": "2026-10-22T18:04:05.123456Z",
+    "reason_code": "owner_request",
+    "actor_kind": "operator"
+  }
+}
+```
+
+An owner-only redaction operation writes this marker; see
+[transcript-ledger.md](transcript-ledger.md). The marker preserves `kind` only
+when it is in the closed capture vocabulary, drops all other original payload
+keys, and uses a UTC timestamp ending in `Z`.
 
 ## Message
 

@@ -59,7 +59,9 @@ type Transcript struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-// TranscriptEntry is one immutable visible turn or explicit system/tool trace.
+// TranscriptEntry is one visible turn or explicit system/tool trace, immutable
+// except owner-authorized redaction, which replaces body, payload and artifacts
+// with a value-free marker and keeps id and sequence.
 // RecordedByAgentID is always derived from the authenticated token.
 type TranscriptEntry struct {
 	ID                string          `json:"id"`
@@ -290,7 +292,9 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			existing, err := transcriptEntryByExternalID(ctx, tx, accountID, transcriptID, in.ExternalID)
 			switch {
 			case err == nil:
-				if !transcriptEntryMatches(existing, in) {
+				_, redacted := TranscriptEntryRedactionOf(existing)
+				redactedReplay := redacted && existing.Role == in.Role && existing.Model == in.Model && existing.ReplyToEntryID == in.ReplyToEntryID
+				if !redactedReplay && !transcriptEntryMatches(existing, in) {
 					return nil, ErrTranscriptExists
 				}
 				out = append(out, existing)
@@ -735,6 +739,15 @@ func normalizeAppendTranscriptEntryInput(in AppendTranscriptEntryInput) (AppendT
 	payload, err := normalizeJSONObject(in.Payload, false)
 	if err != nil {
 		return AppendTranscriptEntryInput{}, fmt.Errorf("%w: payload %v", ErrTranscriptInputInvalid, err)
+	}
+	var payloadObject map[string]json.RawMessage
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &payloadObject); err != nil {
+			return AppendTranscriptEntryInput{}, fmt.Errorf("%w: payload must be a JSON object", ErrTranscriptInputInvalid)
+		}
+		if _, reserved := payloadObject[transcriptRedactionPayloadKey]; reserved {
+			return AppendTranscriptEntryInput{}, fmt.Errorf("%w: payload key witself_redaction is reserved for owner redaction", ErrTranscriptInputInvalid)
+		}
 	}
 	in.Payload = payload
 	if in.Body == "" && len(in.Payload) == 0 {

@@ -1522,22 +1522,32 @@ type Transcript struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-// TranscriptEntry is one immutable visible turn or explicit system/tool trace.
+// TranscriptEntry is one visible turn or explicit system/tool trace, immutable
+// except owner-authorized redaction, which replaces body, payload and artifacts
+// with a value-free marker and keeps id and sequence.
 type TranscriptEntry struct {
-	ID                string          `json:"id"`
-	AccountID         string          `json:"account_id"`
-	TranscriptID      string          `json:"transcript_id"`
-	RealmID           string          `json:"realm_id"`
-	RecordedByAgentID string          `json:"recorded_by_agent_id"`
-	Sequence          int64           `json:"sequence"`
-	ExternalID        string          `json:"external_id,omitempty"`
-	Role              string          `json:"role"`
-	Body              string          `json:"body,omitempty"`
-	Payload           json.RawMessage `json:"payload,omitempty"`
-	Model             string          `json:"model,omitempty"`
-	ReplyToEntryID    string          `json:"reply_to_entry_id,omitempty"`
-	Artifacts         json.RawMessage `json:"artifacts"`
-	CreatedAt         time.Time       `json:"created_at"`
+	ID                string                    `json:"id"`
+	AccountID         string                    `json:"account_id"`
+	TranscriptID      string                    `json:"transcript_id"`
+	RealmID           string                    `json:"realm_id"`
+	RecordedByAgentID string                    `json:"recorded_by_agent_id"`
+	Sequence          int64                     `json:"sequence"`
+	ExternalID        string                    `json:"external_id,omitempty"`
+	Role              string                    `json:"role"`
+	Body              string                    `json:"body,omitempty"`
+	Payload           json.RawMessage           `json:"payload,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	ReplyToEntryID    string                    `json:"reply_to_entry_id,omitempty"`
+	Artifacts         json.RawMessage           `json:"artifacts"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	Redaction         *TranscriptEntryRedaction `json:"redaction,omitempty"`
+}
+
+// TranscriptEntryRedaction is the read-only view of an entry's redaction marker.
+type TranscriptEntryRedaction struct {
+	ReceiptID  string    `json:"receipt_id"`
+	RedactedAt time.Time `json:"redacted_at"`
+	ReasonCode string    `json:"reason_code"`
 }
 
 // CreateTranscriptRequest is the POST /v1/transcripts body.

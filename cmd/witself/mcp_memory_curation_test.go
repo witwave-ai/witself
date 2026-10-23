@@ -287,6 +287,9 @@ func TestMCPMemoryCurationStructuredOutputsMatchAdvertisedSchemas(t *testing.T) 
 			TranscriptEntries: []client.TranscriptEntry{{
 				ID: "tent_1", Payload: json.RawMessage(`{"kind":"message.user","meta":{"turn":7}}`),
 				Artifacts: json.RawMessage(`[{"id":"art_1","kind":"file"}]`),
+				// A backend must never send this on curation inputs; if one does,
+				// curation.get still succeeds and keeps the stored shape.
+				Redaction: &client.TranscriptEntryRedaction{ReceiptID: "trd_0123456789abcdef0123456789abcdef", RedactedAt: time.Date(2026, 10, 22, 18, 4, 5, 123456000, time.UTC), ReasonCode: "owner_request"},
 			}},
 		}},
 	}
@@ -370,6 +373,29 @@ func TestMCPMemoryCurationStructuredOutputsMatchAdvertisedSchemas(t *testing.T) 
 		got := artifacts["type"]
 		t.Errorf("transcript artifacts schema type = %v, want array: %#v", got, artifacts)
 	}
+	entryProperties, ok := entry["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("curation transcript-entry schema has no object properties")
+	}
+	if _, ok := entryProperties["redaction"]; ok {
+		t.Error("curation transcript-entry schema exposes transcript-only redaction view")
+	}
+	for _, name := range []string{"witself.transcript.get", "witself.transcript.tail"} {
+		tool := tools[name]
+		if tool == nil {
+			t.Fatalf("MCP omitted %q", name)
+		}
+		raw, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s output schema: %v", name, err)
+		}
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatalf("decode %s output schema: %v", name, err)
+		}
+		entry := requireMCPArrayItem(t, root, requireMCPObjectProperty(t, root, root, "entries"))
+		requireMCPObjectProperty(t, root, entry, "redaction")
+	}
 	planGetTool := tools["witself.memory.curation.plan.get"]
 	planGetSchema, err := json.Marshal(planGetTool.OutputSchema)
 	if err != nil {
@@ -440,6 +466,7 @@ func TestMCPMemoryCurationStructuredOutputsMatchAdvertisedSchemas(t *testing.T) 
 			TranscriptEntries []struct {
 				Payload   map[string]json.RawMessage   `json:"payload"`
 				Artifacts []map[string]json.RawMessage `json:"artifacts"`
+				Redaction json.RawMessage              `json:"redaction"`
 			} `json:"transcript_entries"`
 		} `json:"inputs"`
 	}
@@ -453,6 +480,9 @@ func TestMCPMemoryCurationStructuredOutputsMatchAdvertisedSchemas(t *testing.T) 
 		t.Fatalf("structured transcript entries = %#v", decoded.Inputs)
 	}
 	entryValue := decoded.Inputs[0].TranscriptEntries[0]
+	if len(entryValue.Redaction) != 0 {
+		t.Errorf("curation transcript entry carries the transcript-only redaction view: %s", entryValue.Redaction)
+	}
 	if got := string(entryValue.Payload["kind"]); got != `"message.user"` {
 		t.Errorf("payload kind = %s", got)
 	}

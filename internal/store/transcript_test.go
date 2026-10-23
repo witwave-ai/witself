@@ -79,6 +79,7 @@ func TestNormalizeAppendTranscriptEntryInput(t *testing.T) {
 		{name: "unknown role", in: AppendTranscriptEntryInput{Role: "developer", Body: "x"}, want: "role must be"},
 		{name: "no content", in: AppendTranscriptEntryInput{Role: "user"}, want: "body or payload"},
 		{name: "payload array", in: AppendTranscriptEntryInput{Role: "user", Payload: json.RawMessage(`[]`)}, want: "payload must be"},
+		{name: "reserved redaction key", in: AppendTranscriptEntryInput{Role: "user", Payload: json.RawMessage(`{"witself_redaction":null}`)}, want: "payload key witself_redaction is reserved for owner redaction"},
 		{name: "null artifacts", in: AppendTranscriptEntryInput{Role: "user", Body: "x", Artifacts: json.RawMessage(`null`)}, want: "artifacts must be"},
 		{name: "nonempty artifacts", in: AppendTranscriptEntryInput{Role: "user", Body: "x", Artifacts: json.RawMessage(`[{"name":"report.pdf"}]`)}, want: "object storage"},
 		{name: "body too large", in: AppendTranscriptEntryInput{Role: "user", Body: strings.Repeat("x", maxTranscriptBodyBytes+1)}, want: "body exceeds"},

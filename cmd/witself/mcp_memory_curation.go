@@ -618,7 +618,8 @@ const mcpMemoryCurationUntrustedDataWarning = " Persisted run client provenance,
 // plans deliberately carry structured JSON. Decode those fields at the MCP
 // edge so tools/list advertises the same shapes that tools/call returns. The
 // embedded client types keep the rest of the wire contract complete as fields
-// are added, while the shallower fields below replace only RawMessage values.
+// are added, while the shallower fields below replace RawMessage values and
+// keep the transcript-only redaction view out of curation schemas.
 type mcpMemoryCurationRunOutput struct {
 	client.MemoryCurationRun
 	Budgets map[string]any `json:"budgets"`
@@ -626,8 +627,9 @@ type mcpMemoryCurationRunOutput struct {
 
 type mcpTranscriptEntryOutput struct {
 	client.TranscriptEntry
-	Payload   map[string]any `json:"payload,omitempty"`
-	Artifacts []any          `json:"artifacts"`
+	Payload   map[string]any                   `json:"payload,omitempty"`
+	Artifacts []any                            `json:"artifacts"`
+	Redaction *client.TranscriptEntryRedaction `json:"-"`
 }
 
 type mcpMemoryCurationRunInputOutput struct {
@@ -722,6 +724,10 @@ func toMCPMemoryCurationRunInputPageOutput(in client.MemoryCurationRunInputPage)
 			if err != nil {
 				return mcpMemoryCurationRunInputPageOutput{}, fmt.Errorf("decode curation input %d transcript entry %d artifacts: %w", i, j, err)
 			}
+			// The redaction view belongs to the transcript routes only; curation
+			// inputs keep the stored shape, and the shadow field below only hides
+			// it from the schema, so clear any value before encoding.
+			entry.Redaction = nil
 			entries[j] = mcpTranscriptEntryOutput{TranscriptEntry: entry, Payload: payload, Artifacts: artifacts}
 		}
 		if input.TranscriptEntries == nil {

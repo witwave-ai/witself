@@ -1689,6 +1689,83 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	}
 }
 
+func TestMCPProposeFromTranscriptRefusesRedactedEntry(t *testing.T) {
+	ctx := context.Background()
+	redaction := &client.TranscriptEntryRedaction{
+		ReceiptID:  "trd_0123456789abcdef0123456789abcdef",
+		RedactedAt: time.Date(2026, 10, 22, 18, 4, 5, 123456000, time.UTC),
+		ReasonCode: "owner_request",
+	}
+	backend := &fakeMCPBackend{transcriptEntries: []client.TranscriptEntry{{
+		ID: "ent_1", TranscriptID: "trn_1", Sequence: 1, Role: "user",
+		Body:      "entry content redacted at the account owner's request",
+		Payload:   json.RawMessage(`{"kind":"message.user","witself_redaction":{"schema":"witself.transcript-redaction.v1","receipt_id":"trd_0123456789abcdef0123456789abcdef","redacted_at":"2026-10-22T18:04:05.123456Z","reason_code":"owner_request","actor_kind":"operator"}}`),
+		Artifacts: json.RawMessage(`[]`), Redaction: redaction,
+	}}}
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.fact.propose_from_transcript",
+		Arguments: map[string]any{
+			"transcript_id": "trn_1", "entry_sequence": 1, "subject": "self",
+			"predicate": "preferences/editor", "value": "helix",
+			"reason":     "the user explicitly stated a durable editor preference",
+			"valid_from": "2026-07-01T00:00:00Z", "idempotency_key": "proposal-redacted-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("redacted transcript entry was accepted as fact evidence")
+	}
+	content, err := json.Marshal(result.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "transcript entry sequence 1 is redacted and cannot be fact evidence") {
+		t.Fatalf("refusal did not come from the redaction check: %s", content)
+	}
+	if !reflect.DeepEqual(backend.lastFactProposal, client.ProposeFactInput{}) {
+		t.Fatal("redacted fact evidence reached the proposal backend")
+	}
+	for _, name := range []string{"witself.transcript.get", "witself.transcript.tail"} {
+		t.Run(name, func(t *testing.T) {
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: name, Arguments: map[string]any{"transcript_id": "trn_1", "limit": 1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsError {
+				t.Fatal("transcript read returned a tool error")
+			}
+			raw, err := json.Marshal(result.StructuredContent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output mcpTranscriptReadOutput
+			if err := json.Unmarshal(raw, &output); err != nil {
+				t.Fatal(err)
+			}
+			if len(output.Entries) != 1 || !reflect.DeepEqual(output.Entries[0].Redaction, redaction) {
+				t.Fatal("transcript read omitted or changed the redaction view")
+			}
+		})
+	}
+}
+
 func TestNormalizeMCPMessageLeaseSeconds(t *testing.T) {
 	for _, tt := range []struct {
 		in      int
