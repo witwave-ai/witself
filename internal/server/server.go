@@ -35,6 +35,15 @@ import (
 
 // Config holds the listen addresses for the three witself-server listeners.
 type Config struct {
+	// LocalRuntime selects the standalone local runtime configuration.
+	LocalRuntime bool
+	// SpoolDir is the private local archive directory; empty preserves hosted temp behavior.
+	SpoolDir string
+	// SpoolRoot pins the validated local directory until the server stops.
+	SpoolRoot *os.Root
+	// AppliedSchemaVersion reads the connected database's applied migration version.
+	AppliedSchemaVersion func(context.Context) (int, error)
+
 	AccountRequestBudget    AccountRequestBudgetConfig
 	accountRequestBudgetNow func() time.Time
 
@@ -2456,14 +2465,29 @@ func setAuthenticatedNoStoreDefault(w http.ResponseWriter) {
 
 func apiMux(cfg Config) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		schemaVersion := store.SchemaVersion()
+		if cfg.LocalRuntime {
+			if cfg.AppliedSchemaVersion == nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "database schema version unavailable")
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			var err error
+			schemaVersion, err = cfg.AppliedSchemaVersion(ctx)
+			if err != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "database schema version unavailable")
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(
 			w,
 			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d,\"store_schema_version\":%d,\"backup_validation_protocol\":%d}\n",
 			version.Version, version.Commit, version.Date,
 			AccountEvacuationProtocolVersion,
-			AccountProvisionProtocolVersion, store.SchemaVersion(),
+			AccountProvisionProtocolVersion, schemaVersion,
 			BackupValidationProtocolVersion,
 		)
 	})
@@ -2592,6 +2616,7 @@ func apiMux(cfg Config) http.Handler {
 				cfg.Authenticate,
 				cfg.StreamAccountSelf,
 				cfg.ReportAccountExportFailure,
+				cfg,
 			))
 		}
 		whoami := whoamiHandler(cfg.Authenticate, cfg.GetOperatorAccountRole)
@@ -5313,7 +5338,7 @@ func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) h
 					return
 				}
 				stream = startValidationStream(w, backupValidationHeartbeat)
-				spool, err := downloadImportArchive(r, client, u, size)
+				spool, err := downloadImportArchive(r, client, u, size, cfg)
 				if err != nil {
 					report(err)
 					stream.finish(map[string]any{"schema_version": "witself.v0", "error": "archive download failed"})
@@ -5321,7 +5346,7 @@ func accountLifecycleHandlerWithArchiveClient(cfg Config, client *http.Client) h
 				}
 				defer func() {
 					_ = spool.Close()
-					_ = os.Remove(spool.Name())
+					_ = cfg.removeArchiveSpool(spool)
 				}()
 				body = spool
 			}
@@ -6101,16 +6126,15 @@ func accountBackupHandlerWithArchiveClient(cfg Config, client *http.Client) http
 			// import must never pace the control plane's stream: a single slow
 			// import step would otherwise exceed the download client's idle read
 			// deadline and fail a healthy archive.
-			spool, err := os.CreateTemp("", "witself-backup-validate-*.tar.gz")
+			spool, err := cfg.createArchiveSpool("witself-backup-validate-*.tar.gz")
 			if err != nil {
 				report(fmt.Errorf("spool backup archive: %w", err))
 				stream.finish(map[string]any{"schema_version": "witself.v0", "error": "could not validate backup"})
 				return
 			}
-			spoolPath := spool.Name()
 			defer func() {
 				_ = spool.Close()
-				_ = os.Remove(spoolPath)
+				_ = cfg.removeArchiveSpool(spool)
 			}()
 			copied, copyErr := io.Copy(spool, io.LimitReader(response.Body, size))
 			if copyErr != nil || copied != size {
@@ -7565,15 +7589,15 @@ func metricsMuxFor(
 
 // downloadImportArchive completes the network transfer before database work.
 // Errors deliberately exclude URLs, capabilities, and remote response bodies.
-func downloadImportArchive(r *http.Request, client *http.Client, u *neturl.URL, size int64) (*os.File, error) {
-	return downloadImportArchiveContext(r.Context(), client, u, r.Header.Get("X-Witself-Archive-Token"), size)
+func downloadImportArchive(r *http.Request, client *http.Client, u *neturl.URL, size int64, cfg Config) (*os.File, error) {
+	return downloadImportArchiveContext(r.Context(), client, u, r.Header.Get("X-Witself-Archive-Token"), size, cfg)
 }
 
-func downloadImportArchiveContext(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64) (*os.File, error) {
-	return downloadArchiveSpool(ctx, client, u, token, size, "witself-account-import-*.tar.gz")
+func downloadImportArchiveContext(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64, cfg Config) (*os.File, error) {
+	return downloadArchiveSpool(ctx, client, u, token, size, "witself-account-import-*.tar.gz", cfg)
 }
 
-func downloadArchiveSpool(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64, pattern string) (*os.File, error) {
+func downloadArchiveSpool(ctx context.Context, client *http.Client, u *neturl.URL, token string, size int64, pattern string, cfg Config) (*os.File, error) {
 	download, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, errors.New("invalid archive download request")
@@ -7587,7 +7611,7 @@ func downloadArchiveSpool(ctx context.Context, client *http.Client, u *neturl.UR
 	if response.StatusCode != http.StatusOK || response.ContentLength != size {
 		return nil, errors.New("archive download status or size mismatch")
 	}
-	spool, err := os.CreateTemp("", pattern)
+	spool, err := cfg.createArchiveSpool(pattern)
 	if err != nil {
 		return nil, errors.New("archive spool creation failed")
 	}
@@ -7595,7 +7619,7 @@ func downloadArchiveSpool(ctx context.Context, client *http.Client, u *neturl.UR
 	defer func() {
 		if !complete {
 			_ = spool.Close()
-			_ = os.Remove(spool.Name())
+			_ = cfg.removeArchiveSpool(spool)
 		}
 	}()
 	copied, err := io.Copy(spool, io.LimitReader(response.Body, size+1))

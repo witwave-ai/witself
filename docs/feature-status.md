@@ -34,6 +34,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
+| [Inactive local runtime configuration](#local-runtime-configuration) | Local cell | `implemented` | `dark` | **not ready** | 4/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
 | [Managed operator authentication](#operator-authentication) | Security | `specified` | `not started` | **not ready** | 1/7 pass | 3 |
@@ -466,6 +467,32 @@ Open gates:
 
 - `identity-capacity-alerting` (observability): Add a value-free dashboard and alert path for realm, agent, token, and lifecycle capacity or drift. ([tracking/evidence](../docs/observability-and-operations.md))
 - `multi-plan-capacity-canary` (rollout / canaries): Retain current boundary, concurrency, upgrade, downgrade, and Founder-unlimited evidence from managed accounts. ([tracking/evidence](../docs/billing-and-limits.md))
+
+<a id="local-runtime-configuration"></a>
+
+### Inactive local runtime configuration
+
+WITSELF_RUNTIME=local selects private listeners, required database and spool storage, database/schema/account readiness, forbidden ambient configuration checks, and an explicit worker job allowlist. Unset or empty preserves hosted behavior; no live activation or installer is included.
+
+- Implementation: `implemented`
+- Managed rollout: `dark`
+- Readiness: **not ready**
+- Detailed docs: [api-routes.md](../docs/api-routes.md), [implementation-plan.md](../docs/research/local-cell/implementation-plan.md)
+
+| Gate | State | Current evidence and conclusion |
+|---|---|---|
+| Behavior | **PASS** | The explicit local switch rejects unsafe configuration and limits worker registration; readiness checks the attached database and active bootstrap account, and version reports its applied schema. [local_runtime_test.go](../cmd/witself-server/local_runtime_test.go), [local_runtime.go](../cmd/witself-worker/local_runtime.go), [config.go](../internal/runtimeconfig/config.go), [local_runtime_test.go](../internal/server/local_runtime_test.go) |
+| Entitlement / policy | **CONDITIONAL** | This foundation does not define a standalone plan/policy snapshot, installation identity, enrollment authority, or local connection routing. The account-id check is limited to the bootstrap account. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Bounds / abuse | **PASS** | Local startup requires loopback listeners and a private owned spool directory (Windows: directory ownership (SID) check only; DACL privacy is pending), refuses hosted provision/backup/billing/email configuration, and excludes purge, retention, outbound dispatch, and support age-out jobs. [config.go](../internal/runtimeconfig/config.go), [spool.go](../internal/runtimeconfig/spool.go), [local_runtime_test.go](../internal/server/local_runtime_test.go), [spool_sweep.go](../internal/server/spool_sweep.go) |
+| Observability | **PASS** | Local readiness and the version endpoint expose database health and applied schema without changing hosted response shapes. Readiness fails on a schema mismatch or missing/inactive bootstrap account. [local_runtime_test.go](../cmd/witself-server/local_runtime_test.go), [api-routes.md](../docs/api-routes.md), [local_runtime_test.go](../internal/server/local_runtime_test.go), [local_runtime_test.go](../internal/store/local_runtime_test.go) |
+| Recovery | **CONDITIONAL** | Removing the explicit switch restores hosted configuration. Installation lifecycle ownership, interruption recovery, bounded migration waits, and worker restart policy remain later slices. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Rollout / canaries | **CONDITIONAL** | Inactive by default with no live activation. Native lifecycle, platform packaging, clean-machine acceptance, and local-product canaries remain separate work. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Docs / support | **PASS** | API documentation distinguishes hosted readiness/version behavior from the local runtime configuration; the implementation plan retains the remaining product and lifecycle boundaries. [api-routes.md](../docs/api-routes.md), [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+
+Open gates:
+
+- `local-lifecycle-and-platform-acceptance` (recovery, rollout / canaries): Complete lifecycle ownership and recovery, platform installers and clean-machine proof, then separately authorize a local-product canary. This inactive foundation does not activate a live cell. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
+- `local-standalone-policy-and-identity` (entitlement / policy): Define standalone policy, installation identity, connection routing and enrollment authority before enabling a supported local product. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
 
 <a id="managed-support"></a>
 

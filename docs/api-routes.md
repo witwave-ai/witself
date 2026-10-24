@@ -1181,6 +1181,40 @@ Health routes should be served on the dedicated health listener, default
 `:8081`, at the short `/livez`, `/readyz`, `/startupz` (plus `/healthz` alias)
 paths rather than under `/v1`.
 
+`WITSELF_RUNTIME=local` explicitly selects the local runtime configuration for
+`witself-server` and `witself-worker`. Unset or empty retains hosted behavior;
+any other value refuses startup. The local configuration requires an explicit
+`WITSELF_DATABASE_URL` (`DATABASE_URL` does not provide a fallback), numeric
+loopback listeners, and a private
+owned `WITSELF_LOCAL_SPOOL_DIR` (Windows: directory ownership (SID) check only;
+DACL privacy is pending). Server defaults are `127.0.0.1:8080` for API,
+`127.0.0.1:8081` for health, and `127.0.0.1:9090` for metrics; worker defaults
+are `127.0.0.1:8082` for health and `127.0.0.1:9091` for metrics. These binaries
+do not own or bind PostgreSQL. This configuration is inactive by default and
+does not install or activate a local cell.
+
+Under the local runtime configuration, `GET /readyz` returns HTTP 200 with
+`ok\n` only when the store pings, the attached database's applied Goose schema
+version equals the compiled store schema version, and the bootstrap account
+exists and is active. A failed check returns HTTP 503. When
+`WITSELF_LOCAL_ACCOUNT_ID` is set, startup also requires the bootstrap account
+id to match it; a refusal names the variable without exposing its value.
+The worker requires an already-created active default account; start the server
+first. The account check runs after migration, so it is not a guard against
+writes to a wrongly configured database. Installation identity is deferred to a
+later slice.
+The unauthenticated `GET /v1/version` keeps its JSON shape and reports the
+attached database's applied schema in `store_schema_version`, including when
+that version differs from the compiled version and readiness fails. If the
+applied schema cannot be read, the local version endpoint returns HTTP 503
+with a value-free error instead of substituting the compiled version.
+
+Hosted server health and version behavior remains unchanged: `/readyz` uses the
+existing readiness callback (a store ping when a database is configured and
+unconditional readiness otherwise), and `/v1/version` reports the compiled
+store schema version. `/livez`, `/startupz`, and `/healthz` remain independent
+of database readiness in both configurations.
+
 Auth session routes are for CLI-initiated browser/device-code login when
 Witself owns the session flow. Self-hosted first-operator bootstrap should use
 a one-time bootstrap token and `POST /v1/bootstrap/operator`; it must not rely
@@ -2316,8 +2350,11 @@ live evacuation never acknowledges success. `import_job.state:"failed"` plus
 a value-free `code` is reserved for a future table-backed protocol and is not
 emitted by this implementation.
 
-The unauthenticated `/v1/version` response adds `store_schema_version` (currently
-98) alongside `account_evacuation_protocol:3` and `backup_validation_protocol:2`.
+The unauthenticated `/v1/version` response includes `store_schema_version`
+alongside `account_evacuation_protocol:3` and `backup_validation_protocol:2`.
+Hosted runtime reports the compiled store schema version; the explicitly
+selected local runtime configuration reports the attached database's applied
+schema version, as described under the health routes above.
 An absent backup validation protocol field means protocol 1 (synchronous validation only).
 The control plane rejects a newer archive schema before minting a capability
 when this attestation is available.

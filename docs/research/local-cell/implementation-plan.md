@@ -256,6 +256,8 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
+LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership, singleton isolation, migration cancellation, and restart policy remain deferred.
+
 - Introduce an explicit local runtime configuration and a dependency-light lifecycle module
   or companion executable. Keep its location and command names open until the
   module review; native installers and a possible infra CLI frontend use the
@@ -272,7 +274,8 @@ schemas the eventual enrollment design cannot preserve or migrate.
 - Give every active server lifecycle a private archive/spool directory, including
   overlapping upgrades and multiple cells. Configure the applicable
   `TMPDIR`/`TEMP`/`TMP` before launching the process; protect permissions/ACLs and
-  verify ownership before cleanup. Today the sweep removes regular files matching
+  verify ownership before cleanup. Today, in the hosted configuration, the sweep
+  removes regular files matching
   `witself-(backup-validate|account-import|self-export)-<n>.tar.gz` in the process
   temp directory with no ownership check
   ([sweep](../../../internal/server/spool_sweep.go#L11)); self-export, backup
@@ -286,7 +289,8 @@ schemas the eventual enrollment design cannot preserve or migrate.
   not an authorization boundary against other users or untrusted browser requests.
 - Explicitly select allowed worker jobs. Review retention, purge, style rollout,
   and outbound dispatch for each runtime/data role. A local projection must not
-  execute imported remote claims, purge account data, or dispatch mail. Today
+  execute imported remote claims, purge account data, or dispatch mail. Today,
+  in the hosted configuration,
   [ten configurable job types](../../../cmd/witself-worker/main.go#L177) exist,
   three enabled by default, and the default `message_rate_bucket_cleanup` also
   performs [activity retirement](../../../internal/store/message_rate_bucket_cleanup_worker.go#L91)
@@ -307,7 +311,8 @@ schemas the eventual enrollment design cannot preserve or migrate.
   returns, without restarting it; the lifecycle owner needs bounded, cancellable
   waits and an explicit restart policy.
 - Require database/schema and authenticated operation checks for cell readiness.
-  Today `/readyz` succeeds with no database configured (unless email receive
+  Today, in the hosted configuration, `/readyz` succeeds with no database
+  configured (unless email receive
   requires one) and otherwise checks only a store ping; `/v1/version` reports the
   compiled schema version, not the attached database's
   ([startup](../../../cmd/witself-server/main.go#L2043),
@@ -834,7 +839,9 @@ slices, not implementation authorization; do not turn them into one long branch.
   database / Dependencies: LC-S0 text (satisfied by this review) / Evidence: unit
   plus real PostgreSQL; one native macOS run / Activation: nothing changes unless
   explicitly selected / Recovery: remove the configuration; behavior reverts /
-  Owner: vacant. **This is the next safe slice for separate authorization.**
+  Owner: Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner).
+  **Authorized by Scott on 2026-10-23 (decision D1); implementation under review.** Implemented subset:
+  see the M1 note.
 - **LC-S2 disposable lifecycle core** / Scope: one owner for process, data and
   temp with an exclusive lock, manifest and interruption journal / Acceptance:
   inspect/install/start/stop/status/repair/remove on synthetic data /
@@ -974,7 +981,7 @@ before starting.
 | M8 | vacant | proposed | none | none | reporting disclosure and controls (founder) | UI states may start early; collection stays off |
 | M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
-| LC-S1 | vacant | proposed | next safe slice | none | authorization | claim owner, then implement |
+| LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | implemented inactive; authorized by Scott 2026-10-23 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | owner gate and integration review; no live activation | Fable reviews and gates unstaged implementation |
 | LC-S2 | vacant | proposed | lifecycle core | none | LC-S1 | resolve dependency |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | vacant | proposed | local route | none | LC-S1; M0b | resolve dependencies |

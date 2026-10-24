@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -377,7 +376,7 @@ func (j *backupValidationJobs) run(ctx context.Context, cfg Config, client *http
 	if cfg.ReportBackupValidationJob != nil {
 		cfg.ReportBackupValidationJob(accountID, job.validationID, "", 0, 0)
 	}
-	spool, err := downloadArchiveSpool(ctx, client, u, job.takeToken(), size, "witself-backup-validate-*.tar.gz")
+	spool, err := downloadArchiveSpool(ctx, client, u, job.takeToken(), size, "witself-backup-validate-*.tar.gz", cfg)
 	downloadDuration := time.Since(started)
 	var message, report string
 	var result map[string]any
@@ -389,7 +388,7 @@ func (j *backupValidationJobs) run(ctx context.Context, cfg Config, client *http
 		var sum ImportSummary
 		sum, err = job.lease.Validate(ctx, spool)
 		_ = spool.Close()
-		_ = os.Remove(spool.Name())
+		_ = cfg.removeArchiveSpool(spool)
 		if err == nil {
 			outcome = "validated"
 			result = map[string]any{"schema_version": "witself.v0", "account_id": sum.AccountID, "status": sum.Status, "archive_schema_version": sum.SchemaVersion, "purpose": "backup", "backup_id": sum.BackupID, "validated": true}

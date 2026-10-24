@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,49 @@ import (
 )
 
 var archiveSpoolName = regexp.MustCompile(`^witself-(backup-validate|account-import|self-export)-[0-9]{1,10}\.tar\.gz$`)
+
+// SweepLocalArchiveSpools uses only the directory handle validated at startup.
+// dir is retained solely for the existing diagnostic.
+func SweepLocalArchiveSpools(root *os.Root, dir string, w io.Writer) error {
+	if root == nil {
+		return errors.New("local archive spool directory is unavailable")
+	}
+	if w == nil {
+		w = io.Discard
+	}
+	var removed, failed int
+	var bytes int64
+	directory, err := root.Open(".")
+	if err != nil {
+		return errors.New("local archive spool directory is unavailable")
+	}
+	defer func() { _ = directory.Close() }()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return errors.New("local archive spool directory could not be read")
+	}
+	for _, entry := range entries {
+		if !archiveSpoolName.MatchString(entry.Name()) {
+			continue
+		}
+		info, err := root.Lstat(entry.Name())
+		if err != nil {
+			failed++
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := root.Remove(entry.Name()); err != nil {
+			failed++
+			continue
+		}
+		removed++
+		bytes += info.Size()
+	}
+	_, _ = fmt.Fprintf(w, "witself-server: stale archive spool sweep dir=%q removed=%d bytes=%d failed=%d\n", dir, removed, bytes, failed)
+	return nil
+}
 
 // SweepStaleArchiveSpools runs before serving, when no archive jobs are active.
 // Each server must own its temp directory; only direct, regular spool files are

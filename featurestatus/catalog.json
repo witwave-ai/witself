@@ -1518,6 +1518,98 @@
       ]
     },
     {
+      "id": "local-runtime-configuration",
+      "name": "Inactive local runtime configuration",
+      "area": "Local cell",
+      "summary": "WITSELF_RUNTIME=local selects private listeners, required database and spool storage, database/schema/account readiness, forbidden ambient configuration checks, and an explicit worker job allowlist. Unset or empty preserves hosted behavior; no live activation or installer is included.",
+      "implementation": "implemented",
+      "managed_rollout": "dark",
+      "docs": [
+        "docs/api-routes.md",
+        "docs/research/local-cell/implementation-plan.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "The explicit local switch rejects unsafe configuration and limits worker registration; readiness checks the attached database and active bootstrap account, and version reports its applied schema.",
+          "evidence": [
+            "cmd/witself-server/local_runtime_test.go",
+            "cmd/witself-worker/local_runtime.go",
+            "internal/runtimeconfig/config.go",
+            "internal/server/local_runtime_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "This foundation does not define a standalone plan/policy snapshot, installation identity, enrollment authority, or local connection routing. The account-id check is limited to the bootstrap account.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Local startup requires loopback listeners and a private owned spool directory (Windows: directory ownership (SID) check only; DACL privacy is pending), refuses hosted provision/backup/billing/email configuration, and excludes purge, retention, outbound dispatch, and support age-out jobs.",
+          "evidence": [
+            "internal/runtimeconfig/config.go",
+            "internal/runtimeconfig/spool.go",
+            "internal/server/local_runtime_test.go",
+            "internal/server/spool_sweep.go"
+          ]
+        },
+        "observability": {
+          "state": "pass",
+          "summary": "Local readiness and the version endpoint expose database health and applied schema without changing hosted response shapes. Readiness fails on a schema mismatch or missing/inactive bootstrap account.",
+          "evidence": [
+            "cmd/witself-server/local_runtime_test.go",
+            "docs/api-routes.md",
+            "internal/server/local_runtime_test.go",
+            "internal/store/local_runtime_test.go"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Removing the explicit switch restores hosted configuration. Installation lifecycle ownership, interruption recovery, bounded migration waits, and worker restart policy remain later slices.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Inactive by default with no live activation. Native lifecycle, platform packaging, clean-machine acceptance, and local-product canaries remain separate work.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "API documentation distinguishes hosted readiness/version behavior from the local runtime configuration; the implementation plan retains the remaining product and lifecycle boundaries.",
+          "evidence": [
+            "docs/api-routes.md",
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "local-lifecycle-and-platform-acceptance",
+          "gate_ids": [
+            "recovery",
+            "rollout_canaries"
+          ],
+          "summary": "Complete lifecycle ownership and recovery, platform installers and clean-machine proof, then separately authorize a local-product canary. This inactive foundation does not activate a live cell.",
+          "ref": "docs/research/local-cell/implementation-plan.md"
+        },
+        {
+          "id": "local-standalone-policy-and-identity",
+          "gate_ids": [
+            "entitlement_policy"
+          ],
+          "summary": "Define standalone policy, installation identity, connection routing and enrollment authority before enabling a supported local product.",
+          "ref": "docs/research/local-cell/implementation-plan.md"
+        }
+      ]
+    },
+    {
       "id": "managed-support",
       "name": "Managed support",
       "area": "Commercial",

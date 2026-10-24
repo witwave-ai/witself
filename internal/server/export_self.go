@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -35,6 +34,7 @@ func accountSelfExportHandler(
 	auth AuthFunc,
 	stream func(context.Context, string, io.Writer) error,
 	reportFailure func(context.Context, string, error),
+	cfg Config,
 ) http.HandlerFunc {
 	var active struct {
 		sync.Mutex
@@ -70,7 +70,7 @@ func accountSelfExportHandler(
 		// repeatable-read transaction closes at database speed. A customer
 		// pacing (or stalling) the response body must never hold a snapshot
 		// open on the shared cell database.
-		spool, err := os.CreateTemp("", "witself-self-export-*.tar.gz")
+		spool, err := cfg.createArchiveSpool("witself-self-export-*.tar.gz")
 		if err != nil {
 			writeSelfExportError(
 				w,
@@ -80,10 +80,9 @@ func accountSelfExportHandler(
 			)
 			return
 		}
-		spoolPath := spool.Name()
 		defer func() {
 			_ = spool.Close()
-			_ = os.Remove(spoolPath)
+			_ = cfg.removeArchiveSpool(spool)
 		}()
 
 		snapshotCtx, cancel := context.WithTimeout(
