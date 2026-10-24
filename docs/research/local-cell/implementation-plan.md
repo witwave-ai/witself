@@ -845,7 +845,7 @@ slices, not implementation authorization; do not turn them into one long branch.
   plus real PostgreSQL; one native macOS run / Activation: nothing changes unless
   explicitly selected / Recovery: remove the configuration; behavior reverts /
   Owner: Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner).
-  **Authorized by Scott on 2026-10-23 (decision D1); implementation under review.** Implemented subset:
+  **Authorized by Scott on 2026-10-23 (decision D1); LC-S1 through LC-S4 merged (#822, #824, #825, #826).** Implemented subset:
   see the M1 note.
 - **LC-S2 disposable lifecycle core** / Scope: one owner for process, data and
   temp with an exclusive lock, manifest and interruption journal / Acceptance:
@@ -959,7 +959,7 @@ branch named in the active review record below, or after that review hands off.
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
 runtime configuration terminology; stage the populated-account acceptance across
-M5/M6/M7; LC-S1, LC-S2 and LC-S3 are merged and LC-S4 is under review; the local-cell architecture stays the
+M5/M6/M7; LC-S1 through LC-S4 are merged; LC-S2-P and LC-S5 wait on founder decisions D8 and M0c; the local-cell architecture stays the
 provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
 first, embedded-service challenger retained, remote-cache-only fails the fixed
 requirements, container cell adds a runtime) with measurable budgets required
@@ -990,7 +990,7 @@ before starting.
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
-| LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | console route trust implemented | route/console and real API tests; seven killed mutations | owner gate and integration review | Fable reviews and gates unstaged implementation |
+| LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
 
 ## Founder decisions awaiting Scott
