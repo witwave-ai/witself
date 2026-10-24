@@ -6,23 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
 
 func unitCell(t *testing.T) (*Cell, *Manifest) {
 	t.Helper()
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
+	}
+	c, m := fileCell(t)
+	if err := os.Chmod(c.cfg.Root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.layout(); err != nil {
+		t.Fatal(err)
+	}
+	return c, m
+}
+
+// fileCell supplies records for byte-level tests without invoking private-root
+// validation or lifecycle layout. Such tests must remain runnable on Windows.
+func fileCell(t *testing.T) (*Cell, *Manifest) {
+	t.Helper()
+	root := t.TempDir()
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	c, err := New(Config{Root: root, Timeout: time.Second})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.layout(); err != nil {
 		t.Fatal(err)
 	}
 	m := &Manifest{
@@ -37,7 +49,7 @@ func unitCell(t *testing.T) (*Cell, *Manifest) {
 }
 
 func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
-	c, before := unitCell(t)
+	c, before := fileCell(t)
 	after := *before
 	after.LastOperation = "start"
 	injected := errors.New("interrupted before publish")
@@ -71,7 +83,7 @@ func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
 }
 
 func TestManifestRejectsUnknownLayoutVersion(t *testing.T) {
-	c, m := unitCell(t)
+	c, m := fileCell(t)
 	m.LayoutVersion = LayoutVersion + 1
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		t.Fatal(err)
@@ -82,7 +94,7 @@ func TestManifestRejectsUnknownLayoutVersion(t *testing.T) {
 }
 
 func TestManifestRejectsUnknownFields(t *testing.T) {
-	c, m := unitCell(t)
+	c, m := fileCell(t)
 	withExtra := struct {
 		*Manifest
 		Extra string `json:"extra"`
@@ -98,7 +110,7 @@ func TestManifestRejectsUnknownFields(t *testing.T) {
 func TestManifestRejectsOtherDatabaseNames(t *testing.T) {
 	for _, database := range []string{"", "codex_b", "postgres", "other", "Witself", localDatabaseName + " "} {
 		t.Run(database, func(t *testing.T) {
-			c, m := unitCell(t)
+			c, m := fileCell(t)
 			m.Database = database
 			if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 				t.Fatal(err)
@@ -175,7 +187,6 @@ func TestJournalRejectsUnfencedOrMismatchedRecords(t *testing.T) {
 		{"missing-time", []journalEntry{{Operation: "start", Step: "operation", State: "started"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			c, _ := unitCell(t)
 			var data []byte
 			for _, entry := range test.entries {
 				encoded, err := json.Marshal(entry)
@@ -184,15 +195,24 @@ func TestJournalRejectsUnfencedOrMismatchedRecords(t *testing.T) {
 				}
 				data = append(data, append(encoded, '\n')...)
 			}
-			if err := os.WriteFile(c.path("journal", "operations.jsonl"), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := c.Inspect(t.Context()); err == nil {
-				t.Fatal("Inspect accepted an untrusted journal fence")
-			}
-			if err := c.Repair(t.Context()); err == nil {
-				t.Fatal("Repair accepted an untrusted journal fence")
-			}
+			t.Run("readJournal", func(t *testing.T) {
+				c := journalFileCell(t, data)
+				if _, err := c.readJournal(); err == nil {
+					t.Fatal("journal reader accepted an untrusted journal fence")
+				}
+			})
+			t.Run("lifecycle", func(t *testing.T) {
+				c, _ := unitCell(t)
+				if err := os.WriteFile(c.path("journal", "operations.jsonl"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.Inspect(t.Context()); err == nil {
+					t.Fatal("Inspect accepted an untrusted journal fence")
+				}
+				if err := c.Repair(t.Context()); err == nil {
+					t.Fatal("Repair accepted an untrusted journal fence")
+				}
+			})
 		})
 	}
 }

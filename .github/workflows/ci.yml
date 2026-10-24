@@ -69,7 +69,7 @@ jobs:
   go:
     name: go
     if: ${{ always() }}
-    needs: [changes, website, docs, go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
+    needs: [changes, website, docs, go-rest, go-store, go-infra, localcell-windows, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -158,6 +158,46 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: node scripts/ci-product-gate.mjs
+
+  # Unit coverage only; native PostgreSQL lifecycle proof is a later slice.
+  localcell-windows:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build Local Cell packages
+        shell: pwsh
+        run: go build ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+      - name: Vet Local Cell packages
+        shell: pwsh
+        run: go vet ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+      - name: Test Go JSON result checker
+        shell: pwsh
+        run: node --test scripts/ci-go-test-json-check.test.mjs
+      - name: Test Local Cell packages and require complete results
+        shell: pwsh
+        run: |
+          $goExit = 1
+          & {
+            go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=10m
+            $script:goExit = $LASTEXITCODE
+          } | node scripts/ci-go-test-json-check.mjs
+          $parserExit = $LASTEXITCODE
+          if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
 
   go-rest:
     needs: changes

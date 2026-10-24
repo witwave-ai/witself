@@ -20,7 +20,7 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
 
 const wrapperDependencies = {
-  go: ['go-rest', 'go-store', 'go-infra', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
+  go: ['go-rest', 'go-store', 'go-infra', 'localcell-windows', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
   'release-config': ['release-config-full'],
   'homebrew-formula': ['homebrew-formula-full'],
   helm: ['helm-full'],
@@ -97,6 +97,55 @@ function assertDocsJob(job) {
   assert.deepEqual(checks.map(step => step.run), ['make check-docs'], 'Local and CI documentation checks share one bounded command');
   assert.equal(checks[0].if, undefined);
   assert.equal(checks[0]['continue-on-error'], undefined);
+}
+
+function assertLocalcellWindowsJob(ci) {
+  const label = 'localcell-windows';
+  assert.equal(ci.env, undefined, `${label}: no inherited workflow environment`);
+  const job = ci.jobs[label];
+  assert(job, 'Missing native Windows Local Cell unit job');
+  needs(job, ['changes'], label);
+  assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
+  assert.equal(job['runs-on'], 'windows-latest');
+  assert.deepEqual(job.permissions, {contents: 'read'});
+  assert.equal(job['timeout-minutes'], 25);
+  for (const key of ['continue-on-error', 'environment', 'env', 'services', 'secrets', 'strategy', 'defaults']) {
+    assert.equal(job[key], undefined, `${label}: no ${key}`);
+  }
+  assert(!JSON.stringify(job).includes('secrets.'), `${label}: no secret access`);
+  assert(!JSON.stringify(job).includes('WITSELF_LOCALCELL_PGBIN'), `${label}: no PostgreSQL lifecycle activation`);
+  const checkout = action(job, 'actions/checkout@', label);
+  assert.equal(checkout.uses, action(ci.jobs['go-rest'], 'actions/checkout@', 'go-rest').uses);
+  assert.deepEqual(checkout.with, {'persist-credentials': false});
+  const go = action(job, 'actions/setup-go@', label);
+  assert.equal(go.uses, action(ci.jobs['go-rest'], 'actions/setup-go@', 'go-rest').uses);
+  assert.deepEqual(go.with, {'go-version-file': 'go.mod', cache: true, 'cache-dependency-path': 'go.sum'});
+  const node = action(job, 'actions/setup-node@', label);
+  assert.equal(node.uses, action(ci.jobs.changes, 'actions/setup-node@', 'changes').uses);
+  assert.deepEqual(node.with, {'node-version': 22});
+  assert.deepEqual(job.steps.slice(0, 3), [checkout, go, node]);
+  const checks = job.steps.slice(3);
+  const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
+  assert.deepEqual(checks.map(step => step.run.trim()), [
+    `go build ${packages}`,
+    `go vet ${packages}`,
+    'node --test scripts/ci-go-test-json-check.test.mjs',
+    [
+      '$goExit = 1',
+      '& {',
+      '  go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=10m',
+      '  $script:goExit = $LASTEXITCODE',
+      '} | node scripts/ci-go-test-json-check.mjs',
+      '$parserExit = $LASTEXITCODE',
+      'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
+    ].join('\n'),
+  ], `${label}: build, vet and parsed test execution stay separate and fail closed`);
+  for (const step of checks) assert.equal(step.shell, 'pwsh');
+  for (const step of job.steps) {
+    for (const key of ['if', 'continue-on-error', 'env', 'working-directory']) {
+      assert.equal(step[key], undefined, `${label}: step cannot override ${key}`);
+    }
+  }
 }
 
 // Evaluate only the small expression grammar used by deployment and concurrency.
@@ -197,6 +246,7 @@ function assertWorkflowContracts(sources) {
   assertClassifier(ci.jobs.changes, ['application', 'docs', 'docs_index', 'docs_only', 'website', 'website_only'], 'ci changes');
   assertWebsiteCall(ci.jobs.website, 'ci website');
   assertDocsJob(ci.jobs.docs);
+  assertLocalcellWindowsJob(ci);
 
   for (const [id, dependencies] of Object.entries(wrapperDependencies)) {
     const job = ci.jobs[id];
@@ -315,6 +365,34 @@ test('main push runs remain independent while newer updates cancel only their ow
   assertCIConcurrency(workflows['ci.yml']);
 });
 
+test('native Windows failures block go while brochure-only and docs-only changes skip Windows', () => {
+  const job = workflows['ci.yml'].jobs['localcell-windows'];
+  for (const [path, application] of [
+    ['web/product/content.mjs', false],
+    ['docs/research/local-cell/implementation-plan.md', false],
+    ['.github/workflows/ci.yml', true],
+    ['scripts/ci-go-test-json-check.mjs', true],
+  ]) {
+    const scope = classifyChanges([{
+      path, status: 'M', oldMode: '100644', newMode: '100644',
+      oldOID: 'a'.repeat(40), newOID: 'b'.repeat(40),
+    }]);
+    assert.equal(scope.application, application, path);
+    assert.equal(evaluateExpression(job.if, {'needs.changes.outputs.application': String(scope.application)}), application, path);
+    const outputs = Object.fromEntries(Object.entries(scope).filter(([key]) => key !== 'reason').map(([key, value]) => [key, String(value)]));
+    const results = {
+      changes: {result: 'success', outputs},
+      docs: {result: scope.docs ? 'success' : 'skipped'},
+      website: {result: scope.website ? 'success' : 'skipped'},
+      ...Object.fromEntries(wrapperDependencies.go.map(id => [id, {result: application ? 'success' : 'skipped'}])),
+    };
+    assert.doesNotThrow(() => assertGate(results), path);
+    for (const result of application ? ['failure', 'cancelled', 'skipped', undefined] : ['success', 'failure']) {
+      assert.throws(() => assertGate({...results, 'localcell-windows': {result}}), `${path}: Windows ${result}`);
+    }
+  }
+});
+
 test('classified docs, mixed, and checker changes preserve every required wrapper and publication fence', () => {
   const research = 'docs/research/local-cell/notes.md';
   const cases = [
@@ -381,6 +459,21 @@ test('exact launch shell guard rejects disabled, case-changed, and non-main sett
 });
 
 const mutations = [
+  ['Windows inherits PostgreSQL lifecycle configuration', data => { data['ci.yml'].env = {WITSELF_LOCALCELL_PGBIN: 'synthetic'}; }],
+  ['missing Windows unit job', data => { delete data['ci.yml'].jobs['localcell-windows']; }],
+  ['missing Windows dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-windows'); }],
+  ['Windows job failure ignored', data => { data['ci.yml'].jobs['localcell-windows']['continue-on-error'] = true; }],
+  ['Windows job always runs', data => { data['ci.yml'].jobs['localcell-windows'].if = 'always()'; }],
+  ['Windows parser step removed', data => { data['ci.yml'].jobs['localcell-windows'].steps.pop(); }],
+  ['Windows parser bypassed', data => { data['ci.yml'].jobs['localcell-windows'].steps.at(-1).run = 'go test ./internal/localcell'; }],
+  ['Windows test failure ignored', data => { data['ci.yml'].jobs['localcell-windows'].steps.at(-1)['continue-on-error'] = true; }],
+  ['Windows native Go exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.at(-1); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
+  ['Windows parser exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.at(-1); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
+  ['Windows parser unit tests removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.run !== 'node --test scripts/ci-go-test-json-check.test.mjs'); }],
+  ...[
+    ['runs-on', 'ubuntu-24.04'], ['needs', []], ['permissions', {contents: 'write'}],
+    ['timeout-minutes', 26], ['environment', 'production'], ['env', {WITSELF_LOCALCELL_PGBIN: 'synthetic'}],
+  ].map(([key, value]) => [`Windows ${key} boundary changed`, data => { data['ci.yml'].jobs['localcell-windows'][key] = value; }]),
   ['main pushes share a cancellation or queue group', data => { data['ci.yml'].concurrency.group = 'ci-${{ github.ref }}'; }],
   ['concurrency cancellation disabled', data => { data['ci.yml'].concurrency['cancel-in-progress'] = false; }],
   ['missing Go application dependency', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'go-store'); }],

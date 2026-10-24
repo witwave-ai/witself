@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {checkLocalRoll, GateFailure, RollIneligible, validateRun, validateJobs, requiredJobs, requiredPublishSteps, main} from './check-local-roll.mjs';
+import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
 const sha = 'a'.repeat(40);
 const oldSHA = 'b'.repeat(40);
@@ -51,10 +52,12 @@ test('jobs must be complete and current; required jobs and publication steps can
   assert.throws(() => validateJobs(jobPages(), run, []), {code: 'release-mirror-contract-invalid'});
 });
 
-function fixture() {
+function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'witself-roll-gate-test-'));
-  const git = (...args) => execFileSync('git', args, {cwd, stdio: ['ignore', 'pipe', 'pipe']}).toString().trim();
+  t.after(() => cleanupGitFixture(cwd, t.name));
+  const git = (...args) => execFileSync('git', fixtureGitArgs(args), {cwd, stdio: ['ignore', 'pipe', 'pipe']}).toString().trim();
   git('init', '-q');
+  configureFixtureGit(git);
   git('config', 'user.email', 'fixture@example.invalid');
   git('config', 'user.name', 'Fixture');
   const cell = 'civo-fixture-use1-serving';
@@ -70,7 +73,7 @@ function fixture() {
   git('add', '.'); git('commit', '-qm', 'baseline');
   const baseRef = git('rev-parse', 'HEAD');
   writeFileSync(join(cwd, values), body('1.2.3', 'c'));
-  return {cwd, baseRef, values, cell, git, cleanup: () => rmSync(cwd, {recursive: true, force: true})};
+  return {cwd, baseRef, values, cell, git};
 }
 
 function runner(f, patch = {}) {
@@ -133,24 +136,22 @@ function runner(f, patch = {}) {
   return {run, calls, state};
 }
 
-test('focused path verifies one signed image and one attested chart, selected render, and generated values', async () => {
-  const f = fixture();
-  try {
-    const {run, calls} = runner(f);
-    const result = await checkLocalRoll({...f, run});
-    assert.equal(result.passed, true);
-    assert.equal(result.release_run_id, 123);
-    assert.equal(JSON.stringify(result).includes(digest), false);
-    assert.equal(JSON.stringify(result).includes(sha), false);
-    const pull = calls.filter(c => c.file === 'helm' && c.args[0] === 'pull');
-    assert.equal(pull.length, 1);
-    assert.equal(existsSync(pull[0].args.at(-1)), false, 'owned scratch removed');
-    assert.ok(calls.some(c => c.file === 'cosign' && c.args.includes('--certificate-github-workflow-sha') && c.args.includes(sha) && c.args.at(-1) === `${image}@${digest}`));
-    assert.ok(calls.some(c => c.file === 'gh' && c.args[0] === 'attestation' && c.args.includes('--source-digest') && c.args.includes('--deny-self-hosted-runners')));
-    assert.equal(calls.some(c => ['docker', 'kubectl', 'make'].includes(c.file)), false);
-    assert.ok(calls.some(c => c.file === 'bash' && c.args[0] === 'scripts/gitops-cell-values.sh' && c.args[1] === '--check'));
-    assert.ok(calls.every(c => !('WITSELF_TEST_STRIPE_SECRET_KEY' in c.options.env)));
-  } finally { f.cleanup(); }
+test('focused path verifies one signed image and one attested chart, selected render, and generated values', async t => {
+  const f = fixture(t);
+  const {run, calls} = runner(f);
+  const result = await checkLocalRoll({...f, run});
+  assert.equal(result.passed, true);
+  assert.equal(result.release_run_id, 123);
+  assert.equal(JSON.stringify(result).includes(digest), false);
+  assert.equal(JSON.stringify(result).includes(sha), false);
+  const pull = calls.filter(c => c.file === 'helm' && c.args[0] === 'pull');
+  assert.equal(pull.length, 1);
+  assert.equal(existsSync(pull[0].args.at(-1)), false, 'owned scratch removed');
+  assert.ok(calls.some(c => c.file === 'cosign' && c.args.includes('--certificate-github-workflow-sha') && c.args.includes(sha) && c.args.at(-1) === `${image}@${digest}`));
+  assert.ok(calls.some(c => c.file === 'gh' && c.args[0] === 'attestation' && c.args.includes('--source-digest') && c.args.includes('--deny-self-hosted-runners')));
+  assert.equal(calls.some(c => ['docker', 'kubectl', 'make'].includes(c.file)), false);
+  assert.ok(calls.some(c => c.file === 'bash' && c.args[0] === 'scripts/gitops-cell-values.sh' && c.args[1] === '--check'));
+  assert.ok(calls.every(c => !('WITSELF_TEST_STRIPE_SECRET_KEY' in c.options.env)));
 });
 
 const rejections = [
@@ -172,27 +173,23 @@ const rejections = [
   ['released chart render failure', {fail: (file, args) => file === 'helm' && args[0] === 'template' && args[1] === 'witself-server'}, 'released-child-render-failed'],
   ['local values changed during final remote check', {changeOnFinal: true}, 'local-roll-changed-during-check'],
 ];
-for (const [name, patch, code] of rejections) test(`refuses ${name} without leaking provider details`, async () => {
-  const f = fixture();
-  try {
-    const {run} = runner(f, patch);
-    await assert.rejects(checkLocalRoll({...f, run}), error => {
-      assert.ok(error instanceof GateFailure);
-      assert.equal(error instanceof RollIneligible, code === 'release-may-advance-schema');
-      assert.match(error.message, /focused approval refused/);
-      return error.code === code && !error.message.includes(digest) && !error.message.includes('private provider body');
-    });
-  } finally { f.cleanup(); }
+for (const [name, patch, code] of rejections) test(`refuses ${name} without leaking provider details`, async t => {
+  const f = fixture(t);
+  const {run} = runner(f, patch);
+  await assert.rejects(checkLocalRoll({...f, run}), error => {
+    assert.ok(error instanceof GateFailure);
+    assert.equal(error instanceof RollIneligible, code === 'release-may-advance-schema');
+    assert.match(error.message, /focused approval refused/);
+    return error.code === code && !error.message.includes(digest) && !error.message.includes('private provider body');
+  });
 });
 
-test('mixed source change refuses before any GitHub/registry calls', async () => {
-  const f = fixture();
-  try {
-    writeFileSync(join(f.cwd, 'untracked.go'), 'package changed\n');
-    const {run, calls} = runner(f);
-    await assert.rejects(checkLocalRoll({...f, run}), {code: 'scope-not-pin-only'});
-    assert.equal(calls.length, 0);
-  } finally { f.cleanup(); }
+test('mixed source change refuses before any GitHub/registry calls', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.cwd, 'untracked.go'), 'package changed\n');
+  const {run, calls} = runner(f);
+  await assert.rejects(checkLocalRoll({...f, run}), {code: 'scope-not-pin-only'});
+  assert.equal(calls.length, 0);
 });
 
 test('CLI accepts no receipt or evidence bypass option', async () => {
@@ -205,8 +202,8 @@ test('CLI accepts no receipt or evidence bypass option', async () => {
   } finally { console.error = prior; }
 });
 
-test('standalone CLI still refuses confirmed schema differences; only the selector may choose full checks', () => {
-  const f = fixture();
+test('standalone CLI still refuses confirmed schema differences; only the selector may choose full checks', t => {
+  const f = fixture(t);
   const bin = mkdtempSync(join(tmpdir(), 'witself-roll-cli-shim-'));
   try {
     const changedValues = readFileSync(join(f.cwd, f.values), 'utf8');
@@ -223,5 +220,5 @@ test('standalone CLI still refuses confirmed schema differences; only the select
     assert.throws(() => execFileSync(process.execPath, [fileURLToPath(new URL('./check-local-roll.mjs', import.meta.url)), '--base', f.baseRef], {
       cwd: f.cwd, env: {...process.env, PATH: `${bin}:${process.env.PATH}`}, stdio: ['ignore', 'pipe', 'pipe'],
     }), error => error.status === 1 && error.stderr.toString().includes('release-may-advance-schema; focused approval refused') && !error.stdout.toString().includes('PASS'));
-  } finally { f.cleanup(); rmSync(bin, {recursive: true, force: true}); }
+  } finally { rmSync(bin, {recursive: true, force: true}); }
 });

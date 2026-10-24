@@ -854,7 +854,8 @@ slices, not implementation authorization; do not turn them into one long branch.
   Activation: explicit harness only / Recovery: synthetic data only / Owner:
   vacant.
 - **LC-S2-P platform adapters** / Scope: one slice per OS; Windows first because
-  server/worker have no Windows build
+  server/worker have no Windows release target and no native lifecycle proof yet
+  (cross-compilation already passes)
   ([server targets](../../../.goreleaser.yaml#L32),
   [worker targets](../../../.goreleaser.yaml#L71)) / Acceptance: native lifecycle
   proof for the selected OS / Dependencies: LC-S2 and the M0a platform decisions
@@ -988,7 +989,7 @@ before starting.
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
-| LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
+| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW0 Windows CI unit lane | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |

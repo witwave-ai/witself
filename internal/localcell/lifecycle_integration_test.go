@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,6 +25,9 @@ import (
 // One build supplies all real-lifecycle scenarios. Missing PostgreSQL is an
 // explicit NOT RUN result; a present but broken toolchain is a test failure.
 func TestRealLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
+	}
 	pgbin := os.Getenv("WITSELF_LOCALCELL_PGBIN")
 	if pgbin == "" || !postgresBinariesPresent(pgbin) {
 		_, _ = fmt.Fprintf(os.Stderr, "NOT RUN %s: no PostgreSQL binaries\n", t.Name())
@@ -50,6 +54,9 @@ func postgresBinariesPresent(directory string) bool {
 
 func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
+	}
 	buildDir := t.TempDir()
 	source, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -79,6 +86,9 @@ func offlineBuildCommand(ctx context.Context, args ...string) *exec.Cmd {
 
 func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error) (*localcell.Cell, string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
+	}
 	// A short, flat prefix keeps every generated path (including the
 	// PostgreSQL data directory and lock files) well inside platform limits;
 	// Unix sockets are disabled, so this is isolation hygiene, not a socket

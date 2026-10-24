@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,9 @@ func testLookup(values map[string]string) func(string) (string, bool) {
 
 func privateDir(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
+	}
 	dir := t.TempDir()
 	dir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -34,7 +38,16 @@ func TestRuntimeSelector(t *testing.T) {
 	for _, role := range []string{"server", "worker"} {
 		for _, selector := range []string{"unset", "", "local", "hosted-secret", " local", "LOCAL"} {
 			t.Run(role+"/"+selector, func(t *testing.T) {
-				values := localValues(t)
+				// Only local selection needs a validated private spool. Hosted and
+				// invalid selectors must remain covered on every platform.
+				values := map[string]string{
+					"WITSELF_RUNTIME":         "local",
+					"WITSELF_DATABASE_URL":    "postgres://synthetic.invalid/local",
+					"WITSELF_LOCAL_SPOOL_DIR": "unused-spool",
+				}
+				if selector == "local" {
+					values = localValues(t)
+				}
 				if selector == "unset" {
 					delete(values, "WITSELF_RUNTIME")
 				} else {

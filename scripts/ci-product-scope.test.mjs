@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {brochureFiles, classifyEvent, classifyLocal, classifyPaths, classifyChanges, parseChanges, parsePaths} from './ci-product-scope.mjs';
 import {captureDocsSnapshot, collectDocsInputs, isDocsPath} from './docs-scope.mjs';
+import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
 const script = fileURLToPath(new URL('./ci-product-scope.mjs', import.meta.url));
 const site = {application: false, website: true, website_only: true, docs: false, docs_only: false, docs_index: false};
@@ -22,8 +23,8 @@ function scope(actual, expected) {
 }
 function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'witself-product-scope-'));
-  t.after(() => rmSync(cwd, {recursive: true, force: true}));
-  const git = (...args) => execFileSync('git', args, {
+  t.after(() => cleanupGitFixture(cwd, t.name));
+  const git = (...args) => execFileSync('git', fixtureGitArgs(args), {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: {...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_AUTHOR_NAME: 'Scope Test', GIT_AUTHOR_EMAIL: 'scope@example.invalid',
@@ -39,6 +40,7 @@ function fixture(t) {
     return git('rev-parse', 'HEAD');
   };
   git('init', '--quiet', '--initial-branch=main');
+  configureFixtureGit(git);
   write('web/product/content.mjs', 'base brochure\n');
   write('web/product/styles.css', 'base styles\n');
   write('cmd/witself/main.go', 'base application\n');
@@ -49,6 +51,62 @@ function fixture(t) {
 }
 const push = (before, after) => ({before, after});
 const pull = (base, head) => ({pull_request: {base: {sha: base}, head: {sha: head}}});
+
+test('Git fixtures disable background maintenance for direct and indirect commands', t => {
+  const f = fixture(t);
+  assert.deepEqual(fixtureGitArgs(['status']), ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'status']);
+  for (const [key, value] of [['gc.auto', '0'], ['maintenance.auto', 'false']]) {
+    assert.equal(f.git('config', '--get', key), value);
+    // --local checks persisted settings, independent of the command overrides.
+    assert.equal(execFileSync('git', fixtureGitArgs(['config', '--local', '--get', key]), {
+      cwd: f.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim(), value);
+  }
+});
+
+test('Git fixture cleanup removes a late-created .git file on its bounded retry', t => {
+  const f = fixture(t);
+  let attempts = 0;
+  let pauses = 0;
+  cleanupGitFixture(f.cwd, t.name, {
+    remove(dir, options) {
+      assert.deepEqual(options, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+      attempts++;
+      if (attempts === 1) {
+        rmSync(join(dir, '.git'), options);
+        throw Object.assign(new Error('fixture removal interrupted'), {code: 'ENOTEMPTY'});
+      }
+      assert.equal(readFileSync(join(dir, '.git', 'late-file'), 'utf8'), 'late fixture write');
+      rmSync(dir, options);
+    },
+    pause(milliseconds) {
+      assert.equal(milliseconds, 100);
+      pauses++;
+      mkdirSync(join(f.cwd, '.git'));
+      writeFileSync(join(f.cwd, '.git', 'late-file'), 'late fixture write');
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(pauses, 1);
+  assert.equal(existsSync(f.cwd), false);
+});
+
+test('Git fixture cleanup retries a residual directory and reports a persistent leak by test name', t => {
+  const f = fixture(t);
+  for (const throws of [false, true]) {
+    let attempts = 0;
+    let pauses = 0;
+    assert.throws(() => cleanupGitFixture(f.cwd, t.name, {
+      remove() {
+        attempts++;
+        if (throws) throw new Error(`private filesystem details: ${f.cwd}`);
+      },
+      pause(milliseconds) { assert.equal(milliseconds, 100); pauses++; },
+    }), {message: `Temporary Git fixture cleanup failed for test: ${t.name}`});
+    assert.equal(attempts, 2);
+    assert.equal(pauses, 1);
+  }
+});
 
 test('only the explicit brochure allowlist bypasses application checks', () => {
   assert.deepEqual([...brochureFiles], [
