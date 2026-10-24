@@ -41,6 +41,28 @@ func main() {
 }
 
 func run(args []string) int {
+	return runWithRuntime(args, os.LookupEnv, dispatchServerCommand, os.Stderr)
+}
+
+// Keep the runtime check ahead of every command handler: operational commands
+// must not inspect their environment or create a store or client when selected.
+func runWithRuntime(args []string, lookup func(string) (string, bool), dispatch func([]string) int, stderr io.Writer) int {
+	if selected, _ := lookup("WITSELF_RUNTIME"); selected != "" {
+		command := ""
+		if len(args) != 0 {
+			command = args[0]
+		}
+		switch command {
+		case "serve", "--version", "-v", "--help", "-h":
+		default:
+			_, _ = fmt.Fprintln(stderr, "operational subcommands are unavailable while WITSELF_RUNTIME is set")
+			return 1
+		}
+	}
+	return dispatch(args)
+}
+
+func dispatchServerCommand(args []string) int {
 	if len(args) == 0 {
 		usage(os.Stdout)
 		return 0
@@ -111,8 +133,21 @@ func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
 }
 
 func serve() int {
+	cfg, runtime, err := serverRuntimeConfigFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	memlimit.Configure(os.Stderr, "witself-server")
-	server.SweepStaleArchiveSpools(os.TempDir(), os.Stderr)
+	if runtime.Local {
+		defer func() { _ = cfg.SpoolRoot.Close() }()
+		if err := server.SweepLocalArchiveSpools(cfg.SpoolRoot, runtime.SpoolDir, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
+		}
+	} else {
+		server.SweepStaleArchiveSpools(os.TempDir(), os.Stderr)
+	}
 	factDeletionEnabled, err := factDeletionEnabledFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -149,7 +184,6 @@ func serve() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg := server.ConfigFromEnv()
 	cfg.AccountImportJobTimeout, cfg.AccountImportJobConcurrency, err = accountImportJobConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -178,7 +212,11 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
-	if dsn := dbDSN(); dsn != "" {
+	dsn := dbDSN()
+	if runtime.Local {
+		dsn = runtime.DatabaseURL
+	}
+	if dsn != "" {
 		st, err := store.Open(ctx, dsn,
 			serverStoreOptions(avatarPayloadCompactionEnabled, supportTicketRateLimit, os.Stderr)...)
 		if err != nil {
@@ -266,6 +304,12 @@ func serve() int {
 			return 1
 		}
 		cfg.AccountID = acctID
+		if runtime.Local {
+			if err := configureLocalStore(ctx, &cfg, st, runtime.AccountID); err != nil {
+				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+				return 1
+			}
+		}
 		oprID, err := st.EnsureRootOperator(ctx, acctID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -2036,7 +2080,9 @@ func serve() int {
 				)
 			}
 		}
-		cfg.Ready = st.Ping
+		if !runtime.Local {
+			cfg.Ready = st.Ping
+		}
 		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
 			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)

@@ -245,7 +245,7 @@ func (j *accountImportJobs) run(cfg Config, client *http.Client, key [2]string, 
 		lease.Close()
 		if spool != nil {
 			_ = spool.Close()
-			_ = os.Remove(spool.Name())
+			_ = cfg.removeArchiveSpool(spool)
 		}
 		<-j.sem
 		if cfg.ReportAccountImportJob != nil {
@@ -260,7 +260,7 @@ func (j *accountImportJobs) run(cfg Config, client *http.Client, key [2]string, 
 		return
 	}
 	var err error
-	spool, err = downloadImportArchiveContext(ctx, client, u, job.takeToken(), size)
+	spool, err = downloadImportArchiveContext(ctx, client, u, job.takeToken(), size, cfg)
 	message := "archive download failed"
 	if err == nil {
 		var sum ImportSummary

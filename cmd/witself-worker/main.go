@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemailoutbound"
-	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/memlimit"
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 	"github.com/witwave-ai/witself/internal/worker"
@@ -112,40 +112,54 @@ func main() {
 }
 
 func run(args []string) int {
+	return runWith(args, os.LookupEnv, os.Stdout, os.Stderr, serve, runAgentEmailReceiptReplay)
+}
+
+func runWith(args []string, lookup func(string) (string, bool), stdout, stderr io.Writer, serveCommand func() int, receiptReplayCommand func([]string) int) int {
+	if selected, _ := lookup("WITSELF_RUNTIME"); selected != "" {
+		allowed := len(args) > 0 && (args[0] == "serve" || args[0] == "--version" || args[0] == "-v" || args[0] == "--help" || args[0] == "-h")
+		if !allowed {
+			_, _ = fmt.Fprintln(stderr, "operational subcommands are unavailable while WITSELF_RUNTIME is set")
+			return 1
+		}
+	}
 	if len(args) == 0 {
-		usage(os.Stdout)
+		usage(stdout)
 		return 0
 	}
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Println(version.String("witself-worker"))
+		_, _ = fmt.Fprintln(stdout, version.String("witself-worker"))
 		return 0
 	case "help", "--help", "-h":
-		usage(os.Stdout)
+		usage(stdout)
 		return 0
 	case "serve":
-		return serve()
+		return serveCommand()
 	case "agent-email":
 		if len(args) >= 2 && args[1] == "receipt-replay" {
-			return runAgentEmailReceiptReplay(args[2:])
+			return receiptReplayCommand(args[2:])
 		}
-		fmt.Fprintln(os.Stderr, "witself-worker: unknown agent-email command")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: unknown agent-email command")
 		return 2
 	default:
-		fmt.Fprintf(os.Stderr, "witself-worker: unknown command %q\n\n", args[0])
-		usage(os.Stderr)
+		_, _ = fmt.Fprintf(stderr, "witself-worker: unknown command %q\n\n", args[0])
+		usage(stderr)
 		return 2
 	}
 }
 
 func serve() int {
 	memlimit.Configure(os.Stderr, "witself-worker")
-	jobs, err := jobConfigFromEnv(os.LookupEnv)
+	runtime, jobs, err := workerConfigFromEnv(os.LookupEnv, os.Environ())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
 		return 1
 	}
 	dsn := dbDSN(os.LookupEnv)
+	if runtime.Local {
+		dsn = runtime.DatabaseURL
+	}
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "witself-worker: WITSELF_DATABASE_URL is required (falls back to DATABASE_URL)")
 		return 1
@@ -168,8 +182,50 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-worker: database readiness: %v\n", err)
 		return 1
 	}
+	return serveWorker(ctx, st, st, runtime, jobs, os.LookupEnv, (*worker.Registry).Run)
+}
+
+// serveWorker keeps the account check and the selected readiness callback in
+// the production path while allowing tests to observe the registry boundary.
+func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.BootstrapStore, runtime runtimeconfig.Config, jobs jobConfig, lookup func(string) (string, bool), runRegistry func(*worker.Registry, context.Context, worker.Config) error) int {
+	if runtime.Local {
+		if err := runtimeconfig.ValidateAccount(ctx, st, runtime.AccountID); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
+			return 1
+		}
+	}
 
 	registry := worker.NewRegistry()
+	if code := registerJobs(registry, jobStore, jobs); code != 0 {
+		return code
+	}
+
+	healthAddr, metricsAddr := workerListenerAddresses(runtime, lookup)
+	ready := st.Ping
+	if runtime.Local {
+		ready = func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			return runtimeconfig.CheckReady(ctx, st, store.SchemaVersion(), runtime.AccountID)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "witself-worker: migrated; database ready")
+	fmt.Fprintf(os.Stderr, "witself-worker: health listening on %s\n", healthAddr)
+	fmt.Fprintf(os.Stderr, "witself-worker: metrics listening on %s\n", metricsAddr)
+	if err := runRegistry(registry, ctx, worker.Config{
+		HealthAddr:  healthAddr,
+		MetricsAddr: metricsAddr,
+		Ready:       ready,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "witself-worker: shut down cleanly")
+	return 0
+}
+
+// registerJobs preserves the hosted registration order and log messages.
+func registerJobs(registry *worker.Registry, st *store.Store, jobs jobConfig) int {
 	metrics := registry.Metrics()
 	metrics.SetAuditAppendFailuresReader(st.AuditAppendFailures)
 	if jobs.avatarEnabled {
@@ -475,20 +531,6 @@ func serve() int {
 		)
 	}
 
-	healthAddr := envconfig.TrimmedOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081")
-	metricsAddr := envconfig.TrimmedOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090")
-	fmt.Fprintln(os.Stderr, "witself-worker: migrated; database ready")
-	fmt.Fprintf(os.Stderr, "witself-worker: health listening on %s\n", healthAddr)
-	fmt.Fprintf(os.Stderr, "witself-worker: metrics listening on %s\n", metricsAddr)
-	if err := registry.Run(ctx, worker.Config{
-		HealthAddr:  healthAddr,
-		MetricsAddr: metricsAddr,
-		Ready:       st.Ping,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(os.Stderr, "witself-worker: shut down cleanly")
 	return 0
 }
 

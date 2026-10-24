@@ -4,8 +4,9 @@ Active research and design for the **local cell**: the default new installation
 provides a usable free local cell, replacing the hosted free plan. Required
 synchronization with SaaS or self-managed services and an explicit lightweight
 remote-only installation remain supported. Local cells are the selected direction,
-explicitly subject to adversarial review and revision. Implementation has not
-started in this effort.
+explicitly subject to adversarial review and revision. Implementation of the first
+inactive foundation slice (LC-S1) is under review; nothing is activated and no
+default changes.
 
 Planning review 2026-10-23: see the
 [living progress record](implementation-plan.md#claude-review-and-living-progress-record)
