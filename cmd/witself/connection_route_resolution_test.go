@@ -303,9 +303,9 @@ func TestConnectionRoutePlanHostedAndExplicitBehavior(t *testing.T) {
 	}
 }
 
-func TestConnectionRouteConsoleStillRequiresDirectoryTrust(t *testing.T) {
+func TestConnectionRouteConsoleUsesLocalTrust(t *testing.T) {
 	consoleTestHome(t)
-	conn, _, _ := accountTestBackend(t)
+	conn, expected, _ := accountTestBackend(t)
 	if err := local.Save("selected", local.Account{ID: conn.AccountID, Route: &local.Route{Kind: "local", Endpoint: conn.Endpoint}}, accountFakeBearer); err != nil {
 		t.Fatal(err)
 	}
@@ -321,10 +321,10 @@ func TestConnectionRouteConsoleStillRequiresDirectoryTrust(t *testing.T) {
 		calls++
 		return "", "", errors.New("directory blackhole")
 	}
-	if got := resolveAccountConsoleManager(context.Background(), conn, consoleTestIdentity(), false, locate); got != nil || calls != 1 || reads != 0 {
-		t.Fatal("local route bypassed console directory trust")
+	if got := resolveAccountConsoleManager(context.Background(), conn, consoleTestIdentity(), false, locate); got == nil || *got != *expected || calls != 0 || reads != 1 {
+		t.Fatal("local route did not establish independent console trust")
 	}
-	calls = 0
+	reads = 0
 	if got := resolveAccountConsoleManager(context.Background(), conn, consoleTestIdentity(), true, locate); got != nil || calls != 0 || reads != 0 {
 		t.Fatal("explicit endpoint was not declined before console lookup or credential read")
 	}

@@ -1718,7 +1718,7 @@
       "id": "local-connection-routes",
       "name": "Explicit local connection routes",
       "area": "Local cell",
-      "summary": "Named accounts can select a loopback HTTP connection route for CLI, MCP and hooks without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.",
+      "summary": "Named accounts can select a loopback HTTP connection route for CLI, MCP, hooks and independently verified console management without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.",
       "implementation": "implemented",
       "managed_rollout": "dark",
       "docs": [
@@ -1737,9 +1737,10 @@
         },
         "entitlement_policy": {
           "state": "pass",
-          "summary": "Plan and billing refuse routed accounts without an explicit endpoint. Console manager trust remains directory-backed; no hosted entitlements or identity remapping are granted.",
+          "summary": "Plan and billing refuse routed accounts without an explicit endpoint. Console management verifies a distinct operator at the matching local route origin and refuses stale routes. Explicit endpoint/token-file consoles remain agent-only; no hosted entitlements are granted.",
           "evidence": [
             "cmd/witself/account_console.go",
+            "cmd/witself/account_console_route_test.go",
             "cmd/witself/plan.go"
           ]
         },
@@ -1770,14 +1771,14 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "No live activation. Offline console trust, lifecycle integration and a supported local-product canary remain separate work.",
+          "summary": "No live activation. Standalone operator bootstrap, offline inventory proof, lifecycle integration and a supported local-product canary remain separate work.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
         },
         "docs_support": {
           "state": "pass",
-          "summary": "CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart and hosted-only billing.",
+          "summary": "CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart, hosted-only billing and independent console route trust.",
           "evidence": [
             "docs/cli-command-surface.md",
             "docs/operator-auth.md",
@@ -1791,7 +1792,7 @@
           "gate_ids": [
             "rollout_canaries"
           ],
-          "summary": "Complete LC-S4 console trust and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred.",
+          "summary": "Complete standalone operator bootstrap, offline inventory proof and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         }
       ]

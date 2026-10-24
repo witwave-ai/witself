@@ -333,7 +333,8 @@ or hosted job behavior.
 
 ### M2 Make standalone use complete enough for a canary
 
-LC-S3 implements connection routes, atomic route activation, per-event hook adoption and the hosted-only plan/billing refusal; live MCP re-binding is deferred (restart required), and offline console trust belongs to LC-S4.
+LC-S3 implements connection routes, atomic route activation, per-event hook adoption and the hosted-only plan/billing refusal; live MCP re-binding is deferred (restart required).
+LC-S4 implements the console route trust path with independent operator verification and stale-route refusal; standalone operator bootstrap and offline inventory proof remain.
 
 - Add explicit connection routes without changing named hosted-account resolution by
   default. Local resolution must survive a blocked directory/control-plane
@@ -346,19 +347,19 @@ LC-S3 implements connection routes, atomic route activation, per-event hook adop
   hooks, console and TUI. Avoid automatic identity remapping on later enrollment.
 - Give account-console management its own authenticated local installation/connection route
   trust path. Adapting ordinary client endpoint resolution is insufficient: the
-  current console independently consults the hosted directory before admitting
+  console independently verifies the local route or hosted directory before admitting
   operator authority. Preserve origin/account identity verification and distinct
   operator/agent credentials; do not bypass these checks or promote an agent
   token to account-wide access to make offline views work. The directory
-  dependency is in the CLI manager resolver, which also declines account-manager
-  credentials for explicit endpoint/token-file invocations
+  lookup remains in the CLI manager resolver for accounts without a route; it
+  also declines account-manager credentials for explicit endpoint/token-file invocations
   ([resolver](../../../cmd/witself/account_console.go#L35),
-  [directory lookup](../../../cmd/witself/account_console.go#L43)); the lower-level
+  [route and directory selection](../../../cmd/witself/account_console.go#L44)); the lower-level
   verifier already accepts a trusted loopback origin via `/v1/whoami`
   ([origin validation](../../../internal/client/account_console.go#L61),
   [manager verification](../../../internal/client/account_console.go#L90)) and is the reuse
-  seam. Named CLI/agent connections without an explicit endpoint require the
-  directory today ([CLI](../../../cmd/witself/main.go#L338),
+  seam. Named CLI/agent connections without a route or explicit endpoint require the
+  directory ([CLI](../../../cmd/witself/main.go#L338),
   [agent](../../../cmd/witself/main.go#L390)).
 - Exercise transcripts, narrative memories, facts, their references and recall,
   including client-driven curation for the declared local scope. Define local
@@ -958,7 +959,7 @@ branch named in the active review record below, or after that review hands off.
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
 runtime configuration terminology; stage the populated-account acceptance across
-M5/M6/M7; LC-S1 and LC-S2 are merged and LC-S3 is under review; the local-cell architecture stays the
+M5/M6/M7; LC-S1, LC-S2 and LC-S3 are merged and LC-S4 is under review; the local-cell architecture stays the
 provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
 first, embedded-service challenger retained, remote-cache-only fails the fixed
 requirements, container cell adds a runtime) with measurable budgets required
@@ -988,8 +989,8 @@ before starting.
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
-| LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | implemented; inert unless a route is set | route/CLI/MCP/hook tests; eight killed mutations | owner gate and integration review | Fable reviews and gates unstaged implementation |
-| LC-S4 | vacant | proposed | console trust | none | LC-S3 | resolve dependency |
+| LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
+| LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | console route trust implemented | route/console and real API tests; seven killed mutations | owner gate and integration review | Fable reviews and gates unstaged implementation |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
 
 ## Founder decisions awaiting Scott

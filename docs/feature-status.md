@@ -500,7 +500,7 @@ Open gates:
 
 ### Explicit local connection routes
 
-Named accounts can select a loopback HTTP connection route for CLI, MCP and hooks without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.
+Named accounts can select a loopback HTTP connection route for CLI, MCP, hooks and independently verified console management without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.
 
 - Implementation: `implemented`
 - Managed rollout: `dark`
@@ -510,16 +510,16 @@ Named accounts can select a loopback HTTP connection route for CLI, MCP and hook
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
 | Behavior | **PASS** | Operator, agent and domain resolution bypass the directory for local routes. Hooks adopt each event; MCP snapshots the startup route and retains identity verification. [integration.go](../cmd/witself/integration.go), [main.go](../cmd/witself/main.go), [mcp.go](../cmd/witself/mcp.go) |
-| Entitlement / policy | **PASS** | Plan and billing refuse routed accounts without an explicit endpoint. Console manager trust remains directory-backed; no hosted entitlements or identity remapping are granted. [account_console.go](../cmd/witself/account_console.go), [plan.go](../cmd/witself/plan.go) |
+| Entitlement / policy | **PASS** | Plan and billing refuse routed accounts without an explicit endpoint. Console management verifies a distinct operator at the matching local route origin and refuses stale routes. Explicit endpoint/token-file consoles remain agent-only; no hosted entitlements are granted. [account_console.go](../cmd/witself/account_console.go), [account_console_route_test.go](../cmd/witself/account_console_route_test.go), [plan.go](../cmd/witself/plan.go) |
 | Bounds / abuse | **PASS** | Unknown kinds and non-HTTP or non-loopback endpoints fail closed. Activation probes are bounded, unauthenticated and do not follow redirects. [account_route.go](../cmd/witself/account_route.go), [account_route_test.go](../cmd/witself/account_route_test.go), [local.go](../internal/local/local.go) |
 | Observability | **PASS** | Route show exposes only the kind and endpoint; validation and probe errors omit supplied values and response bodies. [account_route.go](../cmd/witself/account_route.go), [account_route_test.go](../cmd/witself/account_route_test.go) |
 | Recovery | **PASS** | Same-directory temporary writes and rename preserve valid config through interruption and concurrent reads. Clear restores directory routing; MCP restart is required. [cli-command-surface.md](../docs/cli-command-surface.md), [local.go](../internal/local/local.go) |
-| Rollout / canaries | **CONDITIONAL** | No live activation. Offline console trust, lifecycle integration and a supported local-product canary remain separate work. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
-| Docs / support | **PASS** | CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart and hosted-only billing. [cli-command-surface.md](../docs/cli-command-surface.md), [operator-auth.md](../docs/operator-auth.md), [runbooks.md](../docs/runbooks.md) |
+| Rollout / canaries | **CONDITIONAL** | No live activation. Standalone operator bootstrap, offline inventory proof, lifecycle integration and a supported local-product canary remain separate work. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Docs / support | **PASS** | CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart, hosted-only billing and independent console route trust. [cli-command-surface.md](../docs/cli-command-surface.md), [operator-auth.md](../docs/operator-auth.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
-- `local-connection-product-canary` (rollout / canaries): Complete LC-S4 console trust and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
+- `local-connection-product-canary` (rollout / canaries): Complete standalone operator bootstrap, offline inventory proof and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
 
 <a id="local-runtime-configuration"></a>
 
