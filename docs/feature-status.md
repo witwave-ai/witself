@@ -35,6 +35,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Disposable local cell lifecycle core](#local-cell-lifecycle-core) | Local cell | `implemented` | `dark` | **not ready** | 2/7 pass | 2 |
+| [Explicit local connection routes](#local-connection-routes) | Local cell | `implemented` | `dark` | **not ready** | 6/7 pass | 1 |
 | [Inactive local runtime configuration](#local-runtime-configuration) | Local cell | `implemented` | `dark` | **not ready** | 4/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
@@ -494,6 +495,31 @@ Open gates:
 
 - `local-lifecycle-platform-and-delivery` (behavior, bounds / abuse, recovery, rollout / canaries): Rerun native PostgreSQL lifecycle outside the sandbox, then complete platform and Windows DACL proof, restart policy, migration cancellation, service adapters, downloads and installer manifest trust before a separately authorized rollout. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
 - `local-lifecycle-product-policy` (entitlement / policy): Resolve standalone policy, client authorization, routing and enrollment authority before exposing a supported local product. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
+
+<a id="local-connection-routes"></a>
+
+### Explicit local connection routes
+
+Named accounts can select a loopback HTTP connection route for CLI, MCP and hooks without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.
+
+- Implementation: `implemented`
+- Managed rollout: `dark`
+- Readiness: **not ready**
+- Detailed docs: [cli-command-surface.md](../docs/cli-command-surface.md), [implementation-plan.md](../docs/research/local-cell/implementation-plan.md)
+
+| Gate | State | Current evidence and conclusion |
+|---|---|---|
+| Behavior | **PASS** | Operator, agent and domain resolution bypass the directory for local routes. Hooks adopt each event; MCP snapshots the startup route and retains identity verification. [integration.go](../cmd/witself/integration.go), [main.go](../cmd/witself/main.go), [mcp.go](../cmd/witself/mcp.go) |
+| Entitlement / policy | **PASS** | Plan and billing refuse routed accounts without an explicit endpoint. Console manager trust remains directory-backed; no hosted entitlements or identity remapping are granted. [account_console.go](../cmd/witself/account_console.go), [plan.go](../cmd/witself/plan.go) |
+| Bounds / abuse | **PASS** | Unknown kinds and non-HTTP or non-loopback endpoints fail closed. Activation probes are bounded, unauthenticated and do not follow redirects. [account_route.go](../cmd/witself/account_route.go), [account_route_test.go](../cmd/witself/account_route_test.go), [local.go](../internal/local/local.go) |
+| Observability | **PASS** | Route show exposes only the kind and endpoint; validation and probe errors omit supplied values and response bodies. [account_route.go](../cmd/witself/account_route.go), [account_route_test.go](../cmd/witself/account_route_test.go) |
+| Recovery | **PASS** | Same-directory temporary writes and rename preserve valid config through interruption and concurrent reads. Clear restores directory routing; MCP restart is required. [cli-command-surface.md](../docs/cli-command-surface.md), [local.go](../internal/local/local.go) |
+| Rollout / canaries | **CONDITIONAL** | No live activation. Offline console trust, lifecycle integration and a supported local-product canary remain separate work. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Docs / support | **PASS** | CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart and hosted-only billing. [cli-command-surface.md](../docs/cli-command-surface.md), [operator-auth.md](../docs/operator-auth.md), [runbooks.md](../docs/runbooks.md) |
+
+Open gates:
+
+- `local-connection-product-canary` (rollout / canaries): Complete LC-S4 console trust and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
 
 <a id="local-runtime-configuration"></a>
 

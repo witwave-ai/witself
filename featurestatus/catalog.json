@@ -78,19 +78,28 @@
       "open_gates": [
         {
           "id": "access-policy-core-implementation",
-          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy"],
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "entitlement_policy"
+          ],
           "summary": "Implement the policy evaluator, security-group lifecycle, transactional membership, collective ownership, authorization hooks, audit, API, CLI, MCP, and hostile-input tests.",
           "ref": "docs/security-groups.md"
         },
         {
           "id": "access-policy-operations",
-          "gate_ids": ["observability", "recovery"],
+          "gate_ids": [
+            "observability",
+            "recovery"
+          ],
           "summary": "Add bounded decision metrics, invalidation and backlog alerts, archive/import, rollback, and crash-recovery drills without exposing identity content.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "access-policy-release-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Ship behind a dark account cohort and retain allow, deny, membership-revocation, rollback, and cross-agent isolation canaries before widening.",
           "ref": "docs/access-policy.md"
         }
@@ -180,13 +189,18 @@
       "open_gates": [
         {
           "id": "continuous-capacity-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Serving-cell capacity scraping and alert delivery are deployed and accepted; extend monitoring coverage to every accepting destination cell before automatic placement resumes.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "directed-move-drill",
-          "gate_ids": ["recovery", "rollout_canaries"],
+          "gate_ids": [
+            "recovery",
+            "rollout_canaries"
+          ],
           "summary": "Retain a release-specific multi-cell evacuation, restore, and sealed-state recovery drill.",
           "ref": "docs/deployment-cells.md"
         }
@@ -287,13 +301,17 @@
       "open_gates": [
         {
           "id": "signup-operations-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Connect pending-age and Turnstile alerting, recovery-failure signals, and continuous dashboards.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "signup-release-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain current-release invite-less signup through active/verified status, resend, recovery, email-change undo, crash-resume, and cleanup evidence; open signup and its Turnstile/quota activation are already recorded.",
           "ref": "docs/runbooks.md"
         }
@@ -373,19 +391,25 @@
       "open_gates": [
         {
           "id": "avatar-operations-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Retain live proof for the #357 generation-failure report-rate rule; define an avatar SLO and add lifecycle, compaction, and quota alerts on actual metrics.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "live-avatar-acceptance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain a release-specific live lifecycle and archive/restore acceptance record.",
           "ref": "docs/agent-avatars.md"
         },
         {
           "id": "payload-compaction",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Activate and verify payload compaction before cleanup-dependent mutations can be generally available.",
           "ref": "docs/agent-avatars.md"
         }
@@ -471,13 +495,17 @@
       "open_gates": [
         {
           "id": "current-live-request-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain a current-release offer, assignment, result, retry, and escalation canary.",
           "ref": "docs/autonomous-realm-messaging.md"
         },
         {
           "id": "external-alert-path",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Add request-graph and message-family alert rules to the live rule set; continuous scrape, generic worker-job alerts, and the tested PagerDuty/dead-man receiver are already in place.",
           "ref": "docs/observability-and-operations.md"
         }
@@ -666,25 +694,33 @@
       "open_gates": [
         {
           "id": "disabled-account-edge-preflight",
-          "gate_ids": ["bounds_abuse"],
+          "gate_ids": [
+            "bounds_abuse"
+          ],
           "summary": "Add signed disposition/preflight so mail for disabled accounts is rejected before raw MIME is buffered or relayed.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "email-move-recovery-canary",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Move and restore populated schema-93 email state, including inbound (with edge-attested verdict columns), accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
           "ref": "docs/cell-worker.md"
         },
         {
           "id": "fresh-real-mail-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain a current-release real inbound canary through claim, read, acknowledge, and retention accounting, and verify broader plan enrollment; #294 already records live relay-v2 and DMARC probe delivery.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "inbound-abuse-classification",
-          "gate_ids": ["bounds_abuse"],
+          "gate_ids": [
+            "bounds_abuse"
+          ],
           "summary": "Define and verify spam/reputation policy and provider-wide backpressure before cohort expansion; edge-attested authentication results and trusted-header DMARC failure rejection are already live.",
           "ref": "docs/threat-model.md"
         }
@@ -774,25 +810,33 @@
       "open_gates": [
         {
           "id": "continuous-delivery-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Connect Cloudflare dispatch queue/DLQ and provider-outcome metrics to the now-live tested receiver; storage and cell-worker alerts are already routed.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "email-move-recovery-canary",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Move and restore populated schema-93 email state, including accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
           "ref": "docs/cell-worker.md"
         },
         {
           "id": "fresh-delivery-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain a v0.0.253-or-later real send through accepted and delivered provider lifecycle states.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "provider-wide-backpressure",
-          "gate_ids": ["bounds_abuse"],
+          "gate_ids": [
+            "bounds_abuse"
+          ],
           "summary": "Add and exercise shared-domain capacity and reputation budgets plus a provider-wide pause, then review the cell, account-policy, adapter, queue, retention, and provider-capacity envelope before widening.",
           "ref": "docs/agent-email.md"
         }
@@ -870,13 +914,17 @@
       "open_gates": [
         {
           "id": "self-hydration-operations",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Server hydration evidence and tested alert rules exist; local ledgers and optional acceptance evidence record client outcomes. Retain live alert acceptance, add staleness alerts, and schedule signed-in Claude/Codex regression; Cursor/Grok remain operator-run.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "self-hydration-runtime-acceptance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain signed-in acceptance for automatic and guided hydration, every checkpoint, disabled-feature transitions, and MCP fallback across the supported runtime matrix.",
           "ref": "docs/provider-integration-certification.md"
         }
@@ -956,25 +1004,36 @@
       "open_gates": [
         {
           "id": "audit-doc-reconciliation",
-          "gate_ids": ["docs_support"],
+          "gate_ids": [
+            "docs_support"
+          ],
           "summary": "Reconcile data-retention-policy with the implemented account-events core and target-only dedicated audit export, retention, hold, and metering contract; whole-account export already includes audit rows.",
           "ref": "docs/audit-retention.md"
         },
         {
           "id": "audit-operations-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Connect append failures, registry drift, backlog, oldest age, storage, export, and retention health to continuous metrics and a tested receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "audit-retention-enforcement",
-          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "entitlement_policy",
+            "rollout_canaries"
+          ],
           "summary": "Add a canonical retention policy, bounded worker, delete/archive/hold modes, storage safety, admin override, tests, dark cohort, and expiry canary.",
           "ref": "docs/audit-retention.md"
         },
         {
           "id": "audit-retention-recovery",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Implement and drill dedicated audit export, archive verification, hold preservation, and interrupted sweep recovery; reconcile those semantics with existing whole-account export and restore.",
           "ref": "docs/backup-and-recovery.md"
         }
@@ -1077,25 +1136,36 @@
       "open_gates": [
         {
           "id": "billing-operations",
-          "gate_ids": ["observability", "recovery"],
+          "gate_ids": [
+            "observability",
+            "recovery"
+          ],
           "summary": "Add provider-event dashboards and support escalation, and retain restore reconciliation and a forward-fix drill on the current provider-target lineage; billing metrics and tested failure alerts exist.",
           "ref": "docs/billing-and-limits.md"
         },
         {
           "id": "billing-safety-completion",
-          "gate_ids": ["bounds_abuse", "recovery"],
+          "gate_ids": [
+            "bounds_abuse",
+            "recovery"
+          ],
           "summary": "Complete bounded completed-receipt retention and operator terminalization of deterministic provider failures without clearing ambiguous work.",
           "ref": "docs/billing-and-limits.md"
         },
         {
           "id": "full-lifecycle-reconciliation",
-          "gate_ids": ["behavior", "recovery"],
+          "gate_ids": [
+            "behavior",
+            "recovery"
+          ],
           "summary": "Complete Enterprise transitions, paid-to-paid execution and compensation (subscription schedules beyond the contact-path guard), automated dunning policy or collection mutations, refund mutations, and restore reconciliation.",
           "ref": "https://github.com/witwave-ai/witself/issues/33"
         },
         {
           "id": "nonzero-charge-reconciliation",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain the first nonzero customer-charge reconciliation proof; zero-dollar live Checkout, webhook, invoice, downgrade, Tax activation, and GA cutover are already recorded.",
           "ref": "docs/billing-transition-rollout.md"
         }
@@ -1179,37 +1249,56 @@
       "open_gates": [
         {
           "id": "alias-dependency-and-plan-replay",
-          "gate_ids": ["behavior", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "rollout_canaries"
+          ],
           "summary": "Require an already-authorized realm alias and exercise refresh/claim plus exact plan-lifecycle replay before domain activation.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "authority-capacity-monitoring",
-          "gate_ids": ["bounds_abuse", "observability"],
+          "gate_ids": [
+            "bounds_abuse",
+            "observability"
+          ],
           "summary": "Prove journal health, sealed empty-target restore, and live head-capacity monitoring below the global 10,000-authority-key ceiling.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "custom-domain-canary",
-          "gate_ids": ["behavior", "recovery", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "recovery",
+            "rollout_canaries"
+          ],
           "summary": "Complete a human-controlled domain request, DNS proof, MX route, delivery, retirement, and recovery canary.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "dns-provider-lane",
-          "gate_ids": ["observability", "rollout_canaries"],
+          "gate_ids": [
+            "observability",
+            "rollout_canaries"
+          ],
           "summary": "Implement the production DNS/MX provisioning and verification lane with expiry and alerting.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "route-authority-drill",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Exercise authority bootstrap, backup restore, route republishing, and conflict recovery.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "transfer-quarantine-governance",
-          "gate_ids": ["behavior", "bounds_abuse", "recovery"],
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "recovery"
+          ],
           "summary": "Define and verify ownership transfer, quarantine, conflict, suspension, and retirement governance before customer activation.",
           "ref": "docs/agent-email.md"
         }
@@ -1309,13 +1398,17 @@
       "open_gates": [
         {
           "id": "fact-delete-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain a current-release preview/apply/isolation canary for permanent deletion; #312 already enabled the guarded path on both cells.",
           "ref": "docs/fact-service.md"
         },
         {
           "id": "fact-operations",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Retain live proof for the #357 DELETE failure-ratio rule, define fact SLOs, and instrument remaining fact operations on the shared alert path.",
           "ref": "docs/observability-and-operations.md"
         }
@@ -1405,19 +1498,25 @@
       "open_gates": [
         {
           "id": "continuous-platform-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Retain live loading and evaluation evidence for the five #357 rules, and extend monitoring to the backup and future accepting cells; serving-cell scraping, routing, and receiver acceptance are already recorded.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "provider-pitr-drill",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Enable and retain provider PITR plus a committed production-grade restore rehearsal.",
           "ref": "https://github.com/witwave-ai/witself/issues/68"
         },
         {
           "id": "schema-converged-movement",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Upgrade every possible accepting destination, verify capacity monitoring, and complete a directed move before resuming placement.",
           "ref": "docs/deployment-cells.md"
         }
@@ -1505,13 +1604,17 @@
       "open_gates": [
         {
           "id": "identity-capacity-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Add a value-free dashboard and alert path for realm, agent, token, and lifecycle capacity or drift.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "multi-plan-capacity-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain current boundary, concurrency, upgrade, downgrade, and Founder-unlimited evidence from managed accounts.",
           "ref": "docs/billing-and-limits.md"
         }
@@ -1607,6 +1710,88 @@
             "entitlement_policy"
           ],
           "summary": "Resolve standalone policy, client authorization, routing and enrollment authority before exposing a supported local product.",
+          "ref": "docs/research/local-cell/implementation-plan.md"
+        }
+      ]
+    },
+    {
+      "id": "local-connection-routes",
+      "name": "Explicit local connection routes",
+      "area": "Local cell",
+      "summary": "Named accounts can select a loopback HTTP connection route for CLI, MCP and hooks without directory access. Activation probes version and atomically replaces config. Inert unless a route is set; no defaults or token locations change.",
+      "implementation": "implemented",
+      "managed_rollout": "dark",
+      "docs": [
+        "docs/cli-command-surface.md",
+        "docs/research/local-cell/implementation-plan.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Operator, agent and domain resolution bypass the directory for local routes. Hooks adopt each event; MCP snapshots the startup route and retains identity verification.",
+          "evidence": [
+            "cmd/witself/integration.go",
+            "cmd/witself/main.go",
+            "cmd/witself/mcp.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Plan and billing refuse routed accounts without an explicit endpoint. Console manager trust remains directory-backed; no hosted entitlements or identity remapping are granted.",
+          "evidence": [
+            "cmd/witself/account_console.go",
+            "cmd/witself/plan.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Unknown kinds and non-HTTP or non-loopback endpoints fail closed. Activation probes are bounded, unauthenticated and do not follow redirects.",
+          "evidence": [
+            "cmd/witself/account_route.go",
+            "cmd/witself/account_route_test.go",
+            "internal/local/local.go"
+          ]
+        },
+        "observability": {
+          "state": "pass",
+          "summary": "Route show exposes only the kind and endpoint; validation and probe errors omit supplied values and response bodies.",
+          "evidence": [
+            "cmd/witself/account_route.go",
+            "cmd/witself/account_route_test.go"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Same-directory temporary writes and rename preserve valid config through interruption and concurrent reads. Clear restores directory routing; MCP restart is required.",
+          "evidence": [
+            "docs/cli-command-surface.md",
+            "internal/local/local.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "No live activation. Offline console trust, lifecycle integration and a supported local-product canary remain separate work.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "CLI docs specify route commands, config shape, loopback validation, per-event hooks, MCP restart and hosted-only billing.",
+          "evidence": [
+            "docs/cli-command-surface.md",
+            "docs/operator-auth.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "local-connection-product-canary",
+          "gate_ids": [
+            "rollout_canaries"
+          ],
+          "summary": "Complete LC-S4 console trust and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         }
       ]
@@ -1797,13 +1982,17 @@
       "open_gates": [
         {
           "id": "support-abuse-retention",
-          "gate_ids": ["bounds_abuse"],
+          "gate_ids": [
+            "bounds_abuse"
+          ],
           "summary": "Add bounded evidence-attachment handling; per-account API/CLI rate limiting and a default-off bounded awaiting-customer age-out worker are implemented.",
           "ref": "internal/store/support.go"
         },
         {
           "id": "support-rollout-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Run a selected-account case from intake through escalation, resolution, export, retention, and customer closure before advertising the benefit.",
           "ref": "docs/governance-and-support.md"
         }
@@ -1890,31 +2079,41 @@
       "open_gates": [
         {
           "id": "docs-contract-consistency",
-          "gate_ids": ["docs_support"],
+          "gate_ids": [
+            "docs_support"
+          ],
           "summary": "Remove or clearly mark stale historical server-inference and sealed-plane claims that conflict with current architecture.",
           "ref": "https://github.com/witwave-ai/witself/issues/47"
         },
         {
           "id": "live-runtime-acceptance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Run and retain signed-in acceptance across the supported provider-runtime matrix.",
           "ref": "https://github.com/witwave-ai/witself/issues/45"
         },
         {
           "id": "load-quality-certification",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Run the deterministic load, relevance, isolation, export, and hybrid-recall thresholds on production-shaped infrastructure.",
           "ref": "https://github.com/witwave-ai/witself/issues/46"
         },
         {
           "id": "memory-production-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Enable the implemented witself-memory rule group on serving cells after a measured baseline, then retain firing and resolved receiver evidence and multi-environment SLO evidence.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "multi-cloud-conformance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Complete the account-move and archive/restore matrix on AWS, Google Cloud, and Azure targets.",
           "ref": "https://github.com/witwave-ai/witself/issues/44"
         }
@@ -1993,19 +2192,28 @@
       "open_gates": [
         {
           "id": "operator-auth-core-implementation",
-          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy", "recovery"],
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "entitlement_policy",
+            "recovery"
+          ],
           "summary": "Implement hosted PKCE and device-code sessions, refresh, revocation, secure local custody, lost-device recovery, authorization propagation, and hostile-flow tests.",
           "ref": "docs/operator-auth.md"
         },
         {
           "id": "operator-auth-operations",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Add value-free login, callback, device-code, refresh, revocation, failure, and abuse metrics with SLOs and a tested receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "operator-auth-release-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Ship behind a dark operator cohort and retain browser, headless, refresh, revoke, lost-device, and cross-platform credential-store acceptance.",
           "ref": "docs/operator-auth.md"
         }
@@ -2086,13 +2294,17 @@
       "open_gates": [
         {
           "id": "enterprise-activation",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Keep Enterprise unavailable until its dependent features and billing transitions meet their gates; Professional and Team customer checkout is already generally available.",
           "ref": "web/plans/plans.json"
         },
         {
           "id": "paid-plan-feature-acceptance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Verify broader paid-plan email enrollment and current per-account overrides against resolved snapshots; checkout availability and support entitlement enforcement are already implemented.",
           "ref": "web/plans/plans.json"
         }
@@ -2176,37 +2388,52 @@
       "open_gates": [
         {
           "id": "alias-canonical-inventory",
-          "gate_ids": ["behavior", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "rollout_canaries"
+          ],
           "summary": "Converge the complete canonical address inventory before any alias delivery is enabled.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "alias-operations-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Connect alias conflicts, projection lag, delivery, route coverage, and expiry metrics to continuous alerts and a tested external receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "alias-request-rate-guard",
-          "gate_ids": ["bounds_abuse"],
+          "gate_ids": [
+            "bounds_abuse"
+          ],
           "summary": "Add and test a request and enumeration guard at the global alias authority.",
           "ref": "docs/threat-model.md"
         },
         {
           "id": "alias-route-coverage",
-          "gate_ids": ["behavior", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "rollout_canaries"
+          ],
           "summary": "Prove managed-domain catch-all or equivalent full route coverage before enabling alias delivery.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "alias-route-recovery",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Exercise account movement, projection replay, retirement, tombstone, and canonical fallback recovery.",
           "ref": "docs/agent-email.md"
         },
         {
           "id": "live-alias-canary",
-          "gate_ids": ["behavior", "rollout_canaries"],
+          "gate_ids": [
+            "behavior",
+            "rollout_canaries"
+          ],
           "summary": "Enable one selected alias and retain request-through-delivery and downgrade-grace evidence before widening.",
           "ref": "docs/agent-email.md"
         }
@@ -2303,13 +2530,17 @@
       "open_gates": [
         {
           "id": "continuous-message-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Retain live proof for the #357 retention scan-cap pressure rule; add missing mailbox-depth and claim/lease metrics and message-specific SLO alerts. Generic worker failures already reach the tested receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "message-retention-rollout",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Enable enforce mode for a selected cohort and retain expiry, provenance-hold, and worker-fairness canaries.",
           "ref": "docs/message-retention.md"
         }
@@ -2382,13 +2613,17 @@
       "open_gates": [
         {
           "id": "runtime-acceptance-operations",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Run provider acceptance on a recurring cadence and alert on capability regressions without retaining credentials or private prompt content.",
           "ref": "docs/provider-integration-certification.md"
         },
         {
           "id": "signed-in-runtime-matrix",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Complete current signed-in model acceptance for every advertised runtime and operating-system capability cell.",
           "ref": "docs/provider-integration-certification.md"
         }
@@ -2481,13 +2716,18 @@
       "open_gates": [
         {
           "id": "advanced-secret-operations",
-          "gate_ids": ["behavior"],
+          "gate_ids": [
+            "behavior"
+          ],
           "summary": "Implement secret update, local runtime injection, grants/group ownership, and irreversible tombstone purge with matching policy and tests.",
           "ref": "docs/secret-model.md"
         },
         {
           "id": "sealed-live-certification",
-          "gate_ids": ["recovery", "rollout_canaries"],
+          "gate_ids": [
+            "recovery",
+            "rollout_canaries"
+          ],
           "summary": "Complete four-runtime reveal/TOTP recovery and multi-cloud archive/movement drills with sanitized evidence.",
           "ref": "docs/sealed-plane-acceptance.md"
         }
@@ -2569,31 +2809,43 @@
       "open_gates": [
         {
           "id": "self-host-capability-reconciliation",
-          "gate_ids": ["entitlement_policy"],
+          "gate_ids": [
+            "entitlement_policy"
+          ],
           "summary": "Reconcile additional documented optional-feature flags with implemented support. Facts and existing payload families now match registered routes; the Helm chart has no separate product capability list.",
           "ref": "internal/server/server.go"
         },
         {
           "id": "self-host-doc-consistency",
-          "gate_ids": ["docs_support"],
+          "gate_ids": [
+            "docs_support"
+          ],
           "summary": "Reconcile self-host and server-command history with startup migrations, gen-bootstrap-token plus auth login, Pulumi, current capabilities, and the released client-custodied vault.",
           "ref": "docs/server-command-surface.md"
         },
         {
           "id": "self-host-production-hardening",
-          "gate_ids": ["behavior", "bounds_abuse", "observability"],
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "observability"
+          ],
           "summary": "Certify hardened production values, ingress and abuse controls, database and storage capacity, continuous monitoring, alerts, and every supported optional feature.",
           "ref": "docs/self-host-support.md"
         },
         {
           "id": "self-host-recovery-drill",
-          "gate_ids": ["recovery"],
+          "gate_ids": [
+            "recovery"
+          ],
           "summary": "Retain a fresh PostgreSQL backup restore, migration failure, worker restart, archive/import, and client-vault recovery drill on operator-owned infrastructure.",
           "ref": "docs/backup-and-recovery.md"
         },
         {
           "id": "self-host-release-acceptance",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Retain release-specific fresh-install, upgrade, rollback, and health evidence for every advertised Kubernetes and cloud substrate.",
           "ref": "infra/pulumi/README.md"
         }
@@ -2684,19 +2936,25 @@
       "open_gates": [
         {
           "id": "continuous-retention-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Retain live proof for the #357 batch-rejection and retention scan-cap pressure rules; add client-outbox instrumentation and define retention age/throughput SLOs on the accepted alert path.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "evidence-materialization",
-          "gate_ids": ["behavior"],
+          "gate_ids": [
+            "behavior"
+          ],
           "summary": "Implement the documented path that materializes durable evidence so resolved transcript holds can be released.",
           "ref": "docs/transcript-retention.md"
         },
         {
           "id": "retention-enforce-canary",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Enable enforce mode for a selected account and retain expiry, evidence-hold, crash, and multi-worker fairness evidence.",
           "ref": "docs/transcript-retention.md"
         }
@@ -2775,13 +3033,17 @@
       "open_gates": [
         {
           "id": "usage-operations-alerting",
-          "gate_ids": ["observability"],
+          "gate_ids": [
+            "observability"
+          ],
           "summary": "Connect append failures, rollup lag, missing buckets, reconciliation drift, and retained volume to continuous metrics and a tested receiver.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "usage-rollup-expansion",
-          "gate_ids": ["rollout_canaries"],
+          "gate_ids": [
+            "rollout_canaries"
+          ],
           "summary": "Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load; Team is purchasable while Stripe usage recording remains a stub, raising this gate's urgency.",
           "ref": "docs/billing-and-limits.md"
         }

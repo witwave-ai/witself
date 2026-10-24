@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/witwave-ai/witself/internal/client"
+	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 	"github.com/witwave-ai/witself/internal/version"
 )
@@ -108,6 +109,29 @@ type mcpMessageRequestBackend interface {
 type configuredMCPBackend struct {
 	cfg             transcriptcapture.Config
 	curationProfile string
+	routeSnapshot   bool
+	route           *local.Route
+}
+
+// newConfiguredMCPBackend pins the connection route at server startup. Tokens
+// are still read and the authenticated identity is still checked per operation.
+// A nil route snapshot keeps hosted directory discovery even if a local route
+// is activated while this MCP process is running.
+func newConfiguredMCPBackend(cfg transcriptcapture.Config, profile string) (configuredMCPBackend, error) {
+	backend := configuredMCPBackend{cfg: cfg, curationProfile: profile}
+	if cfg.Endpoint != "" || cfg.TokenFile != "" {
+		return backend, nil
+	}
+	_, account, err := local.ResolveAccount(cfg.Account)
+	if err != nil {
+		return configuredMCPBackend{}, err
+	}
+	backend.routeSnapshot = true
+	if account.Route != nil {
+		route := *account.Route
+		backend.route = &route
+	}
+	return backend, nil
 }
 
 func (b configuredMCPBackend) connect(ctx context.Context) (agentConnection, error) {
@@ -142,7 +166,13 @@ func (b configuredMCPBackend) connectAndVerify(ctx context.Context, includeFacts
 }
 
 func (b configuredMCPBackend) connectAndVerifyOptions(ctx context.Context, opts client.SelfOptions) (agentConnection, client.SelfDigest, error) {
-	conn, err := connectAgent(ctx, b.cfg.Account, b.cfg.Realm, b.cfg.Agent, b.cfg.Endpoint, b.cfg.TokenFile)
+	var conn agentConnection
+	var err error
+	if b.routeSnapshot {
+		conn, err = connectAgentWithRouteSnapshot(ctx, b.cfg.Account, b.cfg.Realm, b.cfg.Agent, b.cfg.Endpoint, b.cfg.TokenFile, connectionLocate, b.route)
+	} else {
+		conn, err = connectAgent(ctx, b.cfg.Account, b.cfg.Realm, b.cfg.Agent, b.cfg.Endpoint, b.cfg.TokenFile)
+	}
 	if err != nil {
 		return agentConnection{}, client.SelfDigest{}, err
 	}
@@ -1162,20 +1192,27 @@ func mcpCmd(args []string) int {
 		}
 		cfg.TokenFile = tokenPath
 	}
-	profile := effectiveMCPProfile(command.Server)
-	backend := configuredMCPBackend{cfg: cfg, curationProfile: profile}
-	if isCuratorMCPProfile(profile) {
-		if _, err := backend.GetMemoryCurationPreflight(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "witself mcp: curator preflight: %v\n", err)
-			return 1
-		}
-	}
-	server := newWitselfMCPServerForRuntimeOptions(backend, cfg.Runtime, command.Server)
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); !isCleanMCPStdioShutdown(err) {
+	if err := runConfiguredMCPServer(context.Background(), cfg, command.Server, &mcp.StdioTransport{}); !isCleanMCPStdioShutdown(err) {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// runConfiguredMCPServer is the serve path shared by stdio and transport tests.
+func runConfiguredMCPServer(ctx context.Context, cfg transcriptcapture.Config, options mcpServerOptions, transport mcp.Transport) error {
+	profile := effectiveMCPProfile(options)
+	backend, err := newConfiguredMCPBackend(cfg, profile)
+	if err != nil {
+		return err
+	}
+	if isCuratorMCPProfile(profile) {
+		if _, err := backend.GetMemoryCurationPreflight(ctx); err != nil {
+			return fmt.Errorf("curator preflight: %w", err)
+		}
+	}
+	server := newWitselfMCPServerForRuntimeOptions(backend, cfg.Runtime, options)
+	return server.Run(ctx, transport)
 }
 
 type mcpServeCommandOptions struct {

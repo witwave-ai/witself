@@ -36,6 +36,10 @@ witself-admin invite disable launch-2026
 
 The account is remembered locally as `default` (binding in
 `~/.witself/config.json`, token under `~/.witself/tokens/accounts/`).
+Each `accounts` entry contains `id`, optional `email`, and an optional `route`
+object with `kind: local` and a loopback HTTP `endpoint`; see
+[connection routes](cli-command-surface.md#witself-account-route-showsetclear-name).
+Creating a hosted account does not set a route.
 
 ## Publish the legal pages
 
