@@ -5,10 +5,11 @@ complete change, and selects the required local gate. This saves repeated local
 application testing when a cell only moves to an already tested release. Full
 GitHub PR and post-merge CI remain required.
 
-The command retains the existing brochure-only path. All other changes use the
-full application gate unless the deployment-specific classifier and verifier
-both pass. Prepare PostgreSQL and the locked Worker dependencies for the full
-path as described in [CLAUDE.md](../CLAUDE.md). The selector requires database and
+The command retains the existing brochure-only path and the
+[audited research documentation path](docs-validation.md). All other changes
+use the full application gate unless the deployment-specific classifier and
+verifier both pass. Prepare PostgreSQL and the locked Worker dependencies for
+the full path as described in [CLAUDE.md](../CLAUDE.md). The selector requires database and
 Node tests on that path; an unset database cannot silently skip integration
 coverage.
 
@@ -19,8 +20,8 @@ time. Its generated `apps.witselfServer.chartVersion`, `imageTag`, and
 `imageDigest` must advance together. Every other byte stays unchanged. The
 classifier checks branch commits, the index, the working tree, and untracked
 files, so reversing or hiding an unrelated edit does not earn the shorter path.
-A shared integrity check also checks raw tracked-file bytes before either
-shorter path, including the existing brochure path.
+A shared integrity check also checks raw tracked-file bytes before every
+shorter path, including the existing brochure and documentation paths.
 An unavailable or redirected repository context refuses before fetching.
 
 First provisioning, multiple-cell changes, rollbacks, PostgreSQL
@@ -64,8 +65,9 @@ checks. The generated roll-state matrix uses that suite's `--cell-derived-only`
 mode to repeat all original cell-dependent contracts without repeating the
 local-gate tests, which establish their own fixtures. The selector is a local
 command, not a mandatory Git hook. Repository
-policy directs humans and agents to use it; GitHub continues enforcing its full
-checks independently.
+policy directs humans and agents to use it; GitHub independently enforces the
+selected scope and required checks.
+Release-roll-only changes still require full GitHub application checks.
 
 ## What stays unchanged
 
