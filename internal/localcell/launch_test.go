@@ -28,7 +28,11 @@ func gatedLaunchFixture(t *testing.T) (*Cell, io.WriteCloser, string, <-chan err
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Env, cmd.Dir = c.baseEnvironment(), c.cfg.Root
+	cmd.Env, err = c.baseEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Dir = c.cfg.Root
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	permit, err := cmd.StdinPipe()
 	if err != nil {

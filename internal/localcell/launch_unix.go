@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 const childLaunchArgument = "--localcell-internal-exec"
@@ -53,4 +54,49 @@ func childCommand(binary, root, component string) (*exec.Cmd, error) {
 		return nil, errors.New("cannot locate local cell launch helper")
 	}
 	return exec.Command(self, childLaunchArgument, root, component, binary), nil
+}
+
+func (c *Cell) launchChild(binary, component string, environment []string, log *os.File) error {
+	// Deliberately not CommandContext: a successful Start transfers lifetime to
+	// the persisted PID record, independent of the invoking harness's lifetime.
+	cmd, err := childCommand(binary, c.cfg.Root, component)
+	if err != nil {
+		return err
+	}
+	cmd.Env, cmd.Dir = environment, c.cfg.Root
+	cmd.Stdout, cmd.Stderr = log, log
+	permit, err := cmd.StdinPipe()
+	if err != nil {
+		return errors.New("cannot create local cell launch handshake")
+	}
+	defer func() { _ = permit.Close() }()
+	configureProcessCommand(cmd)
+	if err := cmd.Start(); err != nil {
+		return errors.New("cannot launch local cell component")
+	}
+	go func() { _ = cmd.Wait() }()
+	identity, alive, err := processIdentity(cmd.Process.Pid)
+	if err != nil || !alive {
+		return errors.New("cannot identify launched local cell component")
+	}
+	deadline := time.Now().Add(c.cfg.Timeout)
+	for time.Now().Before(deadline) {
+		state, stateErr := c.processState(component)
+		if stateErr == nil && state.PID == cmd.Process.Pid && state.Alive && state.Matches {
+			if _, err := permit.Write([]byte{1}); err != nil {
+				return errors.New("cannot authorize local cell component launch")
+			}
+			return nil
+		}
+		current, alive, identityErr := processIdentity(cmd.Process.Pid)
+		if identityErr != nil || !alive || current != identity {
+			return errors.New("local cell launch helper exited before publishing ownership")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	current, alive, identityErr := processIdentity(cmd.Process.Pid)
+	if identityErr == nil && alive && current == identity {
+		_ = signalTerminate(cmd.Process.Pid)
+	}
+	return errors.New("local cell launch ownership deadline exceeded")
 }

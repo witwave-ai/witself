@@ -15,9 +15,11 @@ import (
 // and platform-specific files. Native CI lists each executed skip by test name.
 // This source-only check also runs on Windows; it needs no private directories.
 func windowsSkipOwnerViolations(file *ast.File, windowsOnly bool) []token.Pos {
-	// PW1's private fixtures are implemented; only launch and lifecycle work
-	// may still defer Windows execution.
-	owner := regexp.MustCompile(`^LC-S2-PW[2-3]: \S`)
+	// PW1 privacy and PW2 launch/environment fixtures are implemented. Only
+	// PW3 lifecycle fixtures may defer Windows execution, apart from the exact
+	// native process-DACL witness that enabled SeDebugPrivilege invalidates.
+	owner := regexp.MustCompile(`^LC-S2-PW3: \S`)
+	const debugPrivilegeSkip = "LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege"
 	var violations []token.Pos
 	check := func(node ast.Node) {
 		ast.Inspect(node, func(node ast.Node) bool {
@@ -35,7 +37,7 @@ func windowsSkipOwnerViolations(file *ast.File, windowsOnly bool) []token.Pos {
 					message, _ = strconv.Unquote(literal.Value)
 				}
 			}
-			if !owner.MatchString(message) {
+			if !owner.MatchString(message) && (!windowsOnly || message != debugPrivilegeSkip) {
 				violations = append(violations, call.Pos())
 			}
 			return true
@@ -78,7 +80,7 @@ func TestWindowsSkipsNameOwningSlice(t *testing.T) {
 				t.Fatalf("cannot parse test source %s", path)
 			}
 			for _, position := range windowsSkipOwnerViolations(file, strings.HasSuffix(path, "_windows_test.go")) {
-				t.Errorf("%s: Windows skip must name LC-S2-PW2 or LC-S2-PW3 and a reason; LC-S2-PW1 skips are retired", positions.Position(position))
+				t.Errorf("%s: Windows skip must name LC-S2-PW3 and a reason; only the exact Windows-only LC-S2-PW2 enabled SeDebugPrivilege DACL reason is excepted", positions.Position(position))
 			}
 		}
 	}
@@ -91,10 +93,16 @@ func TestWindowsSkipOwnerGuardCoversHelpers(t *testing.T) {
 		windowsOnly bool
 		want        int
 	}{
-		{"owned-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: launch pending") }`, false, 0},
+		{"owned-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: lifecycle pending") }`, false, 0},
+		{"retired-launch-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: launch pending") }`, false, 1},
+		{"retired-windows-launch-helper", `t.Skip("LC-S2-PW2: launch pending")`, true, 1},
+		{"enabled-debug-privilege-windows-helper", `t.Skip("LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege")`, true, 0},
+		{"wrong-debug-privilege-reason", `t.Skip("LC-S2-PW2: real process DACL denial unavailable with disabled SeDebugPrivilege")`, true, 1},
+		{"anonymous-debug-privilege-reason", `t.Skip("real process DACL denial unavailable with enabled SeDebugPrivilege")`, true, 1},
+		{"debug-privilege-shared-source", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege") }`, false, 1},
 		{"retired-privacy-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW1: privacy pending") }`, false, 1},
 		{"anonymous-helper", `if runtime.GOOS == "windows" { t.Skip("privacy pending") }`, false, 1},
-		{"empty-reason", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: ") }`, false, 1},
+		{"empty-reason", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: ") }`, false, 1},
 		{"anonymous-skipf", `if runtime.GOOS == "windows" { t.Skipf("pending: %s", "fixture") }`, false, 1},
 		{"anonymous-skipnow", `if runtime.GOOS == "windows" { t.SkipNow() }`, false, 1},
 		{"inequality-else", `if runtime.GOOS != "windows" {} else { t.Skip("pending") }`, false, 1},
@@ -119,7 +127,6 @@ func TestWindowsSkipOwnerGuardCoversHelpers(t *testing.T) {
 // reactivate Windows-unready production paths. Only t.Helper may precede it.
 func TestWindowsFixtureSkipsBeforeFilesystem(t *testing.T) {
 	for _, fixture := range []struct{ path, helper, owner string }{
-		{"environment_test.go", "buildEnvironmentNamesChild", "LC-S2-PW2"},
 		{"lifecycle_hermetic_test.go", "buildLifecycleFixture", "LC-S2-PW3"},
 		{"lifecycle_integration_test.go", "buildRealComponents", "LC-S2-PW3"},
 		{"lifecycle_integration_test.go", "disposableCell", "LC-S2-PW3"},

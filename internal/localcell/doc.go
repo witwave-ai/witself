@@ -15,9 +15,7 @@
 // and non-local, non-NTFS, reserved or long roots are refused. Retained handles
 // fence ancestor renames; pathname creation detects in-place reparse changes
 // afterward and rolls back the created object by handle. This is detection with
-// rollback, not prevention; handle-relative creation remains deferred. Windows
-// Start fails closed until a platform adapter can launch with the exact child
-// environment and persist suspended-child identity before allowing execution.
+// rollback, not prevention; handle-relative creation remains deferred.
 //
 // Install, Start, Stop, Repair, and Remove require exclusive OS advisory locks;
 // a competing operation fails promptly. Inspect reads the manifest, process
@@ -38,6 +36,14 @@
 // Unix child startup persists its identity before an explicit handshake allows
 // the component to execute. Final removal checkpoints journal intent in the
 // manifest so Repair can complete cleanup after the journal directory is gone.
+//
+// Windows 10+ creates each actual executable suspended in an atomic kill-on-close
+// Job Object, flushes its private creation-FILETIME record before resume, and
+// transfers cleanup to that record only after launch confirmation; parent crashes
+// before transfer kill the job and Repair reconciles its record. Exact trusted
+// environments and retained-handle identity checks fence shutdown, with an
+// isolated console attachment helper for server/worker CTRL_BREAK and an explicit
+// refusal when their console no longer exists (no service or console-close resilience).
 //
 // Restart policy, migration cancellation, launchd/systemd/Windows service
 // registration, downloads, the installer manifest trust contract, native Windows
