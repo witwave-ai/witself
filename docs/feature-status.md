@@ -34,6 +34,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Accounts, realms, agents, and tokens](#identity-tenancy) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
+| [Disposable local cell lifecycle core](#local-cell-lifecycle-core) | Local cell | `implemented` | `dark` | **not ready** | 2/7 pass | 2 |
 | [Inactive local runtime configuration](#local-runtime-configuration) | Local cell | `implemented` | `dark` | **not ready** | 4/7 pass | 2 |
 | [Managed support](#managed-support) | Commercial | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Narrative memory and curation](#narrative-memory) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 5 |
@@ -467,6 +468,32 @@ Open gates:
 
 - `identity-capacity-alerting` (observability): Add a value-free dashboard and alert path for realm, agent, token, and lifecycle capacity or drift. ([tracking/evidence](../docs/observability-and-operations.md))
 - `multi-plan-capacity-canary` (rollout / canaries): Retain current boundary, concurrency, upgrade, downgrade, and Founder-unlimited evidence from managed accounts. ([tracking/evidence](../docs/billing-and-limits.md))
+
+<a id="local-cell-lifecycle-core"></a>
+
+### Disposable local cell lifecycle core
+
+A caller-owned lifecycle package and test-only harness manage isolated PostgreSQL, server and worker processes with private state, explicit child environments, advisory locking, readiness waits and journal recovery. Implemented for disposable tests; nothing is installed or activated.
+
+- Implementation: `implemented`
+- Managed rollout: `dark`
+- Readiness: **not ready**
+- Detailed docs: [implementation-plan.md](../docs/research/local-cell/implementation-plan.md), [doc.go](../internal/localcell/doc.go)
+
+| Gate | State | Current evidence and conclusion |
+|---|---|---|
+| Behavior | **CONDITIONAL** | Synthetic process lifecycle, exclusive ownership, interruption repair and data-preserving removal are covered. Native PostgreSQL proof is blocked by sandbox shared-memory denial; the integration owner must rerun the real lifecycle before acceptance. [lifecycle.go](../internal/localcell/lifecycle.go), [lifecycle_hermetic_test.go](../internal/localcell/lifecycle_hermetic_test.go), [lifecycle_integration_test.go](../internal/localcell/lifecycle_integration_test.go), [main.go](../internal/tools/localcellharness/main.go) |
+| Entitlement / policy | **CONDITIONAL** | Only tests and the internal harness reach this package. Standalone product policy, client authorization, enrollment authority and supported routing remain separate decisions. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Bounds / abuse | **CONDITIONAL** | Advisory locks, process identity checks, a private root, explicit child environments, loopback ports and separate spools bound disposable cells. Windows DACL privacy and native platform acceptance remain deferred. [environment_test.go](../internal/localcell/environment_test.go), [files.go](../internal/localcell/files.go), [lock_test.go](../internal/localcell/lock_test.go), [safety_test.go](../internal/localcell/safety_test.go) |
+| Observability | **PASS** | Inspect exposes lock, process identity and interrupted-operation state; status adds readiness results. An append-only operation journal and private component logs support harness diagnosis. [files_test.go](../internal/localcell/files_test.go), [lifecycle.go](../internal/localcell/lifecycle.go) |
+| Recovery | **CONDITIONAL** | Journal-based repair and failed-start rollback preserve PostgreSQL data; only explicit purge removes it. Restart policy and migration cancellation remain deferred. [files_test.go](../internal/localcell/files_test.go), [lifecycle.go](../internal/localcell/lifecycle.go), [lifecycle_integration_test.go](../internal/localcell/lifecycle_integration_test.go) |
+| Rollout / canaries | **CONDITIONAL** | Test-harness only, with no installer, service registration, download or live activation. Native platform, clean-machine and local-product acceptance remain separate gates. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md) |
+| Docs / support | **PASS** | Package documentation describes the private layout, exclusive ownership, operation semantics and deferred delivery work; the plan records this bounded M1 foundation. [implementation-plan.md](../docs/research/local-cell/implementation-plan.md), [doc.go](../internal/localcell/doc.go) |
+
+Open gates:
+
+- `local-lifecycle-platform-and-delivery` (behavior, bounds / abuse, recovery, rollout / canaries): Rerun native PostgreSQL lifecycle outside the sandbox, then complete platform and Windows DACL proof, restart policy, migration cancellation, service adapters, downloads and installer manifest trust before a separately authorized rollout. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
+- `local-lifecycle-product-policy` (entitlement / policy): Resolve standalone policy, client authorization, routing and enrollment authority before exposing a supported local product. ([tracking/evidence](../docs/research/local-cell/implementation-plan.md))
 
 <a id="local-runtime-configuration"></a>
 

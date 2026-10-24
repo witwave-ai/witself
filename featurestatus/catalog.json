@@ -1518,6 +1518,100 @@
       ]
     },
     {
+      "id": "local-cell-lifecycle-core",
+      "name": "Disposable local cell lifecycle core",
+      "area": "Local cell",
+      "summary": "A caller-owned lifecycle package and test-only harness manage isolated PostgreSQL, server and worker processes with private state, explicit child environments, advisory locking, readiness waits and journal recovery. Implemented for disposable tests; nothing is installed or activated.",
+      "implementation": "implemented",
+      "managed_rollout": "dark",
+      "docs": [
+        "docs/research/local-cell/implementation-plan.md",
+        "internal/localcell/doc.go"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Synthetic process lifecycle, exclusive ownership, interruption repair and data-preserving removal are covered. Native PostgreSQL proof is blocked by sandbox shared-memory denial; the integration owner must rerun the real lifecycle before acceptance.",
+          "evidence": [
+            "internal/localcell/lifecycle.go",
+            "internal/localcell/lifecycle_hermetic_test.go",
+            "internal/localcell/lifecycle_integration_test.go",
+            "internal/tools/localcellharness/main.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Only tests and the internal harness reach this package. Standalone product policy, client authorization, enrollment authority and supported routing remain separate decisions.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Advisory locks, process identity checks, a private root, explicit child environments, loopback ports and separate spools bound disposable cells. Windows DACL privacy and native platform acceptance remain deferred.",
+          "evidence": [
+            "internal/localcell/environment_test.go",
+            "internal/localcell/files.go",
+            "internal/localcell/lock_test.go",
+            "internal/localcell/safety_test.go"
+          ]
+        },
+        "observability": {
+          "state": "pass",
+          "summary": "Inspect exposes lock, process identity and interrupted-operation state; status adds readiness results. An append-only operation journal and private component logs support harness diagnosis.",
+          "evidence": [
+            "internal/localcell/files_test.go",
+            "internal/localcell/lifecycle.go"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Journal-based repair and failed-start rollback preserve PostgreSQL data; only explicit purge removes it. Restart policy and migration cancellation remain deferred.",
+          "evidence": [
+            "internal/localcell/files_test.go",
+            "internal/localcell/lifecycle.go",
+            "internal/localcell/lifecycle_integration_test.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Test-harness only, with no installer, service registration, download or live activation. Native platform, clean-machine and local-product acceptance remain separate gates.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Package documentation describes the private layout, exclusive ownership, operation semantics and deferred delivery work; the plan records this bounded M1 foundation.",
+          "evidence": [
+            "docs/research/local-cell/implementation-plan.md",
+            "internal/localcell/doc.go"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "local-lifecycle-platform-and-delivery",
+          "gate_ids": [
+            "behavior",
+            "bounds_abuse",
+            "recovery",
+            "rollout_canaries"
+          ],
+          "summary": "Rerun native PostgreSQL lifecycle outside the sandbox, then complete platform and Windows DACL proof, restart policy, migration cancellation, service adapters, downloads and installer manifest trust before a separately authorized rollout.",
+          "ref": "docs/research/local-cell/implementation-plan.md"
+        },
+        {
+          "id": "local-lifecycle-product-policy",
+          "gate_ids": [
+            "entitlement_policy"
+          ],
+          "summary": "Resolve standalone policy, client authorization, routing and enrollment authority before exposing a supported local product.",
+          "ref": "docs/research/local-cell/implementation-plan.md"
+        }
+      ]
+    },
+    {
       "id": "local-runtime-configuration",
       "name": "Inactive local runtime configuration",
       "area": "Local cell",

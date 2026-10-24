@@ -2321,16 +2321,25 @@ func dbDSN() string {
 // preferring an explicit path but also checking the deployment well-known path.
 // WITSELF_BOOTSTRAP_TOKEN remains as a local/dev fallback.
 func bootstrapToken() (string, error) {
-	if path := os.Getenv("WITSELF_BOOTSTRAP_TOKEN_FILE"); path != "" {
-		return tokenfile.Read(path, tokenfile.Options{
+	return bootstrapTokenFromEnv(os.Getenv, tokenfile.Read)
+}
+
+func bootstrapTokenFromEnv(getenv func(string) string, read func(string, tokenfile.Options) (string, error)) (string, error) {
+	if path := getenv("WITSELF_BOOTSTRAP_TOKEN_FILE"); path != "" {
+		return read(path, tokenfile.Options{
 			Description:  "bootstrap token file",
 			UnquotedPath: true,
 		})
 	}
-	if tok := strings.TrimSpace(os.Getenv("WITSELF_BOOTSTRAP_TOKEN")); tok != "" {
+	if tok := strings.TrimSpace(getenv("WITSELF_BOOTSTRAP_TOKEN")); tok != "" {
 		return tok, nil
 	}
-	return tokenfile.Read(defaultBootstrapTokenFile, tokenfile.Options{
+	// The lifecycle's scratch environment cannot mask an ambient absolute
+	// deployment file. Local startup must not adopt a hosted bootstrap token.
+	if getenv("WITSELF_RUNTIME") == "local" {
+		return "", nil
+	}
+	return read(defaultBootstrapTokenFile, tokenfile.Options{
 		Description:  "bootstrap token file",
 		AllowMissing: true,
 		UnquotedPath: true,
