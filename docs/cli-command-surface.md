@@ -1095,8 +1095,14 @@ it retains its startup connection route, and still verifies `/v1/self` identity.
 Live MCP re-binding is deferred. Plan and billing commands are hosted-only:
 without an explicit endpoint, they refuse a routed account with a value-free
 error before any credential read or directory lookup. Account-console manager
-trust still requires the hosted directory; offline console trust is deferred to
-LC-S4.
+trust uses a named account's local route without consulting the directory. The
+route must be a loopback HTTP origin matching the selected connection. The
+account's distinct operator credential must verify through `/v1/whoami`, and
+the account ID and route must still match at the credential read. Accounts
+without a route retain directory-backed console trust. Explicit `--endpoint`
+or `--token-file` invocations remain agent-only; later account reads revalidate
+the bound operator against the trusted origin. Standalone operator bootstrap
+and offline inventory proof remain separate work.
 
 ### `witself account create`
 

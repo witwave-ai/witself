@@ -33,18 +33,30 @@ func accountConsoleExplicit(fs *flag.FlagSet) bool {
 }
 
 func resolveAccountConsoleManager(ctx context.Context, conn agentConnection, identity client.SelfIdentity, explicit bool, locate accountLocator) *dashboard.AccountManager {
-	if explicit || conn.AccountName == "" || conn.AccountID == "" || conn.AccountID != identity.AccountID || !consoleIdentityMatches(identity, identity) || locate == nil {
+	if explicit || conn.AccountName == "" || conn.AccountID == "" || conn.AccountID != identity.AccountID || !consoleIdentityMatches(identity, identity) {
 		return nil
 	}
 	name, metadata, err := local.ResolveAccount(conn.AccountName)
 	if err != nil || name != conn.AccountName || metadata.ID != identity.AccountID {
 		return nil
 	}
-	_, directory, err := locate(ctx, defaultControlPlane, metadata.ID)
-	if err != nil {
-		return nil
+	var endpoint string
+	if metadata.Route != nil {
+		// A local route supplies trust independently of the hosted directory.
+		if metadata.Route.Validate() != nil {
+			return nil
+		}
+		endpoint = metadata.Route.Endpoint
+	} else {
+		if locate == nil {
+			return nil
+		}
+		_, endpoint, err = locate(ctx, defaultControlPlane, metadata.ID)
+		if err != nil {
+			return nil
+		}
 	}
-	trusted, e1 := client.AccountConsoleOrigin(directory)
+	trusted, e1 := client.AccountConsoleOrigin(endpoint)
 	selected, e2 := client.AccountConsoleOrigin(conn.Endpoint)
 	if e1 != nil || e2 != nil || trusted != selected {
 		return nil
@@ -52,6 +64,11 @@ func resolveAccountConsoleManager(ctx context.Context, conn agentConnection, ide
 	// Only now may the exact selected account's bearer be read.
 	resolved, account, bearer, err := accountConsoleResolve(name)
 	if err != nil || resolved != name || account.ID != metadata.ID || bearer == conn.Token {
+		return nil
+	}
+	// Compare the credential read with the first metadata read. Never bind a
+	// stale local route, and never perform a third configuration read.
+	if (metadata.Route == nil) != (account.Route == nil) || (metadata.Route != nil && *metadata.Route != *account.Route) {
 		return nil
 	}
 	principal, err := client.VerifyAccountConsoleManager(ctx, trusted, bearer, identity.AccountID)
