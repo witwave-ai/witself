@@ -858,7 +858,7 @@ slices, not implementation authorization; do not turn them into one long branch.
   ([server targets](../../../.goreleaser.yaml#L32),
   [worker targets](../../../.goreleaser.yaml#L71)) / Acceptance: native lifecycle
   proof for the selected OS / Dependencies: LC-S2 and the M0a platform decisions
-  (pending) / Evidence: native / Activation: explicit synthetic harness only /
+  (D8 answered 2026-10-24) / Evidence: native / Activation: explicit synthetic harness only /
   Recovery: synthetic data only / Owner: vacant.
 - **LC-S3 explicit local connection route** / Scope: CLI/MCP/hooks select a local
   cell with the directory blocked / Acceptance: atomic binding activation;
@@ -959,7 +959,7 @@ branch named in the active review record below, or after that review hands off.
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
 runtime configuration terminology; stage the populated-account acceptance across
-M5/M6/M7; LC-S1 through LC-S4 are merged; LC-S2-P and LC-S5 wait on founder decisions D8 and M0c; the local-cell architecture stays the
+M5/M6/M7; LC-S1 through LC-S4 are merged; with D2–D8 answered on 2026-10-24, LC-S2-P (Windows adapters first) and LC-S5 are the next slices; the local-cell architecture stays the
 provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
 first, embedded-service challenger retained, remote-cache-only fails the fixed
 requirements, container cell adds a runtime) with measurable budgets required
@@ -993,24 +993,29 @@ before starting.
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
 
-## Founder decisions awaiting Scott
+## Founder decisions (answered)
 
-- **D1 — Authorize LC-S1:** recommend separate authorization for the inactive
-  local runtime configuration and its first-commit fixture inventory.
-- **D2 — Identity adoption, namespace join and collisions:** recommend adoption
-  preserve the account namespace and joins require user-reviewed resolution,
-  never silent remapping.
-- **D3 — Device trust, shared machines and offline access horizon:** recommend
-  owner-authorized personal replicas first, explicit stale state and no promise
-  of remote erasure.
-- **D4 — At-rest protection baseline:** recommend an explicit threat model before
-  whole-account enrollment, with vault keys remaining client-held.
-- **D5 — Usage reporting fields, linkage, retention and controls:** recommend
-  coarse bounded aggregates and a narrow build signal, with failure never gating
-  local work.
-- **D6 — Existing free-hosted user transition:** recommend keeping it deferred
-  until after M9.
-- **D7 — Destination commercial policy:** recommend no SaaS subscription
-  prerequisite for local messaging or self-managed enrollment.
-- **D8 — Supported OS versions/architectures and resource budgets:** recommend
-  the smallest set covering the founder's and enrolled test machines first.
+Scott answered D1 on 2026-10-23 and D2–D8 on 2026-10-24, each taking the
+planning lead's recommendation. These are the standing answers; a later change
+is recorded here with its date.
+
+- **D1 — Authorize LC-S1:** YES (2026-10-23). LC-S1 through LC-S4 are merged.
+- **D2 — Identity adoption, namespace join and collisions:** adoption preserves
+  the account namespace; joins require user-reviewed, per-item resolution; never
+  silent remapping (2026-10-24).
+- **D3 — Device trust, shared machines and offline access horizon:**
+  owner-authorized personal replicas first; stale state is explicit; no promise
+  of remote erasure (2026-10-24).
+- **D4 — At-rest protection baseline:** an explicit threat model precedes
+  whole-account enrollment; vault keys remain client-held (2026-10-24).
+- **D5 — Usage reporting fields, linkage, retention and controls:** coarse
+  bounded aggregates and a narrow build signal, bounded retention, and reporting
+  failure never gates local work (2026-10-24).
+- **D6 — Existing free-hosted user transition:** deferred until after M9
+  (2026-10-24).
+- **D7 — Destination commercial policy:** no SaaS subscription prerequisite for
+  local messaging or self-managed enrollment (2026-10-24).
+- **D8 — Supported OS versions/architectures and resource budgets:** macOS 14+
+  on arm64 and x86_64, Windows 11 x86_64, and Linux glibc x86_64 and arm64, with
+  the Windows proof first; resource budgets are set per platform by LC-S2-P
+  (2026-10-24).
