@@ -256,7 +256,9 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
-LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership, singleton isolation, migration cancellation, and restart policy remain deferred.
+LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle: LC-S2 (under review); child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (under review); migration cancellation and restart policy remain deferred.
+
+LC-S2 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports, and bounded readiness checks through tests and a harness only; lifecycle planning, restart policy, migration cancellation, platform service adapters, downloads, installer manifest trust, Windows DACL privacy, and reclaiming a crashed cell's stale SysV shared-memory segment when it is purged (macOS allows 32 machine-wide; a normally stopped cell leaves none) remain deferred, with nothing installed or activated.
 
 - Introduce an explicit local runtime configuration and a dependency-light lifecycle module
   or companion executable. Keep its location and command names open until the
@@ -845,7 +847,7 @@ slices, not implementation authorization; do not turn them into one long branch.
 - **LC-S2 disposable lifecycle core** / Scope: one owner for process, data and
   temp with an exclusive lock, manifest and interruption journal / Acceptance:
   inspect/install/start/stop/status/repair/remove on synthetic data /
-  Dependencies: LC-S1 (pending) / Evidence: fixture, real PostgreSQL, native /
+  Dependencies: LC-S1 (merged #822) / Evidence: fixture, real PostgreSQL, native /
   Activation: explicit harness only / Recovery: synthetic data only / Owner:
   vacant.
 - **LC-S2-P platform adapters** / Scope: one slice per OS; Windows first because
@@ -954,7 +956,7 @@ branch named in the active review record below, or after that review hands off.
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
 runtime configuration terminology; stage the populated-account acceptance across
-M5/M6/M7; LC-S1 is the next safe slice; the local-cell architecture stays the
+M5/M6/M7; LC-S1 is merged and LC-S2 is under review; the local-cell architecture stays the
 provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
 first, embedded-service challenger retained, remote-cache-only fails the fixed
 requirements, container cell adds a runtime) with measurable budgets required
@@ -981,8 +983,8 @@ before starting.
 | M8 | vacant | proposed | none | none | reporting disclosure and controls (founder) | UI states may start early; collection stays off |
 | M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
-| LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | implemented inactive; authorized by Scott 2026-10-23 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | owner gate and integration review; no live activation | Fable reviews and gates unstaged implementation |
-| LC-S2 | vacant | proposed | lifecycle core | none | LC-S1 | resolve dependency |
+| LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
+| LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | lifecycle core; authorized under D1 | unit, mutation, synthetic lifecycle | native PostgreSQL blocked by sandbox shared-memory denial | owner native proof, gate and integration review |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | vacant | proposed | local route | none | LC-S1; M0b | resolve dependencies |
 | LC-S4 | vacant | proposed | console trust | none | LC-S3 | resolve dependency |
