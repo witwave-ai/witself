@@ -256,7 +256,7 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
-LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle: LC-S2 (under review); child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (under review); migration cancellation and restart policy remain deferred.
+LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (merged #824); migration cancellation and restart policy remain deferred.
 
 LC-S2 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports, and bounded readiness checks through tests and a harness only; lifecycle planning, restart policy, migration cancellation, platform service adapters, downloads, installer manifest trust, Windows DACL privacy, and reclaiming a crashed cell's stale SysV shared-memory segment when it is purged (macOS allows 32 machine-wide; a normally stopped cell leaves none) remain deferred, with nothing installed or activated.
 
@@ -958,7 +958,7 @@ branch named in the active review record below, or after that review hands off.
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
 runtime configuration terminology; stage the populated-account acceptance across
-M5/M6/M7; LC-S1 is merged and LC-S2 is under review; the local-cell architecture stays the
+M5/M6/M7; LC-S1 and LC-S2 are merged and LC-S3 is under review; the local-cell architecture stays the
 provisional baseline (lane verdict "revise-with-conditions": native PostgreSQL
 first, embedded-service challenger retained, remote-cache-only fails the fixed
 requirements, container cell adds a runtime) with measurable budgets required
@@ -986,7 +986,7 @@ before starting.
 | M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
-| LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | lifecycle core; authorized under D1 | unit, mutation, synthetic lifecycle | native PostgreSQL blocked by sandbox shared-memory denial | owner native proof, gate and integration review |
+| LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | implemented; inert unless a route is set | route/CLI/MCP/hook tests; eight killed mutations | owner gate and integration review | Fable reviews and gates unstaged implementation |
 | LC-S4 | vacant | proposed | console trust | none | LC-S3 | resolve dependency |
