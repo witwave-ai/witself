@@ -43,9 +43,6 @@ func main() {
 }
 
 func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW2: native child launch and environment adapter is pending")
-	}
 	binary := buildEnvironmentNamesChild(t)
 	t.Setenv("WITSELF_PROVISION_TOKEN", "synthetic-parent-only")
 	t.Setenv("LOCALCELL_PARENT_SENTINEL", "synthetic-parent-only")
@@ -113,9 +110,6 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 }
 
 func TestPostgresCommandsUseCLocale(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
-	}
 	t.Setenv("LC_ALL", "synthetic-parent-only")
 	t.Setenv("LANG", "synthetic-parent-only")
 	directory := t.TempDir()
@@ -156,8 +150,8 @@ func main() {
 }
 
 func TestPostgresConfigDisablesUnixSockets(t *testing.T) {
-	c, m := fileCell(t)
-	if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+	c, m := unitCell(t)
+	if err := testMkdir(c.path("pg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.configurePostgres(m); err != nil {
@@ -173,7 +167,7 @@ func TestPostgresConfigDisablesUnixSockets(t *testing.T) {
 }
 
 func TestCommandsRequireExplicitBinaryPaths(t *testing.T) {
-	c := &Cell{}
+	c, _ := unitCell(t)
 	for _, directory := range []string{"", "relative-postgres"} {
 		c.cfg.Binaries.PostgresDir = directory
 		if err := c.pgCommand(t.Context(), "pg_ctl", "--version"); err == nil || err.Error() != "explicit PostgreSQL binary directory is required" {

@@ -15,12 +15,9 @@ import (
 // This suite verifies real process and HTTP supervision with synthetic PG
 // peers. It deliberately makes no claim about PostgreSQL storage or migration.
 func TestHermeticLifecycle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
-	}
+	binaries := buildLifecycleFixture(t)
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
-	binaries := buildLifecycleFixture(t)
 	t.Run("LifecycleOrderAndRemoval", func(t *testing.T) { testLifecycleOrderAndRemoval(t, binaries) })
 	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries) })
 	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries) })

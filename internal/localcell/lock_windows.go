@@ -10,29 +10,13 @@ import (
 )
 
 func openLockFile(path string, create bool) (*os.File, error) {
-	pointer, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	disposition := uint32(windows.OPEN_EXISTING)
+	flags := os.O_RDWR
 	if create {
-		disposition = windows.OPEN_ALWAYS
+		flags |= os.O_CREATE
 	}
-	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	file, err := openPrivateFile(path, flags, 0o600)
 	if err != nil {
 		return nil, err
-	}
-	file := os.NewFile(uintptr(handle), path)
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
-		_ = file.Close()
-		return nil, errors.New("localcell: lock must not be a reparse point or directory")
 	}
 	if err := validateLockFile(file); err != nil {
 		_ = file.Close()

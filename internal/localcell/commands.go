@@ -59,10 +59,10 @@ func (c *Cell) baseEnvironment() []string {
 func (c *Cell) password() (string, error) {
 	path := c.path("run", "postgres.password")
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 128 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 128 || !privatePassword(path, info) {
 		return "", errors.New("local cell password file is unavailable or not private")
 	}
-	data, err := os.ReadFile(path)
+	data, err := readPrivateFile(path)
 	if err != nil || len(bytes.TrimSpace(data)) < 24 {
 		return "", errors.New("local cell password file is invalid")
 	}
@@ -114,7 +114,7 @@ func (c *Cell) logFile(component string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, errors.New("local cell log must be a regular file")
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, errors.New("cannot open local cell log")
 	}

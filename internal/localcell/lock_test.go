@@ -39,7 +39,7 @@ func TestOperationLockHelperProcess(t *testing.T) {
 }
 
 func TestOperationLockAcrossProcessesAndCrashRelease(t *testing.T) {
-	root := t.TempDir()
+	root := testPrivateRoot(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	holder := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOperationLockHelperProcess$", "--", "localcell-lock-helper", "hold", root)
@@ -85,7 +85,7 @@ func TestOperationLockAcrossProcessesAndCrashRelease(t *testing.T) {
 }
 
 func TestOperationLockProtectsRunRemoval(t *testing.T) {
-	root := t.TempDir()
+	root := testPrivateRoot(t)
 	lock, err := acquireLock(root, true)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestOperationLockProtectsRunRemoval(t *testing.T) {
 }
 
 func TestOperationLockReadOnlyAndModes(t *testing.T) {
-	root := t.TempDir()
+	root := testPrivateRoot(t)
 	lock, err := acquireLock(root, false)
 	if err != nil || lock != nil {
 		t.Fatalf("empty read-only probe: lock=%t err=%v", lock != nil, err)
@@ -158,19 +158,19 @@ func TestOperationLockReadOnlyAndModes(t *testing.T) {
 func TestOperationLockRefusesSymlinks(t *testing.T) {
 	for _, target := range []string{"root", "run", ".owner.lock", "run/operation.lock"} {
 		t.Run(strings.ReplaceAll(target, "/", "_"), func(t *testing.T) {
-			root, outside := t.TempDir(), t.TempDir()
+			root, outside := testPrivateRoot(t), t.TempDir()
 			path := filepath.Join(root, target)
 			if target == "root" {
 				path = filepath.Join(root, "linked-root")
 				root = path
 			} else if strings.HasSuffix(target, ".lock") {
-				if err := os.WriteFile(filepath.Join(outside, "target"), []byte("unchanged"), 0o600); err != nil {
+				if err := testWriteFile(filepath.Join(outside, "target"), []byte("unchanged"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				outside = filepath.Join(outside, "target")
 			}
 			if target == "run/operation.lock" {
-				if err := os.Mkdir(filepath.Join(root, "run"), 0o700); err != nil {
+				if err := testMkdir(filepath.Join(root, "run"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}

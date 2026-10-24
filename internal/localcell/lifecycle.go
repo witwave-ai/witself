@@ -510,7 +510,7 @@ func (c *Cell) postmaster() (int, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 8192 {
 		return 0, errors.New("invalid PostgreSQL process record")
 	}
-	data, err := os.ReadFile(path)
+	data, err := readPrivateFile(path)
 	if err != nil {
 		return 0, errors.New("cannot read PostgreSQL process record")
 	}
@@ -593,7 +593,7 @@ func (c *Cell) recoverPostgresRecord() error {
 		}
 		return nil
 	}
-	data, err := os.ReadFile(c.path("pg", "postmaster.pid"))
+	data, err := readPrivateFile(c.path("pg", "postmaster.pid"))
 	if err != nil {
 		return errors.New("cannot read PostgreSQL recovery identity")
 	}

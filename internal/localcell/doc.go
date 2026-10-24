@@ -10,8 +10,12 @@
 // 0700 and secret/state files with mode 0600 on Unix. A stable root .owner.lock
 // also fences removal of run/: deleting a held lock inode must never allow a
 // second owner to lock a replacement inode concurrently. It remains after
-// removal. Windows ownership checks do not provide Unix-mode privacy; DACL
-// hardening and native Windows runtime acceptance remain deferred. Windows
+// removal. Windows objects require the current user as owner and a protected
+// DACL with explicit full control only for that user and SYSTEM; reparse paths
+// and non-local, non-NTFS, reserved or long roots are refused. Retained handles
+// fence ancestor renames; pathname creation detects in-place reparse changes
+// afterward and rolls back the created object by handle. This is detection with
+// rollback, not prevention; handle-relative creation remains deferred. Windows
 // Start fails closed until a platform adapter can launch with the exact child
 // environment and persist suspended-child identity before allowing execution.
 //
@@ -36,6 +40,6 @@
 // manifest so Repair can complete cleanup after the journal directory is gone.
 //
 // Restart policy, migration cancellation, launchd/systemd/Windows service
-// registration, downloads, the installer manifest trust contract, Windows DACL
-// privacy, and supported local-product routing/authorization remain deferred.
+// registration, downloads, the installer manifest trust contract, native Windows
+// lifecycle proof, and supported local-product routing/authorization remain deferred.
 package localcell

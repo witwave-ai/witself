@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -16,12 +15,9 @@ import (
 // These synthetic peers exercise journal recovery and process supervision. They
 // do not claim to validate PostgreSQL storage or native initdb behavior.
 func TestInstallRepair(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
-	}
+	binaries := buildLifecycleFixture(t)
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
-	binaries := buildLifecycleFixture(t)
 	t.Run("CompletedRequiredStepsResume", func(t *testing.T) {
 		cell, root := disposableCell(t, binaries, nil)
 		if err := cell.Install(t.Context(), localcell.InstallOptions{LeaveRunning: true}); err != nil {

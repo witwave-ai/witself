@@ -19,6 +19,9 @@ type operationLock struct {
 // would let another owner lock a replacement inode while the first still runs.
 // A read-only probe never creates directories or files.
 func acquireLock(root string, create bool) (_ *operationLock, err error) {
+	if err := validatePrivateTree(root); err != nil {
+		return nil, err
+	}
 	if err := lockDirectory(root); err != nil {
 		return nil, err
 	}
@@ -41,7 +44,7 @@ func acquireLock(root string, create bool) (_ *operationLock, err error) {
 	}
 	run := filepath.Join(root, "run")
 	if create {
-		if err := os.Mkdir(run, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := makePrivateDir(run); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("localcell: create run directory: %w", err)
 		}
 	}
