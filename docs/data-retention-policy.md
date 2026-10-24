@@ -2,7 +2,7 @@
 
 This is the customer-facing statement of how long Witself keeps the data an
 account produces, and what happens at the end of each window. It distinguishes
-implemented mechanics and production enforcement from documented policy awaiting
+implemented mechanics and active enforcement from documented policy awaiting
 implementation or activation. The per-domain mechanics and design live in
 [transcript-retention.md](transcript-retention.md),
 [message-retention.md](message-retention.md),
@@ -10,9 +10,13 @@ implementation or activation. The per-domain mechanics and design live in
 [billing-and-limits.md](billing-and-limits.md); this page consolidates them.
 
 > **Status:** PUBLISHED as the operator's retention policy for the mechanics
-> described here. The checked-in production cell values enable account purge in
-> `enforce` mode on both Civo cells and agent-email retention in `enforce` mode on
-> the serving cell only; transcript and message retention are inactive. Audit
+> described here. The checked-in Civo cell values enable account purge in
+> `enforce` mode on all three cells; agent-email retention in `enforce` mode on
+> `civo-sandbox-use1-serving` and in `preview` mode on the other two cells; and
+> transcript and message retention in `preview` mode on all three cells. A
+> worker in `preview` mode deletes nothing. Checked-in values take effect on
+> a cell only once that cell has been created and the values have been
+> applied to it. Audit
 > retention is documented policy, not yet implemented or enforced. The exact
 > activation flags are listed below. Formal ratification/signature of the
 > customer-facing wording remains an owner action.
@@ -36,7 +40,7 @@ subscription, or invoice history.
 When enabled in `enforce` mode, each implemented age-retention worker runs a
 **bounded background sweep inside the account's own cell**, across 16 lanes in
 small batches. The cadence is configurable: the chart default is 5 minutes;
-agent-email retention on the serving production cell uses 1 minute. Eligible
+agent-email retention on the two serving cells is set to 1 minute. Eligible
 records older than the window are **hard-deleted**, subject to each class's
 eligibility and hold checks. Sweeps use database row locks and durable lane
 coordination, and emit **count-only** operational records; they never log retained
@@ -47,7 +51,7 @@ recipient-suppression digests have a separate bounded lifetime.
 
 ## Enforcement activation
 
-Retention enforcement is **activated per cell**, not globally. The platform
+Retention enforcement is **activated per cell**, not globally. The server
 chart ships each implemented retention worker **disabled by default** and offers
 a **preview** stage (which computes and reports what *would* be deleted, deleting
 nothing) before an operator switches a class to **enforce**. Consequently the
@@ -57,19 +61,26 @@ elsewhere the same windows are the declared policy awaiting activation. This is
 an operational rollout control, not
 a change to the retention windows themselves.
 
-The checked-in production configuration is:
+As of 2026-09-29, the checked-in configuration of the three Civo cells is:
 
-| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (rollback) |
-|---|---|---|
-| Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` |
-| Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `false` / `preview` (inactive defaults) |
-| Transcripts: `worker.transcriptRetention.enabled` / `.mode` | `false` / `preview` (inactive defaults) | `false` / `preview` (inactive defaults) |
-| Messages: `worker.messageRetention.enabled` / `.mode` | `false` / `preview` (inactive defaults) | `false` / `preview` (inactive defaults) |
-| Audit trail | No implemented retention worker or chart flag | No implemented retention worker or chart flag |
+| Retention class / chart flags | `civo-sandbox-use1-serving` (serving) | `civo-sandbox-use1-backup` (backup) | `civo-prod-use1-serving` (serving; configuration checked in, cell not yet created; see note) |
+|---|---|---|---|
+| Account closure: `worker.accountPurge.enabled` / `.mode` | `true` / `enforce` | `true` / `enforce` | `true` / `enforce` |
+| Agent email: `worker.agentEmailRetention.enabled` / `.mode` | `true` / `enforce` | `true` / `preview` | `true` / `preview` |
+| Transcripts: `worker.transcriptRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |
+| Messages: `worker.messageRetention.enabled` / `.mode` | `true` / `preview` | `true` / `preview` | `true` / `preview` |
+| Audit trail | No implemented retention worker or chart flag | No implemented retention worker or chart flag | No implemented retention worker or chart flag |
 
-Both cells set `worker.enabled: true`. Cell overrides live under
+All three cells set `worker.enabled: true`. Cell overrides live under
 `apps.witselfServer.worker`; omitted settings inherit the apps/server chart
-defaults. A disabled worker does not run preview sweeps. The audit window and
+defaults. The table records checked-in configuration, not what a cell has
+applied or run: values take effect on a cell only once that cell has been
+created and the values have been applied to it. Note: the configuration of
+`civo-prod-use1-serving` was first checked in on 2026-09-28 and, as of 2026-09-29,
+that cell has not yet been created;
+[deployment-cells.md](deployment-cells.md) records its current status.
+A worker in `preview` mode reports counts and deletes nothing; a disabled
+worker does not run preview sweeps. The audit window and
 modes below are documented policy awaiting implementation, not an active preview
 lane. Account purge still removes audit events as described below.
 
@@ -107,8 +118,8 @@ cannot recreate the account. Purge replaces the receipt's contact-derived
 request fingerprint with a fixed non-contact marker.
 
 Like the retention workers above, the account-purge worker is activated per
-cell. The platform chart ships it disabled and in `preview` mode by default;
-both production Civo cells override `worker.accountPurge.enabled: true` and
+cell. The server chart ships it disabled and in `preview` mode by default;
+all three Civo cells override `worker.accountPurge.enabled: true` and
 `worker.accountPurge.mode: enforce`, with `worker.accountPurge.grace: 720h`
 inherited from the chart. On other cells, preview deletes nothing and does not
 anonymize the account; purge requires explicit enforcement activation.
@@ -119,7 +130,7 @@ Transcript, message, and agent-email defaults follow the plan and are
 operator-overridable account policies. Values below come from
 [billing-and-limits.md](billing-and-limits.md).
 
-| Data class | Personal | Professional | Team | Enterprise | End-of-window action |
+| Data class | Personal (free) | Professional | Team | Enterprise | End-of-window action |
 |---|---|---|---|---|---|
 | **Agent transcripts** | 30 days | 90 days | 365 days | Indefinite (configurable) | Hard delete of the conversation |
 | **Agent-to-agent messages** | 30 days¹ | 90 days | 365 days | 365 days (contract-overridable) | Hard delete of the whole inactive thread |
@@ -134,7 +145,7 @@ new inbound mail.
 
 ² The documented audit-retention policy calls for a 365-day default and
 operator-selected modes. Neither the window nor those modes has an implemented
-Helm value or account policy key; production does not enforce this age window.
+Helm value or account policy key; no cell enforces this age window.
 
 Two safety notes about the implemented policy and sweep behavior:
 
@@ -149,7 +160,7 @@ Two safety notes about the implemented policy and sweep behavior:
 
 The documented audit-retention policy defines three planned operator-selected
 end-of-window modes (see [audit-retention.md](audit-retention.md)). None is
-implemented or enabled in production:
+implemented or enabled on any cell:
 
 - **`delete`** (planned default): audit rows older than the window would be
   hard-deleted on the scheduled sweep.
