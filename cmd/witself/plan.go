@@ -273,7 +273,7 @@ func planContext(
 	accountName, cellEndpoint string,
 ) (accountID, token, controlPlane string, err error) {
 	return planContextWithLocator(
-		ctx, accountName, cellEndpoint, client.LookupAccount,
+		ctx, accountName, cellEndpoint, connectionLocate,
 	)
 }
 
@@ -282,11 +282,26 @@ func planContextWithLocator(
 	accountName, cellEndpoint string,
 	locate accountLocator,
 ) (accountID, token, controlPlane string, err error) {
+	// Refuse a local connection route before opening its operator credential.
+	// Resolve below rechecks the route so a concurrent config replacement cannot
+	// enable a directory lookup between this metadata check and credential read.
+	if strings.TrimSpace(cellEndpoint) == "" {
+		_, acct, err := local.ResolveAccount(accountName)
+		if err != nil {
+			return "", "", "", err
+		}
+		if acct.Route != nil {
+			return "", "", "", fmt.Errorf("plan and billing commands are not available on a local connection route")
+		}
+	}
 	name, acct, tok, err := local.Resolve(accountName)
 	if err != nil {
 		return "", "", "", err
 	}
 	if strings.TrimSpace(cellEndpoint) == "" {
+		if acct.Route != nil {
+			return "", "", "", fmt.Errorf("plan and billing commands are not available on a local connection route")
+		}
 		directory := defaultControlPlane
 		// Preserve the existing staging override only as an unauthenticated
 		// directory audience. The operator token still goes exclusively to the

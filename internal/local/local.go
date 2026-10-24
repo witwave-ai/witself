@@ -4,9 +4,9 @@
 // --endpoint/--token-file ceremony. Nothing here is server-side: local names
 // are how ONE MACHINE keeps track of its accounts.
 //
-// Deliberately NOT stored: the cell endpoint. Accounts can move between
-// cells, so every command asks the control plane directory where the account
-// lives right now — a migrated account keeps working with no local edits.
+// Hosted cell endpoints are resolved through the control plane directory, so
+// migrated accounts keep working with no local edits. An optional connection
+// route binds an account to a local cell instead.
 //
 // Layout (WITSELF_HOME overrides ~/.witself):
 //
@@ -42,6 +42,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 type Account struct {
 	ID    string `json:"id"`
 	Email string `json:"email,omitempty"`
+	Route *Route `json:"route,omitempty"`
 }
 
 // Config is the CLI-managed local configuration file.
@@ -242,10 +243,22 @@ func Load() (*Config, error) {
 	if cfg.Accounts == nil {
 		cfg.Accounts = map[string]Account{}
 	}
+	if err := validateRoutes(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
 func write(cfg *Config) error {
+	return writeWithRename(cfg, os.Rename)
+}
+
+// writeWithRename exposes the commit boundary to tests without replacing a
+// process-global filesystem operation. Readers see either complete version.
+func writeWithRename(cfg *Config, rename func(string, string) error) error {
+	if err := validateRoutes(cfg); err != nil {
+		return err
+	}
 	p, err := configPath()
 	if err != nil {
 		return err
@@ -257,7 +270,23 @@ func write(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, append(b, '\n'), 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return rename(tmp.Name(), p)
 }
 
 // Available returns an error if the name is invalid or already taken.
@@ -289,6 +318,11 @@ func Available(name string) error {
 
 // Save records a new named account: token first (the secret), then the binding.
 func Save(name string, acct Account, operatorToken string) error {
+	if acct.Route != nil {
+		if err := acct.Route.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := Available(name); err != nil {
 		return err
 	}

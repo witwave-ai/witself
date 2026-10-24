@@ -314,9 +314,8 @@ func authLogin(args []string) int {
 // connect resolves how to reach a cell as an operator. Explicit
 // --endpoint/--token-file always wins (the self-hosted path). Otherwise a
 // named local account (--account, WITSELF_ACCOUNT, or "default") supplies the
-// operator token, and the control plane directory is asked — fresh, every
-// time — which cell hosts the account. Accounts can move between cells; the
-// CLI never caches an endpoint.
+// operator token and, when set, its local connection route. Hosted accounts
+// still ask the control plane directory fresh on every connection.
 func connect(ctx context.Context, accountName, endpoint, tokenFile string) (string, string, error) {
 	if tokenFile != "" {
 		if endpoint == "" {
@@ -335,7 +334,10 @@ func connect(ctx context.Context, accountName, endpoint, tokenFile string) (stri
 	if endpoint != "" { // explicit endpoint, named account's token
 		return endpoint, tok, nil
 	}
-	_, cellEndpoint, err := client.LookupAccount(ctx, defaultControlPlane, acct.ID)
+	if acct.Route != nil {
+		return acct.Route.Endpoint, tok, nil
+	}
+	_, cellEndpoint, err := connectionLocate(ctx, defaultControlPlane, acct.ID)
 	if err != nil {
 		return "", "", fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
 	}
@@ -343,6 +345,10 @@ func connect(ctx context.Context, accountName, endpoint, tokenFile string) (stri
 }
 
 type accountLocator func(context.Context, string, string) (string, string, error)
+
+// Ordinary connection resolution shares a directory seam. Console trust has
+// its own resolver and must still establish directory authority independently.
+var connectionLocate accountLocator = client.LookupAccount
 
 type agentConnection struct {
 	Endpoint    string
@@ -357,10 +363,21 @@ type agentConnection struct {
 // The selector chooses local credential material only; the server derives the
 // authenticated identity from that token and selfShow verifies the result.
 func connectAgent(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string) (agentConnection, error) {
-	return connectAgentWithLocator(ctx, accountName, realmName, agentName, endpoint, tokenFile, client.LookupAccount)
+	return connectAgentWithLocator(ctx, accountName, realmName, agentName, endpoint, tokenFile, connectionLocate)
 }
 
 func connectAgentWithLocator(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string, locate accountLocator) (agentConnection, error) {
+	return connectAgentWithRoute(ctx, accountName, realmName, agentName, endpoint, tokenFile, locate, nil, false)
+}
+
+// connectAgentWithRouteSnapshot keeps MCP's startup route selection fixed. A
+// nil route snapshot keeps hosted directory resolution even if a route is set
+// while that MCP process is running.
+func connectAgentWithRouteSnapshot(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string, locate accountLocator, route *local.Route) (agentConnection, error) {
+	return connectAgentWithRoute(ctx, accountName, realmName, agentName, endpoint, tokenFile, locate, route, true)
+}
+
+func connectAgentWithRoute(ctx context.Context, accountName, realmName, agentName, endpoint, tokenFile string, locate accountLocator, route *local.Route, snapshot bool) (agentConnection, error) {
 	realmName = strings.TrimSpace(realmName)
 	if realmName == "" {
 		realmName = strings.TrimSpace(os.Getenv("WITSELF_REALM"))
@@ -396,9 +413,16 @@ func connectAgentWithLocator(ctx context.Context, accountName, realmName, agentN
 		return agentConnection{}, err
 	}
 	if endpoint == "" {
-		_, endpoint, err = locate(ctx, defaultControlPlane, acct.ID)
-		if err != nil {
-			return agentConnection{}, fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
+		if !snapshot {
+			route = acct.Route
+		}
+		if route != nil {
+			endpoint = route.Endpoint
+		} else {
+			_, endpoint, err = locate(ctx, defaultControlPlane, acct.ID)
+			if err != nil {
+				return agentConnection{}, fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
+			}
 		}
 	}
 	return agentConnection{
@@ -1285,7 +1309,10 @@ func connectDomain(ctx context.Context, accountName, endpoint, tokenFile string)
 	if err != nil {
 		return "", "", fmt.Errorf("an agent token without --endpoint needs a local account for routing: %w", err)
 	}
-	_, endpoint, err = client.LookupAccount(ctx, defaultControlPlane, acct.ID)
+	if acct.Route != nil {
+		return acct.Route.Endpoint, tok, nil
+	}
+	_, endpoint, err = connectionLocate(ctx, defaultControlPlane, acct.ID)
 	if err != nil {
 		return "", "", fmt.Errorf("locate account %q (%s): %w", name, acct.ID, err)
 	}
@@ -1356,7 +1383,7 @@ const defaultControlPlane = "https://self.witwave.ai"
 // accountCmd handles `witself account ...`.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself account create|adopt|list|status|placement|resend-verification|change-email|change-display-name|recover|close|events|support|forget ...")
+		fmt.Fprintln(os.Stderr, "usage: witself account create|adopt|list|status|placement|route|resend-verification|change-email|change-display-name|recover|close|events|support|forget ...")
 		return 2
 	}
 	switch args[0] {
@@ -1370,6 +1397,8 @@ func accountCmd(args []string) int {
 		return accountStatus(args[1:])
 	case "placement":
 		return accountPlacementCmd(args[1:])
+	case "route":
+		return accountRouteCmd(args[1:])
 	case "resend-verification":
 		return accountResendVerification(args[1:])
 	case "change-email":
@@ -4250,6 +4279,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself account list         List this machine's local account names")
 	cliout.Line(w, "  witself account status       Show an account's lifecycle status")
 	cliout.Line(w, "  witself account placement    Show or change account cell-placement policy")
+	cliout.Line(w, "  witself account route        Show, set, or clear a local connection route")
 	cliout.Line(w, "  witself account recover      Email a recovery code, redeem it for a fresh owner token")
 	cliout.Line(w, "  witself account change-email Move the account to a new address (code-confirmed)")
 	cliout.Line(w, "  witself account change-display-name  Rename the account (owner only)")

@@ -275,13 +275,21 @@ Ephemeral agents, such as Kubernetes pods, should normally start with only
 token identifies the durable named agent; restarting the pod does not create a
 new Witself agent.
 
-Endpoint selection precedence is global `--endpoint`, `WITSELF_ENDPOINT`, stored
-profile endpoint, then the default managed Witself Cloud endpoint.
+Ordinary connection resolution honors explicit `--endpoint` and `--token-file`
+overrides first. Without an endpoint override, the selected named account's local
+connection route supplies the endpoint; without a route, the hosted directory
+locates the account. `--account`, then `WITSELF_ACCOUNT`, then `default` selects
+the local account. Operator and agent commands require `--endpoint` with an
+explicit `--token-file`.
 
-Authentication source precedence is global `--token-file`,
-`WITSELF_TOKEN_FILE`, `WITSELF_TOKEN`, then stored local profile auth. Raw token
-flags should stay command-specific or testing-only rather than becoming part of
-the broad global surface.
+Authentication uses the explicit token file when supplied, otherwise the selected
+account's operator token or the selected realm/agent token. Domain commands also
+accept `WITSELF_ENDPOINT` and `WITSELF_TOKEN_FILE` after the corresponding flags,
+and `WITSELF_TOKEN` when no token file is selected; absent these overrides, they
+use the named account's operator token. A connection route changes endpoint
+resolution only; credentials stay in their existing files. Raw token flags should
+stay command-specific or testing-only rather than becoming part of the broad
+global surface.
 
 The stable JSON response contract for `--json` output is tracked in
 [json-contracts.md](json-contracts.md).
@@ -844,7 +852,7 @@ Flags:
 
 **Family status: implemented.**
 
-Manage authentication to the managed service or active local profile.
+Manage authentication to a managed-service or self-hosted endpoint.
 
 ### `witself auth login`
 
@@ -1051,6 +1059,44 @@ plus the hosted provider session result from
 Manage the Witself managed-service customer account from the CLI. The CLI is the
 primary control plane for customer account details, human operators/admins,
 billing ownership, support identity, and account exports.
+
+### `witself account route show|set|clear NAME`
+
+Implemented: manage an explicit connection route for an existing local account
+name. No default-account selection or credential location changes.
+
+```sh
+witself account route show work
+witself account route set --local-endpoint http://127.0.0.1:8080 work
+witself account route clear work
+```
+
+`set` accepts only `http://` with the IP literal host `127.0.0.1` or `[::1]`,
+with an optional port and base path. DNS names, other addresses, HTTPS,
+userinfo, queries and fragments are refused. It probes
+`GET /v1/version` without credentials and requires `schema_version: witself.v0`;
+failed probes and redirects leave the previous binding intact. Activation writes
+a temporary file beside `config.json`, then atomically renames it. `clear`
+removes the route and restores hosted directory resolution. `show` prints only
+the route's kind and endpoint as JSON, or `null` when unset.
+
+The existing `~/.witself/config.json` (or `WITSELF_HOME/config.json`) keeps an
+`accounts` object keyed by local name. Each entry still has `id` and optional
+`email`, and may now include
+`"route":{"kind":"local","endpoint":"http://127.0.0.1:8080"}`.
+Unknown route kinds fail closed. Existing operator and agent token files stay
+in place; entries without a route serialize as before.
+
+Ordinary operator, agent and domain commands use the route without a directory
+lookup when no endpoint override is supplied. Explicit endpoint/token-file
+behavior is unchanged. Hooks reload configuration per event and adopt a route
+immediately. **Restart a running MCP server after setting or clearing a route:**
+it retains its startup connection route, and still verifies `/v1/self` identity.
+Live MCP re-binding is deferred. Plan and billing commands are hosted-only:
+without an explicit endpoint, they refuse a routed account with a value-free
+error before any credential read or directory lookup. Account-console manager
+trust still requires the hosted directory; offline console trust is deferred to
+LC-S4.
 
 ### `witself account create`
 
@@ -1295,7 +1341,7 @@ Flags:
 
 | Flag | Description |
 |---|---|
-| `--account NAME` | Managed local account profile. Defaults to the active account. |
+| `--account NAME` | Local account name; default `WITSELF_ACCOUNT` or `default`. |
 | `--control-plane URL` | Managed control-plane URL. |
 | `--endpoint URL` | Self-hosted cell endpoint; use together with `--token-file`. |
 | `--token-file PATH` | Self-hosted operator-token file; use together with `--endpoint`. |

@@ -333,6 +333,8 @@ or hosted job behavior.
 
 ### M2 Make standalone use complete enough for a canary
 
+LC-S3 implements connection routes, atomic route activation, per-event hook adoption and the hosted-only plan/billing refusal; live MCP re-binding is deferred (restart required), and offline console trust belongs to LC-S4.
+
 - Add explicit connection routes without changing named hosted-account resolution by
   default. Local resolution must survive a blocked directory/control-plane
   connection; a local failure must never silently reroute writes remotely.
@@ -986,7 +988,7 @@ before starting.
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | lifecycle core; authorized under D1 | unit, mutation, synthetic lifecycle | native PostgreSQL blocked by sandbox shared-memory denial | owner native proof, gate and integration review |
 | LC-S2-P | vacant | proposed | OS adapters | none | LC-S2; M0a | Windows proof first |
-| LC-S3 | vacant | proposed | local route | none | LC-S1; M0b | resolve dependencies |
+| LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | implemented; inert unless a route is set | route/CLI/MCP/hook tests; eight killed mutations | owner gate and integration review | Fable reviews and gates unstaged implementation |
 | LC-S4 | vacant | proposed | console trust | none | LC-S3 | resolve dependency |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
 

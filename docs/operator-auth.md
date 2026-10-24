@@ -60,8 +60,10 @@ the control plane and verifies that the token belongs to that account before
 writing the local binding. Its optional `--endpoint` selects the control plane,
 not a direct cell. For subsequent operator commands, `--account NAME` selects
 a local account; absent that flag, the CLI uses `WITSELF_ACCOUNT` or `default`.
-Without an explicit cell endpoint, the CLI looks up the account's current cell
-on each connection. The direct self-hosted alternative is
+Without an explicit cell endpoint, the CLI uses a configured local connection
+route, or looks up the hosted account's current cell on each connection when no
+route is set. See [connection routes](cli-command-surface.md#witself-account-route-showsetclear-name).
+The direct self-hosted alternative is
 `--endpoint URL --token-file FILE`.
 
 Sources: `cmd/witself/main.go` (`accountCreateWithLegalVersions`, `accountRecover`,
