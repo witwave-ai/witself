@@ -8,18 +8,21 @@ import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {checkDocs, DocsCheckError} from './check-docs.mjs';
 import {collectDocsInputs} from './docs-scope.mjs';
+import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
 const script = fileURLToPath(new URL('./check-docs.mjs', import.meta.url));
 const repository = resolve(dirname(script), '..');
 const research = 'docs/research/local-cell/README.md';
 function fixture(t, body = '# Research\n', extras = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'witself-docs-[fixture]-'));
-  t.after(() => rmSync(cwd, {recursive: true, force: true}));
+  t.after(() => cleanupGitFixture(cwd, t.name));
   const put = (path, content) => {
     mkdirSync(dirname(join(cwd, path)), {recursive: true});
     writeFileSync(join(cwd, path), content);
   };
-  execFileSync('git', ['init', '-q'], {cwd});
+  const git = (...args) => execFileSync('git', fixtureGitArgs(args), {cwd, stdio: ['ignore', 'pipe', 'pipe']});
+  git('init', '-q');
+  configureFixtureGit(git);
   put('docs/README.md', '# Docs\n[Research](research/local-cell/README.md)\n');
   put(research, body);
   for (const [path, content] of Object.entries(extras)) put(path, content);

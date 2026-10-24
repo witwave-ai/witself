@@ -17,7 +17,7 @@ import (
 // do not claim to validate PostgreSQL storage or native initdb behavior.
 func TestInstallRepair(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("synthetic peers use Unix termination semantics")
+		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
 	}
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())

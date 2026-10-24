@@ -16,7 +16,7 @@ import (
 // peers. It deliberately makes no claim about PostgreSQL storage or migration.
 func TestHermeticLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("synthetic peers use Unix termination semantics")
+		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
 	}
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
@@ -29,6 +29,9 @@ func TestHermeticLifecycle(t *testing.T) {
 
 func buildLifecycleFixture(t *testing.T) localcell.Binaries {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
+	}
 	buildDir := t.TempDir()
 	fixture := filepath.Join(buildDir, "fixture")
 	cmd := offlineBuildCommand(t.Context(), "build", "-o", fixture, "./testdata/lifecyclefixture")

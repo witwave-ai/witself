@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -28,11 +29,20 @@ func TestRejectsInvalidArgumentsBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestInspectDoesNotBuildComponents(t *testing.T) {
+func privateHarnessRoot(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
+	}
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal("cannot make harness test root private")
 	}
+	return root
+}
+
+func TestInspectDoesNotBuildComponents(t *testing.T) {
+	root := privateHarnessRoot(t)
 	var output bytes.Buffer
 	if err := run(context.Background(), []string{"-operation", "inspect", "-root", root, "-source", "/not-a-source-tree"}, &output); err != nil {
 		t.Fatalf("inspect failed: %v", err)

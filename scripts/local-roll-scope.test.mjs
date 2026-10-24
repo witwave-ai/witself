@@ -6,6 +6,7 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {checkLocalContext, checkLocalIntegrity, classifyLocal} from './local-roll-scope.mjs';
+import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
 const script = fileURLToPath(new URL('./local-roll-scope.mjs', import.meta.url));
 const cell = 'civo-sandbox-use1-serving';
@@ -17,14 +18,15 @@ const newDigest = `sha256:${'b'.repeat(64)}`;
 const values = (name = cell, version = '1.2.3', digest = oldDigest) => `cell:\n  name: ${name}\n  cloud: civo\napps:\n  civoPostgres:\n    chartVersion: 18.8.0\n  witselfServer:\n    enabled: true\n    # Preserve operator settings and comments exactly.\n    chartVersion: ${version}\n    imageTag: ${version}\n    imageDigest: ${digest}\n    billing:\n      endpoint: https://self.example.invalid\n    worker:\n      enabled: true\nplatform:\n  monitoring:\n    enabled: true\n`;
 function fixture(t, {body = values(), catalogCell = cell} = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'witself-local-roll-scope-'));
-  t.after(() => rmSync(cwd, {recursive: true, force: true}));
-  const git = (...args) => execFileSync('git', args, {cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  t.after(() => cleanupGitFixture(cwd, t.name));
+  const git = (...args) => execFileSync('git', fixtureGitArgs(args), {cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: {...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_AUTHOR_NAME: 'Roll Scope', GIT_AUTHOR_EMAIL: 'scope@example.invalid',
       GIT_COMMITTER_NAME: 'Roll Scope', GIT_COMMITTER_EMAIL: 'scope@example.invalid'}}).trim();
   const write = (name, content) => {mkdirSync(dirname(join(cwd, name)), {recursive: true}); writeFileSync(join(cwd, name), content);};
   const commit = message => {git('add', '--all'); git('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', message); return git('rev-parse', 'HEAD');};
   git('init', '--quiet', '--initial-branch=main');
+  configureFixtureGit(git);
   write('.gitops/cells/catalog.yaml', `schema: witself.gitops-cells.v1\ncells:\n  ${catalogCell}:\n    cloud: civo\n  ${second}:\n    cloud: civo\n`);
   write(path, body);
   write(valuesPath(second), values(second));

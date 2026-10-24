@@ -16,7 +16,7 @@ func TestLocalSpoolRejectsSymlinkComponents(t *testing.T) {
 	alias := filepath.Join(parent, "alias")
 	if err := os.Symlink(dir, alias); err != nil {
 		if runtime.GOOS == "windows" {
-			t.Skipf("symlink creation unavailable: %v", err)
+			t.Skipf("LC-S2-PW3: symlink fixture creation unavailable: %v", err)
 		}
 		t.Fatal(err)
 	}

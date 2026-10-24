@@ -176,7 +176,7 @@ func TestOperationLockRefusesSymlinks(t *testing.T) {
 			}
 			if err := os.Symlink(outside, path); err != nil {
 				if runtime.GOOS == "windows" {
-					t.Skip("Windows symlink privileges unavailable")
+					t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable")
 				}
 				t.Fatal(err)
 			}
