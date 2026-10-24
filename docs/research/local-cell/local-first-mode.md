@@ -95,16 +95,17 @@ canaries may precede activation of that default. An explicit lightweight
 remote-only mode installs no local cell and talks to a selected service; it serves container,
 cluster, remote and autonomous-agent use cases. No silent local-to-remote fallback
 is implied: account identity, destination and read/write authority must remain
-clear. Exact installation flags/profile selection remain open.
+clear. Exact installation flags/connection route selection remain open.
 
 - **Personal/local:** capture, find, and manage supported state on this computer.
   Ordinary core use should not depend on a live WitSelf account directory or a
   recurring license/entitlement check. Required usage reporting has an explicit
   purpose and privacy/resource budget and never gates local functionality.
   Authorized account-console views and local client inventory also work offline
-  through verified local installation/profile identity. Preserve the separate
-  operator and agent permissions; removing identity/origin checks or promoting an
-  agent credential is not an acceptable way to remove the directory dependency.
+  through verified local installation identity and connection route. Preserve
+  the separate operator and agent permissions; removing identity/origin checks or
+  promoting an agent credential is not an acceptable way to remove the directory
+  dependency.
 - **Paid/connected:** authorize signup/enrollment once, then let WitSelf attach
   the existing local cell and synchronize its data automatically in the background.
   Reads, writes, search, transcripts, memories and messaging keep using the local
@@ -169,12 +170,13 @@ flowchart LR
     A[AI clients and CLI] --> L[Local WitSelf service and durable state]
     L <-->|Authenticated resumable sync| C[SaaS or self-managed account and services]
     B[Another enrolled device] <-->|Enrolled sync| C
-    C --> E[Online email and other hosted operations]
+    C --> E[Email receipt/delivery, provider routing, billing, account administration]
 ```
 
-The diagram leaves transport and packaging open. Hosted email retains remote
-authority. Messaging runs through the local cell, with connected coordination
-defined by the sync protocol; replication never grants duplicate claim authority.
+The diagram leaves transport and packaging open. Email receipt/delivery, provider
+routing, billing and account administration retain hosted authority. Messaging
+runs through the local cell, with connected coordination defined by the sync
+protocol; replication never grants duplicate claim authority.
 
 ## What the current repository actually provides
 
@@ -185,14 +187,14 @@ product. No application or database was run for this research.
 |---|---|---|
 | Native server binaries already build for macOS and Linux; CLI also builds for Windows | [release configuration](../../../.goreleaser.yaml#L10), [server build](../../../.goreleaser.yaml#L32) | Native packaging is credible; Windows server distribution is an actual gap. The current CLI also excludes Windows ARM64. |
 | `internal/local` stores named account/credential bindings, not canonical product data | [local package](../../../internal/local/local.go#L1) | Its name does not establish a local backend. |
-| Named accounts normally resolve the hosted directory; explicit endpoints bypass that lookup | [operator resolution](../../../cmd/witself/main.go#L314), [agent resolution](../../../cmd/witself/main.go#L363) | A durable local/connected profile and offline resolver are needed. |
+| Named accounts normally resolve the hosted directory; explicit endpoints bypass that lookup | [operator resolution](../../../cmd/witself/main.go#L314), [agent resolution](../../../cmd/witself/main.go#L363) | A durable local/connected-local connection route and offline resolver are needed. |
 | MCP uses the authenticated API and verifies installed identity | [MCP connection](../../../cmd/witself/mcp.go#L138) | A private local service could reuse the API surface; retargeting must retain identity checks. |
-| The store is concretely PostgreSQL-backed and startup runs migrations | [store](../../../internal/store/store.go#L16), [server startup](../../../cmd/witself-server/main.go#L181), [migrations](../../../internal/store/migrate.go#L61) | SQLite would require a storage/semantics port, not a connection-string change. |
+| The store is concretely PostgreSQL-backed and startup runs migrations | [store](../../../internal/store/store.go#L16), [server startup](../../../cmd/witself-server/main.go#L181), [migrations](../../../internal/store/migrate.go#L69) | SQLite would require a storage/semantics port, not a connection-string change. |
 | PostgreSQL-specific search and locking are used | [text search](../../../internal/store/migrations/0029_add_narrative_memories.sql#L120), [secret lock](../../../internal/store/secret_mutation.go#L656), [request reconciliation lock](../../../internal/store/message_request.go#L1238) | Preserve recall behavior, atomicity, idempotency, and concurrency semantics when comparing stores. |
-| Whole-account customer export exists; customer import does not | [export CLI](../../../cmd/witself/export.go#L31), [import contract](../../api-routes.md#L2043), [archive importer](../../../internal/store/import.go#L6412) | Archives help bootstrap/recovery but do not provide continuous sync or a customer restore flow. |
+| Whole-account customer export exists; customer import does not | [export CLI](../../../cmd/witself/export.go#L36), [import contract](../../api-routes.md#L2043), [archive importer](../../../internal/store/import.go#L6412) | Archives help bootstrap/recovery but do not provide continuous sync or a customer restore flow. |
 | Existing moves assume one home and fenced evacuation | [cell move contract](../../deployment-cells.md#L851), [portability](../../backup-and-recovery.md#L1474) | Continuous writable replicas are a new architectural contract. |
 | Vault ciphertext binds stable identities, while private keys stay with clients | [associated data](../../../internal/sealed/aad.go#L34), [vault custody](../../decisions/0003-client-custodied-agent-vault.md) | Preserve identity continuity; copying data does not install keys or authorize a device. |
-| Existing plan-fit code compares account usage against a target plan | [plan fit](../../../internal/store/plan_fit.go#L33) | Reuse the concepts for capacity preflight; current code is not a local-sync admission protocol. |
+| Existing plan-fit code compares account usage against a target plan | [plan fit](../../../internal/store/plan_fit.go#L106) | Reuse the concepts for capacity preflight; current code is not a local-sync admission protocol. |
 
 Older documents describe `setup --local` or a serialized mock/local adapter
 ([self-hosting](../../self-hosting.md#L455), [API contract](../../api-contract.md#L448)).
@@ -234,7 +236,7 @@ explain when to revisit the chosen direction.
 All candidates need private local transport, authentication, owner-scoped files,
 one lifecycle owner, crash recovery, schema upgrades, bounded disk use, and a
 restore procedure. Existing server defaults include API/health/metrics listeners
-([listener setup](../../../internal/server/server.go#L2322)); a local product must
+([listener setup](../../../internal/server/server.go#L2340)); a local product must
 explicitly enforce private access rather than inherit all-interface defaults.
 The user should not have to administer Docker or Kubernetes. Whether the product
 contains any automatically managed container/cluster machinery is now an open
@@ -278,10 +280,10 @@ states. A lost acknowledgement must not create duplicate records or effects.
 | Hosted billing/account administration | Display known status and initiate explicit service lifecycle actions | Buying or closing hosted service needs its authority; local rows cannot grant paid entitlements or resurrect a closed hosted account |
 | Avatars and other ordinary versioned content | Cache/read locally; evaluate versioned mutation support | Preserve lifecycle revisions, policy, identity, and conflicts |
 
-Relevant seams: [transcript sequence allocation](../../../internal/store/transcript.go#L236),
+Relevant seams: [transcript sequence allocation](../../../internal/store/transcript.go#L239),
 [memory expected versions](../../../internal/store/memory.go#L847),
 [memory change clock](../../../internal/store/memory.go#L1358),
-[fact recreation](../../../internal/store/fact.go#L270),
+[fact recreation](../../../internal/store/fact.go#L277),
 [memory deletion](../../../internal/store/memory_delete.go#L79),
 [message fencing](../../../internal/store/message.go#L504), and
 [vault rotation](../../../internal/store/vault_key_rotation_mutation.go#L493).
@@ -366,19 +368,22 @@ been changed by this research.
 
 Preserve logical account, realm, agent and record identities across the seamless
 local/paid transition, including messaging history and pending work. Vault
-associated data binds immutable account,
-realm, agent, secret, and field IDs, while excluding host/cell coordinates.
-Creating a different cloud account and remapping all rows is not a simple
-encrypted-vault migration.
+associated data authenticates the immutable `AccountID` in both the
+[value binding](../../../internal/sealed/aad.go#L78) and
+[key-wrap binding](../../../internal/sealed/aad.go#L98), together with realm,
+agent, secret and field IDs, while excluding host/cell coordinates. Adoption of
+the same logical account preserves vault identity; a namespace join cannot
+remap sealed rows. Use the plan's [Terms](implementation-plan.md#terms) for
+these distinct transitions.
 
 The owner-approved paid signup flow must automate adoption, initial snapshot and
 catch-up while clients continue working against the existing local cell. Journal
 new writes during transfer; interruptions resume without losing or duplicating
-work. Joining an already populated hosted account still needs ownership and
-collision checks rather than a blind merge. Capacity or identity conflicts must
-leave local use intact and explain the specific action needed. Internal snapshot
-machinery is acceptable; user-run export/import or restarting from an empty
-account is not the normal upgrade or return-to-local experience.
+work. A namespace join with an already populated hosted account still needs
+ownership and collision checks rather than a blind merge. Capacity or identity
+conflicts must leave local use intact and explain the specific action needed.
+Internal snapshot machinery is acceptable; user-run export/import or restarting
+from an empty account is not the normal upgrade or return-to-local experience.
 
 The required [populated-account transition acceptance](implementation-plan.md#populated-account-transition-acceptance)
 must start with independently populated local and hosted accounts, including
@@ -393,13 +398,13 @@ connection is not a cancelled subscription or closed account; partial catch-up
 must remain visibly incomplete. This fixture strengthens the seamless-transition
 requirement; it does not authorize production enrollment or billing actions.
 
-Design safe adoption of local identities into SaaS, collision handling, account
-ownership proof, enrolled-device credentials, token rotation, and atomic changes
-to installed integration bindings. AVKs require separate client-held transfer,
-enrollment, or recovery. Full account data must never be confused with vault-key
-backup. Device enrollment must retain per-agent permissions even if the account
-is the synchronization unit; whole-account sync does not authorize every agent
-to read every other agent's data.
+Design safe adoption of the standalone logical account into SaaS, namespace-join
+collision handling, account ownership proof, enrolled-device credentials, token
+rotation, and atomic changes to installed integration bindings. AVKs require
+separate client-held transfer, enrollment, or recovery. Full account data must
+never be confused with vault-key backup. Device enrollment must retain per-agent
+permissions even if the account is the synchronization unit; whole-account sync
+does not authorize every agent to read every other agent's data.
 
 Device enrollment also needs a distinct trust boundary. An agent credential must
 not automatically authorize downloading the whole account. An owner-authorized
@@ -415,8 +420,8 @@ well-defined change-log catch-up. Existing self-export is a consistent snapshot,
 not a write freeze; existing import rejects an ordinary existing destination and
 resets active claims. It therefore cannot be reused unchanged for incremental
 sync or overwrite on return. See [export](../../../internal/store/export.go#L159),
-[import](../../../internal/store/import.go#L6674), and
-[import lifecycle behavior](../../backup-and-recovery.md#L521).
+[import](../../../internal/store/import.go#L6707), and
+[import lifecycle behavior](../../backup-and-recovery.md#L522).
 
 Historical email records may travel as account data; that does not move public
 DNS, sender identity, inbound provider routing, or billing relationships. A
@@ -517,9 +522,11 @@ mock documentation or shared PostgreSQL schemas as proof of offline sync.
 - 2026-10-17: clarified required synchronization and lightweight remote-only
   installation, later expressed a local-cell leaning, and requested a thorough
   code-backed recommendation including infrastructure tooling. Hosted email and
-  cross-machine messaging must retain remote authority. The free offering is a
-  standalone local cell; making it the installation default may come after the
-  first rollout. These requirements do not select a database/packaging technology.
+  cross-machine messaging must retain remote authority (superseded by the
+  2026-10-23 entries below). The free offering is a standalone local cell; making
+  it the installation default may come after the first rollout (superseded by the
+  2026-10-23 entries below). These requirements do not select a database/packaging
+  technology.
 
 - 2026-10-17: Scott selected the local-cell direction and explicitly requested
   adversarial review and revisability. Minimal dependencies, preferably no
@@ -540,3 +547,7 @@ mock documentation or shared PostgreSQL schemas as proof of offline sync.
   or manual data move. Messaging must work locally and through paid enrollment;
   email is the sole hosted-only feature exception. This supersedes earlier
   hosted-only messaging assumptions while retaining claim, identity and replay safety.
+- 2026-10-23: Planning review at `88fce5a3` (Fable 5.1 with five Codex lanes):
+  every source reference re-verified, anchors corrected, terminology fixed, M0
+  split by consumer, populated-account acceptance staged across M5–M7; no
+  requirement changed.

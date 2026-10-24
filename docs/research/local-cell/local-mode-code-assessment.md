@@ -11,6 +11,8 @@ current production behavior. Source baseline: `adc6f186`.
 The 2026-10-23 follow-up review checked messaging/request state machines and
 account-console trust at `5380baec`. The additional contracts below remain
 implementation requirements; they do not establish implemented local support.
+2026-10-23: all references re-verified at `88fce5a3`. Shared terminology follows
+the implementation plan's [Terms](implementation-plan.md#terms).
 
 ## Recommendation and decision
 
@@ -70,32 +72,38 @@ locks; memory changes carry owner sequences and version checks. Preserving
 PostgreSQL avoids a parallel storage-conformance project. Matching retrieval
 still requires compatible data, versions and configuration, plus relevance and
 latency measurements. Sources: [store](../../../internal/store/store.go#L16),
-[recall](../../../internal/store/memory_recall.go#L149),
+[recall](../../../internal/store/memory_recall.go#L159),
 [fact mutations](../../../internal/store/fact.go#L156),
 [secret mutation locks](../../../internal/store/secret_mutation.go#L656).
 
 Server startup already opens PostgreSQL, applies migrations and bootstraps
-account state. Local authentication can use its database records. The explicit
-endpoint/token client path avoids the hosted directory, whereas named managed
-accounts normally resolve that directory afresh. These provide real reuse seams,
-but a durable offline connection profile is still needed. Sources:
+account state when a database URL is configured. Local authentication can use its
+database records. The explicit endpoint/token client path avoids the hosted
+directory, whereas named managed accounts normally resolve that directory afresh.
+These provide real reuse seams, but a durable offline connection route is still needed. Sources:
 [startup](../../../cmd/witself-server/main.go#L181),
 [authentication](../../../internal/store/auth.go#L222),
 [connection selection](../../../cmd/witself/main.go#L314).
 
 Account-console access needs its own offline trust path. Today's manager
-resolver refuses explicit endpoint/token profiles and verifies a named account's
-origin against the hosted directory before reading its separate operator bearer.
+resolver declines account-manager credentials for explicit endpoint/token-file
+invocations and verifies a named account's origin against the hosted directory
+before reading its separate operator bearer.
+The lower-level verifier already accepts a trusted loopback origin and is the
+reuse seam; the directory dependency is in the CLI resolver only. Sources:
+[origin validation](../../../internal/client/account_console.go#L61),
+[manager verification](../../../internal/client/account_console.go#L90).
 Merely pointing an agent client at loopback therefore does not enable the local
-account console. Define a local installation/profile binding that authenticates
-the selected cell and verifies the exact account, operator and current role
-without directory access. Keep agent credentials separate from operator authority,
-reject mismatched or stale bindings, and preserve the existing remote trust path.
-Prove local console bootstrap and restart with the directory blocked; hosted
-billing actions still require their service authority. Sources:
-[manager resolution](../../../cmd/witself/account_console.go#L35),
-[operator verification](../../../internal/client/account_console.go#L87),
-[bound-principal revalidation](../../../internal/client/account_console.go#L115).
+account console. Define a binding between the local installation and connection
+route that authenticates the selected cell and verifies the exact account,
+operator and current role without directory access. Keep agent credentials
+separate from operator authority, reject mismatched or stale bindings, and
+preserve the existing remote trust path. Prove local console bootstrap and
+restart with the directory blocked; hosted billing actions still require their
+service authority. Sources: [manager
+resolution](../../../cmd/witself/account_console.go#L35), [operator
+verification](../../../internal/client/account_console.go#L87), [bound-principal
+revalidation](../../../internal/client/account_console.go#L115).
 
 Secrets use client-held keys and identity-bound ciphertext. A local API/database
 can serve the backend reads involved in reveal, while encryption and decryption
@@ -118,7 +126,7 @@ It does not currently install an isolated desktop cell. In particular,
 remain AWS, GCP, Azure and Civo. Sources:
 [infra purpose and module boundary](../../../infra/pulumi/README.md#L1),
 [providers](../../../infra/pulumi/cmd/witself-infra/main.go#L49),
-[local state](../../../infra/pulumi/cmd/witself-infra/main.go#L740).
+[local state](../../../infra/pulumi/cmd/witself-infra/main.go#L760).
 
 | Existing tooling | Reusable idea | Adaptation for local operation |
 |---|---|---|
@@ -129,7 +137,7 @@ remain AWS, GCP, Azure and Civo. Sources:
 | Backup and restore rehearsal | Prove recoverability before risky migration | Local transport and storage; alternative backup destinations are secondary research |
 
 Relevant implementations: [protected preview](../../../infra/pulumi/cmd/witself-infra/deletion_plan.go#L28),
-[cloud readiness](../../../infra/pulumi/cmd/witself-infra/health.go#L103),
+[cloud readiness](../../../infra/pulumi/cmd/witself-infra/health.go#L120),
 [application roll](../../../scripts/roll-cell.sh#L1),
 [backup rehearsal](../../../scripts/civo-pre-migration-backup.sh#L1).
 
@@ -141,7 +149,7 @@ current infra module deliberately isolates the large Pulumi/provider dependency
 tree, and its Homebrew formula requires Pulumi. Do not pull that tree into every
 remote-only client. An `infra local` surface is worth evaluating if it can use
 the same local lifecycle without requiring cloud provisioning tools. Sources:
-[dependency separation](../../../infra/pulumi/README.md#L9),
+[dependency separation](../../../infra/pulumi/README.md#L10),
 [formula products](../../../tools/homebrew-formula/main.go#L40),
 [release boundary](../../../.goreleaser.yaml#L105).
 
@@ -177,21 +185,37 @@ Sources: [release targets](../../../.goreleaser.yaml#L10),
 [formula](../../../packaging/homebrew/formula.rb.tmpl#L14),
 [installer transaction](../../../install.sh#L611).
 
+Embedded migrations require no PostgreSQL extension, and startup checks no
+version floor. The installers verify checksums but not published signatures;
+`install.sh` accepts the server but rejects the worker, and Homebrew ships
+neither. None of the three existing backup formats provides a native desktop
+restore workflow. M0a must settle the PostgreSQL floor, component trust and
+native recovery contract. Sources:
+[extension requirement](../../self-hosting.md#L233),
+[migration startup](../../../internal/store/migrate.go#L69),
+[shell verification](../../../install.sh#L389),
+[Windows verification](../../../install.ps1#L520),
+[shell products](../../../install.sh#L63),
+[Homebrew products](../../../tools/homebrew-formula/main.go#L40),
+[custom dump](../../../scripts/civo-pre-migration-backup.sh#L311),
+[SQL backup](../../../.gitops/charts/apps/files/postgres-backup.sh#L103),
+[rollback-only archive validation](../../../internal/store/import.go#L7073).
+
 The lifecycle needs installation identity, one service owner, private endpoints,
 compatible component versions, data outside disposable package directories,
 writer coordination, migration/recovery sequencing and restart verification.
 Existing listeners default to all interfaces, and server/worker health and
 metrics ports collide when launched unchanged on one host. A success response
 from the present readiness endpoint alone is insufficient: no-database startup
-is possible. Sources: [server listeners](../../../internal/server/server.go#L2322),
-[worker listeners](../../../cmd/witself-worker/main.go#L472),
-[no-database startup](../../../cmd/witself-server/main.go#L2042).
+is possible. Sources: [server listeners](../../../internal/server/server.go#L2340),
+[worker listeners](../../../cmd/witself-worker/main.go#L478),
+[no-database startup](../../../cmd/witself-server/main.go#L2043).
 
 Goose migrations, schema-ahead guards and migration locking are useful. They do
 not implement a PostgreSQL major upgrade, nor make binary rollback a data
 rollback. Account data and unsynchronized work must survive update interruption
 and ordinary software removal; destructive data removal should be a separate,
-explicit operation. [Migration gate](../../../internal/store/migrate.go#L37).
+explicit operation. [Migration gate](../../../internal/store/migrate.go#L92).
 
 ## Synchronization and authority are the largest new work
 
@@ -212,7 +236,8 @@ Concrete source constraints show why generic replication is insufficient:
 
 1. Transcript entry sequences are allocated under a database lock, and memory
    evidence refers to those sequences. Disconnected allocation can collide;
-   renumbering must not invalidate provenance. [Transcript allocation](../../../internal/store/transcript.go#L235),
+   renumbering must not invalidate provenance.
+   [Transcript allocation](../../../internal/store/transcript.go#L239),
    [evidence references](../../../internal/store/migrations/0029_add_narrative_memories.sql#L234).
 2. Permanent deletion scrubs values and retains retry protection. A stale device
    must not recreate deleted content through ordinary replay. Device retirement,
@@ -266,8 +291,8 @@ does not merge into a live existing account, and active claims are invalidated.
 Continuous sync needs a coherent initial snapshot tied to incremental history,
 durable pending operations, resumable cursors and idempotent receipts.
 [Export](../../../internal/store/export.go#L159),
-[import](../../../internal/store/import.go#L6678),
-[claim normalization](../../backup-and-recovery.md#L521).
+[import](../../../internal/store/import.go#L6707),
+[claim normalization](../../backup-and-recovery.md#L522).
 
 These are internal implementation seams, not steps the customer should perform.
 Paid enrollment must automatically attach the populated local cell and catch up
@@ -359,7 +384,7 @@ a separate future topology choice.
 |---|---|---|
 | Synchronization, identity and authority | Largest new correctness/design effort | Two writable replicas plus remote-only writer; crash/retry/reordering, conflicts, evidence identity, deletion, key rotation, quota refusal and long disconnection |
 | Native lifecycle and upgrades | Substantial, especially Windows and database upgrades | Clean-machine install, restart/sleep, interrupted updates, recovery, disk-full and uninstall/data preservation on all three OSes |
-| Routing, profiles and product transition | Significant integration work | Offline local resolution, no cell in remote-only mode, explicit adoption of populated accounts and no silent destination changes |
+| Connection routes and product transition | Significant integration work | Offline local resolution, no cell in remote-only mode, explicit adoption of populated accounts and no silent destination changes |
 | Retrieval and resource behavior | Cross-cutting acceptance work | Same realistic questions/data; relevant memories and provenance, latency, idle CPU/RAM, battery and disk footprint |
 | Reporting and feature discovery | Bounded compared with sync, but requires a clear contract | Payload inspection, blocked-network tests, bounded queue/resource tests and useful non-promotional UI states |
 
@@ -401,8 +426,10 @@ These stages overlap where independent work is safe; they need not become one
 large branch or a final integration event. Keep slices small and releasable under
 the repository's standing validation/release policy. Installer work, sync
 invariants and UI capability states can advance in parallel. Define a concrete
-exit criterion and next owner for each slice, and keep a completion checklist for
-all required features so a narrow successful canary is not mistaken for launch.
+exit criterion and next owner for each slice in the plan's
+[living progress record](implementation-plan.md#claude-review-and-living-progress-record)
+and use the [feature catalog](../../../featurestatus/catalog.json) for required
+feature coverage, so a narrow successful canary is not mistaken for launch.
 
 Canary installation must be a deliberate enrollment. Merely shipping disabled
 code does not authorize downloading a full account, provisioning a local cell,
