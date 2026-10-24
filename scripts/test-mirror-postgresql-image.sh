@@ -275,14 +275,17 @@ raise 'tripwire cannot block required CI gate' unless ci.fetch('go').fetch('need
 aggregate = ci.fetch('go').fetch('steps').find { |step| step['name'] == 'Require scoped CI gates' }
 raise 'required gate does not inspect all tripwire results' unless aggregate && aggregate.dig('env', 'NEEDS_JSON') == '${{ toJSON(needs) }}' && aggregate['run'] == 'node scripts/ci-product-gate.mjs'
 gate_needs = ci.fetch('go').fetch('needs').to_h { |name| [name, {'result' => 'success'}] }
-gate_needs['changes']['outputs'] = {'application' => 'true', 'website' => 'true', 'website_only' => 'false'}
+gate_needs.fetch('docs')['result'] = 'skipped'
+gate_needs['changes']['outputs'] = {'application' => 'true', 'docs' => 'false', 'docs_index' => 'false',
+                                   'docs_only' => 'false', 'website' => 'true', 'website_only' => 'false'}
 %w[success failure skipped cancelled].each do |result|
   gate_needs['postgres-image-mirror']['result'] = result
   _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', aggregate.fetch('run'), chdir: root)
   raise "application gate accepted wrong mirror result: #{result}" unless status.success? == (result == 'success')
 end
 gate_needs.each { |name, value| value['result'] = 'skipped' unless %w[changes website].include?(name) }
-gate_needs['changes']['outputs'] = {'application' => 'false', 'website' => 'true', 'website_only' => 'true'}
+gate_needs['changes']['outputs'] = {'application' => 'false', 'docs' => 'false', 'docs_index' => 'false',
+                                   'docs_only' => 'false', 'website' => 'true', 'website_only' => 'true'}
 _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', aggregate.fetch('run'), chdir: root)
 raise 'website-only gate rejected its scoped mirror skip' unless status.success?
 gate_needs['postgres-image-mirror']['result'] = 'failure'

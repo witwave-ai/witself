@@ -143,7 +143,7 @@ def check(text, workflow):
     if workflow == "ci":
         gate = job(text, "go")
         require(re.findall(r"^    needs: (.+)$", gate, re.M) == [
-                    "[changes, website, go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence]"] and
+                    "[changes, website, docs, go-rest, go-store, go-infra, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]"] and
                 re.findall(r"^    if: (.+)$", gate, re.M) == ["${{ always() }}"] and
                 "NEEDS_JSON: ${{ toJSON(needs) }}" in gate and
                 "run: node scripts/ci-product-gate.mjs" in gate,

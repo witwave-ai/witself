@@ -56,14 +56,17 @@ check('required go gate must inspect all dependency results',
       gate_step && gate_step['run'] == 'node scripts/ci-product-gate.mjs' &&
       gate_step.dig('env', 'NEEDS_JSON') == '${{ toJSON(needs) }}')
 gate_needs = go_gate.fetch('needs').to_h { |name| [name, {'result' => 'success'}] }
-gate_needs['changes']['outputs'] = {'application' => 'true', 'website' => 'true', 'website_only' => 'false'}
+gate_needs.fetch('docs')['result'] = 'skipped'
+gate_needs['changes']['outputs'] = {'application' => 'true', 'docs' => 'false', 'docs_index' => 'false',
+                                   'docs_only' => 'false', 'website' => 'true', 'website_only' => 'false'}
 %w[success failure skipped cancelled].each do |result|
   gate_needs['postgres-backup-image']['result'] = result
   _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', gate_step.fetch('run'), chdir: root)
   check("required go gate must accept only a successful backup build: #{result}", status.success? == (result == 'success'))
 end
 gate_needs.each { |name, value| value['result'] = 'skipped' unless %w[changes website].include?(name) }
-gate_needs['changes']['outputs'] = {'application' => 'false', 'website' => 'true', 'website_only' => 'true'}
+gate_needs['changes']['outputs'] = {'application' => 'false', 'docs' => 'false', 'docs_index' => 'false',
+                                   'docs_only' => 'false', 'website' => 'true', 'website_only' => 'true'}
 _, _, status = Open3.capture3({'NEEDS_JSON' => JSON.generate(gate_needs)}, 'bash', '-c', gate_step.fetch('run'), chdir: root)
 check('website-only gate must accept an explicitly scoped backup skip', status.success?)
 gate_needs['postgres-backup-image']['result'] = 'failure'
