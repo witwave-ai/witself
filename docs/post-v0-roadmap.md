@@ -225,6 +225,17 @@ These forks are intentionally left open; see
 
 ## Deferred Messaging Transport
 
+### Cross-Client Messaging Under One Agent Identity
+
+[Cross-client messaging research](research/cross-client-messaging/README.md)
+records the proposed ability to address a particular AI client or location while
+keeping one shared agent identity: for example, Scott in Codex at home asking
+Scott in Claude at work a question. This concerns internal messages, not email.
+The research covers existing delivery/claim behavior, client identity, return
+routing, session ambiguity, coordinated upgrades, and Local Cell synchronization.
+It is research only; implementation is not authorized. Agent-wide messaging does
+not currently provide independent per-client delivery and acknowledgement.
+
 ### Message Attachments And Large Payloads
 
 Message attachments and large structured payloads in object/blob storage are
