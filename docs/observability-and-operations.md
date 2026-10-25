@@ -1174,6 +1174,7 @@ still pages after about 50 minutes. Every other transaction, including pg_dump,
 keeps the 5-minute threshold. This classification uses client-chosen
 `application_name`: a session can select an import or export name to enter the
 longer-threshold rule.
+Windows PostgreSQL reports `max_val = 0` for `client_connection_check_interval`, so migration 0101 and transcript storage reconciliation set it only where supported.
 `WitselfPostgreSQLDown` and `WitselfPostgreSQLExporterUnavailable` deliberately
 overlap for a database that remains down for 10 minutes; only exporter
 unavailability covers a missing `pg_up` series. The metric links above identify the

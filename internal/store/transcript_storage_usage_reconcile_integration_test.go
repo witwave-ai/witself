@@ -22,6 +22,98 @@ type transcriptStorageRowState struct {
 	Epoch int64
 }
 
+func TestTranscriptStorageUsageFreshMigrationAndReconcileConnectionSettingsPostgres(t *testing.T) {
+	st, dsn := newMigrationTestStore(t, testenv.RequirePostgres(t))
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate empty schema to latest: %v", err)
+	}
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	lease, held, err := st.acquireTranscriptStorageReconcileLease(ctx)
+	if err != nil || !held {
+		t.Fatalf("acquire reconcile lease: held=%t error=%v", held, err)
+	}
+	defer lease.close()
+	var maxValue, intervalMS int64
+	if err := lease.conn.QueryRow(ctx, `SELECT max_val::bigint, setting::bigint
+ FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue, &intervalMS); err != nil {
+		t.Fatal(err)
+	}
+	wantIntervalMS := int64(0)
+	if maxValue > 0 {
+		wantIntervalMS = 2000
+	}
+	if intervalMS != wantIntervalMS {
+		t.Fatalf("connection check interval=%dms, want %dms for max_val=%d", intervalMS, wantIntervalMS, maxValue)
+	}
+	var applicationName, idle, interval, count, lockTimeout string
+	if err := lease.conn.QueryRow(ctx, `SELECT current_setting('application_name'),
+ current_setting('tcp_keepalives_idle'), current_setting('tcp_keepalives_interval'),
+ current_setting('tcp_keepalives_count'), current_setting('lock_timeout')`).Scan(
+		&applicationName, &idle, &interval, &count, &lockTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if applicationName != "witself-transcript-storage-reconcile" || idle != "30" || interval != "10" || count != "6" || lockTimeout != "500ms" {
+		t.Fatalf("reconcile settings: application_name=%q keepalives=%s/%s/%s lock_timeout=%s",
+			applicationName, idle, interval, count, lockTimeout)
+	}
+	t.Logf("fresh schema version=%d; server max_val=%d; reconcile connection check interval=%dms", SchemaVersion(), maxValue, intervalMS)
+}
+
+func TestTranscriptStorageUsageMigrationConnectionSettingsPostgres(t *testing.T) {
+	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
+	settings, _ := transcriptStorageMigrationLockStatements(t)
+	for _, unsupported := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unsupported=%t", unsupported), func(t *testing.T) {
+			ctx := t.Context()
+			conn, err := st.pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Release()
+			tx, err := conn.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			var maxValue int64
+			if err := tx.QueryRow(ctx, `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, `SET LOCAL client_connection_check_interval = '0'`); err != nil {
+				t.Fatal(err)
+			}
+			if unsupported {
+				// Shadow only this transaction's capability answer. The real GUC
+				// remains readable through current_setting, even on Unix servers.
+				if _, err := tx.Exec(ctx, `CREATE TEMP TABLE pg_settings (name text, max_val text) ON COMMIT DROP;
+ INSERT INTO pg_settings VALUES ('client_connection_check_interval', '0')`); err != nil {
+					t.Fatal(err)
+				}
+				maxValue = 0
+			}
+			if _, err := tx.Exec(ctx, settings); err != nil {
+				t.Fatalf("migration settings: %v", err)
+			}
+			wantSeconds := 0
+			if maxValue > 0 {
+				wantSeconds = 1
+			}
+			var correct bool
+			if err := tx.QueryRow(ctx, `SELECT current_setting('statement_timeout')::interval = interval '120 seconds'
+ AND current_setting('lock_timeout')::interval = interval '2 seconds'
+ AND current_setting('idle_in_transaction_session_timeout')::interval = interval '5 seconds'
+ AND current_setting('client_connection_check_interval')::interval = make_interval(secs => $1)`, wantSeconds).Scan(&correct); err != nil {
+				t.Fatal(err)
+			}
+			if !correct {
+				t.Fatal("migration settings do not match platform capability and unchanged timeout values")
+			}
+		})
+	}
+}
+
 func transcriptStorageStateRows(t *testing.T, st *Store, accountID string) map[int16]transcriptStorageRowState {
 	t.Helper()
 	rows, err := st.pool.Query(context.Background(), `SELECT shard,retained_bytes,exact,reconcile_epoch FROM transcript_storage_usage WHERE account_id=$1 ORDER BY shard`, accountID)

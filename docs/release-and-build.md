@@ -256,7 +256,7 @@ Repeat `--scenario` to select the required experiments; the default is `quiet`:
 | `quiet` | Apply each file without concurrent writes. |
 | `load` | Append 100-entry batches with foreign-key checks at `--append-rate` batches per second (default one). `--long-tx SECONDS` also holds a REPEATABLE READ transaction, establishing its snapshot five seconds before the first file. |
 | `kill` | Use `--kill-file BASENAME` and `--kill-after SECONDS` to kill the migrator during the selected file, restart it, and check convergence and orphan lifetime. |
-| `mem16` | Set the role's `maintenance_work_mem=16MB`, `max_parallel_maintenance_workers=0`, and `client_connection_check_interval=5s` before applying files. |
+| `mem16` | Set the role's `maintenance_work_mem=16MB`, `max_parallel_maintenance_workers=0`, and `client_connection_check_interval=5s` before applying files. Windows PostgreSQL reports `max_val = 0` for this GUC, so migration 0101 and transcript storage reconciliation set it only where supported. |
 
 The kill scenario fails if the selected file finishes before the requested
 interruption; killing later helper cleanup does not count. A requested long
