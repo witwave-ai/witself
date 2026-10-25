@@ -1,12 +1,19 @@
 -- +goose Up
--- Keep the guarded connection-check setting in this statement so it takes
--- effect before the lock DO begins.
 SELECT set_config('statement_timeout', '120s', true),
        set_config('lock_timeout', '2s', true),
-       set_config('idle_in_transaction_session_timeout', '5s', true),
-       CASE WHEN (SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval') > 0
-            THEN set_config('client_connection_check_interval', '1s', true)
-       END;
+       set_config('idle_in_transaction_session_timeout', '5s', true);
+
+-- Attempt the setting before the lock DO: unsupported platforms reject it
+-- through a check hook rather than a different pg_settings maximum.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    PERFORM set_config('client_connection_check_interval', '1s', true);
+EXCEPTION WHEN invalid_parameter_value THEN
+    NULL;
+END
+$$;
+-- +goose StatementEnd
 
 -- This comes before catalog writes so retries hold no strong relation locks.
 -- Use lock_timeout, not NOWAIT, so later attempts can outwait deadlock_timeout

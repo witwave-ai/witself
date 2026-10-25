@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,17 +36,33 @@ func TestTranscriptStorageUsageFreshMigrationAndReconcileConnectionSettingsPostg
 		t.Fatalf("acquire reconcile lease: held=%t error=%v", held, err)
 	}
 	defer lease.close()
-	var maxValue, intervalMS int64
-	if err := lease.conn.QueryRow(ctx, `SELECT max_val::bigint, setting::bigint
- FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue, &intervalMS); err != nil {
+	// A NULL transaction ID alone is insufficient: a read-only transaction
+	// may not have assigned one. ReadyForQuery must report idle as well.
+	if status := lease.conn.Conn().PgConn().TxStatus(); status != 'I' {
+		t.Fatalf("lease transaction status=%q, want idle", status)
+	}
+	supported := transcriptStorageConnectionCheckSupported(t, lease.conn)
+	var checkInterval string
+	if err := lease.conn.QueryRow(ctx, `SHOW client_connection_check_interval`).Scan(&checkInterval); err != nil {
 		t.Fatal(err)
 	}
-	wantIntervalMS := int64(0)
-	if maxValue > 0 {
-		wantIntervalMS = 2000
+	wantInterval := "0"
+	if supported {
+		wantInterval = "2s"
 	}
-	if intervalMS != wantIntervalMS {
-		t.Fatalf("connection check interval=%dms, want %dms for max_val=%d", intervalMS, wantIntervalMS, maxValue)
+	if checkInterval != wantInterval {
+		t.Fatalf("connection check interval=%q, want %q for supported=%t", checkInterval, wantInterval, supported)
+	}
+	var one int
+	if err := lease.conn.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("lease usable after probe: value=%d error=%v", one, err)
+	}
+	var noTransactionID bool
+	if err := lease.conn.QueryRow(ctx, `SELECT pg_current_xact_id_if_assigned() IS NULL`).Scan(&noTransactionID); err != nil || !noTransactionID {
+		t.Fatalf("lease has no assigned transaction ID=%t: %v", noTransactionID, err)
+	}
+	if status := lease.conn.Conn().PgConn().TxStatus(); status != 'I' {
+		t.Fatalf("lease transaction status after queries=%q, want idle", status)
 	}
 	var applicationName, idle, interval, count, lockTimeout string
 	if err := lease.conn.QueryRow(ctx, `SELECT current_setting('application_name'),
@@ -58,46 +75,77 @@ func TestTranscriptStorageUsageFreshMigrationAndReconcileConnectionSettingsPostg
 		t.Fatalf("reconcile settings: application_name=%q keepalives=%s/%s/%s lock_timeout=%s",
 			applicationName, idle, interval, count, lockTimeout)
 	}
-	t.Logf("fresh schema version=%d; server max_val=%d; reconcile connection check interval=%dms", SchemaVersion(), maxValue, intervalMS)
+	t.Logf("fresh schema version=%d; attempted connection check supported=%t; reconcile connection check interval=%s; lease transaction status=idle", SchemaVersion(), supported, checkInterval)
 }
 
 func TestTranscriptStorageUsageMigrationConnectionSettingsPostgres(t *testing.T) {
 	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
 	settings, _ := transcriptStorageMigrationLockStatements(t)
-	for _, unsupported := range []bool{false, true} {
-		t.Run(fmt.Sprintf("unsupported=%t", unsupported), func(t *testing.T) {
+	const attempt = "PERFORM set_config('client_connection_check_interval', '1s', true);"
+	if strings.Count(settings, attempt) != 1 {
+		t.Fatal("migration connection check attempt missing or ambiguous")
+	}
+	for _, tc := range []struct {
+		name        string
+		replacement string
+		wantCode    string
+	}{
+		{name: "real_setting", replacement: attempt},
+		{name: "invalid_parameter_value", replacement: "PERFORM set_config('client_connection_check_interval', '-1', true);"},
+		{name: "unrelated_error", replacement: "PERFORM 1 / 0;", wantCode: "22012"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			conn, err := st.pool.Acquire(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer conn.Release()
+			supported := transcriptStorageConnectionCheckSupported(t, conn)
+			var originalInterval string
+			if err := conn.QueryRow(ctx, `SHOW client_connection_check_interval`).Scan(&originalInterval); err != nil {
+				t.Fatal(err)
+			}
 			tx, err := conn.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = tx.Rollback(context.Background()) }()
-			var maxValue int64
-			if err := tx.QueryRow(ctx, `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue); err != nil {
-				t.Fatal(err)
-			}
 			if _, err := tx.Exec(ctx, `SET LOCAL client_connection_check_interval = '0'`); err != nil {
 				t.Fatal(err)
 			}
-			if unsupported {
-				// Shadow only this transaction's capability answer. The real GUC
-				// remains readable through current_setting, even on Unix servers.
-				if _, err := tx.Exec(ctx, `CREATE TEMP TABLE pg_settings (name text, max_val text) ON COMMIT DROP;
- INSERT INTO pg_settings VALUES ('client_connection_check_interval', '0')`); err != nil {
+			if tc.name == "invalid_parameter_value" {
+				// Verify the injected server error's code before exercising the
+				// production handler. The savepoint keeps the outer transaction usable.
+				probe, err := tx.Begin(ctx)
+				if err != nil {
 					t.Fatal(err)
 				}
-				maxValue = 0
+				_, err = probe.Exec(ctx, `SELECT set_config('client_connection_check_interval', '-1', true)`)
+				var pgErr *pgconn.PgError
+				if !errors.As(err, &pgErr) || pgErr.Code != "22023" {
+					t.Fatalf("out-of-range connection check error=%v, want SQLSTATE 22023", err)
+				}
+				if err := probe.Rollback(ctx); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if _, err := tx.Exec(ctx, settings); err != nil {
+			_, err = tx.Exec(ctx, strings.Replace(settings, attempt, tc.replacement, 1))
+			if tc.wantCode != "" {
+				var pgErr *pgconn.PgError
+				if !errors.As(err, &pgErr) || pgErr.Code != tc.wantCode {
+					t.Fatalf("migration settings error=%v, want SQLSTATE %s", err, tc.wantCode)
+				}
+				if status := conn.Conn().PgConn().TxStatus(); status != 'E' {
+					t.Fatalf("unhandled error transaction status=%q, want aborted", status)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("migration settings: %v", err)
 			}
 			wantSeconds := 0
-			if maxValue > 0 {
+			if tc.name == "real_setting" && supported {
 				wantSeconds = 1
 			}
 			var correct bool
@@ -110,8 +158,46 @@ func TestTranscriptStorageUsageMigrationConnectionSettingsPostgres(t *testing.T)
 			if !correct {
 				t.Fatal("migration settings do not match platform capability and unchanged timeout values")
 			}
+			var one int
+			if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+				t.Fatalf("surrounding transaction usable: value=%d error=%v", one, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit surrounding transaction: %v", err)
+			}
+			var afterInterval string
+			if err := conn.QueryRow(ctx, `SHOW client_connection_check_interval`).Scan(&afterInterval); err != nil {
+				t.Fatal(err)
+			}
+			if afterInterval != originalInterval {
+				t.Fatalf("transaction-local setting persisted: interval=%q, original=%q", afterInterval, originalInterval)
+			}
+			t.Logf("migration connection check interval=%ds; supported=%t; surrounding transaction committed; session interval restored", wantSeconds, supported)
 		})
 	}
+}
+
+func transcriptStorageConnectionCheckSupported(t *testing.T, conn interface {
+	Begin(context.Context) (pgx.Tx, error)
+}) bool {
+	t.Helper()
+	tx, err := conn.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, probeErr := tx.Exec(t.Context(), `SET LOCAL client_connection_check_interval = '2s'`)
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatalf("roll back connection check capability attempt: %v", err)
+	}
+	if probeErr == nil {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(probeErr, &pgErr) || pgErr.Code != "22023" {
+		t.Fatalf("unexpected connection check capability attempt error: %v", probeErr)
+	}
+	return false
 }
 
 func transcriptStorageStateRows(t *testing.T, st *Store, accountID string) map[int16]transcriptStorageRowState {

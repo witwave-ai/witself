@@ -12,30 +12,46 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type transcriptStorageReconcileSettingsConn struct {
-	recordingExec
-	t          *testing.T
-	maxValue   int64
-	probeErr   error
-	probeCalls int
+	t           *testing.T
+	statements  []string
+	beginErr    error
+	probeErr    error
+	rollbackErr error
+	settingsErr error
+	cancelProbe context.CancelFunc
 }
 
-func (c *transcriptStorageReconcileSettingsConn) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+func (c *transcriptStorageReconcileSettingsConn) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	c.t.Helper()
-	if sql != `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'` || len(args) != 0 {
-		c.t.Fatalf("unexpected capability query: %q, argument count %d", sql, len(args))
+	if len(args) != 0 {
+		c.t.Fatalf("unexpected argument count %d", len(args))
 	}
-	c.probeCalls++
-	return c
-}
-
-func (c *transcriptStorageReconcileSettingsConn) Scan(dest ...any) error {
-	*dest[0].(*int64) = c.maxValue
-	return c.probeErr
+	c.statements = append(c.statements, sql)
+	var err error
+	switch sql {
+	case "BEGIN":
+		err = c.beginErr
+	case "SET LOCAL client_connection_check_interval = '2s'":
+		if c.cancelProbe != nil {
+			c.cancelProbe()
+		}
+		err = c.probeErr
+	case "ROLLBACK":
+		if ctx.Err() != nil {
+			c.t.Fatalf("rollback context already cancelled: %v", ctx.Err())
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			c.t.Fatal("rollback context has no deadline")
+		}
+		err = c.rollbackErr
+	default:
+		err = c.settingsErr
+	}
+	return pgconn.CommandTag{}, err
 }
 
 func TestTranscriptStorageUsageReconcileConnectionSettings(t *testing.T) {
@@ -44,46 +60,104 @@ func TestTranscriptStorageUsageReconcileConnectionSettings(t *testing.T) {
  SET client_connection_check_interval = '2s'; SET lock_timeout = '500ms'`
 	const unsupportedSQL = `SET application_name = 'witself-transcript-storage-reconcile';
  SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6; SET lock_timeout = '500ms'`
-	probeErr := errors.New("synthetic pg_settings failure")
+	unsupportedErr := &pgconn.PgError{Code: "22023"}
+	otherPgErr := &pgconn.PgError{Code: "57P01"}
+	probeErr := errors.New("synthetic probe failure")
+	beginErr := errors.New("synthetic begin failure")
+	rollbackErr := errors.New("synthetic rollback failure")
 	settingsErr := errors.New("synthetic settings failure")
 	for _, tc := range []struct {
 		name        string
-		maxValue    int64
+		beginErr    error
 		probeErr    error
+		rollbackErr error
 		settingsErr error
+		wantErr     error
 		wantSQL     string
+		cache       bool
 	}{
-		{"supported", 2147483647, nil, nil, supportedSQL},
-		{"positive maximum", 1, nil, nil, supportedSQL},
-		{"unsupported", 0, nil, nil, unsupportedSQL},
-		{"negative maximum", -1, nil, nil, unsupportedSQL},
-		{"missing setting", 0, pgx.ErrNoRows, nil, unsupportedSQL},
-		{"failed probe", 2147483647, probeErr, nil, unsupportedSQL},
-		{"supported settings failure", 2147483647, nil, settingsErr, supportedSQL},
-		{"unsupported settings failure", 0, nil, settingsErr, unsupportedSQL},
+		{name: "supported", wantSQL: supportedSQL, cache: true},
+		{name: "unsupported", probeErr: unsupportedErr, wantSQL: unsupportedSQL, cache: true},
+		{name: "wrapped unsupported", probeErr: fmt.Errorf("wrapped: %w", unsupportedErr), wantSQL: unsupportedSQL, cache: true},
+		{name: "other PostgreSQL error", probeErr: otherPgErr, wantErr: otherPgErr},
+		{name: "driver error", probeErr: probeErr, wantErr: probeErr},
+		{name: "context cancelled", probeErr: context.Canceled, wantErr: context.Canceled},
+		{name: "context deadline", probeErr: context.DeadlineExceeded, wantErr: context.DeadlineExceeded},
+		{name: "begin failure", beginErr: beginErr, wantErr: beginErr},
+		{name: "begin invalid parameter", beginErr: unsupportedErr, wantErr: unsupportedErr},
+		{name: "rollback failure after success", rollbackErr: rollbackErr, wantErr: rollbackErr},
+		{name: "rollback invalid parameter", rollbackErr: unsupportedErr, wantErr: unsupportedErr},
+		{name: "rollback failure after rejection", probeErr: unsupportedErr, rollbackErr: rollbackErr, wantErr: rollbackErr},
+		{name: "rollback failure after driver error", probeErr: probeErr, rollbackErr: rollbackErr, wantErr: rollbackErr},
+		{name: "rollback failure after begin error", beginErr: beginErr, rollbackErr: rollbackErr, wantErr: rollbackErr},
+		{name: "supported settings failure", settingsErr: settingsErr, wantErr: settingsErr, wantSQL: supportedSQL, cache: true},
+		{name: "unsupported settings failure", probeErr: unsupportedErr, settingsErr: settingsErr, wantErr: settingsErr, wantSQL: unsupportedSQL, cache: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &Store{}
 			first := &transcriptStorageReconcileSettingsConn{
-				t: t, maxValue: tc.maxValue, probeErr: tc.probeErr,
-				recordingExec: recordingExec{err: tc.settingsErr},
+				t: t, beginErr: tc.beginErr, probeErr: tc.probeErr,
+				rollbackErr: tc.rollbackErr, settingsErr: tc.settingsErr,
 			}
-			// A different connection must reuse the Store's cached answer, even
-			// after a failed probe or failed SET, without querying again.
-			second := &transcriptStorageReconcileSettingsConn{t: t, maxValue: 1}
-			for i, conn := range []*transcriptStorageReconcileSettingsConn{first, second} {
-				err := st.configureTranscriptStorageReconcileConnection(t.Context(), conn)
-				if !errors.Is(err, conn.err) {
-					t.Fatalf("settings error = %v, want %v", err, conn.err)
+			err := st.configureTranscriptStorageReconcileConnection(t.Context(), first)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("configure error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.rollbackErr != nil {
+				for _, cause := range []error{tc.beginErr, tc.probeErr} {
+					if cause != nil && !errors.Is(err, cause) {
+						t.Fatalf("cleanup failure lost original error: %v", err)
+					}
 				}
-				if conn.calls != 1 || conn.lastSQL != tc.wantSQL {
-					t.Fatalf("settings calls=%d SQL=%q, want one call with %q", conn.calls, conn.lastSQL, tc.wantSQL)
+			}
+			wantStatements := []string{"BEGIN"}
+			if tc.beginErr == nil {
+				wantStatements = append(wantStatements, "SET LOCAL client_connection_check_interval = '2s'")
+			}
+			wantStatements = append(wantStatements, "ROLLBACK")
+			if tc.wantSQL != "" {
+				wantStatements = append(wantStatements, tc.wantSQL)
+			}
+			if !slices.Equal(first.statements, wantStatements) {
+				t.Fatalf("statements = %q, want %q", first.statements, wantStatements)
+			}
+			if st.clientConnectionCheckProbed != tc.cache {
+				t.Fatalf("cached=%t, want %t", st.clientConnectionCheckProbed, tc.cache)
+			}
+			// A fresh lease retries transient failures, but reuses either definitive
+			// answer even when applying the session settings failed afterward.
+			wantSQL := tc.wantSQL
+			if !tc.cache {
+				wantSQL = supportedSQL
+			}
+			for i := range 2 {
+				next := &transcriptStorageReconcileSettingsConn{t: t}
+				if err := st.configureTranscriptStorageReconcileConnection(t.Context(), next); err != nil {
+					t.Fatal(err)
 				}
-				if conn.probeCalls != 1-i {
-					t.Fatalf("connection %d probe calls=%d, want %d", i, conn.probeCalls, 1-i)
+				want := []string{wantSQL}
+				if !tc.cache && i == 0 {
+					want = append([]string{"BEGIN", "SET LOCAL client_connection_check_interval = '2s'", "ROLLBACK"}, want...)
+				}
+				if !slices.Equal(next.statements, want) {
+					t.Fatalf("retry %d statements = %q, want %q", i, next.statements, want)
 				}
 			}
 		})
+	}
+}
+
+func TestTranscriptStorageUsageReconcileConnectionProbeCancellationCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	conn := &transcriptStorageReconcileSettingsConn{t: t, cancelProbe: cancel, probeErr: context.Canceled}
+	st := &Store{}
+	if err := st.configureTranscriptStorageReconcileConnection(ctx, conn); !errors.Is(err, context.Canceled) {
+		t.Fatalf("configure error = %v, want cancellation", err)
+	}
+	want := []string{"BEGIN", "SET LOCAL client_connection_check_interval = '2s'", "ROLLBACK"}
+	if !slices.Equal(conn.statements, want) || st.clientConnectionCheckProbed {
+		t.Fatalf("cancelled probe statements=%q cached=%t", conn.statements, st.clientConnectionCheckProbed)
 	}
 }
 
