@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { register } from "node:module";
 import test from "node:test";
 import {
-  ACCOUNT_BACKUP_SCAN_KEY, ACCOUNT_BACKUP_STATE_SCHEMA,
+  ACCOUNT_BACKUP_SCAN_KEY, ACCOUNT_BACKUP_SCAN_SCHEMA, ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX, ACCOUNT_BACKUP_STATE_SCHEMA,
   RESTORE_DRILL_FRESHNESS_KEY, RESTORE_DRILL_FRESHNESS_SCHEMA,
   BackupValidationBusyError, RestoreDrillProtocolError, RestoreDrillUnconfirmedError,
   accountBackupStatus, backupJobIdentity, validCatalogRecord,
@@ -41,6 +41,7 @@ const scheduleKeys = ["schema_version", "window_start", "state", "reason", "rota
 class ListKV {
   constructor(entries = {}, { rateLimited = false } = {}) {
     this.values = new Map(Object.entries(entries).map(([key, value]) => [key, JSON.stringify(value)]));
+    this.metadata = new Map();
     this.clock = NOW;
     this.rateLimited = rateLimited;
     this.lastPuts = new Map();
@@ -65,7 +66,7 @@ class ListKV {
     const offset = cursor === undefined ? 0 : Number(/^opaque-page:(\d+)$/.exec(cursor)?.[1]);
     assert.ok(Number.isInteger(offset), "listing must reuse the opaque cursor");
     const next = offset + limit;
-    return { keys: keys.slice(offset, next).map((name) => ({ name })),
+    return { keys: keys.slice(offset, next).map((name) => ({ name, metadata: this.metadata.get(name) })),
       list_complete: next >= keys.length,
       ...(next < keys.length ? { cursor: `opaque-page:${next}` } : {}) };
   }
@@ -1086,4 +1087,66 @@ test("enabled fleet status isolates a failed or hung schedule read and reads in 
   assert.ok(reads.includes(RESTORE_DRILL_SCHEDULE_KEY), "schedule read starts while the existing status scan is pending");
   releaseScan(null);
   assert.equal((await pending).status, 200);
+});
+
+test("fleet backup status selects current-pass health metadata without changing pass state", async () => {
+  const identity = {
+    slot: iso(NOW - 60_000), pass_started_slot: iso(NOW - 60_000),
+    updated_at: iso(NOW - 60_000), complete: true, cursor: null, scanned: 2,
+  };
+  const health = {
+    health_available: true, stale_accounts: 1, never_committed_accounts: 0,
+    oldest_committed_age_seconds: 180_000, computed_at: iso(NOW - 60_000),
+  };
+  const scan = { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, ...identity,
+    health, accepted: 2, failed: 0, unreached_entries: 0 };
+  const overlay = {
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, identity,
+    health: { ...health, stale_accounts: 0, oldest_committed_age_seconds: 20, computed_at: iso() },
+  };
+  const prefix = `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${identity.pass_started_slot}:`;
+  const version = (computedAt) => `${String(253402300799999 - Date.parse(computedAt)).padStart(15, "0")}:0123456789abcdef0123456789abcdef`;
+  for (const kind of ["matching", "mismatched", "malformed", "failed list"]) {
+    const f = fixture([]);
+    f.env.FLEET_TOKEN = "fixture-fleet-token";
+    f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
+    const key = `${prefix}${version(iso())}`;
+    f.kv.values.set(key, "");
+    f.kv.metadata.set(key, kind === "matching" ? overlay
+      : kind === "mismatched" ? { ...overlay, identity: { ...identity, scanned: 3 } }
+      : { ...overlay, health: { ...overlay.health, stale_accounts: -1 } });
+    if (kind === "matching") {
+      const olderKey = `${prefix}${version(iso(NOW - 30_000))}`;
+      f.kv.values.set(olderKey, "");
+      f.kv.metadata.set(olderKey, { ...overlay,
+        health: { ...health, computed_at: iso(NOW - 30_000) } });
+      const oldPass = iso(NOW - 86_400_000);
+      const otherKey = `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${oldPass}:${version(iso(NOW + 30_000))}`;
+      f.kv.values.set(otherKey, "");
+      f.kv.metadata.set(otherKey, { ...overlay, identity: { ...identity, pass_started_slot: oldPass },
+        health: { ...health, computed_at: iso(NOW + 30_000) } });
+    }
+    if (kind === "failed list") {
+      const list = f.kv.list.bind(f.kv);
+      f.kv.list = (options) => {
+        if (options.prefix !== prefix) return list(options);
+        f.kv.lists.push({ ...options, cursor: undefined });
+        throw new Error(PRIVATE);
+      };
+    }
+    const originalScan = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+    const response = await worker.fetch(requestStatus(), f.env, {});
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const expectedHealth = kind === "matching" ? overlay.health : health;
+    for (const [field, value] of Object.entries(expectedHealth)) assert.equal(body.scan[field], value, `${kind}: ${field}`);
+    for (const [field, value] of Object.entries(identity)) assert.equal(body.scan[field], value, `${kind}: ${field}`);
+    assert.deepEqual(body.scan.health, health, "the original persisted health remains intact");
+    assert.deepEqual(f.kv.lists.filter(({ prefix: readPrefix }) => readPrefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)),
+      [{ prefix, limit: 32, cursor: undefined }]);
+    assert.equal(f.kv.gets.some(({ key }) => key.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)), false);
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), originalScan);
+    assert.deepEqual(f.kv.puts, []);
+    assert.equal(JSON.stringify(body).includes(PRIVATE), false);
+  }
 });

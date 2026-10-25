@@ -13,6 +13,7 @@ export const ACCOUNT_BACKUP_STATE_SCHEMA = "witself.account-backup.v1";
 export const ACCOUNT_BACKUP_SCAN_SCHEMA =
   "witself.account-backup-scan.v1";
 export const ACCOUNT_BACKUP_SCAN_KEY = "config:account_backup_scan";
+export const ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX = "config:account_backup_health_refresh:";
 export const RESTORE_DRILL_FRESHNESS_KEY = "config:restore_drill_freshness";
 export const RESTORE_DRILL_FRESHNESS_SCHEMA = "witself.restore-drill-freshness.v1";
 const RESTORE_DRILL_FRESHNESS_MAX_RUNNING = 8;
@@ -70,6 +71,16 @@ async function capabilityKey(token) {
 const BASE_RETRY_MS = 60_000;
 const MAX_RETRY_MS = 30 * 60_000;
 const SCAN_FAILURE_SAMPLE_LIMIT = 16;
+const SCAN_STALE_ID_LIMIT = 16;
+const SCAN_HEALTH_REFRESH_TIMEOUT_MS = 120_000;
+const SCAN_HEALTH_OVERLAY_READ_TIMEOUT_MS = 5_000;
+const SCAN_HEALTH_REFRESH_TTL_SECONDS = 3 * 24 * 60 * 60;
+const SCAN_HEALTH_REFRESH_LIST_LIMIT = 32;
+// Last millisecond in the canonical four-digit UTC year range. Subtraction
+// yields 15 digits (zero-padded), so ascending KV lists put newer times first.
+const SCAN_HEALTH_REFRESH_TIME_CEILING = 253402300799999;
+const SCAN_HEALTH_IDENTITY_FIELDS = ["slot", "pass_started_slot", "updated_at", "complete", "cursor", "scanned"];
+const SCAN_HEALTH_FIELDS = ["health_available", "stale_accounts", "never_committed_accounts", "oldest_committed_age_seconds", "computed_at"];
 const SCAN_FAILURE_STATUS = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const SCAN_FAILED_RETRY_POLICY = "next_interval";
 
@@ -2354,9 +2365,27 @@ async function mapBounded(values, concurrency, operation) {
   return results;
 }
 
+function validStaleTracking(state) {
+  const fields = [state.stale_ids, state.stale_ids_truncated,
+    state.untracked_oldest_committed_age_seconds];
+  // A deployment may resume a pass written before bounded refresh existed.
+  if (fields.every((value) => value === undefined)) return true;
+  const age = (value) => value === null || (Number.isSafeInteger(value) && value >= 0);
+  return Array.isArray(state.stale_ids) &&
+    state.stale_ids.length <= SCAN_STALE_ID_LIMIT &&
+    state.stale_ids.every((entry) => isObject(entry) &&
+      typeof entry.account_id === "string" && ACCOUNT_ID.test(entry.account_id) &&
+      age(entry.committed_age_seconds)) &&
+    new Set(state.stale_ids.map((entry) => entry.account_id)).size === state.stale_ids.length &&
+    typeof state.stale_ids_truncated === "boolean" &&
+    (!state.stale_ids_truncated || state.stale_ids.length === SCAN_STALE_ID_LIMIT) &&
+    age(state.untracked_oldest_committed_age_seconds);
+}
+
 function validScanState(state) {
   return isObject(state) &&
     state.schema_version === ACCOUNT_BACKUP_SCAN_SCHEMA &&
+    validStaleTracking(state) &&
     validDate(state.slot) &&
     (state.pass_started_slot === undefined || validDate(state.pass_started_slot)) &&
     (state.overrun_counted_slot === undefined || state.overrun_counted_slot === null ||
@@ -2483,6 +2512,7 @@ function emptyHealth() {
 function addAccountHealth(health, status, now, intervalMinutes, overdue = false) {
   const threshold = 2 * intervalMinutes * 60_000;
   let stale = false;
+  let committedAgeSeconds = null;
   if (status.last_committed_at === null) {
     health.never_committed_accounts++;
     const dates = [status.backups.current_job, ...status.backups.failures]
@@ -2491,18 +2521,204 @@ function addAccountHealth(health, status, now, intervalMinutes, overdue = false)
   } else {
     if (!validDate(status.last_committed_at)) throw new Error("invalid backup commit time");
     const age = Math.max(0, now - Date.parse(status.last_committed_at));
+    committedAgeSeconds = Math.floor(age / 1000);
     stale = age > threshold;
     health.oldest_committed_age_seconds = Math.max(
-      health.oldest_committed_age_seconds ?? 0, Math.floor(age / 1000),
+      health.oldest_committed_age_seconds ?? 0, committedAgeSeconds,
     );
   }
   if (stale || overdue) health.stale_accounts++;
+  return { stale: stale || overdue, committed_age_seconds: committedAgeSeconds };
+}
+
+function maxCommittedAge(left, right) {
+  if (left === null) return right;
+  if (right === null) return left;
+  return Math.max(left, right);
+}
+
+async function refreshAccountBackupHealth(env, scan, config, now, statusLoader) {
+  const passHealth = accountBackupHealthSnapshot(scan);
+  if (!passHealth.health_available || passHealth.stale_accounts === 0 ||
+      !Array.isArray(scan.stale_ids) || scan.stale_ids_truncated ||
+      passHealth.stale_accounts > scan.stale_ids.length || scan.stale_ids.length > scan.scanned) return;
+  const identity = Object.fromEntries(
+    SCAN_HEALTH_IDENTITY_FIELDS.map((key) => [key, scan[key]]),
+  );
+  if (!validHealthIdentity(identity) || !fixedUTCDate(scan.pass_started_slot ?? scan.slot)) return;
+  let stopped = false;
+  let timer;
+  const operation = async () => {
+    const overlay = await readAccountBackupHealthOverlay(env, scan);
+    if (stopped) return;
+    const health = accountBackupHealthSnapshot(scan, overlay);
+    if (health.stale_accounts === 0) return;
+    // Collect every result before writing: one failed read must preserve the
+    // last good snapshot. A timed-out worker cannot start another read or write.
+    const observations = await mapBounded(scan.stale_ids, config.concurrency, async (entry) => {
+      if (stopped) return null;
+      try {
+        const status = await statusLoader(env, entry.account_id);
+        return addAccountHealth(emptyHealth(), status, now, config.interval_minutes);
+      } catch {
+        return null;
+      }
+    });
+    if (stopped || observations.some((observation) => observation === null)) return;
+    let oldest = scan.untracked_oldest_committed_age_seconds;
+    let stale = 0;
+    for (const [index, observation] of observations.entries()) {
+      oldest = maxCommittedAge(oldest, observation.committed_age_seconds);
+      if (observation.stale) {
+        stale++;
+        oldest = maxCommittedAge(oldest, scan.stale_ids[index].committed_age_seconds);
+      }
+    }
+    const refreshed = {
+      ...health,
+      stale_accounts: Math.max(0, Math.min(passHealth.stale_accounts, stale)),
+      oldest_committed_age_seconds: oldest,
+      computed_at: new Date(now).toISOString(),
+    };
+    const records = await listAccountBackupHealthRefreshes(env, scan);
+    if (stopped) return;
+    const current = records.overlay;
+    if (matchingHealthOverlay(scan, current) && Date.parse(current.health.computed_at) >= now) return;
+    const effective = accountBackupHealthSnapshot(scan, current);
+    // computed_at records when the values were established, not reconfirmed.
+    if (["stale_accounts", "oldest_committed_age_seconds", "never_committed_accounts"]
+      .every((key) => refreshed[key] === effective[key])) return;
+    const metadata = { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, identity, health: refreshed };
+    // Ordinary completed scans have a null cursor. Older accepted records may
+    // carry a long cursor; leave their scan health intact rather than exceed
+    // KV's metadata budget with that identity.
+    if (!healthRefreshMetadataFits(metadata)) return;
+    // Concurrent equal-time observations have independent 128-bit versions, so
+    // records are randomly versioned rather than strictly write-once: never reuse
+    // a listed key, even with invalid metadata, and retry a visible random
+    // collision a bounded number of times. KV has no conditional put, so a
+    // collision that neither pre-write list saw cannot be excluded.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const version = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+        (byte) => byte.toString(16).padStart(2, "0")).join("");
+      const key = healthRefreshKey(scan.pass_started_slot ?? scan.slot, refreshed.computed_at, version);
+      if (key === null || records.keys.some((record) => record?.name === key)) continue;
+      await env.DIRECTORY.put(key, "", {
+        metadata,
+        expirationTtl: SCAN_HEALTH_REFRESH_TTL_SECONDS,
+      });
+      return;
+    }
+  };
+  try {
+    await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          stopped = true;
+          reject(new Error("account backup health refresh deadline exceeded"));
+        }, SCAN_HEALTH_REFRESH_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+  }
+}
+
+function exactFields(value, fields) {
+  return isObject(value) && Object.keys(value).length === fields.length &&
+    fields.every((key) => Object.hasOwn(value, key));
+}
+
+function validHealthIdentity(identity) {
+  return exactFields(identity, SCAN_HEALTH_IDENTITY_FIELDS) &&
+    [identity.slot, identity.pass_started_slot, identity.updated_at].every(validDate) &&
+    typeof identity.complete === "boolean" &&
+    (identity.cursor === null || (typeof identity.cursor === "string" &&
+      identity.cursor.length >= 1 && identity.cursor.length <= 2048)) &&
+    Number.isSafeInteger(identity.scanned) && identity.scanned >= 0;
+}
+
+function matchingHealthOverlay(scan, overlay) {
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  return exactFields(overlay, ["schema_version", "identity", "health"]) &&
+    overlay.schema_version === ACCOUNT_BACKUP_SCAN_SCHEMA &&
+    validHealthIdentity(overlay.identity) &&
+    SCAN_HEALTH_IDENTITY_FIELDS.every((key) => overlay.identity[key] === scan?.[key]) &&
+    exactFields(overlay.health, SCAN_HEALTH_FIELDS) &&
+    overlay.health.health_available === true && validDate(overlay.health.computed_at) &&
+    count(overlay.health.stale_accounts) && count(overlay.health.never_committed_accounts) &&
+    (overlay.health.oldest_committed_age_seconds === null || count(overlay.health.oldest_committed_age_seconds)) &&
+    healthRefreshMetadataFits(overlay);
+}
+
+function healthRefreshMetadataFits(metadata) {
+  return new TextEncoder().encode(JSON.stringify(metadata)).byteLength < 1024;
+}
+
+function fixedUTCDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    validDate(value) && new Date(value).toISOString() === value;
+}
+
+function healthRefreshKey(passStartedSlot, computedAt, version) {
+  if (!fixedUTCDate(computedAt) || !/^[0-9a-f]{32}$/.test(version)) return null;
+  const inverted = String(SCAN_HEALTH_REFRESH_TIME_CEILING - Date.parse(computedAt)).padStart(15, "0");
+  return `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${passStartedSlot}:${inverted}:${version}`;
+}
+
+async function listAccountBackupHealthRefreshes(env, scan) {
+  const passStartedSlot = scan?.pass_started_slot ?? scan?.slot;
+  if (!fixedUTCDate(passStartedSlot)) return { keys: [], overlay: null };
+  const prefix = `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${passStartedSlot}:`;
+  // KV list is eventually consistent, like get. Select only among this single
+  // bounded page of visible immutable records; never delete invalid records or
+  // follow cursors on a scrape/refresh. Inverted times keep the newest visible
+  // records in this page even when an already-issued older put lands late.
+  const page = await env.DIRECTORY.list({ prefix, limit: SCAN_HEALTH_REFRESH_LIST_LIMIT });
+  if (!isObject(page) || !Array.isArray(page.keys) || page.keys.length > SCAN_HEALTH_REFRESH_LIST_LIMIT) {
+    throw new Error("account backup health refresh listing is invalid");
+  }
+  let overlay = null;
+  let selectedKey = null;
+  for (const record of page.keys) {
+    const candidate = record?.metadata;
+    if (typeof record?.name !== "string" || !matchingHealthOverlay(scan, candidate) ||
+        record.name !== healthRefreshKey(passStartedSlot, candidate.health.computed_at, record.name.slice(-32))) continue;
+    // The smallest valid key wins, including the random suffix on equal times.
+    // Compare explicitly so the tie rule does not depend on iteration order.
+    if (selectedKey === null || record.name < selectedKey) {
+      overlay = candidate;
+      selectedKey = record.name;
+    }
+  }
+  return { keys: page.keys, overlay };
+}
+
+export async function readAccountBackupHealthOverlay(env, scan) {
+  return (await listAccountBackupHealthRefreshes(env, scan)).overlay;
+}
+
+async function optionalAccountBackupHealthOverlay(env, scan) {
+  let timer;
+  try {
+    return await Promise.race([
+      readAccountBackupHealthOverlay(env, scan),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), SCAN_HEALTH_OVERLAY_READ_TIMEOUT_MS); }),
+    ]);
+  } catch {
+    // Optional refresh failures must not hide persisted scan health.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Only these aggregate fields may cross the public scrape boundary. Legacy or
 // malformed snapshots are unavailable, never a partial healthy fleet.
-export function accountBackupHealthSnapshot(scan) {
-  const health = scan?.health;
+export function accountBackupHealthSnapshot(scan, overlay = undefined) {
+  let health = scan?.health;
   const count = (value) => Number.isSafeInteger(value) && value >= 0;
   if (scan?.schema_version !== ACCOUNT_BACKUP_SCAN_SCHEMA ||
       !isObject(health) || !validDate(health.computed_at) ||
@@ -2511,6 +2727,10 @@ export function accountBackupHealthSnapshot(scan) {
         (!count(health.stale_accounts) || !count(health.never_committed_accounts) ||
          !(health.oldest_committed_age_seconds === null || count(health.oldest_committed_age_seconds))))) {
     return { ...unavailableHealth(), computed_at: null };
+  }
+  if (matchingHealthOverlay(scan, overlay) &&
+      Date.parse(overlay.health.computed_at) > Date.parse(health.computed_at)) {
+    health = overlay.health;
   }
   return {
     ...(health.health_available ? {
@@ -2523,7 +2743,7 @@ export function accountBackupHealthSnapshot(scan) {
   };
 }
 
-// Authenticated live inspection only. The public scrape reads scan.health.
+// Authenticated live inspection only. The public scrape merges persisted health.
 export async function accountBackupHealth(env, dependencies = {}) {
   const config = accountBackupConfig(env);
   const pageLoader = dependencies.activeAccountPage ?? activeAccountPage;
@@ -2561,10 +2781,12 @@ export async function accountBackupStatus(env, accountID = undefined) {
   const scan = env.DIRECTORY
     ? await env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" })
     : null;
+  const overlay = env.DIRECTORY && isObject(scan)
+    ? await optionalAccountBackupHealthOverlay(env, scan) : null;
   const base = {
     schema_version: "witself.v0",
     schedule: config,
-    scan: isObject(scan) ? { ...scan, ...accountBackupHealthSnapshot(scan) } : null,
+    scan: isObject(scan) ? { ...scan, ...accountBackupHealthSnapshot(scan, overlay) } : null,
   };
   if (accountID === undefined || accountID === null || accountID === "") {
     try {
@@ -3131,7 +3353,11 @@ export async function runScheduledAccountBackups(
     );
     const storedValid = validScanState(stored);
     const storedStart = stored?.pass_started_slot ?? stored?.slot;
-    let scan = storedValid && !(stored.complete && slot !== storedStart)
+    const startsNewPass = storedValid && stored.complete && slot !== storedStart;
+    // Only a completed-to-new-pass transition reads the previous pass overlay.
+    // Incomplete pages then carry this effective snapshot until completion.
+    const previousOverlay = startsNewPass ? await optionalAccountBackupHealthOverlay(env, stored) : null;
+    let scan = storedValid && !startsNewPass
       ? stored
       : {
           schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
@@ -3144,7 +3370,7 @@ export async function runScheduledAccountBackups(
           failed: 0,
           failed_retry: SCAN_FAILED_RETRY_POLICY,
           failure_sample: [],
-          health: accountBackupHealthSnapshot(stored),
+          health: accountBackupHealthSnapshot(stored, previousOverlay),
           last_account_id: null,
           overrun_counted_slot: null,
           unreached_entries: 0,
@@ -3152,6 +3378,7 @@ export async function runScheduledAccountBackups(
     const passStartedSlot = scan.pass_started_slot ?? scan.slot;
     const overrun = !scan.complete && Date.parse(slot) > Date.parse(passStartedSlot);
     if (scan.complete) {
+      await refreshAccountBackupHealth(env, scan, config, Number(scheduledTime), statusLoader);
       return {
         ran: false,
         configured: true,
@@ -3220,24 +3447,55 @@ export async function runScheduledAccountBackups(
     };
     // An in-flight legacy scan has no health evidence for its earlier pages.
     if (!scan.health_progress && scan.scanned > 0) healthProgress.health_available = false;
+    // Never manufacture a partial refresh list for an in-flight legacy pass.
+    const staleTracking = scan.stale_ids === undefined
+      ? (scan.scanned === 0 ? {
+          stale_ids: [], stale_ids_truncated: false,
+          untracked_oldest_committed_age_seconds: null,
+        } : null)
+      : {
+          stale_ids: [...scan.stale_ids],
+          stale_ids_truncated: scan.stale_ids_truncated,
+          untracked_oldest_committed_age_seconds: scan.untracked_oldest_committed_age_seconds,
+        };
     const healthTime = Date.parse(healthProgress.computed_at);
     const previous = await mapBounded(jobs, config.concurrency, async (job) => {
       try {
         const status = await statusLoader(env, job.account_id);
-        addAccountHealth(healthProgress, status, healthTime, config.interval_minutes, overrun);
+        const observation = addAccountHealth(healthProgress, status, healthTime, config.interval_minutes, overrun);
         const records = [status.backups.current_job, ...status.backups.failures];
-        return records.some((record) => record?.status === "failed" &&
-          record.scheduled_at === previousSlot) ? "failed" : "ok";
+        return {
+          observation,
+          status: records.some((record) => record?.status === "failed" &&
+            record.scheduled_at === previousSlot) ? "failed" : "ok",
+        };
       } catch {
         healthProgress.health_available = false;
-        return "unavailable";
+        return { status: "unavailable" };
       }
     });
+    // Preserve directory order, rather than status-request completion order.
+    if (staleTracking) {
+      for (const [index, { observation }] of previous.entries()) {
+        if (!observation) continue;
+        if (observation.stale && staleTracking.stale_ids.length < SCAN_STALE_ID_LIMIT) {
+          staleTracking.stale_ids.push({
+            account_id: jobs[index].account_id,
+            committed_age_seconds: observation.committed_age_seconds,
+          });
+        } else {
+          if (observation.stale) staleTracking.stale_ids_truncated = true;
+          staleTracking.untracked_oldest_committed_age_seconds = maxCommittedAge(
+            staleTracking.untracked_oldest_committed_age_seconds, observation.committed_age_seconds,
+          );
+        }
+      }
+    }
     const samePreviousSlot = scan.previous_slot === previousSlot;
     const previousFailures = (samePreviousSlot ? scan.previous_slot_terminal_failures ?? 0 : 0) +
-      previous.filter((result) => result === "failed").length;
+      previous.filter((result) => result.status === "failed").length;
     const previousUnavailable = (samePreviousSlot ? scan.previous_slot_status_unavailable ?? 0 : 0) +
-      previous.filter((result) => result === "unavailable").length;
+      previous.filter((result) => result.status === "unavailable").length;
     const results = await mapBounded(
       jobs,
       config.concurrency,
@@ -3284,6 +3542,7 @@ export async function runScheduledAccountBackups(
       previous_slot: previousSlot,
       previous_slot_terminal_failures: previousFailures,
       previous_slot_status_unavailable: previousUnavailable,
+      ...staleTracking,
       health_progress: healthProgress,
       health: complete ? {
         ...(healthProgress.health_available ? healthProgress : unavailableHealth()),

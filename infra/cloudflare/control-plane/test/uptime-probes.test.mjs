@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { register } from "node:module";
 import test from "node:test";
 import { SIGNUP_OBSERVATION_KEY } from "../src/signup-observation.mjs";
-import { ACCOUNT_BACKUP_SCAN_KEY, ACCOUNT_BACKUP_SCAN_SCHEMA, RESTORE_DRILL_FRESHNESS_KEY } from "../src/account-backup-runtime.mjs";
+import { ACCOUNT_BACKUP_SCAN_KEY, ACCOUNT_BACKUP_SCAN_SCHEMA, ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX, RESTORE_DRILL_FRESHNESS_KEY } from "../src/account-backup-runtime.mjs";
 
 import {
   UPTIME_PROBE_RUN_KEY,
@@ -37,6 +37,7 @@ class DirectoryKV {
     this.values = new Map(Object.entries(entries).map(([key, value]) => [
       key, JSON.stringify(value),
     ]));
+    this.metadata = new Map();
     this.reads = [];
     this.lists = [];
     this.writes = [];
@@ -49,12 +50,13 @@ class DirectoryKV {
     return options?.type === "json" ? JSON.parse(value) : value;
   }
 
-  async list({ prefix = "", cursor } = {}) {
-    this.lists.push({ prefix, cursor });
+  async list({ prefix = "", cursor, limit } = {}) {
+    this.lists.push({ prefix, cursor, ...(limit === undefined ? {} : { limit }) });
+    const names = [...this.values.keys()].filter((key) => key.startsWith(prefix)).sort();
     return {
-      keys: [...this.values.keys()].filter((key) => key.startsWith(prefix))
-        .map((name) => ({ name })),
-      list_complete: true,
+      keys: names.slice(0, limit).map((name) => ({ name, metadata: this.metadata.get(name) })),
+      list_complete: limit === undefined || names.length <= limit,
+      ...(limit !== undefined && names.length > limit ? { cursor: "unused-overlay-page" } : {}),
     };
   }
 
@@ -1570,21 +1572,20 @@ test("transport errors and timeouts fail the scrape for each persisted run key",
   }
 });
 
-test("backup scan and restore drill freshness reads share one scrape timeout", { timeout: 10_000 }, async (t) => {
+test("backup scan overlay and restore drill freshness reads share one scrape timeout", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
   const directory = new DirectoryKV({ [UPTIME_PROBE_RUN_KEY]: runDocument() });
   const get = directory.get.bind(directory);
   const backupReads = [];
+  const { scan } = backupHealthRecords();
+  scan.health.stale_accounts = 2;
   let scanResolved = false;
   directory.get = (key, options) => {
     if (key === ACCOUNT_BACKUP_SCAN_KEY) {
       backupReads.push({ key, options });
       return new Promise((resolve) => setTimeout(() => {
         scanResolved = true;
-        resolve({ schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, health: {
-          computed_at: new Date(NOW).toISOString(), health_available: true,
-          stale_accounts: 2, never_committed_accounts: 3, oldest_committed_age_seconds: 4,
-        } });
+        resolve(scan);
       }, 4_000));
     }
     if (key === RESTORE_DRILL_FRESHNESS_KEY) {
@@ -1592,6 +1593,11 @@ test("backup scan and restore drill freshness reads share one scrape timeout", {
       return new Promise(() => {});
     }
     return get(key, options);
+  };
+  directory.list = (options) => {
+    assert.equal(scanResolved, true, "the overlay prefix comes from the resolved scan");
+    directory.lists.push(options);
+    return new Promise(() => {});
   };
   let response;
   const pending = uptimeProbeMetricsResponse(metricsRequest(), {
@@ -1607,7 +1613,7 @@ test("backup scan and restore drill freshness reads share one scrape timeout", {
   assert.equal(response, undefined);
   t.mock.timers.tick(1);
   await flush();
-  assert.equal(response?.status, 200, "parallel reads answer within five seconds total");
+  assert.equal(response?.status, 200, "the dependent overlay list shares the five-second total deadline");
   await pending;
   const body = await response.text();
   assert.match(body, /witself_control_plane_account_backup_restore_drill_freshness_available 0\n/);
@@ -1617,4 +1623,276 @@ test("backup scan and restore drill freshness reads share one scrape timeout", {
     { key: ACCOUNT_BACKUP_SCAN_KEY, options: { type: "json" } },
     { key: RESTORE_DRILL_FRESHNESS_KEY, options: { type: "text" } },
   ]);
+  assert.deepEqual(directory.lists, [{ prefix: overlayPrefix(scan), limit: 32 }]);
+});
+
+function backupHealthRecords() {
+  const identity = {
+    slot: new Date(NOW - 60_000).toISOString(),
+    pass_started_slot: new Date(NOW - 60_000).toISOString(),
+    updated_at: new Date(NOW - 60_000).toISOString(),
+    complete: true, cursor: null, scanned: 3,
+  };
+  const health = {
+    health_available: true, stale_accounts: 1, never_committed_accounts: 1,
+    oldest_committed_age_seconds: 180_000,
+    computed_at: new Date(NOW - 60_000).toISOString(),
+  };
+  return {
+    scan: { schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, ...identity, health },
+    overlay: {
+      schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA, identity,
+      health: { ...health, stale_accounts: 0, oldest_committed_age_seconds: 20,
+        computed_at: new Date(NOW).toISOString() },
+    },
+  };
+}
+
+function overlayPrefix(scan) {
+  return `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${scan.pass_started_slot ?? scan.slot}:`;
+}
+
+function invertedHealthTimestamp(computedAt) {
+  return String(253402300799999 - Date.parse(computedAt)).padStart(15, "0");
+}
+
+function storeHealthOverlay(directory, scan, metadata,
+  computedAt = metadata?.health?.computed_at ?? new Date(NOW).toISOString(), version = "0".repeat(32)) {
+  const key = `${overlayPrefix(scan)}${invertedHealthTimestamp(computedAt)}:${version}`;
+  directory.values.set(key, "");
+  directory.metadata.set(key, metadata);
+  return key;
+}
+
+function assertOneOverlayList(directory, scan) {
+  assert.deepEqual(directory.lists, [{ prefix: overlayPrefix(scan), cursor: undefined, limit: 32 }]);
+  assert.equal(directory.reads.filter((key) => key === ACCOUNT_BACKUP_SCAN_KEY).length, 1);
+  assert.equal(directory.reads.some((key) => key.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)), false,
+    "metadata supplies overlay health without per-record gets");
+  assert.deepEqual(directory.writes, []);
+}
+
+async function backupMetrics(directory) {
+  const response = await uptimeProbeMetricsResponse(metricsRequest(), {
+    DIRECTORY: directory, CP_ACCOUNT_BACKUPS_ENABLED: "true",
+  });
+  assert.equal(response.status, 200);
+  return response.text();
+}
+
+test("backup metrics merge the matching newer health metadata without exposing its identity", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const { scan, overlay } = backupHealthRecords();
+  const directory = new DirectoryKV({
+    [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+  });
+  storeHealthOverlay(directory, scan, overlay);
+  const body = await backupMetrics(directory);
+  assert.match(body, /witself_control_plane_account_backup_health_available 1\n/);
+  assert.match(body, /witself_control_plane_account_backup_stale_accounts 0\n/);
+  assert.match(body, /witself_control_plane_account_backup_never_committed_accounts 1\n/);
+  assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 20\n/);
+  assert.match(body, /witself_control_plane_account_backup_health_age_seconds 0\n/);
+  assert.equal(body.includes("refreshed_at"), false);
+  assert.equal(body.includes("identity"), false);
+  assertOneOverlayList(directory, scan);
+});
+
+test("backup metrics select newest valid metadata regardless of list order or another pass", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  for (const reverse of [false, true]) {
+    const { scan, overlay } = backupHealthRecords();
+    const directory = new DirectoryKV({
+      [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+    });
+    storeHealthOverlay(directory, scan, overlay);
+    storeHealthOverlay(directory, scan, { ...overlay, health: { ...overlay.health,
+      stale_accounts: 1, oldest_committed_age_seconds: 170_000,
+      computed_at: new Date(NOW - 30_000).toISOString() } });
+    storeHealthOverlay(directory, scan, { ...overlay, identity: { ...overlay.identity, scanned: 4 },
+      health: { ...overlay.health, oldest_committed_age_seconds: 999,
+        computed_at: new Date(NOW + 30_000).toISOString() } });
+    const otherPass = { ...scan, pass_started_slot: new Date(NOW - 86_400_000).toISOString() };
+    storeHealthOverlay(directory, otherPass, { ...overlay,
+      identity: { ...overlay.identity, pass_started_slot: otherPass.pass_started_slot },
+      health: { ...overlay.health, oldest_committed_age_seconds: 999,
+        computed_at: new Date(NOW + 60_000).toISOString() } });
+    if (reverse) {
+      const list = directory.list.bind(directory);
+      directory.list = async (options) => {
+        const page = await list(options);
+        return { ...page, keys: page.keys.reverse() };
+      };
+    }
+    const body = await backupMetrics(directory);
+    assert.match(body, /witself_control_plane_account_backup_stale_accounts 0\n/);
+    assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 20\n/);
+    assertOneOverlayList(directory, scan);
+  }
+});
+
+test("backup metrics select the newest of more than 32 records and ignore a late older record", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const { scan, overlay } = backupHealthRecords();
+  const directory = new DirectoryKV({
+    [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+  });
+  for (let index = 0; index < 33; index++) {
+    storeHealthOverlay(directory, scan, { ...overlay, health: { ...overlay.health,
+      stale_accounts: index === 32 ? 0 : 1,
+      oldest_committed_age_seconds: index,
+      computed_at: new Date(NOW - (32 - index) * 1000).toISOString() } });
+  }
+  assert.equal(directory.metadata.size, 33);
+  let body = await backupMetrics(directory);
+  assert.match(body, /witself_control_plane_account_backup_stale_accounts 0\n/);
+  assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 32\n/);
+  assertOneOverlayList(directory, scan);
+
+  // An earlier observation's delayed publication must not hide the recovered state.
+  storeHealthOverlay(directory, scan, { ...overlay, health: { ...overlay.health,
+    stale_accounts: 1, oldest_committed_age_seconds: 180_000,
+    computed_at: new Date(NOW - 45_000).toISOString() } });
+  directory.lists.length = 0;
+  directory.reads.length = 0;
+  body = await backupMetrics(directory);
+  assert.match(body, /witself_control_plane_account_backup_stale_accounts 0\n/);
+  assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 32\n/);
+  assertOneOverlayList(directory, scan);
+});
+
+test("backup metrics break equal-time ties by the first key regardless of insertion or list order", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  for (const reverseInsertion of [false, true]) {
+    for (const reverseList of [false, true]) {
+      const { scan, overlay } = backupHealthRecords();
+      const directory = new DirectoryKV({
+        [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+      });
+      const observations = [
+        { metadata: overlay, version: "0".repeat(32) },
+        { metadata: { ...overlay, health: { ...overlay.health,
+          stale_accounts: 1, oldest_committed_age_seconds: 180_000 } }, version: "f".repeat(32) },
+      ];
+      if (reverseInsertion) observations.reverse();
+      for (const { metadata, version } of observations) {
+        storeHealthOverlay(directory, scan, metadata, metadata.health.computed_at, version);
+      }
+      if (reverseList) {
+        const list = directory.list.bind(directory);
+        directory.list = async (options) => {
+          const page = await list(options);
+          return { ...page, keys: page.keys.reverse() };
+        };
+      }
+      assert.equal(directory.metadata.size, 2);
+      const body = await backupMetrics(directory);
+      assert.match(body, /witself_control_plane_account_backup_stale_accounts 0\n/);
+      assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 20\n/);
+      assertOneOverlayList(directory, scan);
+    }
+  }
+});
+
+test("backup metrics ignore malformed mismatched or non-newer health metadata", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const { scan, overlay } = backupHealthRecords();
+  const variants = {
+    "string metadata": "{not json",
+    "absent metadata": undefined,
+    "null metadata": null,
+    "wrong schema": { ...overlay, schema_version: "unsupported" },
+    "missing identity": { ...overlay, identity: null },
+    "extra identity field": { ...overlay, identity: { ...overlay.identity, private: PRIVATE_MARKER } },
+    "missing health": { ...overlay, health: null },
+    "extra health field": { ...overlay, health: { ...overlay.health, private: PRIVATE_MARKER } },
+    "negative health count": { ...overlay, health: { ...overlay.health, stale_accounts: -1 } },
+    "unavailable health": { ...overlay, health: { ...overlay.health, health_available: false } },
+    "extra top-level field": { ...overlay, refreshed_at: new Date(NOW).toISOString() },
+    "invalid computation time": { ...overlay, health: { ...overlay.health, computed_at: PRIVATE_MARKER } },
+    "older health": { ...overlay, health: { ...overlay.health, computed_at: new Date(NOW - 120_000).toISOString() } },
+    "equal health time": { ...overlay, health: { ...overlay.health, computed_at: scan.health.computed_at } },
+  };
+  for (const [field, value] of Object.entries({
+    slot: new Date(NOW).toISOString(), pass_started_slot: new Date(NOW).toISOString(),
+    updated_at: new Date(NOW).toISOString(), complete: false, cursor: "next-page", scanned: 4,
+  })) {
+    variants[`mismatched ${field}`] = { ...overlay, identity: { ...overlay.identity, [field]: value } };
+    const identity = { ...overlay.identity };
+    delete identity[field];
+    variants[`missing identity ${field}`] = { ...overlay, identity };
+  }
+  for (const [name, value] of Object.entries(variants)) {
+    await t.test(name, async () => {
+      const directory = new DirectoryKV({
+        [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+      });
+      storeHealthOverlay(directory, scan, value);
+      const body = await backupMetrics(directory);
+      assert.match(body, /witself_control_plane_account_backup_health_available 1\n/);
+      assert.match(body, /witself_control_plane_account_backup_stale_accounts 1\n/);
+      assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 180000\n/);
+      assert.match(body, /witself_control_plane_account_backup_health_age_seconds 60\n/);
+      assert.equal(body.includes(PRIVATE_MARKER), false);
+      assertOneOverlayList(directory, scan);
+    });
+  }
+});
+
+test("backup metrics require an exact inverted timestamp and fixed-width lowercase random key version", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const timestamp = invertedHealthTimestamp(new Date(NOW).toISOString());
+  const version = "a".repeat(32);
+  for (const suffix of [
+    "2026-09-04T12:00:00Z", `${new Date(NOW).toISOString()}:${version}`,
+    `${invertedHealthTimestamp(new Date(NOW + 1000).toISOString())}:${version}`,
+    `${timestamp.slice(1)}:${version}`, `0${timestamp}:${version}`,
+    timestamp, `${timestamp}:`, `${timestamp}:${version.slice(1)}`, `${timestamp}:${version}a`,
+    `${timestamp}:${version.toUpperCase()}`, `${timestamp}:${"g".repeat(32)}`,
+    `${timestamp}:${version}:extra`,
+  ]) {
+    const { scan, overlay } = backupHealthRecords();
+    const directory = new DirectoryKV({
+      [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+    });
+    const key = `${overlayPrefix(scan)}${suffix}`;
+    directory.values.set(key, "");
+    directory.metadata.set(key, overlay);
+    const body = await backupMetrics(directory);
+    assert.match(body, /witself_control_plane_account_backup_stale_accounts 1\n/);
+    assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 180000\n/);
+    assertOneOverlayList(directory, scan);
+  }
+});
+
+test("backup metrics isolate failed or hung health overlay lists", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
+  for (const failure of ["throw", "timeout"]) {
+    const { scan } = backupHealthRecords();
+    const directory = new DirectoryKV({
+      [UPTIME_PROBE_RUN_KEY]: runDocument(), [ACCOUNT_BACKUP_SCAN_KEY]: scan,
+    });
+    directory.list = (options) => {
+      directory.lists.push({ ...options, cursor: undefined });
+      if (failure === "throw") throw new Error(PRIVATE_MARKER);
+      return new Promise(() => {});
+    };
+    let settled = false;
+    const pending = backupMetrics(directory).then((body) => { settled = true; return body; });
+    await flush();
+    if (failure === "timeout") {
+      t.mock.timers.tick(4999);
+      await flush();
+      assert.equal(settled, false);
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(settled, true, "the optional overlay list is bounded to five seconds");
+    }
+    const body = await pending;
+    assert.match(body, /witself_control_plane_account_backup_health_available 1\n/);
+    assert.match(body, /witself_control_plane_account_backup_stale_accounts 1\n/);
+    assert.match(body, /witself_control_plane_account_backup_oldest_committed_age_seconds 180000\n/);
+    assert.equal(body.includes(PRIVATE_MARKER), false);
+    assertOneOverlayList(directory, scan);
+  }
 });
