@@ -752,7 +752,7 @@ The pass resumes across intervals in directory order; at the five-minute cron,
 capacity is 288 × page size accounts per one-day interval, reduced by pending,
 archived and unrouted directory entries that also consume page slots.
 Runtime defaults are one generation per 1,440 minutes, four accounts per scan
-page, concurrency two, four attempts per generation, and 64 catalog entries per
+page, concurrency two, four stream attempts per generation, and 64 catalog entries per
 account. Their bounded overrides are
 `CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES`, `CP_ACCOUNT_BACKUPS_PAGE_SIZE`,
 `CP_ACCOUNT_BACKUPS_CONCURRENCY`, `CP_ACCOUNT_BACKUPS_MAX_ATTEMPTS`, and
@@ -779,6 +779,74 @@ Invalid `account_id` or unparseable `scheduled_at` retains HTTP 400.
 Poll `GET /v1/backups/status?account_id=...`, checking `current_job.status`
 and `last_committed_at`, until the selected id appears in the committed
 catalog. Acceptance alone is not a completed backup.
+
+Each backup attempt has two durable stages, executed in separate alarm
+invocations. The `stream` stage completes the R2 multipart upload, persists
+`current_job.stage: "verify"`, `streamed_at`, and `streamed_size`, then arms an
+immediate alarm and returns. The fresh `verify` invocation reads the completed
+object and performs the archive and source-identity checks before catalog
+commit. A completed object found after an interrupted stream takes the same
+verification path. Re-entering the verify stage after an interruption verifies
+that object again without fetching another export.
+
+Before each fresh stream, the job persists `current_job.attempt_object`, a
+distinct R2 key derived from the scheduler's `object` by inserting `.a<attempt>`
+before `.tar.gz` (or appending it if that suffix is absent). Verification and
+cleanup use that exact persisted key, so a late deletion from an earlier
+attempt cannot erase a later attempt's object. The scheduler's `object`, backup
+identity, and `/start` input remain unchanged. The committed catalog entry's
+`object` is the exact key that committed; consumers use that field rather than
+deriving a key from `backup_id`. Legacy jobs without `attempt_object` use their
+original `object` for recovery, verification, and cleanup.
+
+`current_job.attempts` counts stream attempts and failed recovery HEAD probes
+against `max_attempts`. Recovery arms its alarm and checks the persisted
+attempt's object before starting another stream. A successful probe consumes
+nothing, whether the object is present or absent; a completed upload resumes
+verification without incrementing the count. A failed probe increments and
+persists `attempts` and records `backup_recovery_probe_failed`. At the retry
+budget it fails the generation with `backup retry budget exhausted`, retaining
+the probe reason in `attempt_errors`; a probe that fails with an already
+exhausted budget fails immediately without increasing the count. The persisted
+`attempt_object` still names the last upload, so its attempt suffix may be
+lower than the count after a failed probe. Each fresh stream also increments
+and persists `attempts` before export.
+`verify_attempts` is persisted before verification and permits at most two
+verification invocations per streamed object, including interrupted invocations.
+If both are used without a commit, the next invocation deletes the object and
+returns to a stream retry, which consumes another stream attempt. An archive
+integrity failure deletes the object and returns to a stream retry immediately.
+Exhausting the stream budget makes the generation terminally failed. The stage
+and verification fields are optional additions; jobs persisted before these
+fields existed still validate and resume.
+
+If the final catalog write persists but its acknowledgement fails, the worker
+reloads durable state. An existing catalog entry for the same `backup_id`
+remains committed, and the recovery alarm is cleared without recording a
+failure or starting another attempt.
+
+The stream watchdog allows 120 seconds without body-byte progress, below the
+cell's 150-second write-stall guard, and 13 minutes overall. The verify stage has
+its own 10-minute deadline. Both overall deadlines leave time to record a
+retryable failure before the platform's 15-minute alarm wall-time limit;
+stream deadline expiry records `export_overall_timeout`, and verify expiry
+records `backup_verify_timeout`. An R2 deletion failure keeps the verify
+checkpoint retryable; cleanup must finish before another stream begins, and
+cleanup retries never run a third archive verification. A fresh stream uses a
+new attempt key even if an earlier timed-out deletion is still in flight. After
+the two verification invocations, `verify_cleanup_attempts` permits at most two
+cleanup invocations, including interrupted calls. Exhausting that cleanup
+budget fails the generation without cataloging or reusing the object.
+
+The authenticated status read exposes `current_job.attempt_errors`, a bounded
+list of at most eight `{attempt, stage, at, error}` records, newest last. Each
+error is a bounded, value-free reason, without response bodies, URLs, headers,
+credentials, or stack traces. Terminal failure carries this list into the
+generation's `failures` record, preserving recent attempt evidence even when
+`last_error` reports that the retry budget was exhausted. Older jobs may omit
+the list. The `attempt` number identifies the charged stream budget position,
+including failed recovery probes; object keys are not copied into these error
+records.
 
 Scheduled scans use the same asynchronous Durable Object `/start` path as
 manual backups. A cron tick waits for dispatch acknowledgements, then records

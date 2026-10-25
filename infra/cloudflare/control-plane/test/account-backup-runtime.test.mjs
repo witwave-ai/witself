@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import { register } from "node:module";
 import test from "node:test";
+import { getEventListeners } from "node:events";
+import { ArchiveIntegrityError, validateCommittedAccountArchive } from "../src/archive-integrity.mjs";
 import { uptimeProbeMetricsResponse } from "../src/uptime-probes.mjs";
 import { streamToR2Multipart } from "../src/account-lifecycle-runtime.mjs";
 import {
@@ -18,6 +20,9 @@ import {
   ACCOUNT_BACKUP_STATE_SCHEMA,
   IDLE_TIMEOUT_MS,
   OVERALL_TIMEOUT_MS,
+  VERIFY_TIMEOUT_MS,
+  ExportWatchdog,
+  validateAccountBackupState,
   RESTORE_DRILL_DEADLINE_MS,
   RESTORE_DRILL_HEARTBEAT_MS,
   RESTORE_DRILL_ALARM_DEADLINE_MS,
@@ -417,8 +422,9 @@ test("export stamps the registered source name instead of the cell's environment
     },
   });
   const response = await harness.instance.fetch(harness.request());
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).status, "committed");
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "committed");
   const state = harness.storage.values.get("account-backups");
   assert.equal(manifestCell, state.current_job.source_cell);
   assert.equal(state.catalog[0].source_cell, manifestCell);
@@ -499,7 +505,7 @@ test("start acknowledges a pending job before export and a cold alarm commits it
   assert.equal(state.revision, 1);
   assert.deepEqual(state.catalog, []);
   assert.deepEqual(state.current_job, {
-    ...h.job, status: "pending", attempts: 0, max_attempts: 3,
+    ...h.job, status: "pending", attempts: 0, max_attempts: 3, catalog_limit: 8,
     created_at: NOW.toISOString(), source_cell: SOURCE,
     source_endpoint: "https://source.example", source_registration_id: "reg-source",
     source_registered_at: sourceCell().registered_at, source_route: sourceRoute(),
@@ -507,6 +513,10 @@ test("start acknowledges a pending job before export and a cold alarm commits it
   assert.equal(h.storage.alarm, NOW.getTime());
   const cold = runtime({ storage: h.storage, directory: h.directory, bucket: h.bucket });
   h.storage.alarm = null; // The platform consumes the alarm before invoking it.
+  assert.equal((await cold.instance.alarm()).status, "accepted");
+  assert.equal(h.storage.values.get("account-backups").current_job.stage, "verify");
+  assert.equal(h.storage.values.get("account-backups").catalog.length, 0);
+  assert.equal(h.storage.alarm, NOW.getTime());
   assert.equal((await cold.instance.alarm()).status, "committed");
   assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
   assert.equal(h.storage.values.get("account-backups").catalog[0].backup_id, h.job.backup_id);
@@ -611,7 +621,7 @@ test("start reports busy or accepted while a slow run holds the fence", { timeou
     assert.equal(h.storage.alarm, alarm);
   } finally {
     release();
-    assert.equal((await running).status, 200);
+    assert.equal((await running).status, 202);
   }
 });
 
@@ -662,6 +672,7 @@ test("manual dispatch and public route return accepted, busy, committed and fail
   const busyResponse = await manualRoute(env, { ...body, scheduled_at: new Date(otherTime).toISOString() });
   assert.equal(busyResponse.status, 200);
   assert.deepEqual(await busyResponse.json(), busy);
+  await h.instance.alarm();
   await h.instance.alarm();
   const committed = await runManualAccountBackup(env, ACCOUNT, SCHEDULED_AT);
   assert.equal(committed.status, "committed");
@@ -1060,7 +1071,8 @@ test("scheduled pass accepts a running alarm export and the next status read see
     assert.deepEqual(running.backups.catalog, []);
 
     finishExport.resolve();
-    assert.equal((await execution).status, "committed");
+    assert.equal((await execution).status, "accepted");
+    assert.equal((await h.instance.alarm()).status, "committed");
     const committed = (await accountBackupStatus(env, ACCOUNT)).account;
     assert.equal(committed.backups.current_job.status, "committed");
     assert.equal(committed.backups.current_job.attempts, 1);
@@ -1087,14 +1099,14 @@ test("manifest purpose mismatch never enters the catalog and is removed on retry
 
   const first = await harness.instance.fetch(harness.request());
   assert.equal(first.status, 202);
-  assert.equal((await responseBody(first)).status, "retrying");
+  assert.equal((await responseBody(first)).status, "accepted");
   assert.deepEqual(
     harness.storage.values.get("account-backups").catalog,
     [],
   );
 
   await harness.instance.alarm();
-  assert.deepEqual(harness.bucket.deleted, [harness.job.object]);
+  assert.deepEqual(harness.bucket.deleted, [harness.storage.values.get("account-backups").current_job.attempt_object]);
   assert.deepEqual(
     harness.storage.values.get("account-backups").catalog,
     [],
@@ -1133,8 +1145,9 @@ test("an existing verified object makes an ambiguous upload retry idempotent", a
   assert.equal((await responseBody(first)).status, "retrying");
 
   const second = await harness.instance.fetch(harness.request());
-  const body = await responseBody(second);
-  assert.equal(second.status, 200);
+  assert.equal(second.status, 202);
+  assert.equal((await responseBody(second)).status, "accepted");
+  const body = await harness.instance.alarm();
   assert.equal(body.status, "committed");
   assert.equal(body.recovered_existing_object, true);
   assert.equal(fetches, 1);
@@ -1162,8 +1175,9 @@ test("a manual run arms its Durable Object alarm before outbound export", async 
   });
 
   const response = await harness.instance.fetch(harness.request());
-  assert.equal(response.status, 200);
-  assert.equal((await responseBody(response)).status, "committed");
+  assert.equal(response.status, 202);
+  assert.equal((await responseBody(response)).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "committed");
   assert.equal(observedArmedAlarm, true);
   assert.equal(storage.alarm, null);
   assert.equal(
@@ -1208,8 +1222,9 @@ test("an early alarm blocked by the active run rearms crash recovery", async () 
     replacementAlarm > NOW.getTime(),
     "the busy alarm invocation must install a later recovery alarm",
   );
-  assert.equal(response.status, 200);
-  assert.equal((await responseBody(response)).status, "committed");
+  assert.equal(response.status, 202);
+  assert.equal((await responseBody(response)).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "committed");
   assert.equal(
     harness.storage.alarm,
     null,
@@ -1232,10 +1247,12 @@ test("an existing object with mismatched R2 identity metadata is replaced", asyn
   const harness = runtime({ bucket });
 
   const response = await harness.instance.fetch(harness.request());
-  const body = await responseBody(response);
-  assert.equal(response.status, 200);
-  assert.equal(body.status, "committed");
+  assert.equal(response.status, 202);
+  assert.equal((await responseBody(response)).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "retrying");
   assert.deepEqual(bucket.deleted, [job.object]);
+  assert.equal((await harness.instance.alarm()).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "committed");
   assert.equal(
     harness.storage.values.get("account-backups").catalog[0]
       .source_registration_id,
@@ -1288,7 +1305,8 @@ test("a changed source fence cannot authorize a verified object", async () => {
 
   const response = await harness.instance.fetch(harness.request());
   assert.equal(response.status, 202);
-  assert.equal((await responseBody(response)).status, "retrying");
+  assert.equal((await responseBody(response)).status, "accepted");
+  assert.equal((await harness.instance.alarm()).status, "retrying");
   assert.deepEqual(
     harness.storage.values.get("account-backups").catalog,
     [],
@@ -1711,7 +1729,7 @@ function streamingRuntime() {
 }
 
 test("a cold start alarm retains the export idle watchdog and retry policy", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const h = streamingRuntime();
   assert.equal((await h.instance.fetch(h.request("/start"))).status, 202);
   assert.equal(h.signal, undefined);
@@ -1741,7 +1759,7 @@ test("a cold start alarm retains the export idle watchdog and retry policy", { t
 
 for (const emptyChunks of [false, true]) {
   test(`idle watchdog aborts with no bytes (empty chunks: ${emptyChunks})`, { timeout: 10_000 }, async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
     const h = streamingRuntime();
     const running = h.instance.fetch(h.request());
     await flush();
@@ -1761,7 +1779,7 @@ for (const emptyChunks of [false, true]) {
 }
 
 test("idle watchdog also bounds a fetch that never returns headers", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   let signal;
   const h = runtime({ fetch: (_url, options) => {
     signal = options.signal;
@@ -1776,7 +1794,7 @@ test("idle watchdog also bounds a fetch that never returns headers", { timeout: 
 });
 
 test("body progress continues beyond five minutes and commits verified multipart", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const h = streamingRuntime();
   const running = h.instance.fetch(h.request());
   await flush();
@@ -1787,7 +1805,8 @@ test("body progress continues beyond five minutes and commits verified multipart
     assert.equal(h.signal.aborted, false);
   }
   h.upstream.close();
-  assert.equal((await (await running).json()).status, "committed");
+  assert.equal((await (await running).json()).status, "accepted");
+  assert.equal((await h.instance.alarm()).status, "committed");
   t.mock.timers.tick(OVERALL_TIMEOUT_MS);
   assert.equal(h.signal.aborted, false, "settlement clears both timers");
   assert.equal(h.aborted, false);
@@ -1797,7 +1816,8 @@ test("body progress continues beyond five minutes and commits verified multipart
 });
 
 test("overall ceiling aborts even with continuous body progress", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assert.equal(OVERALL_TIMEOUT_MS, 13 * 60_000);
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const h = streamingRuntime();
   const running = h.instance.fetch(h.request());
   await flush();
@@ -1811,6 +1831,10 @@ test("overall ceiling aborts even with continuous body progress", { timeout: 10_
   assert.equal((await (await running).json()).status, "retrying");
   await flush();
   assert.equal(h.storage.values.get("account-backups").current_job.last_error, "export_overall_timeout");
+  assert.deepEqual(h.storage.values.get("account-backups").current_job.attempt_errors, [
+    { attempt: 1, stage: "stream", at: NOW.toISOString(), error: "export_overall_timeout" },
+  ]);
+  assert.ok(h.storage.alarm > NOW.getTime());
   assert.equal(h.aborted, true);
   assert.equal(h.cancelled, true);
 });
@@ -1892,6 +1916,7 @@ test("status uses newest committed evidence, null for none, and excludes nonlive
   const h = runtime();
   assert.equal((await (await h.instance.fetch(new Request("http://backup/status"))).json()).last_committed_at, null);
   await h.instance.fetch(h.request());
+  await h.instance.alarm();
   assert.equal((await (await h.instance.fetch(new Request("http://backup/status"))).json()).last_committed_at, NOW.toISOString());
 });
 
@@ -2111,7 +2136,7 @@ test("empty scans are healthy but resumed legacy pages cannot fabricate complete
 });
 
 test("EOF stops idle timeout but overall ceiling still bounds a stuck multipart completion", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const h = streamingRuntime();
   const original = h.bucket.createMultipartUpload;
   h.bucket.createMultipartUpload = async (...args) => ({
@@ -2131,7 +2156,7 @@ test("EOF stops idle timeout but overall ceiling still bounds a stuck multipart 
 });
 
 test("watchdog failure code survives the final attempt and clears the alarm", { timeout: 10_000 }, async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const h = runtime({ maxAttempts: 1, fetch: () => new Promise(() => {}) });
   const running = h.instance.fetch(h.request());
   await flush();
@@ -3961,6 +3986,7 @@ test("alarm restore drill leaves backup recovery alarms untouched and rejects ba
   const exports = t.mock.method(backup.instance, "fetchImpl");
   assert.equal((await backup.instance.fetch(backup.request("/start"))).status, 202);
   await fireAlarm(backup.storage, backup.instance);
+  await fireAlarm(backup.storage, backup.instance);
   assert.equal(exports.mock.callCount(), 1);
   assert.equal(backup.storage.values.get("account-backups").current_job.status, "committed");
 });
@@ -4096,7 +4122,7 @@ test("restore drill Worker selection, driver headers, and wait grammar", async (
 });
 
 test("restore drill Worker wait false returns 202 without starting a waiter", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   const f = alarmDrillEnv(t);
   fakeCell(t, { start: () => Response.json(cellAck(f.record)) });
   const response = await f.route({ wait: false });
@@ -4120,7 +4146,7 @@ test("restore drill Worker wait false returns 202 without starting a waiter", as
 test("restore drill Worker default framing waits for the durable outcome with existing statuses", async (t) => {
   for (const mode of ["validated", "cell-error", "fence-error"]) {
     await t.test(mode, async (t) => {
-      t.mock.timers.enable({ apis: ["setTimeout"] });
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
       const f = alarmDrillEnv(t);
       fakeCell(t, { start: () => Response.json(mode === "cell-error"
         ? { schema_version: "witself.v0", error: "invalid or mismatched backup archive" }
@@ -5228,7 +5254,7 @@ test("restore drill freshness failures never change the drill answer or hold the
   assert.deepEqual(logs, Array(2).fill("account-backup: restore drill freshness was not recorded"));
   logs.length = 0;
 
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
   for (const driver of ["request", "alarm"]) {
     const hung = drillEnv();
     let reads = 0;
@@ -5430,3 +5456,626 @@ test("restore drill freshness docs name the gauges and both alerts", async () =>
     for (const fragment of fragments) assert.ok(text.includes(fragment), `${file}: missing ${fragment}`);
   }
 });
+
+// Each helper invocation represents a new isolate using only durable storage.
+function coldBackup(h, overrides = {}) {
+  return runtime({ storage: h.storage, directory: h.directory, bucket: h.bucket, ...overrides });
+}
+
+test("late timed-out integrity deletion cannot delete next attempt object", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+  const h = runtime({ validateArchive: () => { throw new ArchiveIntegrityError("invalid archive"); } });
+  await h.instance.fetch(h.request());
+  const firstJob = h.storage.values.get("account-backups").current_job;
+  const firstKey = firstJob.attempt_object ?? firstJob.object;
+  const late = deferred();
+  const deleteObject = h.bucket.delete.bind(h.bucket);
+  let deletions = 0;
+  h.bucket.delete = async (key) => {
+    assert.equal(key, firstKey);
+    if (++deletions === 1) await late.promise;
+    await deleteObject(key);
+  };
+  const verifying = h.instance.alarm();
+  await flush();
+  assert.equal(deletions, 1);
+  t.mock.timers.tick(VERIFY_TIMEOUT_MS);
+  assert.equal((await verifying).status, "retrying");
+  assert.equal((await h.instance.alarm()).status, "retrying");
+  assert.equal(deletions, 2, "cleanup succeeds while the first deletion remains outstanding");
+  assert.equal(h.storage.values.get("account-backups").current_job.stage, "stream");
+  const cold = coldBackup(h);
+  assert.equal((await cold.instance.alarm()).status, "accepted");
+  assert.equal((await cold.instance.alarm()).status, "committed");
+  const committed = structuredClone(h.storage.values.get("account-backups"));
+  const record = committed.catalog[0];
+  assert.equal(committed.current_job.attempts, 2);
+  assert.ok(await h.bucket.head(record.object));
+  late.resolve();
+  await flush();
+  assert.ok(await h.bucket.head(record.object), "late deletion must leave the committed next attempt intact");
+  assert.notEqual(record.object, firstKey);
+  assert.equal(record.object, committed.current_job.attempt_object);
+  assert.equal(committed.current_job.object, h.job.object);
+  assert.deepEqual(h.storage.values.get("account-backups"), committed);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("completed stream recovery does not consume a second stream attempt", async () => {
+  let interrupted;
+  const h = runtime({ streamArchive: async (bucket, key, _body, options) => {
+    interrupted = structuredClone(h.storage.values.get("account-backups"));
+    assert.ok(h.storage.alarm, "crash recovery is armed before upload");
+    assert.equal(interrupted.current_job.attempt_object, key, "attempt key is durable before upload");
+    assert.equal(key, h.job.object.replace(/\.tar\.gz$/, ".a1.tar.gz"));
+    bucket.write(key, "archive", options.customMetadata);
+    return (await bucket.head(key)).size;
+  } });
+  await h.instance.fetch(h.request());
+  assert.equal(interrupted.current_job.attempts, 1);
+  await h.storage.put("account-backups", interrupted);
+  h.storage.alarm = null;
+  const cold = coldBackup(h, {
+    fetch: () => assert.fail("completed stream recovery attempted an export"),
+    validateArchive: (_bucket, key) => {
+      assert.equal(key, interrupted.current_job.attempt_object);
+      return validVerification(h.job);
+    },
+  });
+  const head = h.bucket.head.bind(h.bucket);
+  h.bucket.head = async (key) => {
+    assert.ok(h.storage.alarm, "recovery alarm is armed before R2 I/O");
+    assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+    assert.equal(key, interrupted.current_job.attempt_object);
+    return head(key);
+  };
+  assert.equal((await cold.instance.alarm()).status, "accepted");
+  assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+  const result = await cold.instance.alarm();
+  assert.equal(result.status, "committed");
+  assert.equal(result.recovered_existing_object, true);
+  assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+  assert.equal(result.backup.object, interrupted.current_job.attempt_object ?? interrupted.current_job.object);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("failed recovery probes exhaust the stream budget and release the next generation", async () => {
+  const h = runtime({ maxAttempts: 2 });
+  await h.instance.fetch(h.request("/start"));
+  const next = backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1);
+  let probes = 0;
+  h.bucket.head = async () => {
+    assert.ok(h.storage.alarm, "recovery alarm is armed before the probe");
+    probes++;
+    throw new Error("private R2 diagnostic https://private.test/archive");
+  };
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    h.storage.alarm = null;
+    const cold = coldBackup(h, { fetch: () => assert.fail("failed probe must not export") });
+    const result = await cold.instance.alarm();
+    const state = h.storage.values.get("account-backups");
+    assert.equal(result.status, attempt === 2 ? "failed" : "retrying");
+    assert.equal(result.attempts, attempt);
+    assert.equal(state.current_job.attempts, attempt, "probe charge is durable across cold invocations");
+    assert.deepEqual(state.current_job.attempt_errors, Array.from({ length: attempt }, (_, i) => ({
+      attempt: i + 1, stage: "stream", at: NOW.toISOString(), error: "backup_recovery_probe_failed",
+    })));
+    assert.equal(validateAccountBackupState(state, ACCOUNT), state);
+    assert.equal(state.current_job.last_error,
+      attempt === 2 ? "backup retry budget exhausted" : "backup_recovery_probe_failed");
+    if (attempt === 2) {
+      assert.deepEqual(state.failures, [state.current_job]);
+      assert.equal(h.storage.alarm, null);
+      await coldBackup(h).instance.alarm();
+      assert.equal(probes, 2, "terminal jobs never probe again");
+    } else {
+      assert.ok(h.storage.alarm > NOW.getTime());
+      assert.deepEqual(state.failures, []);
+    }
+    const response = await cold.instance.fetch(h.request("/start", next));
+    assert.equal(response.status, attempt === 2 ? 202 : 200);
+    assert.equal((await response.json()).status, attempt === 2 ? "accepted" : "busy");
+  }
+  assert.equal(h.storage.values.get("account-backups").current_job.backup_id, next.backup_id);
+});
+
+test("one failed recovery probe followed by a successful probe and stream counts once", async () => {
+  const h = runtime({ maxAttempts: 2 });
+  await h.instance.fetch(h.request("/start"));
+  const head = h.bucket.head.bind(h.bucket);
+  let probes = 0;
+  h.bucket.head = async (key) => {
+    assert.ok(h.storage.alarm, "recovery alarm is armed before R2 I/O");
+    if (++probes === 1) throw new Error("R2 unavailable");
+    if (probes === 2) {
+      assert.equal(h.storage.values.get("account-backups").current_job.attempts, 1);
+      assert.equal(await head(key), null, "successful absent probe is free");
+    }
+    return head(key);
+  };
+  assert.equal((await coldBackup(h).instance.alarm()).status, "retrying");
+  assert.equal((await coldBackup(h).instance.alarm()).status, "accepted");
+  const streamed = h.storage.values.get("account-backups").current_job;
+  assert.equal(streamed.attempts, 2, "one failed probe plus one stream uses two attempts");
+  assert.equal(streamed.attempt_object, h.job.object.replace(/\.tar\.gz$/, ".a2.tar.gz"));
+  const result = await coldBackup(h, { fetch: () => assert.fail("verification must not export") }).instance.alarm();
+  assert.equal(result.status, "committed");
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.current_job.attempts, 2);
+  assert.deepEqual(state.current_job.attempt_errors, [
+    { attempt: 1, stage: "stream", at: NOW.toISOString(), error: "backup_recovery_probe_failed" },
+  ]);
+  assert.deepEqual(state.failures, []);
+  assert.equal(h.storage.alarm, null);
+});
+
+for (const maxAttempts of [1, 3]) {
+  test(`failed recovery probe preserves the completed attempt key (max attempts: ${maxAttempts})`, async () => {
+    let interrupted;
+    const h = runtime({ maxAttempts, streamArchive: async (bucket, key, _body, options) => {
+      bucket.write(key, "archive", options.customMetadata);
+      interrupted = structuredClone(h.storage.values.get("account-backups"));
+      return (await bucket.head(key)).size;
+    } });
+    await h.instance.fetch(h.request());
+    await h.storage.put("account-backups", interrupted);
+    const key = interrupted.current_job.attempt_object;
+    const head = h.bucket.head.bind(h.bucket);
+    h.bucket.head = async (object) => {
+      assert.ok(h.storage.alarm, "recovery alarm is armed before the probe");
+      assert.equal(object, key);
+      throw new Error("R2 unavailable");
+    };
+    const cold = () => coldBackup(h, { fetch: () => assert.fail("completed object must not export again") });
+    assert.equal((await cold().instance.alarm()).status, maxAttempts === 1 ? "failed" : "retrying");
+    let state = h.storage.values.get("account-backups");
+    assert.equal(state.current_job.attempts, Math.min(2, maxAttempts));
+    assert.equal(state.current_job.attempt_object, key);
+    assert.equal(state.current_job.attempt_errors.at(-1).error, "backup_recovery_probe_failed");
+    assert.equal(validateAccountBackupState(state, ACCOUNT), state);
+    if (maxAttempts === 1) {
+      assert.equal(state.current_job.last_error, "backup retry budget exhausted");
+      assert.deepEqual(state.failures, [state.current_job]);
+      assert.equal(h.storage.alarm, null);
+    } else {
+      h.bucket.head = async (object) => {
+        assert.equal(object, key, "probe charge must preserve the existing upload's key");
+        return head(object);
+      };
+      assert.equal((await cold().instance.alarm()).status, "accepted");
+      assert.equal((await cold().instance.alarm()).status, "committed");
+      state = h.storage.values.get("account-backups");
+      assert.equal(state.current_job.attempts, 2, "successful present probe is free");
+      assert.equal(state.catalog[0].object, key);
+      assert.equal(h.storage.alarm, null);
+    }
+  });
+}
+
+test("lost commit acknowledgement preserves the committed backup", async () => {
+  const h = runtime({ maxAttempts: 1 });
+  await h.instance.fetch(h.request());
+  const put = h.storage.put.bind(h.storage);
+  let committed;
+  h.storage.put = async (key, value) => {
+    assert.ok(committed === undefined, "a lost acknowledgement must not overwrite the durable commit");
+    await put(key, value);
+    if (key === "account-backups" && value.current_job.status === "committed") {
+      committed = structuredClone(value);
+      throw new Error("commit acknowledgement lost");
+    }
+  };
+  const result = await h.instance.alarm();
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.backup, committed.catalog[0]);
+  assert.deepEqual(h.storage.values.get("account-backups"), committed);
+  assert.deepEqual(committed.failures, []);
+  assert.equal(committed.current_job.attempt_errors, undefined);
+  assert.equal(h.storage.alarm, null);
+  const retry = await h.instance.fetch(h.request("/start"));
+  assert.equal((await retry.json()).status, "committed");
+});
+
+test("stream persists a verify checkpoint; a fresh invocation commits even on the final stream attempt", async () => {
+  const h = runtime({ maxAttempts: 1, validateArchive: () => assert.fail("stream invocation verified") });
+  await h.instance.fetch(h.request("/start", { catalog_limit: 1 }));
+  assert.equal((await h.instance.alarm()).status, "accepted");
+  const state = h.storage.values.get("account-backups");
+  const job = state.current_job;
+  assert.equal(job.stage, "verify");
+  assert.equal(job.status, "pending");
+  assert.equal(job.attempts, 1);
+  assert.equal(job.verify_attempts, 0);
+  assert.equal(job.streamed_at, NOW.toISOString());
+  assert.equal(job.streamed_size, (await h.bucket.head(job.attempt_object)).size);
+  assert.equal(job.retry_at, NOW.toISOString());
+  assert.equal(job.catalog_limit, 1);
+  assert.equal(h.storage.alarm, NOW.getTime());
+  assert.deepEqual(state.catalog, []);
+  h.storage.alarm = null;
+  const cold = coldBackup(h, { fetch: () => assert.fail("verify invocation streamed") });
+  await cold.instance.fetch(h.request("/start"));
+  assert.equal(h.storage.alarm, NOW.getTime(), "idempotent start repairs the handoff alarm");
+  // Preserve the original caller's catalog limit across the alarm boundary.
+  const prior = committedRecord(backupJobIdentity(ACCOUNT, SCHEDULED_AT - 24 * 60 * 60_000, 1));
+  state.catalog.push(prior);
+  assert.equal((await cold.instance.alarm()).status, "committed");
+  const committed = h.storage.values.get("account-backups");
+  assert.equal(committed.catalog.length, 1);
+  assert.equal(committed.current_job.attempts, 1);
+  assert.equal(committed.current_job.verify_attempts, 1);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("killed verify invocation resumes verification without another stream", async () => {
+  const h = runtime();
+  await h.instance.fetch(h.request());
+  let killedState;
+  let verifications = 0;
+  h.instance.validateArchive = () => {
+    verifications++;
+    killedState = structuredClone(h.storage.values.get("account-backups"));
+    return validVerification(h.job);
+  };
+  await h.instance.alarm();
+  assert.equal(killedState.current_job.verify_attempts, 1, "counter persisted before verifier I/O");
+  // Restore exactly the durable boundary a platform kill would leave behind.
+  await h.storage.put("account-backups", killedState);
+  const cold = coldBackup(h, {
+    fetch: () => assert.fail("killed verification re-streamed"),
+    validateArchive: () => { verifications++; return validVerification(h.job); },
+  });
+  assert.equal((await cold.instance.alarm()).status, "committed");
+  const job = h.storage.values.get("account-backups").current_job;
+  assert.equal(job.attempts, 1);
+  assert.equal(job.verify_attempts, 2);
+  assert.equal(verifications, 2);
+  assert.deepEqual(job.attempt_errors, [{ attempt: 1, stage: "verify", at: NOW.toISOString(), error: "backup_verify_interrupted" }]);
+});
+
+for (const killed of [false, true]) {
+  test(`verification is bounded to two invocations per object (killed: ${killed})`, async () => {
+    let calls = 0;
+    const h = runtime({ validateArchive: () => {
+      calls++;
+      throw new Error("private provider diagnostic");
+    } });
+    await h.instance.fetch(h.request());
+    for (let n = 1; n <= 2; n++) {
+      assert.equal((await coldBackup(h, { validateArchive: h.instance.validateArchive }).instance.alarm()).status, "retrying");
+      const state = h.storage.values.get("account-backups");
+      assert.equal(state.current_job.attempts, 1);
+      assert.equal(state.current_job.verify_attempts, n);
+      if (killed) {
+        state.current_job.status = "running";
+        await h.storage.put("account-backups", state);
+      }
+    }
+    assert.equal(calls, 2);
+    assert.equal((await h.instance.alarm()).status, "retrying");
+    assert.equal(calls, 2, "third entry only discards, never verifies");
+    assert.deepEqual(h.bucket.deleted, [h.storage.values.get("account-backups").current_job.attempt_object]);
+    let job = h.storage.values.get("account-backups").current_job;
+    assert.equal(job.stage, "stream");
+    assert.equal(job.verify_attempts, 0);
+    assert.equal(job.streamed_size, undefined);
+    assert.equal(job.attempt_errors.at(-1).error, "backup verify budget exhausted");
+    assert.equal(job.attempt_errors.at(-1).stage, "verify");
+    assert.equal((await h.instance.alarm()).status, "accepted");
+    job = h.storage.values.get("account-backups").current_job;
+    assert.equal(job.attempts, 2, "restream consumes the next stream attempt");
+    assert.equal(job.verify_attempts, 0);
+  });
+}
+
+test("integrity failure deletes the object, records a safe reason and schedules a separate stream", async () => {
+  const h = runtime({ validateArchive: () => { throw new ArchiveIntegrityError("bad archive accounts/private/key https://private.test"); } });
+  await h.instance.fetch(h.request());
+  assert.equal((await h.instance.alarm()).status, "retrying");
+  const job = h.storage.values.get("account-backups").current_job;
+  assert.deepEqual(h.bucket.deleted, [job.attempt_object]);
+  assert.equal(job.stage, "stream");
+  assert.equal(job.attempts, 1);
+  assert.equal(job.last_error, "archive_integrity_failed");
+  assert.deepEqual(job.attempt_errors, [{ attempt: 1, stage: "verify", at: NOW.toISOString(), error: "archive_integrity_failed" }]);
+  assert.ok(h.storage.alarm > NOW.getTime());
+});
+
+test("failed handoff alarm acknowledgement preserves the durable verify checkpoint", async () => {
+  const h = runtime({ maxAttempts: 1 });
+  const setAlarm = h.storage.setAlarm.bind(h.storage);
+  h.storage.setAlarm = async (at) => {
+    if (h.storage.values.get("account-backups")?.current_job.stage === "verify" && at === NOW.getTime()) {
+      throw new Error("alarm acknowledgement lost");
+    }
+    return setAlarm(at);
+  };
+  assert.equal((await (await h.instance.fetch(h.request())).json()).status, "retrying");
+  const job = h.storage.values.get("account-backups").current_job;
+  assert.equal(job.stage, "verify");
+  assert.equal(job.verify_attempts, 0);
+  assert.equal(job.attempts, 1);
+  assert.equal((await coldBackup(h, { fetch: () => assert.fail("handoff re-streamed") }).instance.alarm()).status, "committed");
+});
+
+test("zero-byte existing object reaches verification and is discarded", async () => {
+  const h = runtime();
+  h.bucket.write(h.job.object, "", objectMetadata(h.job));
+  assert.equal((await (await h.instance.fetch(h.request())).json()).status, "accepted");
+  assert.equal((await h.instance.alarm()).status, "retrying");
+  assert.deepEqual(h.bucket.deleted, [h.job.object]);
+  assert.equal(h.storage.values.get("account-backups").current_job.stage, "stream");
+});
+
+for (const mode of ["pending", "running", "completed-final-stream"]) {
+  test(`old-shape persisted ${mode} state validates and resumes`, async () => {
+    const h = runtime();
+    await h.instance.fetch(h.request("/start"));
+    const legacy = h.storage.values.get("account-backups");
+    delete legacy.current_job.catalog_limit;
+    if (mode !== "pending") {
+      legacy.current_job.status = "running";
+      legacy.current_job.attempts = mode === "running" ? 1 : 3;
+    }
+    if (mode === "completed-final-stream") h.bucket.write(h.job.object, "archive", objectMetadata(h.job));
+    assert.equal(validateAccountBackupState(legacy, ACCOUNT), legacy);
+    const cold = coldBackup(h, mode === "completed-final-stream" ? { fetch: () => assert.fail("final completed stream was re-exported") } : {});
+    assert.equal((await cold.instance.alarm()).status, "accepted");
+    assert.equal(h.storage.values.get("account-backups").current_job.catalog_limit, 8);
+    if (mode === "completed-final-stream") {
+      assert.equal(h.storage.values.get("account-backups").current_job.attempts, 3);
+      assert.equal(h.storage.values.get("account-backups").current_job.attempt_object, undefined);
+    }
+    assert.equal((await cold.instance.alarm()).status, "committed");
+    if (mode === "completed-final-stream") {
+      assert.equal(h.storage.values.get("account-backups").catalog[0].object, h.job.object);
+    }
+  });
+}
+
+test("attempt errors retain the newest eight value-free entries in terminal history and status", async () => {
+  let n = 0;
+  const h = runtime({ maxAttempts: 10, fetch: () => {
+    n++;
+    if (n <= 2) throw new Error("Authorization: Bearer synthetic-private-token https://private.test/path\n    at secret stack");
+    if (n === 3) throw new Error("unlabelled-account-secret");
+    throw new Error(`backup export ${500 + n}`);
+  } });
+  await h.instance.fetch(h.request());
+  assert.equal(h.storage.values.get("account-backups").current_job.attempt_errors[0].error, "backup failed");
+  for (let i = 1; i < 10; i++) await h.instance.alarm();
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.current_job.status, "failed");
+  assert.equal(state.current_job.attempt_errors.length, 8);
+  assert.deepEqual(state.current_job.attempt_errors.map((entry) => entry.attempt), [3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(state.current_job.attempt_errors[0].error, "backup failed");
+  assert.equal(state.current_job.attempt_errors.at(-1).error, "backup export 510");
+  assert.deepEqual(state.failures[0].attempt_errors, state.current_job.attempt_errors);
+  const status = (await accountBackupStatus({
+    ...h.instance.env,
+    ACCOUNT_BACKUP: { idFromName: (name) => ({ name }), get: () => h.instance },
+  }, ACCOUNT)).account;
+  assert.deepEqual(status.backups.failures[0].attempt_errors, state.current_job.attempt_errors);
+  assert.equal(status.last_committed_at, null);
+  const history = JSON.stringify(status.backups.current_job.attempt_errors);
+  for (const privateValue of ["synthetic-private-token", "https://", "Authorization", "stack", "unlabelled-account-secret"]) {
+    assert.equal(history.includes(privateValue), false);
+  }
+});
+
+test("state validation rejects malformed additive fields on jobs and failure records", async () => {
+  const h = runtime();
+  await h.instance.fetch(h.request("/start"));
+  const base = h.storage.values.get("account-backups");
+  base.current_job.attempts = 1;
+  const entry = { attempt: 1, stage: "stream", at: NOW.toISOString(), error: "backup failed" };
+  const malformed = [
+    { stage: "other" }, { streamed_at: "invalid" }, { streamed_size: 0 },
+    { streamed_size: 1.5 }, { verify_attempts: -1 }, { verify_attempts: 3 },
+    { verify_attempts: "1" }, { verify_cleanup_attempts: -1 }, { verify_cleanup_attempts: 3 },
+    { verify_cleanup_attempts: "1" }, { recovered_existing_object: "true" },
+    { catalog_limit: 0 }, { catalog_limit: 257 },
+    { attempt_object: null }, { attempt_object: 1 }, { attempt_object: "" },
+    { attempt_object: "x".repeat(1025) }, { attempt_object: "bad\nkey" },
+    { attempt_object: base.current_job.object },
+    ...["0", "01", "1.5", "9007199254740993"].map((attempt) => ({
+      attempt_object: base.current_job.object.replace(/\.tar\.gz$/, `.a${attempt}.tar.gz`),
+    })),
+    { attempt_object: "other-base.a1.tar.gz" },
+    { attempt_object: base.current_job.object.replace(/\.tar\.gz$/, ".a2.tar.gz") },
+    { attempts: 0, attempt_object: base.current_job.object.replace(/\.tar\.gz$/, ".a0.tar.gz") },
+    { attempt_errors: null }, { attempt_errors: Array(9).fill(entry) },
+    { attempt_errors: Array(1) }, { attempt_errors: [null] },
+    ...[{ attempt: -1 }, { attempt: 2 }, { attempt: 0.5 }, { stage: "other" },
+      { at: "invalid" }, { error: "" }, { error: "x".repeat(301) },
+      { error: "https://private.test" }, { error: "backup failed\nstack" },
+      { error: 123 }, { extra: "private" }].map((patch) => ({ attempt_errors: [{ ...entry, ...patch }] })),
+  ];
+  for (const patch of malformed) {
+    for (const failed of [false, true]) {
+      const state = structuredClone(base);
+      const job = { ...state.current_job, ...patch };
+      if (failed) { job.status = "failed"; state.failures = [job]; }
+      else state.current_job = job;
+      assert.throws(() => validateAccountBackupState(state, ACCOUNT), /state is invalid/);
+    }
+  }
+  base.current_job.attempt_errors = [entry];
+  base.current_job.attempt_object = base.current_job.object.replace(/\.tar\.gz$/, ".a1.tar.gz");
+  assert.equal(validateAccountBackupState(base, ACCOUNT), base);
+  base.current_job.attempts = 2;
+  assert.equal(validateAccountBackupState(base, ACCOUNT), base, "probe charges preserve an earlier upload key");
+});
+
+test("verify deadline cancels a real archive reader and remains retryable on the last stream attempt", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+  assert.equal(VERIFY_TIMEOUT_MS, 10 * 60_000);
+  const h = runtime({ maxAttempts: 1 });
+  await h.instance.fetch(h.request());
+  let cancelled = false;
+  h.bucket.get = async () => ({ body: new ReadableStream({ cancel() { cancelled = true; return new Promise(() => {}); } }) });
+  h.instance.validateArchive = validateCommittedAccountArchive;
+  const verifying = h.instance.alarm();
+  await flush();
+  t.mock.timers.tick(VERIFY_TIMEOUT_MS - 1);
+  await flush();
+  assert.equal(cancelled, false);
+  t.mock.timers.tick(1);
+  assert.equal((await verifying).status, "retrying");
+  await flush();
+  assert.equal(cancelled, true);
+  const job = h.storage.values.get("account-backups").current_job;
+  assert.equal(job.stage, "verify");
+  assert.equal(job.verify_attempts, 1);
+  assert.equal(job.last_error, "backup_verify_timeout");
+  assert.equal(job.attempt_errors.at(-1).error, "backup_verify_timeout");
+  assert.deepEqual(h.bucket.deleted, []);
+  assert.ok(h.storage.alarm > NOW.getTime());
+});
+
+test("late validator resolution after the verify deadline cannot commit", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+  const late = deferred();
+  const h = runtime({ validateArchive: () => late.promise });
+  await h.instance.fetch(h.request());
+  const verifying = h.instance.alarm();
+  await flush();
+  t.mock.timers.tick(VERIFY_TIMEOUT_MS);
+  assert.equal((await verifying).status, "retrying");
+  late.resolve(validVerification(h.job));
+  await flush();
+  assert.deepEqual(h.storage.values.get("account-backups").catalog, []);
+  assert.equal((await coldBackup(h).instance.alarm()).status, "committed");
+});
+
+test("watchdog coalesces idle resets, preserves final-byte deadline and keeps one body listener", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+  assert.equal(OVERALL_TIMEOUT_MS, 13 * 60_000);
+  assert.equal(IDLE_TIMEOUT_MS, 120_000);
+  const timer = t.mock.method(globalThis, "setTimeout");
+  const watchdog = new ExportWatchdog();
+  let source;
+  const reader = watchdog.body(new ReadableStream({ start(controller) { source = controller; } })).getReader();
+  const initialTimers = timer.mock.callCount();
+  for (let i = 0; i < 1000; i++) {
+    source.enqueue(new Uint8Array([1]));
+    await reader.read();
+  }
+  assert.equal(timer.mock.callCount(), initialTimers);
+  assert.equal(getEventListeners(watchdog.signal, "abort").length, 1);
+  t.mock.timers.tick(1000);
+  source.enqueue(new Uint8Array([2]));
+  await reader.read();
+  assert.equal(timer.mock.callCount(), initialTimers + 1);
+  t.mock.timers.tick(999);
+  source.enqueue(new Uint8Array([3]));
+  await reader.read();
+  assert.equal(timer.mock.callCount(), initialTimers + 1);
+  t.mock.timers.tick(IDLE_TIMEOUT_MS - 999);
+  assert.equal(watchdog.signal.aborted, false, "coalesced final progress must not expire early");
+  t.mock.timers.tick(999);
+  assert.equal(watchdog.signal.reason.message, "export_idle_timeout");
+  assert.equal(getEventListeners(watchdog.signal, "abort").length, 0);
+  await assert.rejects(reader.read(), /export_idle_timeout/);
+  watchdog.close();
+});
+
+test("verify exhaustion fails terminally after the final stream and retains both histories", async () => {
+  const h = runtime({ maxAttempts: 1, validateArchive: () => { throw new Error("unreadable provider response"); } });
+  await h.instance.fetch(h.request());
+  for (let n = 0; n < 2; n++) assert.equal((await h.instance.alarm()).status, "retrying");
+  assert.equal((await h.instance.alarm()).status, "failed");
+  const state = h.storage.values.get("account-backups");
+  assert.equal(state.current_job.attempts, 1);
+  assert.equal(state.failures[0].attempt_errors.length, 3);
+  assert.deepEqual(state.failures[0].attempt_errors.map((e) => e.stage), ["verify", "verify", "verify"]);
+  assert.deepEqual(h.bucket.deleted, [state.current_job.attempt_object]);
+  assert.equal(h.storage.alarm, null);
+});
+
+test("verify cleanup timeout retries deletion without a third validation", { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+  const h = runtime({ validateArchive: () => { throw new Error("unreadable"); } });
+  await h.instance.fetch(h.request());
+  await h.instance.alarm();
+  await h.instance.alarm();
+  const originalDelete = h.bucket.delete.bind(h.bucket);
+  h.bucket.delete = () => new Promise(() => {});
+  h.instance.validateArchive = () => assert.fail("third verification ran");
+  const cleanup = h.instance.alarm();
+  await flush();
+  t.mock.timers.tick(VERIFY_TIMEOUT_MS);
+  assert.equal((await cleanup).status, "retrying");
+  const job = h.storage.values.get("account-backups").current_job;
+  assert.equal(job.verify_attempts, 2);
+  assert.equal(job.stage, "verify");
+  assert.equal(job.last_error, "backup_verify_timeout");
+  h.bucket.delete = originalDelete;
+  assert.equal((await h.instance.alarm()).status, "retrying");
+  assert.equal(h.storage.values.get("account-backups").current_job.stage, "stream");
+});
+
+for (const phase of ["r2-open", "precommit-source"]) {
+  test(`late ${phase} after verify timeout cannot publish or retain a new body`, { timeout: 10_000 }, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+    const h = runtime();
+    await h.instance.fetch(h.request());
+    const late = deferred();
+    let cancelled = false;
+    if (phase === "r2-open") {
+      h.bucket.get = () => late.promise;
+      h.instance.validateArchive = validateCommittedAccountArchive;
+    } else {
+      h.instance.sourceCell = () => late.promise;
+    }
+    const verifying = h.instance.alarm();
+    await flush();
+    t.mock.timers.tick(VERIFY_TIMEOUT_MS);
+    assert.equal((await verifying).status, "retrying");
+    const revision = h.storage.values.get("account-backups").revision;
+    late.resolve(phase === "r2-open"
+      ? { body: new ReadableStream({ cancel() { cancelled = true; } }) }
+      : sourceCell());
+    await flush();
+    assert.equal(h.storage.values.get("account-backups").revision, revision);
+    assert.deepEqual(h.storage.values.get("account-backups").catalog, []);
+    assert.equal(cancelled, phase === "r2-open");
+  });
+}
+
+for (const mode of ["rejected", "timeout", "killed"]) {
+  test(`cleanup ${mode} cannot keep an unverifiable generation busy forever`, { timeout: 10_000 }, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW.getTime() });
+    const h = runtime({ validateArchive: () => { throw new Error("unreadable"); } });
+    await h.instance.fetch(h.request());
+    await h.instance.alarm();
+    await h.instance.alarm();
+    let deletions = 0;
+    let killedState;
+    h.bucket.delete = () => {
+      deletions++;
+      killedState = structuredClone(h.storage.values.get("account-backups"));
+      if (mode === "timeout") return new Promise(() => {});
+      throw new Error("private delete failure");
+    };
+    h.instance.validateArchive = () => assert.fail("cleanup performed another verification");
+    for (let n = 1; n <= 2; n++) {
+      const running = h.instance.alarm();
+      await flush();
+      if (mode === "timeout") t.mock.timers.tick(VERIFY_TIMEOUT_MS);
+      assert.equal((await running).status, n === 1 ? "retrying" : "failed");
+      assert.equal(killedState.current_job.verify_cleanup_attempts, n, "cleanup count persisted before I/O");
+      if (mode === "killed") await h.storage.put("account-backups", killedState);
+    }
+    if (mode === "killed") assert.equal((await coldBackup(h).instance.alarm()).status, "failed");
+    const state = h.storage.values.get("account-backups");
+    assert.equal(state.current_job.status, "failed");
+    assert.equal(state.current_job.verify_attempts, 2);
+    assert.equal(state.current_job.attempts, 1);
+    assert.equal(deletions, 2);
+    assert.equal(state.catalog.length, 0);
+    assert.equal(state.failures.length, 1);
+    assert.equal(h.storage.alarm, null);
+    assert.equal((await h.instance.fetch(h.request("/start", backupJobIdentity(ACCOUNT, SCHEDULED_AT + 60_000, 1)))).status, 202);
+  });
+}
