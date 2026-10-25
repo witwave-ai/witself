@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/id"
@@ -514,7 +513,10 @@ func (c *Cell) postmaster() (int, error) {
 	if err != nil {
 		return 0, errors.New("cannot read PostgreSQL process record")
 	}
-	lines := strings.Split(string(data), "\n")
+	if pid, handled, err := c.pendingPostmasterPID(data); handled || err != nil {
+		return pid, err
+	}
+	lines := postmasterLines(data)
 	if len(lines) < 3 || filepath.Clean(lines[1]) != c.path("pg") {
 		return 0, errors.New("PostgreSQL data directory identity mismatch")
 	}
@@ -539,7 +541,7 @@ func (c *Cell) verifyAll() error {
 			return errors.New("local cell process identity mismatch; refusing to signal")
 		}
 		if component == "postgres" {
-			if state.Alive && pgPID != state.PID {
+			if state.Alive && pgPID != state.PID && !c.pendingPostgresWithoutPID(state, pgPID) {
 				return errors.New("PostgreSQL process ownership is unproven; refusing to signal")
 			}
 			if pgPID != 0 {
@@ -551,28 +553,6 @@ func (c *Cell) verifyAll() error {
 		}
 	}
 	return nil
-}
-
-func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
-	if err := c.verifyAll(); err != nil {
-		return err
-	}
-	state, err := c.processState("postgres")
-	if err != nil || state.Alive {
-		return err
-	}
-	if err := c.pgCommand(ctx, "pg_ctl", "start", "-D", c.path("pg"), "-l", c.path("logs", "postgres.log"), "-w", "-t", strconv.Itoa(max(1, int(c.cfg.Timeout.Seconds())))); err != nil {
-		return err
-	}
-	pid, err := c.postmaster()
-	if err != nil || pid == 0 {
-		return errors.New("PostgreSQL did not publish process ownership")
-	}
-	identity, alive, err := processIdentity(pid)
-	if err != nil || !alive {
-		return errors.New("cannot verify started PostgreSQL identity")
-	}
-	return writeAtomic(c.path("run", "postgres.json"), ProcessRecord{PID: pid, StartTime: identity, Root: c.cfg.Root, Component: "postgres"}, nil)
 }
 
 // recoverPostgresRecord is permitted only by a recorded, interrupted postgres
@@ -597,7 +577,7 @@ func (c *Cell) recoverPostgresRecord() error {
 	if err != nil {
 		return errors.New("cannot read PostgreSQL recovery identity")
 	}
-	lines := strings.Split(string(data), "\n")
+	lines := postmasterLines(data)
 	if len(lines) < 3 || filepath.Clean(lines[1]) != c.path("pg") || lines[0] != strconv.Itoa(pid) {
 		return errors.New("PostgreSQL recovery record changed")
 	}
@@ -645,8 +625,8 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 		if !state.Matches {
 			return errors.New("local cell process identity mismatch; refusing to signal")
 		}
-		if err := signalTerminate(state.PID); err != nil {
-			return errors.New("cannot terminate local cell component")
+		if err := c.terminateChild(ctx, component, state); err != nil {
+			return err
 		}
 		for {
 			current, err := c.processState(component)
@@ -673,5 +653,8 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 	if err != nil || !state.Alive {
 		return err
 	}
-	return c.pgCommand(ctx, "pg_ctl", "stop", "-D", c.path("pg"), "-m", "fast", "-w", "-t", strconv.Itoa(max(1, int(c.cfg.Timeout.Seconds()))))
+	if handled, err := c.terminatePendingPostgres(ctx, state); handled || err != nil {
+		return err
+	}
+	return c.stopPostgres(ctx, state)
 }

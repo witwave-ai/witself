@@ -13,11 +13,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Keep identity and control on the same OpenProcess boundary. Tests inject an
+// access refusal here because enabled SeDebugPrivilege bypasses process DACLs.
+var windowsOpenProcess = windows.OpenProcess
+
 func processIdentity(pid int) (string, bool, error) {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return "", false, errors.New("localcell: invalid process ID")
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
+	handle, err := windowsOpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return "", false, nil
 	}
@@ -25,6 +29,17 @@ func processIdentity(pid int) (string, bool, error) {
 		return "", false, errors.New("localcell: cannot verify process creation time")
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
+	return windowsProcessIdentity(handle)
+}
+
+// windowsProcessIdentity uses the retained kernel object, never a second PID
+// lookup. The same helper fences suspended publication and shutdown.
+func windowsProcessIdentity(handle windows.Handle) (string, bool, error) {
+	// INVALID_HANDLE_VALUE is also GetCurrentProcess's pseudo-handle. It can
+	// answer process queries, but cannot fence a retained child kernel object.
+	if handle == 0 || handle == windows.InvalidHandle {
+		return "", false, errors.New("localcell: invalid process identity handle")
+	}
 	state, err := windows.WaitForSingleObject(handle, 0)
 	if err != nil {
 		return "", false, errors.New("localcell: cannot verify process liveness")
@@ -46,16 +61,16 @@ func signalTerminate(pid int) error {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return errors.New("localcell: invalid process ID")
 	}
-	// Windows has no SIGTERM. A dedicated child process group permits the
-	// console's graceful shutdown event without notifying unrelated processes.
-	return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+	// PID-only console control cannot establish ownership. Windows callers must
+	// use terminateChild, which retains and verifies the durable identity fence.
+	return errors.New("localcell: process identity is required before signaling")
 }
 
 func processStartedAt(pid int) (time.Time, error) {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return time.Time{}, errors.New("localcell: invalid process ID")
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
+	handle, err := windowsOpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
 		return time.Time{}, errors.New("localcell: cannot verify process creation time")
 	}

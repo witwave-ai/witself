@@ -46,16 +46,6 @@ func allocatePorts() (Ports, error) {
 
 func addr(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) }
 
-func (c *Cell) baseEnvironment() []string {
-	return []string{
-		"PATH=" + c.cfg.Binaries.PostgresDir,
-		"HOME=" + c.path("home"),
-		"TMPDIR=" + c.path("tmp"),
-		"TEMP=" + c.path("tmp"),
-		"TMP=" + c.path("tmp"),
-	}
-}
-
 func (c *Cell) password() (string, error) {
 	path := c.path("run", "postgres.password")
 	info, err := os.Lstat(path)
@@ -87,7 +77,11 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 	if component == "worker" {
 		health, metrics = m.Ports.WorkerHealth, m.Ports.WorkerMetrics
 	}
-	environment := append(c.baseEnvironment(),
+	environment, err := c.baseEnvironment()
+	if err != nil {
+		return nil, err
+	}
+	environment = appendEnvironment(environment,
 		"WITSELF_RUNTIME=local",
 		"WITSELF_DATABASE_URL="+dsn.String(),
 		"WITSELF_API_ADDR="+addr(m.Ports.ServerAPI),
@@ -97,16 +91,20 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 		"WITSELF_LOCAL_JOBS="+strings.Join(c.cfg.Jobs, ","),
 	)
 	if m.AccountID != "" {
-		environment = append(environment, "WITSELF_LOCAL_ACCOUNT_ID="+m.AccountID)
+		environment = appendEnvironment(environment, "WITSELF_LOCAL_ACCOUNT_ID="+m.AccountID)
 	}
 	return environment, nil
 }
 
-func (c *Cell) command(ctx context.Context, binary string, args ...string) *exec.Cmd {
+func (c *Cell) command(ctx context.Context, binary string, args ...string) (*exec.Cmd, error) {
+	environment, err := c.baseEnvironment()
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.Env = c.baseEnvironment()
+	cmd.Env = environment
 	cmd.Dir = c.cfg.Root
-	return cmd
+	return cmd, nil
 }
 
 func (c *Cell) logFile(component string) (*os.File, error) {
@@ -130,11 +128,18 @@ func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	cmd := c.command(ctx, filepath.Join(c.cfg.Binaries.PostgresDir, executable(tool)), args...)
+	cmd, err := c.command(ctx, filepath.Join(c.cfg.Binaries.PostgresDir, executable(tool)), args...)
+	if err != nil {
+		return err
+	}
+	cmd.Env, err = c.postgresEnvironment()
+	if err != nil {
+		return err
+	}
 	// PostgreSQL tools need a valid locale; on macOS a postmaster started without
 	// one aborts ("became multithreaded during startup"). The server and worker
 	// children keep the exact allowlist and do not receive these.
-	cmd.Env = append(cmd.Env, "LC_ALL=C", "LANG=C")
+	cmd.Env = appendEnvironment(cmd.Env, "LC_ALL=C", "LANG=C")
 	cmd.Stdout, cmd.Stderr = log, log
 	if cmd.Run() != nil {
 		return errors.New("local cell PostgreSQL command failed")
@@ -153,7 +158,10 @@ func (c *Cell) reportedVersion(ctx context.Context, binary string) (string, erro
 	if !filepath.IsAbs(binary) {
 		return "", errors.New("component binary is required")
 	}
-	cmd := c.command(ctx, binary, "--version")
+	cmd, err := c.command(ctx, binary, "--version")
+	if err != nil {
+		return "", err
+	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	if cmd.Run() != nil || output.Len() > 1024 {
@@ -185,8 +193,15 @@ func (c *Cell) databaseCommand(ctx context.Context, _ *Manifest, tool string, ar
 	if err != nil {
 		return "", err
 	}
-	cmd := c.command(ctx, filepath.Join(c.cfg.Binaries.PostgresDir, executable(tool)), args...)
-	cmd.Env = append(cmd.Env, "PGPASSWORD="+password, "PGCONNECT_TIMEOUT=3", "LC_ALL=C", "LANG=C")
+	cmd, err := c.command(ctx, filepath.Join(c.cfg.Binaries.PostgresDir, executable(tool)), args...)
+	if err != nil {
+		return "", err
+	}
+	cmd.Env, err = c.postgresEnvironment()
+	if err != nil {
+		return "", err
+	}
+	cmd.Env = appendEnvironment(cmd.Env, "PGPASSWORD="+password, "PGCONNECT_TIMEOUT=3", "LC_ALL=C", "LANG=C")
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	// Do not propagate database errors, SQL, or connection strings to callers.
@@ -227,48 +242,7 @@ func (c *Cell) startChild(m *Manifest, component string) error {
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	// Deliberately not CommandContext: a successful Start transfers lifetime to
-	// the persisted PID record, independent of the invoking harness's lifetime.
-	cmd, err := childCommand(binary, c.cfg.Root, component)
-	if err != nil {
-		return err
-	}
-	cmd.Env, cmd.Dir = environment, c.cfg.Root
-	cmd.Stdout, cmd.Stderr = log, log
-	permit, err := cmd.StdinPipe()
-	if err != nil {
-		return errors.New("cannot create local cell launch handshake")
-	}
-	defer func() { _ = permit.Close() }()
-	configureProcessCommand(cmd)
-	if err := cmd.Start(); err != nil {
-		return errors.New("cannot launch local cell component")
-	}
-	go func() { _ = cmd.Wait() }()
-	identity, alive, err := processIdentity(cmd.Process.Pid)
-	if err != nil || !alive {
-		return errors.New("cannot identify launched local cell component")
-	}
-	deadline := time.Now().Add(c.cfg.Timeout)
-	for time.Now().Before(deadline) {
-		state, stateErr := c.processState(component)
-		if stateErr == nil && state.PID == cmd.Process.Pid && state.Alive && state.Matches {
-			if _, err := permit.Write([]byte{1}); err != nil {
-				return errors.New("cannot authorize local cell component launch")
-			}
-			return nil
-		}
-		current, alive, identityErr := processIdentity(cmd.Process.Pid)
-		if identityErr != nil || !alive || current != identity {
-			return errors.New("local cell launch helper exited before publishing ownership")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	current, alive, identityErr := processIdentity(cmd.Process.Pid)
-	if identityErr == nil && alive && current == identity {
-		_ = signalTerminate(cmd.Process.Pid)
-	}
-	return errors.New("local cell launch ownership deadline exceeded")
+	return c.launchChild(binary, component, environment, log)
 }
 
 func ready(ctx context.Context, client *http.Client, port int) bool {

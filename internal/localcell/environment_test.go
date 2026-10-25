@@ -15,9 +15,6 @@ import (
 
 func buildEnvironmentNamesChild(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW2: native child launch and environment adapter is pending")
-	}
 	directory := t.TempDir()
 	source := filepath.Join(directory, "names.go")
 	const child = `package main
@@ -27,6 +24,7 @@ func main() {
   for _, entry := range os.Environ() { name, _, _ := strings.Cut(entry, "="); names = append(names, name) }
   sort.Strings(names)
   for _, name := range names { fmt.Println(name) }
+  if len(os.Args) > 1 { return }
   time.Sleep(time.Minute)
 }
 `
@@ -49,6 +47,11 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 	t.Setenv("PGHOST", "synthetic-parent-only")
 	t.Setenv("LC_ALL", "synthetic-parent-only")
 	t.Setenv("LANG", "synthetic-parent-only")
+	if runtime.GOOS == "windows" {
+		t.Setenv("SystemRoot", "synthetic-parent-only")
+		t.Setenv("COMSPEC", "synthetic-parent-only")
+		t.Setenv("USERPROFILE", "synthetic-parent-only")
+	}
 	for _, component := range []string{"server", "worker"} {
 		t.Run(component, func(t *testing.T) {
 			for _, bound := range []bool{false, true} {
@@ -66,6 +69,9 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 						t.Fatal(err)
 					}
 					want := []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "WITSELF_RUNTIME", "WITSELF_DATABASE_URL", "WITSELF_API_ADDR", "WITSELF_HEALTH_ADDR", "WITSELF_METRICS_ADDR", "WITSELF_LOCAL_SPOOL_DIR", "WITSELF_LOCAL_JOBS"}
+					if runtime.GOOS == "windows" {
+						want = append(want, "SystemRoot", "USERPROFILE")
+					}
 					if bound {
 						want = append(want, "WITSELF_LOCAL_ACCOUNT_ID")
 					}
@@ -80,7 +86,19 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 					t.Cleanup(func() {
 						identity, alive, err := processIdentity(record.PID)
 						if err == nil && alive && identity == record.StartTime {
-							_ = signalTerminate(record.PID)
+							if err := terminateEnvironmentFixture(record); err != nil {
+								t.Error("cannot terminate environment fixture for cleanup")
+								return
+							}
+							deadline := time.Now().Add(5 * time.Second)
+							for time.Now().Before(deadline) {
+								_, alive, err := processIdentity(record.PID)
+								if err == nil && !alive {
+									return
+								}
+								time.Sleep(10 * time.Millisecond)
+							}
+							t.Error("environment fixture remained alive after cleanup")
 						}
 					})
 					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
