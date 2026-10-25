@@ -36,6 +36,7 @@ and authenticated offline account-console access.
 |---|---|
 | [Fable handoff](fable-handoff.md) | One-link planning assignment, selected requirements and shared tracking instructions for Fable, Opus and Astra. |
 | [Implementation plan](implementation-plan.md) | Draft milestones, dependencies, first implementation batch, acceptance criteria and open decisions for Claude to refine. |
+| [Synchronization contract](sync-contract.md) | Draft M0c connected operation matrix, authority, capture, receipts, recovery and owned gates for LC-S5 and M4. |
 | [Code assessment and rollout plan](local-mode-code-assessment.md) | Recommendation, source-backed findings, infra CLI reuse, native installation, effort, staged canaries and grounds to revise the decision. |
 | [Product requirements and decisions](local-first-mode.md) | Discussion record, required behavior, authority, identity, capacity and open product questions. |
 | [Storage and competitor research](local-storage-and-sync-patterns.md) | Database and packaging alternatives, retrieval quality, comparable products and synchronization patterns. |

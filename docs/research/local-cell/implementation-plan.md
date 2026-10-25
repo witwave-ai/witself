@@ -181,6 +181,10 @@ stays disabled until its disclosure/control contract is settled. M9 is progressi
 
 #### M0c synchronization contract
 
+The [synchronization contract record](sync-contract.md) is a draft of the planning
+lead defaults, with testable DECIDED rules, source-backed CURRENT CODE and owned
+OPEN gates. It awaits review and authorizes no implementation or durable customer data.
+
 Nothing in M0c blocks M1–M3.
 
 - Complete the connected columns of the operation matrix for every API family:
@@ -879,7 +883,8 @@ slices, not implementation authorization; do not turn them into one long branch.
   M0c; operation IDs, capture, incarnation, receipts, accounting, deletion
   knowledge, compound publication; two local stores plus a remote and a move
   target / Acceptance: failure-harness scaffolding is not synchronization /
-  Dependencies: M0c decisions (pending) / Evidence: fixture plus real PostgreSQL /
+  Dependencies: [M0c open items](sync-contract.md#open-items-by-milestone) (pending) /
+  Evidence: fixture plus real PostgreSQL /
   Activation: synthetic harness only; no account synchronization / Recovery:
   disposable stores only; no user-data recovery claim / Owner: vacant.
 
@@ -994,7 +999,7 @@ before starting.
 | LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW2 Windows launch and environment | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
-| LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |
+| LC-S5 | vacant | proposed | sync harness | none | [M0c open items](sync-contract.md#open-items-by-milestone) | settle contracts |
 
 ## Founder decisions (answered)
 

@@ -27,6 +27,8 @@ deployment cells under a thin global control plane.
   installation and infrastructure reuse, and incremental canary delivery. The
   [draft implementation plan](research/local-cell/implementation-plan.md) adds
   milestones, dependencies, acceptance gates and review points for Claude.
+  The [draft synchronization contract](research/local-cell/sync-contract.md)
+  records M0c rules, inspected code and owned gates for LC-S5 and M4.
   Research only; no implemented local-mode or synchronization claim.
 
 ## Product And Architecture
