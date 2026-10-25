@@ -7,12 +7,32 @@ import (
 	"testing"
 )
 
+func TestLocalSpoolRejectsReplacementDuringValidation(t *testing.T) {
+	dir := privateDir(t)
+	root, err := openSpoolRoot(dir, func(path string) (os.FileInfo, error) {
+		before, err := validatedSpoolDirectory(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Rename(path, path+"-retired"); err != nil {
+			t.Fatal(err)
+		}
+		privateMkdir(t, path)
+		return before, nil
+	})
+	if root != nil {
+		_ = root.Close()
+		t.Fatal("replacement directory escaped the identity check")
+	}
+	if err != errSpoolIdentity {
+		t.Fatal("replacement must produce the fixed value-free refusal")
+	}
+}
+
 func TestLocalSpoolRejectsSymlinkComponents(t *testing.T) {
 	parent := privateDir(t)
 	dir := filepath.Join(parent, "private")
-	if err := os.Mkdir(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
+	privateMkdir(t, dir)
 	alias := filepath.Join(parent, "alias")
 	if err := os.Symlink(dir, alias); err != nil {
 		if runtime.GOOS == "windows" {
@@ -20,9 +40,7 @@ func TestLocalSpoolRejectsSymlinkComponents(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(dir, "child"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	privateMkdir(t, filepath.Join(dir, "child"))
 	for _, path := range []string{alias, filepath.Join(alias, "child")} {
 		if ValidateSpoolDir(path) == nil {
 			t.Error("symlink component accepted by spool validation")

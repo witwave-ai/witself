@@ -4,29 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 func testLookup(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) { value, ok := values[key]; return value, ok }
-}
-
-func privateDir(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
-	}
-	dir := t.TempDir()
-	dir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
 }
 
 func localValues(t *testing.T) map[string]string {
@@ -38,16 +21,7 @@ func TestRuntimeSelector(t *testing.T) {
 	for _, role := range []string{"server", "worker"} {
 		for _, selector := range []string{"unset", "", "local", "hosted-secret", " local", "LOCAL"} {
 			t.Run(role+"/"+selector, func(t *testing.T) {
-				// Only local selection needs a validated private spool. Hosted and
-				// invalid selectors must remain covered on every platform.
-				values := map[string]string{
-					"WITSELF_RUNTIME":         "local",
-					"WITSELF_DATABASE_URL":    "postgres://synthetic.invalid/local",
-					"WITSELF_LOCAL_SPOOL_DIR": "unused-spool",
-				}
-				if selector == "local" {
-					values = localValues(t)
-				}
+				values := localValues(t)
 				if selector == "unset" {
 					delete(values, "WITSELF_RUNTIME")
 				} else {
@@ -57,15 +31,18 @@ func TestRuntimeSelector(t *testing.T) {
 				switch selector {
 				case "unset", "":
 					if err != nil || !reflect.DeepEqual(cfg, Config{}) {
-						t.Fatalf("hosted config changed: %+v %v", cfg, err)
+						t.Error("hosted config changed")
+						t.Fatalf("configuration error: %v", err)
 					}
 				case "local":
 					if err != nil || !cfg.Local {
-						t.Fatalf("local not selected: %v", err)
+						t.Error("local not selected")
+						t.Fatalf("configuration error: %v", err)
 					}
 				default:
 					if err == nil || !strings.Contains(err.Error(), "WITSELF_RUNTIME") || strings.Contains(err.Error(), selector) {
-						t.Fatalf("unsafe selector diagnostic: %v", err)
+						t.Error("unsafe selector diagnostic")
+						t.Fatalf("configuration error: %v", err)
 					}
 				}
 			})
@@ -86,10 +63,12 @@ func TestLocalListenerIsolation(t *testing.T) {
 					_, err := FromEnv(role, testLookup(values), nil)
 					allowed := address == "127.0.0.1:0" || address == "127.2.3.4:1234" || address == "[::1]:8080" || address == "[::ffff:127.0.0.1]:8080"
 					if allowed && err != nil {
-						t.Fatalf("loopback refused: %v", err)
+						t.Error("loopback refused")
+						t.Fatalf("configuration error: %v", err)
 					}
 					if !allowed && (err == nil || !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), address)) {
-						t.Fatalf("unsafe listener accepted or disclosed: %v", err)
+						t.Error("unsafe listener accepted or disclosed")
+						t.Fatalf("configuration error: %v", err)
 					}
 				})
 			}
@@ -98,10 +77,12 @@ func TestLocalListenerIsolation(t *testing.T) {
 	values := localValues(t)
 	server, err := FromEnv("server", testLookup(values), nil)
 	if err != nil {
+		t.Error("server listener defaults could not be loaded")
 		t.Fatal(err)
 	}
 	worker, err := FromEnv("worker", testLookup(values), nil)
 	if err != nil {
+		t.Error("worker listener defaults could not be loaded")
 		t.Fatal(err)
 	}
 	if server.APIAddr != "127.0.0.1:8080" || server.HealthAddr != "127.0.0.1:8081" || server.MetricsAddr != "127.0.0.1:9090" || worker.HealthAddr != "127.0.0.1:8082" || worker.MetricsAddr != "127.0.0.1:9091" {
@@ -123,12 +104,14 @@ func TestLocalDangerousEnvironment(t *testing.T) {
 				t.Run(role+"/"+name+"/"+value, func(t *testing.T) {
 					values := localValues(t)
 					if _, err := FromEnv(role, testLookup(values), nil); err != nil {
+						t.Error("dangerous environment baseline could not be loaded")
 						t.Fatal(err)
 					}
 					values[name] = value
 					_, err := FromEnv(role, testLookup(values), []string{name + "=" + value})
 					if err == nil || !strings.Contains(err.Error(), name) || (value != "" && strings.Contains(err.Error(), value)) {
-						t.Fatalf("forbidden variable accepted or value disclosed: %v", err)
+						t.Error("forbidden variable accepted or value disclosed")
+						t.Fatalf("configuration error: %v", err)
 					}
 					delete(values, "WITSELF_RUNTIME")
 					if cfg, err := FromEnv(role, testLookup(values), []string{name + "=" + value}); err != nil || !reflect.DeepEqual(cfg, Config{}) {
@@ -149,7 +132,8 @@ func TestLocalRequiredConfiguration(t *testing.T) {
 				values["DATABASE_URL"] = "postgres://ambient.invalid/database"
 				_, err := FromEnv("server", testLookup(values), nil)
 				if err == nil || !strings.Contains(err.Error(), name) {
-					t.Fatalf("missing refusal: %v", err)
+					t.Error("required configuration refusal missing")
+					t.Fatalf("configuration error: %v", err)
 				}
 			})
 		}
@@ -157,7 +141,11 @@ func TestLocalRequiredConfiguration(t *testing.T) {
 	values := localValues(t)
 	values["WITSELF_LOCAL_ACCOUNT_ID"] = " account-fixture "
 	cfg, err := FromEnv("server", testLookup(values), nil)
-	if err != nil || cfg.AccountID != " account-fixture " {
+	if err != nil {
+		t.Error("account configuration could not be loaded")
+		t.Fatal(err)
+	}
+	if cfg.AccountID != " account-fixture " {
 		t.Fatal("account identity must not be normalized")
 	}
 }

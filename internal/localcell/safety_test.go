@@ -99,12 +99,12 @@ func TestStopRefusesForeignPostmasterDirectoryBeforeSignals(t *testing.T) {
 	if err := writeAtomic(c.path("run", "postgres.json"), postgres, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+	if err := testMkdir(c.path("pg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	foreign := filepath.Join(t.TempDir(), "foreign-pg")
 	pidFile := fmt.Sprintf("%d\n%s\n1\n%s\n\n127.0.0.1\n1\nready\n", postgres.PID, foreign, strconv.Itoa(m.Ports.Postgres))
-	if err := os.WriteFile(c.path("pg", "postmaster.pid"), []byte(pidFile), 0o600); err != nil {
+	if err := testWriteFile(c.path("pg", "postmaster.pid"), []byte(pidFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Stop(t.Context()); err == nil {
@@ -121,13 +121,13 @@ func TestPostgresRecoveryRequiresNativeStartEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot obtain recovery witness creation time")
 	}
-	if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+	if err := testMkdir(c.path("pg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writePostmaster := func(epoch int64) {
 		t.Helper()
 		data := fmt.Sprintf("%d\n%s\n%d\n%d\n\n127.0.0.1\n1\nready\n", child.PID, c.path("pg"), epoch, m.Ports.Postgres)
-		if err := os.WriteFile(c.path("pg", "postmaster.pid"), []byte(data), 0o600); err != nil {
+		if err := testWriteFile(c.path("pg", "postmaster.pid"), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -162,15 +162,15 @@ func TestRepairSettlesDeadUnrecordedPostgresAndPreservesData(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot obtain recovery witness creation time")
 	}
-	if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+	if err := testMkdir(c.path("pg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	const retained = "retained synthetic database bytes"
-	if err := os.WriteFile(c.path("pg", "retained"), []byte(retained), 0o600); err != nil {
+	if err := testWriteFile(c.path("pg", "retained"), []byte(retained), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	data := fmt.Sprintf("%d\n%s\n%d\n%d\n\n127.0.0.1\n1\nready\n", child.PID, c.path("pg"), started.Unix(), m.Ports.Postgres)
-	if err := os.WriteFile(c.path("pg", "postmaster.pid"), []byte(data), 0o600); err != nil {
+	if err := testWriteFile(c.path("pg", "postmaster.pid"), []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range []string{"operation", "postgres"} {

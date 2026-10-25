@@ -108,6 +108,9 @@ func New(cfg Config) (*Cell, error) {
 	if cfg.Root == "" {
 		return nil, errors.New("local cell root is required")
 	}
+	if err := validateRootPath(cfg.Root); err != nil {
+		return nil, err
+	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil || root == filepath.VolumeName(root)+string(os.PathSeparator) {
 		return nil, errors.New("invalid local cell root")

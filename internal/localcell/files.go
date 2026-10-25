@@ -15,10 +15,14 @@ import (
 
 var syncFile = func(f *os.File) error { return f.Sync() }
 
+// beforePasswordWrite observes the opened password temporary immediately before
+// its first data write. It is nil outside tests.
+var beforePasswordWrite func(f *os.File)
+
 func privateDir(path string, create bool) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) && create {
-		if err = os.Mkdir(path, 0o700); err != nil {
+		if err = makePrivateDir(path); err != nil {
 			return errors.New("cannot create private local cell directory")
 		}
 		info, err = os.Lstat(path)
@@ -33,6 +37,9 @@ func privateDir(path string, create bool) error {
 }
 
 func (c *Cell) validateRoot(create bool) error {
+	if err := validatePrivateTree(c.cfg.Root); err != nil {
+		return err
+	}
 	// Resolve parent aliases once at the trust boundary; never follow a root or
 	// layout symlink. Callers must supply an existing parent directory.
 	parent, err := filepath.EvalSymlinks(filepath.Dir(c.cfg.Root))
@@ -76,7 +83,7 @@ func readJSON(path string, dst any) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("local cell record must be a regular file")
 	}
-	f, err := os.Open(path)
+	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return errors.New("cannot open local cell record")
 	}
@@ -125,14 +132,20 @@ func writeAtomic(path string, value any, beforeRename func() error) error {
 }
 
 func writeAtomicBytes(path string, data []byte, beforeRename func() error) error {
+	if err := validateWriteTarget(path); err != nil {
+		return err
+	}
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return errors.New("local cell record must be a regular file")
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".pending-*")
+	f, err := createPrivateTemp(filepath.Dir(path))
 	if err != nil {
 		return errors.New("cannot create local cell record")
 	}
-	defer func() { _ = os.Remove(f.Name()) }()
+	defer func() { _ = removePrivateFile(f.Name()) }()
+	if filepath.Base(path) == "postgres.password" && beforePasswordWrite != nil {
+		beforePasswordWrite(f)
+	}
 	if _, err = f.Write(data); err == nil {
 		err = syncFile(f)
 	}
@@ -145,7 +158,13 @@ func writeAtomicBytes(path string, data []byte, beforeRename func() error) error
 			return err
 		}
 	}
-	if err := os.Rename(f.Name(), path); err != nil {
+	if err := validateWriteTarget(path); err != nil {
+		return err
+	}
+	if err := validateWriteTarget(f.Name()); err != nil {
+		return err
+	}
+	if err := publishPrivateFile(f.Name(), path); err != nil {
 		return errors.New("cannot publish local cell record")
 	}
 	return syncDirectory(filepath.Dir(path))
@@ -181,7 +200,7 @@ func (c *Cell) journal(operation, step, state string) error {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return errors.New("local cell journal must be a regular file")
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return errors.New("cannot open local cell journal")
 	}
@@ -230,7 +249,7 @@ func (c *Cell) readJournal() (journalProgress, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return progress, errors.New("invalid local cell journal")
 	}
-	f, err := os.Open(path)
+	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return progress, errors.New("cannot read local cell journal")
 	}
@@ -308,7 +327,7 @@ func (c *Cell) discardJournalTail(progress journalProgress) error {
 	if !progress.tornTail {
 		return nil
 	}
-	f, err := os.OpenFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)
+	f, err := openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)
 	if err != nil {
 		return errors.New("cannot open torn local cell journal")
 	}

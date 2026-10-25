@@ -19,26 +19,11 @@ func journalRecord(t *testing.T, operation, step, state string) []byte {
 	return append(data, '\n')
 }
 
-func journalFileCell(t *testing.T, data []byte) *Cell {
-	t.Helper()
-	c, _ := fileCell(t)
-	if err := os.Mkdir(c.path("journal"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(c.path("journal", "operations.jsonl"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return c
-}
-
 func TestJournalAppendSync(t *testing.T) {
 	for _, state := range []string{"started", "done"} {
 		for _, outcome := range []string{"success", "failure"} {
 			t.Run(state+"/"+outcome, func(t *testing.T) {
-				c, _ := fileCell(t)
-				if err := os.Mkdir(c.path("journal"), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				c, _ := unitCell(t)
 				originalSync := syncFile
 				t.Cleanup(func() { syncFile = originalSync })
 				calls := 0
@@ -82,7 +67,7 @@ func TestJournalTailTruncationSync(t *testing.T) {
 			c, _ := unitCell(t)
 			path := c.path("journal", "operations.jsonl")
 			prefix := journalRecord(t, "stop", "operation", "started")
-			if err := os.WriteFile(path, append(bytes.Clone(prefix), []byte(`{"operation":`)...), 0o600); err != nil {
+			if err := testWriteFile(path, append(bytes.Clone(prefix), []byte(`{"operation":`)...), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			originalSync := syncFile
@@ -140,11 +125,11 @@ func TestJournalTornTailRepair(t *testing.T) {
 		for _, signature := range []string{"partial", "zero_fill", "partial_zero_fill", "complete_without_newline", "long_zero_fill", "partial_long_zero_fill"} {
 			t.Run(boundary+"/"+signature, func(t *testing.T) {
 				c, _ := unitCell(t)
-				if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+				if err := testMkdir(c.path("pg"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 				const retained = "retained synthetic PostgreSQL bytes"
-				if err := os.WriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
+				if err := testWriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				// Recover from a settled prior operation or the empty durable prefix,
@@ -181,7 +166,7 @@ func TestJournalTornTailRepair(t *testing.T) {
 					data = append(data, bytes.TrimSuffix(last, []byte{'\n'})...)
 				}
 				path := c.path("journal", "operations.jsonl")
-				if err := os.WriteFile(path, data, 0o600); err != nil {
+				if err := testWriteFile(path, data, 0o600); err != nil {
 					t.Fatal(err)
 				}
 				pgBefore, err := os.Stat(c.path("pg", "retained-data"))
@@ -285,27 +270,18 @@ func TestJournalCorruptionFailsClosed(t *testing.T) {
 		{"first-record-garbage", []byte("garbage")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Run("readJournal", func(t *testing.T) {
-				c := journalFileCell(t, test.data)
-				if _, err := c.readJournal(); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
-					t.Fatal("journal reader accepted committed or ambiguous corruption")
-				}
-				assertFileBytes(t, c.path("journal", "operations.jsonl"), test.data, "journal reader changed corrupt journal evidence")
-			})
-			t.Run("lifecycle", func(t *testing.T) {
-				c, _ := unitCell(t)
-				path := c.path("journal", "operations.jsonl")
-				if err := os.WriteFile(path, test.data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := c.Inspect(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
-					t.Fatal("Inspect accepted committed or ambiguous corruption")
-				}
-				if err := c.Repair(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
-					t.Fatal("Repair accepted committed or ambiguous corruption")
-				}
-				assertFileBytes(t, path, test.data, "Repair changed corrupt journal evidence")
-			})
+			c, _ := unitCell(t)
+			path := c.path("journal", "operations.jsonl")
+			if err := testWriteFile(path, test.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Inspect(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
+				t.Fatal("Inspect accepted committed or ambiguous corruption")
+			}
+			if err := c.Repair(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
+				t.Fatal("Repair accepted committed or ambiguous corruption")
+			}
+			assertFileBytes(t, path, test.data, "Repair changed corrupt journal evidence")
 		})
 	}
 }

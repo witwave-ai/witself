@@ -6,35 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"testing"
 	"time"
 )
 
 func unitCell(t *testing.T) (*Cell, *Manifest) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
-	}
-	c, m := fileCell(t)
-	if err := os.Chmod(c.cfg.Root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.layout(); err != nil {
-		t.Fatal(err)
-	}
-	return c, m
-}
-
-// fileCell supplies records for byte-level tests without invoking private-root
-// validation or lifecycle layout. Such tests must remain runnable on Windows.
-func fileCell(t *testing.T) (*Cell, *Manifest) {
-	t.Helper()
-	root := t.TempDir()
+	root := testPrivateRoot(t)
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	c, err := New(Config{Root: root, Timeout: time.Second})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.layout(); err != nil {
 		t.Fatal(err)
 	}
 	m := &Manifest{
@@ -49,7 +34,7 @@ func fileCell(t *testing.T) (*Cell, *Manifest) {
 }
 
 func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
-	c, before := fileCell(t)
+	c, before := unitCell(t)
 	after := *before
 	after.LastOperation = "start"
 	injected := errors.New("interrupted before publish")
@@ -83,7 +68,7 @@ func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
 }
 
 func TestManifestRejectsUnknownLayoutVersion(t *testing.T) {
-	c, m := fileCell(t)
+	c, m := unitCell(t)
 	m.LayoutVersion = LayoutVersion + 1
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		t.Fatal(err)
@@ -94,7 +79,7 @@ func TestManifestRejectsUnknownLayoutVersion(t *testing.T) {
 }
 
 func TestManifestRejectsUnknownFields(t *testing.T) {
-	c, m := fileCell(t)
+	c, m := unitCell(t)
 	withExtra := struct {
 		*Manifest
 		Extra string `json:"extra"`
@@ -110,7 +95,7 @@ func TestManifestRejectsUnknownFields(t *testing.T) {
 func TestManifestRejectsOtherDatabaseNames(t *testing.T) {
 	for _, database := range []string{"", "codex_b", "postgres", "other", "Witself", localDatabaseName + " "} {
 		t.Run(database, func(t *testing.T) {
-			c, m := fileCell(t)
+			c, m := unitCell(t)
 			m.Database = database
 			if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 				t.Fatal(err)
@@ -124,12 +109,12 @@ func TestManifestRejectsOtherDatabaseNames(t *testing.T) {
 
 func TestJournalInterruptionRepairPreservesDataAndRepeats(t *testing.T) {
 	c, _ := unitCell(t)
-	if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+	if err := testMkdir(c.path("pg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	dataPath := c.path("pg", "retained-data")
 	const retained = "synthetic database bytes"
-	if err := os.WriteFile(dataPath, []byte(retained), 0o600); err != nil {
+	if err := testWriteFile(dataPath, []byte(retained), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c.cfg.Failpoint = func(operation, step string) error {
@@ -187,6 +172,7 @@ func TestJournalRejectsUnfencedOrMismatchedRecords(t *testing.T) {
 		{"missing-time", []journalEntry{{Operation: "start", Step: "operation", State: "started"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			c, _ := unitCell(t)
 			var data []byte
 			for _, entry := range test.entries {
 				encoded, err := json.Marshal(entry)
@@ -195,24 +181,15 @@ func TestJournalRejectsUnfencedOrMismatchedRecords(t *testing.T) {
 				}
 				data = append(data, append(encoded, '\n')...)
 			}
-			t.Run("readJournal", func(t *testing.T) {
-				c := journalFileCell(t, data)
-				if _, err := c.readJournal(); err == nil {
-					t.Fatal("journal reader accepted an untrusted journal fence")
-				}
-			})
-			t.Run("lifecycle", func(t *testing.T) {
-				c, _ := unitCell(t)
-				if err := os.WriteFile(c.path("journal", "operations.jsonl"), data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := c.Inspect(t.Context()); err == nil {
-					t.Fatal("Inspect accepted an untrusted journal fence")
-				}
-				if err := c.Repair(t.Context()); err == nil {
-					t.Fatal("Repair accepted an untrusted journal fence")
-				}
-			})
+			if err := testWriteFile(c.path("journal", "operations.jsonl"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Inspect(t.Context()); err == nil {
+				t.Fatal("Inspect accepted an untrusted journal fence")
+			}
+			if err := c.Repair(t.Context()); err == nil {
+				t.Fatal("Repair accepted an untrusted journal fence")
+			}
 		})
 	}
 }
@@ -221,11 +198,11 @@ func TestRemoveCleanupInterruptionRepairsFromManifest(t *testing.T) {
 	for _, boundary := range []string{"cleanup_run", "cleanup_journal"} {
 		t.Run(boundary, func(t *testing.T) {
 			c, _ := unitCell(t)
-			if err := os.Mkdir(c.path("pg"), 0o700); err != nil {
+			if err := testMkdir(c.path("pg"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			const retained = "synthetic retained database bytes"
-			if err := os.WriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
+			if err := testWriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			c.cfg.Failpoint = func(operation, step string) error {

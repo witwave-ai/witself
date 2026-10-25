@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -27,18 +26,6 @@ func TestRejectsInvalidArgumentsBeforeMutation(t *testing.T) {
 			t.Fatal("invalid harness invocation succeeded")
 		}
 	}
-}
-
-func privateHarnessRoot(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW1: Windows private-root ownership/DACL semantics are pending")
-	}
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatal("cannot make harness test root private")
-	}
-	return root
 }
 
 func TestInspectDoesNotBuildComponents(t *testing.T) {

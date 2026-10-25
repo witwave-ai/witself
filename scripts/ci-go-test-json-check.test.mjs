@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
@@ -32,10 +32,12 @@ function stream(events) {
 
 function summary(counts = {}) {
   return `${packages.flatMap(name => {
-    const {pass = 1, skip = 0, fail = 0, names = [], failedNames = []} = counts[name] ?? {};
+    const {pass = 1, skip = 0, fail = 0, names = [], failedNames = [], why = {}} = counts[name] ?? {};
     const outcomes = [...names.map(testName => [testName, 'skip']), ...failedNames.map(testName => [testName, 'fail'])]
       .sort(([left], [right]) => left.localeCompare(right));
-    return [`package ${name} pass=${pass} skip=${skip} fail=${fail}`, ...outcomes.map(([testName, action]) => `${action} ${name} ${testName}`)];
+    return [`package ${name} pass=${pass} skip=${skip} fail=${fail}`, ...outcomes.flatMap(([testName, action]) => [
+      `${action} ${name} ${testName}`, ...(action === 'fail' ? [`why ${name} ${testName} :: ${why[testName] ?? '(unclassified)'}`] : []),
+    ])];
   }).join('\n')}\n`;
 }
 
@@ -127,6 +129,108 @@ test('output values and dependency build output are discarded', () => {
   assertFixture(script, {input: stream(events), output: summary(), status: 0});
 });
 
+function withDiagnosticSources(callback) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-diagnostics-')));
+  try {
+    mkdirSync(join(directory, 'scripts'));
+    const target = join(directory, 'scripts', 'ci-go-test-json-check.mjs');
+    writeFileSync(target, readFileSync(script, 'utf8'));
+    for (const name of ['localcell', 'runtimeconfig', 'tools/localcellharness']) {
+      mkdirSync(join(directory, 'internal', name), {recursive: true});
+    }
+    writeFileSync(join(directory, 'internal', 'localcell', 'errors.go'), `package localcell
+var allowed = errors.New("localcell: fixed private error")
+var concatenated = errors.New("concatenated error" + suffix)
+// errors.New("comment error")
+var quoted = \`errors.New("quoted error")\`
+var formatted = fmt.Errorf("formatted error")
+`);
+    writeFileSync(join(directory, 'internal', 'runtimeconfig', 'policy_test.go'), `package runtimeconfig
+func TestPolicy(t *testing.T) {
+  t.Fatal("owner-is-admin-group")
+  t.Errorf("ace-count")
+  t.Fatal("assertion with 12 safe digits")
+  t.Fatal("assertion with 123 unsafe digits")
+  t.Fatal("private/path")
+  t.Fatal("private\\\\path")
+  t.Fatal("private=marker")
+  t.Fatal("private: marker")
+  t.Fatalf("private %s", value)
+  t.Fatal("multiple arguments", value)
+  // t.Fatal("comment assertion")
+  t.Fatal("concatenated assertion" + value)
+  _ = errors.New("test-only error")
+}
+`);
+    callback(target);
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+}
+
+function outputFailure(output, message = '(unclassified)', packageName = packages[1]) {
+  return {input: stream(packages.flatMap(name => name === packageName
+    ? [event('start', name), event('run', name, 'TestFixture'),
+      ...output.map(Output => event('output', name, 'TestFixture', {Output})),
+      event('fail', name, 'TestFixture'), event('fail', name)] : packageEvents(name))),
+  output: summary({[packageName]: {pass: 0, fail: 1, failedNames: ['TestFixture'], why: {TestFixture: message}}}),
+  stderr: failureDiagnostic};
+}
+
+test('why diagnostics accept only exact fixed errors and package-local literal assertions', () => {
+  withDiagnosticSources(target => {
+    for (const message of ['localcell: fixed private error', 'owner-is-admin-group', 'ace-count', 'assertion with 12 safe digits']) {
+      assertFixture(target, outputFailure([`    policy_test.go:123: ${message}\r\n`], message));
+    }
+    // A fixed helper error may propagate to another package; assertions may not.
+    assertFixture(target, outputFailure(['localcell: fixed private error\n'], 'localcell: fixed private error', packages[2]));
+    assertFixture(target, outputFailure(['owner-is-admin-group\n'], '(unclassified)', packages[0]));
+  });
+});
+
+test('why diagnostics suppress unallowlisted, unsafe, interpolated, commented and test-only errors', () => {
+  withDiagnosticSources(target => {
+    for (const message of ['private-fixture-marker', 'assertion with 123 unsafe digits', 'private/path', 'private\\path',
+      'private=marker', 'private: marker', 'private value', 'multiple arguments value', 'concatenated error',
+      'comment error', 'quoted error', 'formatted error', 'comment assertion', 'concatenated assertion', 'test-only error',
+      'owner-is-admin-group private-fixture-marker', 'private/path_test.go:12: owner-is-admin-group', 'a'.repeat(64)]) {
+      assertFixture(target, outputFailure([`    policy_test.go:12: ${message}\n`]));
+    }
+  });
+});
+
+test('why diagnostics emit at most the first allowlisted output line per failed test', () => {
+  withDiagnosticSources(target => {
+    assertFixture(target, outputFailure(['private-fixture-marker\n    policy_test.go:12: ace-count\nowner-is-admin-group\n',
+      'localcell: fixed private error\n'], 'ace-count'));
+  });
+});
+
+test('why diagnostics from the actual packages recognize production errors and native assertions', () => {
+  assertFixture(script, outputFailure(['    policy_test.go:12: canonical policy was rejected\n'], 'canonical policy was rejected'));
+  assertFixture(script, outputFailure(['    fixture_test.go:12: local cell password file is unavailable or not private\n'],
+    'local cell password file is unavailable or not private', packages[0]));
+});
+
+test('runtime configuration failures retain fixed first-line reasons before formatted details', () => {
+  // Independent list: reverting any assertion to a formatted-only failure must
+  // lose its source allowlist entry and fail this fixture. Details stay private.
+  for (const message of [
+    'hosted config changed', 'local not selected', 'unsafe selector diagnostic',
+    'loopback refused', 'unsafe listener accepted or disclosed',
+    'server listener defaults could not be loaded', 'worker listener defaults could not be loaded',
+    'local listener defaults changed', 'dangerous environment baseline could not be loaded',
+    'forbidden variable accepted or value disclosed', 'hosted configuration changed',
+    'required configuration refusal missing', 'account configuration could not be loaded',
+    'account identity must not be normalized',
+  ]) {
+    assertFixture(script, outputFailure([
+      `    config_test.go:12: ${message}\n`,
+      '    config_test.go:13: configuration error: private-fixture-marker\n',
+    ], message));
+  }
+});
+
 test('build failures, malformed input, and unexpected package or unsafe test names fail without reflecting values', () => {
   for (const extra of [
     {Action: 'build-fail', ImportPath: 'private-fixture-marker'},
@@ -172,10 +276,12 @@ for (const mutation of [
   {name: 'ignoring a fail action', from: "if (action === 'fail') failed = true;", to: '', fixture: failures[1], changed: {status: 0, stderr: ''}},
   {name: 'accepting zero tests', from: 'if (state.tests.size === 0) invalid = true;', to: '', fixture: failures[2], changed: {status: 0, stderr: ''}},
   {name: 'accepting a truncated stream', from: 'if (pending.length !== 0) invalid = true;', to: '', fixture: failures[4], changed: {status: 0, stderr: ''}},
-  {name: 'suppressing fail-name emission', from: "if (action === 'fail') lines.push(`fail ${name} ${testName}`);", to: '', fixture: failures[0],
+  {name: 'suppressing fail-name emission', from: "if (action === 'fail') {", to: 'if (false) {', fixture: failures[0],
     changed: {output: summary({[packages[0]]: {pass: 0, fail: 1}})}},
   {name: 'misclassifying a complete failing package as incomplete', from: 'if (!terminalActions.has(state.summary)) invalid = true;',
     to: "if (!['pass', 'skip'].includes(state.summary)) invalid = true;", fixture: completeFailure, changed: {stderr: diagnostic}},
+  {name: 'printing an unallowlisted output line', from: 'if (allowlist.get(event.Package)?.has(message)) {', to: 'if (message) {',
+    fixture: outputFailure(['private-fixture-marker\n']), changed: {output: outputFailure(['private-fixture-marker\n'], 'private-fixture-marker').output}},
 ]) {
   test(`mutation killed: ${mutation.name}`, () => {
     // Node resolves the module URL through symlinks; use the same canonical

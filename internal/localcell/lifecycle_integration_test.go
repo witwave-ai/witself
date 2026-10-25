@@ -25,17 +25,10 @@ import (
 // One build supplies all real-lifecycle scenarios. Missing PostgreSQL is an
 // explicit NOT RUN result; a present but broken toolchain is a test failure.
 func TestRealLifecycle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
-	}
 	pgbin := os.Getenv("WITSELF_LOCALCELL_PGBIN")
-	if pgbin == "" || !postgresBinariesPresent(pgbin) {
-		_, _ = fmt.Fprintf(os.Stderr, "NOT RUN %s: no PostgreSQL binaries\n", t.Name())
-		t.Skip("no PostgreSQL binaries")
-	}
+	binaries := buildRealComponents(t, pgbin)
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
-	binaries := buildRealComponents(t, pgbin)
 	t.Run("InstallStartRestartRemove", func(t *testing.T) { testInstallStartRestartRemove(t, binaries) })
 	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries) })
 	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries) })
@@ -56,6 +49,10 @@ func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
+	}
+	if pgbin == "" || !postgresBinariesPresent(pgbin) {
+		_, _ = fmt.Fprintf(os.Stderr, "NOT RUN %s: no PostgreSQL binaries\n", t.Name())
+		t.Skip("no PostgreSQL binaries")
 	}
 	buildDir := t.TempDir()
 	source, err := filepath.Abs(filepath.Join("..", ".."))
