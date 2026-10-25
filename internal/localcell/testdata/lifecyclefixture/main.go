@@ -12,14 +12,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 func main() {
-	name := filepath.Base(os.Args[0])
+	if runFixtureStopHelper() {
+		return
+	}
+	name := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		if name == "postgres" {
 			fmt.Println("postgres (PostgreSQL) 16.1")
@@ -38,12 +39,12 @@ func run(name string) error {
 	switch name {
 	case "initdb":
 		directory := argument("-D")
-		if err := os.Mkdir(directory, 0o700); err != nil {
+		if err := fixtureMkdir(directory); err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(directory, "PG_VERSION"), []byte("16\n"), 0o600)
+		return fixtureWriteFile(filepath.Join(directory, "PG_VERSION"), []byte("16\n"))
 	case "createdb":
-		return os.WriteFile(filepath.Join("pg", "fixture-created-database"), []byte(os.Args[len(os.Args)-1]), 0o600)
+		return fixtureWriteFile(filepath.Join("pg", "fixture-created-database"), []byte(os.Args[len(os.Args)-1]))
 	case "psql":
 		if err := checkDatabase(argument("-d")); err != nil {
 			return err
@@ -83,7 +84,7 @@ func checkDatabase(database string) error {
 }
 
 func record(event string) error {
-	file, err := os.OpenFile("fixture-events", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	file, err := fixtureOpenFile("fixture-events", os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func controlPostgres() error {
 	data := argument("-D")
 	pidfile := filepath.Join(data, "postmaster.pid")
 	if len(os.Args) > 1 && os.Args[1] == "start" {
-		command := exec.Command(filepath.Join(filepath.Dir(os.Args[0]), "postgres"), "-D", data)
+		command := exec.Command(filepath.Join(filepath.Dir(os.Args[0]), fixtureExecutable("postgres")), "-D", data)
 		command.Stdout, command.Stderr = os.Stdout, os.Stderr
 		if err := command.Start(); err != nil {
 			return err
@@ -114,16 +115,7 @@ func controlPostgres() error {
 	if err != nil {
 		return err
 	}
-	pid, err := strconv.Atoi(strings.Split(string(dataBytes), "\n")[0])
-	if err != nil {
-		return err
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = process.Release() }()
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := stopFixturePostgres(dataBytes); err != nil {
 		return err
 	}
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
@@ -150,13 +142,13 @@ func servePostgres() error {
 	}
 	defer func() { _ = listener.Close() }()
 	stopped := make(chan os.Signal, 1)
-	signal.Notify(stopped, syscall.SIGTERM, os.Interrupt)
+	notifyFixtureStop(stopped)
 	defer signal.Stop(stopped)
 	if err := record("postgres-start"); err != nil {
 		return err
 	}
 	pidfile := filepath.Join(data, "postmaster.pid")
-	if err := os.WriteFile(pidfile, []byte(fmt.Sprintf("%d\n%s\n1\n", os.Getpid(), data)), 0o600); err != nil {
+	if err := fixtureWriteFile(pidfile, fixturePostmasterRecord(data, string(match[1]))); err != nil {
 		return err
 	}
 	<-stopped
@@ -192,7 +184,7 @@ func serveComponent(component string) error {
 		listeners = append(listeners, listener)
 	}
 	stopped := make(chan os.Signal, 1)
-	signal.Notify(stopped, syscall.SIGTERM, os.Interrupt)
+	notifyFixtureStop(stopped)
 	defer signal.Stop(stopped)
 	if err := record(component + "-start"); err != nil {
 		return err

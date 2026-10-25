@@ -73,8 +73,8 @@ const completeFailure = {
   stderr: failureDiagnostic,
 };
 
-function assertFixture(target, {input, output, status = 1, stderr = status === 0 ? '' : diagnostic}) {
-  const result = spawnSync(process.execPath, [target], {input, encoding: 'utf8'});
+function assertFixture(target, {input, output, status = 1, stderr = status === 0 ? '' : diagnostic, args = []}) {
+  const result = spawnSync(process.execPath, [target, ...args], {input, encoding: 'utf8'});
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, status);
@@ -271,6 +271,294 @@ test('an input stream error fails closed without reflecting its message', async 
   assert.equal(result.valid, false);
   assert.equal(`${result.lines.join('\n')}\n`, summary());
 });
+
+const requiredTests = ['TestRealLifecycle', ...[
+  'InstallStartRestartRemove', 'TwoCellsAreIndependent', 'InterruptedStartRepair', 'WaitsForReadiness',
+].map(name => `TestRealLifecycle/${name}`)];
+const requiredArgs = ['--require', requiredTests.join(',')];
+const proofEvents = [event('start', packages[0]), event('run', packages[0], requiredTests[0]),
+  ...requiredTests.slice(1).flatMap(name => [event('run', packages[0], name), event('pass', packages[0], name)]),
+  event('pass', packages[0], requiredTests[0]), event('pass', packages[0])];
+const proofSummary = count => `package ${packages[0]} pass=${count} skip=0 fail=0\n`;
+
+test('required-test mode accepts the complete native proof without requiring unrelated unit packages', () => {
+  assertFixture(script, {args: requiredArgs, input: stream(proofEvents), output: proofSummary(5), status: 0});
+});
+
+for (const required of requiredTests) {
+  test(`required-test mode rejects missing ${required}`, () => {
+    assertFixture(script, {args: requiredArgs,
+      input: stream(proofEvents.filter(value => value.Test !== required)), output: proofSummary(4)});
+  });
+  test(`required-test mode rejects skipped ${required}`, () => {
+    assertFixture(script, {args: requiredArgs,
+      input: stream(proofEvents.map(value => value.Test === required && value.Action === 'pass' ? {...value, Action: 'skip'} : value)),
+      output: `package ${packages[0]} pass=4 skip=1 fail=0\nskip ${packages[0]} ${required}\n`});
+  });
+}
+
+test('required-test mode rejects truncated proof and package skip', () => {
+  assertFixture(script, {args: requiredArgs, input: stream(proofEvents).trimEnd(), output: proofSummary(5)});
+  for (const Action of ['skip']) {
+    assertFixture(script, {args: requiredArgs,
+      input: stream([...proofEvents.slice(0, -1), event(Action, packages[0])]), output: proofSummary(5)});
+  }
+});
+
+test('required-test mode classifies complete failed tests and packages as Go test failures without stream diagnostics', async () => {
+  for (const required of [undefined, ...requiredTests]) {
+    const events = proofEvents.map(value => value.Action === 'pass' &&
+      (value.Test === required || value.Test === undefined) ? {...value, Action: 'fail'} : value);
+    const result = await checkGoTestJSON([stream(events)], requiredTests, {diagnose: true});
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, failureDiagnostic.trimEnd());
+    assert.equal(result.lines.some(line => line.startsWith('stream ')), false);
+    if (required !== undefined) assert(result.lines.includes(`fail ${packages[0]} ${required}`));
+  }
+});
+
+test('required-test mode diagnoses missing and skipped requirements as incomplete even with a failed package', async () => {
+  for (const action of ['missing', 'skip']) {
+    const events = proofEvents.filter(value => action !== 'missing' || value.Test !== requiredTests[1])
+      .map(value => value.Action === 'pass' && value.Test === undefined ? {...value, Action: 'fail'}
+        : value.Action === 'pass' && value.Test === requiredTests[1] ? {...value, Action: action} : value);
+    const result = await checkGoTestJSON([stream(events)], requiredTests, {diagnose: true});
+    assert.equal(result.reason, diagnostic.trimEnd());
+    assert(result.lines.some(line => line.startsWith('stream ')));
+  }
+});
+
+test('mutation killed: required failure classified as an incomplete stream', () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-failure-')));
+  try {
+    const source = readFileSync(script, 'utf8');
+    const guard = "!['pass', 'fail'].includes(state.tests.get(testName))";
+    assert.equal(source.split(guard).length, 2);
+    const target = join(directory, 'mutant.mjs');
+    writeFileSync(target, source.replace(guard, "state.tests.get(testName) !== 'pass'"));
+    const input = stream(proofEvents.map(value => value.Action === 'pass' &&
+      (value.Test === requiredTests[1] || value.Test === requiredTests[0] || value.Test === undefined)
+      ? {...value, Action: 'fail'} : value));
+    const args = [...requiredArgs, '--diagnose'];
+    const expected = spawnSync(process.execPath, [script, ...args], {input, encoding: 'utf8'});
+    assert.equal(expected.status, 1);
+    assert.equal(expected.stderr, failureDiagnostic);
+    assert(!expected.stdout.includes('stream records='));
+    assert.throws(() => assertFixture(target, {args, input, output: expected.stdout, stderr: expected.stderr}), {code: 'ERR_ASSERTION'});
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('required-test mode rejects an additional skipped child even when every named scenario passes', () => {
+  const extra = 'TestRealLifecycle/AdditionalScenario';
+  assertFixture(script, {args: requiredArgs,
+    input: stream([...proofEvents.slice(0, -2), event('run', packages[0], extra), event('skip', packages[0], extra), ...proofEvents.slice(-2)]),
+    output: `package ${packages[0]} pass=5 skip=1 fail=0\nskip ${packages[0]} ${extra}\n`});
+});
+
+function diagnosedFailure(outputs, {packageOutput = [], finish = true} = {}) {
+  const name = requiredTests[0];
+  return [event('start', packages[0]), event('run', packages[0], name),
+    ...outputs.map(Output => event('output', packages[0], name, {Output})),
+    ...packageOutput.map(Output => event('output', packages[0], undefined, {Output})),
+    ...(finish ? [event('fail', packages[0], name), event('fail', packages[0])] : [])];
+}
+
+const diagnoseArgs = ['--diagnose', '--require', requiredTests[0]];
+
+test('diagnose emits only failed required tests and repository test assertions or Go FAIL lines', async () => {
+  const output = '    lifecycle_proof_test.go:42: cannot start native database\n';
+  const events = diagnosedFailure([output, 'raw PostgreSQL output is private\n',
+    '    foreign_test.go:42: foreign assertion is private\n',
+    '    lifecycle.go:42: production log is private\n',
+    '    --- FAIL: TestRealLifecycle (0.25s)\n']);
+  const result = await checkGoTestJSON([stream(events)], [requiredTests[0]], {diagnose: true});
+  assert.deepEqual(result.lines.filter(line => line.startsWith('diagnose ')), [
+    `diagnose ${packages[0]} ${requiredTests[0]} :: ${output.trimEnd()}`,
+    `diagnose ${packages[0]} ${requiredTests[0]} ::     --- FAIL: TestRealLifecycle (0.25s)`,
+  ]);
+  const passed = await checkGoTestJSON([stream(events.map(value => value.Action === 'fail' ? {...value, Action: 'pass'} : value))], [requiredTests[0]], {diagnose: true});
+  assert.equal(passed.lines.some(line => line.startsWith('diagnose ')), false);
+  const unit = await checkGoTestJSON([stream(events)], [], {diagnose: true});
+  assert.equal(unit.lines.some(line => line.startsWith('diagnose ') || line.startsWith('stream ')), false);
+  const extra = 'TestRealLifecycle/Unrequired';
+  const unrequired = await checkGoTestJSON([stream([
+    ...proofEvents.slice(0, -2), event('run', packages[0], extra), event('output', packages[0], extra, {Output: output}),
+    event('fail', packages[0], extra), ...proofEvents.slice(-2),
+  ])], requiredTests, {diagnose: true});
+  assert.equal(unrequired.lines.some(line => line.startsWith('diagnose ')), false);
+});
+
+test('diagnose masks credentials before truncating and caps each failed test at 128 lines of two hundred characters', async () => {
+  const prefix = '    lifecycle_proof_test.go:42: ';
+  const outputs = [
+    `${prefix}digest ${'a'.repeat(64)}\n`,
+    `${prefix}password=private-password\n`,
+    `${prefix}password="private password with spaces"\n`,
+    `${prefix}--pwfile="private password path" other text\n`,
+    `${prefix}PGPASSWORD=private-environment\n`,
+    `${prefix}postgres://private-user:private-secret@127.0.0.1/db\n`,
+    `${prefix}private-user:private-secret@127.0.0.1/db\n`,
+    `${prefix}postgres://private-user:priv'ate"sec\\ret@127.0.0.1/db\n`,
+    `${prefix}private-user:it's-private@127.0.0.1/db\n`,
+    `${prefix}${'x'.repeat(160)}${'b'.repeat(64)}\n`,
+    `${prefix}${'x'.repeat(250)}\n`,
+    ...Array.from({length: 140}, (_, i) => `${prefix}assertion ${i}\n`),
+  ];
+  const result = await checkGoTestJSON([stream(diagnosedFailure(outputs))], [requiredTests[0]], {diagnose: true});
+  const diagnostics = result.lines.filter(line => line.startsWith('diagnose ')).map(line => line.split(' :: ')[1]);
+  assert.equal(diagnostics.length, 128);
+  assert(diagnostics.every(line => line.length <= 200));
+  assert.equal(diagnostics[10].length, 200);
+  assert.equal(diagnostics[0], `${prefix}digest [MASKED]`);
+  assert.equal(diagnostics[1], `${prefix}password=[MASKED]`);
+  assert.equal(diagnostics[2], `${prefix}password=[MASKED]`);
+  assert.equal(diagnostics[3], `${prefix}--[MASKED]`);
+  assert.equal(diagnostics[4], `${prefix}[MASKED]`);
+  assert.equal(diagnostics[5], `${prefix}postgres://[MASKED]@127.0.0.1/db`);
+  assert.equal(diagnostics[6], `${prefix}[MASKED]@127.0.0.1/db`);
+  assert.equal(diagnostics[7], `${prefix}postgres://[MASKED]@127.0.0.1/db`);
+  assert.equal(diagnostics[8], `${prefix}[MASKED]@127.0.0.1/db`);
+  assert.equal(diagnostics[9], `${prefix}${'x'.repeat(160)}[MASKED]`);
+  assert(!result.lines.join('\n').includes('private-'));
+  assert(!/[a-f0-9]{64}/i.test(result.lines.join('\n')));
+});
+
+test('diagnose reports the first invalid line masked and bounded with the observed record count', async () => {
+  const invalid = `postgres://private-user:private-secret@127.0.0.1 ${'a'.repeat(64)} ${'x'.repeat(200)}`;
+  const result = await checkGoTestJSON([stream(proofEvents) + `${invalid}\nsecond-invalid-line\n`], requiredTests, {diagnose: true});
+  const detail = result.lines.find(line => line.startsWith('stream '));
+  assert.equal(detail, `stream records=${proofEvents.length + 2} :: first offending line: ${`postgres://[MASKED]@127.0.0.1 [MASKED] ${'x'.repeat(200)}`.slice(0, 120)}`);
+  assert(!detail.includes('private-'));
+  assert(!detail.includes('second-invalid-line'));
+  for (const fragment of ['password="private password with spaces"', 'PGPASSWORD=private-value', '--pwfile="private path"']) {
+    const rejected = await checkGoTestJSON([stream(proofEvents) + fragment], requiredTests, {diagnose: true});
+    assert(!rejected.lines.join('\n').includes('private'));
+    assert(rejected.lines.some(line => line.startsWith(`stream records=${proofEvents.length} :: first offending line: `)));
+  }
+});
+
+test('diagnose preserves both forty-line readiness log tails after cause and identity details', async () => {
+  for (const component of ['server', 'worker']) {
+    const details = [`inner cause: local cell ${component} exited before readiness`,
+      `${component} identity before rollback: recorded=true alive=false matches=false exit_observed=true observation_failed=false`,
+      ...[component, 'postgres'].flatMap(name => Array.from({length: 40}, (_, i) => `${name} log: line ${i}`))];
+    const events = diagnosedFailure(details.map(line => `    lifecycle_diagnostics_test.go:99: ${line}\n`));
+    const result = await checkGoTestJSON([stream(events)], [requiredTests[0]], {diagnose: true});
+    const diagnostics = result.lines.filter(line => line.startsWith('diagnose '));
+    assert.equal(diagnostics.length, 82);
+    assert(diagnostics.at(-1).endsWith('postgres log: line 39'));
+    assert.equal(result.reason, failureDiagnostic.trimEnd());
+    assert.equal(result.lines.some(line => line.startsWith('stream ')), false);
+  }
+});
+
+test('diagnose explains a stream ending before the package summary and preserves unit output', async () => {
+  const input = stream(proofEvents.slice(0, -1));
+  const result = await checkGoTestJSON([input], requiredTests, {diagnose: true});
+  assert.equal(result.lines.at(-1), `stream records=${proofEvents.length - 1} :: stream ended before the package summary`);
+  const normal = await checkGoTestJSON([input], requiredTests);
+  assert.deepEqual(normal.lines, result.lines.slice(0, -1));
+});
+
+test('timeout panic is classified in both test and package output, including unfinished tests', async () => {
+  for (const packageLevel of [false, true]) {
+    for (const finish of [false, true]) {
+      const panic = 'panic: test timed out after 15m0s\n';
+      const events = diagnosedFailure(packageLevel ? [] : [panic], {packageOutput: packageLevel ? [panic] : [], finish});
+      const result = await checkGoTestJSON([stream(events)], [requiredTests[0]], {diagnose: true});
+      assert(result.lines.includes(`why ${packages[0]} ${requiredTests[0]} :: test timed out`));
+      assert(!result.lines.some(line => line.endsWith('(unclassified)')));
+      assert(!result.lines.some(line => line.startsWith('diagnose ')));
+    }
+  }
+});
+
+test('input mode reads the named UTF-8 proof file instead of stdin and diagnoses invalid file input', () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-input-')));
+  try {
+    const input = join(directory, 'proof.json');
+    writeFileSync(input, stream(proofEvents).replaceAll('\n', '\r\n'));
+    assertFixture(script, {args: [...requiredArgs, '--input', input, '--diagnose'], input: 'invalid stdin\n', output: proofSummary(5), status: 0});
+    writeFileSync(input, stream(proofEvents.slice(0, -1)));
+    assertFixture(script, {args: [...requiredArgs, '--input', input, '--diagnose'], input: '',
+      output: `${proofSummary(5)}stream records=${proofEvents.length - 1} :: stream ended before the package summary\n`});
+    assertFixture(script, {args: [...requiredArgs, '--input', join(directory, 'private-missing-file'), '--diagnose'], input: '',
+      output: 'package ' + packages[0] + ' pass=0 skip=0 fail=0\nstream records=0 :: stream ended before the package summary\n'});
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('diagnose and input argument validation fails without reflecting values or enabling unit diagnostics', () => {
+  for (const args of [['--diagnose'], ['--input'], ['--input', ''], ['--input', '--diagnose'],
+    [...diagnoseArgs, '--diagnose'], [...requiredArgs, '--require', requiredTests[0]], ['--input', 'private-input', '--input', 'private-input']]) {
+    assertFixture(script, {args, input: '', output: '', stderr: 'FAIL: invalid Go test checker arguments\n'});
+  }
+});
+
+for (const mutation of [
+  {name: 'diagnostic limit removed', from: 'if (diagnostics.length === 128) break;', to: '',
+    outputs: Array.from({length: 129}, (_, i) => `--- FAIL: TestRealLifecycle (${i}s)\n`)},
+  {name: 'diagnostic width limit removed', from: '.slice(0, limit);', to: ';',
+    outputs: [`--- FAIL: TestRealLifecycle ${'x'.repeat(250)}\n`]},
+  {name: 'diagnostic masking removed', from: "return maskedDiagnostic(line.replace(/\\r$/, ''), 200);", to: "return line.replace(/\\r$/, '').slice(0, 200);",
+    outputs: [`--- FAIL: TestRealLifecycle ${'a'.repeat(64)}\n`, '--- FAIL: TestRealLifecycle password=private-value\n']},
+  {name: 'foreign test assertions accepted', from: 'testFiles.get(packageName)?.has(assertion[1])', to: 'true',
+    outputs: ['    foreign_test.go:42: private-value\n']},
+  {name: 'timeout classification removed', from: 'state.timedOut.add(name)', to: 'void name',
+    outputs: ['panic: test timed out after 15m0s\n']},
+]) {
+  test(`mutation killed: ${mutation.name}`, () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-proof-mutation-')));
+    try {
+      const source = readFileSync(script, 'utf8');
+      assert.equal(source.split(mutation.from).length, 2, 'mutation must target exactly one guard');
+      const target = join(directory, 'mutant.mjs');
+      writeFileSync(target, source.replace(mutation.from, mutation.to));
+      const input = stream(diagnosedFailure(mutation.outputs));
+      const expected = spawnSync(process.execPath, [script, ...diagnoseArgs], {input, encoding: 'utf8'});
+      assert.equal(expected.status, 1);
+      const fixture = {args: diagnoseArgs, input, output: expected.stdout, stderr: expected.stderr};
+      assert.throws(() => assertFixture(target, fixture), {code: 'ERR_ASSERTION'});
+    } finally {
+      rmSync(directory, {recursive: true, force: true});
+    }
+  });
+}
+
+test('required-test mode rejects malformed arguments without reflecting their values', () => {
+  for (const args of [['--require'], ['--require', ''], ['--private-fixture-marker'], ['--require', requiredTests.join(','), 'extra']]) {
+    assertFixture(script, {args, input: stream(proofEvents), output: '', stderr: 'FAIL: invalid Go test checker arguments\n'});
+  }
+  for (const names of [['TestPrivate\nprivate-fixture-marker'], [`Test${'a'.repeat(64)}`], ['TestRealLifecycle', 'TestRealLifecycle']]) {
+    assertFixture(script, {args: ['--require', names.join(',')], input: stream(proofEvents), output: proofSummary(5)});
+  }
+});
+
+for (const [name, replacement, events, output] of [
+  ['missing required children accepted', 'false', proofEvents.filter(value => value.Test !== requiredTests[1]), proofSummary(4)],
+  ['skipped required children accepted', "!['pass', 'fail', 'skip'].includes(state.tests.get(testName))",
+    proofEvents.map(value => value.Test === requiredTests[1] && value.Action === 'pass' ? {...value, Action: 'skip'} : value),
+    `package ${packages[0]} pass=4 skip=1 fail=0\nskip ${packages[0]} ${requiredTests[1]}\n`],
+]) {
+  test(`mutation killed: ${name}`, () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-required-')));
+    try {
+      const source = readFileSync(script, 'utf8');
+      const guard = "!['pass', 'fail'].includes(state.tests.get(testName))";
+      assert.equal(source.split(guard).length, 2);
+      const target = join(directory, 'mutant.mjs');
+      writeFileSync(target, source.replace(guard, replacement).replace('state.skip !== 0 ||', ''));
+      const fixture = {args: requiredArgs, input: stream(events), output};
+      assertFixture(target, {...fixture, status: 0});
+      assert.throws(() => assertFixture(target, fixture), {code: 'ERR_ASSERTION'});
+    } finally {
+      rmSync(directory, {recursive: true, force: true});
+    }
+  });
+}
 
 for (const mutation of [
   {name: 'ignoring a fail action', from: "if (action === 'fail') failed = true;", to: '', fixture: failures[1], changed: {status: 0, stderr: ''}},

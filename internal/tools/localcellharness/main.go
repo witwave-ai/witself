@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
+	return runWithBuilder(ctx, args, out, buildBinaries)
+}
+
+func runWithBuilder(ctx context.Context, args []string, out io.Writer, build func(context.Context, string, string, *localcell.Binaries) error) error {
 	flags := flag.NewFlagSet("localcellharness", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	operation := flags.String("operation", "", "install, start, stop, inspect, status, repair, or remove")
@@ -56,12 +62,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	binaries := localcell.Binaries{PostgresDir: *pgbin, Server: *server, Worker: *worker}
 	if (*operation == "install" || *operation == "start") && (binaries.Server == "" || binaries.Worker == "") {
-		buildDir, err := os.MkdirTemp("", "localcellharness-build-")
+		buildDir, err := harnessBuildDirectory(ctx, *root)
 		if err != nil {
-			return errors.New("localcellharness: cannot create temporary build directory")
+			return errors.New("localcellharness: cannot create component build directory")
 		}
-		defer func() { _ = os.RemoveAll(buildDir) }()
-		if err := buildBinaries(ctx, *source, buildDir, &binaries); err != nil {
+		// Children and later stop/repair invocations still need these executable
+		// paths after this command returns. Only a successful purge removes them.
+		if err := build(ctx, *source, buildDir, &binaries); err != nil {
+			_ = os.RemoveAll(buildDir)
 			return err
 		}
 	}
@@ -92,6 +100,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		err = cell.Repair(ctx)
 	case "remove":
 		err = cell.Remove(ctx, localcell.RemoveOptions{Purge: *purge})
+		if err == nil && *purge {
+			cache := filepath.Join(*root, ".harness-build")
+			if _, statErr := os.Lstat(cache); !errors.Is(statErr, os.ErrNotExist) {
+				if statErr != nil || harnessPrivateDirectory(cache) != nil || os.RemoveAll(cache) != nil {
+					return errors.New("localcellharness: cannot remove component build directory")
+				}
+			}
+		}
 	case "inspect":
 		inspection, inspectErr := cell.Inspect(ctx)
 		if inspectErr != nil {
@@ -123,6 +139,45 @@ func validOperation(operation string) bool {
 	}
 }
 
+func harnessBuildDirectory(ctx context.Context, root string) (string, error) {
+	if err := harnessPrivateDirectory(root); err != nil {
+		return "", err
+	}
+	cell, err := localcell.New(localcell.Config{Root: root})
+	if err != nil {
+		return "", err
+	}
+	if _, err := cell.Inspect(ctx); err != nil {
+		return "", err
+	}
+	cache := filepath.Join(root, ".harness-build")
+	if err := harnessPrivateDirectory(cache); err != nil {
+		return "", err
+	}
+	for range 10 {
+		var suffix [6]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", errors.New("cannot allocate component build identity")
+		}
+		directory := filepath.Join(cache, fmt.Sprintf("build-%x", suffix))
+		if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := harnessPrivateDirectory(directory); err != nil {
+			return "", err
+		}
+		return directory, nil
+	}
+	return "", errors.New("cannot allocate component build directory")
+}
+
+func harnessExecutable(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
 func buildBinaries(ctx context.Context, source, directory string, binaries *localcell.Binaries) error {
 	for _, component := range []struct {
 		name string
@@ -131,8 +186,16 @@ func buildBinaries(ctx context.Context, source, directory string, binaries *loca
 		if *component.path != "" {
 			continue
 		}
-		path := filepath.Join(directory, component.name)
-		cmd := exec.CommandContext(ctx, "go", "build", "-o", path, "./cmd/"+component.name)
+		path := filepath.Join(directory, harnessExecutable(component.name))
+		// Build tools do not promise PW1's protected DACL. Publish into a private
+		// file before making the path available to a lifecycle invocation.
+		staging, err := os.MkdirTemp("", "lc-build-")
+		if err != nil {
+			return errors.New("localcellharness: cannot create build staging directory")
+		}
+		defer func() { _ = os.RemoveAll(staging) }()
+		staged := filepath.Join(staging, harnessExecutable(component.name))
+		cmd := exec.CommandContext(ctx, "go", "build", "-o", staged, "./cmd/"+component.name)
 		// Reuse the caller's already-installed toolchain and cached modules;
 		// the developer harness never downloads a component or dependency.
 		cmd.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
@@ -143,7 +206,28 @@ func buildBinaries(ctx context.Context, source, directory string, binaries *loca
 		if err := cmd.Run(); err != nil {
 			return errors.New("localcellharness: component build failed")
 		}
+		if err := publishHarnessBinary(staged, path); err != nil {
+			return errors.New("localcellharness: cannot publish component build")
+		}
 		*component.path = path
 	}
 	return nil
+}
+
+func publishHarnessBinary(source, target string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = input.Close() }()
+	output, err := harnessCreateFile(target)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(output, input)
+	closeErr := output.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

@@ -8,11 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,14 +28,14 @@ func TestRealLifecycle(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	t.Run("InstallStartRestartRemove", func(t *testing.T) { testInstallStartRestartRemove(t, binaries) })
-	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries) })
-	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries) })
-	t.Run("WaitsForReadiness", func(t *testing.T) { testWaitsForReadiness(t, binaries) })
+	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries, assertPostgresEncodingAndUnicode) })
+	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries, assertPostgresEncodingAndUnicode) })
+	t.Run("WaitsForReadiness", func(t *testing.T) { testWaitsForReadiness(t, binaries, assertPostgresEncodingAndUnicode) })
 }
 
 func postgresBinariesPresent(directory string) bool {
 	for _, name := range []string{"postgres", "initdb", "pg_ctl", "psql", "createdb"} {
-		info, err := os.Stat(filepath.Join(directory, name))
+		info, err := os.Stat(filepath.Join(directory, lifecycleExecutableName(name)))
 		if err != nil || info.IsDir() {
 			return false
 		}
@@ -47,13 +45,14 @@ func postgresBinariesPresent(directory string) bool {
 
 func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
-	}
-	if pgbin == "" || !postgresBinariesPresent(pgbin) {
+	if pgbin == "" {
 		_, _ = fmt.Fprintf(os.Stderr, "NOT RUN %s: no PostgreSQL binaries\n", t.Name())
 		t.Skip("no PostgreSQL binaries")
 	}
+	if !postgresBinariesPresent(pgbin) {
+		t.Fatal("configured PostgreSQL distribution is incomplete")
+	}
+	requirePostgres16(t, pgbin)
 	buildDir := t.TempDir()
 	source, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -64,7 +63,7 @@ func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 		name string
 		path *string
 	}{{"witself-server", &binaries.Server}, {"witself-worker", &binaries.Worker}} {
-		*component.path = filepath.Join(buildDir, component.name)
+		*component.path = filepath.Join(buildDir, lifecycleExecutableName(component.name))
 		cmd := offlineBuildCommand(t.Context(), "build", "-o", *component.path, "./cmd/"+component.name)
 		cmd.Dir = source
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
@@ -83,37 +82,42 @@ func offlineBuildCommand(ctx context.Context, args ...string) *exec.Cmd {
 
 func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error) (*localcell.Cell, string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: PostgreSQL lifecycle requires portable binary and temporary-directory fixtures")
+	root := shortLifecycleRoot(t)
+	witness := newLifecycleProcessWitness(t, root)
+	observe := func(operation, step string) error {
+		witness.capture(t)
+		if failpoint != nil {
+			return failpoint(operation, step)
+		}
+		return nil
 	}
-	// A short, flat prefix keeps every generated path (including the
-	// PostgreSQL data directory and lock files) well inside platform limits;
-	// Unix sockets are disabled, so this is isolation hygiene, not a socket
-	// requirement. This is still test-owned data.
-	root, err := os.MkdirTemp("/tmp", "lc-s2-")
-	if err != nil {
-		t.Fatal("cannot allocate disposable cell")
-	}
-	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 60 * time.Second, Failpoint: failpoint})
+	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 60 * time.Second, Failpoint: observe})
 	if err != nil {
 		_ = os.RemoveAll(root)
 		t.Fatalf("construct cell: %v", err)
 	}
 	t.Cleanup(func() {
+		witness.capture(t)
+		defer witness.assertStopped(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 		defer cancel()
 		cleanupCell, newErr := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 30 * time.Second})
-		if newErr == nil {
-			// Recovery uses the durable fence, so even a test interrupted by
-			// its own failure point cannot strand child processes.
-			if repairErr := cleanupCell.Repair(ctx); repairErr != nil {
-				t.Errorf("cleanup repair: %v", repairErr)
-				return
-			}
-			if removeErr := cleanupCell.Remove(ctx, localcell.RemoveOptions{Purge: true}); removeErr != nil {
-				t.Errorf("cleanup remove: %v", removeErr)
-				return
-			}
+		if newErr != nil {
+			t.Error("cannot construct cleanup cell")
+			return
+		}
+		// Recovery uses the durable fence, so even a test interrupted by
+		// its own failure point cannot strand child processes.
+		if repairErr := cleanupCell.Repair(ctx); repairErr != nil {
+			t.Errorf("cleanup repair: %v", repairErr)
+			return
+		}
+		// Repair can recover a postmaster's missing durable identity. Retain
+		// that recovered incarnation before Remove deletes the run directory.
+		witness.capture(t)
+		if removeErr := cleanupCell.Remove(ctx, localcell.RemoveOptions{Purge: true}); removeErr != nil {
+			t.Errorf("cleanup remove: %v", removeErr)
+			return
 		}
 		if err := os.RemoveAll(root); err != nil {
 			t.Error("cannot remove disposable cell root")
@@ -129,11 +133,12 @@ func testInstallStartRestartRemove(t *testing.T, binaries localcell.Binaries) {
 		t.Fatalf("install: %v", err)
 	}
 	assertStopped(t, cell)
-	if err := cell.Start(ctx); err != nil {
+	if err := startLifecycle(t, cell, root); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	manifest := assertReady(t, cell)
 	account := readStoreState(t, root, manifest)
+	assertPostgresEncodingAndUnicode(t, root, manifest)
 	if manifest.LastVerifiedSchemaVersion != store.SchemaVersion() {
 		t.Fatal("manifest did not record the verified applied schema")
 	}
@@ -148,7 +153,7 @@ func testInstallStartRestartRemove(t *testing.T, binaries localcell.Binaries) {
 		t.Fatalf("stop: %v", err)
 	}
 	assertStopped(t, cell)
-	if err := cell.Start(ctx); err != nil {
+	if err := startLifecycle(t, cell, root); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	if readStoreState(t, root, assertReady(t, cell)) != account {
@@ -177,15 +182,19 @@ func testInstallStartRestartRemove(t *testing.T, binaries localcell.Binaries) {
 	}
 }
 
-func testTwoCellsAreIndependent(t *testing.T, binaries localcell.Binaries) {
+type lifecycleDatabaseProof func(*testing.T, string, *localcell.Manifest)
+
+func testTwoCellsAreIndependent(t *testing.T, binaries localcell.Binaries, databaseProof lifecycleDatabaseProof) {
 	first, firstRoot := disposableCell(t, binaries, nil)
 	second, secondRoot := disposableCell(t, binaries, nil)
 	ports := make(map[int]bool)
+	roots := map[*localcell.Cell]string{first: firstRoot, second: secondRoot}
 	for _, cell := range []*localcell.Cell{first, second} {
+		root := roots[cell]
 		if err := cell.Install(t.Context(), localcell.InstallOptions{LeaveRunning: true}); err != nil {
 			t.Fatalf("install: %v", err)
 		}
-		if err := cell.Start(t.Context()); err != nil {
+		if err := startLifecycle(t, cell, root); err != nil {
 			t.Fatalf("start: %v", err)
 		}
 		manifest := assertReady(t, cell)
@@ -196,11 +205,15 @@ func testTwoCellsAreIndependent(t *testing.T, binaries localcell.Binaries) {
 			ports[port] = true
 		}
 	}
-	if err := os.WriteFile(filepath.Join(firstRoot, "spool", "first-cell-only"), []byte("isolated"), 0o600); err != nil {
+	if err := lifecycleWriteFile(filepath.Join(firstRoot, "spool", "first-cell-only"), []byte("isolated")); err != nil {
 		t.Fatal("cannot create spool isolation witness")
 	}
 	if _, err := os.Stat(filepath.Join(secondRoot, "spool", "first-cell-only")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("cells share spool contents")
+	}
+	if databaseProof != nil {
+		databaseProof(t, firstRoot, assertReady(t, first))
+		databaseProof(t, secondRoot, assertReady(t, second))
 	}
 	if err := first.Stop(t.Context()); err != nil {
 		t.Fatalf("stop first cell: %v", err)
@@ -209,7 +222,7 @@ func testTwoCellsAreIndependent(t *testing.T, binaries localcell.Binaries) {
 	assertReady(t, second)
 }
 
-func testInterruptedStartRepair(t *testing.T, binaries localcell.Binaries) {
+func testInterruptedStartRepair(t *testing.T, binaries localcell.Binaries, databaseProof lifecycleDatabaseProof) {
 	interrupted := false
 	cell, root := disposableCell(t, binaries, func(operation, step string) error {
 		if operation == "start" && step == "postgres" && !interrupted {
@@ -221,7 +234,7 @@ func testInterruptedStartRepair(t *testing.T, binaries localcell.Binaries) {
 	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := cell.Start(t.Context()); err == nil || !interrupted {
+	if err := startLifecycle(t, cell, root); err == nil || !interrupted {
 		t.Fatal("start did not reach the interruption point")
 	}
 	inspection, err := cell.Inspect(t.Context())
@@ -246,13 +259,31 @@ func testInterruptedStartRepair(t *testing.T, binaries localcell.Binaries) {
 		t.Fatalf("second repair: %v", err)
 	}
 	assertStopped(t, cell)
-	if err := cell.Start(t.Context()); err != nil {
+	if err := startLifecycle(t, cell, root); err != nil {
 		t.Fatalf("start after repair: %v", err)
 	}
-	assertReady(t, cell)
+	manifest := assertReady(t, cell)
+	if databaseProof != nil {
+		databaseProof(t, root, manifest)
+	}
 }
 
-func testWaitsForReadiness(t *testing.T, binaries localcell.Binaries) {
+func testWaitsForReadiness(t *testing.T, binaries localcell.Binaries, databaseProof lifecycleDatabaseProof) {
+	cell, root := disposableCell(t, binaries, nil)
+	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if databaseProof != nil {
+		if err := startLifecycle(t, cell, root); err != nil {
+			t.Fatalf("start before readiness fault: %v", err)
+		}
+		// Prove the database before substituting the server that deliberately
+		// cannot become ready or serve the Unicode HTTP request.
+		databaseProof(t, root, assertReady(t, cell))
+		if err := cell.Stop(t.Context()); err != nil {
+			t.Fatalf("stop before readiness fault: %v", err)
+		}
+	}
 	buildDir := t.TempDir()
 	source := filepath.Join(buildDir, "notready.go")
 	const program = `package main
@@ -265,24 +296,28 @@ func main() {
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal("cannot write readiness fixture")
 	}
-	binaries.Server = filepath.Join(buildDir, "notready")
+	binaries.Server = filepath.Join(buildDir, lifecycleExecutableName("notready"))
 	cmd := offlineBuildCommand(t.Context(), "build", "-o", binaries.Server, source)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Run(); err != nil {
 		t.Fatal("cannot build readiness fixture")
 	}
-	cell, root := disposableCell(t, binaries, nil)
-	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 2 * time.Second})
+	// Ten seconds bounds every step; a Windows PostgreSQL restart alone takes about 2.5 s
+	// (oracle round 6), so a two-second bound failed the postgres step before the server
+	// readiness fault under test was ever reached.
+	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal("cannot set bounded readiness timeout")
 	}
 	started := time.Now()
-	err = cell.Start(t.Context())
+	err = startLifecycle(t, cell, root)
 	if err == nil || !strings.Contains(err.Error(), "server") {
 		t.Fatal("start succeeded without server readiness or omitted the failed component")
+	}
+	component, cause, state, observationFailed, ok := localcell.ReadinessFailureForTest(err)
+	if !ok || component != "server" || cause != "local cell server readiness deadline exceeded" ||
+		state.PID <= 1 || !state.Alive || !state.Matches || observationFailed {
+		t.Fatal("readiness deadline lost the live matching identity observed before rollback")
 	}
 	if time.Since(started) < time.Second {
 		t.Fatal("start skipped the bounded readiness wait")
@@ -317,12 +352,8 @@ func readStoreState(t *testing.T, root string, manifest *localcell.Manifest) str
 	if manifest.Database != "witself" {
 		t.Fatal("disposable cell database must be witself")
 	}
-	password, err := os.ReadFile(filepath.Join(root, "run", "postgres.password"))
-	if err != nil {
-		t.Fatal("cannot read test-owned PostgreSQL password")
-	}
-	dsn := url.URL{Scheme: "postgres", User: url.UserPassword(manifest.Role, strings.TrimSpace(string(password))), Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(manifest.Ports.Postgres)), Path: "/" + manifest.Database, RawQuery: "sslmode=disable"}
-	st, err := store.Open(t.Context(), dsn.String())
+	dsn := lifecycleDSN(t, root, manifest)
+	st, err := store.Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal("cannot open test-owned local store")
 	}

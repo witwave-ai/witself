@@ -158,11 +158,11 @@ func stageInstallInterruption(t *testing.T, cell *localcell.Cell, root, lastStep
 	if err != nil {
 		t.Fatal("cannot encode interrupted install manifest")
 	}
-	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0o600); err != nil {
+	if err := lifecycleWriteFile(filepath.Join(root, "manifest.json"), manifest); err != nil {
 		t.Fatal("cannot stage interrupted install manifest")
 	}
 	prefix := append(bytes.Join(lines[:keep], []byte("\n")), '\n')
-	if err := os.WriteFile(journalPath, prefix, 0o600); err != nil {
+	if err := lifecycleWriteFile(journalPath, prefix); err != nil {
 		t.Fatal("cannot stage interrupted install journal")
 	}
 }
@@ -170,7 +170,7 @@ func stageInstallInterruption(t *testing.T, cell *localcell.Cell, root, lastStep
 func preserveInstallData(t *testing.T, root string) func() {
 	t.Helper()
 	witness := filepath.Join(root, "pg", "repair-preserved-data")
-	if err := os.WriteFile(witness, []byte("existing cluster data"), 0o600); err != nil {
+	if err := lifecycleWriteFile(witness, []byte("existing cluster data")); err != nil {
 		t.Fatal("cannot prepare PGDATA preservation witness")
 	}
 	paths := []string{filepath.Join(root, "pg", "PG_VERSION"), witness}

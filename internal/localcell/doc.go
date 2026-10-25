@@ -10,9 +10,11 @@
 // 0700 and secret/state files with mode 0600 on Unix. A stable root .owner.lock
 // also fences removal of run/: deleting a held lock inode must never allow a
 // second owner to lock a replacement inode concurrently. It remains after
-// removal. Windows objects require the current user as owner and a protected
-// DACL with explicit full control only for that user and SYSTEM; reparse paths
-// and non-local, non-NTFS, reserved or long roots are refused. Retained handles
+// removal. Windows control objects require the current user as owner and a
+// protected DACL with explicit full control only for that user and SYSTEM.
+// PGDATA alone grants that same private access through directory inheritance
+// so PostgreSQL-created descendants are private before their first write.
+// Reparse paths and non-local, non-NTFS, reserved or long roots are refused. Retained handles
 // fence ancestor renames; pathname creation detects in-place reparse changes
 // afterward and rolls back the created object by handle. This is detection with
 // rollback, not prevention; handle-relative creation remains deferred.
@@ -44,8 +46,11 @@
 // environments and retained-handle identity checks fence shutdown, with an
 // isolated console attachment helper for server/worker CTRL_BREAK and an explicit
 // refusal when their console no longer exists (no service or console-close resilience).
+// PostgreSQL launches disable administrative groups and privileges, retain the
+// current user, and explicitly use that user's ownership and a private default
+// object DACL; an elevated CI parent never makes PostgreSQL administrative.
 //
 // Restart policy, migration cancellation, launchd/systemd/Windows service
-// registration, downloads, the installer manifest trust contract, native Windows
-// lifecycle proof, and supported local-product routing/authorization remain deferred.
+// registration, product downloads, the installer manifest trust contract, the
+// Windows 11 receipt, and supported local-product routing/authorization remain deferred.
 package localcell

@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,12 +14,63 @@ import (
 // and platform-specific files. Native CI lists each executed skip by test name.
 // This source-only check also runs on Windows; it needs no private directories.
 func windowsSkipOwnerViolations(file *ast.File, windowsOnly bool) []token.Pos {
-	// PW1 privacy and PW2 launch/environment fixtures are implemented. Only
-	// PW3 lifecycle fixtures may defer Windows execution, apart from the exact
-	// native process-DACL witness that enabled SeDebugPrivilege invalidates.
-	owner := regexp.MustCompile(`^LC-S2-PW3: \S`)
+	// PW1-PW3 are implemented. Only privilege-dependent symlink creation
+	// may skip; the unconditional Windows junction coverage stays active. The
+	// one further exception is the exact native process-DACL witness that an
+	// enabled SeDebugPrivilege invalidates, and only in Windows-only files.
+	allowed := map[string]bool{
+		"LC-S2-PW3: Windows spool symlink fixture privilege unavailable; mandatory junction coverage remains active": true,
+		"LC-S2-PW3: Windows symlink fixture privileges unavailable":                                                  true,
+		"LC-S2-PW3: Windows state symlink fixture privilege unavailable; mandatory junction coverage remains active": true,
+	}
 	const debugPrivilegeSkip = "LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege"
+	permitted := func(message string) bool {
+		return allowed[message] || (windowsOnly && message == debugPrivilegeSkip)
+	}
 	var violations []token.Pos
+	seen := make(map[token.Pos]bool)
+	reject := func(position token.Pos) {
+		if !seen[position] {
+			seen[position] = true
+			violations = append(violations, position)
+		}
+	}
+	// Retired owner literals are forbidden everywhere, including switch cases
+	// and shared helpers whose caller supplies the Windows condition.
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		method, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (method.Sel.Name != "Skip" && method.Sel.Name != "Skipf") {
+			return true
+		}
+		if len(call.Args) == 1 {
+			if literal, ok := call.Args[0].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				message, _ := strconv.Unquote(literal.Value)
+				if permitted(message) {
+					return true
+				}
+			}
+		}
+		for _, argument := range call.Args {
+			ast.Inspect(argument, func(node ast.Node) bool {
+				literal, ok := node.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					return true
+				}
+				message, _ := strconv.Unquote(literal.Value)
+				for _, owner := range []string{"LC-S2-PW0:", "LC-S2-PW1:", "LC-S2-PW2:", "LC-S2-PW3:"} {
+					if strings.Contains(message, owner) {
+						reject(call.Pos())
+					}
+				}
+				return true
+			})
+		}
+		return true
+	})
 	check := func(node ast.Node) {
 		ast.Inspect(node, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -37,8 +87,8 @@ func windowsSkipOwnerViolations(file *ast.File, windowsOnly bool) []token.Pos {
 					message, _ = strconv.Unquote(literal.Value)
 				}
 			}
-			if !owner.MatchString(message) && (!windowsOnly || message != debugPrivilegeSkip) {
-				violations = append(violations, call.Pos())
+			if !permitted(message) {
+				reject(call.Pos())
 			}
 			return true
 		})
@@ -48,19 +98,28 @@ func windowsSkipOwnerViolations(file *ast.File, windowsOnly bool) []token.Pos {
 		return violations
 	}
 	ast.Inspect(file, func(node ast.Node) bool {
-		branch, ok := node.(*ast.IfStmt)
-		if !ok {
-			return true
-		}
-		// Inspect every branch, including those in non-Test fixture helpers.
-		op, found := windowsGOOSCondition(branch.Cond)
-		if !found {
-			return true
-		}
-		if op == token.EQL {
-			check(branch.Body)
-		} else if branch.Else != nil {
-			check(branch.Else)
+		// A GOOS-dependent condition requires ownership in every branch. Do
+		// not infer which side runs on Windows: negation, compound conditions
+		// and switch defaults can all reach Windows without naming it directly.
+		switch branch := node.(type) {
+		case *ast.IfStmt:
+			if containsRuntimeGOOS(branch.Cond) || containsRuntimeGOOS(branch.Init) {
+				check(branch.Body)
+				if branch.Else != nil {
+					check(branch.Else)
+				}
+			}
+		case *ast.SwitchStmt:
+			goosDependent := containsRuntimeGOOS(branch.Tag) || containsRuntimeGOOS(branch.Init)
+			for _, statement := range branch.Body.List {
+				clause := statement.(*ast.CaseClause)
+				for _, condition := range clause.List {
+					goosDependent = goosDependent || containsRuntimeGOOS(condition)
+				}
+			}
+			if goosDependent {
+				check(branch.Body)
+			}
 		}
 		return true
 	})
@@ -80,7 +139,7 @@ func TestWindowsSkipsNameOwningSlice(t *testing.T) {
 				t.Fatalf("cannot parse test source %s", path)
 			}
 			for _, position := range windowsSkipOwnerViolations(file, strings.HasSuffix(path, "_windows_test.go")) {
-				t.Errorf("%s: Windows skip must name LC-S2-PW3 and a reason; only the exact Windows-only LC-S2-PW2 enabled SeDebugPrivilege DACL reason is excepted", positions.Position(position))
+				t.Errorf("%s: Windows lifecycle skips are retired; only the documented symlink-privilege skips and the exact Windows-only LC-S2-PW2 enabled SeDebugPrivilege DACL reason are allowed", positions.Position(position))
 			}
 		}
 	}
@@ -93,7 +152,7 @@ func TestWindowsSkipOwnerGuardCoversHelpers(t *testing.T) {
 		windowsOnly bool
 		want        int
 	}{
-		{"owned-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: lifecycle pending") }`, false, 0},
+		{"retired-lifecycle-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: lifecycle pending") }`, false, 1},
 		{"retired-launch-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: launch pending") }`, false, 1},
 		{"retired-windows-launch-helper", `t.Skip("LC-S2-PW2: launch pending")`, true, 1},
 		{"enabled-debug-privilege-windows-helper", `t.Skip("LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege")`, true, 0},
@@ -101,15 +160,42 @@ func TestWindowsSkipOwnerGuardCoversHelpers(t *testing.T) {
 		{"anonymous-debug-privilege-reason", `t.Skip("real process DACL denial unavailable with enabled SeDebugPrivilege")`, true, 1},
 		{"debug-privilege-shared-source", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW2: real process DACL denial unavailable with enabled SeDebugPrivilege") }`, false, 1},
 		{"retired-privacy-helper", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW1: privacy pending") }`, false, 1},
+		{"retired-lifecycle-switch", `switch runtime.GOOS { case "windows": t.Skip("LC-S2-PW3: lifecycle pending") }`, false, 1},
+		{"retired-launch-switch", `switch runtime.GOOS { case "windows": t.Skipf("LC-S2-PW2: %s", "launch pending") }`, false, 1},
+		{"retired-privacy-switch", `switch runtime.GOOS { case "windows": t.Skip("LC-S2-PW1: privacy pending") }`, false, 1},
+		{"retired-unconditional-helper", `t.Skip("LC-S2-PW3: lifecycle pending")`, false, 1},
+		{"retired-unit-helper", `t.Skip("LC-S2-PW0: unit coverage pending")`, false, 1},
+		{"retired-concatenated-helper", `t.Skip("LC-S2-PW3:" + " lifecycle pending")`, false, 1},
+		{"altered-symlink-exception", `t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable" + " for another reason")`, false, 1},
+		{"retired-nested-switch", `if ready { switch runtime.GOOS { case "windows": t.Skipf("LC-S2-PW3: %s", "lifecycle pending") } }`, false, 1},
 		{"anonymous-helper", `if runtime.GOOS == "windows" { t.Skip("privacy pending") }`, false, 1},
 		{"empty-reason", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: ") }`, false, 1},
 		{"anonymous-skipf", `if runtime.GOOS == "windows" { t.Skipf("pending: %s", "fixture") }`, false, 1},
 		{"anonymous-skipnow", `if runtime.GOOS == "windows" { t.SkipNow() }`, false, 1},
+		{"anonymous-switch-case", `switch runtime.GOOS { case "windows": t.Skip("pending") }`, false, 1},
+		{"anonymous-switch-default", `switch runtime.GOOS { case "linux", "darwin": default: t.Skip("pending") }`, false, 1},
+		{"anonymous-condition-switch-case", `switch { case runtime.GOOS == "windows": t.Skipf("pending: %s", "fixture") }`, false, 1},
+		{"anonymous-condition-switch-default", `switch { case runtime.GOOS != "windows": default: t.SkipNow() }`, false, 1},
 		{"inequality-else", `if runtime.GOOS != "windows" {} else { t.Skip("pending") }`, false, 1},
 		{"nested-condition", `if true && (runtime.GOOS == "windows") { t.Skip("pending") }`, false, 1},
+		{"compound-condition", `if runtime.GOOS != "windows" || !ready { t.Skip("pending") }`, false, 1},
+		{"compound-else", `if runtime.GOOS == "windows" && ready {} else { t.Skipf("pending: %s", "fixture") }`, false, 1},
+		{"multiple-goos-comparisons", `if runtime.GOOS != "windows" || (runtime.GOOS == "windows" && !ready) { t.Skip("pending") }`, false, 1},
+		{"negated-condition", `if !(runtime.GOOS != "windows") { t.Skip("pending") }`, false, 1},
+		{"negated-else", `if !(runtime.GOOS == "windows") {} else { t.Skip("pending") }`, false, 1},
+		{"condition-both-branches", `if runtime.GOOS == "windows" { t.Skip("pending") } else { t.Skip("pending") }`, false, 2},
+		{"goos-if-initializer", `if platform := runtime.GOOS; platform == "windows" { t.Skip("pending") }`, false, 1},
+		{"goos-switch-initializer", `switch platform := runtime.GOOS; platform { case "linux", "darwin": default: t.Skip("pending") }`, false, 1},
 		{"windows-only-helper", `t.Skip("pending")`, true, 1},
-		{"owned-windows-helper", `t.Skip("LC-S2-PW3: fixture pending")`, true, 0},
-		{"other-platform", `if runtime.GOOS == "plan9" { t.Skip("pending") }`, false, 0},
+		{"retired-windows-helper", `t.Skip("LC-S2-PW3: fixture pending")`, true, 1},
+		{"symlink-privilege", `if runtime.GOOS == "windows" { t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable") }`, false, 0},
+		{"symlink-privilege-switch", `switch runtime.GOOS { case "windows": t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable") }`, false, 0},
+		{"symlink-privilege-switch-default", `switch runtime.GOOS { case "linux", "darwin": default: t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable") }`, false, 0},
+		{"symlink-privilege-compound", `if runtime.GOOS == "windows" && !ready { t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable") }`, false, 0},
+		{"state-symlink-privilege", `t.Skip("LC-S2-PW3: Windows state symlink fixture privilege unavailable; mandatory junction coverage remains active")`, true, 0},
+		{"other-platform", `if runtime.GOOS == "plan9" { t.Skip("pending") }`, false, 1},
+		{"non-platform-condition", `if !ready { t.Skip("fixture unavailable") }`, false, 0},
+		{"non-platform-switch", `switch ready { case false: t.Skip("fixture unavailable") }`, false, 0},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			file, err := parser.ParseFile(token.NewFileSet(), "fixture_test.go", "package fixture\nfunc sharedFixture(t *testing.T) { "+fixture.body+" }", 0)
@@ -123,118 +209,22 @@ func TestWindowsSkipOwnerGuardCoversHelpers(t *testing.T) {
 	}
 }
 
-// Pin the pending fixture boundaries so deleting a helper guard cannot silently
-// reactivate Windows-unready production paths. Only t.Helper may precede it.
-func TestWindowsFixtureSkipsBeforeFilesystem(t *testing.T) {
-	for _, fixture := range []struct{ path, helper, owner string }{
-		{"lifecycle_hermetic_test.go", "buildLifecycleFixture", "LC-S2-PW3"},
-		{"lifecycle_integration_test.go", "buildRealComponents", "LC-S2-PW3"},
-		{"lifecycle_integration_test.go", "disposableCell", "LC-S2-PW3"},
-	} {
-		t.Run(fixture.helper, func(t *testing.T) {
-			file, err := parser.ParseFile(token.NewFileSet(), fixture.path, nil, 0)
-			if err != nil {
-				t.Fatal("cannot parse fixture source")
-			}
-			var body *ast.BlockStmt
-			for _, declaration := range file.Decls {
-				if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == fixture.helper {
-					body = function.Body
-					break
-				}
-			}
-			if body == nil || !startsWithWindowsSkip(body, fixture.owner) {
-				t.Fatal("fixture must skip Windows with its owning slice before filesystem work")
-			}
-		})
-	}
-}
-
-func startsWithWindowsSkip(body *ast.BlockStmt, owner string) bool {
-	statements := body.List
-	if len(statements) > 0 {
-		if call := testingMethodCall(statements[0], "Helper"); call != nil && len(call.Args) == 0 {
-			statements = statements[1:]
-		}
-	}
-	if len(statements) == 0 {
+func containsRuntimeGOOS(condition ast.Node) bool {
+	if condition == nil {
 		return false
 	}
-	branch, ok := statements[0].(*ast.IfStmt)
-	if !ok || branch.Init != nil || branch.Else != nil || len(branch.Body.List) != 1 {
-		return false
-	}
-	condition, ok := branch.Cond.(*ast.BinaryExpr)
-	if !ok || condition.Op != token.EQL || (!windowsGOOSComparison(condition.X, condition.Y) && !windowsGOOSComparison(condition.Y, condition.X)) {
-		return false
-	}
-	call := testingMethodCall(branch.Body.List[0], "Skip")
-	if call == nil || len(call.Args) != 1 {
-		return false
-	}
-	literal, ok := call.Args[0].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		return false
-	}
-	message, err := strconv.Unquote(literal.Value)
-	return err == nil && strings.HasPrefix(message, owner+": ") && strings.TrimSpace(strings.TrimPrefix(message, owner+": ")) != ""
-}
-
-func testingMethodCall(statement ast.Stmt, method string) *ast.CallExpr {
-	expression, ok := statement.(*ast.ExprStmt)
-	if !ok {
-		return nil
-	}
-	call, ok := expression.X.(*ast.CallExpr)
-	if !ok {
-		return nil
-	}
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != method {
-		return nil
-	}
-	receiver, ok := selector.X.(*ast.Ident)
-	if !ok || receiver.Name != "t" {
-		return nil
-	}
-	return call
-}
-
-// windowsGOOSCondition reports the first runtime.GOOS comparison with "windows"
-// found anywhere inside a condition, and its operator.
-func windowsGOOSCondition(condition ast.Expr) (token.Token, bool) {
-	var op token.Token
 	found := false
 	ast.Inspect(condition, func(node ast.Node) bool {
 		if found {
 			return false
 		}
-		binary, ok := node.(*ast.BinaryExpr)
-		if !ok || (binary.Op != token.EQL && binary.Op != token.NEQ) {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "GOOS" {
 			return true
 		}
-		if windowsGOOSComparison(binary.X, binary.Y) || windowsGOOSComparison(binary.Y, binary.X) {
-			op, found = binary.Op, true
-			return false
-		}
-		return true
+		qualifier, ok := selector.X.(*ast.Ident)
+		found = ok && qualifier.Name == "runtime"
+		return !found
 	})
-	return op, found
-}
-
-func windowsGOOSComparison(left, right ast.Expr) bool {
-	selector, ok := left.(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != "GOOS" {
-		return false
-	}
-	qualifier, ok := selector.X.(*ast.Ident)
-	if !ok || qualifier.Name != "runtime" {
-		return false
-	}
-	literal, ok := right.(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		return false
-	}
-	value, err := strconv.Unquote(literal.Value)
-	return err == nil && value == "windows"
+	return found
 }

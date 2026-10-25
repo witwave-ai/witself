@@ -863,6 +863,7 @@ slices, not implementation authorization; do not turn them into one long branch.
   Recovery: synthetic data only / Owner: vacant.
   LC-S2-P PW1 implements protected Windows DACLs, private creation, and local NTFS/reparse path boundaries for lifecycle state and the archive spool. Retained handles fence renames; in-place reparse changes are detected after pathname creation with handle-bound rollback, not prevented (handle-relative creation remains deferred). PW2 still owes the launch/environment adapter, and PW3 the native executable fixtures and PostgreSQL lifecycle proof.
   LC-S2-P PW2 implements suspended Windows launch with atomic Job Object crash cleanup, durable creation-identity fences, isolated console shutdown, and exact trusted child environments; PW3 owes real PostgreSQL 16 distribution/private-child-filesystem compatibility, executable lifecycle fixtures, and native lifecycle proof.
+  LC-S2-P PW3 implements portable executable fixtures, retained harness builds, private PostgreSQL child files, and the pinned PostgreSQL 16 Windows CI proof with required lifecycle scenarios, UTF8/Unicode and process cleanup assertions; intentional Unix test/harness changes use the process temp directory, fail configured-but-incomplete PostgreSQL distributions, require PostgreSQL 16, and retain mode-0700 harness builds until purge; native CI results remain to be recorded, and the Windows 11 receipt remains PW4.
 - **LC-S3 explicit local connection route** / Scope: CLI/MCP/hooks select a local
   cell with the directory blocked / Acceptance: atomic binding activation;
   fail-closed partial switch / Dependencies: LC-S1, M0b route decision (pending) /
@@ -991,7 +992,7 @@ before starting.
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
-| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW2 Windows launch and environment | none | LC-S2; M0a | Windows proof first |
+| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW3 Windows fixtures and PostgreSQL 16 proof | none | LC-S2; M0a | Windows proof first |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S5 | vacant | proposed | sync harness | none | M0c | settle contracts |

@@ -23,3 +23,10 @@ func validateWriteTarget(string) error { return nil }
 
 func publishPrivateFile(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
 func removePrivateFile(path string) error              { return os.Remove(path) }
+
+func (c *Cell) preparePostgresDirectory() error    { return nil }
+func (c *Cell) validatePostgresDirectory() error   { return privateDir(c.path("pg"), false) }
+func readPostgresFile(path string) ([]byte, error) { return readPrivateFile(path) }
+func (c *Cell) writePostgresConfig(data []byte) error {
+	return writeAtomicBytes(c.path("pg", "postgresql.conf"), data, nil)
+}

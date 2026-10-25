@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {assertGate} from './ci-product-gate.mjs';
 import {classifyChanges} from './ci-product-scope.mjs';
@@ -103,17 +104,16 @@ function assertLocalcellWindowsJob(ci) {
   const label = 'localcell-windows';
   assert.equal(ci.env, undefined, `${label}: no inherited workflow environment`);
   const job = ci.jobs[label];
-  assert(job, 'Missing native Windows Local Cell unit job');
+  assert(job, 'Missing native Windows Local Cell job');
   needs(job, ['changes'], label);
   assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
   assert.equal(job['runs-on'], 'windows-latest');
   assert.deepEqual(job.permissions, {contents: 'read'});
-  assert.equal(job['timeout-minutes'], 25);
+  assert.equal(job['timeout-minutes'], 45);
   for (const key of ['continue-on-error', 'environment', 'env', 'services', 'secrets', 'strategy', 'defaults']) {
     assert.equal(job[key], undefined, `${label}: no ${key}`);
   }
   assert(!JSON.stringify(job).includes('secrets.'), `${label}: no secret access`);
-  assert(!JSON.stringify(job).includes('WITSELF_LOCALCELL_PGBIN'), `${label}: no PostgreSQL lifecycle activation`);
   const checkout = action(job, 'actions/checkout@', label);
   assert.equal(checkout.uses, action(ci.jobs['go-rest'], 'actions/checkout@', 'go-rest').uses);
   assert.deepEqual(checkout.with, {'persist-credentials': false});
@@ -139,13 +139,224 @@ function assertLocalcellWindowsJob(ci) {
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
-  ], `${label}: build, vet and parsed test execution stay separate and fail closed`);
+    './scripts/ci-postgres16-windows.ps1',
+    [
+      "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
+      "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
+      '$goExit = $LASTEXITCODE',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness',
+      '$parserExit = $LASTEXITCODE',
+      'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
+    ].join('\n'),
+    './scripts/ci-postgres16-windows.ps1 -Cleanup',
+  ], `${label}: unit execution stays unchanged and the native proof is narrow, complete, and fail closed`);
   for (const step of checks) assert.equal(step.shell, 'pwsh');
+  const proof = checks[5];
+  const cleanup = checks[6];
+  assert.deepEqual(proof.env, {
+    WITSELF_LOCALCELL_PGBIN: '${{ runner.temp }}\\lc-pg16\\pgsql\\bin',
+    TEMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
+    TMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
+  });
+  assert.equal(expression(cleanup.if), 'always()', `${label}: cleanup also runs after failure`);
   for (const step of job.steps) {
-    for (const key of ['if', 'continue-on-error', 'env', 'working-directory']) {
+    for (const key of ['continue-on-error', 'working-directory']) {
       assert.equal(step[key], undefined, `${label}: step cannot override ${key}`);
     }
+    if (step !== cleanup) assert.equal(step.if, undefined, `${label}: required steps cannot skip`);
+    if (step !== proof) assert.equal(step.env, undefined, `${label}: only native proof receives PostgreSQL`);
   }
+}
+
+// This is a deliberately narrow structural contract, not a PowerShell evaluator.
+// Preserve offsets and statement boundaries while removing non-executable text.
+function postgresProvisionCode(source) {
+  const code = source.split('');
+  const erase = (start, end) => {
+    for (let i = start; i < end; i++) if (!/[\r\n]/.test(code[i])) code[i] = ' ';
+  };
+  for (let i = 0; i < source.length;) {
+    const start = i;
+    if (source.startsWith('<#', i)) {
+      let depth = 1;
+      i += 2;
+      while (i < source.length && depth > 0) {
+        if (source.startsWith('<#', i)) { depth++; i += 2; }
+        else if (source.startsWith('#>', i)) { depth--; i += 2; }
+        else i++;
+      }
+      assert.equal(depth, 0, 'Provisioning block comment must close');
+      erase(start, i);
+    } else if (source[i] === '#') {
+      while (i < source.length && source[i] !== '\n') i++;
+      erase(start, i);
+    } else if (source[i] === "'" || source[i] === '"') {
+      const quote = source[i++];
+      assert(source[start - 1] !== '@', 'Provisioning contract does not accept here strings');
+      let closed = false;
+      while (i < source.length) {
+        if (quote === '"' && source[i] === '`') { i += 2; continue; }
+        if (source[i++] !== quote) continue;
+        if (quote === "'" && source[i] === "'") { i++; continue; }
+        closed = true;
+        break;
+      }
+      assert(closed, 'Provisioning string must close');
+      erase(start, i);
+    } else {
+      // Reject continuation syntax outside literals so it cannot disguise a
+      // statement boundary from the contract's restricted grammar.
+      assert(source[i] !== '`', 'Provisioning contract does not accept escaped code tokens');
+      i++;
+    }
+  }
+  return code.join('');
+}
+
+function assertPostgresChecksumTermination(source) {
+  const code = postgresProvisionCode(source);
+  const mismatch = /\bif\s*\(\s*\$actualDigest\s+-cne\s+\$pin\.sha256\s*\)\s*\{/gi;
+  const branches = [...code.matchAll(mismatch)];
+  assert.equal(branches.length, 1, 'Exactly one executable hash mismatch branch is required');
+  const branch = branches[0];
+  const open = branch.index + branch[0].length - 1;
+  const stack = [];
+  let close;
+  for (let i = 0; i < code.length; i++) {
+    if (i === branch.index) assert.equal(stack.length, 0, 'Hash mismatch branch must execute at script scope');
+    if ('({['.includes(code[i])) stack.push(code[i]);
+    else if (')}]'.includes(code[i])) {
+      assert.equal(stack.pop(), {')': '(', '}': '{', ']': '['}[code[i]], 'Provisioning delimiters must balance');
+      if (code[i] === '}' && i > open && stack.length === 0 && close === undefined) close = i;
+    }
+  }
+  assert.equal(stack.length, 0, 'Provisioning delimiters must close');
+  assert(close !== undefined, 'Hash mismatch branch must close');
+  // Requiring the first statement to terminate rules out dead nested branches,
+  // early returns, and a checksum throw moved after archive access.
+  const body = code.slice(open + 1, close).trimStart();
+  assert(/^(?:throw(?=\s|;|$)|exit[ \t]+1[ \t]*(?:[;\r\n]|$))/i.test(body),
+    'Hash mismatch branch must unconditionally terminate with throw or exit 1');
+  const archive = /\[\s*(?:System\.)?IO\.Compression\.ZipFile\s*\]\s*::\s*(?:OpenRead|Open|ExtractToDirectory)\s*\(|\bExpand-Archive\b/gi;
+  const firstArchive = archive.exec(code);
+  assert(firstArchive !== null, 'Provisioning must open the verified archive');
+  assert(close < firstArchive.index, 'Hash mismatch must terminate before the first archive-opening call');
+}
+
+function assertPostgresProvisionContract(source) {
+  assertPostgresChecksumTermination(source);
+  for (const guard of [
+    "$pin.major -ne 16", "$pin.sha256 -cnotmatch '^[a-f0-9]{64}$'",
+    "Get-FileHash -LiteralPath $archivePath -Algorithm SHA256",
+    "if ($actualDigest -cne $pin.sha256)",
+    "'^pgsql/(bin|lib|share)/'", "@('bin', 'lib', 'share')",
+    "@('initdb', 'pg_ctl', 'postgres', 'psql', 'createdb')",
+    "New-Item -ItemType Directory -Path (Join-Path $proofRoot 'testtmp')",
+    "$version -notmatch '\\(PostgreSQL\\) 16\\.[0-9]+'",
+    "$LASTEXITCODE -ne 0", "$archive.Dispose()",
+    "Remove-Item -LiteralPath $proofRoot -Recurse -Force",
+    "throw 'PostgreSQL proof cleanup failed'",
+  ]) assert(source.includes(guard), `PostgreSQL provisioning guard missing: ${guard}`);
+  assert(!/WITSELF_LOCALCELL_PGBIN|GITHUB_ENV|Write-(?:Output|Host).*\$(?:pin|actualDigest)|register|Start-Service/.test(source),
+    'Provisioning cannot activate lifecycle, persist environment, disclose digest, or install a service');
+  assert(readFileSync(new URL('./test-powershell-static-analysis.ps1', import.meta.url), 'utf8')
+    .includes("'scripts\\ci-postgres16-windows.ps1'"), 'Provisioning script must be analyzed');
+}
+
+const postgresProvision = readFileSync(new URL('./ci-postgres16-windows.ps1', import.meta.url), 'utf8');
+const checksumThrow = "throw 'PostgreSQL proof archive checksum mismatch'";
+for (const [name, replacement] of [
+  ['comment out mismatch throw (M11)', `# ${checksumThrow}`],
+  ['hide mismatch throw in block comment', `<# ${checksumThrow} #>`],
+  ['hide mismatch throw in string', '"throw ignored"'],
+  ['make mismatch throw unreachable', `if ($false) { ${checksumThrow} }`],
+  ['return before mismatch throw', `return; ${checksumThrow}`],
+  ['open archive before mismatch throw', `[IO.Compression.ZipFile]::OpenRead($archivePath); ${checksumThrow}`],
+]) {
+  test(`rejects structural checksum mutation: ${name}`, () => {
+    assert(postgresProvision.includes(checksumThrow), 'Checksum mutation must target a real statement');
+    assert.throws(() => assertPostgresChecksumTermination(postgresProvision.replace(checksumThrow, replacement)));
+  });
+}
+
+test('checksum structural contract accepts terminating exit with non-code decoys removed', () => {
+  assertPostgresChecksumTermination(postgresProvision.replace(checksumThrow,
+    `# throw and [IO.Compression.ZipFile]::OpenRead are comments\n    <# { ignored } #>\n    exit 1`));
+});
+
+test('PowerShell mocked checksum mismatch terminates before archive access', t => {
+  const archiveCall = '[IO.Compression.ZipFile]::OpenRead($archivePath)';
+  assert(postgresProvision.includes(archiveCall), 'Mock must target the actual archive-opening expression');
+  // Replace only the static archive call with an observable mock. All mismatch
+  // control flow remains the real script; no download, files, or PG tools run.
+  const source = postgresProvision.replace(archiveCall, '(Open-ProofArchive)');
+  const harness = `
+    $env:RUNNER_TEMP = [IO.Path]::GetTempPath()
+    function Join-Path { param($Path, $ChildPath) 'proof-fixture' }
+    function Get-Content {
+      param($LiteralPath, [switch]$Raw)
+      @{ major = 16; sha256 = ('a' * 64); url = 'https://get.enterprisedb.com/postgresql/postgresql-16.0-1-windows-x64-binaries.zip' } | ConvertTo-Json
+    }
+    function Test-Path { param($LiteralPath) $false }
+    function New-Item { param($ItemType, $Path) }
+    function Invoke-WebRequest {
+      param([switch]$UseBasicParsing, $Uri, $OutFile)
+      [Console]::Out.WriteLine('contract:download')
+    }
+    function Get-FileHash {
+      param($LiteralPath, $Algorithm)
+      [Console]::Out.WriteLine('contract:hash')
+      [pscustomobject]@{ Hash = ('b' * 64) }
+    }
+    function Add-Type { param($AssemblyName) }
+    function Open-ProofArchive {
+      [Console]::Out.WriteLine('contract:archive')
+      throw 'Archive must not open'
+    }
+    try {
+      & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(source).toString('base64')}'))))
+      exit 42
+    } catch {
+      if ($_.Exception.Message -eq 'PostgreSQL proof archive checksum mismatch') { exit 1 }
+      exit 42
+    }
+  `;
+  const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', harness], {
+    encoding: 'utf8', timeout: 30_000,
+  });
+  if (result.error?.code === 'ENOENT') {
+    t.skip('pwsh is unavailable; mocked PowerShell runtime contract requires PowerShell');
+    return;
+  }
+  // Never include child output or values in diagnostics, even on a failing mock.
+  assert(result.error === undefined, 'Mocked PowerShell contract must launch');
+  assert(result.status === 1, 'Checksum mismatch must terminate the mocked PowerShell script');
+  assert(result.stdout.replaceAll('\r\n', '\n').trim() === 'contract:download\ncontract:hash',
+    'Mismatch must follow download and hashing without archive access');
+});
+
+test('Windows PostgreSQL provisioning verifies a complete exact vendor pin and runtime before use', () => {
+  const pin = JSON.parse(readFileSync(new URL('./ci-postgres16-windows.json', import.meta.url), 'utf8'));
+  assert.deepEqual(Object.keys(pin).sort(), ['major', 'sha256', 'url']);
+  assert.equal(pin.major, 16);
+  // Boolean assertions keep the digest out of test diagnostics, even on failure.
+  assert(/^[a-f0-9]{64}$/.test(pin.sha256), 'Owner must fill the verified PostgreSQL archive digest before gating');
+  assert(/^https:\/\/get\.enterprisedb\.com\/postgresql\/postgresql-16\.[0-9]+-[0-9]+-windows-x64-binaries\.zip$/.test(pin.url),
+    'An exact PostgreSQL sixteen x64 EDB binary ZIP must be pinned');
+  assertPostgresProvisionContract(postgresProvision);
+});
+
+for (const [name, guard] of [
+  ['drop the digest check', 'if ($actualDigest -cne $pin.sha256)'],
+  ['drop the PostgreSQL major check', "$pin.major -ne 16"],
+  ['drop executable major preflight', "$version -notmatch '\\(PostgreSQL\\) 16\\.[0-9]+'"],
+  ['ignore executable native exit', '$LASTEXITCODE -ne 0'],
+  ['remove extracted tree cleanup', 'Remove-Item -LiteralPath $proofRoot -Recurse -Force'],
+]) {
+  test(`rejects PostgreSQL provisioning mutation: ${name}`, () => {
+    assert(postgresProvision.includes(guard), 'Mutation must target a real guard');
+    assert.throws(() => assertPostgresProvisionContract(postgresProvision.replace(guard, 'REMOVED')));
+  });
 }
 
 // Evaluate only the small expression grammar used by deployment and concurrency.
@@ -459,16 +670,32 @@ test('exact launch shell guard rejects disabled, case-changed, and non-main sett
 });
 
 const mutations = [
+  ['Windows proof step removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.name !== 'Prove native PostgreSQL sixteen lifecycle'); }],
+  ['Windows proof broadens the run filter', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace("'^TestRealLifecycle$'", "'TestRealLifecycle'"); }],
+  ['Windows proof makes a skip acceptable', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(/ --require [^\n]+/, ''); }],
+  ['Windows proof omits one required child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/WaitsForReadiness', ''); }],
+  ['Windows proof ignores native exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
+  ['Windows proof ignores parser exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
+  ['Windows proof omits bounded diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' --diagnose', ''); }],
+  ['Windows proof reads stdin instead of its file', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' --input $proofJSON', ''); }],
+  ['Windows proof leaks output instead of capturing its file', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' > $proofJSON 2>&1', ''); }],
+  ['Windows proof leaves its file outside the cleanup tree', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('lc-pg16\\proof.json', 'proof.json'); }],
+  ['Windows proof loses the separate native exit capture', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit = $LASTEXITCODE', '$goExit = 0'); }],
+  ['Windows unit step enables proof diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results'); step.run += ' --diagnose'; }],
+  ['Windows proof cleanup removed', data => { data['ci.yml'].jobs['localcell-windows'].steps.pop(); }],
+  ['Windows proof cleanup only on success', data => { delete data['ci.yml'].jobs['localcell-windows'].steps.at(-1).if; }],
+  ['Windows PostgreSQL is enabled on the unit step', data => { data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results').env = {WITSELF_LOCALCELL_PGBIN: 'synthetic'}; }],
+  ['Windows proof uploads artifacts', data => { data['ci.yml'].jobs['localcell-windows'].steps.push({uses: 'actions/upload-artifact@' + 'a'.repeat(40)}); }],
   ['Windows inherits PostgreSQL lifecycle configuration', data => { data['ci.yml'].env = {WITSELF_LOCALCELL_PGBIN: 'synthetic'}; }],
   ['missing Windows unit job', data => { delete data['ci.yml'].jobs['localcell-windows']; }],
   ['missing Windows dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-windows'); }],
   ['Windows job failure ignored', data => { data['ci.yml'].jobs['localcell-windows']['continue-on-error'] = true; }],
   ['Windows job always runs', data => { data['ci.yml'].jobs['localcell-windows'].if = 'always()'; }],
-  ['Windows parser step removed', data => { data['ci.yml'].jobs['localcell-windows'].steps.pop(); }],
-  ['Windows parser bypassed', data => { data['ci.yml'].jobs['localcell-windows'].steps.at(-1).run = 'go test ./internal/localcell'; }],
-  ['Windows test failure ignored', data => { data['ci.yml'].jobs['localcell-windows'].steps.at(-1)['continue-on-error'] = true; }],
-  ['Windows native Go exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.at(-1); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
-  ['Windows parser exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.at(-1); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
+  ['Windows parser step removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.name !== 'Test Local Cell packages and require complete results'); }],
+  ['Windows parser bypassed', data => { data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results').run = 'go test ./internal/localcell'; }],
+  ['Windows test failure ignored', data => { data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results')['continue-on-error'] = true; }],
+  ['Windows native Go exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results'); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
+  ['Windows parser exit masked', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results'); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
   ['Windows parser unit tests removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.run !== 'node --test scripts/ci-go-test-json-check.test.mjs'); }],
   ...[
     ['runs-on', 'ubuntu-24.04'], ['needs', []], ['permissions', {contents: 'write'}],

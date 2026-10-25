@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -24,7 +26,7 @@ func main() {
   for _, entry := range os.Environ() { name, _, _ := strings.Cut(entry, "="); names = append(names, name) }
   sort.Strings(names)
   for _, name := range names { fmt.Println(name) }
-  if len(os.Args) > 1 { return }
+  if len(os.Args) > 1 && os.Args[1] == "exit" { return }
   time.Sleep(time.Minute)
 }
 `
@@ -84,21 +86,8 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 						t.Fatal(err)
 					}
 					t.Cleanup(func() {
-						identity, alive, err := processIdentity(record.PID)
-						if err == nil && alive && identity == record.StartTime {
-							if err := terminateEnvironmentFixture(record); err != nil {
-								t.Error("cannot terminate environment fixture for cleanup")
-								return
-							}
-							deadline := time.Now().Add(5 * time.Second)
-							for time.Now().Before(deadline) {
-								_, alive, err := processIdentity(record.PID)
-								if err == nil && !alive {
-									return
-								}
-								time.Sleep(10 * time.Millisecond)
-							}
-							t.Error("environment fixture remained alive after cleanup")
+						if err := cleanupEnvironmentFixture(record, 5*time.Second, processIdentity, terminateEnvironmentFixture); err != nil {
+							t.Error(err)
 						}
 					})
 					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -122,6 +111,100 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 						}
 					}
 				})
+			}
+		})
+	}
+}
+
+// The lifecycle launcher owns Wait (or the native process handle). Wait here
+// for the recorded incarnation to disappear instead of racing its exit with
+// Kill, or trying to reap a child a second time. Refuse a known reused PID.
+func cleanupEnvironmentFixture(record ProcessRecord, timeout time.Duration, identity func(int) (string, bool, error), terminate func(ProcessRecord) error) error {
+	current, alive, err := identity(record.PID)
+	if err != nil {
+		return errors.New("cannot identify environment fixture for cleanup")
+	}
+	if !alive || current != record.StartTime {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	stopErr := terminate(record)
+	if errors.Is(stopErr, os.ErrProcessDone) || errors.Is(stopErr, syscall.ESRCH) {
+		stopErr = nil
+	}
+	for {
+		current, alive, err = identity(record.PID)
+		if err == nil && (!alive || current != record.StartTime) {
+			// Windows can also return access denied when exit wins the race.
+			// Confirmed exit wins over any stale termination error.
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			if stopErr != nil {
+				return errors.New("cannot terminate environment fixture for cleanup")
+			}
+			return errors.New("environment fixture remained alive or unverifiable after cleanup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestEnvironmentFixtureCleanup(t *testing.T) {
+	for _, fixture := range []struct {
+		name        string
+		initialDead bool
+		stopErr     error
+		staysAlive  bool
+		reused      bool
+		waitProbes  int
+	}{
+		{name: "already-exited", initialDead: true},
+		{name: "exits-before-kill-ESRCH", stopErr: &os.SyscallError{Syscall: "kill", Err: syscall.ESRCH}},
+		{name: "exits-before-kill-process-finished", stopErr: os.ErrProcessDone},
+		{name: "exits-before-kill-other-error", stopErr: os.ErrPermission},
+		{name: "running-child-terminated"},
+		{name: "delayed-child-exit", waitProbes: 2},
+		{name: "running-child-not-terminated", staysAlive: true},
+		{name: "termination-fails", staysAlive: true, stopErr: os.ErrPermission},
+		{name: "false-exit-error-still-alive", staysAlive: true, stopErr: syscall.ESRCH},
+		{name: "pid-reused", reused: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			record := ProcessRecord{PID: 42, StartTime: "fixture-identity"}
+			terminated := false
+			waitProbes := 0
+			identity := func(pid int) (string, bool, error) {
+				if pid != record.PID {
+					t.Fatal("cleanup inspected a different process")
+				}
+				if fixture.reused {
+					return "different-identity", true, nil
+				}
+				if terminated && waitProbes < fixture.waitProbes {
+					waitProbes++
+					return record.StartTime, true, nil
+				}
+				return record.StartTime, !fixture.initialDead && (!terminated || fixture.staysAlive), nil
+			}
+			terminate := func(got ProcessRecord) error {
+				if got != record || terminated {
+					t.Fatal("cleanup changed the process fence or terminated twice")
+				}
+				terminated = true
+				return fixture.stopErr
+			}
+			// Zero deadlines exercise failure without sleeps. The delayed-exit
+			// case must actually retry the identity probe before it can succeed.
+			var timeout time.Duration
+			if fixture.waitProbes > 0 {
+				timeout = time.Second
+			}
+			err := cleanupEnvironmentFixture(record, timeout, identity, terminate)
+			if (err != nil) != fixture.staysAlive {
+				t.Fatal("cleanup did not distinguish an exited child from a surviving child")
+			}
+			if terminated == (fixture.initialDead || fixture.reused) {
+				t.Fatal("cleanup did not terminate exactly the live owned child")
 			}
 		})
 	}

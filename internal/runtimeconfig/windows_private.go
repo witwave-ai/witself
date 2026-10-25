@@ -606,6 +606,10 @@ func WindowsPrivateCreateTemp(dir string) (*os.File, error) {
 // and the published object is rolled back by handle. Existing destinations are
 // validated before replacement; sharing violations leave both files intact.
 func WindowsPrivateRename(oldPath, newPath string) error {
+	return windowsPrivateRename(oldPath, newPath, WindowsPrivateValidate, windowsPrivateValidateHandle)
+}
+
+func windowsPrivateRename(oldPath, newPath string, validate func(string, bool) error, validateHandle func(windows.Handle, bool) error) error {
 	oldClean, err := windowsPrivateCleanPath(oldPath)
 	if err != nil {
 		return err
@@ -624,10 +628,10 @@ func WindowsPrivateRename(oldPath, newPath string) error {
 		return err
 	}
 	defer newGuard.close()
-	if err := WindowsPrivateValidate(oldClean, false); err != nil {
+	if err := validate(oldClean, false); err != nil {
 		return err
 	}
-	if err := WindowsPrivateValidate(newClean, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := validate(newClean, false); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	// POSIX replacement permits existing target readers. First acquire DELETE
@@ -636,7 +640,7 @@ func WindowsPrivateRename(oldPath, newPath string) error {
 	target, err := windowsPrivateOpenMetadata(newClean, windows.DELETE|windows.READ_CONTROL)
 	if err == nil {
 		defer func() { _ = windows.CloseHandle(target) }()
-		if err := windowsPrivateValidateHandle(target, false); err != nil {
+		if err := validateHandle(target, false); err != nil {
 			return err
 		}
 		if err := newGuard.verify(newClean, target, false); err != nil {
@@ -650,6 +654,12 @@ func WindowsPrivateRename(oldPath, newPath string) error {
 		return windowsPrivateFailure(err)
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
+	// Only a newly created strict-private replacement can be published. Check
+	// the actual source handle before mutation, even when the PG destination
+	// policy also accepts inherited files.
+	if err := windowsPrivateValidateHandle(handle, false); err != nil {
+		return err
+	}
 	if err := oldGuard.verify(oldClean, handle, false); err != nil {
 		return err
 	}

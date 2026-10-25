@@ -110,7 +110,16 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	// process, or ambient stdio inheritance. If the target has no console,
 	// graceful stop explicitly refuses; service semantics remain deferred.
 	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
-	err = windows.CreateProcess(application, command, nil, nil, true, flags, &block[0], directory, &startup.StartupInfo, &process)
+	if component == "postgres" {
+		token, tokenErr := windowsPostgresToken()
+		if tokenErr != nil {
+			return tokenErr
+		}
+		err = windows.CreateProcessAsUser(token, application, command, nil, nil, true, flags, &block[0], directory, &startup.StartupInfo, &process)
+		_ = token.Close()
+	} else {
+		err = windows.CreateProcess(application, command, nil, nil, true, flags, &block[0], directory, &startup.StartupInfo, &process)
+	}
 	runtime.KeepAlive(handles)
 	runtime.KeepAlive(job)
 	runtime.KeepAlive(block)
