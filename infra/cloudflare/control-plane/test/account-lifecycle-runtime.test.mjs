@@ -5,6 +5,7 @@ import {
   AccountLifecycleRuntimeError,
   ACCOUNT_CLOSE_TIMEOUT_MS,
   DurableAccountLifecycle,
+  streamToR2Multipart,
 } from "../src/account-lifecycle-runtime.mjs";
 import {
   ArchiveIntegrityError,
@@ -31,6 +32,111 @@ const TARGET = "civo-fixture-target";
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";
 const SOURCE_EVACUATION_ID =
   "22222222-2222-4222-8222-222222222222";
+
+const MULTIPART_PART_SIZE = 8 * 1024 * 1024;
+
+for (const [label, chunkSize, size] of [
+  ["one-byte chunks", 1, 4097],
+  ["4 KiB chunks", 4096, 2 * MULTIPART_PART_SIZE + 17],
+  ["64 KiB chunks", 64 * 1024, 2 * MULTIPART_PART_SIZE + 17],
+  ["exactly one part", MULTIPART_PART_SIZE, MULTIPART_PART_SIZE],
+  ["one part plus one byte", MULTIPART_PART_SIZE + 1, MULTIPART_PART_SIZE + 1],
+  ["several parts in one chunk", 3 * MULTIPART_PART_SIZE + 31, 3 * MULTIPART_PART_SIZE + 31],
+]) {
+  test(`multipart streaming preserves bytes with ${label}`, async () => {
+    const input = Buffer.allocUnsafe(size);
+    for (let i = 0; i < size; i++) input[i] = i % 251;
+    let offset = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (offset === size) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + chunkSize, size);
+        controller.enqueue(input.subarray(offset, end));
+        offset = end;
+      },
+    });
+    const uploaded = [];
+    const receipts = [];
+    let completed = false;
+    let aborted = false;
+    const options = { httpMetadata: { contentType: "application/gzip" } };
+    const bucket = {
+      async createMultipartUpload(key, actualOptions) {
+        assert.equal(key, "fixture-archive");
+        assert.equal(actualOptions, options);
+        return {
+          async uploadPart(partNumber, body) {
+            // The helper must wait for the upload to consume the buffer.
+            await Promise.resolve();
+            assert.equal(partNumber, uploaded.length + 1);
+            uploaded.push(Buffer.from(body));
+            const receipt = { partNumber, etag: `part-${partNumber}` };
+            receipts.push(receipt);
+            return receipt;
+          },
+          async complete(parts) {
+            assert.deepEqual(parts, receipts);
+            completed = true;
+          },
+          async abort() { aborted = true; },
+        };
+      },
+    };
+    assert.equal(await streamToR2Multipart(bucket, "fixture-archive", stream, options), size);
+    assert.equal(uploaded.length, Math.ceil(size / MULTIPART_PART_SIZE));
+    for (let i = 0; i < uploaded.length; i++) {
+      assert.equal(uploaded[i].length, Math.min(MULTIPART_PART_SIZE, size - i * MULTIPART_PART_SIZE));
+    }
+    assert.ok(Buffer.concat(uploaded).equals(input), "uploaded parts preserve every input byte");
+    assert.equal(completed, true);
+    assert.equal(aborted, false);
+  });
+}
+
+for (const stage of ["read", "upload", "complete", "empty"]) {
+  test(`multipart streaming aborts on ${stage} failure`, async () => {
+    const failure = new Error(`fixture ${stage} failure`);
+    let aborts = 0;
+    let completed = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        if (stage === "read") {
+          controller.error(failure);
+          return;
+        }
+        if (stage !== "empty") controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      },
+    });
+    const bucket = {
+      async createMultipartUpload() {
+        return {
+          async uploadPart(partNumber) {
+            if (stage === "upload") throw failure;
+            return { partNumber, etag: "fixture-part" };
+          },
+          async complete() {
+            completed = true;
+            if (stage === "complete") throw failure;
+          },
+          async abort() {
+            aborts++;
+            throw new Error("fixture abort failure must not replace original failure");
+          },
+        };
+      },
+    };
+    await assert.rejects(
+      streamToR2Multipart(bucket, "fixture-archive", stream, {}),
+      stage === "empty" ? { message: "export stream was empty" } : (error) => error === failure,
+    );
+    assert.equal(aborts, 1);
+    assert.equal(completed, stage === "complete");
+  });
+}
 
 class Storage {
   constructor() {
@@ -4687,8 +4793,8 @@ test("heartbeat error persists retryable import failure and a cold retry mints a
 });
 
 test("evacuation export watchdog aborts idle bodies and allows progress beyond five minutes", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const watchdog = new ExportWatchdog();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const watchdog = new ExportWatchdog({ overallTimeoutMs: 60 * 60 * 1000 });
   let source;
   const reader = watchdog.body(new ReadableStream({ start(controller) { source = controller; } })).getReader();
   for (let i = 0; i < 7; i++) {
@@ -4755,7 +4861,7 @@ test("claim pins the configured public origin over the request origin and record
 
 for (const mode of ["idle", "progress", "overall"]) {
   test(`exportArchive uses the shared watchdog: ${mode}`, async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
     let state = claimOperation(bootstrapLiveState({ account_id: ACCOUNT, route: sourceRoute() }), {
       kind: "evacuate", operation_id: OPERATION_ID, evacuation_id: OPERATION_ID, source_cell: SOURCE,
       archive: { archive_id: "archive_watchdog", object: `archives/${ACCOUNT}/watchdog.tar.gz` },
@@ -5183,7 +5289,7 @@ test("export split run between alarm ticks finishes without re-export", async ()
 });
 
 test("export split lock wait times out then retries only abort until source releases", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
   const f = splitExportFixture({ job: streamedExportJob({ streamed: null }) });
   const fetch = f.coordinator.fetchImpl;
   let exports = 0, aborts = 0;
@@ -5206,7 +5312,7 @@ test("export split lock wait times out then retries only abort until source rele
 
 for (const timeout of [false, true]) {
   test(`export split verify-only alarm disarms idle but preserves overall timeout: ${timeout}`, async t => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
     const f = splitExportFixture({ job: streamedExportJob() });
     seedStreamedObject(f);
     const verify = f.coordinator.verifyArchive;
@@ -5450,8 +5556,8 @@ test("export split resumed stale owner cannot increment verification attempts", 
 });
 
 test("export split disarmed watchdog ignores later progress", t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const watchdog = new ExportWatchdog();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const watchdog = new ExportWatchdog({ overallTimeoutMs: 60 * 60 * 1000 });
   try {
     watchdog.disarmIdle();
     watchdog.progress();

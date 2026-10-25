@@ -13,7 +13,7 @@ and the persisted `scan` (or null). Additive fields:
 | Fleet | `never_committed_accounts` | All live accounts without a commit, including overdue ones also counted as stale. Null when live health is unavailable. |
 | Fleet | `health_available` | True after a complete live health read; false on any health-read failure, including the page cap. |
 | Fleet | `restore_drill_schedule` | Present only when `CP_RESTORE_DRILLS_ENABLED` is true. The stored weekly drill schedule record, or null when absent, unparsable, or unavailable. Includes its window, state, reason, rotation and selected account/backup/drill ids, timestamps, and up to eight prior windows. This operational record requires fleet authentication; it is not a public freshness metric. |
-| Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Existing `account.backups` is unchanged apart from optional catalog `committed_at`. |
+| Per account | `account.last_committed_at` | Newest catalog commit timestamp, or null. Legacy entries fall back to `verified_at`. Catalog entries may include optional `committed_at`; backup jobs retain their existing fields plus the optional stage and attempt fields described below. |
 | Per account | `account.restore_drill` | Latest drill record: `drill_id`, `account_id`, `backup_id`, `target_cell` (strings), `state` (`running`, `validated`, or `failed`), `started_at` and `deadline_at` (ISO timestamps), `finished_at` and `validated_at` (ISO timestamps or null), and `error` (printable string of at most 300 characters on failure, otherwise null), plus `driver: "alarm"` for an alarm-driven drill (absent for a request-driven one). For `/restore-drill:finish`, an empty sanitized failure reason is recorded as `backup failed`. Null when no drill has ever started on this control plane or the stored record is invalid. The deadline is 90 minutes after start for an alarm drill and 30 minutes for a request-driven one; an unreported running drill is read as failed at that deadline without rewriting storage. `state: "failed"` with `finished_at: null` means this deadline rule applied, not a reported failure. A late completion can still report its outcome unless a new drill has superseded it. |
 | Scan | `slot` | Scheduled interval of the most recent tick that wrote the record. |
 | Scan | `pass_started_slot` | Scheduled interval in which this directory pass read its first page; legacy records fall back to `slot`. |
@@ -109,6 +109,34 @@ for validated or 0 for failed (omitted until a drill finishes), and running coun
 drills whose deadlines plus the two-minute final-report grace have not expired.
 Null timestamps are omitted. These six gauges exist only with backups enabled;
 when disabled, the freshness key is not read. They identify no account or drill.
+
+`account.backups.current_job` may include `stage` (`stream` or `verify`),
+`attempt_object`, `streamed_at`, `streamed_size`, `verify_attempts` (at most two
+per streamed object), and `verify_cleanup_attempts` (at most two cleanup-only invocations
+after verification is exhausted). Streaming and verification use separate
+alarms with 13-minute and 10-minute deadlines. `attempts` counts stream attempts
+and failed recovery HEAD probes. Successful probes consume nothing, whether the
+object is present or absent. A failed probe records
+`backup_recovery_probe_failed`; exhausting the budget sets terminal
+`last_error` to `backup retry budget exhausted` while preserving the probe
+reason in `attempt_errors`. A failed probe at an already exhausted budget
+fails immediately without incrementing the count.
+
+`attempt_object` is persisted before each fresh upload and inserts `.a<attempt>`
+before the scheduler's `object` suffix `.tar.gz` (or appends it if absent).
+Verification and cleanup use this exact key; legacy jobs without the field use
+`object`. Failed probes preserve this key, whose attempt suffix can therefore
+be lower than `attempts`. The scheduler's `object` and `/start` input are unchanged. Committed
+catalog entries expose the exact committed key in their existing `object`
+field, which consumers must use rather than derive from `backup_id`. A lost
+catalog-write acknowledgement is resolved by reloading durable state; a catalog
+entry for that `backup_id` remains committed and its recovery alarm is cleared.
+
+Optional `attempt_errors` holds at most eight
+`{attempt, stage, at, error}` entries, newest last, and is retained in terminal
+`failures` records. Reasons are bounded and value-free; unknown upstream errors
+become `backup failed`. Object keys are not included in these error records.
+Jobs without these fields remain valid.
 
 A non-OK cell export records `last_error` as `backup export <status>` without
 the cell's response body text. See

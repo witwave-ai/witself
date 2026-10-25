@@ -33,8 +33,13 @@ const UNREACHED_COUNT_MAX_LISTS = 100;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_CATALOG_LIMIT = 64;
+// Stay below the cell's 150-second write-stall guard (export_write_guard.go).
 export const IDLE_TIMEOUT_MS = 120_000;
-export const OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
+export const OVERALL_TIMEOUT_MS = 13 * 60 * 1000;
+export const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_VERIFY_ATTEMPTS = 2;
+const MAX_VERIFY_CLEANUP_ATTEMPTS = 2;
+const MAX_ATTEMPT_ERRORS = 8;
 const VALIDATION_TIMEOUT_MS = 20 * 60 * 1000;
 export const RESTORE_DRILL_DEADLINE_MS = VALIDATION_TIMEOUT_MS + 10 * 60 * 1000;
 export const RESTORE_DRILL_HEARTBEAT_MS = 10_000;
@@ -346,6 +351,36 @@ function emptyState(accountID) {
   };
 }
 
+function validAttemptErrors(errors, attempts) {
+  return errors === undefined || (Array.isArray(errors) &&
+    errors.length <= MAX_ATTEMPT_ERRORS && Array.from(errors).every((entry) =>
+      isObject(entry) && Object.keys(entry).length === 4 &&
+      Number.isSafeInteger(entry.attempt) && entry.attempt >= 0 && entry.attempt <= attempts &&
+      ["stream", "verify"].includes(entry.stage) && validDate(entry.at) &&
+      typeof entry.error === "string" && entry.error === backupFailureReason(entry.error)));
+}
+
+function streamAttemptObject(object, attempt) {
+  return object.endsWith(".tar.gz")
+    ? `${object.slice(0, -7)}.a${attempt}.tar.gz`
+    : `${object}.a${attempt}`;
+}
+
+function validAttemptObject(job) {
+  if (job.attempt_object === undefined) return true;
+  if (typeof job.attempt_object !== "string" || job.attempt_object.length > BACKUP_OBJECT_MAX_LENGTH) return false;
+  const attempt = Number(/\.a([1-9][0-9]*)(?:\.tar\.gz)?$/.exec(job.attempt_object)?.[1]);
+  // Failed recovery probes charge the budget without changing the last
+  // upload's key. That key must still belong to this job and a used attempt.
+  return Number.isSafeInteger(attempt) && attempt <= job.attempts &&
+    job.attempt_object === streamAttemptObject(job.object, attempt);
+}
+
+function backupObjectKey(job) {
+  // Jobs persisted before attempt keys were introduced still own object.
+  return job.attempt_object ?? job.object;
+}
+
 function validJob(job, accountID) {
   return isObject(job) &&
     job.account_id === accountID &&
@@ -359,6 +394,18 @@ function validJob(job, accountID) {
       .includes(job.status) &&
     Number.isSafeInteger(job.attempts) &&
     job.attempts >= 0 &&
+    validAttemptObject(job) &&
+    (job.stage === undefined || ["stream", "verify"].includes(job.stage)) &&
+    (job.streamed_at === undefined || validDate(job.streamed_at)) &&
+    (job.streamed_size === undefined || (Number.isSafeInteger(job.streamed_size) && job.streamed_size > 0)) &&
+    (job.verify_attempts === undefined || (Number.isSafeInteger(job.verify_attempts) &&
+      job.verify_attempts >= 0 && job.verify_attempts <= MAX_VERIFY_ATTEMPTS)) &&
+    (job.verify_cleanup_attempts === undefined || (Number.isSafeInteger(job.verify_cleanup_attempts) &&
+      job.verify_cleanup_attempts >= 0 && job.verify_cleanup_attempts <= MAX_VERIFY_CLEANUP_ATTEMPTS)) &&
+    (job.recovered_existing_object === undefined || typeof job.recovered_existing_object === "boolean") &&
+    (job.catalog_limit === undefined || (Number.isSafeInteger(job.catalog_limit) &&
+      job.catalog_limit >= 1 && job.catalog_limit <= 256)) &&
+    validAttemptErrors(job.attempt_errors, job.attempts) &&
     Number.isSafeInteger(job.max_attempts) &&
     job.max_attempts >= 1 &&
     job.max_attempts <= 10 &&
@@ -523,6 +570,29 @@ function sameRouteFence(left, right) {
 function boundedReason(error) {
   const message = String(error?.message ?? error ?? "backup failed").trim();
   return (message || "backup failed").slice(0, 300);
+}
+
+// External exception messages may contain URLs, headers, archive paths or
+// account values. Only these fixed diagnostics can enter backup job history.
+const BACKUP_FAILURE_REASONS = new Set([
+  "backup failed", "connection_lost", "export_idle_timeout", "export_overall_timeout",
+  "backup_verify_timeout", "backup_stream_interrupted", "backup_verify_interrupted",
+  "backup_recovery_probe_failed",
+  "backup verify budget exhausted", "backup cleanup budget exhausted", "backup retry budget exhausted", "archive_integrity_failed",
+  "export stream was empty", "account has no active backup source route",
+  "account backup source cell is not configured", "account backup source fence changed before commit",
+  "backup job lost durable ownership before commit",
+  "backup export did not acknowledge the exact backup id",
+  "backup export did not acknowledge the exact source cell",
+  "backup R2 object identity does not match its durable authority",
+  "backup R2 binding cannot verify object identity",
+  "committed backup manifest does not match the exact backup job",
+]);
+
+function backupFailureReason(error) {
+  const reason = boundedReason(exportFailure(error));
+  if (BACKUP_FAILURE_REASONS.has(reason) || /^backup export [1-5][0-9]{2}$/.test(reason)) return reason;
+  return error instanceof ArchiveIntegrityError ? "archive_integrity_failed" : "backup failed";
 }
 
 function effectiveRestoreDrill(record, nowMs) {
@@ -710,17 +780,28 @@ export function heartbeatJSONResponse(terminal, { interval_ms = RESTORE_DRILL_HE
 // Only body bytes constitute progress. Keep at most the stream's normal
 // backpressure buffer; never tee or accumulate the archive in this watchdog.
 export class ExportWatchdog {
-  constructor() {
+  constructor({ overallTimeoutMs = OVERALL_TIMEOUT_MS, timeoutCode = "export_overall_timeout" } = {}) {
     this.controller = new AbortController();
     this.signal = this.controller.signal;
-    this.overall = setTimeout(() => this.abort("export_overall_timeout"), OVERALL_TIMEOUT_MS);
+    this.overall = setTimeout(() => this.abort(timeoutCode), overallTimeoutMs);
     this.progress();
   }
 
   progress() {
     if (this.closed || this.idleDisarmed) return;
+    const now = Date.now();
+    this.lastProgress = now;
+    if (this.idleArmedAt !== undefined && now - this.idleArmedAt < 1000) return;
+    this.idleArmedAt = now;
     clearTimeout(this.idle);
-    this.idle = setTimeout(() => this.abort("export_idle_timeout"), IDLE_TIMEOUT_MS);
+    const check = () => {
+      const remaining = IDLE_TIMEOUT_MS - (Date.now() - this.lastProgress);
+      if (remaining > 0) {
+        this.idleArmedAt = Date.now();
+        this.idle = setTimeout(check, remaining);
+      } else this.abort("export_idle_timeout");
+    };
+    this.idle = setTimeout(check, IDLE_TIMEOUT_MS);
   }
 
   disarmIdle() {
@@ -751,25 +832,50 @@ export class ExportWatchdog {
   body(body) {
     const reader = body.getReader();
     this.reader = reader;
+    let stopped = false;
+    let abort;
+    const cleanup = () => {
+      stopped = true;
+      this.signal.removeEventListener("abort", abort);
+      this.reader = null;
+    };
+    this.bodyCleanup = cleanup;
     return new ReadableStream({
+      start: (controller) => {
+        // One listener per body, never one retained promise/listener per chunk.
+        abort = () => {
+          if (stopped) return;
+          controller.error(this.signal.reason);
+          cleanup();
+          reader.cancel(this.signal.reason).catch(() => {});
+        };
+        this.signal.addEventListener("abort", abort, { once: true });
+        if (this.signal.aborted) abort();
+      },
       pull: async (controller) => {
         try {
-          const { done, value } = await this.wait(reader.read());
-          this.signal.throwIfAborted();
+          const { done, value } = await reader.read();
+          if (stopped) return;
           if (value?.byteLength > 0) this.progress();
           if (done) {
             clearTimeout(this.idle);
+            cleanup();
             controller.close();
             reader.releaseLock();
-            this.reader = null;
           } else {
             controller.enqueue(value);
           }
         } catch (error) {
-          controller.error(error);
+          if (!stopped) {
+            cleanup();
+            controller.error(error);
+          }
         }
       },
-      cancel: (reason) => reader.cancel(reason),
+      cancel: (reason) => {
+        cleanup();
+        return reader.cancel(reason);
+      },
     });
   }
 
@@ -780,6 +886,7 @@ export class ExportWatchdog {
     // Also cancel on bad headers or an R2 error; cancellation must not hold
     // the durable retry state hostage to a broken upstream implementation.
     this.reader?.cancel().catch(() => {});
+    this.bodyCleanup?.();
   }
 }
 
@@ -1091,7 +1198,7 @@ export class DurableAccountBackup {
           account_id: this.accountId,
           backup_id: input.backup_id,
           ...result,
-        }, result.status === "retrying" ? 202 : 200);
+        }, ["retrying", "accepted"].includes(result.status) ? 202 : 200);
       });
     } catch (error) {
       if (error instanceof AccountLifecycleBusyError) {
@@ -1571,6 +1678,7 @@ export class DurableAccountBackup {
           status: "pending",
           attempts: 0,
           max_attempts: input.max_attempts,
+          catalog_limit: input.catalog_limit,
           created_at: this.now().toISOString(),
           source_cell: source.name,
           source_endpoint: source.endpoint,
@@ -1622,6 +1730,7 @@ export class DurableAccountBackup {
         status: "pending",
         attempts: 0,
         max_attempts: input.max_attempts,
+        catalog_limit: input.catalog_limit,
         created_at: this.now().toISOString(),
         source_cell: source.name,
         source_endpoint: source.endpoint,
@@ -1665,55 +1774,53 @@ export class DurableAccountBackup {
     if (job.status === "failed") {
       return { status: "failed", attempts: job.attempts };
     }
-    if (job.attempts >= job.max_attempts) {
-      state = await this.failJob(
-        state,
-        job,
-        new Error("backup retry budget exhausted"),
-        false,
-      );
-      return { status: "failed", attempts: state.current_job.attempts };
+    catalogLimit = job.catalog_limit ?? catalogLimit;
+    job = { ...job, catalog_limit: catalogLimit };
+    if (job.status === "running") {
+      job = this.recordAttemptError(job, new Error(
+        job.stage === "verify" ? "backup_verify_interrupted" : "backup_stream_interrupted",
+      ));
     }
+    if (job.stage === "verify") return this.executeVerify(state, job, catalogLimit);
 
-    const {
-      retry_at: _retryAt,
-      ...resumingJob
-    } = job;
-    job = {
-      ...resumingJob,
-      status: "running",
-      attempts: job.attempts + 1,
-      started_at: this.now().toISOString(),
-    };
-    state = {
-      ...state,
-      revision: state.revision + 1,
-      current_job: job,
-    };
-    await this.saveState(state);
-
+    const watchdog = new ExportWatchdog();
     try {
-      // Manual runs must remain resumable even when fleet scheduling is
-      // disabled. Arm the Durable Object alarm before any outbound I/O; a
-      // successful commit clears it, while retry state moves it forward.
+      // Rearm before I/O; even a killed final stream may leave a completed
+      // object. A successful probe uses its persisted key without charging an
+      // attempt or enforcing the retry budget first; a failed probe is charged.
       await this.scheduleRetry(job);
-      const existing = await this.existingObject(job);
-      if (existing) {
-        state = await this.commitJob(
-          state,
-          job,
-          existing,
-          catalogLimit,
-        );
-        return {
-          status: "committed",
-          backup: state.catalog[0],
-          recovered_existing_object: true,
-        };
+      let existing = null;
+      try {
+        existing = typeof this.env.BACKUPS?.head === "function"
+          ? await watchdog.wait(this.env.BACKUPS.head(backupObjectKey(job))) : null;
+      } catch {
+        const error = new Error("backup_recovery_probe_failed");
+        job = this.recordAttemptError({
+          ...job,
+          attempts: job.attempts < job.max_attempts ? job.attempts + 1 : job.attempts,
+        }, error, "stream");
+        return this.jobResult(await this.failJob(state, job,
+          job.attempts >= job.max_attempts ? new Error("backup retry budget exhausted") : error,
+          true, false));
       }
-
-      const source = await this.sourceCell(job);
-      const watchdog = new ExportWatchdog();
+      if (existing) return await this.queueVerification(state, job, existing.size, true);
+      if (job.attempts >= job.max_attempts) {
+        await this.failJob(state, job, new Error("backup retry budget exhausted"), false);
+        return { status: "failed", attempts: job.attempts };
+      }
+      const { retry_at: _retryAt, ...resumingJob } = job;
+      job = {
+        ...resumingJob,
+        stage: "stream",
+        status: "running",
+        attempts: job.attempts + 1,
+        attempt_object: streamAttemptObject(job.object, job.attempts + 1),
+        started_at: this.now().toISOString(),
+      };
+      state = { ...state, revision: state.revision + 1, current_job: job };
+      // Persist the counter and unique key together before starting export.
+      await this.saveState(state);
+      const source = await watchdog.wait(this.sourceCell(job));
       let size;
       try {
         const response = await watchdog.wait(this.fetchImpl(
@@ -1753,7 +1860,7 @@ export class DurableAccountBackup {
         const streamedAt = this.now().toISOString();
         size = await watchdog.wait(this.streamArchive(
           this.env.BACKUPS,
-          job.object,
+          backupObjectKey(job),
           watchdog.body(response.body),
           {
             httpMetadata: {
@@ -1780,21 +1887,119 @@ export class DurableAccountBackup {
       } finally {
         watchdog.close();
       }
-      const verification = await this.verifyObject(job, source.name, size);
-      state = await this.commitJob(
-        state,
-        job,
-        verification,
-        catalogLimit,
-      );
-      return { status: "committed", backup: state.catalog[0] };
+      return await this.queueVerification(state, job, size);
     } catch (error) {
-      state = await this.failJob(state, job, error, true);
-      return {
-        status: state.current_job.status,
-        attempts: state.current_job.attempts,
-        retry_at: state.current_job.retry_at ?? null,
-      };
+      // A handoff write can succeed before its acknowledgement or immediate
+      // alarm fails. Preserve that durable stage instead of overwriting it.
+      const persisted = await this.loadState();
+      if (persisted.current_job?.backup_id === job.backup_id &&
+          persisted.current_job.stage === "verify") {
+        state = persisted;
+        job = persisted.current_job;
+      }
+      state = await this.failJob(state, job,
+        watchdog.signal.aborted ? watchdog.signal.reason : error, true);
+      return this.jobResult(state);
+    } finally {
+      watchdog.close();
+    }
+  }
+
+  jobResult(state) {
+    return {
+      status: state.current_job.status,
+      attempts: state.current_job.attempts,
+      retry_at: state.current_job.retry_at ?? null,
+    };
+  }
+
+  async queueVerification(state, job, size, recovered = false) {
+    const now = this.now();
+    await this.saveState({
+      ...state,
+      revision: state.revision + 1,
+      current_job: {
+        ...job, stage: "verify", status: "pending", verify_attempts: 0, verify_cleanup_attempts: 0,
+        streamed_at: now.toISOString(),
+        ...(Number.isSafeInteger(size) && size > 0 ? { streamed_size: size } : {}),
+        retry_at: now.toISOString(), recovered_existing_object: recovered,
+      },
+    });
+    await this.storage.setAlarm(now.getTime());
+    return { status: "accepted", stage: "verify", scheduled_at: job.scheduled_at };
+  }
+
+  recordAttemptError(job, error, stage = job.stage ?? "stream") {
+    return { ...job, attempt_errors: [...(job.attempt_errors ?? []), {
+      attempt: job.attempts, stage, at: this.now().toISOString(), error: backupFailureReason(error),
+    }].slice(-MAX_ATTEMPT_ERRORS) };
+  }
+
+  async discardUnverified(state, job, error, watchdog) {
+    // A timed-out deletion can still finish later. Each fresh stream gets a
+    // distinct key, so this request can only remove its own attempt's object.
+    await watchdog.wait(this.env.BACKUPS.delete(backupObjectKey(job)));
+    const recorded = this.recordAttemptError(job, error, "verify");
+    const { streamed_at: _at, streamed_size: _size, recovered_existing_object: _recovered, ...rest } = recorded;
+    return this.failJob(state, { ...rest, stage: "stream", verify_attempts: 0, verify_cleanup_attempts: 0 }, error, true, false);
+  }
+
+  async executeVerify(state, job, catalogLimit) {
+    const watchdog = new ExportWatchdog({ overallTimeoutMs: VERIFY_TIMEOUT_MS, timeoutCode: "backup_verify_timeout" });
+    watchdog.disarmIdle();
+    try {
+      await this.scheduleRetry(job);
+      if ((job.verify_attempts ?? 0) >= MAX_VERIFY_ATTEMPTS) {
+        // The third entry does cleanup only: never perform a third expensive
+        // verification of the same object, even if the prior alarms were killed.
+        // Bound cleanup too: unavailable R2 must not keep every later generation
+        // busy forever. Persist before deletion so killed cleanup calls count.
+        if ((job.verify_cleanup_attempts ?? 0) >= MAX_VERIFY_CLEANUP_ATTEMPTS) {
+          return this.jobResult(await this.failJob(state, job,
+            new Error("backup cleanup budget exhausted"), false));
+        }
+        job = { ...job, status: "running", verify_cleanup_attempts: (job.verify_cleanup_attempts ?? 0) + 1 };
+        state = { ...state, revision: state.revision + 1, current_job: job };
+        await this.saveState(state);
+        try {
+          return this.jobResult(await this.discardUnverified(state, job,
+            new Error("backup verify budget exhausted"), watchdog));
+        } catch (error) {
+          return this.jobResult(await this.failJob(state, job,
+            watchdog.signal.aborted ? watchdog.signal.reason : error,
+            job.verify_cleanup_attempts < MAX_VERIFY_CLEANUP_ATTEMPTS));
+        }
+      }
+      const { retry_at: _retryAt, ...rest } = job;
+      job = { ...rest, status: "running", verify_attempts: (job.verify_attempts ?? 0) + 1 };
+      state = { ...state, revision: state.revision + 1, current_job: job };
+      await this.saveState(state);
+      const verification = await watchdog.wait(this.verifyObject(job, job.source_cell, job.streamed_size, watchdog));
+      watchdog.signal.throwIfAborted();
+      state = await this.commitJob(state, job, verification, catalogLimit, watchdog);
+      return { status: "committed", backup: state.catalog[0],
+        ...(job.recovered_existing_object ? { recovered_existing_object: true } : {}) };
+    } catch (error) {
+      // A commit put can persist and then reject its acknowledgement. Reload
+      // authority before recording any failure or deleting an attempt object.
+      const persisted = await this.loadState();
+      const committed = persisted.catalog.find((record) => record.backup_id === job.backup_id);
+      if (committed) {
+        if (typeof this.storage.deleteAlarm === "function") await this.storage.deleteAlarm();
+        return { status: "committed", backup: committed,
+          ...(job.recovered_existing_object ? { recovered_existing_object: true } : {}) };
+      }
+      error = watchdog.signal.aborted ? watchdog.signal.reason : error;
+      if (error instanceof ArchiveIntegrityError) {
+        try {
+          return this.jobResult(await this.discardUnverified(state, job, error, watchdog));
+        } catch (deleteError) {
+          error = watchdog.signal.aborted ? watchdog.signal.reason : deleteError;
+        }
+      }
+      return this.jobResult(await this.failJob(state, job, error, true));
+    } finally {
+      watchdog.close();
     }
   }
 
@@ -1859,45 +2064,37 @@ export class DurableAccountBackup {
     return source;
   }
 
-  async existingObject(job) {
-    if (typeof this.env.BACKUPS?.head !== "function") {
-      return null;
-    }
-    const existing = await this.env.BACKUPS.head(job.object);
-    if (!existing) return null;
-    try {
-      return await this.verifyObject(
-        job,
-        job.source_cell,
-        existing.size,
-      );
-    } catch (error) {
-      if (error instanceof ArchiveIntegrityError) {
-        // No catalog entry points at this attempt object, so it has not crossed
-        // the immutable authority boundary and may be removed before retry.
-        await this.env.BACKUPS.delete(job.object);
-        return null;
-      }
-      throw error;
-    }
-  }
-
-  async verifyObject(job, sourceCell, sizeHint) {
+  async verifyObject(job, sourceCell, sizeHint, watchdog) {
     if (typeof this.env.BACKUPS?.head !== "function") {
       throw new ArchiveIntegrityError(
         "backup R2 binding cannot verify object identity",
       );
     }
+    const object = backupObjectKey(job);
     const before = assertR2ObjectIdentity(
       job,
-      await this.env.BACKUPS.head(job.object),
+      await this.env.BACKUPS.head(object),
       sizeHint,
     );
-    const verification = await this.validateArchive(
-      this.env.BACKUPS,
-      job.object,
-      this.accountId,
-    );
+    let bucket = this.env.BACKUPS;
+    if (watchdog) {
+      bucket = Object.create(bucket);
+      bucket.get = async (...args) => {
+        const object = await watchdog.wait(Promise.resolve(this.env.BACKUPS.get(...args)).then((object) => {
+          // R2 may finish opening the response after the deadline race settled.
+          if (watchdog.signal.aborted) {
+            object?.body?.cancel(watchdog.signal.reason).catch(() => {});
+            watchdog.signal.throwIfAborted();
+          }
+          return object;
+        }));
+        watchdog.signal.throwIfAborted();
+        return object?.body ? { ...object, body: watchdog.body(object.body) } : object;
+      };
+      watchdog.signal.throwIfAborted();
+    }
+    const verification = await this.validateArchive(bucket, object, this.accountId);
+    watchdog?.signal.throwIfAborted();
     const manifest = verification?.manifest;
     if (
       manifest?.account_id !== this.accountId ||
@@ -1926,14 +2123,14 @@ export class DurableAccountBackup {
     }
     const after = assertR2ObjectIdentity(
       job,
-      await this.env.BACKUPS.head(job.object),
+      await this.env.BACKUPS.head(object),
       before.size,
       before.etag,
     );
     return {
       account_id: this.accountId,
       backup_id: job.backup_id,
-      object: job.object,
+      object,
       source_cell: sourceCell,
       source_registration_id: job.source_registration_id,
       source_registered_at: job.source_registered_at,
@@ -1951,11 +2148,13 @@ export class DurableAccountBackup {
     };
   }
 
-  async commitJob(state, job, record, catalogLimit) {
-    await this.sourceCell(job);
+  async commitJob(state, job, record, catalogLimit, watchdog) {
+    const wait = (operation) => watchdog ? watchdog.wait(operation) : operation;
+    await wait(this.sourceCell(job));
     // Reload before crossing the authority boundary. A lost acknowledgement
     // from an earlier storage put may already have committed this exact record.
-    const persisted = await this.loadState();
+    const persisted = await wait(this.loadState());
+    watchdog?.signal.throwIfAborted();
     const existing = persisted.catalog.find(
       (entry) => entry.backup_id === job.backup_id,
     );
@@ -1989,12 +2188,13 @@ export class DurableAccountBackup {
     return next;
   }
 
-  async failJob(state, job, error, retryable) {
-    const terminal = !retryable || job.attempts >= job.max_attempts;
+  async failJob(state, job, error, retryable, recordError = true) {
+    const terminal = !retryable || (job.stage !== "verify" && job.attempts >= job.max_attempts);
+    if (recordError) job = this.recordAttemptError(job, error);
     const failed = {
       ...job,
       status: terminal ? "failed" : "retrying",
-      last_error: boundedReason(error),
+      last_error: backupFailureReason(error),
       ...(terminal
         ? { failed_at: this.now().toISOString() }
         : {

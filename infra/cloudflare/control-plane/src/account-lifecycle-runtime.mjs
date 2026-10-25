@@ -1947,7 +1947,8 @@ export class DurableAccountLifecycle {
     let pointer;
     let job;
     let verifyMs;
-    const watchdog = new ExportWatchdog();
+    // Evacuation retains its established overall export timeout policy.
+    const watchdog = new ExportWatchdog({ overallTimeoutMs: 60 * 60 * 1000 });
     try {
       job = exportJob(operation);
       let head = null;
@@ -3162,28 +3163,29 @@ export async function streamToR2Multipart(bucket, key, stream, options) {
   let totalBytes = 0;
   try {
     const reader = stream.getReader();
-    let buffer = new Uint8Array(0);
+    const buffer = new Uint8Array(partSize);
+    let bufferedBytes = 0;
     let partNumber = 1;
     while (true) {
       const { done, value } = await reader.read();
       if (value && value.length > 0) {
-        const combined = new Uint8Array(buffer.length + value.length);
-        combined.set(buffer);
-        combined.set(value, buffer.length);
-        buffer = combined;
         totalBytes += value.length;
-      }
-      while (buffer.length >= partSize) {
-        const uploaded = await upload.uploadPart(
-          partNumber++,
-          buffer.slice(0, partSize),
-        );
-        parts.push(uploaded);
-        buffer = buffer.slice(partSize);
+        let offset = 0;
+        while (offset < value.length) {
+          const count = Math.min(partSize - bufferedBytes, value.length - offset);
+          buffer.set(value.subarray(offset, offset + count), bufferedBytes);
+          bufferedBytes += count;
+          offset += count;
+          if (bufferedBytes === partSize) {
+            // Await consumption before reusing the fixed part buffer.
+            parts.push(await upload.uploadPart(partNumber++, buffer));
+            bufferedBytes = 0;
+          }
+        }
       }
       if (done) {
-        if (buffer.length > 0) {
-          parts.push(await upload.uploadPart(partNumber, buffer));
+        if (bufferedBytes > 0) {
+          parts.push(await upload.uploadPart(partNumber, buffer.subarray(0, bufferedBytes)));
         }
         break;
       }
