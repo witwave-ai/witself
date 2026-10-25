@@ -16,6 +16,8 @@ import {
 
 import {
   ACCOUNT_BACKUP_SCAN_KEY,
+  ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX,
+  readAccountBackupHealthOverlay,
   ACCOUNT_BACKUP_SCAN_SCHEMA,
   ACCOUNT_BACKUP_STATE_SCHEMA,
   IDLE_TIMEOUT_MS,
@@ -44,6 +46,8 @@ import {
   awaitRestoreDrill,
   BackupValidationBusyError,
   accountBackupHealth,
+  accountBackupHealthSnapshot,
+  accountBackupPassSnapshot,
   accountBackupStatus,
   backupJobIdentity,
   beginAccountBackupValidation,
@@ -4363,11 +4367,12 @@ test("restore drill docs describe the alarm driver and the request-driver fallba
   }
 });
 
-// A keys-only KV listing with opaque, insertion-stable cursors. Values are
+// A metadata-bearing KV listing with opaque, insertion-stable cursors. Values are
 // serialized exactly as KV stores them so a new Worker can resume from a copy.
 class PagedKV {
   constructor(entries = {}) {
     this.values = new Map(Object.entries(entries).map(([key, value]) => [key, JSON.stringify(value)]));
+    this.metadata = new Map();
     this.listCalls = [];
     this.putCalls = [];
     this.getCalls = [];
@@ -4382,15 +4387,17 @@ class PagedKV {
     return value === undefined ? null : options?.type === "json" ? JSON.parse(value) : value;
   }
 
-  async put(key, value) {
-    this.putCalls.push({ key, value });
+  async put(key, value, options) {
+    this.putCalls.push({ key, value, options });
     if (this.putCalls.length === this.throwPutAt) throw new Error("fixture rejected KV write");
     this.values.set(key, value);
+    if (options?.metadata !== undefined) this.metadata.set(key, structuredClone(options.metadata));
     await this.afterPut?.(key, value);
   }
 
   async delete(key) {
     this.values.delete(key);
+    this.metadata.delete(key);
   }
 
   async list({ prefix = "", limit = 1000, cursor } = {}) {
@@ -4406,7 +4413,7 @@ class PagedKV {
     const names = remaining.slice(0, limit);
     const complete = remaining.length <= limit;
     return {
-      keys: names.map((name) => ({ name })),
+      keys: names.map((name) => ({ name, ...(this.metadata.has(name) ? { metadata: structuredClone(this.metadata.get(name)) } : {}) })),
       list_complete: complete,
       ...(complete ? {} : { cursor: `after:${Buffer.from(names.at(-1)).toString("base64url")}` }),
     };
@@ -4418,12 +4425,14 @@ class PagedKV {
   }
 
   serialize() {
-    return JSON.stringify([...this.values]);
+    return JSON.stringify({ values: [...this.values], metadata: [...this.metadata] });
   }
 
   static from(serialized) {
     const copy = new PagedKV();
-    copy.values = new Map(JSON.parse(serialized));
+    const stored = JSON.parse(serialized);
+    copy.values = new Map(stored.values);
+    copy.metadata = new Map(stored.metadata);
     return copy;
   }
 }
@@ -4485,6 +4494,1215 @@ async function passScrape(env) {
 function assertPassGauge(text, suffix, value) {
   assert.ok(text.includes(`witself_control_plane_account_backup_${suffix} ${value}\n`), `${suffix} must equal ${value}`);
 }
+
+async function effectivePassHealth(f) {
+  const scan = f.kv.value();
+  return accountBackupHealthSnapshot(scan, await readAccountBackupHealthOverlay(f.env, scan));
+}
+
+function overlayKey(overlay, version = "0".repeat(32)) {
+  const inverted = String(253402300799999 - Date.parse(overlay.health.computed_at)).padStart(15, "0");
+  return `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${overlay.identity.pass_started_slot ?? overlay.identity.slot}:${inverted}:${version}`;
+}
+
+function seedOverlay(f, overlay, key = overlayKey(overlay)) {
+  f.kv.values.set(key, "");
+  f.kv.metadata.set(key, structuredClone(overlay));
+  return key;
+}
+
+function storedOverlays(f) {
+  return JSON.stringify([...f.kv.metadata]);
+}
+
+function refreshOverlay(scan, health) {
+  return {
+    schema_version: ACCOUNT_BACKUP_SCAN_SCHEMA,
+    identity: Object.fromEntries(["slot", "pass_started_slot", "updated_at", "complete", "cursor", "scanned"]
+      .map((field) => [field, scan[field]])),
+    health: { ...health },
+  };
+}
+
+function assertRefreshWrites(f, before, count = 1) {
+  const writes = f.kv.putCalls.slice(before);
+  assert.equal(writes.filter(({ key }) => key === ACCOUNT_BACKUP_SCAN_KEY).length, 0,
+    "a refresh must never write the scan key");
+  assert.equal(writes.length, count);
+  for (const { key, value, options } of writes) {
+    assert.match(key, /:\d{15}:[0-9a-f]{32}$/);
+    assert.equal(key, overlayKey(options.metadata, key.slice(-32)));
+    assert.equal(value, "", "the record payload is stored only in KV metadata");
+    assert.equal(options.expirationTtl, 3 * 24 * 60 * 60);
+    assert.deepEqual(Object.keys(options.metadata).sort(), ["health", "identity", "schema_version"]);
+    assert.deepEqual(Object.keys(options.metadata.identity).sort(), ["complete", "cursor", "pass_started_slot", "scanned", "slot", "updated_at"]);
+    assert.deepEqual(Object.keys(options.metadata.health).sort(), ["computed_at", "health_available", "never_committed_accounts", "oldest_committed_age_seconds", "stale_accounts"]);
+    assert.ok(Buffer.byteLength(JSON.stringify(options.metadata)) < 1024, "KV metadata must stay below 1024 bytes");
+  }
+}
+
+test("stale health tracking keeps the first sixteen directory ids across pages despite status completion order", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(18, { interval: "60", pageSize: "8" });
+  f.env.CP_ACCOUNT_BACKUPS_CONCURRENCY = "4";
+  const completed = [];
+  let releaseFirst;
+  f.dependencies.status = async (_env, id) => {
+    const index = f.ids.indexOf(id);
+    if (index % 8 === 0) await new Promise((resolve) => { releaseFirst = resolve; });
+    if (index % 8 === 7 || index === 17) releaseFirst();
+    completed.push(id);
+    return passStatus(passISO(PASS_START - (8000 + index) * 1000));
+  };
+  for (let page = 0; page < 3; page++) {
+    await runScheduledAccountBackups(f.env, PASS_START + page * PASS_TICK, f.dependencies);
+    const scan = f.kv.value();
+    const count = Math.min((page + 1) * 8, 16);
+    assert.deepEqual(scan.stale_ids, f.ids.slice(0, count).map((id, index) => ({
+      account_id: id, committed_age_seconds: 8000 + index,
+    })));
+    assert.equal(scan.stale_ids_truncated, page === 2);
+    assert.equal(scan.health_progress.stale_accounts, Math.min((page + 1) * 8, 18));
+  }
+  assert.notEqual(completed[0], f.ids[0], "the fixture must observe statuses out of directory order");
+  assert.equal(f.kv.value().health.stale_accounts, 18);
+  assert.equal(f.kv.value().untracked_oldest_committed_age_seconds, 8017);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  let rereads = 0;
+  f.dependencies.status = async () => { rereads++; return passStatus(passISO(PASS_START + 3 * PASS_TICK)); };
+  await runScheduledAccountBackups(f.env, PASS_START + 3 * PASS_TICK, f.dependencies);
+  assert.equal(rereads, 0, "a truncated list cannot safely refresh aggregate health");
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+});
+
+test("exactly sixteen stale accounts remain eligible for refresh", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(16, { interval: "60", pageSize: "16" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  assert.equal(f.kv.value().stale_ids.length, 16);
+  assert.equal(f.kv.value().stale_ids_truncated, false);
+  const rereads = [];
+  f.dependencies.status = async (_env, id) => {
+    rereads.push(id);
+    return passStatus(passISO(PASS_START + PASS_TICK));
+  };
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const puts = f.kv.putCalls.length;
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.deepEqual(rereads, f.ids);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 0);
+  assert.equal((await effectivePassHealth(f)).oldest_committed_age_seconds, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assertRefreshWrites(f, puts);
+});
+
+test("R3-F4 a completed accepted sixteen-id truncated record cannot refresh", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(16, { interval: "60", pageSize: "16" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = { ...f.kv.value(), stale_ids_truncated: true };
+  assert.equal(scan.health.stale_accounts, 16);
+  assert.equal(scan.stale_ids.length, 16);
+  assert.notEqual(accountBackupPassSnapshot(scan), null, "the regression exercises accepted input");
+  const raw = JSON.stringify(scan);
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, raw);
+  let rereads = 0;
+  f.dependencies.status = async () => { rereads++; return passStatus(passISO(PASS_START + PASS_TICK)); };
+  const puts = f.kv.putCalls.length;
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(rereads, 0);
+  assertRefreshWrites(f, puts, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 16);
+});
+
+test("R3-F4 two still-stale rereads cannot exceed the accepted pass stale count of one", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(2, { interval: "60", pageSize: "2" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = f.kv.value();
+  scan.health.stale_accounts = 1;
+  scan.health_progress.stale_accounts = 1;
+  assert.equal(scan.stale_ids.length, 2);
+  assert.notEqual(accountBackupPassSnapshot(scan), null, "the regression exercises accepted input");
+  const raw = JSON.stringify(scan);
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, raw);
+  const rereads = [];
+  f.dependencies.status = async (_env, id) => {
+    rereads.push(id);
+    return passStatus(passISO(PASS_START - 8000_000));
+  };
+  const puts = f.kv.putCalls.length;
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.deepEqual(rereads, f.ids);
+  assertRefreshWrites(f, puts);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 1);
+  assert.equal((await effectivePassHealth(f)).oldest_committed_age_seconds, 8300);
+});
+
+test("stale health tracking includes overdue accounts with recent or absent commits", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(4, { pageSize: "2" });
+  f.dependencies.status = async (_env, id) => passStatus(id === f.ids[3] ? null : passISO(PASS_START));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  assert.deepEqual(f.kv.value().stale_ids, []);
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  const scan = f.kv.value();
+  assert.equal(scan.health.stale_accounts, 2);
+  assert.deepEqual(scan.stale_ids, [
+    { account_id: f.ids[2], committed_age_seconds: 0 },
+    { account_id: f.ids[3], committed_age_seconds: null },
+  ]);
+  assert.equal(scan.stale_ids_truncated, false);
+  assert.equal(scan.untracked_oldest_committed_age_seconds, 0);
+});
+
+test("completed stale health refresh clears a committed account and retains other accounts' pass-time maximum", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(2, { interval: "60", pageSize: "2" });
+  f.dependencies.status = async (_env, id) => passStatus(passISO(PASS_START - (id === f.ids[0] ? 8000 : 600) * 1000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const before = f.kv.value();
+  assert.equal(before.health.oldest_committed_age_seconds, 8000);
+  assert.equal(before.untracked_oldest_committed_age_seconds, 600);
+  const reads = [];
+  const tick = PASS_START + PASS_TICK;
+  f.dependencies.status = async (_env, id) => {
+    reads.push(id);
+    return passStatus(passISO(tick - 60_000));
+  };
+  const lists = f.kv.listCalls.length;
+  const puts = f.kv.putCalls.length;
+  // Reject an accidental second write, as KV may do within one second. The
+  // refresh must succeed with exactly one put and establish the recovered health.
+  f.kv.throwPutAt = f.kv.putCalls.length + 2;
+  const result = await runScheduledAccountBackups(f.env, tick, f.dependencies);
+  assert.equal(result.ran, false);
+  assertRefreshWrites(f, puts);
+  assert.deepEqual(reads, [f.ids[0]]);
+  assert.deepEqual(f.kv.listCalls.slice(lists), Array.from({ length: 2 }, () => ({
+    prefix: `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${before.pass_started_slot}:`, limit: 32, cursor: undefined,
+  })));
+  assert.equal(f.jobs.length, 2);
+  assert.deepEqual(f.kv.value(), before, "refresh leaves all scan state unchanged");
+  assert.deepEqual((await readAccountBackupHealthOverlay(f.env, f.kv.value())), refreshOverlay(before, {
+    ...before.health, stale_accounts: 0, oldest_committed_age_seconds: 600, computed_at: passISO(tick),
+  }));
+  t.mock.method(Date, "now", () => tick);
+  const scrape = await passScrape(f.env);
+  assertPassGauge(scrape, "stale_accounts", 0);
+  assertPassGauge(scrape, "oldest_committed_age_seconds", 600);
+  assertPassGauge(scrape, "health_age_seconds", 0);
+  assert.doesNotMatch(scrape, /coverage_0000|stale_ids|committed_age_seconds\{|untracked_oldest/);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const overlay = storedOverlays(f);
+  const recoveredPuts = f.kv.putCalls.length;
+  reads.length = 0;
+  await runScheduledAccountBackups(f.env, tick + PASS_TICK, f.dependencies);
+  assert.deepEqual(reads, [], "a healthy completed snapshot needs no stale-account rereads");
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assert.equal(storedOverlays(f), overlay);
+  assertRefreshWrites(f, recoveredPuts, 0);
+});
+
+test("completed stale health refresh retains still-stale pass ages then drops them on repeated recovery", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(2, { interval: "60", pageSize: "2" });
+  f.dependencies.status = async (_env, id) => passStatus(passISO(PASS_START - (id === f.ids[0] ? 9000 : 8500) * 1000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const before = f.kv.value();
+  const puts = f.kv.putCalls.length;
+  const firstTick = PASS_START + PASS_TICK;
+  f.dependencies.status = async (_env, id) => passStatus(passISO(firstTick - (id === f.ids[0] ? 60 : 7500) * 1000));
+  await runScheduledAccountBackups(f.env, firstTick, f.dependencies);
+  assert.deepEqual((await effectivePassHealth(f)), {
+    ...before.health, stale_accounts: 1, oldest_committed_age_seconds: 8500, computed_at: passISO(firstTick),
+  });
+  assertRefreshWrites(f, puts);
+  assert.deepEqual(f.kv.value().stale_ids, before.stale_ids, "original pass entries survive partial recovery");
+  const secondTick = firstTick + PASS_TICK;
+  const rereads = [];
+  f.dependencies.status = async (_env, id) => {
+    rereads.push(id);
+    return passStatus(passISO(secondTick - (id === f.ids[0] ? 60 : 30) * 1000));
+  };
+  const secondPuts = f.kv.putCalls.length;
+  await runScheduledAccountBackups(f.env, secondTick, f.dependencies);
+  assert.deepEqual(rereads, f.ids);
+  assert.deepEqual(f.kv.value(), before);
+  assert.deepEqual((await effectivePassHealth(f)), {
+    ...before.health, stale_accounts: 0, oldest_committed_age_seconds: 60, computed_at: passISO(secondTick),
+  });
+  assertRefreshWrites(f, secondPuts);
+});
+
+test("completed stale health refresh uses tick time and the exact committed and never-committed stale threshold", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(3, { interval: "60", pageSize: "3" });
+  const neverCommitted = (scheduledAt) => ({
+    last_committed_at: null,
+    backups: { current_job: { scheduled_at: scheduledAt }, failures: [] },
+  });
+  f.dependencies.status = async (_env, id) => id === f.ids[0]
+    ? passStatus(passISO(PASS_START - 8000_000))
+    : neverCommitted(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  assert.equal(f.kv.value().health.stale_accounts, 3);
+  assert.equal(f.kv.value().health.never_committed_accounts, 2);
+  const tick = PASS_START + PASS_TICK;
+  f.dependencies.status = async (_env, id) => {
+    if (id === f.ids[0]) return passStatus(passISO(PASS_START - 8000_000));
+    return neverCommitted(passISO(tick - 7200_000 - (id === f.ids[1] ? 1 : 0)));
+  };
+  const puts = f.kv.putCalls.length;
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  await runScheduledAccountBackups(f.env, tick, f.dependencies);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 2, "exactly twice the interval is fresh; one millisecond older is stale");
+  assert.equal((await effectivePassHealth(f)).oldest_committed_age_seconds, 8300);
+  assert.equal((await effectivePassHealth(f)).computed_at, passISO(tick));
+  assert.equal((await effectivePassHealth(f)).never_committed_accounts, 2, "refresh preserves pass-time never-committed accounting");
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assertRefreshWrites(f, puts);
+});
+
+test("completed stale health rereads are bounded by configured concurrency", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(5, { interval: "60", pageSize: "5" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  f.env.CP_ACCOUNT_BACKUPS_CONCURRENCY = "2";
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let firstWaveReady;
+  const ready = new Promise((resolve) => { firstWaveReady = resolve; });
+  let active = 0;
+  let maxActive = 0;
+  const rereads = [];
+  const tick = PASS_START + PASS_TICK;
+  f.dependencies.status = async (_env, id) => {
+    rereads.push(id);
+    active++;
+    maxActive = Math.max(maxActive, active);
+    if (rereads.length === 2) firstWaveReady();
+    await gate;
+    active--;
+    return passStatus(passISO(tick));
+  };
+  const puts = f.kv.putCalls.length;
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const refresh = runScheduledAccountBackups(f.env, tick, f.dependencies);
+  await ready;
+  assert.equal(active, 2);
+  assert.equal(rereads.length, 2);
+  release();
+  await refresh;
+  assert.deepEqual(rereads, f.ids);
+  assert.equal(maxActive, 2);
+  assert.equal(active, 0);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 0);
+  assert.equal((await effectivePassHealth(f)).oldest_committed_age_seconds, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assertRefreshWrites(f, puts);
+});
+
+test("one failed or malformed stale-account reread leaves the complete snapshot untouched", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const failure of ["throw", "invalid_commit"]) {
+    const f = passFixture(3, { interval: "60", pageSize: "3" });
+    f.env.CP_ACCOUNT_BACKUPS_CONCURRENCY = "2";
+    f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+    const writes = f.kv.putCalls.length;
+    const rereads = [];
+    f.dependencies.status = async (_env, id) => {
+      rereads.push(id);
+      if (id !== f.ids[1]) return passStatus(passISO(PASS_START + PASS_TICK));
+      if (failure === "throw") throw new Error("fixture stale-account status unavailable");
+      return passStatus("invalid");
+    };
+    await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw, failure);
+    assert.equal(f.kv.putCalls.length, writes, failure);
+    assert.deepEqual(rereads, f.ids, "all bounded workers settle before the refresh is discarded");
+    assert.equal(f.kv.value().health.health_available, true);
+  }
+});
+
+test("page-advancing, pass-finishing and new-pass ticks never add stale-account rereads", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(6, { interval: "60", pageSize: "2" });
+  const reads = [];
+  f.dependencies.status = async (_env, id) => {
+    reads.push(id);
+    return passStatus(passISO(PASS_START - (id === f.ids[0] ? 8000_000 : 0)));
+  };
+  for (let page = 0; page < 3; page++) {
+    reads.length = 0;
+    await runScheduledAccountBackups(f.env, PASS_START + page * PASS_TICK, f.dependencies);
+    assert.deepEqual(reads, f.ids.slice(page * 2, page * 2 + 2));
+    assert.equal(f.kv.value().health_progress.computed_at, passISO(PASS_START));
+  }
+  assert.equal(f.kv.value().complete, true);
+  assert.equal(f.kv.value().health.computed_at, passISO(PASS_START));
+  const firstPassHealth = f.kv.value().health;
+  assert.equal(firstPassHealth.health_available, true);
+  assert.equal(firstPassHealth.stale_accounts, 1);
+  reads.length = 0;
+  const secondPassStart = PASS_START + 3600_000;
+  await runScheduledAccountBackups(f.env, secondPassStart, f.dependencies);
+  assert.deepEqual(reads, f.ids.slice(0, 2));
+  assert.equal(f.kv.value().complete, false);
+  assert.equal(f.kv.value().pass_started_slot, passISO(secondPassStart));
+  assert.deepEqual(f.kv.value().health, firstPassHealth, "the second pass retains available stale first-pass health");
+  assert.deepEqual(f.kv.value().stale_ids.map((entry) => entry.account_id), [f.ids[0]]);
+  // Available stale health plus a complete stale-id subset makes a misplaced
+  // refresh eligible on both ticks; it would reread id0 before the page's ids.
+  for (let page = 1; page < 3; page++) {
+    reads.length = 0;
+    const puts = f.kv.putCalls.filter((call) => call.key === ACCOUNT_BACKUP_SCAN_KEY).length;
+    await runScheduledAccountBackups(f.env, secondPassStart + page * PASS_TICK, f.dependencies);
+    assert.deepEqual(reads, f.ids.slice(page * 2, page * 2 + 2), `second-pass page ${page} reads only its own account ids`);
+    assert.equal(f.kv.putCalls.filter((call) => call.key === ACCOUNT_BACKUP_SCAN_KEY).length - puts, 1,
+      `second-pass page ${page} writes only its page result`);
+    assert.equal(f.kv.value().complete, page === 2);
+    if (page === 1) assert.deepEqual(f.kv.value().health, firstPassHealth);
+  }
+  assert.equal(f.kv.value().health.computed_at, passISO(secondPassStart));
+});
+
+test("delayed refresh writes an inert overlay without overwriting a newer pass", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(4, { interval: "60", pageSize: "4" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let rereads = 0;
+  f.dependencies.status = () => { rereads++; return held; };
+  const refresh = runScheduledAccountBackups(f.env, PASS_START + 11 * PASS_TICK, f.dependencies);
+  await flush();
+  assert.equal(rereads, 1);
+  // A last-tick refresh is still reading when the next pass starts and advances.
+  f.env.CP_ACCOUNT_BACKUPS_PAGE_SIZE = "1";
+  f.dependencies.status = async () => passStatus();
+  await runScheduledAccountBackups(f.env, PASS_START + 3600_000, f.dependencies);
+  await runScheduledAccountBackups(f.env, PASS_START + 3600_000 + PASS_TICK, f.dependencies);
+  const newer = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const puts = f.kv.putCalls.length;
+  assert.equal(f.kv.value().complete, false);
+  assert.equal(f.kv.value().scanned, 2);
+  assert.equal(f.kv.value().pass_started_slot, passISO(PASS_START + 3600_000));
+  release(passStatus());
+  await refresh;
+  assert.equal(rereads, 4);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), newer);
+  assertRefreshWrites(f, puts);
+  assert.deepEqual((await effectivePassHealth(f)), accountBackupHealthSnapshot(f.kv.value()));
+});
+
+test("delayed refresh writes an inert overlay without rolling back newer overrun accounting", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(4, { interval: "60", pageSize: "4" });
+  f.dependencies.status = async (_env, id) => passStatus(passISO(PASS_START - (id === f.ids[0] ? 8000_000 : 0)));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  let release;
+  f.dependencies.status = () => new Promise((resolve) => { release = resolve; });
+  const refresh = runScheduledAccountBackups(f.env, PASS_START + 11 * PASS_TICK, f.dependencies);
+  await flush();
+  assert.equal(typeof release, "function");
+  f.env.CP_ACCOUNT_BACKUPS_PAGE_SIZE = "1";
+  f.dependencies.status = async () => passStatus();
+  await runScheduledAccountBackups(f.env, PASS_START + 3600_000, f.dependencies);
+  // Persist overrun coverage but fail the page, retaining its exact cursor.
+  f.kv.beforeList = async ({ limit }) => {
+    if (limit === 1) throw new Error("fixture page unavailable");
+  };
+  const overrun = await runScheduledAccountBackups(f.env, PASS_START + 7200_000, f.dependencies);
+  assert.equal(overrun.succeeded, false);
+  assert.equal(f.kv.value().overrun_counted_slot, passISO(PASS_START + 7200_000));
+  assert.equal(f.kv.value().unreached_entries, 3);
+  assert.equal(f.kv.value().scanned, 1);
+  const newer = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const puts = f.kv.putCalls.length;
+  release(passStatus());
+  await refresh;
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), newer);
+  assertRefreshWrites(f, puts);
+  assert.deepEqual((await effectivePassHealth(f)), accountBackupHealthSnapshot(f.kv.value()));
+});
+
+test("stale health refresh overlay is inert when any captured scan identity field changes", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const field of ["slot", "pass_started_slot", "updated_at", "complete", "cursor", "scanned"]) {
+    const f = passFixture(1, { interval: "60", pageSize: "1" });
+    f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const changed = { ...f.kv.value(), [field]: {
+      slot: passISO(PASS_START + 3600_000), pass_started_slot: passISO(PASS_START + 3600_000),
+      updated_at: passISO(PASS_START + PASS_TICK), complete: false, cursor: "next-page", scanned: 2,
+    }[field] };
+    if (field === "scanned") changed.accepted = 2;
+    const newer = JSON.stringify(changed);
+    f.dependencies.status = async () => {
+      f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, newer);
+      return passStatus();
+    };
+    const puts = f.kv.putCalls.length;
+    await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), newer, field);
+    assertRefreshWrites(f, puts);
+    assert.deepEqual((await effectivePassHealth(f)), accountBackupHealthSnapshot(changed), field);
+  }
+});
+
+test("R2-F1 older same-pass refresh skips a newer or equal-time overlay at the pre-write read", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const offset of [0, PASS_TICK]) {
+    const f = passFixture(1, { interval: "60", pageSize: "1" });
+    f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+    const puts = f.kv.putCalls.length;
+    let release;
+    f.dependencies.status = () => new Promise((resolve) => { release = resolve; });
+    const older = runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    await flush();
+    assert.equal(typeof release, "function");
+    const newerTick = PASS_START + PASS_TICK + offset;
+    await runScheduledAccountBackups(f.env, newerTick, {
+      ...f.dependencies, status: async () => passStatus(passISO(newerTick)),
+    });
+    const newerOverlay = storedOverlays(f);
+    assert.equal((await effectivePassHealth(f)).stale_accounts, 0);
+    assert.equal((await effectivePassHealth(f)).computed_at, passISO(newerTick));
+    release(passStatus(passISO(PASS_START - 8000_000)));
+    await older;
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+    assert.equal(storedOverlays(f), newerOverlay,
+      "the older status observation must not overwrite the later recovered overlay");
+    assertRefreshWrites(f, puts);
+    assert.equal(f.kv.listCalls.filter(({ prefix }) => prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)).length, 6,
+      "both refreshes perform initial and pre-write lists plus the two explicit projection checks");
+  }
+});
+
+test("R2-F1 merge keeps later scan health when an older matching overlay lands", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = f.kv.value();
+  const olderHealth = { ...scan.health, computed_at: passISO(PASS_START + PASS_TICK) };
+  scan.health = { ...scan.health, stale_accounts: 0, oldest_committed_age_seconds: 0,
+    computed_at: passISO(PASS_START + 2 * PASS_TICK) };
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(scan));
+  for (const computedAt of [olderHealth.computed_at, scan.health.computed_at]) {
+    const overlay = refreshOverlay(scan, { ...olderHealth, computed_at: computedAt });
+    seedOverlay(f, overlay);
+    assert.deepEqual((await effectivePassHealth(f)), accountBackupHealthSnapshot(scan),
+      "older and equal-time overlays cannot replace later scan health");
+    assertPassGauge(await passScrape(f.env), "stale_accounts", 0);
+  }
+});
+
+test("R4-F1 an older already-issued same-pass put cannot evict newer recovered health beyond 32 records", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const olderTime = PASS_START + PASS_TICK;
+  const newerTime = olderTime + PASS_TICK;
+  t.mock.method(Date, "now", () => newerTime);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  let issued;
+  const put = f.kv.put.bind(f.kv);
+  f.kv.put = async (key, value, options) => {
+    if (options?.metadata?.health.computed_at !== passISO(olderTime)) return put(key, value, options);
+    f.kv.putCalls.push({ key, value, options });
+    issued = { key, value, options };
+    await held;
+    f.kv.values.set(key, value);
+    f.kv.metadata.set(key, structuredClone(options.metadata));
+  };
+  const puts = f.kv.putCalls.length;
+  const older = runScheduledAccountBackups(f.env, olderTime, f.dependencies);
+  await flush();
+  assert.ok(issued, "the older put has passed its last pre-write check and been issued");
+  assert.equal(issued.options.metadata.health.stale_accounts, 1);
+  for (let index = 1; index <= 32; index++) {
+    seedOverlay(f, refreshOverlay(f.kv.value(), {
+      ...issued.options.metadata.health, computed_at: passISO(olderTime + index * 1000),
+    }));
+  }
+  await runScheduledAccountBackups(f.env, newerTime, {
+    ...f.dependencies, status: async () => passStatus(passISO(newerTime)),
+  });
+  assertRefreshWrites(f, puts, 2);
+  const newer = await readAccountBackupHealthOverlay(f.env, f.kv.value());
+  assert.equal(newer.health.stale_accounts, 0);
+  const beforeLanding = await passScrape(f.env);
+  release();
+  await older;
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assert.equal(f.kv.metadata.size, 34, "all records survive the reversed write completion order");
+  assert.deepEqual(await readAccountBackupHealthOverlay(f.env, f.kv.value()), newer);
+  assert.equal(await passScrape(f.env), beforeLanding);
+  assertPassGauge(beforeLanding, "stale_accounts", 0);
+  assert.equal((await effectivePassHealth(f)).computed_at, passISO(newerTime));
+});
+
+test("R4-F2 concurrent equal-time refreshes keep distinct records and select the first key deterministically", { timeout: 10_000 }, async (t) => {
+  for (const firstWins of [false, true]) {
+    await t.test(firstWins ? "first issued key wins" : "second issued key wins", async (t) => {
+      t.mock.method(console, "log", () => {});
+      const f = passFixture(1, { interval: "60", pageSize: "1" });
+      f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+      await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+      const tick = PASS_START + PASS_TICK;
+      const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+      const versions = firstWins ? [0x10, 0x20] : [0x20, 0x10];
+      t.mock.method(crypto, "getRandomValues", (bytes) => {
+        assert.equal(bytes.length, 16);
+        assert.ok(versions.length > 0);
+        return bytes.fill(versions.shift());
+      });
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      t.after(() => release());
+      const puts = f.kv.putCalls.length;
+      const put = f.kv.put.bind(f.kv);
+      let issued;
+      f.kv.put = async (key, value, options) => {
+        if (issued) return put(key, value, options);
+        issued = { key, value, options };
+        f.kv.putCalls.push(issued);
+        await held;
+        f.kv.values.set(key, value);
+        f.kv.metadata.set(key, structuredClone(options.metadata));
+      };
+      const first = runScheduledAccountBackups(f.env, tick, f.dependencies);
+      await flush();
+      assert.ok(issued, "the first refresh put is issued but not yet visible");
+      await runScheduledAccountBackups(f.env, tick, {
+        ...f.dependencies, status: async () => passStatus(passISO(tick)),
+      });
+      const secondKey = [...f.kv.metadata.keys()][0];
+      const secondMetadata = structuredClone(f.kv.metadata.get(secondKey));
+      release();
+      await first;
+      assertRefreshWrites(f, puts, 2);
+      assert.equal(versions.length, 0, "each observation draws an independent version");
+      assert.notEqual(issued.key, secondKey, "equal scheduler times must not share a key");
+      assert.equal(f.kv.metadata.size, 2);
+      assert.deepEqual(f.kv.metadata.get(secondKey), secondMetadata, "the late first put cannot overwrite the second");
+      assert.deepEqual(f.kv.metadata.get(issued.key), issued.options.metadata);
+      assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+      const expected = firstWins ? issued.options.metadata : secondMetadata;
+      assert.deepEqual(await readAccountBackupHealthOverlay(f.env, f.kv.value()), expected);
+      const list = f.kv.list.bind(f.kv);
+      f.kv.list = async (options) => {
+        const page = await list(options);
+        return { ...page, keys: page.keys.reverse() };
+      };
+      assert.deepEqual(await readAccountBackupHealthOverlay(f.env, f.kv.value()), expected,
+        "the equal-time winner is independent of listing iteration order");
+      assert.equal((await effectivePassHealth(f)).stale_accounts, firstWins ? 1 : 0);
+    });
+  }
+});
+
+test("R3-F2 an old-pass already-issued put cannot evict the current pass overlay", { timeout: 10_000 }, async (t) => {
+  for (const expire of [false, true]) {
+    await t.test(expire ? "landing after the deadline" : "landing before the deadline", { timeout: 10_000 }, async (t) => {
+      t.mock.method(console, "log", () => {});
+      const f = passFixture(4, { interval: "60", pageSize: "4" });
+      f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+      await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: PASS_START + 7200_000 });
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let issued;
+      const put = f.kv.put.bind(f.kv);
+      f.kv.put = async (key, value, options) => {
+        if (options?.metadata?.identity.pass_started_slot !== passISO(PASS_START)) return put(key, value, options);
+        f.kv.putCalls.push({ key, value, options });
+        issued = { key, value, options };
+        await held;
+        f.kv.values.set(key, value);
+        f.kv.metadata.set(key, structuredClone(options.metadata));
+      };
+      const puts = f.kv.putCalls.length;
+      const refresh = runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, {
+        ...f.dependencies, status: async () => passStatus(passISO(PASS_START + PASS_TICK)),
+      });
+      await flush();
+      assert.ok(issued, "hold the already-issued old-pass write before it lands");
+      assertRefreshWrites(f, puts);
+      if (expire) {
+        t.mock.timers.tick(120_000);
+        await flush();
+        assert.equal((await refresh).succeeded, false);
+      }
+      f.env.CP_ACCOUNT_BACKUPS_PAGE_SIZE = "2";
+      const lists = f.kv.listCalls.length;
+      const nextPass = PASS_START + 3600_000;
+      await runScheduledAccountBackups(f.env, nextPass, f.dependencies);
+      assert.equal(f.kv.value().scanned, 2);
+      assert.equal(f.kv.value().complete, false);
+      assert.notEqual(f.kv.value().cursor, null);
+      assert.deepEqual(f.kv.listCalls.slice(lists).filter(({ prefix }) => prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)), [{
+        prefix: `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${passISO(PASS_START)}:`, limit: 32, cursor: undefined,
+      }], "the pass writer reads the prior overlay only at the transition");
+      const nextLists = f.kv.listCalls.length;
+      await runScheduledAccountBackups(f.env, nextPass + PASS_TICK, f.dependencies);
+      assert.equal(f.kv.value().complete, true);
+      assert.equal(f.kv.listCalls.slice(nextLists).some(({ prefix }) => prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)), false,
+        "ordinary page advancement never reads an overlay");
+      const newerTick = nextPass + 2 * PASS_TICK;
+      const newPuts = f.kv.putCalls.length;
+      await runScheduledAccountBackups(f.env, newerTick, {
+        ...f.dependencies, status: async () => passStatus(passISO(newerTick)),
+      });
+      assertRefreshWrites(f, newPuts);
+      const newer = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+      const selected = await readAccountBackupHealthOverlay(f.env, f.kv.value());
+      assert.equal(selected.health.stale_accounts, 0);
+      assert.equal(selected.identity.pass_started_slot, passISO(nextPass));
+      const beforeLanding = await passScrape(f.env);
+      const afterPassPuts = f.kv.putCalls.length;
+      release();
+      await refresh;
+      await flush();
+      assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), newer,
+        "an already-issued late overlay put cannot restore old pass state");
+      assert.equal(f.kv.putCalls.length, afterPassPuts);
+      assert.equal(f.kv.metadata.size, 2);
+      const beforeSelection = f.kv.listCalls.length;
+      assert.deepEqual(await readAccountBackupHealthOverlay(f.env, f.kv.value()), selected);
+      assert.deepEqual(f.kv.listCalls.slice(beforeSelection), [{
+        prefix: `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${passISO(nextPass)}:`, limit: 32, cursor: undefined,
+      }], "readers select only the current pass prefix with one bounded list");
+      assert.equal(await passScrape(f.env), beforeLanding);
+      assertPassGauge(beforeLanding, "stale_accounts", 0);
+      assertPassGauge(beforeLanding, "pass_scanned_accounts", 4);
+    });
+  }
+});
+
+test("R3-F3 a new incomplete pass carries forward the effective recovered snapshot", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(6, { interval: "60", pageSize: "6" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, {
+    ...f.dependencies, status: async () => passStatus(passISO(PASS_START + PASS_TICK)),
+  });
+  assert.equal(f.kv.value().health.stale_accounts, 6);
+  const recovered = await effectivePassHealth(f);
+  assert.equal(recovered.stale_accounts, 0);
+  f.env.CP_ACCOUNT_BACKUPS_PAGE_SIZE = "2";
+  for (let page = 0; page < 2; page++) {
+    const lists = f.kv.listCalls.length;
+    const puts = f.kv.putCalls.length;
+    await runScheduledAccountBackups(f.env, PASS_START + 3600_000 + page * PASS_TICK, f.dependencies);
+    assert.equal(f.kv.value().complete, false);
+    assert.deepEqual(f.kv.value().health, recovered);
+    assert.equal(f.kv.value().health_progress.stale_accounts, (page + 1) * 2);
+    assert.deepEqual(f.kv.putCalls.slice(puts).map(({ key }) => key), [ACCOUNT_BACKUP_SCAN_KEY]);
+    assert.equal(f.kv.listCalls.slice(lists).filter(({ prefix }) => prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)).length,
+      page === 0 ? 1 : 0, "only the new-pass transition reads prior effective health");
+    assertPassGauge(await passScrape(f.env), "stale_accounts", 0);
+  }
+});
+
+test("R3-F3 rollover list failure falls back to the previous scan-only snapshot", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const failure of ["throw", "malformed"]) {
+    const f = passFixture(4, { interval: "60", pageSize: "4" });
+    f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const previous = f.kv.value().health;
+    const list = f.kv.list.bind(f.kv);
+    f.kv.list = async (options) => {
+      if (!options.prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)) return list(options);
+      if (failure === "throw") throw new Error("fixture overlay list unavailable");
+      return { keys: null };
+    };
+    f.env.CP_ACCOUNT_BACKUPS_PAGE_SIZE = "2";
+    const puts = f.kv.putCalls.length;
+    await runScheduledAccountBackups(f.env, PASS_START + 3600_000, f.dependencies);
+    assert.equal(f.kv.value().scanned, 2);
+    assert.equal(f.kv.value().complete, false);
+    assert.deepEqual(f.kv.value().health, previous);
+    assert.deepEqual(f.kv.putCalls.slice(puts).map(({ key }) => key), [ACCOUNT_BACKUP_SCAN_KEY]);
+    assertPassGauge(await passScrape(f.env), "stale_accounts", 4);
+  }
+});
+
+test("refresh no-op compares effective overlay health and preserves its computed_at", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(2, { interval: "60", pageSize: "2" });
+  f.dependencies.status = async (_env, id) => passStatus(passISO(PASS_START - (id === f.ids[0] ? 9000 : 8500) * 1000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const firstTick = PASS_START + PASS_TICK;
+  f.dependencies.status = async (_env, id) => passStatus(passISO(firstTick - (id === f.ids[0] ? 60 : 7500) * 1000));
+  await runScheduledAccountBackups(f.env, firstTick, f.dependencies);
+  const overlay = storedOverlays(f);
+  const puts = f.kv.putCalls.length;
+  assert.notDeepEqual((await effectivePassHealth(f)), accountBackupHealthSnapshot(f.kv.value()));
+  await runScheduledAccountBackups(f.env, firstTick + PASS_TICK, f.dependencies);
+  assertRefreshWrites(f, puts, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  assert.equal(storedOverlays(f), overlay);
+  assert.equal((await effectivePassHealth(f)).computed_at, passISO(firstTick));
+});
+
+test("unchanged still-stale never-committed health is not rewritten across two ticks", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  let reads = 0;
+  f.dependencies.status = async () => {
+    reads++;
+    return { last_committed_at: null, backups: {
+      current_job: { scheduled_at: passISO(PASS_START - 8000_000) }, failures: [],
+    } };
+  };
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const puts = f.kv.putCalls.length;
+  assert.deepEqual(f.kv.value().health, {
+    stale_accounts: 1, never_committed_accounts: 1, oldest_committed_age_seconds: null,
+    health_available: true, computed_at: passISO(PASS_START),
+  });
+  for (const tick of [PASS_START + PASS_TICK, PASS_START + 2 * PASS_TICK]) {
+    await runScheduledAccountBackups(f.env, tick, f.dependencies);
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+    assert.equal(f.kv.value().health.computed_at, passISO(PASS_START));
+    assert.equal(f.kv.putCalls.length, puts);
+  }
+  assert.equal(reads, 3, "each eligible tick confirms the still-stale account");
+});
+
+test("stale health refresh deadline bounds status reads and KV operations", { timeout: 10_000 }, async (t) => {
+  for (const phase of ["initial_overlay_list", "status", "final_overlay_list", "put"]) {
+    await t.test(phase, { timeout: 10_000 }, async (t) => {
+      t.mock.method(console, "log", () => {});
+      const f = passFixture(2, { interval: "60", pageSize: "2" });
+      f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+      await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+      const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+      const puts = f.kv.putCalls.length;
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let reads = 0;
+      f.dependencies.status = async () => {
+        reads++;
+        if (phase === "status") await held;
+        return passStatus();
+      };
+      if (phase.endsWith("_list")) {
+        let overlayReads = 0;
+        f.kv.beforeList = async ({ prefix }) => {
+          if (prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX)
+            && ++overlayReads === (phase === "initial_overlay_list" ? 1 : 2)) await held;
+        };
+      }
+      if (phase === "put") f.kv.afterPut = () => held;
+      let settled = false;
+      const refresh = runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies)
+        .then((result) => { settled = true; return result; });
+      await flush();
+      t.mock.timers.tick(119_999);
+      await flush();
+      assert.equal(settled, false, "deadline must not fire early");
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(settled, true, "the whole refresh returns within 120 seconds");
+      assert.equal((await refresh).succeeded, false);
+      const writes = f.kv.putCalls.length;
+      assert.equal(writes - puts, phase === "put" ? 1 : 0);
+      assertRefreshWrites(f, puts, phase === "put" ? 1 : 0);
+      assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+      release();
+      await flush();
+      assert.equal(f.kv.putCalls.length, writes, "late continuations never initiate a write");
+      if (phase === "status") assert.equal(reads, 1, "queued rereads stop after the deadline");
+      if (phase === "initial_overlay_list") assert.equal(reads, 0, "expired initial overlay reads never start status work");
+      assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+    });
+  }
+});
+
+test("stale health refresh shares one 120-second deadline across status and final KV read", { timeout: 10_000 }, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  const puts = f.kv.putCalls.length;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let releaseStatus;
+  f.dependencies.status = () => new Promise((resolve) => { releaseStatus = resolve; });
+  let releaseRead;
+  const heldRead = new Promise((resolve) => { releaseRead = resolve; });
+  let overlayReads = 0;
+  f.kv.beforeList = async ({ prefix }) => {
+    if (prefix.startsWith(ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX) && ++overlayReads === 2) await heldRead;
+  };
+  let settled = false;
+  const refresh = runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies)
+    .then((result) => { settled = true; return result; });
+  await flush();
+  t.mock.timers.tick(90_000);
+  releaseStatus(passStatus());
+  await flush();
+  assert.equal(overlayReads, 2, "status work has advanced to the final overlay read");
+  t.mock.timers.tick(29_999);
+  await flush();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(settled, true, "the KV read receives only the remaining 30 seconds");
+  assert.equal((await refresh).succeeded, false);
+  releaseRead();
+  await flush();
+  assert.equal(f.kv.putCalls.length, puts);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+});
+
+test("legacy scans without stale tracking validate and never adopt a partial refresh list", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const stripTracking = (scan) => {
+    const result = { ...scan };
+    delete result.stale_ids;
+    delete result.stale_ids_truncated;
+    delete result.untracked_oldest_committed_age_seconds;
+    return result;
+  };
+  for (const pageSize of ["2", "4"]) {
+    const f = passFixture(4, { interval: "60", pageSize });
+    const reads = [];
+    f.dependencies.status = async (_env, id) => {
+      reads.push(id);
+      return passStatus(passISO(PASS_START - 8000_000));
+    };
+    await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+    const legacy = stripTracking(f.kv.value());
+    f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, JSON.stringify(legacy));
+    reads.length = 0;
+    await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+    assert.deepEqual(reads, pageSize === "2" ? f.ids.slice(2) : []);
+    assert.equal(f.kv.value().scanned, 4);
+    assert.equal(f.kv.value().complete, true);
+    assert.equal(Object.hasOwn(f.kv.value(), "stale_ids"), false);
+    assert.equal(f.kv.value().health.health_available, true);
+    assert.equal(f.kv.value().health.stale_accounts, 4);
+    const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+    reads.length = 0;
+    await runScheduledAccountBackups(f.env, PASS_START + 2 * PASS_TICK, f.dependencies);
+    assert.deepEqual(reads, []);
+    assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+    const scrape = await passScrape(f.env);
+    assertPassGauge(scrape, "pass_complete", 1);
+    assertPassGauge(scrape, "stale_accounts", 4);
+  }
+});
+
+test("unavailable completed health never starts a stale-account refresh", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(2, { interval: "60", pageSize: "2" });
+  f.dependencies.status = async (_env, id) => {
+    if (id === f.ids[1]) throw new Error("fixture pass-time status unavailable");
+    return passStatus(passISO(PASS_START - 8000_000));
+  };
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  assert.equal(f.kv.value().health.health_available, false);
+  const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+  let rereads = 0;
+  f.dependencies.status = async () => { rereads++; return passStatus(); };
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  assert.equal(rereads, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+});
+
+test("refreshed health projection exposes only public fields and rejects malformed aggregates", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  f.dependencies.status = async () => passStatus(passISO(PASS_START + PASS_TICK));
+  await runScheduledAccountBackups(f.env, PASS_START + PASS_TICK, f.dependencies);
+  const scan = f.kv.value();
+  const overlay = (await readAccountBackupHealthOverlay(f.env, f.kv.value()));
+  assert.deepEqual(accountBackupHealthSnapshot(scan, overlay), {
+    stale_accounts: 0, never_committed_accounts: 0, oldest_committed_age_seconds: 0,
+    health_available: true, computed_at: passISO(PASS_START + PASS_TICK),
+  });
+  for (const invalid of [
+    { computed_at: "invalid" }, { health_available: "true" },
+    { stale_accounts: -1 }, { stale_accounts: 1.5 }, { stale_accounts: "0" },
+    { never_committed_accounts: Number.MAX_SAFE_INTEGER + 1 }, { never_committed_accounts: null },
+    { oldest_committed_age_seconds: -1 }, { oldest_committed_age_seconds: "0" },
+  ]) {
+    assert.deepEqual(accountBackupHealthSnapshot({ ...scan, health: { ...scan.health, ...invalid } }), {
+      stale_accounts: null, oldest_committed_age_seconds: null, never_committed_accounts: null,
+      health_available: false, computed_at: null,
+    }, JSON.stringify(invalid));
+  }
+});
+
+test("refresh overlay projection validates schema, exact identity and exact health shapes", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = f.kv.value();
+  const projected = { ...scan.health, stale_accounts: 0, oldest_committed_age_seconds: 0,
+    computed_at: passISO(PASS_START + PASS_TICK) };
+  const overlay = refreshOverlay(scan, projected);
+  assert.deepEqual(accountBackupHealthSnapshot(scan, overlay), projected);
+  const invalid = [null, [], "overlay", {},
+    { ...overlay, schema_version: "unknown" },
+    { ...overlay, refreshed_at: "invalid" },
+    { ...overlay, extra: true },
+    { ...overlay, identity: null },
+    { ...overlay, identity: [] },
+    { ...overlay, identity: { ...overlay.identity, extra: true } },
+    { ...overlay, health: null },
+    { ...overlay, health: [] },
+    { ...overlay, health: { ...projected, extra: true } },
+  ];
+  for (const field of Object.keys(overlay)) {
+    const missing = structuredClone(overlay);
+    delete missing[field];
+    invalid.push(missing);
+  }
+  for (const field of Object.keys(overlay.identity)) {
+    const missing = structuredClone(overlay);
+    delete missing.identity[field];
+    invalid.push(missing);
+  }
+  for (const identity of [
+    { slot: "invalid" }, { pass_started_slot: "invalid" }, { updated_at: "invalid" },
+    { complete: "true" }, { cursor: 1 }, { cursor: "" }, { cursor: "x".repeat(2049) },
+    { scanned: -1 }, { scanned: 1.5 }, { scanned: "1" },
+    { scanned: Number.MAX_SAFE_INTEGER + 1 },
+    { slot: passISO(PASS_START + 3600_000) },
+    { pass_started_slot: passISO(PASS_START + 3600_000) },
+    { updated_at: passISO(PASS_START + PASS_TICK) },
+    { complete: false }, { cursor: "next" }, { scanned: 2 },
+  ]) invalid.push({ ...overlay, identity: { ...overlay.identity, ...identity } });
+  for (const field of Object.keys(projected)) {
+    const missing = structuredClone(overlay);
+    delete missing.health[field];
+    invalid.push(missing);
+  }
+  for (const health of [
+    { computed_at: "invalid" }, { health_available: false }, { health_available: "true" },
+    { stale_accounts: -1 }, { stale_accounts: 1.5 }, { stale_accounts: "0" },
+    { never_committed_accounts: Number.MAX_SAFE_INTEGER + 1 }, { never_committed_accounts: null },
+    { oldest_committed_age_seconds: -1 }, { oldest_committed_age_seconds: "0" },
+  ]) invalid.push({ ...overlay, health: { ...projected, ...health } });
+  for (const [index, candidate] of invalid.entries()) {
+    assert.deepEqual(accountBackupHealthSnapshot(scan, candidate), accountBackupHealthSnapshot(scan),
+      `invalid overlay ${index} must leave scan health unchanged`);
+  }
+});
+
+test("versioned overlay selection ignores malformed metadata and mismatched names without deletion", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = f.kv.value();
+  const first = refreshOverlay(scan, { ...scan.health, oldest_committed_age_seconds: 8300,
+    computed_at: passISO(PASS_START + PASS_TICK) });
+  const newest = refreshOverlay(scan, { ...scan.health, stale_accounts: 0, oldest_committed_age_seconds: 0,
+    computed_at: passISO(PASS_START + 2 * PASS_TICK) });
+  seedOverlay(f, newest);
+  seedOverlay(f, first);
+  const invalid = [
+    null, [], "metadata", {},
+    { ...newest, extra: true },
+    { ...newest, identity: { ...newest.identity, scanned: 2 } },
+    { ...newest, identity: { ...newest.identity, extra: true } },
+    { ...newest, health: { ...newest.health, extra: true } },
+    { ...newest, health: { ...newest.health, stale_accounts: -1 } },
+  ];
+  for (const [index, candidate] of invalid.entries()) {
+    const computedAt = passISO(PASS_START + (index + 3) * PASS_TICK);
+    const record = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? { ...candidate, ...(candidate.health ? { health: { ...candidate.health, computed_at: computedAt } } : {}) }
+      : candidate;
+    seedOverlay(f, record, overlayKey(refreshOverlay(scan, { ...newest.health, computed_at: computedAt })));
+  }
+  seedOverlay(f, newest, `${overlayKey(newest)}:extra`);
+  seedOverlay(f, newest, overlayKey(newest).replace(/:\d{15}:/, ":1:"));
+  seedOverlay(f, newest, overlayKey(refreshOverlay(scan, { ...newest.health,
+    computed_at: passISO(PASS_START + 15 * PASS_TICK) })));
+  const raw = [...f.kv.values];
+  const metadata = storedOverlays(f);
+  const lists = f.kv.listCalls.length;
+  const gets = f.kv.getCalls.length;
+  assert.deepEqual(await readAccountBackupHealthOverlay(f.env, scan), newest);
+  assert.deepEqual(f.kv.listCalls.slice(lists), [{
+    prefix: `${ACCOUNT_BACKUP_HEALTH_REFRESH_PREFIX}${scan.pass_started_slot}:`, limit: 32, cursor: undefined,
+  }]);
+  assert.equal(f.kv.getCalls.length, gets, "selection obtains metadata from list without individual get calls");
+  assert.deepEqual([...f.kv.values], raw, "invalid records are never deleted");
+  assert.equal(storedOverlays(f), metadata);
+  assertPassGauge(await passScrape(f.env), "stale_accounts", 0);
+});
+
+test("R4-F2 a seeded valid same-time record prevents another put", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const tick = PASS_START + PASS_TICK;
+  const scan = f.kv.value();
+  seedOverlay(f, refreshOverlay(scan, { ...scan.health, computed_at: passISO(tick) }));
+  const before = storedOverlays(f);
+  const puts = f.kv.putCalls.length;
+  const random = t.mock.method(crypto, "getRandomValues", () => { assert.fail("a visible same-time record must prevent publication"); });
+  await runScheduledAccountBackups(f.env, tick, {
+    ...f.dependencies, status: async () => passStatus(passISO(tick)),
+  });
+  assertRefreshWrites(f, puts, 0);
+  assert.equal(random.mock.callCount(), 0);
+  assert.equal(storedOverlays(f), before);
+  assert.equal((await effectivePassHealth(f)).stale_accounts, 1);
+});
+
+test("R4-F2 a random collision never overwrites even malformed metadata and retries are bounded", async (t) => {
+  for (const exhausted of [false, true]) {
+    await t.test(exhausted ? "four collisions leave records unchanged" : "a new version publishes alongside the old key", async (t) => {
+      t.mock.method(console, "log", () => {});
+      const f = passFixture(1, { interval: "60", pageSize: "1" });
+      f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+      await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+      const tick = PASS_START + PASS_TICK;
+      const scan = f.kv.value();
+      const raw = f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY);
+      const key = overlayKey(refreshOverlay(scan, { ...scan.health, computed_at: passISO(tick) }));
+      seedOverlay(f, { invalid: true }, key);
+      let randomCalls = 0;
+      t.mock.method(crypto, "getRandomValues", (bytes) => {
+        randomCalls++;
+        return bytes.fill(exhausted || randomCalls === 1 ? 0 : 1);
+      });
+      const puts = f.kv.putCalls.length;
+      const lists = f.kv.listCalls.length;
+      await runScheduledAccountBackups(f.env, tick, {
+        ...f.dependencies, status: async () => passStatus(passISO(tick)),
+      });
+      assertRefreshWrites(f, puts, exhausted ? 0 : 1);
+      assert.equal(f.kv.putCalls.slice(puts).some((call) => call.key === key), false);
+      assert.equal(randomCalls, exhausted ? 4 : 2);
+      assert.deepEqual(f.kv.metadata.get(key), { invalid: true });
+      assert.equal(f.kv.metadata.size, exhausted ? 1 : 2);
+      assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+      assert.equal(f.kv.listCalls.length - lists, 2, "collisions do not add list calls");
+      assert.equal((await effectivePassHealth(f)).stale_accounts, exhausted ? 1 : 0);
+    });
+  }
+});
+
+test("accepted completed scans with oversized identity metadata never issue a KV record put", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = passFixture(1, { interval: "60", pageSize: "1" });
+  f.dependencies.status = async () => passStatus(passISO(PASS_START - 8000_000));
+  await runScheduledAccountBackups(f.env, PASS_START, f.dependencies);
+  const scan = { ...f.kv.value(), cursor: "x".repeat(2048) };
+  assert.notEqual(accountBackupPassSnapshot(scan), null, "legacy scan validation accepts a completed non-null cursor");
+  const raw = JSON.stringify(scan);
+  f.kv.values.set(ACCOUNT_BACKUP_SCAN_KEY, raw);
+  const tick = PASS_START + PASS_TICK;
+  const oversized = refreshOverlay(scan, { ...scan.health, stale_accounts: 0,
+    oldest_committed_age_seconds: 0, computed_at: passISO(tick) });
+  assert.ok(Buffer.byteLength(JSON.stringify(oversized)) >= 1024);
+  const puts = f.kv.putCalls.length;
+  await runScheduledAccountBackups(f.env, tick, {
+    ...f.dependencies, status: async () => passStatus(passISO(tick)),
+  });
+  assertRefreshWrites(f, puts, 0);
+  assert.equal(f.kv.values.get(ACCOUNT_BACKUP_SCAN_KEY), raw);
+  seedOverlay(f, oversized);
+  assert.equal(await readAccountBackupHealthOverlay(f.env, scan), null,
+    "the reader rejects metadata which cannot fit the production write bound");
+});
+
+test("inverted refresh keys preserve ordering across the canonical four-digit UTC year range", async () => {
+  const scan = passRecord({ complete: true, scanned: 1, updated_at: passISO(PASS_START) });
+  const f = passFixture(0);
+  const cases = [
+    ["0000-01-01T00:00:00.000Z", "315569519999999"],
+    ["1970-01-01T00:00:00.000Z", "253402300799999"],
+    ["9999-12-31T23:59:59.999Z", "000000000000000"],
+  ];
+  const keys = [];
+  for (const [computed_at, inverted] of cases) {
+    const record = refreshOverlay(scan, { ...scan.health, computed_at });
+    const key = seedOverlay(f, record);
+    assert.ok(key.endsWith(`:${inverted}:${"0".repeat(32)}`));
+    keys.push(key);
+    assert.deepEqual(await readAccountBackupHealthOverlay(f.env, scan), record);
+  }
+  assert.deepEqual([...keys].sort(), keys.toReversed());
+});
+
+test("maximum accepted completed overlay metadata remains below the KV 1024-byte bound", async () => {
+  const max = Number.MAX_SAFE_INTEGER;
+  const latest = "9999-12-31T23:59:59.999Z";
+  const scan = passRecord({ complete: true, scanned: max, accepted: max, updated_at: latest,
+    health: { stale_accounts: max, never_committed_accounts: max, oldest_committed_age_seconds: max,
+      health_available: true, computed_at: passISO(PASS_START) } });
+  const metadata = refreshOverlay(scan, { ...scan.health, computed_at: latest });
+  assert.notEqual(accountBackupPassSnapshot(scan), null);
+  assert.deepEqual(accountBackupHealthSnapshot(scan, metadata), metadata.health);
+  assert.ok(Buffer.byteLength(JSON.stringify(metadata)) < 1024);
+  const f = passFixture(0);
+  seedOverlay(f, metadata);
+  assert.deepEqual(await readAccountBackupHealthOverlay(f.env, scan), metadata);
+});
+
+test("stale tracking validation accepts legacy scans and rejects malformed optional metadata", () => {
+  const legacy = passRecord({ scanned: 1, accepted: 1, complete: true });
+  const scan = {
+    ...legacy,
+    stale_ids: [{ account_id: "coverage_0000", committed_age_seconds: 8000 }],
+    stale_ids_truncated: false,
+    untracked_oldest_committed_age_seconds: null,
+  };
+  assert.notEqual(accountBackupPassSnapshot(legacy), null);
+  assert.deepEqual(accountBackupPassSnapshot(scan), accountBackupPassSnapshot(legacy));
+  for (const invalid of [
+    { stale_ids: undefined }, { stale_ids_truncated: undefined },
+    { untracked_oldest_committed_age_seconds: undefined },
+    { stale_ids: null }, { stale_ids: [null] },
+    { stale_ids: [{ account_id: "invalid account", committed_age_seconds: 1 }] },
+    { stale_ids: [{ account_id: "coverage_0000", committed_age_seconds: -1 }] },
+    { stale_ids: [{ account_id: "coverage_0000", committed_age_seconds: 1.5 }] },
+    { stale_ids: [{ account_id: "coverage_0000", committed_age_seconds: "1" }] },
+    { stale_ids: [scan.stale_ids[0], scan.stale_ids[0]] },
+    { stale_ids: passAccountIDs(17).map((account_id) => ({ account_id, committed_age_seconds: 0 })) },
+    { stale_ids_truncated: "false" }, { stale_ids_truncated: true },
+    { untracked_oldest_committed_age_seconds: -1 },
+    { untracked_oldest_committed_age_seconds: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    assert.equal(accountBackupPassSnapshot({ ...scan, ...invalid }), null, JSON.stringify(invalid));
+  }
+});
 
 test("scheduled passes carry the cursor across slots and reach every account in order", async (t) => {
   t.mock.method(console, "log", () => {});

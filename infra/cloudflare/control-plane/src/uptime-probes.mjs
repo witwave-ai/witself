@@ -1,4 +1,4 @@
-import { ACCOUNT_BACKUP_SCAN_KEY, RESTORE_DRILL_FRESHNESS_KEY, accountBackupConfig, accountBackupHealthSnapshot, accountBackupPassSnapshot, restoreDrillFreshnessSnapshot } from "./account-backup-runtime.mjs";
+import { ACCOUNT_BACKUP_SCAN_KEY, RESTORE_DRILL_FRESHNESS_KEY, accountBackupConfig, accountBackupHealthSnapshot, readAccountBackupHealthOverlay, accountBackupPassSnapshot, restoreDrillFreshnessSnapshot } from "./account-backup-runtime.mjs";
 import { signupObservationLines } from "./signup-observation.mjs";
 import { entitlementDeliveryLines } from "./entitlement-delivery-metrics.mjs";
 
@@ -347,11 +347,19 @@ async function accountBackupLines(env) {
   const enabled = String(env.CP_ACCOUNT_BACKUPS_ENABLED ?? "").trim().toLowerCase() === "true";
   const values = { enabled: Number(enabled), health_available: 0 };
   if (enabled) {
-    const [scan, freshness] = await Promise.all([
-      bounded(
-        () => env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" }),
-        SNAPSHOT_TIMEOUT_MS,
-      ),
+    const scanRead = bounded(
+      () => env.DIRECTORY.get(ACCOUNT_BACKUP_SCAN_KEY, { type: "json" }),
+      SNAPSHOT_TIMEOUT_MS,
+    );
+    const [scan, overlay, freshness] = await Promise.all([
+      scanRead,
+      // The current pass determines the list prefix. Include the scan wait in
+      // this optional read's deadline so it cannot extend the scrape timeout.
+      bounded(async (signal) => {
+        const scan = await scanRead;
+        signal.throwIfAborted();
+        return readAccountBackupHealthOverlay(env, scan);
+      }, SNAPSHOT_TIMEOUT_MS).catch(() => null),
       // This extra KV read is independently bounded and failure-isolated.
       // The scan read retains its existing scrape-failure behavior.
       bounded(async () => {
@@ -363,7 +371,7 @@ async function accountBackupLines(env) {
         }
       }, SNAPSHOT_TIMEOUT_MS).catch(() => null),
     ]);
-    const health = accountBackupHealthSnapshot(scan);
+    const health = accountBackupHealthSnapshot(scan, overlay);
     const pass = accountBackupPassSnapshot(scan);
     if (pass !== null) {
       values.pass_started_timestamp_seconds = Date.parse(pass.pass_started_slot) / 1000;
