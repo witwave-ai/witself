@@ -26,6 +26,8 @@ type Store struct {
 	importObserver                 ImportObserver
 	importRowDecodeLegacy          bool
 	importRowClobber               bool
+	clientConnectionCheckOnce      sync.Once
+	clientConnectionCheckSupported bool
 }
 
 // AuditAppendFailures returns failed account_events INSERT attempts made by

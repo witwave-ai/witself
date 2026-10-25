@@ -70,9 +70,7 @@ func (s *Store) acquireTranscriptStorageReconcileLease(ctx context.Context) (*tr
 	if !lease.held {
 		return lease, false, nil
 	}
-	_, err = conn.Exec(acquireCtx, `SET application_name = 'witself-transcript-storage-reconcile';
- SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6;
- SET client_connection_check_interval = '2s'; SET lock_timeout = '500ms'`)
+	err = s.configureTranscriptStorageReconcileConnection(acquireCtx, conn)
 	if err == nil {
 		err = conn.QueryRow(acquireCtx, `SELECT pg_backend_pid()`).Scan(&lease.pid)
 	}
@@ -82,6 +80,28 @@ func (s *Store) acquireTranscriptStorageReconcileLease(ctx context.Context) (*tr
 		return nil, false, err
 	}
 	return lease, true, nil
+}
+
+func (s *Store) configureTranscriptStorageReconcileConnection(ctx context.Context, conn interface {
+	queryer
+	pgxExec
+}) error {
+	// Probe the server, not the client's OS. Windows exposes this GUC with a
+	// zero maximum; missing settings and failed probes also stay disabled for
+	// this Store's lifetime. Use the lease connection, avoiding another pool slot.
+	s.clientConnectionCheckOnce.Do(func() {
+		var maxValue int64
+		err := conn.QueryRow(ctx, `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue)
+		s.clientConnectionCheckSupported = err == nil && maxValue > 0
+	})
+	settings := `SET application_name = 'witself-transcript-storage-reconcile';
+ SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6;`
+	if s.clientConnectionCheckSupported {
+		settings += "\n SET client_connection_check_interval = '2s';"
+	}
+	settings += " SET lock_timeout = '500ms'"
+	_, err := conn.Exec(ctx, settings)
+	return err
 }
 
 func (l *transcriptStorageReconcileLease) close() {

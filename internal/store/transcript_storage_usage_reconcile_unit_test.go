@@ -12,8 +12,80 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type transcriptStorageReconcileSettingsConn struct {
+	recordingExec
+	t          *testing.T
+	maxValue   int64
+	probeErr   error
+	probeCalls int
+}
+
+func (c *transcriptStorageReconcileSettingsConn) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	c.t.Helper()
+	if sql != `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'` || len(args) != 0 {
+		c.t.Fatalf("unexpected capability query: %q, argument count %d", sql, len(args))
+	}
+	c.probeCalls++
+	return c
+}
+
+func (c *transcriptStorageReconcileSettingsConn) Scan(dest ...any) error {
+	*dest[0].(*int64) = c.maxValue
+	return c.probeErr
+}
+
+func TestTranscriptStorageUsageReconcileConnectionSettings(t *testing.T) {
+	const supportedSQL = `SET application_name = 'witself-transcript-storage-reconcile';
+ SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6;
+ SET client_connection_check_interval = '2s'; SET lock_timeout = '500ms'`
+	const unsupportedSQL = `SET application_name = 'witself-transcript-storage-reconcile';
+ SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6; SET lock_timeout = '500ms'`
+	probeErr := errors.New("synthetic pg_settings failure")
+	settingsErr := errors.New("synthetic settings failure")
+	for _, tc := range []struct {
+		name        string
+		maxValue    int64
+		probeErr    error
+		settingsErr error
+		wantSQL     string
+	}{
+		{"supported", 2147483647, nil, nil, supportedSQL},
+		{"positive maximum", 1, nil, nil, supportedSQL},
+		{"unsupported", 0, nil, nil, unsupportedSQL},
+		{"negative maximum", -1, nil, nil, unsupportedSQL},
+		{"missing setting", 0, pgx.ErrNoRows, nil, unsupportedSQL},
+		{"failed probe", 2147483647, probeErr, nil, unsupportedSQL},
+		{"supported settings failure", 2147483647, nil, settingsErr, supportedSQL},
+		{"unsupported settings failure", 0, nil, settingsErr, unsupportedSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &Store{}
+			first := &transcriptStorageReconcileSettingsConn{
+				t: t, maxValue: tc.maxValue, probeErr: tc.probeErr,
+				recordingExec: recordingExec{err: tc.settingsErr},
+			}
+			// A different connection must reuse the Store's cached answer, even
+			// after a failed probe or failed SET, without querying again.
+			second := &transcriptStorageReconcileSettingsConn{t: t, maxValue: 1}
+			for i, conn := range []*transcriptStorageReconcileSettingsConn{first, second} {
+				err := st.configureTranscriptStorageReconcileConnection(t.Context(), conn)
+				if !errors.Is(err, conn.err) {
+					t.Fatalf("settings error = %v, want %v", err, conn.err)
+				}
+				if conn.calls != 1 || conn.lastSQL != tc.wantSQL {
+					t.Fatalf("settings calls=%d SQL=%q, want one call with %q", conn.calls, conn.lastSQL, tc.wantSQL)
+				}
+				if conn.probeCalls != 1-i {
+					t.Fatalf("connection %d probe calls=%d, want %d", i, conn.probeCalls, 1-i)
+				}
+			}
+		})
+	}
+}
 
 func TestTranscriptStorageUsageReconcileConfig(t *testing.T) {
 	defaults := DefaultTranscriptStorageReconcileConfig()

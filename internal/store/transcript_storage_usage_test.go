@@ -200,11 +200,15 @@ func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
 		"set_config('statement_timeout', '120s', true)",
 		"set_config('lock_timeout', '2s', true)",
 		"set_config('idle_in_transaction_session_timeout', '5s', true)",
-		"set_config('client_connection_check_interval', '1s', true)",
 	} {
 		if !strings.Contains(settings, setting) {
 			t.Errorf("first SELECT missing %s", setting)
 		}
+	}
+	const connectionCheckSetting = "set_config('client_connection_check_interval', '1s', true)"
+	guardedConnectionCheck := regexp.MustCompile(`(?s)case when \(select max_val::bigint from pg_settings where name = 'client_connection_check_interval'\) > 0\s+then ` + regexp.QuoteMeta(connectionCheckSetting) + `\s+end\s*$`)
+	if strings.Count(up, connectionCheckSetting) != 1 || !guardedConnectionCheck.MatchString(settings) {
+		t.Error("first SELECT must set client_connection_check_interval once, guarded by max_val > 0 before the lock DO statement")
 	}
 	for _, banned := range []string{"lock table accounts", "references", "nowait", "no transaction", "md5("} {
 		if strings.Contains(up, banned) {
