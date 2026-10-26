@@ -25,7 +25,7 @@ func RequirePostgres(t testing.TB) string {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is not set (WITSELF_TEST_REQUIRE_DATABASE=1)")
 		return ""
 	}
-	t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	t.Skipf("NOT RUN %s: no test database (WITSELF_TEST_DATABASE_URL is not set)", t.Name())
 	return ""
 }
 

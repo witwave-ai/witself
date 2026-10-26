@@ -22,13 +22,13 @@ func TestRequirePostgres(t *testing.T) {
 
 	t.Run("missing DSN skips", func(t *testing.T) {
 		t.Setenv(databaseURLEnv, "")
-		t.Setenv(requireDatabaseEnv, "")
+		t.Setenv(requireDatabaseEnv, "0")
 		t.Setenv(helperModeEnv, "postgres")
 		output, err := runHelperProcess(t)
 		if err != nil {
 			t.Fatalf("skip helper failed: %v\n%s", err, output)
 		}
-		if !strings.Contains(output, "WITSELF_TEST_DATABASE_URL is not set") ||
+		if !strings.Contains(output, "NOT RUN TestRequirementHelperProcess/postgres: no test database (WITSELF_TEST_DATABASE_URL is not set)") ||
 			!strings.Contains(output, "--- SKIP: TestRequirementHelperProcess/postgres") {
 			t.Fatalf("helper did not skip with the standard message:\n%s", output)
 		}

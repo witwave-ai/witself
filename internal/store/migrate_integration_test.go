@@ -4,12 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,8 +19,6 @@ import (
 	"github.com/witwave-ai/witself/internal/sealed"
 	"github.com/witwave-ai/witself/internal/testenv"
 )
-
-var migrationTestSchemaSequence atomic.Uint64
 
 func TestMigration73FreshInstallAllowsRetentionPolicyAccountsPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
@@ -2099,45 +2096,63 @@ type migrationTestReporter interface {
 
 func newMigrationTestStore(t migrationTestReporter, baseDSN string) (*Store, string) {
 	t.Helper()
-	schema := fmt.Sprintf("witself_migration_%d_%d", os.Getpid(), migrationTestSchemaSequence.Add(1))
-	admin, err := sql.Open("pgx", baseDSN)
+	// Preserve the original search-path helper's raw URL diagnostic for callers
+	// with their own redacting reporter, before the shared harness fixture can
+	// replace it with a value-free label.
+	if strings.HasPrefix(baseDSN, "postgres://") || strings.HasPrefix(baseDSN, "postgresql://") {
+		if _, err := url.Parse(baseDSN); err != nil {
+			t.Fatalf("parse PostgreSQL test URL: %v", err)
+			return nil, ""
+		}
+	}
+	fixture := testenv.NewPostgresSchema(t, baseDSN)
+	st, err := Open(context.Background(), fixture.DSN())
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemaStarted := time.Now()
-	if _, err := admin.Exec(`CREATE SCHEMA ` + schema); err != nil {
-		_ = admin.Close()
-		t.Fatalf("create test schema: %v", err)
-	}
-	var st *Store
-	// Register before opening the store so setup failures use the same bounded
-	// schema cleanup as successful fixtures.
-	t.Cleanup(func() {
-		cleanupTimeout := migrationTestSchemaCleanupTimeout(time.Since(schemaStarted))
-		if st != nil {
-			st.Close()
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		if _, err := admin.ExecContext(cleanupCtx, `DROP SCHEMA `+schema+` CASCADE`); err != nil {
-			t.Errorf("drop migration test schema %s: %v", schema, err)
-		}
-		if err := admin.Close(); err != nil {
-			t.Errorf("close migration test admin connection: %v", err)
-		}
-	})
-	dsn, err := migrationTestDSNWithSearchPath(baseDSN, schema)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err = Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Registered after schema allocation: close consumers before bounded DROP.
+	t.Cleanup(st.Close)
 	if err := st.Ping(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return st, dsn
+	return st, fixture.DSN()
+}
+
+func TestMigrationStoreMalformedDSNDiagnostics(t *testing.T) {
+	const childKey = "WITSELF_MIGRATION_MALFORMED_DSN_CHILD"
+	const malformed = "postgres://migration_fixture_user:migration_fixture_password@%zz/migration_fixture_database"
+	if os.Getenv(childKey) == "1" {
+		newMigrationTestStore(t, malformed)
+		t.Fatal("malformed connection unexpectedly accepted")
+	}
+
+	// Pin the original search-path diagnostic, including all synthetic fields.
+	// The malformed URL must fail before any connection or schema allocation.
+	want := "parse PostgreSQL test URL: parse \"" + malformed + "\": invalid URL escape \"%zz\""
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMigrationStoreMalformedDSNDiagnostics$", "-test.v")
+	command.Env = append(os.Environ(), childKey+"=1")
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatal("migration wrapper did not exit with the expected test failure")
+	}
+	if !strings.Contains(string(output), want) {
+		t.Fatal("migration wrapper changed the original raw parse diagnostic")
+	}
+	harnessError := testenv.ValidateHarnessPostgresDSN(malformed)
+	if harnessError == nil || harnessError.Error() != "harness requires a local test database" {
+		t.Fatal("harness validator changed its value-free malformed connection refusal")
+	}
+	for _, field := range []string{"migration_fixture_user", "migration_fixture_password", "migration_fixture_database"} {
+		if !strings.Contains(string(output), field) {
+			t.Fatal("migration wrapper diagnostic omitted a synthetic connection field")
+		}
+		if strings.Contains(harnessError.Error(), field) {
+			t.Fatal("harness validator disclosed a synthetic connection field")
+		}
+	}
 }
 
 // migrationTestSchemaCleanupTimeout gives DROP CASCADE three times the elapsed
@@ -2147,7 +2162,7 @@ func newMigrationTestStore(t migrationTestReporter, baseDSN string) (*Store, str
 // one-minute floor allows catalog/lock contention when host load rises after a
 // fast setup; the old fixed ten-second budget flaked during concurrent builds.
 func migrationTestSchemaCleanupTimeout(fixtureElapsed time.Duration) time.Duration {
-	return max(3*fixtureElapsed, time.Minute)
+	return testenv.PostgresSchemaCleanupTimeout(fixtureElapsed)
 }
 
 func TestMigrationSchemaCleanupTimeout(t *testing.T) {
@@ -2172,21 +2187,7 @@ func TestMigrationSchemaCleanupTimeout(t *testing.T) {
 }
 
 func migrationTestDSNWithSearchPath(baseDSN, schema string) (string, error) {
-	if strings.HasPrefix(baseDSN, "postgres://") || strings.HasPrefix(baseDSN, "postgresql://") {
-		u, err := url.Parse(baseDSN)
-		if err != nil {
-			return "", fmt.Errorf("parse PostgreSQL test URL: %w", err)
-		}
-		query := u.Query()
-		query.Set("search_path", schema)
-		u.RawQuery = query.Encode()
-		return u.String(), nil
-	}
-	// A separate startup parameter preserves provider-required `options`
-	// (for example statement timeouts or routing flags). pgx applies the last
-	// keyword occurrence, so this controlled value also overrides any caller
-	// search_path without creating a second options parameter.
-	return baseDSN + " search_path='" + schema + "'", nil
+	return testenv.PostgresDSNWithSearchPath(baseDSN, schema)
 }
 
 func migrationTestUpTo(t *testing.T, dsn string, version int64) {
