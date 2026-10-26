@@ -56,6 +56,12 @@ func (c *Cell) validateRoot(create bool) error {
 		if _, err := os.Lstat(c.path(name)); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		if name == "pg" {
+			if err := c.validatePostgresDirectory(); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := privateDir(c.path(name), false); err != nil {
 			return err
 		}
@@ -374,6 +380,12 @@ func (c *Cell) step(operation, step string, fn func() error) error {
 	}
 	if err := fn(); err != nil {
 		_ = c.journal(operation, step, "failed")
+		var readiness *readinessError
+		if errors.As(err, &readiness) {
+			// Unwrap only our fixed-message failure. A wrapper around it may
+			// contain command output, paths, or other private values.
+			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, readiness)
+		}
 		return fmt.Errorf("local cell %s: %s failed", operation, step)
 	}
 	if c.cfg.Failpoint != nil && c.cfg.Failpoint(operation, step) != nil {

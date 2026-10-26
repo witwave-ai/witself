@@ -15,8 +15,8 @@ import (
 
 // Launch postgres itself: pg_ctl start creates a cmd.exe intermediary on
 // Windows. Its PID cannot provide the actual postmaster's pre-execution fence.
-// An elevated token unsupported by postgres is refused by the executable; this
-// adapter does not silently grant service rights or emulate pg_ctl's token strip.
+// Its direct launch uses the same restricted-user policy as PostgreSQL's own
+// Windows launcher without losing atomic job assignment or the actual PID fence.
 func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 	if err := c.verifyAll(); err != nil {
 		return err
@@ -78,7 +78,7 @@ func (c *Cell) windowsPostgresReady(record ProcessRecord, stale []byte) (bool, e
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 8192 {
 		return false, errors.New("invalid PostgreSQL process record")
 	}
-	data, err := readPrivateFile(path)
+	data, err := readPostgresFile(path)
 	if err != nil || len(data) > 8192 {
 		return false, errors.New("cannot read PostgreSQL process record")
 	}
@@ -106,7 +106,7 @@ func (c *Cell) windowsPostgresReady(record ProcessRecord, stale []byte) (bool, e
 }
 
 func (c *Cell) windowsStalePostmaster() ([]byte, error) {
-	data, err := readPrivateFile(c.path("pg", "postmaster.pid"))
+	data, err := readPostgresFile(c.path("pg", "postmaster.pid"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

@@ -141,6 +141,11 @@ func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error
 	// children keep the exact allowlist and do not receive these.
 	cmd.Env = appendEnvironment(cmd.Env, "LC_ALL=C", "LANG=C")
 	cmd.Stdout, cmd.Stderr = log, log
+	release, err := configurePostgresCommand(cmd)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if cmd.Run() != nil {
 		return errors.New("local cell PostgreSQL command failed")
 	}
@@ -162,6 +167,11 @@ func (c *Cell) reportedVersion(ctx context.Context, binary string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	release, err := configurePostgresVersionCommand(cmd, c.cfg.Binaries.PostgresDir)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	if cmd.Run() != nil || output.Len() > 1024 {
@@ -182,7 +192,7 @@ func (c *Cell) configurePostgres(m *Manifest) error {
 		return "'" + strings.ReplaceAll(strings.ReplaceAll(value, "\\", "\\\\"), "'", "''") + "'"
 	}
 	config := fmt.Sprintf("listen_addresses = '127.0.0.1'\nport = %d\nunix_socket_directories = %s\npassword_encryption = 'scram-sha-256'\nlogging_collector = off\nlog_destination = 'stderr'\n", m.Ports.Postgres, quote(socketDir))
-	return writeAtomicBytes(c.path("pg", "postgresql.conf"), []byte(config), nil)
+	return c.writePostgresConfig([]byte(config))
 }
 
 func (c *Cell) databaseCommand(ctx context.Context, _ *Manifest, tool string, args ...string) (string, error) {
@@ -202,6 +212,11 @@ func (c *Cell) databaseCommand(ctx context.Context, _ *Manifest, tool string, ar
 		return "", err
 	}
 	cmd.Env = appendEnvironment(cmd.Env, "PGPASSWORD="+password, "PGCONNECT_TIMEOUT=3", "LC_ALL=C", "LANG=C")
+	release, err := configurePostgresCommand(cmd)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	// Do not propagate database errors, SQL, or connection strings to callers.
@@ -259,6 +274,34 @@ func ready(ctx context.Context, client *http.Client, port int) bool {
 	return res.StatusCode == http.StatusOK
 }
 
+// readinessError retains the observation made before Start rolls back its
+// children and removes their records. Its text is deliberately restricted to
+// fixed messages; no component path, process identity, or underlying error is
+// included in the public error.
+type readinessError struct {
+	component         string
+	deadlineExceeded  bool
+	state             ProcessState
+	observationFailed bool
+}
+
+func (e *readinessError) Error() string {
+	switch e.component {
+	case "server":
+		if e.deadlineExceeded {
+			return "local cell server readiness deadline exceeded"
+		}
+		return "local cell server exited before readiness"
+	case "worker":
+		if e.deadlineExceeded {
+			return "local cell worker readiness deadline exceeded"
+		}
+		return "local cell worker exited before readiness"
+	default:
+		return "local cell readiness failed"
+	}
+}
+
 func (c *Cell) waitReady(ctx context.Context, component string, port int) error {
 	client := localHTTPClient()
 	defer client.CloseIdleConnections()
@@ -267,14 +310,14 @@ func (c *Cell) waitReady(ctx context.Context, component string, port int) error 
 	for {
 		state, err := c.processState(component)
 		if err != nil || !state.Alive || !state.Matches {
-			return fmt.Errorf("local cell %s exited before readiness", component)
+			return &readinessError{component: component, state: state, observationFailed: err != nil}
 		}
 		if ready(ctx, client, port) {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("local cell %s readiness deadline exceeded", component)
+			return &readinessError{component: component, deadlineExceeded: true, state: state}
 		case <-ticker.C:
 		}
 	}

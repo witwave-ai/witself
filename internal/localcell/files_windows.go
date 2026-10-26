@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
@@ -55,6 +56,10 @@ func validatePrivateTree(root string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return errors.New("cannot inspect private local cell layout")
+		}
+		pg := filepath.Join(root, "pg")
+		if path == pg || strings.HasPrefix(path, pg+string(filepath.Separator)) {
+			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, entry.IsDir())
 		}
 		return validatePrivate(path, entry.IsDir())
 	})

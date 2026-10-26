@@ -159,14 +159,14 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: node scripts/ci-product-gate.mjs
 
-  # Unit coverage only; native PostgreSQL lifecycle proof is a later slice.
+  # Unit coverage, pinned PostgreSQL 16 provisioning, native lifecycle proof, and cleanup.
   localcell-windows:
     needs: changes
     if: needs.changes.outputs.application == 'true'
     runs-on: windows-latest
     permissions:
       contents: read
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -198,6 +198,26 @@ jobs:
           } | node scripts/ci-go-test-json-check.mjs
           $parserExit = $LASTEXITCODE
           if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
+      - name: Provision pinned PostgreSQL sixteen
+        shell: pwsh
+        run: ./scripts/ci-postgres16-windows.ps1
+      - name: Prove native PostgreSQL sixteen lifecycle
+        shell: pwsh
+        env:
+          WITSELF_LOCALCELL_PGBIN: ${{ runner.temp }}\lc-pg16\pgsql\bin
+          TEMP: ${{ runner.temp }}\lc-pg16\testtmp
+          TMP: ${{ runner.temp }}\lc-pg16\testtmp
+        run: |
+          $proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\proof.json'
+          go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1
+          $goExit = $LASTEXITCODE
+          node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness
+          $parserExit = $LASTEXITCODE
+          if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
+      - name: Clean PostgreSQL proof tree
+        if: always()
+        shell: pwsh
+        run: ./scripts/ci-postgres16-windows.ps1 -Cleanup
 
   go-rest:
     needs: changes

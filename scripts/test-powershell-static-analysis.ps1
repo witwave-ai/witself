@@ -20,6 +20,7 @@ if ($AnalyzerChild) {
     $scripts = @(
         Join-Path $RepositoryRoot 'install.ps1'
         Join-Path $RepositoryRoot 'scripts\test-install-windows.ps1'
+        Join-Path $RepositoryRoot 'scripts\ci-postgres16-windows.ps1'
         Join-Path $RepositoryRoot 'scripts\test-powershell-static-analysis.ps1'
     )
     $findings = @(

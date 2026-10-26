@@ -121,6 +121,9 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		{"manifest", func() error { return writeAtomic(c.path("manifest.json"), m, nil) }},
 		{"password", c.makePassword},
 		{"initdb", func() error {
+			if err := c.preparePostgresDirectory(); err != nil {
+				return err
+			}
 			return c.pgCommand(ctx, "initdb", "-D", c.path("pg"), "-U", m.Role, "--auth=scram-sha-256", "--pwfile="+c.path("run", "postgres.password"), "--encoding=UTF8", "--locale=C")
 		}},
 		{"configure", func() error { return c.configurePostgres(m) }},
@@ -509,7 +512,7 @@ func (c *Cell) postmaster() (int, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 8192 {
 		return 0, errors.New("invalid PostgreSQL process record")
 	}
-	data, err := readPrivateFile(path)
+	data, err := readPostgresFile(path)
 	if err != nil {
 		return 0, errors.New("cannot read PostgreSQL process record")
 	}
@@ -573,7 +576,7 @@ func (c *Cell) recoverPostgresRecord() error {
 		}
 		return nil
 	}
-	data, err := readPrivateFile(c.path("pg", "postmaster.pid"))
+	data, err := readPostgresFile(c.path("pg", "postmaster.pid"))
 	if err != nil {
 		return errors.New("cannot read PostgreSQL recovery identity")
 	}

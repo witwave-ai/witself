@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -19,29 +18,26 @@ func TestHermeticLifecycle(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	t.Run("LifecycleOrderAndRemoval", func(t *testing.T) { testLifecycleOrderAndRemoval(t, binaries) })
-	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries) })
-	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries) })
-	t.Run("ReadinessFailureRollsBack", func(t *testing.T) { testWaitsForReadiness(t, binaries) })
+	t.Run("TwoCellsAreIndependent", func(t *testing.T) { testTwoCellsAreIndependent(t, binaries, nil) })
+	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries, nil) })
+	t.Run("ReadinessFailureRollsBack", func(t *testing.T) { testWaitsForReadiness(t, binaries, nil) })
 }
 
 func buildLifecycleFixture(t *testing.T) localcell.Binaries {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("LC-S2-PW3: synthetic peers use Unix termination and filesystem fixtures")
-	}
 	buildDir := t.TempDir()
-	fixture := filepath.Join(buildDir, "fixture")
+	fixture := filepath.Join(buildDir, lifecycleExecutableName("fixture"))
 	cmd := offlineBuildCommand(t.Context(), "build", "-o", fixture, "./testdata/lifecyclefixture")
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Run(); err != nil {
 		t.Fatal("cannot build synthetic lifecycle fixture")
 	}
 	for _, name := range []string{"postgres", "initdb", "pg_ctl", "createdb", "psql", "witself-server", "witself-worker"} {
-		if err := os.Link(fixture, filepath.Join(buildDir, name)); err != nil {
+		if err := os.Link(fixture, filepath.Join(buildDir, lifecycleExecutableName(name))); err != nil {
 			t.Fatal("cannot prepare synthetic lifecycle tool")
 		}
 	}
-	return localcell.Binaries{PostgresDir: buildDir, Server: filepath.Join(buildDir, "witself-server"), Worker: filepath.Join(buildDir, "witself-worker")}
+	return localcell.Binaries{PostgresDir: buildDir, Server: filepath.Join(buildDir, lifecycleExecutableName("witself-server")), Worker: filepath.Join(buildDir, lifecycleExecutableName("witself-worker"))}
 }
 
 func testLifecycleOrderAndRemoval(t *testing.T, binaries localcell.Binaries) {
@@ -58,7 +54,7 @@ func testLifecycleOrderAndRemoval(t *testing.T, binaries localcell.Binaries) {
 	if err != nil || string(created) != inspection.Manifest.Database {
 		t.Fatal("synthetic install did not create the manifest's witself database")
 	}
-	if err := os.WriteFile(filepath.Join(root, "fixture-events"), nil, 0o600); err != nil {
+	if err := lifecycleWriteFile(filepath.Join(root, "fixture-events"), nil); err != nil {
 		t.Fatal("cannot reset synthetic operation log")
 	}
 	if err := cell.Start(t.Context()); err != nil {
