@@ -985,10 +985,10 @@ before starting.
 
 | ID | Owner | State | PR or decision | Evidence | Unresolved gate | Next action |
 |---|---|---|---|---|---|---|
-| M0 | vacant | in progress | text split into M0a–M0c in this review | static review only | founder rows of the decision table | fixtures with LC-S1 |
-| M1 | vacant | proposed | none | none | LC-S1 authorization | LC-S1 |
+| M0 | planning lead | in progress | M0a/M0b text; M0c contract record merged as a reviewed draft (#837) | static review; sync-contract.md with 53 DECIDED rules and 19 owned OPEN items | founder items O-14 (M8), O-15 (M7), O-17 (M5); planning-lead items O-2/O-5/O-7/O-9/O-11/O-12 block M4 | settle the M4-blocking OPEN items, then spec LC-S5 |
+| M1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S1 #822, LC-S2 #824, LC-S3 #825, LC-S4 #826, LC-S2-R1 #839 | unit, real PostgreSQL, hermetic lifecycle, native proofs on four platform rows, executable reviews | service adapters, downloads and installer manifest trust remain deferred | service adapters slice after the sync track starts |
 | M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
-| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | Record native lifecycle CI receipts for Windows, Linux x86_64, macOS arm64 and macOS x86_64; Linux arm64 proof and the Windows 11 receipt remain owed |
+| M3 | vacant | proposed | native lifecycle CI receipts recorded: Windows (#834), Linux x86_64, macOS arm64, macOS x86_64 (#838) | required `localcell-windows` and `localcell-unix` checks | packaging and installer decisions; Linux arm64 proof; Windows 11 receipt (founder VM) | Linux arm64 proof row; installer/manifest trust slice |
 | M4 | vacant | proposed | none | none | capture, authority-continuity and accounting contracts | harness specification after M0 sync subset |
 | M5 | vacant | proposed | staged assertions (steps 1–4) | none | M4 barrier proof; destination admission policy | blocked on M4 |
 | M6 | vacant | proposed | none | none | deletion and conflict rules | blocked on M5 |
@@ -998,10 +998,11 @@ before starting.
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
-| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW3 Windows fixtures and PL1 Unix PostgreSQL 16 CI proofs | native CI receipts pending | LC-S2; M0a | Record Windows, Linux x86_64 and both macOS architecture receipts; Linux arm64 and Windows 11 remain owed |
+| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW0 #829, PW1 #830, PW2 #831, PW3 #834, PL1 #838 merged | native real-PostgreSQL 16 lifecycle proofs in CI: Windows x86_64 (5m17s), Linux x86_64 (3m49s), macOS arm64 (4m8s), macOS x86_64 (8m39s) | Linux arm64 row; Windows 11 acceptance receipt (PW4, founder VM); per-platform resource budgets (D8) | Linux arm64 proof row |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
-| LC-S5 | vacant | proposed | sync harness | none | [M0c open items](sync-contract.md#open-items-by-milestone) | settle contracts |
+| LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
+| LC-S5 | vacant | proposed | sync harness | none | [M0c open items](sync-contract.md#open-items-by-milestone) | settle the M4-blocking items, then spec |
 
 ## Founder decisions (answered)
 
