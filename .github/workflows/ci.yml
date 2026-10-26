@@ -69,7 +69,7 @@ jobs:
   go:
     name: go
     if: ${{ always() }}
-    needs: [changes, website, docs, go-rest, go-store, go-infra, localcell-windows, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
+    needs: [changes, website, docs, go-rest, go-store, go-infra, localcell-windows, localcell-unix, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -218,6 +218,72 @@ jobs:
         if: always()
         shell: pwsh
         run: ./scripts/ci-postgres16-windows.ps1 -Cleanup
+
+  # The same required lifecycle protocol runs natively on each supported Unix row.
+  localcell-unix:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build Local Cell packages
+        shell: bash
+        run: go build ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+      - name: Vet Local Cell packages
+        shell: bash
+        run: go vet ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+      - name: Test Go JSON result checker
+        shell: bash
+        run: node --test scripts/ci-go-test-json-check.test.mjs
+      - name: Test Local Cell packages and require complete results
+        shell: bash
+        run: |
+          set +e
+          go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=10m | node scripts/ci-go-test-json-check.mjs
+          test_exits=("${PIPESTATUS[@]}")
+          set -e
+          if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi
+      - name: Provision pinned PostgreSQL sixteen
+        shell: bash
+        run: bash scripts/ci-postgres16-unix.sh '${{ matrix.platform }}'
+      - name: Prove native PostgreSQL sixteen lifecycle
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}/lc-pg16/testtmp
+        run: |
+          proof_json="$RUNNER_TEMP/lc-pg16/proof.json"
+          go_exit=0
+          go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > "$proof_json" 2>&1 || go_exit=$?
+          parser_exit=0
+          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness || parser_exit=$?
+          if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
+      - name: Clean PostgreSQL proof tree
+        if: always()
+        shell: bash
+        run: bash scripts/ci-postgres16-unix.sh --cleanup
 
   go-rest:
     needs: changes

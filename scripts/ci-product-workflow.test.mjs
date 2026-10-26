@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {readFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {dirname, join} from 'node:path';
 import test from 'node:test';
 import {assertGate} from './ci-product-gate.mjs';
 import {classifyChanges} from './ci-product-scope.mjs';
@@ -21,7 +23,7 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
 
 const wrapperDependencies = {
-  go: ['go-rest', 'go-store', 'go-infra', 'localcell-windows', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
+  go: ['go-rest', 'go-store', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
   'release-config': ['release-config-full'],
   'homebrew-formula': ['homebrew-formula-full'],
   helm: ['helm-full'],
@@ -166,6 +168,335 @@ function assertLocalcellWindowsJob(ci) {
     if (step !== cleanup) assert.equal(step.if, undefined, `${label}: required steps cannot skip`);
     if (step !== proof) assert.equal(step.env, undefined, `${label}: only native proof receives PostgreSQL`);
   }
+}
+
+const unixPlatforms = [
+  {platform: 'linux-x64', runner: 'ubuntu-24.04'},
+  {platform: 'macos-arm64', runner: 'macos-15'},
+  {platform: 'macos-intel', runner: 'macos-15-intel'},
+];
+const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness';
+
+function assertLocalcellUnixJob(ci) {
+  const label = 'localcell-unix';
+  const job = ci.jobs[label];
+  assert(job, 'Missing native Unix Local Cell job');
+  assert.equal(ci.env, undefined, `${label}: no inherited workflow environment`);
+  needs(job, ['changes'], label);
+  assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
+  assert.equal(job['runs-on'], '${{ matrix.runner }}');
+  assert.deepEqual(job.strategy, {'fail-fast': false, matrix: {include: unixPlatforms}});
+  assert.deepEqual(job.permissions, {contents: 'read'});
+  assert.equal(job['timeout-minutes'], 45);
+  for (const key of ['continue-on-error', 'environment', 'env', 'services', 'secrets', 'defaults']) {
+    assert.equal(job[key], undefined, `${label}: no ${key}`);
+  }
+  assert(!JSON.stringify(job).includes('secrets.'), `${label}: no secret access`);
+  const windows = ci.jobs['localcell-windows'];
+  assert.deepEqual(job.steps.slice(0, 3), windows.steps.slice(0, 3), `${label}: same pinned checkout and toolchain`);
+  const checks = job.steps.slice(3);
+  const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
+  assert.deepEqual(checks.map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered proof stages`);
+  assert.deepEqual(checks.map(step => step.run.trim()), [
+    `go build ${packages}`,
+    `go vet ${packages}`,
+    'node --test scripts/ci-go-test-json-check.test.mjs',
+    [
+      'set +e',
+      'go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=10m | node scripts/ci-go-test-json-check.mjs',
+      'test_exits=("${PIPESTATUS[@]}")',
+      'set -e',
+      'if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi',
+    ].join('\n'),
+    "bash scripts/ci-postgres16-unix.sh '${{ matrix.platform }}'",
+    [
+      'proof_json="$RUNNER_TEMP/lc-pg16/proof.json"',
+      'go_exit=0',
+      'go test -json ./internal/localcell -run \'^TestRealLifecycle$\' -count=1 -timeout=15m > "$proof_json" 2>&1 || go_exit=$?',
+      'parser_exit=0',
+      `node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require ${lifecycleRequired} || parser_exit=$?`,
+      'if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi',
+    ].join('\n'),
+    'bash scripts/ci-postgres16-unix.sh --cleanup',
+  ], `${label}: narrow proof preserves native and checker failures`);
+  for (const step of checks) assert.equal(step.shell, 'bash');
+  const proof = checks[5];
+  const cleanup = checks[6];
+  assert.deepEqual(proof.env, {TMPDIR: '${{ runner.temp }}/lc-pg16/testtmp'});
+  assert.equal(expression(cleanup.if), 'always()', `${label}: cleanup also runs after failure`);
+  for (const step of job.steps) {
+    for (const key of ['continue-on-error', 'working-directory']) {
+      assert.equal(step[key], undefined, `${label}: step cannot override ${key}`);
+    }
+    if (step !== cleanup) assert.equal(step.if, undefined, `${label}: required steps use default success gating`);
+    if (step !== proof) assert.equal(step.env, undefined, `${label}: only proof uses the private temporary tree`);
+  }
+}
+
+function assertUnixPostgresPins(pins) {
+  assert.deepEqual(Object.keys(pins).sort(), unixPlatforms.map(row => row.platform).sort(), 'One PostgreSQL pin per Unix matrix row');
+  for (const {platform} of unixPlatforms) {
+    const pin = pins[platform];
+    assert.deepEqual(Object.keys(pin).sort(), ['major', 'sha256', 'url', 'version']);
+    assert.equal(pin.major, 16, `${platform}: PostgreSQL sixteen required`);
+    // Keep pin values out of diagnostics, including malformed checksum values.
+    assert(typeof pin.sha256 === 'string' && /^[a-f0-9]{64}$/.test(pin.sha256), `${platform}: complete lowercase SHA-256 required`);
+    assert(pin.version === '16.10', `${platform}: exact PostgreSQL sixteen source version`);
+    const url = new URL(pin.url);
+    assert(url.protocol === 'https:' && url.hostname === 'apt-archive.postgresql.org', `${platform}: allowlisted HTTPS archive host`);
+    assert(url.pathname === `/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_${pin.version}.orig.tar.bz2`, `${platform}: exact PostgreSQL source archive`);
+    assert(!url.username && !url.password && !url.port && !url.search && !url.hash, `${platform}: plain pinned archive URL`);
+  }
+  assert(new Set(Object.values(pins).map(pin => pin.sha256)).size === 1, 'Every row builds the same verified source bytes');
+}
+
+const unixPostgresPins = JSON.parse(readFileSync(new URL('./ci-postgres16-unix.json', import.meta.url), 'utf8'));
+
+// The Unix provisioner must keep bash strict mode including pipefail as its first executable statement; a comment or
+// string containing the words must not satisfy the check (review LC-S2-PL1R, finding E1).
+const unixProvisionerSource = readFileSync(new URL('./ci-postgres16-unix.sh', import.meta.url), 'utf8');
+function firstExecutableStatement(source) {
+  const lines = source.split('\n').map((line) => line.trim());
+  return lines.find((line, index) => index > 0 && line !== '' && !line.startsWith('#')) ?? '';
+}
+test('unix provisioner keeps strict mode with pipefail as its first executable statement', () => {
+  assert.equal(firstExecutableStatement(unixProvisionerSource), 'set -euo pipefail');
+  assert.ok(unixProvisionerSource.startsWith('#!/usr/bin/env bash\n'), 'bash shebang');
+  const weakened = unixProvisionerSource.replace('set -euo pipefail', 'set -eu');
+  assert.notEqual(firstExecutableStatement(weakened), 'set -euo pipefail', 'dropping pipefail is detected');
+  const decoy = unixProvisionerSource.replace('set -euo pipefail', '# set -euo pipefail\nset -eu');
+  assert.notEqual(firstExecutableStatement(decoy), 'set -euo pipefail', 'a commented decoy is not strict mode');
+});
+test('Unix PostgreSQL pins cover every native row with exact versions and verified digests', () => {
+  assertUnixPostgresPins(unixPostgresPins);
+});
+
+test('Unix PostgreSQL provisioner is enrolled in the repository shell static analysis', () => {
+  const source = readFileSync(new URL('./test-ci-static-analysis.sh', import.meta.url), 'utf8');
+  assert(source.includes("mapfile -d '' shell_files < <(find scripts -type f -name '*.sh' -print0)"), 'Static analysis discovers every shell script');
+  assert(source.includes('"$work_dir/shellcheck-v${shellcheck_version}/shellcheck" install.sh "${shell_files[@]}"'), 'Static analysis checks every discovered shell script');
+});
+
+for (const [name, mutate] of [
+  ['missing platform', pins => { delete pins['linux-x64']; }],
+  ['extra platform', pins => { pins['linux-arm64'] = {...pins['linux-x64']}; }],
+  ['missing digest', pins => { delete pins['linux-x64'].sha256; }],
+  ['malformed digest', pins => { pins['linux-x64'].sha256 = 'unverified'; }],
+  ['wrong major', pins => { pins['linux-x64'].major = 17; }],
+  ['unversioned artifact', pins => { pins['linux-x64'].version = 'latest'; }],
+  ['HTTP archive', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('https:', 'http:'); }],
+  ['untrusted host', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('apt-archive.postgresql.org', 'example.invalid'); }],
+  ['wrong source version', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('16.10', '16.9'); }],
+  ['different source bytes per platform', pins => { pins['linux-x64'].sha256 = createHash('sha256').update('different source').digest('hex'); }],
+  ['embedded URL credentials', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('https://', 'https://user:password@'); }],
+]) {
+  test(`rejects Unix PostgreSQL pin mutation: ${name}`, () => {
+    const pins = structuredClone(unixPostgresPins);
+    mutate(pins);
+    assert.throws(() => assertUnixPostgresPins(pins));
+  });
+}
+
+// Run the actual provisioner with generated command shims. The shims never
+// download or execute PostgreSQL; the script's validation, sequencing, export,
+// and cleanup stay unchanged. Trace records contain fixed operation names only.
+const unixProvisionMockDriver = String.raw`
+const {appendFileSync, mkdirSync, readFileSync, writeFileSync} = require('node:fs');
+const {createHash} = require('node:crypto');
+const {basename, join} = require('node:path');
+const config = JSON.parse(readFileSync(process.env.LC_PROOF_MOCK_CONFIG, 'utf8'));
+const command = basename(process.argv[2]);
+const args = process.argv.slice(3);
+const trace = value => appendFileSync(config.trace, value + '\n');
+const executable = (path, name) => writeFileSync(path,
+  '#!/bin/bash\nexec "$LC_PROOF_MOCK_NODE" "$LC_PROOF_MOCK_DRIVER" ' + name + ' "$@"\n', {mode: 0o755});
+if (command === 'uname') {
+  process.stdout.write(args[0] === '-s' ? config.os + '\n' : config.arch + '\n');
+} else if (command === 'curl') {
+  trace('download');
+  writeFileSync(args[args.indexOf('--output') + 1], 'synthetic PostgreSQL source bytes');
+} else if (command === 'shasum') {
+  trace('hash');
+  const digest = config.mode === 'checksum-mismatch' ? '0'.repeat(64)
+    : createHash('sha256').update(readFileSync(args.at(-1))).digest('hex');
+  process.stdout.write(digest + '  archive\n');
+} else if (command === 'tar') {
+  trace('extract');
+  const source = join(args[args.indexOf('-C') + 1], 'postgresql-' + config.version);
+  mkdirSync(source);
+  executable(join(source, 'configure'), 'configure');
+} else if (command === 'configure') {
+  trace('configure');
+  if (!args.includes('--prefix=' + config.runtime)) process.exit(42);
+  if (config.mode === 'configure-failure') process.exit(1);
+} else if (command === 'make') {
+  const install = args[0] === 'install';
+  trace(install ? 'install' : 'build');
+  if (config.mode === 'build-failure' && !install) process.exit(1);
+  if (config.mode === 'install-failure' && install) process.exit(1);
+  if (install) {
+    for (const directory of ['bin', 'lib', 'share']) mkdirSync(join(config.runtime, directory), {recursive: true});
+    for (const name of ['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb']) {
+      if (config.mode === 'missing-binary' && name === 'psql') continue;
+      executable(join(config.runtime, 'bin', name), name);
+    }
+  }
+} else if (['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb'].includes(command)) {
+  if (args.length !== 1 || args[0] !== '--version') process.exit(42);
+  trace('version:' + command);
+  if (config.mode === 'nonzero-version' && command === 'initdb') process.exit(1);
+  const version = config.mode === 'wrong-version' && command === 'initdb' ? '17.1' : config.version;
+  process.stdout.write(command + ' (PostgreSQL) ' + version + '\n');
+} else {
+  process.exit(42);
+}
+`;
+
+function withUnixProvisionFixture(options, check) {
+  const temporary = mkdtempSync(join(root, '.lc-unix-provision-test-'));
+  try {
+    const scriptDirectory = join(temporary, 'scripts');
+    const mockDirectory = join(temporary, 'commands');
+    const runner = join(temporary, 'runner');
+    for (const directory of [scriptDirectory, mockDirectory, runner]) mkdirSync(directory);
+    const script = join(scriptDirectory, 'ci-postgres16-unix.sh');
+    writeFileSync(script, readFileSync(new URL('./ci-postgres16-unix.sh', import.meta.url)));
+    const pins = structuredClone(unixPostgresPins);
+    const digest = createHash('sha256').update('synthetic PostgreSQL source bytes').digest('hex');
+    for (const pin of Object.values(pins)) pin.sha256 = digest;
+    options.mutatePin?.(pins);
+    writeFileSync(join(scriptDirectory, 'ci-postgres16-unix.json'), JSON.stringify(pins));
+    const trace = join(temporary, 'operations');
+    const githubEnvironment = join(temporary, 'github-env');
+    writeFileSync(trace, '');
+    writeFileSync(githubEnvironment, '');
+    const driver = join(temporary, 'driver.cjs');
+    writeFileSync(driver, unixProvisionMockDriver);
+    for (const name of ['uname', 'curl', 'shasum', 'tar', 'make']) {
+      writeFileSync(join(mockDirectory, name),
+        '#!/bin/bash\nexec "$LC_PROOF_MOCK_NODE" "$LC_PROOF_MOCK_DRIVER" "$0" "$@"\n', {mode: 0o755});
+    }
+    const runtime = join(runner, 'lc-pg16', 'pgsql');
+    const config = join(temporary, 'config.json');
+    writeFileSync(config, JSON.stringify({
+      mode: options.mode ?? 'success', trace, runtime, version: '16.10',
+      os: options.os ?? 'Linux', arch: options.arch ?? 'x86_64',
+    }));
+    // Pass only fixture values and executable search paths; no user environment
+    // is exposed to the mocked provisioner or its generated version shims.
+    const environment = {
+      PATH: [mockDirectory, dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':'),
+      RUNNER_TEMP: runner, GITHUB_ENV: githubEnvironment,
+      LC_PROOF_MOCK_CONFIG: config, LC_PROOF_MOCK_NODE: process.execPath, LC_PROOF_MOCK_DRIVER: driver,
+      PYTHONOPTIMIZE: '1',
+    };
+    const invoke = argument => spawnSync('/bin/bash', [script, argument], {
+      env: environment, encoding: 'utf8', timeout: 20_000,
+    });
+    check({
+      run: () => invoke(options.platform ?? 'linux-x64'), cleanup: () => invoke('--cleanup'),
+      runtime, proofRoot: join(runner, 'lc-pg16'),
+      operations: () => readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean),
+      exported: () => readFileSync(githubEnvironment, 'utf8'),
+    });
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
+}
+
+test('Unix provisioner checksum mismatch terminates before extraction or build without export', () => {
+  withUnixProvisionFixture({mode: 'checksum-mismatch'}, fixture => {
+    const result = fixture.run();
+    assert(result.error === undefined && result.status === 1, 'Checksum mismatch must fail the actual script');
+    assert.deepEqual(fixture.operations(), ['download', 'hash']);
+    assert(fixture.exported() === '', 'A mismatched archive cannot publish PostgreSQL');
+    assert(result.stderr.trim() === 'PostgreSQL proof: archive checksum mismatch', 'Checksum failure stays value-free');
+    assert(result.stdout === '', 'Checksum failure cannot print archive values');
+  });
+});
+
+test('Unix provisioner verifies all five executables before export and cleanup is repeatable', () => {
+  withUnixProvisionFixture({}, fixture => {
+    const result = fixture.run();
+    assert(result.error === undefined && result.status === 0, 'Complete mocked provisioning must pass');
+    assert.deepEqual(fixture.operations(), [
+      'download', 'hash', 'extract', 'configure', 'build', 'install',
+      'version:postgres', 'version:initdb', 'version:pg_ctl', 'version:psql', 'version:createdb',
+    ]);
+    assert(fixture.exported() === `WITSELF_LOCALCELL_PGBIN=${fixture.runtime}/bin\n`, 'Only the completely verified runtime is published');
+    assert(existsSync(join(fixture.proofRoot, 'testtmp')), 'Proof temporary files belong to the cleanup tree');
+    assert(result.stdout === 'Pinned PostgreSQL sixteen runtime verified\n' && result.stderr === '', 'Successful provisioning has bounded value-free output');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cleanup = fixture.cleanup();
+      assert(cleanup.error === undefined && cleanup.status === 0, 'Cleanup must be repeatable');
+      assert(!existsSync(fixture.proofRoot), 'Cleanup removes the complete proof tree');
+    }
+  });
+});
+
+for (const [mode, message] of [
+  ['wrong-version', 'runtime executable did not report major sixteen'],
+  ['missing-binary', 'runtime executable is missing'],
+  ['nonzero-version', 'runtime executable failed'],
+  ['configure-failure', 'configure failed (runner build.log)'],
+  ['build-failure', 'build failed (runner build.log)'],
+  ['install-failure', 'staging failed (runner build.log)'],
+]) {
+  test(`Unix provisioner rejects ${mode} without exporting a runtime`, () => {
+    withUnixProvisionFixture({mode}, fixture => {
+      const result = fixture.run();
+      assert(result.error === undefined && result.status === 1, 'Invalid runtime must fail provisioning');
+      assert(fixture.exported() === '', 'Incomplete runtime cannot be published');
+      assert(result.stderr.trim() === `PostgreSQL proof: ${message}`, 'Failure uses the expected bounded diagnostic');
+      assert(result.stdout === '', 'Failed provisioning cannot print build values');
+    });
+  });
+}
+
+for (const [name, options, message] of [
+  ['invalid pin', {mutatePin: pins => { pins['linux-x64'].major = 17; }}, 'invalid pin'],
+  ['untrusted pin URL', {mutatePin: pins => { pins['linux-x64'].url = 'https://example.invalid/archive'; }}, 'invalid pin'],
+  ['invalid digest', {mutatePin: pins => { pins['linux-x64'].sha256 = 'unverified'; }}, 'invalid pin'],
+  ['native platform mismatch', {os: 'Darwin', arch: 'arm64'}, 'platform does not match the native runner'],
+]) {
+  test(`Unix provisioner rejects ${name} before download`, () => {
+    withUnixProvisionFixture(options, fixture => {
+      const result = fixture.run();
+      assert(result.error === undefined && result.status !== 0, 'Invalid platform or pin must fail provisioning');
+      assert.deepEqual(fixture.operations(), []);
+      assert(fixture.exported() === '', 'Rejected inputs cannot publish PostgreSQL');
+      assert(result.stderr.trim() === `PostgreSQL proof: ${message}`, 'Input rejection stays value-free');
+      assert(result.stdout === '', 'Rejected inputs cannot print pin values');
+    });
+  });
+}
+
+for (const stage of ['Test Local Cell packages and require complete results', 'Prove native PostgreSQL sixteen lifecycle']) {
+  test(`Unix bash exit propagation: ${stage}`, () => {
+    const script = workflows['ci.yml'].jobs['localcell-unix'].steps.find(step => step.name === stage).run;
+    const temporary = mkdtempSync(join(root, '.lc-unix-workflow-test-'));
+    try {
+      mkdirSync(join(temporary, 'lc-pg16'));
+      for (const [goExit, checkerExit] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        // Execute the actual workflow shell under Actions' bash flags. Functions
+        // replace commands only: no Go tests, PostgreSQL, or downloads run here.
+        const mock = [
+          'RUNNER_TEMP=$1',
+          `go() { printf 'contract:captured-go-output\\n'; return ${goExit}; }`,
+          `node() { if [[ "$*" != *'--input'* ]]; then cat >/dev/null; fi; printf 'contract:checker\\n'; return ${checkerExit}; }`,
+          script,
+        ].join('\n');
+        const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', mock, 'unix-workflow-contract', temporary], {
+          encoding: 'utf8', timeout: 10_000,
+        });
+        assert(result.error === undefined, `${stage}: mock must execute`);
+        assert.equal(result.status, goExit || checkerExit ? 1 : 0, `${stage}: native=${goExit} checker=${checkerExit}`);
+        assert(result.stdout === 'contract:checker\n', `${stage}: checker always runs and Go output stays captured`);
+      }
+    } finally {
+      rmSync(temporary, {recursive: true, force: true});
+    }
+  });
 }
 
 // This is a deliberately narrow structural contract, not a PowerShell evaluator.
@@ -458,6 +789,7 @@ function assertWorkflowContracts(sources) {
   assertWebsiteCall(ci.jobs.website, 'ci website');
   assertDocsJob(ci.jobs.docs);
   assertLocalcellWindowsJob(ci);
+  assertLocalcellUnixJob(ci);
 
   for (const [id, dependencies] of Object.entries(wrapperDependencies)) {
     const job = ci.jobs[id];
@@ -604,6 +936,35 @@ test('native Windows failures block go while brochure-only and docs-only changes
   }
 });
 
+test('native Unix failures block go while brochure-only and docs-only changes skip Unix', () => {
+  const job = workflows['ci.yml'].jobs['localcell-unix'];
+  for (const [path, application] of [
+    ['web/product/content.mjs', false],
+    ['docs/research/local-cell/implementation-plan.md', false],
+    ['.github/workflows/ci.yml', true],
+    ['scripts/ci-postgres16-unix.sh', true],
+    ['scripts/ci-postgres16-unix.json', true],
+  ]) {
+    const scope = classifyChanges([{
+      path, status: 'M', oldMode: '100644', newMode: '100644',
+      oldOID: 'a'.repeat(40), newOID: 'b'.repeat(40),
+    }]);
+    assert.equal(scope.application, application, path);
+    assert.equal(evaluateExpression(job.if, {'needs.changes.outputs.application': String(scope.application)}), application, path);
+    const outputs = Object.fromEntries(Object.entries(scope).filter(([key]) => key !== 'reason').map(([key, value]) => [key, String(value)]));
+    const results = {
+      changes: {result: 'success', outputs},
+      docs: {result: scope.docs ? 'success' : 'skipped'},
+      website: {result: scope.website ? 'success' : 'skipped'},
+      ...Object.fromEntries(wrapperDependencies.go.map(id => [id, {result: application ? 'success' : 'skipped'}])),
+    };
+    assert.doesNotThrow(() => assertGate(results), path);
+    for (const result of application ? ['failure', 'cancelled', 'skipped', undefined] : ['success', 'failure']) {
+      assert.throws(() => assertGate({...results, 'localcell-unix': {result}}), `${path}: Unix ${result}`);
+    }
+  }
+});
+
 test('classified docs, mixed, and checker changes preserve every required wrapper and publication fence', () => {
   const research = 'docs/research/local-cell/notes.md';
   const cases = [
@@ -670,6 +1031,49 @@ test('exact launch shell guard rejects disabled, case-changed, and non-main sett
 });
 
 const mutations = [
+  ['missing Unix lifecycle job', data => { delete data['ci.yml'].jobs['localcell-unix']; }],
+  ['missing Unix dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-unix'); }],
+  ['Unix matrix row removed', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.pop(); }],
+  ['Unix architecture runs on the wrong runner', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include[1].runner = 'macos-15-intel'; }],
+  ['Unix matrix cancels remaining native rows', data => { data['ci.yml'].jobs['localcell-unix'].strategy['fail-fast'] = true; }],
+  ['Unix job always runs', data => { data['ci.yml'].jobs['localcell-unix'].if = 'always()'; }],
+  ...[
+    ['runs-on', 'ubuntu-24.04'], ['needs', []], ['permissions', {contents: 'write'}],
+    ['timeout-minutes', 26], ['continue-on-error', true], ['env', {WITSELF_LOCALCELL_PGBIN: 'synthetic'}],
+  ].map(([key, value]) => [`Unix ${key} boundary changed`, data => { data['ci.yml'].jobs['localcell-unix'][key] = value; }]),
+  ...[
+    'Build Local Cell packages', 'Vet Local Cell packages', 'Test Go JSON result checker',
+    'Test Local Cell packages and require complete results', 'Provision pinned PostgreSQL sixteen',
+    'Prove native PostgreSQL sixteen lifecycle', 'Clean PostgreSQL proof tree',
+  ].map(name => [`Unix stage removed: ${name}`, data => {
+    const job = data['ci.yml'].jobs['localcell-unix'];
+    job.steps = job.steps.filter(step => step.name !== name);
+  }]),
+  ['Unix proof runs before provisioning', data => {
+    const steps = data['ci.yml'].jobs['localcell-unix'].steps;
+    [steps[7], steps[8]] = [steps[8], steps[7]];
+  }],
+  ['Unix proof runs after failed provisioning', data => { data['ci.yml'].jobs['localcell-unix'].steps[8].if = 'always()'; }],
+  ['Unix provisioning ignores failure', data => { data['ci.yml'].jobs['localcell-unix'].steps[7]['continue-on-error'] = true; }],
+  ['Unix cleanup only runs after success', data => { delete data['ci.yml'].jobs['localcell-unix'].steps.at(-1).if; }],
+  ['Unix unit loses native pipe exit', data => { data['ci.yml'].jobs['localcell-unix'].steps[6].run = data['ci.yml'].jobs['localcell-unix'].steps[6].run.replace('test_exits[0] != 0 || ', ''); }],
+  ['Unix unit loses checker pipe exit', data => { data['ci.yml'].jobs['localcell-unix'].steps[6].run = data['ci.yml'].jobs['localcell-unix'].steps[6].run.replace(' || test_exits[1] != 0', ''); }],
+  ...[
+    ["'^TestRealLifecycle$'", "'TestRealLifecycle'", 'broadens the run filter'],
+    [',TestRealLifecycle/WaitsForReadiness', '', 'omits a required child'],
+    [' --diagnose', '', 'omits diagnostics'],
+    [' --input "$proof_json"', '', 'does not read captured JSON'],
+    [' > "$proof_json" 2>&1', '', 'prints raw Go output'],
+    ['lc-pg16/proof.json', 'proof.json', 'leaves JSON outside cleanup tree'],
+    [' || go_exit=$?', '', 'stops before checking Go failure'],
+    [' || parser_exit=$?', '', 'loses checker exit capture'],
+    ['go_exit != 0 || ', '', 'masks native exit'],
+    [' || parser_exit != 0', '', 'masks checker exit'],
+  ].map(([before, after, name]) => [`Unix proof ${name}`, data => {
+    const step = data['ci.yml'].jobs['localcell-unix'].steps[8];
+    step.run = step.run.replace(before, after);
+  }]),
+  ['Unix proof temporary files escape cleanup tree', data => { data['ci.yml'].jobs['localcell-unix'].steps[8].env.TMPDIR = '${{ runner.temp }}'; }],
   ['Windows proof step removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.name !== 'Prove native PostgreSQL sixteen lifecycle'); }],
   ['Windows proof broadens the run filter', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace("'^TestRealLifecycle$'", "'TestRealLifecycle'"); }],
   ['Windows proof makes a skip acceptable', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(/ --require [^\n]+/, ''); }],
