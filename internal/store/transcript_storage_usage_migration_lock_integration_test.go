@@ -289,16 +289,21 @@ func transcriptStorageMigrationLockStatements(t *testing.T) (string, string) {
 	text := string(raw)
 	lower := strings.ToLower(text)
 	settingsStart := strings.Index(lower, "select set_config(")
-	blockStart := strings.Index(lower, "do $$")
-	if settingsStart < 0 || blockStart < 0 {
+	lockStatement := strings.Index(lower, "lock table transcript_entries in share row exclusive mode;")
+	if settingsStart < 0 || lockStatement < 0 {
 		t.Fatal("migration settings or lock block missing")
 	}
-	settingsEnd := strings.Index(lower[settingsStart:], ";")
+	// The capability attempt now has its own DO block before the lock block.
+	// Keep both settings statements and identify the actual lock block by its lock.
+	blockStart := strings.LastIndex(lower[:lockStatement], "do $$")
+	if blockStart < settingsStart {
+		t.Fatal("migration lock block missing or before settings")
+	}
 	blockEnd := strings.Index(lower[blockStart:], "-- +goose statementend")
-	if settingsEnd < 0 || blockEnd < 0 {
+	if blockEnd < 0 {
 		t.Fatal("migration settings or lock block terminator missing")
 	}
-	return text[settingsStart : settingsStart+settingsEnd+1], text[blockStart : blockStart+blockEnd]
+	return text[settingsStart:blockStart], text[blockStart : blockStart+blockEnd]
 }
 
 func (f *transcriptStorageLockFixture) lateTimeout(t *testing.T) time.Duration {

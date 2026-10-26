@@ -192,7 +192,7 @@ func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
 	up := transcriptStorageMigrationContractText(upRaw)
 	down := transcriptStorageMigrationContractText(downRaw)
 	first := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(up), "-- +goose up"))
-	settings, _, ok := strings.Cut(first, ";")
+	settings, afterSettings, ok := strings.Cut(first, ";")
 	if !ok || !strings.HasPrefix(settings, "select set_config(") {
 		t.Fatal("first Up statement must be the settings SELECT")
 	}
@@ -206,11 +206,11 @@ func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
 		}
 	}
 	const connectionCheckSetting = "set_config('client_connection_check_interval', '1s', true)"
-	guardedConnectionCheck := regexp.MustCompile(`(?s)case when \(select max_val::bigint from pg_settings where name = 'client_connection_check_interval'\) > 0\s+then ` + regexp.QuoteMeta(connectionCheckSetting) + `\s+end\s*$`)
-	if strings.Count(up, connectionCheckSetting) != 1 || !guardedConnectionCheck.MatchString(settings) {
-		t.Error("first SELECT must set client_connection_check_interval once, guarded by max_val > 0 before the lock DO statement")
+	connectionCheckBlock := regexp.MustCompile(`(?s)^\s*-- \+goose statementbegin\s+do \$\$\s+begin\s+perform ` + regexp.QuoteMeta(connectionCheckSetting) + `;\s+exception when invalid_parameter_value then\s+null;\s+end\s+\$\$;\s+-- \+goose statementend`)
+	if strings.Count(up, connectionCheckSetting) != 1 || !connectionCheckBlock.MatchString(afterSettings) {
+		t.Error("settings SELECT must be followed by a Goose-wrapped DO that attempts client_connection_check_interval once and catches only invalid_parameter_value")
 	}
-	for _, banned := range []string{"lock table accounts", "references", "nowait", "no transaction", "md5("} {
+	for _, banned := range []string{"lock table accounts", "references", "nowait", "no transaction", "md5(", "pg_settings", "max_val"} {
 		if strings.Contains(up, banned) {
 			t.Errorf("Up contains prohibited token %q", banned)
 		}
@@ -219,10 +219,11 @@ func TestTranscriptStorageUsageSchema101MigrationContract(t *testing.T) {
 	if strings.Count(up, lock) != 1 {
 		t.Fatal("Up must contain exactly one transcript_entries strong lock")
 	}
-	do := regexp.MustCompile(`(?s)-- \+goose statementbegin\s+do \$\$.*?-- \+goose statementend`).FindString(up)
-	if do == "" || !strings.Contains(do, lock) {
-		t.Fatal("strong lock must be inside the first DO block")
+	doBlocks := regexp.MustCompile(`(?s)-- \+goose statementbegin\s+do \$\$.*?-- \+goose statementend`).FindAllString(up, -1)
+	if len(doBlocks) != 2 || !strings.Contains(doBlocks[1], lock) {
+		t.Fatal("strong lock must be inside the second DO block, after the connection-check attempt")
 	}
+	do := doBlocks[1]
 	firstCreate := regexp.MustCompile(`(?m)^\s*create\s`).FindStringIndex(up)
 	if firstCreate == nil || strings.Index(up, do)+len(do) > firstCreate[0] {
 		t.Fatal("lock loop must precede every CREATE")

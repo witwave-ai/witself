@@ -82,26 +82,51 @@ func (s *Store) acquireTranscriptStorageReconcileLease(ctx context.Context) (*tr
 	return lease, true, nil
 }
 
-func (s *Store) configureTranscriptStorageReconcileConnection(ctx context.Context, conn interface {
-	queryer
-	pgxExec
-}) error {
-	// Probe the server, not the client's OS. Windows exposes this GUC with a
-	// zero maximum; missing settings and failed probes also stay disabled for
-	// this Store's lifetime. Use the lease connection, avoiding another pool slot.
-	s.clientConnectionCheckOnce.Do(func() {
-		var maxValue int64
-		err := conn.QueryRow(ctx, `SELECT max_val::bigint FROM pg_settings WHERE name = 'client_connection_check_interval'`).Scan(&maxValue)
-		s.clientConnectionCheckSupported = err == nil && maxValue > 0
-	})
+func (s *Store) configureTranscriptStorageReconcileConnection(ctx context.Context, conn pgxExec) error {
+	supported, err := s.probeTranscriptStorageClientConnectionCheck(ctx, conn)
+	if err != nil {
+		return err
+	}
 	settings := `SET application_name = 'witself-transcript-storage-reconcile';
  SET tcp_keepalives_idle = 30; SET tcp_keepalives_interval = 10; SET tcp_keepalives_count = 6;`
-	if s.clientConnectionCheckSupported {
+	if supported {
 		settings += "\n SET client_connection_check_interval = '2s';"
 	}
 	settings += " SET lock_timeout = '500ms'"
-	_, err := conn.Exec(ctx, settings)
+	_, err = conn.Exec(ctx, settings)
 	return err
+}
+
+func (s *Store) probeTranscriptStorageClientConnectionCheck(ctx context.Context, conn pgxExec) (bool, error) {
+	s.clientConnectionCheckMu.Lock()
+	defer s.clientConnectionCheckMu.Unlock()
+	if s.clientConnectionCheckProbed {
+		return s.clientConnectionCheckSupported, nil
+	}
+	// The server's check hook, not pg_settings.max_val, determines support.
+	// Use the lease connection and roll back even a rejected SET or failed BEGIN.
+	_, beginErr := conn.Exec(ctx, `BEGIN`)
+	var probeErr error
+	if beginErr == nil {
+		_, probeErr = conn.Exec(ctx, `SET LOCAL client_connection_check_interval = '2s'`)
+	}
+	// Cancellation must not prevent cleanup of an open or aborted transaction.
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, rollbackErr := conn.Exec(rollbackCtx, `ROLLBACK`)
+	if beginErr != nil || rollbackErr != nil {
+		return false, errors.Join(beginErr, probeErr, rollbackErr)
+	}
+	if probeErr != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(probeErr, &pgErr) || pgErr.Code != "22023" {
+			return false, probeErr
+		}
+	}
+	// Only a completed probe with a successful rollback is a cacheable answer.
+	s.clientConnectionCheckSupported = probeErr == nil
+	s.clientConnectionCheckProbed = true
+	return s.clientConnectionCheckSupported, nil
 }
 
 func (l *transcriptStorageReconcileLease) close() {

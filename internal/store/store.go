@@ -26,7 +26,8 @@ type Store struct {
 	importObserver                 ImportObserver
 	importRowDecodeLegacy          bool
 	importRowClobber               bool
-	clientConnectionCheckOnce      sync.Once
+	clientConnectionCheckMu        sync.Mutex
+	clientConnectionCheckProbed    bool
 	clientConnectionCheckSupported bool
 }
 
