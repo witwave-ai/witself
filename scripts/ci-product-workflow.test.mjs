@@ -172,6 +172,7 @@ function assertLocalcellWindowsJob(ci) {
 
 const unixPlatforms = [
   {platform: 'linux-x64', runner: 'ubuntu-24.04'},
+  {platform: 'linux-arm64', runner: 'ubuntu-24.04-arm'},
   {platform: 'macos-arm64', runner: 'macos-15'},
   {platform: 'macos-intel', runner: 'macos-15-intel'},
 ];
@@ -279,7 +280,8 @@ test('Unix PostgreSQL provisioner is enrolled in the repository shell static ana
 
 for (const [name, mutate] of [
   ['missing platform', pins => { delete pins['linux-x64']; }],
-  ['extra platform', pins => { pins['linux-arm64'] = {...pins['linux-x64']}; }],
+  ['missing Linux arm64 platform', pins => { delete pins['linux-arm64']; }],
+  ['extra platform', pins => { pins['linux-riscv64'] = {...pins['linux-x64']}; }],
   ['missing digest', pins => { delete pins['linux-x64'].sha256; }],
   ['malformed digest', pins => { pins['linux-x64'].sha256 = 'unverified'; }],
   ['wrong major', pins => { pins['linux-x64'].major = 17; }],
@@ -287,7 +289,7 @@ for (const [name, mutate] of [
   ['HTTP archive', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('https:', 'http:'); }],
   ['untrusted host', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('apt-archive.postgresql.org', 'example.invalid'); }],
   ['wrong source version', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('16.10', '16.9'); }],
-  ['different source bytes per platform', pins => { pins['linux-x64'].sha256 = createHash('sha256').update('different source').digest('hex'); }],
+  ['Linux arm64 uses different source bytes', pins => { pins['linux-arm64'].sha256 = createHash('sha256').update('different source').digest('hex'); }],
   ['embedded URL credentials', pins => { pins['linux-x64'].url = pins['linux-x64'].url.replace('https://', 'https://user:password@'); }],
 ]) {
   test(`rejects Unix PostgreSQL pin mutation: ${name}`, () => {
@@ -367,6 +369,8 @@ function withUnixProvisionFixture(options, check) {
     options.mutatePin?.(pins);
     writeFileSync(join(scriptDirectory, 'ci-postgres16-unix.json'), JSON.stringify(pins));
     const trace = join(temporary, 'operations');
+    // The provisioner's output is fixture data only; never source this file or
+    // activate WITSELF_LOCALCELL_PGBIN in the test process or a real Go test.
     const githubEnvironment = join(temporary, 'github-env');
     writeFileSync(trace, '');
     writeFileSync(githubEnvironment, '');
@@ -415,24 +419,29 @@ test('Unix provisioner checksum mismatch terminates before extraction or build w
   });
 });
 
-test('Unix provisioner verifies all five executables before export and cleanup is repeatable', () => {
-  withUnixProvisionFixture({}, fixture => {
-    const result = fixture.run();
-    assert(result.error === undefined && result.status === 0, 'Complete mocked provisioning must pass');
-    assert.deepEqual(fixture.operations(), [
-      'download', 'hash', 'extract', 'configure', 'build', 'install',
-      'version:postgres', 'version:initdb', 'version:pg_ctl', 'version:psql', 'version:createdb',
-    ]);
-    assert(fixture.exported() === `WITSELF_LOCALCELL_PGBIN=${fixture.runtime}/bin\n`, 'Only the completely verified runtime is published');
-    assert(existsSync(join(fixture.proofRoot, 'testtmp')), 'Proof temporary files belong to the cleanup tree');
-    assert(result.stdout === 'Pinned PostgreSQL sixteen runtime verified\n' && result.stderr === '', 'Successful provisioning has bounded value-free output');
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const cleanup = fixture.cleanup();
-      assert(cleanup.error === undefined && cleanup.status === 0, 'Cleanup must be repeatable');
-      assert(!existsSync(fixture.proofRoot), 'Cleanup removes the complete proof tree');
-    }
+for (const options of [
+  {platform: 'linux-x64', os: 'Linux', arch: 'x86_64'},
+  {platform: 'linux-arm64', os: 'Linux', arch: 'aarch64'},
+]) {
+  test(`Unix provisioner ${options.platform} verifies all five executables before export and cleanup is repeatable`, () => {
+    withUnixProvisionFixture(options, fixture => {
+      const result = fixture.run();
+      assert(result.error === undefined && result.status === 0, 'Complete mocked provisioning must pass');
+      assert.deepEqual(fixture.operations(), [
+        'download', 'hash', 'extract', 'configure', 'build', 'install',
+        'version:postgres', 'version:initdb', 'version:pg_ctl', 'version:psql', 'version:createdb',
+      ]);
+      assert(fixture.exported() === `WITSELF_LOCALCELL_PGBIN=${fixture.runtime}/bin\n`, 'Only the completely verified runtime is published');
+      assert(existsSync(join(fixture.proofRoot, 'testtmp')), 'Proof temporary files belong to the cleanup tree');
+      assert(result.stdout === 'Pinned PostgreSQL sixteen runtime verified\n' && result.stderr === '', 'Successful provisioning has bounded value-free output');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const cleanup = fixture.cleanup();
+        assert(cleanup.error === undefined && cleanup.status === 0, 'Cleanup must be repeatable');
+        assert(!existsSync(fixture.proofRoot), 'Cleanup removes the complete proof tree');
+      }
+    });
   });
-});
+}
 
 for (const [mode, message] of [
   ['wrong-version', 'runtime executable did not report major sixteen'],
@@ -458,6 +467,9 @@ for (const [name, options, message] of [
   ['untrusted pin URL', {mutatePin: pins => { pins['linux-x64'].url = 'https://example.invalid/archive'; }}, 'invalid pin'],
   ['invalid digest', {mutatePin: pins => { pins['linux-x64'].sha256 = 'unverified'; }}, 'invalid pin'],
   ['native platform mismatch', {os: 'Darwin', arch: 'arm64'}, 'platform does not match the native runner'],
+  ['Linux arm64 on x64 runner', {platform: 'linux-arm64', os: 'Linux', arch: 'x86_64'}, 'platform does not match the native runner'],
+  ['Linux arm64 on macOS runner', {platform: 'linux-arm64', os: 'Darwin', arch: 'arm64'}, 'platform does not match the native runner'],
+  ['unsupported native platform', {platform: 'linux-riscv64', os: 'Linux', arch: 'riscv64'}, 'platform does not match the native runner'],
 ]) {
   test(`Unix provisioner rejects ${name} before download`, () => {
     withUnixProvisionFixture(options, fixture => {
@@ -1034,7 +1046,9 @@ const mutations = [
   ['missing Unix lifecycle job', data => { delete data['ci.yml'].jobs['localcell-unix']; }],
   ['missing Unix dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-unix'); }],
   ['Unix matrix row removed', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.pop(); }],
-  ['Unix architecture runs on the wrong runner', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include[1].runner = 'macos-15-intel'; }],
+  ['Linux arm64 matrix row removed', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include = data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.filter(row => row.platform !== 'linux-arm64'); }],
+  ['Linux arm64 runs on the x64 runner', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.find(row => row.platform === 'linux-arm64').runner = 'ubuntu-24.04'; }],
+  ['Unix architecture runs on the wrong runner', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.find(row => row.platform === 'macos-arm64').runner = 'macos-15-intel'; }],
   ['Unix matrix cancels remaining native rows', data => { data['ci.yml'].jobs['localcell-unix'].strategy['fail-fast'] = true; }],
   ['Unix job always runs', data => { data['ci.yml'].jobs['localcell-unix'].if = 'always()'; }],
   ...[
