@@ -1,0 +1,427 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "name": "exact_decimal_and_counter",
+      "source": {
+        "envelope_version": 1,
+        "schema_version": 1,
+        "protocol_version": 1,
+        "operation_id": "op_AQAAAAAAAAAAAAAAAAAAAA",
+        "original_incarnation": {
+          "account_id": "account-fixture",
+          "lifecycle_epoch": "1",
+          "restore_marker": "restore_AgAAAAAAAAAAAAAAAAAAAA"
+        },
+        "capture_epoch": "1",
+        "origin": {
+          "installation_id": "installation-fixture",
+          "replica_id": "replica-fixture",
+          "write_lineage_id": "lineage-fixture",
+          "origin_sequence": "9007199254740993"
+        },
+        "kind": "fixture.write",
+        "authorization": {
+          "principal_kind": "operator",
+          "principal_id": "operator-fixture",
+          "agent_id": null,
+          "realm_id": "realm-fixture",
+          "access_profile_id": "profile-fixture",
+          "policy_revision": "policy-fixture",
+          "enrollment_generation": "enrollment-fixture",
+          "grant_id": "grant-fixture"
+        },
+        "basis": {
+          "family": "facts_subjects_candidates_aliases",
+          "object_id": "object-fixture",
+          "generation": "generation_AwAAAAAAAAAAAAAAAAAAAA",
+          "expected_absent": false,
+          "expected": [],
+          "dependencies": [],
+          "deletion_generation": null,
+          "recreation_intent_id": null,
+          "domain_basis": {
+            "v": 1,
+            "t": "domain",
+            "tag": "facts_subjects_candidates_aliases",
+            "value": {
+              "v": 1,
+              "t": "null"
+            }
+          }
+        },
+        "payload": {
+          "v": 1,
+          "t": "decimal",
+          "coefficient": "9007199254740993",
+          "exponent": "0"
+        },
+        "compound": null
+      },
+      "canonical": "{\"authorization\":{\"access_profile_id\":\"profile-fixture\",\"agent_id\":null,\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\",\"policy_revision\":\"policy-fixture\",\"principal_id\":\"operator-fixture\",\"principal_kind\":\"operator\",\"realm_id\":\"realm-fixture\"},\"basis\":{\"deletion_generation\":null,\"dependencies\":[],\"domain_basis\":{\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"v\":1,\"value\":{\"t\":\"null\",\"v\":1}},\"expected\":[],\"expected_absent\":false,\"family\":\"facts_subjects_candidates_aliases\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"object_id\":\"object-fixture\",\"recreation_intent_id\":null},\"capture_epoch\":\"1\",\"compound\":null,\"envelope_version\":1,\"kind\":\"fixture.write\",\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"origin\":{\"installation_id\":\"installation-fixture\",\"origin_sequence\":\"9007199254740993\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\"},\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"payload\":{\"coefficient\":\"9007199254740993\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1},\"protocol_version\":1,\"schema_version\":1}"
+    },
+    {
+      "name": "unsorted_sets",
+      "source": {
+        "envelope_version": 1,
+        "schema_version": 1,
+        "protocol_version": 1,
+        "operation_id": "op_AQAAAAAAAAAAAAAAAAAAAA",
+        "original_incarnation": {
+          "account_id": "account-fixture",
+          "lifecycle_epoch": "1",
+          "restore_marker": "restore_AgAAAAAAAAAAAAAAAAAAAA"
+        },
+        "capture_epoch": "1",
+        "origin": {
+          "installation_id": "installation-fixture",
+          "replica_id": "replica-fixture",
+          "write_lineage_id": "lineage-fixture",
+          "origin_sequence": "9007199254740993"
+        },
+        "kind": "fixture.write",
+        "authorization": {
+          "principal_kind": "operator",
+          "principal_id": "operator-fixture",
+          "agent_id": null,
+          "realm_id": "realm-fixture",
+          "access_profile_id": "profile-fixture",
+          "policy_revision": "policy-fixture",
+          "enrollment_generation": "enrollment-fixture",
+          "grant_id": "grant-fixture"
+        },
+        "basis": {
+          "family": "facts_subjects_candidates_aliases",
+          "object_id": "object-fixture",
+          "generation": "generation_AwAAAAAAAAAAAAAAAAAAAA",
+          "expected_absent": false,
+          "expected": [
+            "revision__wAAAAAAAAAAAAAAAAAAAA",
+            "revision_AAAAAAAAAAAAAAAAAAAAAA"
+          ],
+          "dependencies": [
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "z",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            },
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "a",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            }
+          ],
+          "deletion_generation": null,
+          "recreation_intent_id": null,
+          "domain_basis": {
+            "v": 1,
+            "t": "domain",
+            "tag": "facts_subjects_candidates_aliases",
+            "value": {
+              "v": 1,
+              "t": "null"
+            }
+          }
+        },
+        "payload": {
+          "v": 1,
+          "t": "decimal",
+          "coefficient": "9007199254740993",
+          "exponent": "0"
+        },
+        "compound": {
+          "group_id": "group",
+          "request_id": "request",
+          "authority_installation_id": "installation-fixture",
+          "authority_epoch": "1",
+          "expected_graph_revision": "0",
+          "result_graph_revision": "1",
+          "ordered_members": [
+            "b",
+            "a"
+          ],
+          "required_fragments": [
+            "z",
+            "a"
+          ],
+          "manifest_commitment": "commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "canonical": "{\"authorization\":{\"access_profile_id\":\"profile-fixture\",\"agent_id\":null,\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\",\"policy_revision\":\"policy-fixture\",\"principal_id\":\"operator-fixture\",\"principal_kind\":\"operator\",\"realm_id\":\"realm-fixture\"},\"basis\":{\"deletion_generation\":null,\"dependencies\":[{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"a\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null},{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"z\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null}],\"domain_basis\":{\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"v\":1,\"value\":{\"t\":\"null\",\"v\":1}},\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"expected_absent\":false,\"family\":\"facts_subjects_candidates_aliases\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"object_id\":\"object-fixture\",\"recreation_intent_id\":null},\"capture_epoch\":\"1\",\"compound\":{\"authority_epoch\":\"1\",\"authority_installation_id\":\"installation-fixture\",\"expected_graph_revision\":\"0\",\"group_id\":\"group\",\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"ordered_members\":[\"b\",\"a\"],\"request_id\":\"request\",\"required_fragments\":[\"a\",\"z\"],\"result_graph_revision\":\"1\"},\"envelope_version\":1,\"kind\":\"fixture.write\",\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"origin\":{\"installation_id\":\"installation-fixture\",\"origin_sequence\":\"9007199254740993\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\"},\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"payload\":{\"coefficient\":\"9007199254740993\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1},\"protocol_version\":1,\"schema_version\":1}"
+    },
+    {
+      "name": "same_sets_reversed",
+      "source": {
+        "envelope_version": 1,
+        "schema_version": 1,
+        "protocol_version": 1,
+        "operation_id": "op_AQAAAAAAAAAAAAAAAAAAAA",
+        "original_incarnation": {
+          "account_id": "account-fixture",
+          "lifecycle_epoch": "1",
+          "restore_marker": "restore_AgAAAAAAAAAAAAAAAAAAAA"
+        },
+        "capture_epoch": "1",
+        "origin": {
+          "installation_id": "installation-fixture",
+          "replica_id": "replica-fixture",
+          "write_lineage_id": "lineage-fixture",
+          "origin_sequence": "9007199254740993"
+        },
+        "kind": "fixture.write",
+        "authorization": {
+          "principal_kind": "operator",
+          "principal_id": "operator-fixture",
+          "agent_id": null,
+          "realm_id": "realm-fixture",
+          "access_profile_id": "profile-fixture",
+          "policy_revision": "policy-fixture",
+          "enrollment_generation": "enrollment-fixture",
+          "grant_id": "grant-fixture"
+        },
+        "basis": {
+          "family": "facts_subjects_candidates_aliases",
+          "object_id": "object-fixture",
+          "generation": "generation_AwAAAAAAAAAAAAAAAAAAAA",
+          "expected_absent": false,
+          "expected": [
+            "revision_AAAAAAAAAAAAAAAAAAAAAA",
+            "revision__wAAAAAAAAAAAAAAAAAAAA"
+          ],
+          "dependencies": [
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "a",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            },
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "z",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            }
+          ],
+          "deletion_generation": null,
+          "recreation_intent_id": null,
+          "domain_basis": {
+            "v": 1,
+            "t": "domain",
+            "tag": "facts_subjects_candidates_aliases",
+            "value": {
+              "v": 1,
+              "t": "null"
+            }
+          }
+        },
+        "payload": {
+          "v": 1,
+          "t": "decimal",
+          "coefficient": "9007199254740993",
+          "exponent": "0"
+        },
+        "compound": {
+          "group_id": "group",
+          "request_id": "request",
+          "authority_installation_id": "installation-fixture",
+          "authority_epoch": "1",
+          "expected_graph_revision": "0",
+          "result_graph_revision": "1",
+          "ordered_members": [
+            "b",
+            "a"
+          ],
+          "required_fragments": [
+            "a",
+            "z"
+          ],
+          "manifest_commitment": "commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "canonical": "{\"authorization\":{\"access_profile_id\":\"profile-fixture\",\"agent_id\":null,\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\",\"policy_revision\":\"policy-fixture\",\"principal_id\":\"operator-fixture\",\"principal_kind\":\"operator\",\"realm_id\":\"realm-fixture\"},\"basis\":{\"deletion_generation\":null,\"dependencies\":[{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"a\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null},{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"z\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null}],\"domain_basis\":{\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"v\":1,\"value\":{\"t\":\"null\",\"v\":1}},\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"expected_absent\":false,\"family\":\"facts_subjects_candidates_aliases\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"object_id\":\"object-fixture\",\"recreation_intent_id\":null},\"capture_epoch\":\"1\",\"compound\":{\"authority_epoch\":\"1\",\"authority_installation_id\":\"installation-fixture\",\"expected_graph_revision\":\"0\",\"group_id\":\"group\",\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"ordered_members\":[\"b\",\"a\"],\"request_id\":\"request\",\"required_fragments\":[\"a\",\"z\"],\"result_graph_revision\":\"1\"},\"envelope_version\":1,\"kind\":\"fixture.write\",\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"origin\":{\"installation_id\":\"installation-fixture\",\"origin_sequence\":\"9007199254740993\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\"},\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"payload\":{\"coefficient\":\"9007199254740993\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1},\"protocol_version\":1,\"schema_version\":1}"
+    },
+    {
+      "name": "different_member_order",
+      "source": {
+        "envelope_version": 1,
+        "schema_version": 1,
+        "protocol_version": 1,
+        "operation_id": "op_AQAAAAAAAAAAAAAAAAAAAA",
+        "original_incarnation": {
+          "account_id": "account-fixture",
+          "lifecycle_epoch": "1",
+          "restore_marker": "restore_AgAAAAAAAAAAAAAAAAAAAA"
+        },
+        "capture_epoch": "1",
+        "origin": {
+          "installation_id": "installation-fixture",
+          "replica_id": "replica-fixture",
+          "write_lineage_id": "lineage-fixture",
+          "origin_sequence": "9007199254740993"
+        },
+        "kind": "fixture.write",
+        "authorization": {
+          "principal_kind": "operator",
+          "principal_id": "operator-fixture",
+          "agent_id": null,
+          "realm_id": "realm-fixture",
+          "access_profile_id": "profile-fixture",
+          "policy_revision": "policy-fixture",
+          "enrollment_generation": "enrollment-fixture",
+          "grant_id": "grant-fixture"
+        },
+        "basis": {
+          "family": "facts_subjects_candidates_aliases",
+          "object_id": "object-fixture",
+          "generation": "generation_AwAAAAAAAAAAAAAAAAAAAA",
+          "expected_absent": false,
+          "expected": [
+            "revision_AAAAAAAAAAAAAAAAAAAAAA",
+            "revision__wAAAAAAAAAAAAAAAAAAAA"
+          ],
+          "dependencies": [
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "a",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            },
+            {
+              "kind": "generation",
+              "account_id": "account-fixture",
+              "realm_id": "realm-fixture",
+              "owner_id": "owner",
+              "object_id": "z",
+              "generation": "generation_BAAAAAAAAAAAAAAAAAAAAA",
+              "revision": null,
+              "operation": null
+            }
+          ],
+          "deletion_generation": null,
+          "recreation_intent_id": null,
+          "domain_basis": {
+            "v": 1,
+            "t": "domain",
+            "tag": "facts_subjects_candidates_aliases",
+            "value": {
+              "v": 1,
+              "t": "null"
+            }
+          }
+        },
+        "payload": {
+          "v": 1,
+          "t": "decimal",
+          "coefficient": "9007199254740993",
+          "exponent": "0"
+        },
+        "compound": {
+          "group_id": "group",
+          "request_id": "request",
+          "authority_installation_id": "installation-fixture",
+          "authority_epoch": "1",
+          "expected_graph_revision": "0",
+          "result_graph_revision": "1",
+          "ordered_members": [
+            "a",
+            "b"
+          ],
+          "required_fragments": [
+            "a",
+            "z"
+          ],
+          "manifest_commitment": "commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "canonical": "{\"authorization\":{\"access_profile_id\":\"profile-fixture\",\"agent_id\":null,\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\",\"policy_revision\":\"policy-fixture\",\"principal_id\":\"operator-fixture\",\"principal_kind\":\"operator\",\"realm_id\":\"realm-fixture\"},\"basis\":{\"deletion_generation\":null,\"dependencies\":[{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"a\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null},{\"account_id\":\"account-fixture\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"generation\",\"object_id\":\"z\",\"operation\":null,\"owner_id\":\"owner\",\"realm_id\":\"realm-fixture\",\"revision\":null}],\"domain_basis\":{\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"v\":1,\"value\":{\"t\":\"null\",\"v\":1}},\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"expected_absent\":false,\"family\":\"facts_subjects_candidates_aliases\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"object_id\":\"object-fixture\",\"recreation_intent_id\":null},\"capture_epoch\":\"1\",\"compound\":{\"authority_epoch\":\"1\",\"authority_installation_id\":\"installation-fixture\",\"expected_graph_revision\":\"0\",\"group_id\":\"group\",\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"ordered_members\":[\"a\",\"b\"],\"request_id\":\"request\",\"required_fragments\":[\"a\",\"z\"],\"result_graph_revision\":\"1\"},\"envelope_version\":1,\"kind\":\"fixture.write\",\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"origin\":{\"installation_id\":\"installation-fixture\",\"origin_sequence\":\"9007199254740993\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\"},\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"payload\":{\"coefficient\":\"9007199254740993\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1},\"protocol_version\":1,\"schema_version\":1}"
+    }
+  ],
+  "reject": [
+    {
+      "name": "numeric_counter",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":9007199254740993},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "leading_counter",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"01\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "counter_max",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"9223372036854775808\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "lifecycle_max",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"9007199254740992\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "id_padding",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA==\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "id_wrong_type",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"revision_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "id_tail_bits",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AAAAAAAAAAAAAAAAAAAAAB\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "id_null",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":null,\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "null_origin",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":null,\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "null_boolean",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":null,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "nil_expected",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":null,\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "unknown_field",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"extra\":true}"
+    },
+    {
+      "name": "unknown_domain",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"unreviewed\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "wrong_family_tag",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"realms\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "unknown_protocol",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":2,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_AAAAAAAAAAAAAAAAAAAAAA\",\"revision__wAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    },
+    {
+      "name": "duplicate_set",
+      "wire": "{\"envelope_version\":1,\"schema_version\":1,\"protocol_version\":1,\"operation_id\":\"op_AQAAAAAAAAAAAAAAAAAAAA\",\"original_incarnation\":{\"account_id\":\"account-fixture\",\"lifecycle_epoch\":\"1\",\"restore_marker\":\"restore_AgAAAAAAAAAAAAAAAAAAAA\"},\"capture_epoch\":\"1\",\"origin\":{\"installation_id\":\"installation-fixture\",\"replica_id\":\"replica-fixture\",\"write_lineage_id\":\"lineage-fixture\",\"origin_sequence\":\"9007199254740993\"},\"kind\":\"fixture.write\",\"authorization\":{\"principal_kind\":\"operator\",\"principal_id\":\"operator-fixture\",\"agent_id\":null,\"realm_id\":\"realm-fixture\",\"access_profile_id\":\"profile-fixture\",\"policy_revision\":\"policy-fixture\",\"enrollment_generation\":\"enrollment-fixture\",\"grant_id\":\"grant-fixture\"},\"basis\":{\"family\":\"facts_subjects_candidates_aliases\",\"object_id\":\"object-fixture\",\"generation\":\"generation_AwAAAAAAAAAAAAAAAAAAAA\",\"expected_absent\":false,\"expected\":[\"revision_BAAAAAAAAAAAAAAAAAAAAA\",\"revision_BAAAAAAAAAAAAAAAAAAAAA\"],\"dependencies\":[{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"a\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null},{\"kind\":\"generation\",\"account_id\":\"account-fixture\",\"realm_id\":\"realm-fixture\",\"owner_id\":\"owner\",\"object_id\":\"z\",\"generation\":\"generation_BAAAAAAAAAAAAAAAAAAAAA\",\"revision\":null,\"operation\":null}],\"deletion_generation\":null,\"recreation_intent_id\":null,\"domain_basis\":{\"v\":1,\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"value\":{\"v\":1,\"t\":\"null\"}}},\"payload\":{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"9007199254740993\",\"exponent\":\"0\"},\"compound\":{\"group_id\":\"group\",\"request_id\":\"request\",\"authority_installation_id\":\"installation-fixture\",\"authority_epoch\":\"1\",\"expected_graph_revision\":\"0\",\"result_graph_revision\":\"1\",\"ordered_members\":[\"a\",\"b\"],\"required_fragments\":[\"a\",\"z\"],\"manifest_commitment\":\"commitment_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
+    }
+  ]
+}

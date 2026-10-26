@@ -455,3 +455,112 @@ func TestEveryManifestEntryHasDisposition(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Route existence does not establish its semantic family. These expectations
+// are reviewed from SC-1.2/1.3/1.8 and server handlers, independently of either
+// manifest; realm prefixes include agent operations and email provisioning.
+func reviewedRouteFamilies() map[string]string {
+	return map[string]string{
+		"GET /v1/realms":                                    "realms",
+		"POST /v1/realms":                                   "realms",
+		"GET /v1/realms/{realm}/agents":                     "accounts_operators_agents",
+		"POST /v1/realms/{realm}/agents":                    "accounts_operators_agents",
+		"DELETE /v1/realms/{realm}/agents/{agent}":          "accounts_operators_agents",
+		"POST /v1/realms/{realm}/agents:with-email-segment": "inbound_outbound_email",
+	}
+}
+
+func routeFamilyMismatches(c Catalog) int {
+	mismatches := 0
+	for route, family := range reviewedRouteFamilies() {
+		name := "route:internal/server/server.go:" + route
+		sourceFound, accountingFound := false, false
+		for _, entry := range c.Sources {
+			if entry.Name == name {
+				sourceFound = true
+				if entry.Kind != "route" || entry.Symbol != route || entry.Source != "internal/server/server.go" || entry.Family != family {
+					mismatches++
+				}
+			}
+		}
+		for _, entry := range c.Accounting {
+			if entry.Name == name {
+				accountingFound = true
+				if entry.Family != family {
+					mismatches++
+				}
+			}
+		}
+		if !sourceFound {
+			mismatches++
+		}
+		if !accountingFound {
+			mismatches++
+		}
+	}
+	return mismatches
+}
+
+func TestReviewedRouteToFamilyExpectations(t *testing.T) {
+	if routeFamilyMismatches(mustCatalog(t)) != 0 {
+		t.Fatal("reviewed route family differs in source or accounting inventory")
+	}
+}
+
+func TestReviewedRouteToFamilyRejectsExistingWrongFamily(t *testing.T) {
+	for _, manifest := range []string{"source", "accounting", "both"} {
+		t.Run(manifest, func(t *testing.T) {
+			c := mustCatalog(t)
+			name := "route:internal/server/server.go:GET /v1/realms/{realm}/agents"
+			if manifest != "accounting" {
+				for i := range c.Sources {
+					if c.Sources[i].Name == name {
+						c.Sources[i].Family = "realms"
+					}
+				}
+			}
+			if manifest != "source" {
+				for i := range c.Accounting {
+					if c.Accounting[i].Name == name {
+						c.Accounting[i].Family = "realms"
+					}
+				}
+			}
+			if c.Validate() != nil {
+				t.Fatal("negative must retain valid catalog structure and existing route")
+			}
+			if routeFamilyMismatches(c) == 0 {
+				t.Fatal("route existence or matching wrong manifests blessed an incorrect family")
+			}
+		})
+	}
+}
+
+func TestS5BFixtureDispositionAccounting(t *testing.T) {
+	c := mustCatalog(t)
+	// These retain full contract-obligation status. Passing B's narrower model
+	// and SQL tests cannot claim legacy backfill, deployed cursors/trust, domain
+	// application or complete capacity behavior. No missing adapter is a skip.
+	required := map[string]string{
+		"H03": "legacy projection migration adapter absent",
+		"H23": "model/SQL admission subset; production authorization adapter absent",
+		"H25": "independent model vectors; deployed cross-language protocol absent",
+		"H26": "synthetic SQL admission subset; domain apply adapter absent",
+		"H31": "bounded codec subset; queue/refusal reservation adapter absent",
+		"H54": "receipt mutation subset; cursor and deployed-trust adapters absent",
+	}
+	count := 0
+	for _, entry := range c.Scenarios {
+		if reason, ok := required[entry.ID]; ok {
+			if entry.Evidence != ScaffoldOnly {
+				t.Fatal("partial S5B proof promoted full obligation")
+			}
+			count++
+			t.Log(entry.ID + ": SCAFFOLD_ONLY; " + reason)
+		}
+	}
+	if count != 6 {
+		t.Fatal("S5B fixture disposition missing")
+	}
+	t.Logf("LC-S5B full obligations: implemented=0 SCAFFOLD_ONLY=%d; model/SQL subset evidence reported separately", count)
+}

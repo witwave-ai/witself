@@ -577,7 +577,7 @@
     },
     {
       "name": "route:internal/server/server.go:DELETE /v1/realms/{realm}/agents/{agent}",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY",
       "original_events": null,
@@ -1072,7 +1072,7 @@
     },
     {
       "name": "route:internal/server/server.go:GET /v1/realms/{realm}/agents",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY",
       "original_events": null,
@@ -2007,7 +2007,7 @@
     },
     {
       "name": "route:internal/server/server.go:POST /v1/realms/{realm}/agents",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY",
       "original_events": null,

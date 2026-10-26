@@ -476,7 +476,7 @@
       "kind": "route",
       "source": "internal/server/server.go",
       "symbol": "DELETE /v1/realms/{realm}/agents/{agent}",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY"
     },
@@ -881,7 +881,7 @@
       "kind": "route",
       "source": "internal/server/server.go",
       "symbol": "GET /v1/realms/{realm}/agents",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY"
     },
@@ -1646,7 +1646,7 @@
       "kind": "route",
       "source": "internal/server/server.go",
       "symbol": "POST /v1/realms/{realm}/agents",
-      "family": "realms",
+      "family": "accounts_operators_agents",
       "disposition": "S",
       "evidence": "SCAFFOLD_ONLY"
     },

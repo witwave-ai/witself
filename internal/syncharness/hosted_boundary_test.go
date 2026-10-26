@@ -33,7 +33,7 @@ func TestHostedCommandDependencyBoundary(t *testing.T) {
 }
 
 func TestHarnessSupportDependencyBoundary(t *testing.T) {
-	for _, pkg := range []string{"syncharness", "testenv"} {
+	for _, pkg := range []string{"syncharness", "syncmodel", "testenv"} {
 		t.Run(pkg, func(t *testing.T) {
 			cmd := exec.Command("go", "list", "-deps", "./internal/"+pkg)
 			cmd.Dir = "../.."
