@@ -12,7 +12,7 @@ import (
 
 func journalRecord(t *testing.T, operation, step, state string) []byte {
 	t.Helper()
-	data, err := json.Marshal(journalEntry{operation, step, state, time.Now().UTC()})
+	data, err := json.Marshal(journalEntry{Operation: operation, Step: step, State: state, At: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}

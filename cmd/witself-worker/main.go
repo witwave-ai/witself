@@ -202,7 +202,9 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 
 	healthAddr, metricsAddr := workerListenerAddresses(runtime, lookup)
 	ready := st.Ping
+	restartPolicy := ""
 	if runtime.Local {
+		restartPolicy = runtime.JobRestartPolicy
 		ready = func(ctx context.Context) error {
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
@@ -213,9 +215,10 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 	fmt.Fprintf(os.Stderr, "witself-worker: health listening on %s\n", healthAddr)
 	fmt.Fprintf(os.Stderr, "witself-worker: metrics listening on %s\n", metricsAddr)
 	if err := runRegistry(registry, ctx, worker.Config{
-		HealthAddr:  healthAddr,
-		MetricsAddr: metricsAddr,
-		Ready:       ready,
+		HealthAddr:       healthAddr,
+		MetricsAddr:      metricsAddr,
+		Ready:            ready,
+		JobRestartPolicy: restartPolicy,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
 		return 1

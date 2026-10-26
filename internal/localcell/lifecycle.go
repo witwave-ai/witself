@@ -111,6 +111,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	m := &Manifest{LayoutVersion: LayoutVersion, InstallationID: installationID, CreatedAt: time.Now().UTC(),
 		PostgreSQLVersion: pgVersion, ServerVersion: serverVersion, WorkerVersion: workerVersion,
 		Ports: ports, Database: localDatabaseName, Role: "localcell", LastOperation: "install"}
+	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
 	if err := c.begin("install"); err != nil {
 		return err
 	}
@@ -158,8 +159,6 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 // Start orders PostgreSQL, server readiness, then worker readiness. It never
 // inherits the caller's environment or assumes HTTP readiness proves ownership.
 func (c *Cell) Start(ctx context.Context) error {
-	ctx, cancel := c.deadline(ctx)
-	defer cancel()
 	lock, err := c.own(false)
 	if err != nil {
 		return err
@@ -172,6 +171,7 @@ func (c *Cell) Start(ctx context.Context) error {
 	if !m.Installed {
 		return errors.New("local cell installation is incomplete")
 	}
+	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
 	if err := c.layout(); err != nil {
 		return err
 	}
@@ -194,12 +194,12 @@ func (c *Cell) Start(ctx context.Context) error {
 	}
 	steps := []struct {
 		name string
-		run  func() error
+		run  func(context.Context) error
 	}{
-		{"postgres", func() error { return c.startPostgres(ctx, m) }},
-		{"server", func() error { return c.startChild(m, "server") }},
-		{"server_ready", func() error { return c.waitReady(ctx, "server", m.Ports.ServerHealth) }},
-		{"account", func() error {
+		{"postgres", func(ctx context.Context) error { return c.startPostgres(ctx, m) }},
+		{"server", func(context.Context) error { return c.startChild(m, "server") }},
+		{"server_ready", func(ctx context.Context) error { return c.waitReady(ctx, "server", m.Ports.ServerHealth) }},
+		{"account", func(ctx context.Context) error {
 			account, err := c.psql(ctx, m, "SELECT id FROM accounts WHERE is_default AND status = 'active'")
 			if err != nil || !accountPattern.MatchString(account) || (m.AccountID != "" && account != m.AccountID) {
 				return errors.New("local cell bootstrap account mismatch")
@@ -215,11 +215,27 @@ func (c *Cell) Start(ctx context.Context) error {
 			m.AccountID, m.LastVerifiedSchemaVersion = account, schema
 			return writeAtomic(c.path("manifest.json"), m, nil)
 		}},
-		{"worker", func() error { return c.startChild(m, "worker") }},
-		{"worker_ready", func() error { return c.waitReady(ctx, "worker", m.Ports.WorkerHealth) }},
+		{"worker", func(context.Context) error { return c.startChild(m, "worker") }},
+		{"worker_ready", func(ctx context.Context) error { return c.waitReady(ctx, "worker", m.Ports.WorkerHealth) }},
 	}
 	for _, step := range steps {
-		if err := c.step("start", step.name, step.run); err != nil {
+		err := c.step("start", step.name, func() error {
+			timeout := c.cfg.Timeout
+			if step.name == "server_ready" {
+				timeout = c.readinessTimeout("server", m)
+			}
+			stepCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			// The readiness steps run even when the step context is already done:
+			// waitReady turns the cancellation into the fixed readiness cause with
+			// the pre-rollback process observation (slice LC-S2-PW3), which a bare
+			// context error would discard (review LC-S2-R1R4, R4-1).
+			if err := stepCtx.Err(); err != nil && step.name != "server_ready" && step.name != "worker_ready" {
+				return err
+			}
+			return step.run(stepCtx)
+		})
+		if err != nil {
 			if errors.Is(err, errInterrupted) {
 				return err
 			}
@@ -482,6 +498,20 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 	server, worker := inspection.Processes["server"], inspection.Processes["worker"]
 	result.ServerReady = server.Alive && server.Matches && ready(ctx, client, m.Ports.ServerHealth)
 	result.WorkerReady = worker.Alive && worker.Matches && ready(ctx, client, m.Ports.WorkerHealth)
+	// Readiness cannot survive a process exit or identity change during HTTP.
+	for _, component := range []struct {
+		name  string
+		ready *bool
+	}{{"server", &result.ServerReady}, {"worker", &result.WorkerReady}} {
+		if *component.ready {
+			current, err := c.processState(component.name)
+			previous := inspection.Processes[component.name]
+			*component.ready = err == nil && current.Alive && current.Matches && current.PID == previous.PID
+			if err == nil {
+				result.Processes[component.name] = current
+			}
+		}
+	}
 	return result, nil
 }
 

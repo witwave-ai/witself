@@ -169,6 +169,11 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	if err := launchCheckpoint("confirmed", process); err != nil {
 		return err
 	}
+	if component != "postgres" {
+		if err := c.observeChildExit(component, int(process.ProcessId), nil); err != nil {
+			return err
+		}
+	}
 	// This is the only transfer of cleanup ownership, after file Sync and
 	// publication of the final record. Windows power-loss durability is not claimed.
 	limits.BasicLimitInformation.LimitFlags = 0

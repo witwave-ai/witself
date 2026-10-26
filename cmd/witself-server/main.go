@@ -132,7 +132,28 @@ func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
 	return values["--overrides"], exceptionOutput, true
 }
 
+type startupMigrator interface {
+	Migrate() error
+	MigrateContext(context.Context) error
+}
+
+// These boundaries keep migration selection and its ordering before listener
+// startup testable without applying migrations or opening server listeners.
+type serverStartup struct {
+	migrator      func(*store.Store) startupMigrator
+	notifyContext func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)
+	run           func(context.Context, server.Config) error
+}
+
 func serve() int {
+	return serveWithStartup(serverStartup{
+		migrator:      func(st *store.Store) startupMigrator { return st },
+		notifyContext: signal.NotifyContext,
+		run:           server.Run,
+	})
+}
+
+func serveWithStartup(startup serverStartup) int {
 	cfg, runtime, err := serverRuntimeConfigFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -181,7 +202,7 @@ func serve() int {
 		))
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := startup.notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	cfg.AccountImportJobTimeout, cfg.AccountImportJobConcurrency, err = accountImportJobConfig()
@@ -224,7 +245,20 @@ func serve() int {
 			return 1
 		}
 		defer st.Close()
-		if err := st.Migrate(); err != nil {
+		migrator := startup.migrator(st)
+		var migrationErr error
+		if runtime.Local {
+			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+			migrationErr = migrator.MigrateContext(migrationCtx)
+			cancel()
+		} else {
+			migrationErr = migrator.Migrate()
+		}
+		if err := migrationErr; err != nil {
+			if runtime.Local && errors.Is(err, store.ErrMigrationWaitCanceled) {
+				fmt.Fprintf(os.Stderr, "witself-server: migration wait exceeded %s during %s\n", runtime.MigrationWait, store.MigrationWaitPhase(err))
+				return 1
+			}
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
 		}
@@ -2094,7 +2128,7 @@ func serve() int {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
 
-	runErr := server.Run(ctx, cfg)
+	runErr := startup.run(ctx, cfg)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", runErr)
 		return 1

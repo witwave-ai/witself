@@ -7,6 +7,16 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	// DefaultMigrationWait bounds migration waits in the selected local runtime.
+	DefaultMigrationWait = 120 * time.Second
+	// JobRestartNever preserves the worker's exit-on-return behavior.
+	JobRestartNever = "never"
+	// JobRestartOnFailure restarts unexpected worker job returns.
+	JobRestartOnFailure = "on-failure"
 )
 
 // Config contains local-only overrides. Hosted callers receive its zero value.
@@ -15,6 +25,8 @@ type Config struct {
 	APIAddr, HealthAddr, MetricsAddr string
 	DatabaseURL, SpoolDir, AccountID string
 	Jobs                             map[string]bool
+	MigrationWait                    time.Duration
+	JobRestartPolicy                 string
 }
 
 // This is the complete ambient configuration refusal inventory. A trailing star
@@ -77,7 +89,18 @@ func FromEnv(role string, lookup func(string) (string, bool), environ []string) 
 			}
 		}
 	}
-	cfg := Config{Local: true}
+	cfg := Config{Local: true, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever}
+	if raw := trimmed(lookup, "WITSELF_LOCAL_MIGRATION_WAIT", ""); raw != "" {
+		var err error
+		cfg.MigrationWait, err = time.ParseDuration(raw)
+		if err != nil || cfg.MigrationWait <= 0 {
+			return Config{}, fmt.Errorf("WITSELF_LOCAL_MIGRATION_WAIT must be a positive duration")
+		}
+	}
+	cfg.JobRestartPolicy = trimmed(lookup, "WITSELF_LOCAL_JOB_RESTART_POLICY", JobRestartNever)
+	if cfg.JobRestartPolicy != JobRestartNever && cfg.JobRestartPolicy != JobRestartOnFailure {
+		return Config{}, fmt.Errorf("WITSELF_LOCAL_JOB_RESTART_POLICY has an unsupported value")
+	}
 	cfg.DatabaseURL = trimmed(lookup, "WITSELF_DATABASE_URL", "")
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("WITSELF_DATABASE_URL is required under the local runtime configuration")

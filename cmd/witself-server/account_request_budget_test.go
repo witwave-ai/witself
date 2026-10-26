@@ -181,18 +181,62 @@ func TestServeConfiguresAccountRequestBudgetBeforeRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var serve *ast.FuncDecl
+	var serve, startup *ast.FuncDecl
 	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "serve" {
-			serve = fn
-			break
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			switch fn.Name.Name {
+			case "serve":
+				serve = fn
+			case "serveWithStartup":
+				startup = fn
+			}
 		}
 	}
-	if serve == nil {
-		t.Fatal("serve declaration not found")
+	if serve == nil || startup == nil {
+		t.Fatal("serve or serveWithStartup declaration not found")
+	}
+	// Follow the production delegation, including the actual listener binding,
+	// so moving startup behind its injectable seam does not weaken this guard.
+	if len(serve.Body.List) != 1 {
+		t.Fatal("serve must delegate directly to serveWithStartup")
+	}
+	result, ok := serve.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(result.Results) != 1 {
+		t.Fatal("serve must return serveWithStartup's result")
+	}
+	delegation, ok := result.Results[0].(*ast.CallExpr)
+	if !ok || len(delegation.Args) != 1 {
+		t.Fatal("serve must pass its production startup boundaries")
+	}
+	callee, ok := delegation.Fun.(*ast.Ident)
+	if !ok || callee.Name != "serveWithStartup" {
+		t.Fatal("serve must call serveWithStartup")
+	}
+	boundaries, ok := delegation.Args[0].(*ast.CompositeLit)
+	if !ok {
+		t.Fatal("serve must supply production startup boundaries")
+	}
+	listenerBound := false
+	for _, entry := range boundaries.Elts {
+		field, ok := entry.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		name, ok := field.Key.(*ast.Ident)
+		if !ok || name.Name != "run" {
+			continue
+		}
+		var expression bytes.Buffer
+		if err := format.Node(&expression, fset, field.Value); err != nil {
+			t.Fatal(err)
+		}
+		listenerBound = expression.String() == "server.Run"
+	}
+	if !listenerBound {
+		t.Fatal("serve must bind the startup listener runner to server.Run")
 	}
 	var configureCalls, runCalls []*ast.CallExpr
-	ast.Inspect(serve.Body, func(node ast.Node) bool {
+	ast.Inspect(startup.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -200,18 +244,18 @@ func TestServeConfiguresAccountRequestBudgetBeforeRun(t *testing.T) {
 		if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "configureAccountRequestBudget" {
 			configureCalls = append(configureCalls, call)
 		}
-		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Run" {
-			if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "server" {
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "run" {
+			if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "startup" {
 				runCalls = append(runCalls, call)
 			}
 		}
 		return true
 	})
 	if len(configureCalls) != 1 {
-		t.Fatalf("serve has %d configureAccountRequestBudget calls, want 1", len(configureCalls))
+		t.Fatalf("serveWithStartup has %d configureAccountRequestBudget calls, want 1", len(configureCalls))
 	}
 	if len(runCalls) != 1 {
-		t.Fatalf("serve has %d server.Run calls, want 1", len(runCalls))
+		t.Fatalf("serveWithStartup has %d listener runner calls, want 1", len(runCalls))
 	}
 	call := configureCalls[0]
 	if len(call.Args) != 3 {
