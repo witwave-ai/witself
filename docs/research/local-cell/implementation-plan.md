@@ -1030,3 +1030,4 @@ is recorded here with its date.
   on arm64 and x86_64, Windows 11 x86_64, and Linux glibc x86_64 and arm64, with
   the Windows proof first; resource budgets are set per platform by LC-S2-P
   (2026-10-24).
+- **D9 — Self-managed disaster recovery witness (pending):** must supported self-managed recovery include an independent witness or content copy that survives whole-host loss, or is explicit continuity-unproven recovery acceptable? Default until answered: continuity-unproven recovery is surfaced as such and never certified (sync-contract SC-6.13–SC-6.14). Asked when it blocks M5.
