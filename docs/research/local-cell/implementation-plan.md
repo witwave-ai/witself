@@ -857,9 +857,9 @@ slices, not implementation authorization; do not turn them into one long branch.
   Dependencies: LC-S1 (merged #822) / Evidence: fixture, real PostgreSQL, native /
   Activation: explicit harness only / Recovery: synthetic data only / Owner:
   vacant.
-- **LC-S2-P platform adapters** / Scope: one slice per OS; Windows first because
-  server/worker have no Windows release target and no native lifecycle proof yet
-  (cross-compilation already passes)
+- **LC-S2-P platform adapters** / Scope: platform adapters and native PostgreSQL
+  16 CI proofs; Windows adapters first because server/worker have no Windows
+  release target (cross-compilation already passes)
   ([server targets](../../../.goreleaser.yaml#L32),
   [worker targets](../../../.goreleaser.yaml#L71)) / Acceptance: native lifecycle
   proof for the selected OS / Dependencies: LC-S2 and the M0a platform decisions
@@ -868,6 +868,7 @@ slices, not implementation authorization; do not turn them into one long branch.
   LC-S2-P PW1 implements protected Windows DACLs, private creation, and local NTFS/reparse path boundaries for lifecycle state and the archive spool. Retained handles fence renames; in-place reparse changes are detected after pathname creation with handle-bound rollback, not prevented (handle-relative creation remains deferred). PW2 still owes the launch/environment adapter, and PW3 the native executable fixtures and PostgreSQL lifecycle proof.
   LC-S2-P PW2 implements suspended Windows launch with atomic Job Object crash cleanup, durable creation-identity fences, isolated console shutdown, and exact trusted child environments; PW3 owes real PostgreSQL 16 distribution/private-child-filesystem compatibility, executable lifecycle fixtures, and native lifecycle proof.
   LC-S2-P PW3 implements portable executable fixtures, retained harness builds, private PostgreSQL child files, and the pinned PostgreSQL 16 Windows CI proof with required lifecycle scenarios, UTF8/Unicode and process cleanup assertions; intentional Unix test/harness changes use the process temp directory, fail configured-but-incomplete PostgreSQL distributions, require PostgreSQL 16, and retain mode-0700 harness builds until purge; native CI results remain to be recorded, and the Windows 11 receipt remains PW4.
+  LC-S2-PL1 adds the required `localcell-unix` matrix alongside `localcell-windows`, running the same PostgreSQL 16 lifecycle proof protocol on Linux x86_64, macOS arm64 and macOS x86_64; each Unix runner builds the complete runtime from the checksum-pinned PGDG 16.10 source package in its temporary directory, native CI receipts remain to be recorded, and Linux arm64 proof is still owed.
 - **LC-S3 explicit local connection route** / Scope: CLI/MCP/hooks select a local
   cell with the directory blocked / Acceptance: atomic binding activation;
   fail-closed partial switch / Dependencies: LC-S1, M0b route decision (pending) /
@@ -987,7 +988,7 @@ before starting.
 | M0 | vacant | in progress | text split into M0a–M0c in this review | static review only | founder rows of the decision table | fixtures with LC-S1 |
 | M1 | vacant | proposed | none | none | LC-S1 authorization | LC-S1 |
 | M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
-| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | Windows runtime proof first; native lifecycle proof on all three OSes |
+| M3 | vacant | proposed | none | none | platform, packaging and PostgreSQL distribution decisions | Record native lifecycle CI receipts for Windows, Linux x86_64, macOS arm64 and macOS x86_64; Linux arm64 proof and the Windows 11 receipt remain owed |
 | M4 | vacant | proposed | none | none | capture, authority-continuity and accounting contracts | harness specification after M0 sync subset |
 | M5 | vacant | proposed | staged assertions (steps 1–4) | none | M4 barrier proof; destination admission policy | blocked on M4 |
 | M6 | vacant | proposed | none | none | deletion and conflict rules | blocked on M5 |
@@ -997,7 +998,7 @@ before starting.
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
-| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW3 Windows fixtures and PostgreSQL 16 proof | none | LC-S2; M0a | Windows proof first |
+| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW3 Windows fixtures and PL1 Unix PostgreSQL 16 CI proofs | native CI receipts pending | LC-S2; M0a | Record Windows, Linux x86_64 and both macOS architecture receipts; Linux arm64 and Windows 11 remain owed |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S5 | vacant | proposed | sync harness | none | [M0c open items](sync-contract.md#open-items-by-milestone) | settle contracts |
