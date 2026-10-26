@@ -1,0 +1,2095 @@
+{
+  "version": 1,
+  "kind": "source_inventory",
+  "scope": "Literal server route registrations, worker job declarations, dynamic action selectors and identified store writers. Semantic effects, cascade completeness, raw SQL/COPY/autocommit and role coverage remain unreviewed; no M4 proof.",
+  "entries": [
+    {
+      "name": "action:internal/server/agent_email.go:ack",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "ack",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:claim",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "claim",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:code-consumed",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "code-consumed",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:complete",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "complete",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:read",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "read",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:release",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "release",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email.go:renew",
+      "kind": "action",
+      "source": "internal/server/agent_email.go",
+      "symbol": "renew",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/agent_email_outbound.go:reply",
+      "kind": "action",
+      "source": "internal/server/agent_email_outbound.go",
+      "symbol": "reply",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/fact.go:confirm",
+      "kind": "action",
+      "source": "internal/server/fact.go",
+      "symbol": "confirm",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/fact.go:reject",
+      "kind": "action",
+      "source": "internal/server/fact.go",
+      "symbol": "reject",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/memory.go:forget",
+      "kind": "action",
+      "source": "internal/server/memory.go",
+      "symbol": "forget",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/memory.go:reactivate",
+      "kind": "action",
+      "source": "internal/server/memory.go",
+      "symbol": "reactivate",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/memory.go:restore",
+      "kind": "action",
+      "source": "internal/server/memory.go",
+      "symbol": "restore",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:ack",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "ack",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:claim",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "claim",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:complete",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "complete",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:peek",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "peek",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:read",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "read",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:release",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "release",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:renew",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "renew",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message.go:reply",
+      "kind": "action",
+      "source": "internal/server/message.go",
+      "symbol": "reply",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:cancel",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "cancel",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:claim",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "claim",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:complete",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "complete",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:decline",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "decline",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:offer",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "offer",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:release",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "release",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:renew",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "renew",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/message_request.go:select",
+      "kind": "action",
+      "source": "internal/server/message_request.go",
+      "symbol": "select",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/secret.go:archive",
+      "kind": "action",
+      "source": "internal/server/secret.go",
+      "symbol": "archive",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/secret.go:delete",
+      "kind": "action",
+      "source": "internal/server/secret.go",
+      "symbol": "delete",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/secret.go:restore",
+      "kind": "action",
+      "source": "internal/server/secret.go",
+      "symbol": "restore",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_enrollment.go:approve",
+      "kind": "action",
+      "source": "internal/server/vault_enrollment.go",
+      "symbol": "approve",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_enrollment.go:cancel",
+      "kind": "action",
+      "source": "internal/server/vault_enrollment.go",
+      "symbol": "cancel",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_enrollment.go:consume",
+      "kind": "action",
+      "source": "internal/server/vault_enrollment.go",
+      "symbol": "consume",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_enrollment.go:receive",
+      "kind": "action",
+      "source": "internal/server/vault_enrollment.go",
+      "symbol": "receive",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_key_rotation.go:cancel",
+      "kind": "action",
+      "source": "internal/server/vault_key_rotation.go",
+      "symbol": "cancel",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_key_rotation.go:commit",
+      "kind": "action",
+      "source": "internal/server/vault_key_rotation.go",
+      "symbol": "commit",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "action:internal/server/vault_key_rotation.go:stage",
+      "kind": "action",
+      "source": "internal/server/vault_key_rotation.go",
+      "symbol": "stage",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/agent_email_outbound.go:POST /v1/internal/agent-email-send:provider-event",
+      "kind": "route",
+      "source": "internal/server/agent_email_outbound.go",
+      "symbol": "POST /v1/internal/agent-email-send:provider-event",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/healthz",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/healthz",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/livez",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/livez",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/metrics",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/metrics",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/readyz",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/readyz",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/startupz",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/startupz",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/v1/capabilities",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/v1/capabilities",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:/v1/version",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/v1/version",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/facts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/facts",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/facts/{fact}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/facts/{fact}",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/memories/{memory}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/memories/{memory}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/operators/{operator}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/operators/{operator}",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/realms/{realm}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/realms/{realm}",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:DELETE /v1/realms/{realm}/agents/{agent}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "DELETE /v1/realms/{realm}/agents/{agent}",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/account",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/account",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/account/close-eligibility",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/account/close-eligibility",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/account/events",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/account/events",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/account/placement-policy",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/account/placement-policy",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/accounts/",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/accounts/",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/activity",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/activity",
+      "family": "preferences_consent",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/agents/{agent}/avatar",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/agents/{agent}/avatar",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/agents/{agent}/avatar/history",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/agents/{agent}/avatar/history",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/agents/{agent}/avatar/versions/{version}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/agents/{agent}/avatar/versions/{version}",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/agents/{agent}/email-receive",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/agents/{agent}/email-receive",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/agents/{agent}/email-send",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/agents/{agent}/email-send",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/auth/whoami",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/auth/whoami",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email/address",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email/address",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email/checkpoint",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email/checkpoint",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email/sent",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email/sent",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email/sent/{id}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email/sent/{id}",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/email:status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/email:status",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/export",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/export",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/fact-candidates",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/fact-candidates",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/fact-candidates/{candidate}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/fact-candidates/{candidate}",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/fact-occurrences",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/fact-occurrences",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/fact-subjects",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/fact-subjects",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/facts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/facts",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/facts/{fact}/history",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/facts/{fact}/history",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/facts:status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/facts:status",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memories",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memories",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memories/{memory}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memories/{memory}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memories/{memory}/history",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memories/{memory}/history",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memories:status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memories:status",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-preflight",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-preflight",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-requests",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-requests",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-requests/{request}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-requests/{request}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-runs/{run}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-runs/{run}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-runs/{run}/inputs",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-runs/{run}/inputs",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-runs/{run}/plan",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-runs/{run}/plan",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-curation-status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-curation-status",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/memory-vector-profiles",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/memory-vector-profiles",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/message-requests",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/message-requests",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/message-requests/{request}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/message-requests/{request}",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/messages",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/messages",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/messages/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/messages/{action}",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/operators",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/operators",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/realms",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/realms",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/realms/{realm}/agents",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/realms/{realm}/agents",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/realms/{realm}/avatar-style",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/realms/{realm}/avatar-style",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/realms/{realm}/email-receive",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/realms/{realm}/email-receive",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/realms/{realm}/email-send",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/realms/{realm}/email-send",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/secrets",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/secrets",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/secrets/{secret}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/secrets/{secret}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/secrets:status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/secrets:status",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/avatar",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/avatar",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/avatar/history",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/avatar/history",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/avatar/style",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/avatar/style",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/avatar/versions/{version}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/avatar/versions/{version}",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/dashboard-preferences",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/dashboard-preferences",
+      "family": "preferences_consent",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/self/peers",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/self/peers",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/support/tickets",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/support/tickets",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/support/tickets/{ticket}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/support/tickets/{ticket}",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/transcripts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/transcripts",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/transcripts/{transcript}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/transcripts/{transcript}",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/usage",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/usage",
+      "family": "usage_billing",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/enrollments",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/enrollments",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/enrollments/{enrollment}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/enrollments/{enrollment}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/key-epochs/current",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/key-epochs/current",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/rotations/open",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/rotations/open",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/rotations/{rotation}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/rotations/{rotation}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/vault/rotations/{rotation}/items",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/vault/rotations/{rotation}/items",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:GET /v1/whoami",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "GET /v1/whoami",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/account/placement-policy",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/account/placement-policy",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/accounts/",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/accounts/",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/agents/{agent}/avatar-policy",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/agents/{agent}/avatar-policy",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/agents/{agent}/avatar-quota",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/agents/{agent}/avatar-quota",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/agents/{agent}/email-receive",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/agents/{agent}/email-receive",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/agents/{agent}/email-send",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/agents/{agent}/email-send",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/memories/{memory}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/memories/{memory}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/realms/{realm}/email-receive",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/realms/{realm}/email-receive",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/realms/{realm}/email-send",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/realms/{realm}/email-send",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PATCH /v1/support/tickets/{ticket}/state",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PATCH /v1/support/tickets/{ticket}/state",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/account:close",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/account:close",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/account:rename",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/account:rename",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/account:resume",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/account:resume",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/account:suspend",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/account:suspend",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/accounts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/accounts",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/accounts/",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/accounts/",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/accounts:provision-exact",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/accounts:provision-exact",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/avatar/proposals",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/avatar/proposals",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/avatar:activate",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/avatar:activate",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/avatar:reject",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/avatar:reject",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/avatar:reset",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/avatar:reset",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/avatar:rollback",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/avatar:rollback",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/curator-tokens",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/curator-tokens",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/agents/{agent}/tokens",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/agents/{agent}/tokens",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/auth/bootstrap",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/auth/bootstrap",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/email/retry-canary:arm",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/email/retry-canary:arm",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/email/retry-canary:status",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/email/retry-canary:status",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/email/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/email/{action}",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/email:listen",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/email:listen",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/email:send",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/email:send",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/events/admin:list",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/events/admin:list",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/fact-candidates",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/fact-candidates",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/fact-candidates/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/fact-candidates/{action}",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/fact-subjects/{subject}/aliases",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/fact-subjects/{subject}/aliases",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/facts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/facts",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/internal/agent-email:ingest",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/internal/agent-email:ingest",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memories",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memories",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memories/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memories/{action}",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memories/{memory}/supersede",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memories/{memory}/supersede",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memories:recall",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memories:recall",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-requests",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-requests",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-requests/{request}/start",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-requests/{request}/start",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/abandon",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/abandon",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/apply",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/apply",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/cancel",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/cancel",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/plan",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/plan",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/renew",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/renew",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-curation-runs/{run}/rollback",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-curation-runs/{run}/rollback",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-evidence/{evidence}/resolution",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-evidence/{evidence}/resolution",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-vector-profiles",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-vector-profiles",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/memory-vectors",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/memory-vectors",
+      "family": "memories_capture_curation_vectors_deletion",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/message-requests",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/message-requests",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/message-requests/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/message-requests/{action}",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/messages",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/messages",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/messages/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/messages/{action}",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/messages:listen",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/messages:listen",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/operators",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/operators",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/operators/self/tokens",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/operators/self/tokens",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/realms",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/realms",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/realms/{realm}/agents",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/realms/{realm}/agents",
+      "family": "realms",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/realms/{realm}/agents:with-email-segment",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/realms/{realm}/agents:with-email-segment",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/realms/{realm}/avatar-style/versions",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/realms/{realm}/avatar-style/versions",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/secrets",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/secrets",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/secrets/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/secrets/{action}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/secrets/{secret}/fields/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/secrets/{secret}/fields/{action}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/activity",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/activity",
+      "family": "preferences_consent",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/avatar/proposals",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/avatar/proposals",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/avatar:activate",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/avatar:activate",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/avatar:generation-failed",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/avatar:generation-failed",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/avatar:reset",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/avatar:reset",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/self/avatar:rollback",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/self/avatar:rollback",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/support/admin:list-tickets",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/support/admin:list-tickets",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/support/admin:match-contact",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/support/admin:match-contact",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/support/tickets",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/support/tickets",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/support/tickets/{ticket}/messages",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/support/tickets/{ticket}/messages",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/tokens/",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/tokens/",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/transcripts",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/transcripts",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/transcripts/{transcript}/entries",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/transcripts/{transcript}/entries",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/transcripts/{transcript}/entries:batch",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/transcripts/{transcript}/entries:batch",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/transcripts/{transcript}/entries:redact",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/transcripts/{transcript}/entries:redact",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/vault/enrollments",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/vault/enrollments",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/vault/enrollments/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/vault/enrollments/{action}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/vault/key-epochs",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/vault/key-epochs",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/vault/rotations",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/vault/rotations",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:POST /v1/vault/rotations/{action}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "POST /v1/vault/rotations/{action}",
+      "family": "secrets_vault",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PUT /v1/fact-subjects/{subject}",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PUT /v1/fact-subjects/{subject}",
+      "family": "facts_subjects_candidates_aliases",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "route:internal/server/server.go:PUT /v1/self/dashboard-preferences",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "PUT /v1/self/dashboard-preferences",
+      "family": "preferences_consent",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:account_purge",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "accountPurgeJob",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:agent_email_outbound",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "agentEmailOutboundJob",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:agent_email_rate_bucket_cleanup",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "agentEmailRateBucketCleanupJob",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:agent_email_retention",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "agentEmailRetentionJob",
+      "family": "inbound_outbound_email",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:avatar_style_rollout",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "avatarStyleRolloutJob",
+      "family": "avatars",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:message_rate_bucket_cleanup",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "messageRateBucketCleanupJob",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:message_retention",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "messageRetentionJob",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "worker:transcript_retention",
+      "kind": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "transcriptRetentionJob",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:DeleteAgent",
+      "kind": "writer",
+      "source": "internal/store/agent.go",
+      "symbol": "DeleteAgent",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ExportAccount",
+      "kind": "writer",
+      "source": "internal/store/export.go",
+      "symbol": "ExportAccount",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ExportAccountBackup",
+      "kind": "writer",
+      "source": "internal/store/export.go",
+      "symbol": "ExportAccountBackup",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ExportAccountSelf",
+      "kind": "writer",
+      "source": "internal/store/export.go",
+      "symbol": "ExportAccountSelf",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:FinalizeAccountEvacuationSource",
+      "kind": "writer",
+      "source": "internal/store/finalize_evacuation.go",
+      "symbol": "FinalizeAccountEvacuationSource",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ImportAccount",
+      "kind": "writer",
+      "source": "internal/store/import.go",
+      "symbol": "ImportAccount",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ImportAccountEvacuation",
+      "kind": "writer",
+      "source": "internal/store/import.go",
+      "symbol": "ImportAccountEvacuation",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ListMessageRequests",
+      "kind": "writer",
+      "source": "internal/store/message_request.go",
+      "symbol": "ListMessageRequests",
+      "family": "messages_complete_requests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:ProcessAccountPurgeBatch",
+      "kind": "writer",
+      "source": "internal/store/account_purge.go",
+      "symbol": "ProcessAccountPurgeBatch",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:PutDashboardPreferences",
+      "kind": "writer",
+      "source": "internal/store/dashboard_preferences.go",
+      "symbol": "PutDashboardPreferences",
+      "family": "preferences_consent",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:RunSupportTicketAgeOutWorker",
+      "kind": "writer",
+      "source": "internal/store/support_age_out.go",
+      "symbol": "RunSupportTicketAgeOutWorker",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:RunTranscriptStorageReconcileWorker",
+      "kind": "writer",
+      "source": "internal/store/transcript_storage_usage_reconcile.go",
+      "symbol": "RunTranscriptStorageReconcileWorker",
+      "family": "transcripts",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:purgePortableAccountRowsTx",
+      "kind": "writer",
+      "source": "internal/store/finalize_evacuation.go",
+      "symbol": "purgePortableAccountRowsTx",
+      "family": "backups_exports_imports",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "writer:recordUsageEventTx",
+      "kind": "writer",
+      "source": "internal/store/usage.go",
+      "symbol": "recordUsageEventTx",
+      "family": "usage_billing",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    }
+  ]
+}

@@ -1,0 +1,610 @@
+{
+  "version": 1,
+  "kind": "writers",
+  "rules": "SC-5.2,SC-5.8,O-10",
+  "scope": "SCAFFOLD_ONLY: source inventory does not prove writer, table or database-role capture coverage",
+  "writers": [
+    {
+      "name": "server",
+      "source": "internal/server/server.go",
+      "symbol": "apiMux",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    },
+    {
+      "name": "worker",
+      "source": "cmd/witself-worker/main.go",
+      "symbol": "registerJobs",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    },
+    {
+      "name": "foreground_reconciliation",
+      "source": "internal/store/message_request.go",
+      "symbol": "ListMessageRequests",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    },
+    {
+      "name": "failed_request_reconciliation",
+      "source": "internal/store/message_request.go",
+      "symbol": "reconcileMessageRequestsTx",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    },
+    {
+      "name": "maintenance",
+      "source": "internal/store/account_purge.go",
+      "symbol": "ProcessAccountPurgeBatch",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    },
+    {
+      "name": "raw_sql_copy_autocommit",
+      "source": "internal/store/import.go",
+      "symbol": "ImportAccount",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "role": "UNVERIFIED_DATABASE_PRINCIPAL",
+      "coverage": "Semantic writes, rollback/cascade effects and admission ownership need M4 review"
+    }
+  ],
+  "tables": [
+    {
+      "name": "account_evacuation_finalizations",
+      "source": "internal/store/migrations/0071_finalize_source_evacuation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "account_events",
+      "source": "internal/store/migrations/0014_add_account_events.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "account_provision_receipts",
+      "source": "internal/store/migrations/0072_add_account_provision_receipts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "account_purge_sweep_state",
+      "source": "internal/store/migrations/0092_add_account_purge.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "accounts",
+      "source": "internal/store/migrations/0001_create_accounts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_activity",
+      "source": "internal/store/migrations/0039_add_agent_activity.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_avatar_activations",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_avatar_profiles",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_avatar_rejections",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_avatar_resets",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_avatar_versions",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_dashboard_preferences",
+      "source": "internal/store/migrations/0057_add_agent_dashboard_preferences.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_account_rate_buckets",
+      "source": "internal/store/migrations/0090_bound_agent_email_account_traffic.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_address_domains",
+      "source": "internal/store/migrations/0087_add_agent_email_address_domains.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_addresses",
+      "source": "internal/store/migrations/0059_add_agent_email.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_cell_storage_capacity",
+      "source": "internal/store/migrations/0091_bound_agent_email_cell_storage.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_custom_domain_routes",
+      "source": "internal/store/migrations/0088_add_agent_email_custom_domain_routes.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_deliveries",
+      "source": "internal/store/migrations/0059_add_agent_email.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_mailboxes",
+      "source": "internal/store/migrations/0059_add_agent_email.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_messages",
+      "source": "internal/store/migrations/0059_add_agent_email.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_outbound_messages",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_outbound_provider_events",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_outbound_rate_buckets",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_outbound_recipient_suppressions",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_rate_buckets",
+      "source": "internal/store/migrations/0084_add_agent_email_rate_buckets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_realm_aliases",
+      "source": "internal/store/migrations/0085_add_agent_email_realm_aliases.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_realm_receive_controls",
+      "source": "internal/store/migrations/0060_add_agent_email_receive_controls.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_realm_send_controls",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_retention_account_scan_state",
+      "source": "internal/store/migrations/0069_add_agent_email_retention.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_retention_worker_lanes",
+      "source": "internal/store/migrations/0069_add_agent_email_retention.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_retry_canary_arms",
+      "source": "internal/store/migrations/0061_add_agent_email_retry_canary.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_email_send_controls",
+      "source": "internal/store/migrations/0089_add_agent_email_outbound.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_deliveries",
+      "source": "internal/store/migrations/0020_add_agent_messaging.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_rate_buckets",
+      "source": "internal/store/migrations/0083_add_agent_message_rate_buckets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_request_candidates",
+      "source": "internal/store/migrations/0038_add_open_message_requests.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_request_claims",
+      "source": "internal/store/migrations/0038_add_open_message_requests.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_request_selections",
+      "source": "internal/store/migrations/0038_add_open_message_requests.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_message_requests",
+      "source": "internal/store/migrations/0038_add_open_message_requests.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_messages",
+      "source": "internal/store/migrations/0020_add_agent_messaging.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_vault_key_enrollments",
+      "source": "internal/store/migrations/0056_add_vault_key_lifecycle.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_vault_key_rotation_items",
+      "source": "internal/store/migrations/0056_add_vault_key_lifecycle.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_vault_key_rotations",
+      "source": "internal/store/migrations/0056_add_vault_key_lifecycle.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agent_vault_keys",
+      "source": "internal/store/migrations/0055_add_agent_secrets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "agents",
+      "source": "internal/store/migrations/0005_create_agents.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "avatar_mutation_receipts",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "avatar_style_pack_versions",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "avatar_style_packs",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "avatar_style_rollout_jobs",
+      "source": "internal/store/migrations/0052_add_avatar_style_rollouts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "fact_assertions",
+      "source": "internal/store/migrations/0022_add_facts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "fact_candidates",
+      "source": "internal/store/migrations/0023_add_fact_candidates.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "fact_mutation_tombstones",
+      "source": "internal/store/migrations/0027_add_fact_deletion.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "fact_subjects",
+      "source": "internal/store/migrations/0022_add_facts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "facts",
+      "source": "internal/store/migrations/0022_add_facts.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memories",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_change_clocks",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_actions",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_cursors",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_lanes",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_mutations",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_requests",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_run_inputs",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_curation_runs",
+      "source": "internal/store/migrations/0030_add_memory_curation.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_deleted_references",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_evidence",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_relations",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_vector_profiles",
+      "source": "internal/store/migrations/0032_add_memory_vectors.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_vectors",
+      "source": "internal/store/migrations/0032_add_memory_vectors.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "memory_versions",
+      "source": "internal/store/migrations/0029_add_narrative_memories.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "message_retention_account_scan_state",
+      "source": "internal/store/migrations/0068_add_message_retention.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "message_retention_thread_activity",
+      "source": "internal/store/migrations/0068_add_message_retention.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "message_retention_worker_lanes",
+      "source": "internal/store/migrations/0068_add_message_retention.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "operators",
+      "source": "internal/store/migrations/0002_create_operators.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "realm_avatar_styles",
+      "source": "internal/store/migrations/0050_add_agent_avatars.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "realms",
+      "source": "internal/store/migrations/0004_create_realms.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "secret_deks",
+      "source": "internal/store/migrations/0055_add_agent_secrets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "secret_fields",
+      "source": "internal/store/migrations/0055_add_agent_secrets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "secret_mutation_receipts",
+      "source": "internal/store/migrations/0055_add_agent_secrets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "secrets",
+      "source": "internal/store/migrations/0055_add_agent_secrets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "support_ticket_messages",
+      "source": "internal/store/migrations/0015_add_support_tickets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "support_tickets",
+      "source": "internal/store/migrations/0015_add_support_tickets.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "tokens",
+      "source": "internal/store/migrations/0003_create_tokens.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_conversations",
+      "source": "internal/store/migrations/0019_add_transcript_ledger.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_entries",
+      "source": "internal/store/migrations/0019_add_transcript_ledger.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_retention_account_scan_state",
+      "source": "internal/store/migrations/0062_add_account_plan_policies.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_retention_sweep_state",
+      "source": "internal/store/migrations/0062_add_account_plan_policies.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_retention_worker_lanes",
+      "source": "internal/store/migrations/0066_add_parallel_transcript_retention_lanes.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "transcript_storage_usage",
+      "source": "internal/store/migrations/0101_add_transcript_storage_usage.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "usage_events",
+      "source": "internal/store/migrations/0021_add_agent_usage.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "usage_rollups",
+      "source": "internal/store/migrations/0021_add_agent_usage.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "vault_key_enrollment_receipts",
+      "source": "internal/store/migrations/0056_add_vault_key_lifecycle.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "vault_key_rotation_receipts",
+      "source": "internal/store/migrations/0056_add_vault_key_lifecycle.sql",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "kind": "policies",
+  "entries": [
+    {
+      "name": "Local standalone",
+      "messaging": "Enabled under explicit M0b local policy",
+      "hosted_email": "unsupported; local history remains readable",
+      "provider_credentials": "Provider dispatch credentials unsupported in replica state",
+      "vault_capacity_source": "Explicit M0b standalone policy, never missing-limit inference",
+      "paid_plan_authority": "unsupported",
+      "rules": "SC-8.2",
+      "disposition": "I",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "Self-managed destination",
+      "messaging": "Destination-authorized; no SaaS subscription prerequisite",
+      "hosted_email": "Only an explicitly operated hosted email service; otherwise unsupported",
+      "provider_credentials": "Destination operator/service custody; copying through sync unsupported",
+      "vault_capacity_source": "Authoritative self-managed destination policy",
+      "paid_plan_authority": "Destination policy only; asserting a SaaS paid plan unsupported",
+      "rules": "SC-8.2",
+      "disposition": "I",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
+      "name": "SaaS destination",
+      "messaging": "Destination policy for connected service; independent local messaging continues",
+      "hosted_email": "Hosted entitlement, routing and capacity required",
+      "provider_credentials": "Hosted service custody; copying through sync unsupported",
+      "vault_capacity_source": "Authoritative SaaS destination policy",
+      "paid_plan_authority": "Authoritative SaaS billing/control plane only",
+      "rules": "SC-8.2",
+      "disposition": "I",
+      "evidence": "SCAFFOLD_ONLY"
+    }
+  ]
+}

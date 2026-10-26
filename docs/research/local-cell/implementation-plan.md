@@ -985,7 +985,7 @@ before starting.
 
 | ID | Owner | State | PR or decision | Evidence | Unresolved gate | Next action |
 |---|---|---|---|---|---|---|
-| M0 | planning lead | in progress | M0a/M0b text; M0c contract record merged as a reviewed draft (#837) | static review; sync-contract.md with 53 DECIDED rules and 19 owned OPEN items | founder items O-14 (M8), O-15 (M7), O-17 (M5); planning-lead items O-2/O-5/O-7/O-9/O-11/O-12 block M4 | settle the M4-blocking OPEN items, then spec LC-S5 |
+| M0 | planning lead | in progress | M0a/M0b text; M0c contract record merged as a reviewed draft (#837); six M4-blocking design items CLOSED in #842 | static review; sync-contract.md with 84 numbered rules including 12 matrix rows and 13 OPEN rows remaining in the consolidated table | founder items O-14 (M8), O-15 (M7), O-17 (M5); CLOSED O-2/O-5/O-7/O-9/O-11/O-12 retain LC-S5/M4 implementation and runtime proof obligations | complete LC-S5 fixtures and M4 proof; resolve remaining OPEN items with their owners |
 | M1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S1 #822, LC-S2 #824, LC-S3 #825, LC-S4 #826, LC-S2-R1 #839 | unit, real PostgreSQL, hermetic lifecycle, native proofs on four platform rows, executable reviews | service adapters, downloads and installer manifest trust remain deferred | service adapters slice after the sync track starts |
 | M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
 | M3 | vacant | proposed | native lifecycle CI receipts recorded: Windows (#834), Linux x86_64, macOS arm64, macOS x86_64 (#838); LC-S2-PL2 adds the Linux arm64 row | required `localcell-windows` and `localcell-unix` checks; Linux arm64 receipt pending this PR's CI run (owner records timing) | packaging and installer decisions; Windows 11 receipt (founder VM); per-platform resource budgets (D8) | per-platform resource budgets; installer/manifest trust slice |
@@ -1002,7 +1002,17 @@ before starting.
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
-| LC-S5 | vacant | proposed | sync harness | none | [M0c open items](sync-contract.md#open-items-by-milestone) | settle the M4-blocking items, then spec |
+| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | LC-S5A implemented; owner gate/merge pending | synthetic topology, catalogs and deterministic scheduler | model fixtures; opted-in real PostgreSQL isolation and ordinary remote-client tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing adapters remain SCAFFOLD_ONLY | owner gates LC-S5A; LC-S5B identities/protocol model next |
+
+LC-S5A lands the synthetic harness foundation: four separately migrated schemas
+plus a minimal witness in one disposable PostgreSQL database, an ordinary
+authenticated remote-only client, deterministic model scheduling/replay, and the
+H01–H69 and operation-family catalogs. This worker implementation awaits the
+owner's gate and merge. All transports start disconnected, no replication adapter
+is installed, and the writer/accounting/movement inventories explicitly retain
+`SCAFFOLD_ONLY` obligations. The witness shares the database's failure domain.
+No production migration, endpoint, worker registration or default changes;
+failure-harness scaffolding is not synchronization and does not close M4.
 
 ## Founder decisions (answered)
 
