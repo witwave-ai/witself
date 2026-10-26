@@ -1,0 +1,387 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "name": "null",
+      "source": {
+        "kind": "null"
+      },
+      "canonical": "{\"t\":\"null\",\"v\":1}"
+    },
+    {
+      "name": "false",
+      "source": {
+        "kind": "bool",
+        "value": false
+      },
+      "canonical": "{\"t\":\"bool\",\"v\":1,\"value\":false}"
+    },
+    {
+      "name": "true",
+      "source": {
+        "kind": "bool",
+        "value": true
+      },
+      "canonical": "{\"t\":\"bool\",\"v\":1,\"value\":true}"
+    },
+    {
+      "name": "empty",
+      "source": {
+        "kind": "string",
+        "value": ""
+      },
+      "canonical": "{\"t\":\"string\",\"v\":1,\"value\":\"\"}"
+    },
+    {
+      "name": "unicode_controls",
+      "source": {
+        "kind": "string",
+        "value": "\u00e9\ud83d\ude00 / <>&\u2028\u2029\b\f\n\r\t\u0000\"\\"
+      },
+      "canonical": "{\"t\":\"string\",\"v\":1,\"value\":\"\u00e9\ud83d\ude00 / \\u003c\\u003e\\u0026\\u2028\\u2029\\b\\f\\n\\r\\t\\u0000\\\"\\\\\"}"
+    },
+    {
+      "name": "negative_zero",
+      "source": {
+        "kind": "decimal",
+        "value": "-0.000e+20"
+      },
+      "canonical": "{\"coefficient\":\"0\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "trailing_zero",
+      "source": {
+        "kind": "decimal",
+        "value": "123.45000"
+      },
+      "canonical": "{\"coefficient\":\"12345\",\"exponent\":\"-2\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "large_integer_a",
+      "source": {
+        "kind": "decimal",
+        "value": "9007199254740992"
+      },
+      "canonical": "{\"coefficient\":\"9007199254740992\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "large_integer_b",
+      "source": {
+        "kind": "decimal",
+        "value": "9007199254740993"
+      },
+      "canonical": "{\"coefficient\":\"9007199254740993\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "large_fraction",
+      "source": {
+        "kind": "decimal",
+        "value": "123456789012345678901234567890.1234567890123456789"
+      },
+      "canonical": "{\"coefficient\":\"1234567890123456789012345678901234567890123456789\",\"exponent\":\"-19\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "tiny",
+      "source": {
+        "kind": "decimal",
+        "value": "1e-1000000"
+      },
+      "canonical": "{\"coefficient\":\"1\",\"exponent\":\"-1000000\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "huge",
+      "source": {
+        "kind": "decimal",
+        "value": "1e1000000"
+      },
+      "canonical": "{\"coefficient\":\"1\",\"exponent\":\"1000000\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "exponent_shift",
+      "source": {
+        "kind": "decimal",
+        "value": "-123000e-7"
+      },
+      "canonical": "{\"coefficient\":\"-123\",\"exponent\":\"-4\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "equivalent_a",
+      "source": {
+        "kind": "decimal",
+        "value": "1.00"
+      },
+      "canonical": "{\"coefficient\":\"1\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "equivalent_b",
+      "source": {
+        "kind": "decimal",
+        "value": "10e-1"
+      },
+      "canonical": "{\"coefficient\":\"1\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "binary_empty",
+      "source": {
+        "kind": "binary",
+        "bytes": []
+      },
+      "canonical": "{\"t\":\"binary\",\"v\":1,\"value\":\"\"}"
+    },
+    {
+      "name": "binary_tail",
+      "source": {
+        "kind": "binary",
+        "bytes": [
+          0,
+          1,
+          254,
+          255
+        ]
+      },
+      "canonical": "{\"t\":\"binary\",\"v\":1,\"value\":\"AAH-_w\"}"
+    },
+    {
+      "name": "ordered_list",
+      "source": {
+        "kind": "list",
+        "items": [
+          {
+            "kind": "string",
+            "value": "b"
+          },
+          {
+            "kind": "null"
+          },
+          {
+            "kind": "string",
+            "value": "a"
+          }
+        ]
+      },
+      "canonical": "{\"items\":[{\"t\":\"string\",\"v\":1,\"value\":\"b\"},{\"t\":\"null\",\"v\":1},{\"t\":\"string\",\"v\":1,\"value\":\"a\"}],\"t\":\"list\",\"v\":1}"
+    },
+    {
+      "name": "omitted_and_null",
+      "source": {
+        "kind": "object",
+        "fields": [
+          {
+            "name": "omit",
+            "value": {
+              "kind": "omitted"
+            }
+          },
+          {
+            "name": "null",
+            "value": {
+              "kind": "null"
+            }
+          }
+        ]
+      },
+      "canonical": "{\"fields\":{\"null\":{\"t\":\"null\",\"v\":1}},\"t\":\"object\",\"v\":1}"
+    },
+    {
+      "name": "unicode_key_order",
+      "source": {
+        "kind": "object",
+        "fields": [
+          {
+            "name": "\ud83d\ude00",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          },
+          {
+            "name": "\uffff",
+            "value": {
+              "kind": "null"
+            }
+          },
+          {
+            "name": "\u00e9",
+            "value": {
+              "kind": "string",
+              "value": "scalar"
+            }
+          }
+        ]
+      },
+      "canonical": "{\"fields\":{\"\u00e9\":{\"t\":\"string\",\"v\":1,\"value\":\"scalar\"},\"\uffff\":{\"t\":\"null\",\"v\":1},\"\ud83d\ude00\":{\"t\":\"bool\",\"v\":1,\"value\":true}},\"t\":\"object\",\"v\":1}"
+    },
+    {
+      "name": "nested_domain",
+      "source": {
+        "kind": "domain",
+        "tag": "facts_subjects_candidates_aliases",
+        "value": {
+          "kind": "object",
+          "fields": [
+            {
+              "name": "z",
+              "value": {
+                "kind": "domain",
+                "tag": "transcripts",
+                "value": {
+                  "kind": "list",
+                  "items": [
+                    {
+                      "kind": "decimal",
+                      "value": "1.20"
+                    },
+                    {
+                      "kind": "binary",
+                      "bytes": [
+                        255
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "a",
+              "value": {
+                "kind": "null"
+              }
+            }
+          ]
+        }
+      },
+      "canonical": "{\"t\":\"domain\",\"tag\":\"facts_subjects_candidates_aliases\",\"v\":1,\"value\":{\"fields\":{\"a\":{\"t\":\"null\",\"v\":1},\"z\":{\"t\":\"domain\",\"tag\":\"transcripts\",\"v\":1,\"value\":{\"items\":[{\"coefficient\":\"12\",\"exponent\":\"-1\",\"t\":\"decimal\",\"v\":1},{\"t\":\"binary\",\"v\":1,\"value\":\"_w\"}],\"t\":\"list\",\"v\":1}}},\"t\":\"object\",\"v\":1}}"
+    },
+    {
+      "name": "long_trailing_coefficient",
+      "source": {
+        "kind": "decimal",
+        "value": "1",
+        "trailing_zeros": 4096
+      },
+      "canonical": "{\"coefficient\":\"1\",\"exponent\":\"4096\",\"t\":\"decimal\",\"v\":1}"
+    },
+    {
+      "name": "zero_large_exponent",
+      "source": {
+        "kind": "decimal",
+        "value": "0e2147483648"
+      },
+      "canonical": "{\"coefficient\":\"0\",\"exponent\":\"0\",\"t\":\"decimal\",\"v\":1}"
+    }
+  ],
+  "reject": [
+    {
+      "name": "duplicate_version",
+      "wire": "{\"v\":1,\"v\":1,\"t\":\"null\"}"
+    },
+    {
+      "name": "escaped_duplicate",
+      "wire": "{\"v\":1,\"\\u0076\":1,\"t\":\"null\"}"
+    },
+    {
+      "name": "unknown_field",
+      "wire": "{\"v\":1,\"t\":\"null\",\"extra\":false}"
+    },
+    {
+      "name": "missing_version",
+      "wire": "{\"t\":\"null\"}"
+    },
+    {
+      "name": "version_string",
+      "wire": "{\"v\":\"1\",\"t\":\"null\"}"
+    },
+    {
+      "name": "version_decimal",
+      "wire": "{\"v\":1.0,\"t\":\"null\"}"
+    },
+    {
+      "name": "unknown_kind",
+      "wire": "{\"v\":1,\"t\":\"float\"}"
+    },
+    {
+      "name": "omitted_wire",
+      "wire": "{\"v\":1,\"t\":\"\"}"
+    },
+    {
+      "name": "null_string",
+      "wire": "{\"v\":1,\"t\":\"string\",\"value\":null}"
+    },
+    {
+      "name": "high_surrogate",
+      "wire": "{\"v\":1,\"t\":\"string\",\"value\":\"\\ud800\"}"
+    },
+    {
+      "name": "low_surrogate",
+      "wire": "{\"v\":1,\"t\":\"string\",\"value\":\"\\udc00\"}"
+    },
+    {
+      "name": "wrong_pair",
+      "wire": "{\"v\":1,\"t\":\"string\",\"value\":\"\\ud800\\u0041\"}"
+    },
+    {
+      "name": "binary_padding",
+      "wire": "{\"v\":1,\"t\":\"binary\",\"value\":\"_w==\"}"
+    },
+    {
+      "name": "binary_tail_bits",
+      "wire": "{\"v\":1,\"t\":\"binary\",\"value\":\"_x\"}"
+    },
+    {
+      "name": "binary_alphabet",
+      "wire": "{\"v\":1,\"t\":\"binary\",\"value\":\"/w\"}"
+    },
+    {
+      "name": "negative_zero_coefficient",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"-0\",\"exponent\":\"0\"}"
+    },
+    {
+      "name": "coefficient_zeros",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"10\",\"exponent\":\"0\"}"
+    },
+    {
+      "name": "coefficient_leading",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"01\",\"exponent\":\"0\"}"
+    },
+    {
+      "name": "exponent_leading",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"1\",\"exponent\":\"01\"}"
+    },
+    {
+      "name": "exponent_plus",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"1\",\"exponent\":\"+1\"}"
+    },
+    {
+      "name": "exponent_overflow",
+      "wire": "{\"v\":1,\"t\":\"decimal\",\"coefficient\":\"1\",\"exponent\":\"1000001\"}"
+    },
+    {
+      "name": "bare_number",
+      "wire": "9007199254740993"
+    },
+    {
+      "name": "trailing_json",
+      "wire": "{\"v\":1,\"t\":\"null\"}{}"
+    },
+    {
+      "name": "unknown_domain",
+      "wire": "{\"v\":1,\"t\":\"domain\",\"tag\":\"unreviewed\",\"value\":{\"v\":1,\"t\":\"null\"}}"
+    },
+    {
+      "name": "duplicate_fields",
+      "wire": "{\"v\":1,\"t\":\"object\",\"fields\":{\"x\":{\"v\":1,\"t\":\"null\"},\"x\":{\"v\":1,\"t\":\"null\"}}}"
+    },
+    {
+      "name": "missing_items",
+      "wire": "{\"v\":1,\"t\":\"list\"}"
+    },
+    {
+      "name": "null_fields",
+      "wire": "{\"v\":1,\"t\":\"object\",\"fields\":null}"
+    },
+    {
+      "name": "invalid_utf8",
+      "invalid_utf8": true
+    }
+  ]
+}

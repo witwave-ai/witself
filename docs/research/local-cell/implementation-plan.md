@@ -1002,17 +1002,20 @@ before starting.
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
-| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | LC-S5A implemented; owner gate/merge pending | synthetic topology, catalogs and deterministic scheduler | model fixtures; opted-in real PostgreSQL isolation and ordinary remote-client tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing adapters remain SCAFFOLD_ONLY | owner gates LC-S5A; LC-S5B identities/protocol model next |
+| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | LC-S5A merged; LC-S5B implemented, owner gate/merge pending | synthetic topology/catalogs/scheduler; typed identities, canonical codec, immutable receipts and recovery oracle | model/vector fixtures and opted-in PostgreSQL synthetic admission/receipt tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing adapters remain SCAFFOLD_ONLY | owner gates LC-S5B; LC-S5C local capture/publication next |
 
-LC-S5A lands the synthetic harness foundation: four separately migrated schemas
-plus a minimal witness in one disposable PostgreSQL database, an ordinary
-authenticated remote-only client, deterministic model scheduling/replay, and the
-H01–H69 and operation-family catalogs. This worker implementation awaits the
-owner's gate and merge. All transports start disconnected, no replication adapter
-is installed, and the writer/accounting/movement inventories explicitly retain
-`SCAFFOLD_ONLY` obligations. The witness shares the database's failure domain.
-No production migration, endpoint, worker registration or default changes;
-failure-harness scaffolding is not synchronization and does not close M4.
+LC-S5A supplies four separately migrated schemas plus a minimal witness in one
+disposable PostgreSQL database, an ordinary remote-only client, deterministic
+scheduling/replay and H01–H69 catalogs. LC-S5B adds harness-only typed identities,
+a strict versioned canonical codec with independent golden-vector checks,
+HMAC input commitments, signed immutable receipt/admission fixtures, and pure
+incarnation and SC-6.13 recovery oracles. Its six assigned fixture obligations
+retain explicit `SCAFFOLD_ONLY` accounting beyond the implemented model/SQL
+subsets; the worker report distinguishes those checks from deferred migration,
+cursor, capacity and deployed-trust proof. No production caller, migration,
+endpoint or default is activated; no cross-store apply adapter is installed.
+The witness shares the database's failure domain. Owner gating remains pending,
+and failure-harness scaffolding is not synchronization and does not close M4.
 
 ## Founder decisions (answered)
 
