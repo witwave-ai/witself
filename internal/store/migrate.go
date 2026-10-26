@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -53,7 +54,35 @@ var (
 	// ErrMigrationStateInvalid identifies a version/application-schema pairing
 	// that a normal Witself migration or fresh-install retry cannot produce.
 	ErrMigrationStateInvalid = errors.New("invalid database migration state")
+
+	// ErrMigrationWaitCanceled means a migration wait was canceled or expired.
+	// MigrationWaitPhase identifies the phase without exposing database details.
+	ErrMigrationWaitCanceled = errors.New("migration wait canceled")
 )
+
+type migrationWaitError struct {
+	phase string
+}
+
+func (e *migrationWaitError) Error() string { return ErrMigrationWaitCanceled.Error() + ": " + e.phase }
+func (e *migrationWaitError) Unwrap() error { return ErrMigrationWaitCanceled }
+
+// MigrationWaitPhase returns the value-free phase of a canceled migration wait,
+// or an empty string when err is not ErrMigrationWaitCanceled.
+func MigrationWaitPhase(err error) string {
+	var wait *migrationWaitError
+	if errors.As(err, &wait) {
+		return wait.phase
+	}
+	return ""
+}
+
+func migrationContextError(ctx context.Context, phase string) error {
+	if ctx.Err() != nil {
+		return &migrationWaitError{phase: phase}
+	}
+	return nil
+}
 
 type migrationPreflightState struct {
 	CurrentVersion      int64
@@ -67,41 +96,71 @@ type migrationPreflightState struct {
 // on serve startup, so a configured database must be reachable and migratable
 // for the server to start (in Kubernetes it simply restarts until the DB is up).
 func (s *Store) Migrate() error {
+	return s.MigrateContext(context.Background())
+}
+
+// MigrateContext applies pending migrations with cancellable waits. A migration
+// file already being applied finishes before cancellation is reported; its SQL
+// is never interrupted by this context. Previously completed files stay applied
+// and the next startup resumes with the next pending file.
+func (s *Store) MigrateContext(ctx context.Context) error {
 	db, err := sql.Open("pgx", s.dsn)
 	if err != nil {
 		return fmt.Errorf("open for migrate: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	current, err := migrateSchemaWithAdvisoryLock(db, int64(SchemaVersion()))
+	current, err := migrateSchemaWithAdvisoryLock(ctx, db, int64(SchemaVersion()))
 	if err != nil {
 		return err
 	}
 	if current >= 51 {
-		if _, err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
+		if _, err := s.finalizeAvatarLockedLayerDigestMigration(ctx); err != nil {
+			if canceled := migrationContextError(ctx, "verify"); canceled != nil {
+				return canceled
+			}
 			return fmt.Errorf("finalize avatar locked-layer digests: %w", err)
 		}
 	}
-	return nil
+	return migrationContextError(ctx, "verify")
 }
 
 // migrateSchemaWithAdvisoryLock serializes startup migration preflight, Goose
 // application, and final version verification across every replica connected
 // to the database. The dedicated connection is intentional: PostgreSQL
 // session advisory locks are owned by a connection, not a transaction.
-func migrateSchemaWithAdvisoryLock(db *sql.DB, target int64) (current int64, retErr error) {
-	ctx := context.Background()
+func migrateSchemaWithAdvisoryLock(ctx context.Context, db *sql.DB, target int64) (current int64, retErr error) {
 	lockConn, err := db.Conn(ctx)
 	if err != nil {
+		if canceled := migrationContextError(ctx, "advisory lock"); canceled != nil {
+			return 0, canceled
+		}
 		return 0, fmt.Errorf("open migration lock connection: %w", err)
 	}
-	defer func() { _ = lockConn.Close() }()
+	defer func() {
+		// Close alone returns a connection to the pool. Discard the physical
+		// session too, so even an uncertain acquisition or failed unlock cannot
+		// retain a session advisory lock in that pool.
+		if ctx.Done() != nil {
+			_ = lockConn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = lockConn.Close()
+	}()
 
 	if err := acquireMigrationAdvisoryLock(ctx, lockConn); err != nil {
+		if canceled := migrationContextError(ctx, "advisory lock"); canceled != nil {
+			return 0, canceled
+		}
 		return 0, fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	defer func() {
-		if err := releaseMigrationAdvisoryLock(context.Background(), lockConn); err != nil && retErr == nil {
+		cleanupCtx := context.Background()
+		if ctx.Done() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = context.WithTimeout(cleanupCtx, time.Second)
+			defer cancel()
+		}
+		if err := releaseMigrationAdvisoryLock(cleanupCtx, lockConn); err != nil && retErr == nil {
 			retErr = fmt.Errorf("release migration advisory lock: %w", err)
 		}
 	}()
@@ -110,18 +169,30 @@ func migrateSchemaWithAdvisoryLock(db *sql.DB, target int64) (current int64, ret
 	if err := goose.SetDialect("postgres"); err != nil {
 		return 0, fmt.Errorf("goose dialect: %w", err)
 	}
-	state, err := inspectMigrationPreflightState(db, target)
+	state, err := inspectMigrationPreflightState(ctx, db, target)
 	if err != nil {
+		if canceled := migrationContextError(ctx, "preflight"); canceled != nil {
+			return 0, canceled
+		}
 		return 0, fmt.Errorf("inspect migration state: %w", err)
+	}
+	if err := migrationContextError(ctx, "preflight"); err != nil {
+		return 0, err
 	}
 	if err := validateMigrationPreflight(state); err != nil {
 		return 0, err
 	}
-	if err := goose.Up(db, "migrations"); err != nil {
+	if err := applyMigrationsContext(ctx, db); err != nil {
+		if errors.Is(err, ErrMigrationWaitCanceled) {
+			return 0, err
+		}
 		return 0, fmt.Errorf("apply migrations: %w", err)
 	}
-	current, err = goose.GetDBVersion(db)
+	current, err = goose.GetDBVersionContext(ctx, db)
 	if err != nil {
+		if canceled := migrationContextError(ctx, "verify"); canceled != nil {
+			return 0, canceled
+		}
 		return 0, fmt.Errorf("verify migration version: %w", err)
 	}
 	if current != state.TargetVersion {
@@ -132,7 +203,28 @@ func migrateSchemaWithAdvisoryLock(db *sql.DB, target int64) (current int64, ret
 			state.TargetVersion,
 		)
 	}
-	return current, nil
+	return current, migrationContextError(ctx, "verify")
+}
+
+func applyMigrationsContext(ctx context.Context, db *sql.DB) error {
+	if ctx.Done() == nil {
+		// Preserve hosted Goose behavior, including its logging and errors.
+		return goose.Up(db, "migrations")
+	}
+	for {
+		if err := migrationContextError(ctx, "verify"); err != nil {
+			return err
+		}
+		// UpByOne uses an uncancelled context. This protects both transactional
+		// files and NO TRANSACTION files from cancellation partway through SQL.
+		err := goose.UpByOne(db, "migrations")
+		if errors.Is(err, goose.ErrNoNextVersion) {
+			return migrationContextError(ctx, "verify")
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 func acquireMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn) error {
@@ -172,23 +264,23 @@ func releaseMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
-func inspectMigrationPreflightState(db *sql.DB, target int64) (migrationPreflightState, error) {
+func inspectMigrationPreflightState(ctx context.Context, db *sql.DB, target int64) (migrationPreflightState, error) {
 	state := migrationPreflightState{TargetVersion: target}
-	if err := db.QueryRow(`SELECT to_regclass('goose_db_version') IS NOT NULL`).Scan(&state.VersionTableExists); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('goose_db_version') IS NOT NULL`).Scan(&state.VersionTableExists); err != nil {
 		return migrationPreflightState{}, fmt.Errorf("locate Goose version table: %w", err)
 	}
 	if state.VersionTableExists {
-		current, err := goose.GetDBVersion(db)
+		current, err := goose.GetDBVersionContext(ctx, db)
 		if err != nil {
 			return migrationPreflightState{}, fmt.Errorf("read Goose version: %w", err)
 		}
 		state.CurrentVersion = current
 	}
-	if err := db.QueryRow(`SELECT to_regclass('accounts') IS NOT NULL`).Scan(&state.AccountsTableExists); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('accounts') IS NOT NULL`).Scan(&state.AccountsTableExists); err != nil {
 		return migrationPreflightState{}, fmt.Errorf("locate accounts table: %w", err)
 	}
 	if state.AccountsTableExists {
-		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM accounts)`).Scan(&state.AccountsPopulated); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM accounts)`).Scan(&state.AccountsPopulated); err != nil {
 			return migrationPreflightState{}, fmt.Errorf("inspect accounts table: %w", err)
 		}
 	}

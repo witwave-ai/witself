@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
 // LayoutVersion is the only on-disk layout understood by this implementation.
@@ -26,11 +29,15 @@ type Binaries struct {
 // Config describes one disposable cell. Failpoint is a test-only crash seam:
 // an error after a step leaves its journal open, without ordinary error rollback.
 type Config struct {
-	Root      string
-	Binaries  Binaries
-	Jobs      []string
-	Timeout   time.Duration
-	Failpoint func(operation, step string) error
+	Root     string
+	Binaries Binaries
+	Jobs     []string
+	Timeout  time.Duration
+	// Zero values preserve the manifest settings, or the local runtime defaults
+	// for older manifests that predate these fields.
+	MigrationWait    time.Duration
+	JobRestartPolicy string
+	Failpoint        func(operation, step string) error
 }
 
 // Ports are loopback TCP listeners allocated for this cell.
@@ -59,6 +66,8 @@ type Manifest struct {
 	LastOperation             string        `json:"last_operation"`
 	Installed                 bool          `json:"installed"`
 	Cleanup                   *journalEntry `json:"cleanup,omitempty"`
+	MigrationWait             time.Duration `json:"migration_wait,omitempty"`
+	JobRestartPolicy          string        `json:"job_restart_policy,omitempty"`
 }
 
 // InstallOptions controls whether PostgreSQL stays running after installation.
@@ -100,7 +109,9 @@ type Status struct {
 
 // Cell is a handle, not a daemon. Every operation rereads its durable state.
 type Cell struct {
-	cfg Config
+	cfg        Config
+	childrenMu sync.Mutex
+	children   map[string]*childObservation
 }
 
 // New validates configuration without creating anything or starting a process.
@@ -124,6 +135,9 @@ func New(cfg Config) (*Cell, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
+	if err := validateRuntimeSettings(cfg.MigrationWait, cfg.JobRestartPolicy); err != nil {
+		return nil, err
+	}
 	allowed := map[string]bool{"avatar_style_rollout": true, "message_rate_bucket_cleanup": true, "agent_email_rate_bucket_cleanup": true, "transcript_storage_reconcile": true}
 	for _, job := range cfg.Jobs {
 		if !allowed[job] {
@@ -144,6 +158,46 @@ func (c *Cell) path(parts ...string) string {
 
 func (c *Cell) deadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, c.cfg.Timeout)
+}
+
+func validateRuntimeSettings(wait time.Duration, policy string) error {
+	if wait < 0 {
+		return errors.New("local cell migration wait must be positive")
+	}
+	if policy != "" && policy != runtimeconfig.JobRestartNever && policy != runtimeconfig.JobRestartOnFailure {
+		return errors.New("local cell job restart policy is unsupported")
+	}
+	return nil
+}
+
+func (c *Cell) runtimeSettings(m *Manifest) (time.Duration, string) {
+	wait, policy := m.MigrationWait, m.JobRestartPolicy
+	if c.cfg.MigrationWait != 0 {
+		wait = c.cfg.MigrationWait
+	}
+	if c.cfg.JobRestartPolicy != "" {
+		policy = c.cfg.JobRestartPolicy
+	}
+	if wait == 0 {
+		wait = runtimeconfig.DefaultMigrationWait
+	}
+	if policy == "" {
+		policy = runtimeconfig.JobRestartNever
+	}
+	return wait, policy
+}
+
+func (c *Cell) readinessTimeout(component string, m *Manifest) time.Duration {
+	if component != "server" {
+		return c.cfg.Timeout
+	}
+	wait, _ := c.runtimeSettings(m)
+	// Saturate instead of wrapping an otherwise valid large positive duration.
+	const maxDuration = time.Duration(1<<63 - 1)
+	if wait > maxDuration-c.cfg.Timeout {
+		return maxDuration
+	}
+	return c.cfg.Timeout + wait
 }
 
 func localHTTPClient() *http.Client {

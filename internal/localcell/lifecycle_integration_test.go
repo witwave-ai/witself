@@ -302,10 +302,10 @@ func main() {
 	if err := cmd.Run(); err != nil {
 		t.Fatal("cannot build readiness fixture")
 	}
-	// Ten seconds bounds every step; a Windows PostgreSQL restart alone takes about 2.5 s
+	// Ten seconds bounds non-server steps; a Windows PostgreSQL restart alone takes about 2.5 s
 	// (oracle round 6), so a two-second bound failed the postgres step before the server
 	// readiness fault under test was ever reached.
-	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 10 * time.Second})
+	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 10 * time.Second, MigrationWait: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatal("cannot set bounded readiness timeout")
 	}

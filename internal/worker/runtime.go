@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,12 +15,29 @@ import (
 
 const defaultShutdownTimeout = 10 * time.Second
 
-// Config controls the worker's private health and Prometheus listeners.
+const (
+	// JobRestartNever preserves the default exit-on-return behavior.
+	JobRestartNever = "never"
+	// JobRestartOnFailure retries any unexpected job return, including nil.
+	JobRestartOnFailure = "on-failure"
+
+	jobRestartInitialBackoff = time.Second
+	jobRestartMaxBackoff     = 30 * time.Second
+	jobRestartResetAfter     = 10 * time.Minute
+	jobRestartLimit          = 5
+)
+
+// ErrJobRestartLimit means a job exhausted its consecutive restart allowance.
+// The returned error adds only the registered, bounded job name.
+var ErrJobRestartLimit = errors.New("worker job restart limit exceeded")
+
+// Config controls the worker's private listeners and optional job supervision.
 type Config struct {
-	HealthAddr      string
-	MetricsAddr     string
-	Ready           func(context.Context) error
-	ShutdownTimeout time.Duration
+	HealthAddr       string
+	MetricsAddr      string
+	Ready            func(context.Context) error
+	ShutdownTimeout  time.Duration
+	JobRestartPolicy string
 }
 
 type healthState struct {
@@ -35,6 +54,15 @@ type runtimeEvent struct {
 // Run starts every registered job in its own supervised goroutine, serves
 // health and metrics, and blocks until cancellation or an unexpected exit.
 func (r *Registry) Run(ctx context.Context, cfg Config) error {
+	return r.run(ctx, cfg, jobRestartTiming{now: time.Now, wait: waitJobRestart})
+}
+
+type jobRestartTiming struct {
+	now  func() time.Time
+	wait func(context.Context, time.Duration) bool
+}
+
+func (r *Registry) run(ctx context.Context, cfg Config, timing jobRestartTiming) error {
 	if ctx == nil {
 		return errors.New("worker context is nil")
 	}
@@ -50,12 +78,21 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 	if cfg.ShutdownTimeout < 0 {
 		return errors.New("worker shutdown timeout cannot be negative")
 	}
+	if cfg.JobRestartPolicy != "" && cfg.JobRestartPolicy != JobRestartNever && cfg.JobRestartPolicy != JobRestartOnFailure {
+		return errors.New("worker job restart policy must be never or on-failure")
+	}
 
 	jobs, err := r.startJobs()
 	if err != nil {
 		return err
 	}
 	defer r.stopJobs()
+	var restarts *jobRestartMetrics
+	metricsHandler := r.metrics.handler()
+	if cfg.JobRestartPolicy == JobRestartOnFailure {
+		restarts = newJobRestartMetrics(jobs)
+		metricsHandler = restarts.handler(metricsHandler)
+	}
 
 	healthListener, err := net.Listen("tcp", cfg.HealthAddr)
 	if err != nil {
@@ -80,7 +117,7 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 		},
 		{
 			name: "metrics",
-			srv:  &http.Server{Handler: r.metrics.handler(), ReadHeaderTimeout: 5 * time.Second},
+			srv:  &http.Server{Handler: metricsHandler, ReadHeaderTimeout: 5 * time.Second},
 			ln:   metricsListener,
 		},
 	}
@@ -94,14 +131,7 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 		jobWG.Add(1)
 		go func() {
 			defer jobWG.Done()
-			err := job.Run(runCtx)
-			result := JobResultCompleted
-			if runCtx.Err() != nil {
-				result = JobResultCanceled
-			} else if err != nil {
-				result = JobResultError
-			}
-			r.metrics.observeJobExit(job.Name, result)
+			err := r.runJob(runCtx, job, cfg.JobRestartPolicy, timing, restarts)
 			events <- runtimeEvent{kind: "job", name: job.Name, err: err}
 		}()
 	}
@@ -121,7 +151,9 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 		if ctx.Err() == nil {
 			switch event.kind {
 			case "job":
-				if event.err != nil {
+				if cfg.JobRestartPolicy == JobRestartOnFailure && errors.Is(event.err, ErrJobRestartLimit) {
+					runErr = event.err
+				} else if event.err != nil {
 					runErr = fmt.Errorf("worker job %s stopped: %w", event.name, event.err)
 				} else {
 					runErr = fmt.Errorf("worker job %s stopped unexpectedly", event.name)
@@ -155,6 +187,107 @@ func (r *Registry) Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	return runErr
+}
+
+func (r *Registry) runJob(ctx context.Context, job Job, policy string, timing jobRestartTiming, restarts *jobRestartMetrics) error {
+	consecutiveRestarts := 0
+	for {
+		var started time.Time
+		if policy == JobRestartOnFailure {
+			started = timing.now()
+		}
+		err := job.Run(ctx)
+		result := JobResultCompleted
+		if ctx.Err() != nil {
+			result = JobResultCanceled
+		} else if err != nil {
+			result = JobResultError
+		}
+		r.metrics.observeJobExit(job.Name, result)
+		if policy != JobRestartOnFailure || ctx.Err() != nil {
+			return err
+		}
+		if timing.now().Sub(started) >= jobRestartResetAfter {
+			consecutiveRestarts = 0
+		}
+		if consecutiveRestarts == jobRestartLimit {
+			return fmt.Errorf("%w: %s", ErrJobRestartLimit, job.Name)
+		}
+		if !timing.wait(ctx, jobRestartBackoff(consecutiveRestarts)) || ctx.Err() != nil {
+			return nil
+		}
+		consecutiveRestarts++
+		restarts.observeRestart(job.Name)
+		r.metrics.setJobRunning(job.Name, true)
+	}
+}
+
+func jobRestartBackoff(restarts int) time.Duration {
+	delay := jobRestartInitialBackoff
+	for i := 0; i < restarts && delay < jobRestartMaxBackoff; i++ {
+		delay = min(delay*2, jobRestartMaxBackoff)
+	}
+	return delay
+}
+
+func waitJobRestart(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// Restart metrics exist only for the opt-in policy, so the hosted scrape remains
+// byte-identical. Names come exclusively from the frozen job registry.
+type jobRestartMetrics struct {
+	mu     sync.Mutex
+	names  []string
+	counts map[string]uint64
+}
+
+func newJobRestartMetrics(jobs []Job) *jobRestartMetrics {
+	m := &jobRestartMetrics{counts: make(map[string]uint64, len(jobs))}
+	for _, job := range jobs {
+		m.names = append(m.names, job.Name)
+		m.counts[job.Name] = 0
+	}
+	sort.Strings(m.names)
+	return m
+}
+
+func (m *jobRestartMetrics) observeRestart(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.counts[name]; exists {
+		m.counts[name]++
+	}
+}
+
+func (m *jobRestartMetrics) handler(base http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		base.ServeHTTP(w, request)
+		if request.URL.Path == "/metrics" {
+			m.writePrometheus(w)
+		}
+	})
+}
+
+func (m *jobRestartMetrics) writePrometheus(w io.Writer) {
+	m.mu.Lock()
+	counts := make([]uint64, len(m.names))
+	for i, name := range m.names {
+		counts[i] = m.counts[name]
+	}
+	m.mu.Unlock()
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_job_restarts_total Restarts of a registered job after an unexpected return.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_job_restarts_total counter")
+	for i, name := range m.names {
+		_, _ = fmt.Fprintf(w, "witself_worker_job_restarts_total{job=%q} %d\n", name, counts[i])
+	}
 }
 
 func healthHandler(state *healthState) http.Handler {

@@ -70,7 +70,7 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 					if err := c.makePassword(); err != nil {
 						t.Fatal(err)
 					}
-					want := []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "WITSELF_RUNTIME", "WITSELF_DATABASE_URL", "WITSELF_API_ADDR", "WITSELF_HEALTH_ADDR", "WITSELF_METRICS_ADDR", "WITSELF_LOCAL_SPOOL_DIR", "WITSELF_LOCAL_JOBS"}
+					want := []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "WITSELF_RUNTIME", "WITSELF_DATABASE_URL", "WITSELF_API_ADDR", "WITSELF_HEALTH_ADDR", "WITSELF_METRICS_ADDR", "WITSELF_LOCAL_SPOOL_DIR", "WITSELF_LOCAL_JOBS", "WITSELF_LOCAL_MIGRATION_WAIT", "WITSELF_LOCAL_JOB_RESTART_POLICY"}
 					if runtime.GOOS == "windows" {
 						want = append(want, "SystemRoot", "USERPROFILE")
 					}

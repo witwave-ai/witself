@@ -49,8 +49,14 @@
 // PostgreSQL launches disable administrative groups and privileges, retain the
 // current user, and explicitly use that user's ownership and a private default
 // object DACL; an elevated CI parent never makes PostgreSQL administrative.
+// Launch hands the child's identity to the shared exit observer.
 //
-// Restart policy, migration cancellation, launchd/systemd/Windows service
-// registration, product downloads, the installer manifest trust contract, the
-// Windows 11 receipt, and supported local-product routing/authorization remain deferred.
+// LC-S2-R1 bounds cancellable migration waits and supports an explicit in-process
+// worker job restart policy. Server readiness includes the configured migration
+// wait; early child exits retain their exit status and a bounded value-free
+// diagnostic in the failed journal step. No server or PostgreSQL process is
+// supervised or restarted: platform service adapters own process supervision.
+// launchd/systemd/Windows service registration, product downloads, the installer
+// manifest trust contract, the Windows 11 receipt, and supported local-product
+// routing/authorization remain deferred.
 package localcell

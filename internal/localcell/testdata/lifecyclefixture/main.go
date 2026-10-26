@@ -159,6 +159,20 @@ func servePostgres() error {
 }
 
 func serveComponent(component string) error {
+	if component == "server" {
+		if _, err := os.Stat("fixture-server-exit"); err == nil {
+			fmt.Fprintln(os.Stderr, "postgres://synthetic-private-value@invalid/fixture")
+			fmt.Fprintln(os.Stderr, "witself-server: migration wait exceeded 250ms during advisory lock")
+			os.Exit(7)
+		}
+		if data, err := os.ReadFile("fixture-server-delay"); err == nil {
+			delay, err := time.ParseDuration(string(data))
+			if err != nil {
+				return err
+			}
+			time.Sleep(delay)
+		}
+	}
 	dsn, err := url.Parse(os.Getenv("WITSELF_DATABASE_URL"))
 	if err != nil {
 		return fmt.Errorf("fixture database connection URL is invalid")

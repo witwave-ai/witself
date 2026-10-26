@@ -81,6 +81,7 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
+	wait, policy := c.runtimeSettings(m)
 	environment = appendEnvironment(environment,
 		"WITSELF_RUNTIME=local",
 		"WITSELF_DATABASE_URL="+dsn.String(),
@@ -89,6 +90,8 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 		"WITSELF_METRICS_ADDR="+addr(metrics),
 		"WITSELF_LOCAL_SPOOL_DIR="+c.path("spool"),
 		"WITSELF_LOCAL_JOBS="+strings.Join(c.cfg.Jobs, ","),
+		"WITSELF_LOCAL_MIGRATION_WAIT="+wait.String(),
+		"WITSELF_LOCAL_JOB_RESTART_POLICY="+policy,
 	)
 	if m.AccountID != "" {
 		environment = appendEnvironment(environment, "WITSELF_LOCAL_ACCOUNT_ID="+m.AccountID)
@@ -257,6 +260,11 @@ func (c *Cell) startChild(m *Manifest, component string) error {
 		return err
 	}
 	defer func() { _ = log.Close() }()
+	info, err := log.Stat()
+	if err != nil {
+		return errors.New("cannot inspect local cell component log")
+	}
+	c.beginChildObservation(component, info.Size())
 	return c.launchChild(binary, component, environment, log)
 }
 
@@ -310,10 +318,18 @@ func (c *Cell) waitReady(ctx context.Context, component string, port int) error 
 	for {
 		state, err := c.processState(component)
 		if err != nil || !state.Alive || !state.Matches {
+			if err == nil && !state.Alive {
+				return c.childReadinessExit(ctx, component, state.PID)
+			}
 			return &readinessError{component: component, state: state, observationFailed: err != nil}
 		}
 		if ready(ctx, client, port) {
-			return nil
+			// A ready response must not outlive the process fence that owns it.
+			current, err := c.processState(component)
+			if err == nil && current.Alive && current.Matches && current.PID == state.PID {
+				return nil
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():

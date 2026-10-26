@@ -173,16 +173,20 @@ func (s workerBootstrapStore) LocalBootstrapAccount(context.Context) (string, er
 func TestWorkerLocalServeWiring(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
+		local          bool
+		restartPolicy  string
 		account        string
 		version        int
 		wantRun, ready bool
 	}{
-		{name: "account mismatch before registry", account: "other-private-account", version: store.SchemaVersion()},
-		{name: "schema mismatch", account: "expected-private-account", version: store.SchemaVersion() - 1, wantRun: true},
-		{name: "schema equal", account: "expected-private-account", version: store.SchemaVersion(), wantRun: true, ready: true},
+		{name: "account mismatch before registry", local: true, restartPolicy: worker.JobRestartNever, account: "other-private-account", version: store.SchemaVersion()},
+		{name: "schema mismatch", local: true, restartPolicy: worker.JobRestartNever, account: "expected-private-account", version: store.SchemaVersion() - 1, wantRun: true},
+		{name: "local never", local: true, restartPolicy: worker.JobRestartNever, account: "expected-private-account", version: store.SchemaVersion(), wantRun: true, ready: true},
+		{name: "local on-failure", local: true, restartPolicy: worker.JobRestartOnFailure, account: "expected-private-account", version: store.SchemaVersion(), wantRun: true, ready: true},
+		{name: "hosted", restartPolicy: worker.JobRestartOnFailure, account: "other-private-account", version: store.SchemaVersion() - 1, wantRun: true, ready: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runtime := runtimeconfig.Config{Local: true, AccountID: "expected-private-account", HealthAddr: "127.0.0.1:8082", MetricsAddr: "127.0.0.1:9091"}
+			runtime := runtimeconfig.Config{Local: tc.local, AccountID: "expected-private-account", HealthAddr: "127.0.0.1:8082", MetricsAddr: "127.0.0.1:9091", JobRestartPolicy: tc.restartPolicy}
 			st := workerBootstrapStore{version: tc.version, account: tc.account}
 			ran := false
 			output := captureWorkerStderr(t, func() {
@@ -191,8 +195,15 @@ func TestWorkerLocalServeWiring(t *testing.T) {
 					if !tc.wantRun {
 						t.Fatal("account mismatch reached registry.Run")
 					}
-					if cfg.HealthAddr != runtime.HealthAddr || cfg.MetricsAddr != runtime.MetricsAddr {
-						t.Fatal("local listener configuration did not reach registry.Run")
+					wantHealth, wantMetrics, wantPolicy := ":8081", ":9090", ""
+					if runtime.Local {
+						wantHealth, wantMetrics, wantPolicy = runtime.HealthAddr, runtime.MetricsAddr, runtime.JobRestartPolicy
+					}
+					if cfg.HealthAddr != wantHealth || cfg.MetricsAddr != wantMetrics {
+						t.Fatal("selected listener configuration did not reach registry.Run")
+					}
+					if cfg.JobRestartPolicy != wantPolicy {
+						t.Fatalf("registry restart policy = %q, want %q", cfg.JobRestartPolicy, wantPolicy)
 					}
 					if err := cfg.Ready(ctx); (err == nil) != tc.ready {
 						t.Fatalf("selected readiness success = %t, want %t", err == nil, tc.ready)

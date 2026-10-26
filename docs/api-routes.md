@@ -1221,6 +1221,14 @@ are `127.0.0.1:8082` for health and `127.0.0.1:9091` for metrics. These binaries
 do not own or bind PostgreSQL. This configuration is inactive by default and
 does not install or activate a local cell.
 
+`WITSELF_LOCAL_MIGRATION_WAIT` is a positive duration (default `120s`) bounding
+server migration waits; shutdown signals cancel those waits, while an in-flight
+migration file finishes before cancellation is reported.
+`WITSELF_LOCAL_JOB_RESTART_POLICY` selects `never` (default) or `on-failure` for
+worker jobs. The latter restarts unexpected error or nil returns after exponential
+backoff from 1s to 30s, allows five consecutive restarts, and resets after a job
+runs for 10 minutes. Both settings apply only with `WITSELF_RUNTIME=local`.
+
 Under the local runtime configuration, `GET /readyz` returns HTTP 200 with
 `ok\n` only when the store pings, the attached database's applied Goose schema
 version equals the compiled store schema version, and the bootstrap account

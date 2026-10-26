@@ -74,7 +74,10 @@ func (c *Cell) launchChild(binary, component string, environment []string, log *
 	if err := cmd.Start(); err != nil {
 		return errors.New("cannot launch local cell component")
 	}
-	go func() { _ = cmd.Wait() }()
+	_ = c.observeChildExit(component, cmd.Process.Pid, func() (*os.ProcessState, error) {
+		err := cmd.Wait()
+		return cmd.ProcessState, err
+	})
 	identity, alive, err := processIdentity(cmd.Process.Pid)
 	if err != nil || !alive {
 		return errors.New("cannot identify launched local cell component")

@@ -6,7 +6,64 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestLocalMigrationWaitAndJobRestartPolicy(t *testing.T) {
+	for _, role := range []string{"server", "worker"} {
+		t.Run(role, func(t *testing.T) {
+			values := localValues(t)
+			cfg, err := FromEnv(role, testLookup(values), nil)
+			if err != nil || cfg.MigrationWait != 120*time.Second || cfg.JobRestartPolicy != "never" {
+				t.Fatalf("local wait/restart defaults: %v", err)
+			}
+			values["WITSELF_LOCAL_MIGRATION_WAIT"] = " 250ms "
+			values["WITSELF_LOCAL_JOB_RESTART_POLICY"] = " on-failure "
+			cfg, err = FromEnv(role, testLookup(values), nil)
+			if err != nil || cfg.MigrationWait != 250*time.Millisecond || cfg.JobRestartPolicy != "on-failure" {
+				t.Fatalf("local wait/restart overrides: %v", err)
+			}
+			for _, name := range []string{"WITSELF_LOCAL_MIGRATION_WAIT", "WITSELF_LOCAL_JOB_RESTART_POLICY"} {
+				values[name] = " "
+			}
+			cfg, err = FromEnv(role, testLookup(values), nil)
+			if err != nil || cfg.MigrationWait != 120*time.Second || cfg.JobRestartPolicy != "never" {
+				t.Fatalf("empty local settings must use defaults: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalMigrationWaitAndJobRestartPolicyRejectUnsafeValues(t *testing.T) {
+	for _, role := range []string{"server", "worker"} {
+		for name, invalid := range map[string][]string{
+			"WITSELF_LOCAL_MIGRATION_WAIT":     {"0", "0s", "-1s", "1", "private-duration-marker", "999999999999999999999h"},
+			"WITSELF_LOCAL_JOB_RESTART_POLICY": {"always", "NEVER", "private-policy-marker"},
+		} {
+			for _, raw := range invalid {
+				t.Run(role+"/"+name+"/"+raw, func(t *testing.T) {
+					values := localValues(t)
+					values[name] = raw
+					_, err := FromEnv(role, testLookup(values), nil)
+					if err == nil || !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), raw) {
+						t.Fatalf("invalid local configuration accepted or disclosed: %v", err)
+					}
+					for _, selector := range []string{"unset", ""} {
+						if selector == "unset" {
+							delete(values, "WITSELF_RUNTIME")
+						} else {
+							values["WITSELF_RUNTIME"] = selector
+						}
+						cfg, err := FromEnv(role, testLookup(values), nil)
+						if err != nil || !reflect.DeepEqual(cfg, Config{}) {
+							t.Fatalf("local settings affected hosted configuration: %v", err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
 
 func testLookup(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) { value, ok := values[key]; return value, ok }

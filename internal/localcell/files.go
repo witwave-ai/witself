@@ -116,6 +116,9 @@ func readManifest(root string) (*Manifest, error) {
 	if m.InstallationID == "" || m.Database != localDatabaseName || m.Role != "localcell" {
 		return nil, errors.New("invalid local cell manifest identity")
 	}
+	if err := validateRuntimeSettings(m.MigrationWait, m.JobRestartPolicy); err != nil {
+		return nil, err
+	}
 	if m.Cleanup != nil && (m.Cleanup.Operation != "remove" || m.Cleanup.Step != "runtime_cleanup" || m.Cleanup.State != "started" || m.Cleanup.At.IsZero()) {
 		return nil, errors.New("invalid local cell cleanup journal checkpoint")
 	}
@@ -196,12 +199,17 @@ type journalEntry struct {
 	Step      string    `json:"step"`
 	State     string    `json:"state"`
 	At        time.Time `json:"at"`
+	Cause     string    `json:"cause,omitempty"`
 }
 
 // journal appends each value plus its newline in ONE write, then fsyncs before
 // acknowledging success. An unterminated final line was never acknowledged;
 // readJournal identifies the crash signatures that Repair may discard.
 func (c *Cell) journal(operation, step, state string) error {
+	return c.journalCause(operation, step, state, "")
+}
+
+func (c *Cell) journalCause(operation, step, state, cause string) error {
 	path := c.path("journal", "operations.jsonl")
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return errors.New("local cell journal must be a regular file")
@@ -211,7 +219,7 @@ func (c *Cell) journal(operation, step, state string) error {
 		return errors.New("cannot open local cell journal")
 	}
 	defer func() { _ = f.Close() }()
-	data, err := json.Marshal(journalEntry{operation, step, state, time.Now().UTC()})
+	data, err := json.Marshal(journalEntry{Operation: operation, Step: step, State: state, At: time.Now().UTC(), Cause: cause})
 	if err != nil {
 		return errors.New("cannot encode local cell journal")
 	}
@@ -379,6 +387,13 @@ func (c *Cell) step(operation, step string, fn func() error) error {
 		return err
 	}
 	if err := fn(); err != nil {
+		var exit *readinessExitError
+		if errors.As(err, &exit) {
+			if journalErr := c.journalCause(operation, step, "failed", exit.Error()); journalErr != nil {
+				return journalErr
+			}
+			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, exit)
+		}
 		_ = c.journal(operation, step, "failed")
 		var readiness *readinessError
 		if errors.As(err, &readiness) {

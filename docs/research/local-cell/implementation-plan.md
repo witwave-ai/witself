@@ -260,7 +260,7 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
-LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (merged #824); migration cancellation and restart policy remain deferred.
+LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (merged #824); LC-S2-R1 adds bounded, cancellable migration waits and an opt-in worker job restart policy, superseding those two deferrals in the historical LC-S2 note below while process supervision remains deferred to platform service adapters.
 
 LC-S2 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports, and bounded readiness checks through tests and a harness only; lifecycle planning, restart policy, migration cancellation, platform service adapters, downloads, installer manifest trust, Windows DACL privacy, and reclaiming a crashed cell's stale SysV shared-memory segment when it is purged (macOS allows 32 machine-wide; a normally stopped cell leaves none) remain deferred, with nothing installed or activated.
 
