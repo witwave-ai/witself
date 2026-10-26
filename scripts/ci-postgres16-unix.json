@@ -5,6 +5,12 @@
     "sha256": "de8485f4ce9c32e3ddfeef0b7c261eed1cecb54c9bcd170e437ff454cb292b42",
     "major": 16
   },
+  "linux-arm64": {
+    "version": "16.10",
+    "url": "https://apt-archive.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.10.orig.tar.bz2",
+    "sha256": "de8485f4ce9c32e3ddfeef0b7c261eed1cecb54c9bcd170e437ff454cb292b42",
+    "major": 16
+  },
   "macos-arm64": {
     "version": "16.10",
     "url": "https://apt-archive.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.10.orig.tar.bz2",

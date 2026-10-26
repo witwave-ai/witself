@@ -20,7 +20,7 @@ if [[ $1 == --cleanup ]]; then
 fi
 
 case "$1:$(uname -s):$(uname -m)" in
-  linux-x64:Linux:x86_64|macos-arm64:Darwin:arm64|macos-intel:Darwin:x86_64) ;;
+  linux-x64:Linux:x86_64|linux-arm64:Linux:aarch64|macos-arm64:Darwin:arm64|macos-intel:Darwin:x86_64) ;;
   *) fail 'platform does not match the native runner' ;;
 esac
 [[ -n ${GITHUB_ENV:-} && -f $GITHUB_ENV && -w $GITHUB_ENV ]] \
