@@ -45,6 +45,7 @@ func (v releaseVersion) less(o releaseVersion) bool {
 type backupImageTools struct{ FirstRelease, Base, AgeX8664, AgeAarch64, AWSCLI string }
 
 const backupImageBaseV0291 = "postgres:18-alpine@sha256:6c538e7206ea40ff740ef27883529390a690b6ead6ba96b44c67a9f7c638e8fd"
+const backupImageBaseV0342 = "postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
 const backupImageRepository = "ghcr.io/witwave-ai/images/witself-postgres-backup"
 const backupImageDockerfileRel = "images/witself-postgres-backup/Dockerfile"
 
@@ -57,6 +58,7 @@ var backupImageToolReleases = []backupImageTools{
 	{FirstRelease: "0.0.330", Base: backupImageBaseV0291, AgeX8664: "1.3.2-r0", AgeAarch64: "1.3.2-r0", AWSCLI: "2.34.63-r0"},
 	{FirstRelease: "0.0.336", Base: backupImageBaseV0291, AgeX8664: "1.3.2-r0", AgeAarch64: "1.3.2-r1", AWSCLI: "2.34.63-r0"},
 	{FirstRelease: "0.0.337", Base: backupImageBaseV0291, AgeX8664: "1.3.2-r1", AgeAarch64: "1.3.2-r1", AWSCLI: "2.34.63-r0"},
+	{FirstRelease: "0.0.342", Base: backupImageBaseV0342, AgeX8664: "1.3.2-r1", AgeAarch64: "1.3.2-r1", AWSCLI: "2.34.63-r0"},
 }
 
 type backupImagePinException struct{ Cell, Tag, Reason string }

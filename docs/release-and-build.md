@@ -1119,6 +1119,11 @@ revisions, one `aws-cli` revision, and the base image. Its package history is:
 | 0.0.330 | 1.3.2-r0 | 1.3.2-r0 | 2.34.63-r0 |
 | 0.0.336 | 1.3.2-r0 | 1.3.2-r1 | 2.34.63-r0 |
 | 0.0.337 | 1.3.2-r1 | 1.3.2-r1 | 2.34.63-r0 |
+| 0.0.342 | 1.3.2-r1 | 1.3.2-r1 | 2.34.63-r0 |
+
+The 0.0.342 entry keeps the same tool pins and records the new `postgres:18-alpine`
+base digest; that build also upgrades `brotli-libs`, `libcurl` and `zlib` in place
+to their Alpine 3.24 security fixes and verifies the exact revisions.
 
 `TestBackupImageToolLedgerIsOrderedAndMatchesDockerfile` fails until that entry
 is added. After tagging, confirm it with
