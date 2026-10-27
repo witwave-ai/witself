@@ -1,0 +1,1170 @@
+{
+  "version": 1,
+  "kind": "runtime_results",
+  "records": [
+    {
+      "version": 1,
+      "obligation": "H01",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OperationMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H02",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ThreeWriterDeletedGeneration",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H03",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "LegacyProjectionMigration",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H03",
+      "capability": "legacy_projection_backfill_model",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncmodel",
+        "symbol": "RunLegacyProjectionBackfillScenario"
+      },
+      "scenario": "LegacyProjectionMigration",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H03_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H04",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EqualSequenceDistinctEntries",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H05",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EvidenceMembershipInterleaving",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H05",
+      "capability": "ordered_evidence_membership_model",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncmodel",
+        "symbol": "RunOrderedEvidenceMembershipScenario"
+      },
+      "scenario": "EvidenceMembershipInterleaving",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H05_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H06",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EqualIntegerDifferentRevision",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H07",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ClonedOriginLineage",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H08",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EvidenceAfterDeletionAndNameReuse",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H09",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PinnedCurationProjection",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H10",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "FamilyCausalBasis",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H11",
+      "capability": "production_transition_admission",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "AdoptionJoinEnrollment",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_transition_admission"
+    },
+    {
+      "version": 1,
+      "obligation": "H11",
+      "capability": "cross_store_snapshot",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "AdoptionJoinEnrollment",
+      "outcome": "NOT_RUN",
+      "missing_capability": "cross_store_snapshot"
+    },
+    {
+      "version": 1,
+      "obligation": "H12",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "UpgradeReturnCustodyContinuity",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H13",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "SiblingClaimTransferPartition",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H14",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CompoundNotificationBeforeLink",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H15",
+      "capability": "complete_graph_writer_inventory",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "GraphFreezeMutationMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "complete_graph_writer_inventory"
+    },
+    {
+      "version": 1,
+      "obligation": "H16",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CompetingTransferTargets",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H17",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "TransferCommitPinCrashMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H18",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "TransferProofAndImportedProjection",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H19",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "StaleEpochEveryWriter",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H20",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "UnavailableTargetNeverTimesIntoAuthority",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H21",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "AbortPublicationRestoreRace",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H22",
+      "capability": "cross_store_transfer",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "TransferredExecutionDisposition",
+      "outcome": "NOT_RUN",
+      "missing_capability": "cross_store_transfer"
+    },
+    {
+      "version": 1,
+      "obligation": "H23",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EnvelopeAdmissionNegative",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H24",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OperationStateCrashMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H25",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CanonicalEnvelopeGoldenVectors",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H26",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OperationIDConcurrentAdmission",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H27",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ReceiptCommitSignatureRetry",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H28",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PayloadRetirementCommitmentFloor",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H29",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "KeyRotationMoveHistoricalReceipt",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H30",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ReceiptForgeryAndCutoverFrontier",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H31",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "BoundedMalformedAdmission",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H32",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "MixedWriterActivation",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H33",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "FailurePathMaintenanceCoverage",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H34",
+      "capability": "real_database_roles",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CoverageInventoryAndSchedule",
+      "outcome": "NOT_RUN",
+      "missing_capability": "real_database_roles"
+    },
+    {
+      "version": 1,
+      "obligation": "H34",
+      "capability": "mixed_executable_versions",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CoverageInventoryAndSchedule",
+      "outcome": "NOT_RUN",
+      "missing_capability": "mixed_executable_versions"
+    },
+    {
+      "version": 1,
+      "obligation": "H34",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CoverageInventoryAndSchedule",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H35",
+      "capability": "production_relation_guards",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "GuardInstallRelationDrain",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_relation_guards"
+    },
+    {
+      "version": 1,
+      "obligation": "H35",
+      "capability": "prepared_transactions",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "GuardInstallRelationDrain",
+      "outcome": "NOT_RUN",
+      "missing_capability": "prepared_transactions"
+    },
+    {
+      "version": 1,
+      "obligation": "H35",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "GuardInstallRelationDrain",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H35_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H36",
+      "capability": "mixed_executable_versions",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PreBeginLateFirstWrite",
+      "outcome": "NOT_RUN",
+      "missing_capability": "mixed_executable_versions"
+    },
+    {
+      "version": 1,
+      "obligation": "H36",
+      "capability": "production_writer_admission",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PreBeginLateFirstWrite",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_writer_admission"
+    },
+    {
+      "version": 1,
+      "obligation": "H36",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "PreBeginLateFirstWrite",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H36_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H37",
+      "capability": "production_locking_admission",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OldSnapshotLockingAdmission",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_locking_admission"
+    },
+    {
+      "version": 1,
+      "obligation": "H37",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "OldSnapshotLockingAdmission",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H37_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H38",
+      "capability": "production_account_gate",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "AccountGateDrain",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_account_gate"
+    },
+    {
+      "version": 1,
+      "obligation": "H38",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "AccountGateDrain",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H38_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H39",
+      "capability": "same_physical_session_snapshot",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "SnapshotPinSameSessionAck",
+      "outcome": "NOT_RUN",
+      "missing_capability": "same_physical_session_snapshot"
+    },
+    {
+      "version": 1,
+      "obligation": "H39",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "SnapshotPinSameSessionAck",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H39_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H40",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "IncompleteSnapshotRestart",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H40",
+      "capability": "cross_store_snapshot",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "IncompleteSnapshotRestart",
+      "outcome": "NOT_RUN",
+      "missing_capability": "cross_store_snapshot"
+    },
+    {
+      "version": 1,
+      "obligation": "H40",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "IncompleteSnapshotRestart",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H40_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H41",
+      "capability": "complete_production_writer_inventory",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OmittedSemanticJournal",
+      "outcome": "NOT_RUN",
+      "missing_capability": "complete_production_writer_inventory"
+    },
+    {
+      "version": 1,
+      "obligation": "H41",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "OmittedSemanticJournal",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H41_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H42",
+      "capability": "production_committed_prefix",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CommittedPrefixCounter",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_committed_prefix"
+    },
+    {
+      "version": 1,
+      "obligation": "H42",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "CommittedPrefixCounter",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H42_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "real_database_roles",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "real_database_roles"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "mixed_executable_versions",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "mixed_executable_versions"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_guard_bypass_proof",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_guard_bypass_proof"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H43_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H44",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ActivationCrashAndReplayAccounting",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H44",
+      "capability": "cross_store_apply",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ActivationCrashAndReplayAccounting",
+      "outcome": "NOT_RUN",
+      "missing_capability": "cross_store_apply"
+    },
+    {
+      "version": 1,
+      "obligation": "H44",
+      "capability": "production_logical_accounting",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ActivationCrashAndReplayAccounting",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_logical_accounting"
+    },
+    {
+      "version": 1,
+      "obligation": "H44",
+      "capability": "runtime_schedule_adapter",
+      "evidence_class": "fixture",
+      "adapter": {
+        "package": "syncharness",
+        "symbol": "RunCoverageScheduleModel"
+      },
+      "scenario": "ActivationCrashAndReplayAccounting",
+      "executable": "lc_s6a_go_test_v1",
+      "database_class": "none",
+      "platform_class": "portable_go",
+      "artifact": "H44_fixture_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H45",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "MoveWithLostAck",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H46",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "OlderBackupEvidenceClasses",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H47",
+      "capability": "production_movement_registry",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "MovementRegistryCompleteness",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_movement_registry"
+    },
+    {
+      "version": 1,
+      "obligation": "H48",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "SuccessorOriginalReceipt",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H49",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ReplicaNewerDeletionRevocation",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H50",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "RestoreMarkerCrashMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H51",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "RollbackCloneOldHostMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H52",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ArchiveNormalizationNotHandoff",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H53",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PurgeRetiredAuthorityDenial",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H54",
+      "capability": "deployed_cursor_trust",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CursorReceiptFieldMutation",
+      "outcome": "NOT_RUN",
+      "missing_capability": "deployed_cursor_trust"
+    },
+    {
+      "version": 1,
+      "obligation": "H55",
+      "capability": "independent_witness",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "RetiredSignerSealedPrefix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "independent_witness"
+    },
+    {
+      "version": 1,
+      "obligation": "H56",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PublicationOutboxWitnessBoundary",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H57",
+      "capability": "production_recovery_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "RecoveryRJPTruthTable",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_recovery_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H58",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "RecoveredCreateLaterDeleted",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H59",
+      "capability": "independent_external_signal",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "IndistinguishableWholeSystemRollback",
+      "outcome": "NOT_RUN",
+      "missing_capability": "independent_external_signal"
+    },
+    {
+      "version": 1,
+      "obligation": "H59",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "IndistinguishableWholeSystemRollback",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H60",
+      "capability": "independent_witness",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "FrontierGapAndProofConflict",
+      "outcome": "NOT_RUN",
+      "missing_capability": "independent_witness"
+    },
+    {
+      "version": 1,
+      "obligation": "H61",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "UnresolvedBeyondHorizon",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H62",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "HistoricalCompletionNoReexecution",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H63",
+      "capability": "native_restore",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "DatabaseVsWholeDiskRestoreDomain",
+      "outcome": "NOT_RUN",
+      "missing_capability": "native_restore"
+    },
+    {
+      "version": 1,
+      "obligation": "H63",
+      "capability": "independent_physical_witness",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "DatabaseVsWholeDiskRestoreDomain",
+      "outcome": "NOT_RUN",
+      "missing_capability": "independent_physical_witness"
+    },
+    {
+      "version": 1,
+      "obligation": "H64",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "LogicalAccountingMatrix",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H65",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "ReportingQueueUnavailable",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H66",
+      "capability": "production_destination_admission",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "DestinationPolicyModes",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_destination_admission"
+    },
+    {
+      "version": 1,
+      "obligation": "H67",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "EntitlementLossIndependentLocalWork",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H68",
+      "capability": "production_replica_identity",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "GrantDeletionClockHorizon",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_replica_identity"
+    },
+    {
+      "version": 1,
+      "obligation": "H69",
+      "capability": "production_domain_adapter",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CurationAndKeyCustody",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_domain_adapter"
+    }
+  ]
+}

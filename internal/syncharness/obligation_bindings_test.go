@@ -64,3 +64,43 @@ func TestImplementedObligationBindings(t *testing.T) {
 		t.Fatal("orphaned obligation test binding")
 	}
 }
+
+func TestRuntimeResultAdapterBindings(t *testing.T) {
+	// A symbol inventory is insufficient: this typed pointer must compile and
+	// the exact scenario must execute before its artifact can be accepted.
+	bindings := map[string]func(CoverageSchedule) (Trace, error){
+		"RunCoverageScheduleModel": RunCoverageScheduleModel,
+	}
+	results, err := EmbeddedRuntimeResults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed := 0
+	for _, record := range results.Records {
+		if record.Adapter.Package != "syncharness" {
+			continue
+		}
+		run, ok := bindings[record.Adapter.Symbol]
+		if !ok {
+			t.Fatal("runtime result lacks a compiled adapter")
+		}
+		index := slices.IndexFunc(CoverageSchedules(), func(s CoverageSchedule) bool { return s.ID == record.Obligation })
+		if index < 0 {
+			t.Fatal("runtime result has no executable schedule")
+		}
+		t.Run(record.Obligation, func(t *testing.T) {
+			trace, runErr := run(CoverageSchedules()[index])
+			observed, _, _ := fixtureRuntimeRecord(record.Obligation)
+			if runErr != nil || trace.Outcome != ModelPass {
+				observed.Outcome = Fail
+			}
+			if observed != record || VerifyRuntimeArtifact(observed, len(trace.Steps)) != nil {
+				t.Fatal("executed adapter differs from retained runtime result")
+			}
+		})
+		executed++
+	}
+	if executed != 10 {
+		t.Fatal("runtime schedule execution bindings incomplete")
+	}
+}

@@ -43,7 +43,10 @@ func TestCoverageSchedulesDoNotTrustCapabilityClaims(t *testing.T) {
 
 type coverageAdapter struct{ calls int }
 
-func (a *coverageAdapter) RunCoverageSchedule(CoverageSchedule) error { a.calls++; return nil }
+func (a *coverageAdapter) RunCoverageSchedule(CoverageSchedule) (RuntimeResultRecord, error) {
+	a.calls++
+	return RuntimeResultRecord{}, nil
+}
 
 func TestCoverageScheduleCannotDropRequiredCapabilities(t *testing.T) {
 	for _, mutation := range []string{"capability", "barrier", "name"} {
@@ -79,5 +82,84 @@ func TestCoverageScheduleOrderingMutationFails(t *testing.T) {
 		if err == nil && trace.Outcome != Fail {
 			t.Fatalf("%s missing causal state was accepted", s.ID)
 		}
+	}
+}
+
+func TestCoverageScheduleFixtureEvidenceCannotClaimPostgres(t *testing.T) {
+	for _, s := range CoverageSchedules() {
+		result := RunCoverageSchedule(s, s.Required, FixtureCoverageAdapter{})
+		if result.Status != Pass || !result.Passed() || result.EvidenceClass != FixtureEvidence || result.Record == nil || result.Record.DatabaseClass != "none" || len(result.Missing) != len(s.Required) {
+			t.Fatal("model-only schedule misclassified its evidence or discharged runtime gaps")
+		}
+	}
+}
+
+type fabricatedCoverageAdapter struct{ mutation string }
+
+func (a fabricatedCoverageAdapter) RunCoverageSchedule(s CoverageSchedule) (RuntimeResultRecord, error) {
+	r, err := (FixtureCoverageAdapter{}).RunCoverageSchedule(s)
+	switch a.mutation {
+	case "class":
+		r.EvidenceClass = RealPostgresEvidence
+	case "artifact":
+		r.Artifact = ""
+	case "adapter":
+		r.Adapter.Symbol = "NonexistentAdapter"
+	case "obligation":
+		r.Obligation = "H01"
+	case "failure":
+		r.Outcome = Fail
+	}
+	return r, err
+}
+
+func TestCoverageScheduleRejectsFabricatedAdapterResults(t *testing.T) {
+	for _, mutation := range []string{"class", "artifact", "adapter", "obligation", "failure"} {
+		s := CoverageSchedules()[0]
+		if result := RunCoverageSchedule(s, s.Required, fabricatedCoverageAdapter{mutation}); result.Status != Fail || result.Passed() {
+			t.Fatal("fabricated schedule evidence accepted")
+		}
+	}
+}
+
+type copiedPassAdapter struct{ calls int }
+
+func (a *copiedPassAdapter) RunCoverageSchedule(s CoverageSchedule) (RuntimeResultRecord, error) {
+	a.calls++
+	// Deliberately execute no model barrier; a retained artifact is not a run.
+	results, err := EmbeddedRuntimeResults()
+	if err != nil {
+		return RuntimeResultRecord{}, err
+	}
+	for _, r := range results.Records {
+		if r.Obligation == s.ID && r.Outcome == Pass {
+			return r, nil
+		}
+	}
+	return RuntimeResultRecord{}, ErrRuntimeResult
+}
+
+func TestCoverageScheduleRejectsCopiedPassWithoutExecution(t *testing.T) {
+	s := CoverageSchedules()[0]
+	adapter := &copiedPassAdapter{}
+	if result := RunCoverageSchedule(s, s.Required, adapter); result.Passed() || result.Status != Fail || adapter.calls != 0 {
+		t.Fatal("unregistered adapter manufactured evidence from a copied retained pass")
+	}
+	var nilAdapter *FixtureCoverageAdapter
+	if result := RunCoverageSchedule(s, s.Required, nilAdapter); result.Passed() || result.Status != Fail {
+		t.Fatal("nil compiled adapter accepted")
+	}
+}
+
+func TestFixtureCoverageAdapterRejectsAlteredSchedule(t *testing.T) {
+	s := CoverageSchedules()[0]
+	// Same ID and barrier count, and still a successful model execution, but
+	// guard installation never occurs. It cannot earn the retained scenario.
+	s.Barriers[len(s.Barriers)-1].Action = "writer_hold"
+	if trace, err := RunCoverageScheduleModel(s); err != nil || trace.Outcome != ModelPass {
+		t.Fatal("counterexample no longer exercises a successful altered model")
+	}
+	if _, err := (FixtureCoverageAdapter{}).RunCoverageSchedule(s); err == nil {
+		t.Fatal("altered scenario earned the original artifact")
 	}
 }
