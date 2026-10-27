@@ -1003,6 +1003,7 @@ before starting.
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
 | LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations remain deferred | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
+| LC-S6 | Codex GPT-6 Astra (LC-S6A implementer); Fable (integration owner) | LC-S6A implemented, owner gate pending; B–F specced/planned per the LC-S6 design | A completes H03/H05 model allocations and separates executable capability evidence from the immutable v1 scaffold inventory | pure legacy-projection and ordered-membership models; versioned runtime result validation and compiled adapter bindings; fixture evidence only | owner application gate; B–F production schema, writer capture, application/accounting, movement and native/independent-witness proof; founder F1–F4 and D9 boundaries remain | owner gates and reviews A; implement B–F in their accepted dependency order without promoting an obligation from partial capability evidence |
 
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic
@@ -1029,6 +1030,17 @@ one host and database failure domain. M4 still owes real writer/role isolation,
 mixed binaries, cross-store apply, native restore, full movement and independent
 witness proofs. All four slices are merged; failure-harness scaffolding is not
 synchronization and does not close M4.
+
+LC-S6A completes the deferred H03 legacy projection backfill and H05 ordered
+evidence membership model allocations. Runtime results are separate, versioned
+records that bind each capability outcome to its executing adapter, scenario,
+build label, database/platform class and retained value-free artifact. They
+distinguish fixture, real PostgreSQL, mixed binaries, native lifecycle and
+independent failure-domain evidence. No obligation's runtime status changes in
+this slice: the v1 scaffold inventory retains `NOT_RUN` and `SCAFFOLD_ONLY`, and
+capability evidence cannot promote those fields without a separate explicit,
+reviewed promotion step. LC-S6A activates no production behavior; B–F remain
+specced/planned under the LC-S6 design and their unresolved acceptance gates.
 
 ## Founder decisions (answered)
 

@@ -3,14 +3,38 @@
   "id": "H05",
   "name": "EvidenceMembershipInterleaving",
   "design_allocation": "I+S",
-  "disposition": "SCAFFOLD_ONLY",
-  "implemented_scope": "design allocation I+S is not met for the model part: the ordered evidence membership interleaving model is not implemented in LC-S5; scenario and explicit expectation retained; runtime implementation deferred",
-  "tests": [],
+  "disposition": "I",
+  "implemented_scope": "LC-S6A pure ordered evidence membership model; no production adapter",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestOrderedEvidenceMembershipScenario"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestEvidenceMembershipInterleaving"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestEvidenceMembershipRetryBackfillDeletion"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestEvidenceMembershipRejectsForgedProof"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestEvidenceMembershipProjectionAppendAndOwnership"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestEvidenceMembershipValueFreeBounds"
+    }
+  ],
   "runtime_status": "NOT_RUN",
   "remaining": "SCAFFOLD_ONLY",
   "missing_capabilities": [
-    "production_domain_adapter",
-    "ordered_evidence_membership_model"
+    "production_domain_adapter"
   ],
   "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
 }

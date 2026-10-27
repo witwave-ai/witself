@@ -74,7 +74,9 @@ func (m ObligationManifest) Validate() error {
 	return nil
 }
 
-// EmbeddedObligations loads one versioned manifest for every adopted H ID.
+// EmbeddedObligations loads the reviewed allocation for every H ID.
+// Runtime results never alter runtime_status or remaining: promoting either
+// needs a separate reviewed implementation.
 func EmbeddedObligations() ([]ObligationManifest, error) {
 	catalog, err := EmbeddedCatalog()
 	if err != nil {

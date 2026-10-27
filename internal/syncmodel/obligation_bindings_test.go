@@ -1,6 +1,7 @@
 package syncmodel
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 
@@ -11,6 +12,21 @@ import (
 // inventory match alone cannot satisfy an implemented manifest. Pure tests only.
 func TestImplementedObligationBindings(t *testing.T) {
 	bindings := map[string]func(*testing.T){
+		"TestLegacyProjectionTypedScopeIsolation":            TestLegacyProjectionTypedScopeIsolation,
+		"TestLegacyProjectionBackfillScenario":               TestLegacyProjectionBackfillScenario,
+		"TestLegacyProjectionBackfillRetry":                  TestLegacyProjectionBackfillRetry,
+		"TestLegacyProjectionBackfillAtomicConflict":         TestLegacyProjectionBackfillAtomicConflict,
+		"TestLegacyProjectionDeletionAndNameReuse":           TestLegacyProjectionDeletionAndNameReuse,
+		"TestLegacyProjectionDeletionBeforeBackfill":         TestLegacyProjectionDeletionBeforeBackfill,
+		"TestLegacyProjectionAmbiguousCoordinatesAndScope":   TestLegacyProjectionAmbiguousCoordinatesAndScope,
+		"TestLegacyProjectionInvalidMappings":                TestLegacyProjectionInvalidMappings,
+		"TestOrderedEvidenceMembershipScenario":              TestOrderedEvidenceMembershipScenario,
+		"TestEvidenceMembershipInterleaving":                 TestEvidenceMembershipInterleaving,
+		"TestEvidenceMembershipRetryBackfillDeletion":        TestEvidenceMembershipRetryBackfillDeletion,
+		"TestEvidenceMembershipRejectsForgedProof":           TestEvidenceMembershipRejectsForgedProof,
+		"TestEvidenceMembershipProjectionAppendAndOwnership": TestEvidenceMembershipProjectionAppendAndOwnership,
+		"TestEvidenceMembershipValueFreeBounds":              TestEvidenceMembershipValueFreeBounds,
+
 		"TestAbortPublicationRestoreRace":                               TestAbortPublicationRestoreRace,
 		"TestAdoptionJoinEnrollment":                                    TestAdoptionJoinEnrollment,
 		"TestAuthorityControlPinsAreSeparateAndRestartRollsBackWriters": TestAuthorityControlPinsAreSeparateAndRestartRollsBackWriters,
@@ -51,6 +67,9 @@ func TestImplementedObligationBindings(t *testing.T) {
 	// Reviewed per-obligation bindings prevent a real but unrelated test from
 	// being substituted for the required model invariant.
 	expected := map[string][]string{
+		"H03": {"TestLegacyProjectionBackfillScenario", "TestLegacyProjectionBackfillRetry", "TestLegacyProjectionBackfillAtomicConflict", "TestLegacyProjectionDeletionAndNameReuse", "TestLegacyProjectionDeletionBeforeBackfill", "TestLegacyProjectionAmbiguousCoordinatesAndScope", "TestLegacyProjectionInvalidMappings", "TestLegacyProjectionTypedScopeIsolation"},
+		"H05": {"TestOrderedEvidenceMembershipScenario", "TestEvidenceMembershipInterleaving", "TestEvidenceMembershipRetryBackfillDeletion", "TestEvidenceMembershipRejectsForgedProof", "TestEvidenceMembershipProjectionAppendAndOwnership", "TestEvidenceMembershipValueFreeBounds"},
+
 		"H11": {"TestAdoptionJoinEnrollment", "TestTransitionCrashResumeAndPartialCopy"},
 		"H14": {"TestCompoundNotificationBeforeLink"},
 		"H15": {"TestGraphFreezeMutationMatrix"},
@@ -117,5 +136,151 @@ func TestImplementedObligationBindings(t *testing.T) {
 	}
 	if len(used) != len(bindings) || len(seenIDs) != len(expected) {
 		t.Fatal("orphaned obligation test binding")
+	}
+}
+
+// These expected resolutions are frozen independently of the adapter body and
+// model fixture helpers. Counts increase only for completed matching assertions.
+func observeLegacyProjectionScenario(run func() (LegacyProjectionObservations, error)) (int, error) {
+	observed, err := run()
+	if err != nil {
+		return 0, err
+	}
+	scope := LegacyProjectionScope{
+		Incarnation: Incarnation{AccountID: "account_fixture", Lifecycle: 1, Restore: RestoreMarker{1}},
+		RealmID:     "realm_fixture", OwnerID: "owner_fixture", ObjectID: "conversation_fixture",
+		Generation: GenerationID{1}, ProjectionID: "projection_legacy", ExternalName: "conversation_name",
+	}
+	original := LegacyProjectionRecord{Coordinate: LegacyCoordinate{LegacyTranscriptSequence, scope, 1}, Identity: LegacyIdentity{EntryID: "entry_original"}}
+	memory := LegacyProjectionRecord{Coordinate: LegacyCoordinate{LegacyMemoryVersion, LegacyProjectionScope{
+		Incarnation: scope.Incarnation, RealmID: "realm_fixture", OwnerID: "owner_fixture", ObjectID: "memory_fixture",
+		Generation: GenerationID{1}, ProjectionID: "projection_legacy", ExternalName: "memory_name",
+	}, 1}, Identity: LegacyIdentity{VersionID: RevisionID{1}}}
+	deleted := original
+	deleted.Deleted = true
+	reused := LegacyProjectionRecord{Coordinate: LegacyCoordinate{LegacyTranscriptSequence, LegacyProjectionScope{
+		Incarnation: scope.Incarnation, RealmID: "realm_fixture", OwnerID: "owner_fixture", ObjectID: "conversation_new",
+		Generation: GenerationID{2}, ProjectionID: "projection_legacy", ExternalName: "conversation_name",
+	}, 1}, Identity: LegacyIdentity{EntryID: "entry_new"}}
+	if len(observed.OriginalAliases) != 2 || len(observed.RetriedAliases) != 2 {
+		return 0, syncharness.ErrRuntimeResult
+	}
+	return completedModelAssertions(
+		observed.OriginalAliases[0] == original, observed.OriginalAliases[1] == memory,
+		observed.RetriedAliases[0] == original, observed.RetriedAliases[1] == memory,
+		observed.DeletedAlias == deleted, observed.ReusedNameAlias == reused, observed.AmbiguityRefused,
+	)
+}
+
+func observeEvidenceMembershipScenario(run func() (EvidenceMembershipObservations, error)) (int, error) {
+	observed, err := run()
+	if err != nil {
+		return 0, err
+	}
+	expected := EvidenceMembershipProof{
+		Scope:      EvidenceScope{Incarnation: Incarnation{AccountID: "account", Lifecycle: 1}, RealmID: "realm", OwnerID: "owner", ConversationID: "conversation", Generation: GenerationID{1}},
+		EvidenceID: RevisionID{3}, SourceProjection: RevisionID{1}, First: 10, Last: 12,
+		Members: []TranscriptEntryID{"entry_A", "entry_B", "entry_C"},
+	}
+	return completedModelAssertions(
+		reflect.DeepEqual(observed.SealedMembership, expected),
+		slices.Equal(observed.DestinationPositions, []Ordinal{20, 22, 24}),
+		reflect.DeepEqual(observed.RetriedMembership, expected),
+		slices.Equal(observed.UnavailableMembers, []TranscriptEntryID{"entry_B"}),
+		observed.ForgedProofRefused, observed.OriginalProofValid,
+	)
+}
+
+func completedModelAssertions(matches ...bool) (int, error) {
+	checks := 0
+	for _, match := range matches {
+		if !match {
+			return checks, syncharness.ErrRuntimeResult
+		}
+		checks++
+	}
+	if checks == 0 {
+		return 0, syncharness.ErrRuntimeResult
+	}
+	return checks, nil
+}
+
+func observeModelRuntimeResult(id string, run func() (int, error)) (syncharness.RuntimeResultRecord, int) {
+	observed := syncharness.RuntimeResultRecord{
+		Version: 1, Obligation: id, Capability: "legacy_projection_backfill_model",
+		EvidenceClass: syncharness.FixtureEvidence, Adapter: syncharness.RuntimeAdapterSymbol{Package: "syncmodel", Symbol: "RunLegacyProjectionBackfillScenario"},
+		Scenario: "LegacyProjectionMigration", Executable: "lc_s6a_go_test_v1", DatabaseClass: "none", PlatformClass: "portable_go", Artifact: "H03_fixture_v1", Outcome: syncharness.Fail,
+	}
+	switch id {
+	case "H03":
+	case "H05":
+		observed.Capability = "ordered_evidence_membership_model"
+		observed.Adapter.Symbol = "RunOrderedEvidenceMembershipScenario"
+		observed.Scenario = "EvidenceMembershipInterleaving"
+		observed.Artifact = "H05_fixture_v1"
+	default:
+		return observed, 0
+	}
+	checks, err := run()
+	if err == nil && checks > 0 {
+		observed.Outcome = syncharness.Pass
+	}
+	return observed, checks
+}
+
+func TestRuntimeResultAdapterBindings(t *testing.T) {
+	bindings := map[string]func() (int, error){
+		"RunLegacyProjectionBackfillScenario": func() (int, error) {
+			return observeLegacyProjectionScenario(RunLegacyProjectionBackfillScenario)
+		},
+		"RunOrderedEvidenceMembershipScenario": func() (int, error) {
+			return observeEvidenceMembershipScenario(RunOrderedEvidenceMembershipScenario)
+		},
+	}
+	results, err := syncharness.EmbeddedRuntimeResults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed := 0
+	for _, record := range results.Records {
+		if record.Adapter.Package != "syncmodel" {
+			continue
+		}
+		run, ok := bindings[record.Adapter.Symbol]
+		if !ok {
+			t.Fatal("runtime result lacks a compiled model adapter")
+		}
+		t.Run(record.Obligation, func(t *testing.T) {
+			observed, checks := observeModelRuntimeResult(record.Obligation, run)
+			if observed != record || syncharness.VerifyRuntimeArtifact(observed, checks) != nil {
+				t.Fatal("executed model differs from retained runtime evidence")
+			}
+		})
+		executed++
+	}
+	if executed != len(bindings) {
+		t.Fatal("model runtime execution bindings incomplete")
+	}
+}
+
+func TestRuntimeResultAdapterRejectsEmptyObservations(t *testing.T) {
+	for id, run := range map[string]func() (int, error){
+		"H03": func() (int, error) {
+			return observeLegacyProjectionScenario(func() (LegacyProjectionObservations, error) {
+				return LegacyProjectionObservations{}, nil
+			})
+		},
+		"H05": func() (int, error) {
+			return observeEvidenceMembershipScenario(func() (EvidenceMembershipObservations, error) {
+				return EvidenceMembershipObservations{}, nil
+			})
+		},
+	} {
+		t.Run(id, func(t *testing.T) {
+			observed, checks := observeModelRuntimeResult(id, run)
+			if observed.Outcome != syncharness.Fail || checks != 0 || syncharness.VerifyRuntimeArtifact(observed, checks) == nil {
+				t.Fatal("no-op adapter earned runtime evidence without observations")
+			}
+		})
 	}
 }

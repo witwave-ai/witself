@@ -49,24 +49,32 @@ func CoverageSchedules() []CoverageSchedule {
 	}
 }
 
-// RuntimeScheduleAdapter must execute the named real interleaving. Capability
-// claims alone never manufacture a pass. No implementation ships in LC-S5.
-type RuntimeScheduleAdapter interface{ RunCoverageSchedule(CoverageSchedule) error }
+// RuntimeScheduleAdapter returns the evidence actually executed. A fixture
+// adapter cannot upgrade its experiment by claiming production capabilities.
+type RuntimeScheduleAdapter interface {
+	RunCoverageSchedule(CoverageSchedule) (RuntimeResultRecord, error)
+}
+
+// CoverageScheduleResult preserves missing capabilities alongside the class of
+// an executed observation. PASS with fixture evidence is never a runtime H pass.
+type CoverageScheduleResult struct {
+	Obligation    string
+	Status        EvidenceStatus
+	EvidenceClass EvidenceClass
+	Missing       []string
+	Record        *RuntimeResultRecord
+}
+
+// Passed reports an executed observation within its explicit evidence class.
+func (r CoverageScheduleResult) Passed() bool {
+	return r.Status == Pass && r.Record != nil && r.Record.Outcome == Pass && r.EvidenceClass == r.Record.EvidenceClass && validEvidenceClass(r.EvidenceClass)
+}
 
 // RunCoverageSchedule requires the registered schedule, every runtime capability
 // and an executing adapter. Missing capabilities return NOT_RUN explicitly.
-func RunCoverageSchedule(s CoverageSchedule, available []string, adapter RuntimeScheduleAdapter) Result {
-	result := Result{Obligation: s.ID, Status: NotRun}
-	registered := false
-	for _, candidate := range CoverageSchedules() {
-		if candidate.ID == s.ID && candidate.Name == s.Name && slices.Equal(candidate.Required, s.Required) && slices.EqualFunc(candidate.Barriers, s.Barriers, func(a, b ScheduleBarrier) bool {
-			return a.Role == b.Role && a.Action == b.Action && slices.Equal(a.After, b.After)
-		}) {
-			registered = true
-			break
-		}
-	}
-	if !registered {
+func RunCoverageSchedule(s CoverageSchedule, available []string, adapter RuntimeScheduleAdapter) CoverageScheduleResult {
+	result := CoverageScheduleResult{Obligation: s.ID, Status: NotRun}
+	if !registeredCoverageSchedule(s) {
 		result.Status = Fail
 		return result
 	}
@@ -82,12 +90,64 @@ func RunCoverageSchedule(s CoverageSchedule, available []string, adapter Runtime
 	if len(result.Missing) > 0 {
 		return result
 	}
-	if adapter.RunCoverageSchedule(s) != nil {
+	// A caller-supplied implementation could copy a retained PASS without doing
+	// any work. Only reviewed concrete execution bindings may supply evidence.
+	// Later slices must register their actual adapters here as well as in the
+	// versioned result validator and package-local compiled binding tests.
+	switch a := adapter.(type) {
+	case FixtureCoverageAdapter:
+	case *FixtureCoverageAdapter:
+		if a == nil {
+			result.Status = Fail
+			return result
+		}
+	default:
+		result.Status = Fail
+		return result
+	}
+	record, err := adapter.RunCoverageSchedule(s)
+	if err != nil || record.Obligation != s.ID || record.Scenario != s.Name || VerifyRuntimeArtifact(record, len(s.Barriers)) != nil {
 		result.Status = Fail
 	} else {
-		result.Status = PostgresPass
+		result.Status = record.Outcome
+		result.EvidenceClass = record.EvidenceClass
+		result.Record = &record
+		if record.EvidenceClass == FixtureEvidence {
+			// Executing the barrier model does not discharge production gaps,
+			// even if the caller supplied every capability name above.
+			result.Missing = slices.Clone(s.Required)
+			slices.Sort(result.Missing)
+		}
 	}
 	return result
+}
+
+func registeredCoverageSchedule(s CoverageSchedule) bool {
+	return slices.ContainsFunc(CoverageSchedules(), func(candidate CoverageSchedule) bool {
+		return candidate.ID == s.ID && candidate.Name == s.Name && slices.Equal(candidate.Required, s.Required) && slices.EqualFunc(candidate.Barriers, s.Barriers, func(a, b ScheduleBarrier) bool {
+			return a.Role == b.Role && a.Action == b.Action && slices.Equal(a.After, b.After)
+		})
+	})
+}
+
+// FixtureCoverageAdapter executes only the model barriers. The evidence class,
+// executable and retained artifact are fixed by this adapter, not its caller.
+type FixtureCoverageAdapter struct{}
+
+// RunCoverageSchedule executes exactly the reviewed model barrier sequence.
+func (FixtureCoverageAdapter) RunCoverageSchedule(s CoverageSchedule) (RuntimeResultRecord, error) {
+	if !registeredCoverageSchedule(s) {
+		return RuntimeResultRecord{}, ErrRuntimeResult
+	}
+	trace, err := RunCoverageScheduleModel(s)
+	if err != nil || trace.Outcome != ModelPass || len(trace.Steps) != len(s.Barriers) {
+		return RuntimeResultRecord{}, ErrRuntimeResult
+	}
+	record, checks, ok := fixtureRuntimeRecord(s.ID)
+	if !ok || record.Scenario != s.Name || checks != len(trace.Steps) {
+		return RuntimeResultRecord{}, ErrRuntimeResult
+	}
+	return record, nil
 }
 
 // CompileCoverageSchedule uses the existing causal scheduler, with all six SC-5
