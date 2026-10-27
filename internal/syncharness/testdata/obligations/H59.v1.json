@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "H59",
+  "name": "IndistinguishableWholeSystemRollback",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "paired observationally identical surviving-world oracle",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestIndistinguishableWholeSystemRollback"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "independent_external_signal",
+    "native_restore"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed.",
+  "external_signal_limit": "Observationally identical surviving datasets cannot certify the latest frontier. W shares the test PostgreSQL host; a whole-system rollback requires an independent surviving external signal to establish continuity."
+}

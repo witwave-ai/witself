@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H42",
+  "name": "CommittedPrefixCounter",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "committed-prefix lock/rollback barrier model; SQL evidence separately tested",
+  "tests": [
+    {
+      "package": "syncharness",
+      "name": "TestCoverageInventoryAndSchedule"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_committed_prefix"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

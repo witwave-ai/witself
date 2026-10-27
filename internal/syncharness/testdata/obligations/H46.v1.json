@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H46",
+  "name": "OlderBackupEvidenceClasses",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "recovery evidence-class oracle",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryRJPTruthTable"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

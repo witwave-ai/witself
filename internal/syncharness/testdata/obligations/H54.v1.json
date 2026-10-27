@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "H54",
+  "name": "CursorReceiptFieldMutation",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "signed model cursor and expected receipt acceptance/authority coordinate checks",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestSignedCursorFieldMutation"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestReceiptExpectedAcceptanceAndAuthorityCoordinates"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "deployed_cursor_trust"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

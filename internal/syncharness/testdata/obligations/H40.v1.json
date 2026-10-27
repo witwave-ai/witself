@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "H40",
+  "name": "IncompleteSnapshotRestart",
+  "design_allocation": "S",
+  "disposition": "S",
+  "implemented_scope": "scenario and explicit expectation retained; runtime implementation deferred",
+  "tests": [],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "native_restore",
+    "cross_store_snapshot"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

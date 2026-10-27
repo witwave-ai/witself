@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "H34",
+  "name": "CoverageInventoryAndSchedule",
+  "design_allocation": "I",
+  "disposition": "I",
+  "implemented_scope": "ten controlled role/barrier schedules; runtime capability accounting",
+  "tests": [
+    {
+      "package": "syncharness",
+      "name": "TestCoverageInventoryAndSchedule"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "real_database_roles",
+    "mixed_executable_versions",
+    "native_restore"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

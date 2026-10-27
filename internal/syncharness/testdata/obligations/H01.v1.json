@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H01",
+  "name": "OperationMatrix",
+  "design_allocation": "I",
+  "disposition": "I",
+  "implemented_scope": "operation catalog and capability accounting; family adapters absent",
+  "tests": [
+    {
+      "package": "syncharness",
+      "name": "TestOperationMatrix"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

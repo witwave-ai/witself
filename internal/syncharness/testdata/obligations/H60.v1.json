@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "H60",
+  "name": "FrontierGapAndProofConflict",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "middle-group gaps and conflicting evidence override model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryIntervalCoverageAndAtomicHoles"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryMandatoryOverrides"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "independent_witness"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

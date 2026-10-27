@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H68",
+  "name": "GrantDeletionClockHorizon",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "grant renewal, deletion catch-up, uncertain clock and retired-identity model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestGrantDeletionClockHorizon"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_replica_identity"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

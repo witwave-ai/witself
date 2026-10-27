@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "H31",
+  "name": "BoundedMalformedAdmission",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "strict bounded decoder and miniature resource reservation model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestBoundedMalformedAdmission"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestBoundedResourceAdmission"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

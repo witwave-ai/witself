@@ -1,4 +1,4 @@
--- LC-S5A/B/C synthetic fixture version 1. Explicitly loaded by opted-in tests only.
+-- LC-S5A/B/C/D synthetic fixture version 1. Explicitly loaded by opted-in tests only.
 -- Harness capture/receipt/projection storage: no production migration or sync API.
 -- Comparison and signing secrets live only in fixture providers, never these rows.
 CREATE TABLE h_fixture_objects (
@@ -438,7 +438,9 @@ CREATE TABLE h_graph_authority (
     graph_epoch bigint NOT NULL CHECK (graph_epoch > 0),
     graph_revision bigint NOT NULL CHECK (graph_revision >= 0),
     authority_installation text NOT NULL,
-    state text NOT NULL CHECK (state IN ('active','fenced','retired')),
+    state text NOT NULL CHECK (state IN ('active','fenced','staged','installed','retired')),
+    final_revision bigint CHECK (final_revision>=0),
+    final_frontier bigint CHECK (final_frontier>=0),
     PRIMARY KEY (account_id,request_id,graph_epoch)
 );
 CREATE UNIQUE INDEX h_one_active_graph ON h_graph_authority(account_id,request_id) WHERE state='active';
@@ -570,3 +572,217 @@ CREATE TABLE h_acceptance_counter (
     last_accepted bigint NOT NULL CHECK(last_accepted>=0),
     PRIMARY KEY(account_id,issuer_stream)
 );
+
+-- LC-S5D replay/recovery storage. These are miniature fixture constraints, not
+-- production graph writer guards or a movement/restore implementation.
+CREATE TABLE h_graph_transfers (
+    account_id text NOT NULL,
+    transfer_id bytea NOT NULL CHECK (octet_length(transfer_id)=16),
+    request_id text NOT NULL,
+    predecessor_epoch bigint NOT NULL CHECK (predecessor_epoch>0),
+    successor_epoch bigint NOT NULL CHECK (successor_epoch>predecessor_epoch),
+    predecessor_installation text NOT NULL,
+    successor_installation text NOT NULL,
+    predecessor_lifecycle bigint NOT NULL CHECK (predecessor_lifecycle BETWEEN 0 AND 9007199254740991),
+    predecessor_marker bytea NOT NULL CHECK (octet_length(predecessor_marker)=16),
+    successor_lifecycle bigint NOT NULL CHECK (successor_lifecycle BETWEEN 0 AND 9007199254740991),
+    successor_marker bytea NOT NULL CHECK (octet_length(successor_marker)=16),
+    manifest bytea NOT NULL CHECK (octet_length(manifest)>0),
+    final_revision bigint NOT NULL CHECK (final_revision>=0),
+    state text NOT NULL CHECK (state IN ('fenced','staged','installed','published','aborted')),
+    unresolved_execution boolean NOT NULL,
+    fence_proof_ref text,
+    install_proof_ref text,
+    publication_proof_ref text,
+    abort_proof_ref text,
+    PRIMARY KEY (account_id,transfer_id),
+    UNIQUE (account_id,request_id,predecessor_epoch),
+    FOREIGN KEY (account_id,request_id,predecessor_epoch) REFERENCES h_graph_authority(account_id,request_id,graph_epoch),
+    CHECK (predecessor_installation<>successor_installation),
+    CHECK (NOT (publication_proof_ref IS NOT NULL AND abort_proof_ref IS NOT NULL)),
+    CHECK ((state='published')=(publication_proof_ref IS NOT NULL)),
+    CHECK ((state='aborted')=(abort_proof_ref IS NOT NULL))
+);
+CREATE FUNCTION h_transfer_transition() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'immutable transfer'; END IF;
+    IF (NEW.account_id,NEW.transfer_id,NEW.request_id,NEW.predecessor_epoch,NEW.successor_epoch,
+        NEW.predecessor_installation,NEW.successor_installation,NEW.predecessor_lifecycle,NEW.predecessor_marker,
+        NEW.successor_lifecycle,NEW.successor_marker,NEW.manifest,NEW.final_revision)
+        IS DISTINCT FROM (OLD.account_id,OLD.transfer_id,OLD.request_id,OLD.predecessor_epoch,OLD.successor_epoch,
+        OLD.predecessor_installation,OLD.successor_installation,OLD.predecessor_lifecycle,OLD.predecessor_marker,
+        OLD.successor_lifecycle,OLD.successor_marker,OLD.manifest,OLD.final_revision)
+       OR OLD.state IN ('published','aborted')
+       OR (OLD.fence_proof_ref IS NOT NULL AND NEW.fence_proof_ref IS DISTINCT FROM OLD.fence_proof_ref)
+       OR (OLD.install_proof_ref IS NOT NULL AND NEW.install_proof_ref IS DISTINCT FROM OLD.install_proof_ref)
+       OR NOT (NEW.state=OLD.state OR (OLD.state,NEW.state) IN
+        (('fenced','staged'),('staged','installed'),('installed','published'),('fenced','aborted'),('staged','aborted'),('installed','aborted')))
+    THEN RAISE EXCEPTION 'transfer binding or terminal state changed'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER h_transfer_monotone BEFORE UPDATE OR DELETE ON h_graph_transfers FOR EACH ROW EXECUTE FUNCTION h_transfer_transition();
+CREATE TABLE h_transfer_outbox (
+    account_id text NOT NULL,
+    transfer_id bytea NOT NULL CHECK (octet_length(transfer_id)=16),
+    proof_kind text NOT NULL CHECK (proof_kind IN ('fence','install','publish','abort')),
+    state text NOT NULL CHECK (state IN ('pending','pinned')),
+    witness_proof_ref text,
+    PRIMARY KEY (account_id,transfer_id,proof_kind),
+    FOREIGN KEY (account_id,transfer_id) REFERENCES h_graph_transfers(account_id,transfer_id),
+    CHECK ((state='pinned')=(witness_proof_ref IS NOT NULL))
+);
+CREATE FUNCTION h_transfer_outbox_transition() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'transfer proof retained'; END IF;
+    IF (NEW.account_id,NEW.transfer_id,NEW.proof_kind) IS DISTINCT FROM (OLD.account_id,OLD.transfer_id,OLD.proof_kind)
+       OR OLD.state='pinned'
+       OR (NEW.state<>'pinned' AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'transfer proof pin changed'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER h_transfer_outbox_monotone BEFORE UPDATE OR DELETE ON h_transfer_outbox FOR EACH ROW EXECUTE FUNCTION h_transfer_outbox_transition();
+CREATE TABLE h_replicas (
+    account_id text NOT NULL REFERENCES accounts(id),
+    replica_id text NOT NULL,
+    installation_id text NOT NULL,
+    write_lineage_id text NOT NULL,
+    enrollment_generation bigint NOT NULL CHECK (enrollment_generation>0),
+    revoked_at timestamptz,
+    policy_version text NOT NULL DEFAULT 'fixture-v1',
+    PRIMARY KEY (account_id,replica_id),
+    UNIQUE (account_id,replica_id,enrollment_generation)
+);
+CREATE TABLE h_grants (
+    account_id text NOT NULL,
+    grant_id text NOT NULL,
+    replica_id text NOT NULL,
+    enrollment_generation bigint NOT NULL CHECK (enrollment_generation>0),
+    expires_at timestamptz NOT NULL,
+    deletion_frontier bigint NOT NULL CHECK (deletion_frontier>=0),
+    revocation_frontier bigint NOT NULL CHECK (revocation_frontier>=0),
+    scope text NOT NULL DEFAULT 'account' CHECK (scope='account'),
+    PRIMARY KEY (account_id,grant_id),
+    FOREIGN KEY (account_id,replica_id,enrollment_generation) REFERENCES h_replicas(account_id,replica_id,enrollment_generation)
+);
+CREATE TABLE h_recovery_cases (
+    account_id text NOT NULL REFERENCES accounts(id),
+    recovery_id text NOT NULL,
+    protocol_version integer NOT NULL CHECK (protocol_version=1),
+    issuer_stream text NOT NULL,
+    from_ordinal bigint NOT NULL CHECK (from_ordinal>=0),
+    through_ordinal bigint NOT NULL CHECK (through_ordinal>=from_ordinal),
+    state text NOT NULL,
+    reason text NOT NULL,
+    required_action text NOT NULL,
+    convergence boolean NOT NULL,
+    receipt_evidence boolean NOT NULL,
+    journal_evidence boolean NOT NULL,
+    replica_evidence boolean NOT NULL,
+    deletion_coverage text NOT NULL CHECK (deletion_coverage IN ('proven','unproven')),
+    authorization_coverage text NOT NULL CHECK (authorization_coverage IN ('proven','unproven')),
+    PRIMARY KEY (account_id,recovery_id),
+    UNIQUE (account_id,recovery_id,issuer_stream),
+    CHECK (NOT convergence OR (deletion_coverage='proven' AND authorization_coverage='proven')),
+    CHECK ((reason,state,required_action,convergence) IN (
+        ('continuation_verified','ready','none',true),
+        ('recovery_complete','ready','none',true),
+        ('authority_transfer_pending','pending','obtain_evidence',false),
+        ('durability_publication_pending','pending','retry_same_operation',false),
+        ('rebootstrap_required','reconciling','rebootstrap_preserve_pending',false),
+        ('recovery_in_progress','reconciling','obtain_evidence',false),
+        ('cursor_authentication_failed','blocked','rebootstrap_preserve_pending',false),
+        ('receipt_authentication_failed','blocked','obtain_evidence',false),
+        ('replica_reenrollment_required','blocked','reenroll',false),
+        ('acceptance_ambiguous','blocked','obtain_evidence',false),
+        ('accepted_effect_unrecoverable','blocked','operator_review',false),
+        ('history_gap_unrecoverable','blocked','operator_review',false),
+        ('continuity_unproven','blocked','obtain_evidence',false),
+        ('deletion_coverage_unproven','blocked','obtain_evidence',false),
+        ('authorization_coverage_unproven','blocked','obtain_evidence',false),
+        ('evidence_conflict','blocked','operator_review',false)))
+);
+CREATE TABLE h_recovery_gaps (
+    account_id text NOT NULL,
+    recovery_id text NOT NULL,
+    issuer_stream text NOT NULL,
+    from_ordinal bigint NOT NULL CHECK (from_ordinal>=0),
+    through_ordinal bigint NOT NULL CHECK (through_ordinal>=from_ordinal),
+    atomic_group_ref text NOT NULL,
+    PRIMARY KEY (account_id,recovery_id,issuer_stream,from_ordinal),
+    FOREIGN KEY (account_id,recovery_id,issuer_stream) REFERENCES h_recovery_cases(account_id,recovery_id,issuer_stream)
+);
+CREATE TABLE h_transition_checkpoints (
+    account_id text NOT NULL REFERENCES accounts(id),
+    transition_id bytea NOT NULL CHECK (octet_length(transition_id)=16),
+    transition_kind text NOT NULL CHECK (transition_kind IN ('adoption','join','enrollment')),
+    state text NOT NULL CHECK (state IN ('intent','admission_review','snapshot_staged','catchup_pending','identity_verified','publication_pending','complete','blocked','rebootstrap')),
+    verified_watermark bigint NOT NULL CHECK (verified_watermark>=0),
+    pending_operation_ids bytea[] NOT NULL,
+    PRIMARY KEY (account_id,transition_id)
+);
+CREATE TABLE h_recorded_traces (
+    account_id text NOT NULL,
+    run_id text NOT NULL,
+    event_ordinal bigint NOT NULL CHECK (event_ordinal BETWEEN 1 AND 10000),
+    scenario_version integer NOT NULL CHECK (scenario_version=1),
+    canonical_schedule bytea NOT NULL CHECK (octet_length(canonical_schedule) BETWEEN 1 AND 8388608),
+    PRIMARY KEY (account_id,run_id,event_ordinal)
+);
+CREATE TRIGGER h_recorded_trace_immutable BEFORE UPDATE OR DELETE ON h_recorded_traces FOR EACH ROW EXECUTE FUNCTION h_immutable_row();
+
+-- LC-S5D WITNESS DEFINITIONS
+-- The fixture DDL includes empty definitions in node schemas for inventory;
+-- recovery tests populate these only in W, outside modeled node restore sets.
+-- No account FK: allocations/denials must outlive restored or purged node rows.
+-- All schemas still share one PostgreSQL process and physical failure domain.
+CREATE TABLE h_restore_intents (
+    account_id text NOT NULL,
+    restore_operation_id bytea NOT NULL CHECK (octet_length(restore_operation_id)=16),
+    new_marker bytea NOT NULL CHECK (octet_length(new_marker)=16),
+    transition_id bytea NOT NULL CHECK (octet_length(transition_id)=16),
+    state text NOT NULL CHECK (state IN ('allocated','imported','cas_installed','installed','published','aborted')),
+    lifecycle_epoch bigint NOT NULL CHECK (lifecycle_epoch BETWEEN 0 AND 9007199254740991),
+    authority_installation text NOT NULL,
+    publication_proof_ref text,
+    PRIMARY KEY (account_id,restore_operation_id),
+    UNIQUE (account_id,new_marker),
+    UNIQUE (account_id,transition_id),
+    CHECK ((state='published')=(publication_proof_ref IS NOT NULL))
+);
+CREATE FUNCTION h_restore_intent_transition() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'restore allocation consumed'; END IF;
+    IF (NEW.account_id,NEW.restore_operation_id,NEW.new_marker,NEW.transition_id,NEW.lifecycle_epoch,NEW.authority_installation)
+        IS DISTINCT FROM (OLD.account_id,OLD.restore_operation_id,OLD.new_marker,OLD.transition_id,OLD.lifecycle_epoch,OLD.authority_installation)
+       OR OLD.state IN ('published','aborted')
+       OR NOT (NEW.state=OLD.state OR NEW.state='aborted' OR (OLD.state,NEW.state) IN
+        (('allocated','imported'),('imported','cas_installed'),('cas_installed','installed'),('installed','published')))
+    THEN RAISE EXCEPTION 'restore allocation changed'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER h_restore_intent_immutable BEFORE UPDATE OR DELETE ON h_restore_intents FOR EACH ROW EXECUTE FUNCTION h_restore_intent_transition();
+CREATE TABLE h_authority_heads (
+    account_id text PRIMARY KEY,
+    lifecycle_epoch bigint NOT NULL CHECK (lifecycle_epoch BETWEEN 0 AND 9007199254740991),
+    restore_marker bytea NOT NULL CHECK (octet_length(restore_marker)=16),
+    authority_installation text NOT NULL,
+    cas_revision bigint NOT NULL CHECK (cas_revision>0)
+);
+CREATE TABLE h_restore_witness_heads (
+    account_id text NOT NULL,
+    issuer_stream text NOT NULL,
+    through_ordinal bigint NOT NULL CHECK (through_ordinal>=0),
+    prefix_members bytea NOT NULL CHECK (octet_length(prefix_members)>0),
+    cas_revision bigint NOT NULL CHECK (cas_revision>0),
+    PRIMARY KEY (account_id,issuer_stream)
+);
+CREATE TABLE h_retired_denials (
+    account_id text NOT NULL,
+    authority_installation text NOT NULL,
+    lifecycle_epoch bigint NOT NULL CHECK (lifecycle_epoch BETWEEN 0 AND 9007199254740991),
+    reason text NOT NULL CHECK (reason IN ('retired','purged','finalized')),
+    PRIMARY KEY (account_id,authority_installation,lifecycle_epoch)
+);
+CREATE FUNCTION h_witness_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'immutable external witness denial'; END $$;
+CREATE TRIGGER h_retired_denial_immutable BEFORE UPDATE OR DELETE ON h_retired_denials FOR EACH ROW EXECUTE FUNCTION h_witness_immutable();

@@ -441,7 +441,9 @@ jobs:
       - name: test store
         # The PostgreSQL integration suite deliberately serializes schema
         # migrations behind one advisory lock. Keep a bounded margin for
-        # the lock queue even though this suite now has its own runner.
+        # the lock queue even though this suite now has its own runner. The
+        # synthetic sync harness (LC-S5) adds real-PostgreSQL lock-observation
+        # tests; the job took 39.6 min at LC-S5C under the former 45m limit.
         env:
           WITSELF_TEST_REQUIRE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_NODE: "1"
@@ -449,7 +451,7 @@ jobs:
           go test ./internal/store/... \
             -race \
             -shuffle=on \
-            -timeout=45m \
+            -timeout=60m \
             -covermode=atomic \
             -coverprofile="$RUNNER_TEMP/go-coverage-store.out"
           go tool cover -func="$RUNNER_TEMP/go-coverage-store.out"

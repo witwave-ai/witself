@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "H63",
+  "name": "DatabaseVsWholeDiskRestoreDomain",
+  "design_allocation": "I",
+  "disposition": "I",
+  "implemented_scope": "simulated independent-signal survival and shared-instance failure-domain boundary",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestDatabaseVsWholeDiskRestoreDomain"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "native_restore",
+    "independent_physical_witness"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed.",
+  "external_signal_limit": "Observationally identical surviving datasets cannot certify the latest frontier. W shares the test PostgreSQL host; a whole-system rollback requires an independent surviving external signal to establish continuity."
+}

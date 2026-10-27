@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "H24",
+  "name": "OperationStateCrashMatrix",
+  "design_allocation": "I+S",
+  "disposition": "SCAFFOLD_ONLY",
+  "implemented_scope": "model and catalog test count only: the local SQL subset executes in internal store harness test TestSyncHarnessOperationStateCrashMatrix and is counted I-local in local_publication.v1.json; the cross-store and production obligation remains scaffolded",
+  "tests": [],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}
