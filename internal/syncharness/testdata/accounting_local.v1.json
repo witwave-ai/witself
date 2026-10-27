@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "name": "original_mutation",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 0,
+      "delta_original_events": 1,
+      "delta_hour_count": 1,
+      "delta_day_count": 1
+    },
+    {
+      "name": "snapshot",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 1,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "replay",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 2,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "duplicate",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 3,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "lost_ack",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 4,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "rebuild",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 4,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "regroup",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 5,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "passive_read",
+      "action_class": "fixture_mutation",
+      "original_events": 1,
+      "hour_count": 1,
+      "day_count": 1,
+      "replay_work": 5,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    },
+    {
+      "name": "audited_read",
+      "action_class": "fixture_audited_read",
+      "original_events": 2,
+      "hour_count": 2,
+      "day_count": 2,
+      "replay_work": 5,
+      "delta_original_events": 1,
+      "delta_hour_count": 1,
+      "delta_day_count": 1
+    },
+    {
+      "name": "compound",
+      "action_class": "fixture_compound",
+      "original_events": 3,
+      "hour_count": 3,
+      "day_count": 3,
+      "replay_work": 5,
+      "delta_original_events": 1,
+      "delta_hour_count": 1,
+      "delta_day_count": 1
+    },
+    {
+      "name": "refusal",
+      "action_class": "fixture_conflict",
+      "original_events": 3,
+      "hour_count": 3,
+      "day_count": 3,
+      "replay_work": 5,
+      "delta_original_events": 0,
+      "delta_hour_count": 0,
+      "delta_day_count": 0
+    }
+  ]
+}
