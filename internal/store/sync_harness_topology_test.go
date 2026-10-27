@@ -190,7 +190,7 @@ func (top *syncHarnessTopology) disconnectedViolation(ctx context.Context) error
 func TestSyncHarnessDisconnectedBaseline(t *testing.T) {
 	t.Cleanup(func() {
 		if !t.Failed() && !t.Skipped() {
-			t.Log("POSTGRES_PASS: disconnected L1/L2/R sentinels, empty D, zero receipts/cursors/status/actions/rollups, untouched W; five schemas dropped and consumer/administrator pools closed")
+			t.Log("POSTGRES_PASS: disconnected L1/L2/R sentinels with nonempty local capture on L1/R, empty D, zero receipts/cursors/status/actions/rollups, untouched W; five schemas dropped and consumer/administrator pools closed")
 		}
 	})
 	top := newSyncHarnessTopology(t)
@@ -207,11 +207,38 @@ func TestSyncHarnessDisconnectedBaseline(t *testing.T) {
 	if err := top.transport.Deliver(syncharness.Delivery{From: syncharness.L1, To: syncharness.R, Operation: "sentinel"}); !errors.Is(err, syncharness.ErrCapabilityMissing) {
 		t.Fatal("missing adapter did not return a harness capability error")
 	}
+	keys := newSyncHarnessKeys()
 	for _, node := range top.nodes[:3] {
-		syncHarnessWrite(t, node, syncHarnessAccount, "sentinel_"+string(node.id))
+		if node.id == syncharness.L2 {
+			syncHarnessWrite(t, node, syncHarnessAccount, "sentinel_"+string(node.id))
+			continue
+		}
+		seedSyncHarnessSharedAdmission(t, node, keys)
+		seedSyncHarnessCapture(t, node)
+		if err := syncHarnessLocalCapture(context.Background(), node, keys, syncHarnessEnvelope(syncHarnessAccount), "sentinel_"+string(node.id)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := top.disconnectedViolation(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	for _, node := range top.nodes {
+		want := 0
+		if node.id == syncharness.L1 || node.id == syncharness.R {
+			want = 1
+		}
+		for _, table := range []string{"h_operations", "h_operation_payloads", "h_bundles", "h_bundle_operations"} {
+			if syncHarnessCount(t, node, table) != want {
+				t.Fatal("local capture crossed disconnected node boundary")
+			}
+		}
+		if syncHarnessCount(t, node, "h_publication_outbox") != 0 || syncHarnessCount(t, node, "h_inbound") != 0 || syncHarnessCount(t, node, "h_replay_work") != 0 {
+			t.Fatal("local capture created remote publication or replay state")
+		}
+		var nonprovisional int
+		if err := node.store.pool.QueryRow(context.Background(), `SELECT count(*) FROM h_operations WHERE admission_state<>'admitted' OR receipt_ref IS NOT NULL`).Scan(&nonprovisional); err != nil || nonprovisional != 0 {
+			t.Fatal("local capture claimed destination acceptance")
+		}
 	}
 	top.close(t)
 }

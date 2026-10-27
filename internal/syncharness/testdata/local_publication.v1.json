@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "H14",
+      "name": "CompoundNotificationBeforeLink",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H24",
+      "name": "OperationStateCrashMatrix",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H27",
+      "name": "ReceiptCommitSignatureRetry",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H28",
+      "name": "PayloadRetirementCommitmentFloor",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H41",
+      "name": "OmittedSemanticJournal",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H42",
+      "name": "CommittedPrefixCounter",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H56",
+      "name": "PublicationOutboxWitnessBoundary",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    },
+    {
+      "id": "H64",
+      "name": "LogicalAccountingMatrix",
+      "disposition": "I local",
+      "evidence": "POSTGRES_PASS",
+      "remaining": "SCAFFOLD_ONLY",
+      "boundary": "single-node synthetic SQL only; production and cross-store adapters absent"
+    }
+  ]
+}
