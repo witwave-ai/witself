@@ -376,3 +376,45 @@ func TestOperationReuseRefusalKeepsOriginalReceipt(t *testing.T) {
 		t.Fatal("refusal key did not bind conflicting input")
 	}
 }
+
+func TestReceiptExpectedAcceptanceAndAuthorityCoordinates(t *testing.T) {
+	r, key, expected := fixtureReceipt(t)
+	ordinal, epoch := r.Acceptance, r.IssuerAuthorityEpoch
+	expected.ExpectedAcceptance, expected.ExpectedIssuerAuthorityEpoch = &ordinal, &epoch
+	public := key.Public().(ed25519.PublicKey)
+	if _, err := VerifyReceipt(r, public, expected); err != nil {
+		t.Fatal("matching expected coordinates refused")
+	}
+	for _, mutate := range []func(*Receipt){
+		func(r *Receipt) { r.Acceptance++ },
+		func(r *Receipt) { r.IssuerAuthorityEpoch.Epoch++; r.IssuerIncarnation.Lifecycle++ },
+	} {
+		changed := r
+		changed.CanonicalBody, changed.SignedBytes = nil, nil
+		mutate(&changed)
+		changed, err := SignReceipt(changed, key)
+		if err != nil {
+			t.Fatal("legitimate issuer mutation was not structurally valid")
+		}
+		// Update key trust to the legitimate issuer's new current epoch. The
+		// independent expected acceptance coordinates still name the original.
+		expectation := expected
+		expectation.Trust.IssuerIncarnation = changed.IssuerIncarnation
+		expectation.Trust.AuthorityEpoch = changed.IssuerAuthorityEpoch
+		if _, err := VerifyReceipt(changed, public, expectation); err == nil {
+			t.Fatal("legitimate re-sign at different expected coordinates verified")
+		}
+		expectation.ExpectedAcceptance, expectation.ExpectedIssuerAuthorityEpoch = nil, nil
+		if _, err := VerifyReceipt(changed, public, expectation); err != nil {
+			t.Fatal("optional coordinate checks changed legacy trust verification")
+		}
+	}
+	invalid := r
+	invalid.SignedBytes = append([]byte(nil), r.SignedBytes...)
+	invalid.SignedBytes[0] ^= 1
+	wrongOrdinal := ordinal + 1
+	expected.ExpectedAcceptance = &wrongOrdinal
+	if _, err := VerifyReceipt(invalid, public, expected); err == nil || err.Error() != "receipt authentication failed" {
+		t.Fatal("coordinate comparison ran before signature authentication")
+	}
+}

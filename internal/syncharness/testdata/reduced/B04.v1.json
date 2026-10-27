@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "scenario": {
+    "scenario_version": 1,
+    "scenario": "B04",
+    "seed": 29,
+    "prng_version": "splitmix64-fnv1a-v1",
+    "clock_start": "2030-01-01T00:00:00Z",
+    "symbolic_inputs": [
+      "request"
+    ],
+    "actors": [
+      "actor-L1"
+    ],
+    "capabilities": [
+      "model-scheduler"
+    ],
+    "expected_invariant": "no_fresh_action"
+  },
+  "steps": [
+    {
+      "ordinal": 1,
+      "event": {
+        "actor": "actor-L1",
+        "node": "L1",
+        "channel": "model",
+        "operation": "prepare",
+        "checkpoint": "domain_write",
+        "barrier": "a",
+        "at_ns": 0,
+        "advance_ns": 0,
+        "alternatives": [
+          "fixed"
+        ]
+      },
+      "now": "2030-01-01T00:00:00Z",
+      "clock_uncertain": false,
+      "draw": 263629774153715,
+      "choice": "fixed"
+    },
+    {
+      "ordinal": 3,
+      "event": {
+        "actor": "actor-L1",
+        "node": "L1",
+        "channel": "model",
+        "operation": "retry",
+        "checkpoint": "returned_ack",
+        "barrier": "c",
+        "at_ns": 0,
+        "advance_ns": 0,
+        "alternatives": [
+          "fixed"
+        ],
+        "requires": [
+          1
+        ]
+      },
+      "now": "2030-01-01T00:00:00Z",
+      "clock_uncertain": false,
+      "draw": 5212071581290976,
+      "choice": "fixed",
+      "faults": [
+        {
+          "class": "delayed_lost_ack",
+          "node": "L1",
+          "channel": "model",
+          "operation": "retry",
+          "checkpoint": "returned_ack",
+          "observable": "Retry original operation; no fresh ID or repeat external effect"
+        }
+      ]
+    }
+  ],
+  "payload_shapes": [
+    {
+      "input": "request",
+      "fields": [
+        "effect"
+      ],
+      "elements": 1
+    }
+  ]
+}

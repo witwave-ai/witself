@@ -1002,7 +1002,7 @@ before starting.
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
-| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | LC-S5A/B inherited; LC-S5C implemented, owner gate/merge pending | synthetic topology/catalogs/scheduler; typed protocol; local capture, compound publication, witness outbox, deletion pins and logical accounting | model/vector fixtures and opted-in PostgreSQL single-node synthetic transaction/visibility tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing adapters remain SCAFFOLD_ONLY | owner gates LC-S5C; LC-S5D recovery/schedules next |
+| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | LC-S5D skeleton implemented; H03/H05 model allocations remain deferred; owner gate/merge pending | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | owner gates LC-S5D; M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
 
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic
@@ -1010,13 +1010,25 @@ scheduling, catalogs, typed identities, strict canonical vectors and immutable
 signed receipts. LC-S5C adds synthetic transaction admission and semantic capture,
 a committed-prefix counter, compound staging and atomic inert projections,
 publication outbox/pin states, payload retirement and evidence pins, and original
-action/hour/day accounting. Eight local fixture dispositions are recorded as
-`I local` separately from their `SCAFFOLD_ONLY` cross-store and production
-obligations; miniature O-13 vectors do not replace unknown production counts.
-The disconnected baseline includes nonempty local capture. No production caller,
-migration, endpoint or default is activated, and no cross-store apply adapter is
-installed. The witness shares the database's failure domain. Owner gating remains
-pending; failure-harness scaffolding is not synchronization and does not close M4.
+action/hour/day accounting. LC-S5D adds the recovery and reproducibility skeleton (inherited
+H03/H05 model allocations remain deferred) with distinct
+adoption/join/enrollment transitions, restore markers, graph authority transfer,
+recovery evidence intervals and overrides, signed continuation proofs, recorded
+schedule replay/reduction, and miniature PostgreSQL persistence/reopen evidence.
+Every H01–H69 obligation has a versioned manifest. Implemented dispositions bind
+directly to executing scoped model/catalog tests; they retain separate
+`SCAFFOLD_ONLY` full obligations and `NOT_RUN` runtime capability results. The ten
+SC-5 schedules execute controlled model barriers over U/I/V/T/A/S and name each
+missing runtime capability. The harness movement registry covers every miniature
+table and stream, including empty streams, for all five movement purposes;
+production archive policies and unknown production accounting counts remain
+unreviewed inventory. The disconnected baseline includes nonempty local capture.
+No production caller, migration, endpoint or default is activated, and no
+cross-store apply adapter is installed. All fixture schemas, including W, share
+one host and database failure domain. M4 still owes real writer/role isolation,
+mixed binaries, cross-store apply, native restore, full movement and independent
+witness proofs. Owner gating remains pending; failure-harness scaffolding is not
+synchronization and does not close M4.
 
 ## Founder decisions (answered)
 

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "H19",
+  "name": "StaleEpochEveryWriter",
+  "design_allocation": "S",
+  "disposition": "S",
+  "implemented_scope": "scenario and explicit expectation retained; runtime implementation deferred",
+  "tests": [],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

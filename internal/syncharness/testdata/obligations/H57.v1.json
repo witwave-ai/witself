@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "H57",
+  "name": "RecoveryRJPTruthTable",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "eight evidence classes, exact interval holes, atomic groups and overrides",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryRJPTruthTable"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryIntervalCoverageAndAtomicHoles"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryReplicaOutboxAndInputOnlyReceipt"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestRecoveryIntervalsOverridePrecedence"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_recovery_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

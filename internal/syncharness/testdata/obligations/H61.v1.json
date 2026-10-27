@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H61",
+  "name": "UnresolvedBeyondHorizon",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "unresolved evidence and operation identity beyond retention horizon",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestUnresolvedBeyondHorizon"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

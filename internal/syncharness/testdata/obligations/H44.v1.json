@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "H44",
+  "name": "ActivationCrashAndReplayAccounting",
+  "design_allocation": "S",
+  "disposition": "S",
+  "implemented_scope": "scenario and explicit expectation retained; runtime implementation deferred",
+  "tests": [],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "native_restore",
+    "cross_store_apply",
+    "production_logical_accounting"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

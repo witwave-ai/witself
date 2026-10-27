@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H66",
+  "name": "DestinationPolicyModes",
+  "design_allocation": "I",
+  "disposition": "I",
+  "implemented_scope": "three destination policy modes and forged authority/capacity refusal model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestDestinationPolicyModes"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_destination_admission"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

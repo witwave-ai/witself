@@ -188,6 +188,11 @@ type ReceiptExpectation struct {
 	ComparisonKeyID  ComparisonKeyID
 	InputCommitment  Commitment
 	Trust            ReceiptTrust
+	// ExpectedAcceptance and ExpectedIssuerAuthorityEpoch are independently
+	// selected coordinates. Nil retains the legacy operation/trust-only check.
+	// They are compared only after the original signature has verified.
+	ExpectedAcceptance           *Ordinal
+	ExpectedIssuerAuthorityEpoch *AuthorityEpoch
 }
 
 // ReceiptTrust is an independently supplied issuer binding and historical membership proof.
@@ -227,6 +232,12 @@ func VerifyReceipt(r Receipt, key ed25519.PublicKey, expected ReceiptExpectation
 	}
 	if !bytes.Equal(body, r.CanonicalBody) || !ed25519.Verify(key, receiptMessage(r.CanonicalBody), r.SignedBytes) {
 		return out, errors.New("receipt authentication failed")
+	}
+	if expected.ExpectedAcceptance != nil && (*expected.ExpectedAcceptance == 0 || expected.ExpectedAcceptance.Validate() != nil || r.Acceptance != *expected.ExpectedAcceptance) {
+		return out, errors.New("receipt acceptance coordinate mismatch")
+	}
+	if expected.ExpectedIssuerAuthorityEpoch != nil && (expected.ExpectedIssuerAuthorityEpoch.Validate() != nil || !sameAuthorityEpoch(r.IssuerAuthorityEpoch, *expected.ExpectedIssuerAuthorityEpoch)) {
+		return out, errors.New("receipt authority coordinate mismatch")
 	}
 	e := expected.OriginalEnvelope
 	if err := e.Validate(); err != nil {
@@ -349,4 +360,11 @@ func validateIdentityBasis(v CanonicalTypedValue) error {
 		}
 	}
 	return nil
+}
+
+func sameAuthorityEpoch(a, b AuthorityEpoch) bool {
+	if a.Scope != b.Scope || a.Epoch != b.Epoch || (a.ObjectID == nil) != (b.ObjectID == nil) {
+		return false
+	}
+	return a.ObjectID == nil || *a.ObjectID == *b.ObjectID
 }

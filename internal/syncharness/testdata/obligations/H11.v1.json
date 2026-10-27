@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "H11",
+  "name": "AdoptionJoinEnrollment",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "adoption, join and enrollment transition oracle",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestAdoptionJoinEnrollment"
+    },
+    {
+      "package": "syncmodel",
+      "name": "TestTransitionCrashResumeAndPartialCopy"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_transition_admission",
+    "cross_store_snapshot"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

@@ -1,0 +1,1383 @@
+{
+  "version": 1,
+  "scope": "harness_only",
+  "streams": [
+    {
+      "name": "h_acceptance_counter",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_authority_heads",
+      "location": "witness",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "h_bundle_operations",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_bundles",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_capture",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_compounds",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_deletion_knowledge",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_evidence_pins",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_finalized_counter",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_fixture_messages",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_fixture_objects",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_fixture_request_links",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_fragments",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "refuse"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "refuse"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "refuse"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_grants",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_graph_authority",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_graph_transfers",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_inbound",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_incarnations",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_logical_actions",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_operation_payloads",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_operations",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_payload_retirements",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_provider_actions",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_publication_outbox",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_receipts",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_recorded_traces",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "preserve"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "preserve"
+        }
+      }
+    },
+    {
+      "name": "h_recovery_cases",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_recovery_gaps",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_replay_work",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_replica_cursors",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "h_replica_status",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "h_replicas",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_resource_budgets",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_resource_reservations",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "h_restore_intents",
+      "location": "witness",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "h_restore_witness_heads",
+      "location": "witness",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "h_retained_evidence",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_retired_denials",
+      "location": "witness",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "h_reuse_refusals",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_rollups",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "rebuild"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_transfer_outbox",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_transition_checkpoints",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_tx_admissions",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "h_tx_touches",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "h_verifier_history",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "proven_move": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "backup_restore": {
+          "classification": "portable",
+          "action": "preserve"
+        },
+        "source_finalization": {
+          "classification": "portable",
+          "action": "purge"
+        },
+        "account_purge": {
+          "classification": "portable",
+          "action": "purge"
+        }
+      }
+    },
+    {
+      "name": "h_witness_prefixes",
+      "location": "witness",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "h_writer_capabilities",
+      "location": "node",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "stream_sessions",
+      "location": "transport",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "stream_transport_capabilities",
+      "location": "transport",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    },
+    {
+      "name": "stream_comparison_keys",
+      "location": "key_provider",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "proven_move": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "backup_restore": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "source_finalization": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        },
+        "account_purge": {
+          "classification": "cell-local",
+          "action": "retain-external"
+        }
+      }
+    },
+    {
+      "name": "stream_executable_grants",
+      "location": "transport",
+      "empty_required": true,
+      "purposes": {
+        "snapshot_projection": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "proven_move": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "backup_restore": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "source_finalization": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        },
+        "account_purge": {
+          "classification": "invalidated",
+          "action": "invalidate"
+        }
+      }
+    }
+  ]
+}

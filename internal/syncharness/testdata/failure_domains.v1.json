@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "independent_physical_witness": false,
+  "limitation": "L1, L2, R, D and W use separate schemas in one PostgreSQL instance on one host. A simulated node restore can exclude W; a physical host or database loss can include every schema. External independent signals are required to certify continuity after whole-system rollback.",
+  "schemas": [
+    {
+      "node": "L1",
+      "schema": "fixture_l1",
+      "host": "shared_postgres_host",
+      "domain": "shared_postgres_instance"
+    },
+    {
+      "node": "L2",
+      "schema": "fixture_l2",
+      "host": "shared_postgres_host",
+      "domain": "shared_postgres_instance"
+    },
+    {
+      "node": "R",
+      "schema": "fixture_r",
+      "host": "shared_postgres_host",
+      "domain": "shared_postgres_instance"
+    },
+    {
+      "node": "D",
+      "schema": "fixture_d",
+      "host": "shared_postgres_host",
+      "domain": "shared_postgres_instance"
+    },
+    {
+      "node": "W",
+      "schema": "fixture_w",
+      "host": "shared_postgres_host",
+      "domain": "shared_postgres_instance"
+    }
+  ]
+}

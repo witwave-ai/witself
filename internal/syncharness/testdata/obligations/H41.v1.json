@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H41",
+  "name": "OmittedSemanticJournal",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "miniature complete-effect journal oracle",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestCaptureOmittedSemanticJournal"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "complete_production_writer_inventory"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

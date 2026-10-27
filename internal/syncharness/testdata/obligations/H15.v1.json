@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H15",
+  "name": "GraphFreezeMutationMatrix",
+  "design_allocation": "I+S",
+  "disposition": "I",
+  "implemented_scope": "all graph-mutation kinds in deterministic authority model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestGraphFreezeMutationMatrix"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "complete_graph_writer_inventory"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}

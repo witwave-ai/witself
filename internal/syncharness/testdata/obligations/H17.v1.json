@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "H17",
+  "name": "TransferCommitPinCrashMatrix",
+  "design_allocation": "S",
+  "disposition": "I",
+  "implemented_scope": "graph control commit and pin crash model",
+  "tests": [
+    {
+      "package": "syncmodel",
+      "name": "TestAuthorityTransferCommitPinCrashMatrix"
+    }
+  ],
+  "runtime_status": "NOT_RUN",
+  "remaining": "SCAFFOLD_ONLY",
+  "missing_capabilities": [
+    "production_domain_adapter"
+  ],
+  "boundary": "Harness-only model/catalog evidence; no M4 runtime acceptance, production capture or cross-store synchronization is claimed."
+}
