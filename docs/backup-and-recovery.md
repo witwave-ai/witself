@@ -1414,7 +1414,9 @@ Dockerfile selects an exact `age_version` for each architecture in its
 `case "$(apk --print-arch)"` block, rejects unsupported architectures, and
 installs `"age=$age_version"` with one pinned `aws-cli` revision. Release
 0.0.337 pins `age=1.3.2-r1` on both architectures and `aws-cli=2.34.63-r0`;
-0.0.336 still used `age=1.3.2-r0` on `x86_64`. With
+0.0.336 still used `age=1.3.2-r0` on `x86_64`. Release 0.0.342 keeps those pins
+and moves to the current `postgres:18-alpine` digest, upgrading `brotli-libs`,
+`libcurl` and `zlib` to their Alpine 3.24 security fixes. With
 `backupImageMaxPatchLag` set to 20, the test also refuses pins
 more than 20 patch releases behind that server, or from an older minor or major
 release. The rules live in `internal/gitopsvalues/backup_image_tools.go`.
