@@ -197,7 +197,7 @@ function assertLocalcellUnixJob(ci) {
   assert.deepEqual(job.steps.slice(0, 3), windows.steps.slice(0, 3), `${label}: same pinned checkout and toolchain`);
   const checks = job.steps.slice(3);
   const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
-  assert.deepEqual(checks.map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered proof stages`);
+  assert.deepEqual(checks.filter(step => step.name !== 'Prove native service restart or record adapter capability').map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered lifecycle proof stages`);
   assert.deepEqual(checks.map(step => step.run.trim()), [
     `go build ${packages}`,
     `go vet ${packages}`,
@@ -218,11 +218,21 @@ function assertLocalcellUnixJob(ci) {
       `node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require ${lifecycleRequired} || parser_exit=$?`,
       'if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi',
     ].join('\n'),
+    [
+      'proof_json="$RUNNER_TEMP/lc-pg16/service-proof.json"',
+      'go_exit=0',
+      'go test -json ./internal/localcell -run \'^TestNativeServiceLifecycle$\' -count=1 -timeout=15m > "$proof_json" 2>&1 || go_exit=$?',
+      'parser_exit=0',
+      'node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestNativeServiceLifecycle || parser_exit=$?',
+      'if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi',
+    ].join('\n'),
     'bash scripts/ci-postgres16-unix.sh --cleanup',
   ], `${label}: narrow proof preserves native and checker failures`);
   for (const step of checks) assert.equal(step.shell, 'bash');
   const proof = checks[5];
-  const cleanup = checks[6];
+  const serviceProof = checks[6];
+  const cleanup = checks[7];
+  assert.deepEqual(serviceProof.env, {TMPDIR: '${{ runner.temp }}/lc-pg16/testtmp'});
   assert.deepEqual(proof.env, {TMPDIR: '${{ runner.temp }}/lc-pg16/testtmp'});
   assert.equal(expression(cleanup.if), 'always()', `${label}: cleanup also runs after failure`);
   for (const step of job.steps) {
@@ -230,7 +240,7 @@ function assertLocalcellUnixJob(ci) {
       assert.equal(step[key], undefined, `${label}: step cannot override ${key}`);
     }
     if (step !== cleanup) assert.equal(step.if, undefined, `${label}: required steps use default success gating`);
-    if (step !== proof) assert.equal(step.env, undefined, `${label}: only proof uses the private temporary tree`);
+    if (step !== proof && step !== serviceProof) assert.equal(step.env, undefined, `${label}: only proof uses the private temporary tree`);
   }
 }
 
@@ -483,7 +493,7 @@ for (const [name, options, message] of [
   });
 }
 
-for (const stage of ['Test Local Cell packages and require complete results', 'Prove native PostgreSQL sixteen lifecycle']) {
+for (const stage of ['Test Local Cell packages and require complete results', 'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability']) {
   test(`Unix bash exit propagation: ${stage}`, () => {
     const script = workflows['ci.yml'].jobs['localcell-unix'].steps.find(step => step.name === stage).run;
     const temporary = mkdtempSync(join(root, '.lc-unix-workflow-test-'));
@@ -1058,7 +1068,7 @@ const mutations = [
   ...[
     'Build Local Cell packages', 'Vet Local Cell packages', 'Test Go JSON result checker',
     'Test Local Cell packages and require complete results', 'Provision pinned PostgreSQL sixteen',
-    'Prove native PostgreSQL sixteen lifecycle', 'Clean PostgreSQL proof tree',
+    'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability', 'Clean PostgreSQL proof tree',
   ].map(name => [`Unix stage removed: ${name}`, data => {
     const job = data['ci.yml'].jobs['localcell-unix'];
     job.steps = job.steps.filter(step => step.name !== name);
@@ -1085,6 +1095,16 @@ const mutations = [
     [' || parser_exit != 0', '', 'masks checker exit'],
   ].map(([before, after, name]) => [`Unix proof ${name}`, data => {
     const step = data['ci.yml'].jobs['localcell-unix'].steps[8];
+    step.run = step.run.replace(before, after);
+  }]),
+  ...[
+    ["'^TestNativeServiceLifecycle$'", "'TestNativeServiceLifecycle'", 'broadens the run filter'],
+    [' --require TestNativeServiceLifecycle', '', 'omits required service outcome'],
+    [' > "$proof_json" 2>&1', '', 'prints raw Go output'],
+    ['go_exit != 0 || ', '', 'masks native exit'],
+    [' || parser_exit != 0', '', 'masks checker exit'],
+  ].map(([before, after, name]) => [`Unix service proof ${name}`, data => {
+    const step = data['ci.yml'].jobs['localcell-unix'].steps.find(step => step.name === 'Prove native service restart or record adapter capability');
     step.run = step.run.replace(before, after);
   }]),
   ['Unix proof temporary files escape cleanup tree', data => { data['ci.yml'].jobs['localcell-unix'].steps[8].env.TMPDIR = '${{ runner.temp }}'; }],

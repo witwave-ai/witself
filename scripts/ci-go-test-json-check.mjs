@@ -11,6 +11,12 @@ export const expectedPackages = Object.freeze([
 ]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
+const serviceProofTest = 'TestNativeServiceLifecycle';
+const serviceOutcomes = new Set([
+  'PASS service_manager_available', 'NOT_RUN service_manager_unavailable',
+  'NOT_RUN service_adapter_unsupported', 'NOT_RUN native_postgres_unconfigured',
+  'PASS service_manager_persistence', 'PASS service_foreground_persistence',
+]);
 // Go replaces whitespace in subtest names with underscores. Accept the names
 // used by these suites, including empty subtest segments, addresses, and #NN.
 const testNamePattern = /^(?:Test|Example|Fuzz)[A-Za-z0-9_]*(?:\/[A-Za-z0-9_.,:=+\-[\]#]*)*$/;
@@ -90,7 +96,7 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
   const packageNames = requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1);
   const packages = new Map(packageNames.map(name => [name, {
     started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), diagnostics: new Map(),
-    timedOut: new Set(), pass: 0, skip: 0, fail: 0,
+    timedOut: new Set(), serviceOutcomes: new Set(), pass: 0, skip: 0, fail: 0,
   }]));
   let invalid = requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
     new Set(requiredTests).size !== requiredTests.length;
@@ -163,6 +169,12 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     else if (action === 'output' && previous !== undefined && !terminalActions.has(previous)) {
       if (typeof event.Output === 'string') {
         classifyTimeout(state, event.Output);
+        if (name === serviceProofTest && event.Package === expectedPackages[0]) {
+          for (const line of event.Output.split('\n')) {
+            const message = line.replace(/^[ \t]*(?:service_native_test\.go:[0-9]+: )?/, '').replace(/\r$/, '');
+            if (serviceOutcomes.has(message)) state.serviceOutcomes.add(message);
+          }
+        }
         if (diagnoseProof && required.has(name)) {
           const diagnostics = state.diagnostics.get(name) ?? [];
           for (const outputLine of event.Output.split('\n')) {
@@ -216,10 +228,19 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     const incompleteProof = requiredTests.length !== 0 && (state.summary === 'skip' || state.skip !== 0 ||
       requiredTests.some(testName => !['pass', 'fail'].includes(state.tests.get(testName))));
     if (incompleteProof) invalid = true;
+    if (required.has(serviceProofTest) && state.tests.get(serviceProofTest) === 'pass') {
+      const outcomes = state.serviceOutcomes;
+      const supported = outcomes.has('PASS service_manager_available') && outcomes.has('PASS service_manager_persistence');
+      const foreground = outcomes.has('NOT_RUN service_manager_unavailable') && outcomes.has('PASS service_foreground_persistence');
+      const unsupported = outcomes.has('NOT_RUN service_adapter_unsupported');
+      if (outcomes.has('NOT_RUN native_postgres_unconfigured') || Number(supported) + Number(foreground) + Number(unsupported) !== 1 ||
+        outcomes.size !== (unsupported ? 1 : 2)) invalid = true;
+    }
     if (invalid && firstInvalidLine === null && state.summaryLine !== null &&
       (state.tests.size === 0 || [...state.tests.values()].some(action => !terminalActions.has(action)) ||
         incompleteProof)) firstInvalidLine = maskedDiagnostic(state.summaryLine, 120);
     lines.push(`package ${name} pass=${state.pass} skip=${state.skip} fail=${state.fail}`);
+    for (const outcome of [...state.serviceOutcomes].sort()) lines.push(`capability ${name} ${serviceProofTest} :: ${outcome}`);
     for (const [testName, action] of [...state.tests].sort(([left], [right]) => left.localeCompare(right))) {
       if (action === 'skip') lines.push(`skip ${name} ${testName}`);
       if (action === 'fail') {

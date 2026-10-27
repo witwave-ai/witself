@@ -42,6 +42,38 @@ function summary(counts = {}) {
 }
 
 const passing = packages.flatMap(name => packageEvents(name));
+
+test('native service capability results stay explicit and require the selected persistence proof', async () => {
+  const name = 'TestNativeServiceLifecycle';
+  for (const [outcomes, valid] of [
+    [['PASS service_manager_available', 'PASS service_manager_persistence'], true],
+    [['NOT_RUN service_manager_unavailable', 'PASS service_foreground_persistence'], true],
+    [['NOT_RUN service_adapter_unsupported'], true],
+    [['NOT_RUN native_postgres_unconfigured'], false],
+    [[], false],
+    [['NOT_RUN service_manager_unavailable'], false],
+    [['PASS service_manager_available'], false],
+    [['PASS service_manager_available', 'PASS service_foreground_persistence'], false],
+    [['NOT_RUN service_adapter_unsupported', 'PASS service_manager_available', 'PASS service_manager_persistence'], false],
+  ]) {
+    const events = [event('start', packages[0]), event('run', packages[0], name),
+      ...outcomes.map(message => event('output', packages[0], name, {Output: `    service_native_test.go:10: ${message}\n`})),
+      event('pass', packages[0], name), event('pass', packages[0])];
+    const result = await checkGoTestJSON([stream(events)], [name]);
+    assert.equal(result.valid, valid);
+    for (const outcome of outcomes) assert(result.lines.includes(`capability ${packages[0]} ${name} :: ${outcome}`));
+  }
+});
+
+test('native service capability output cannot disclose arbitrary diagnostics', async () => {
+  const name = 'TestNativeServiceLifecycle';
+  const events = [event('start', packages[0]), event('run', packages[0], name),
+    event('output', packages[0], name, {Output: '    service_native_test.go:10: NOT_RUN service_manager_unavailable private-marker\n'}),
+    event('pass', packages[0], name), event('pass', packages[0])];
+  const result = await checkGoTestJSON([stream(events)], [name]);
+  assert.equal(result.valid, false);
+  assert(!result.lines.join('\n').includes('private-marker'));
+});
 const failures = [
   {name: 'one failing test', input: stream(packages.flatMap((name, index) => packageEvents(name, index === 0 ? 'fail' : 'pass'))),
     output: summary({[packages[0]]: {pass: 0, fail: 1, failedNames: ['TestFixture']}}), stderr: failureDiagnostic},

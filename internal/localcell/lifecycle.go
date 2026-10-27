@@ -171,6 +171,9 @@ func (c *Cell) Start(ctx context.Context) error {
 	if !m.Installed {
 		return errors.New("local cell installation is incomplete")
 	}
+	if err := c.serviceStartFence(); err != nil {
+		return err
+	}
 	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
 	if err := c.layout(); err != nil {
 		return err
@@ -255,6 +258,16 @@ func (c *Cell) Start(ctx context.Context) error {
 
 // Stop refuses all signals if any recorded process has conflicting identity.
 func (c *Cell) Stop(ctx context.Context) error {
+	return c.stopWithServiceFence(ctx, true)
+}
+
+// A host restart or child failure shuts down the owned tree while preserving
+// running intent. Only an explicit Stop changes the durable desired state.
+func (c *Cell) stopServiceChildren(ctx context.Context) error {
+	return c.stopWithServiceFence(ctx, false)
+}
+
+func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 	ctx, cancel := c.deadline(ctx)
 	defer cancel()
 	lock, err := c.own(false)
@@ -262,6 +275,11 @@ func (c *Cell) Stop(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
+	if fence {
+		if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	m, err := readManifest(c.cfg.Root)
 	if err != nil {
 		return err
@@ -347,6 +365,9 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
+	if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	m, err := readManifest(c.cfg.Root)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
