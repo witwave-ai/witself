@@ -282,6 +282,17 @@ jobs:
           parser_exit=0
           node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness || parser_exit=$?
           if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
+      - name: Prove native service restart or record adapter capability
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}/lc-pg16/testtmp
+        run: |
+          proof_json="$RUNNER_TEMP/lc-pg16/service-proof.json"
+          go_exit=0
+          go test -json ./internal/localcell -run '^TestNativeServiceLifecycle$' -count=1 -timeout=15m > "$proof_json" 2>&1 || go_exit=$?
+          parser_exit=0
+          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestNativeServiceLifecycle || parser_exit=$?
+          if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
       - name: Clean PostgreSQL proof tree
         if: always()
         shell: bash

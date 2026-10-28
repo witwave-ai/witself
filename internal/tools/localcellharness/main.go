@@ -1,5 +1,6 @@
 // Command localcellharness is a developer-only driver for disposable local
-// cells. It is not an installer and is not registered by any existing binary.
+// cells. Service registration is available only through its explicit local-only
+// service install command; no existing product binary invokes it.
 package main
 
 import (
@@ -38,6 +39,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func runWithBuilder(ctx context.Context, args []string, out io.Writer, build func(context.Context, string, string, *localcell.Binaries) error) error {
+	if len(args) != 0 && (args[0] == "run" || args[0] == "service") {
+		return runServiceCommand(ctx, args, out)
+	}
 	flags := flag.NewFlagSet("localcellharness", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	operation := flags.String("operation", "", "install, start, stop, inspect, status, repair, or remove")
