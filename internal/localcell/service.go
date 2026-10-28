@@ -66,6 +66,10 @@ var (
 	ErrServiceManagerUnavailable = errors.New("service_manager_unavailable: use explicit localcellharness run foreground fallback")
 	// ErrServiceOwnershipConflict refuses matching labels with foreign payloads.
 	ErrServiceOwnershipConflict = errors.New("service_ownership_conflict")
+	// ErrServiceRegistrationFailed identifies a failed manager registration step.
+	ErrServiceRegistrationFailed = errors.New("service_registration_failed")
+	// ErrServiceRemovalFailed identifies a failed manager removal step.
+	ErrServiceRemovalFailed = errors.New("service_removal_failed")
 	// ErrServiceDesiredState prevents automatic starts against durable intent.
 	ErrServiceDesiredState = errors.New("service_desired_state_refused")
 )

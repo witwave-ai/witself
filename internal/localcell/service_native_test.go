@@ -58,9 +58,15 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	adapter := localcell.NewServiceAdapter()
 	diagnosticHome := nativeServiceDiagnosticHome()
 	label := "witself-cell-" + descriptor.InstallationID + ".service"
+	diagnosticRun := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "child-capability" {
+			return nativeServiceCapabilityDiagnostic(ctx, descriptor)
+		}
+		return nativeServiceDiagnosticOutput(ctx, name, args...)
+	}
 	logFailure := func(err error, stderr []byte) {
 		t.Helper()
-		nativeServiceFailureDiagnostics(t.Logf, root, diagnosticHome, label, err, stderr, nativeServiceDiagnosticOutput)
+		nativeServiceFailureDiagnostics(t.Logf, root, diagnosticHome, label, err, stderr, diagnosticRun)
 	}
 	_, planErr := adapter.Plan(t.Context(), descriptor)
 	manager := planErr == nil
@@ -73,7 +79,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	var foregroundStderr *nativeServiceDiagnosticBuffer
 	invoke := func(action string) error {
 		return nativeServiceInvoke(t.Context(), host, root, diagnosticHome, label,
-			[]string{"service", action, "--root", root}, t.Logf, nativeServiceDiagnosticOutput)
+			[]string{"service", action, "--root", root}, t.Logf, diagnosticRun)
 	}
 	start := func() {
 		t.Helper()

@@ -55,11 +55,11 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 
 	t.Run("adapter_errors_reach_stderr", func(t *testing.T) {
 		for _, test := range []struct {
-			method, action, reason, calls string
+			method, action, reason, detail, calls string
 		}{
-			{"Plan", "install", localcell.ErrServiceManagerUnavailable.Error(), "New\nPlan\n"},
-			{"Apply", "install", "service_registration_failed", "New\nPlan\nApply\n"},
-			{"Remove", "remove", localcell.ErrServiceOwnershipConflict.Error(), "New\nRemove\n"},
+			{"Plan", "install", localcell.ErrServiceManagerUnavailable.Error(), "runtime_dir_mode: 0755", "New\nPlan\n"},
+			{"Apply", "install", localcell.ErrServiceRegistrationFailed.Error(), "enable_now: refused <root> <home> <hex>", "New\nPlan\nApply\n"},
+			{"Remove", "remove", localcell.ErrServiceOwnershipConflict.Error(), "unit_dir_walk:3:mode: 0775", "New\nRemove\n"},
 		} {
 			t.Run(test.method, func(t *testing.T) {
 				root, _ := prepareServiceHarnessInstallation(t, host, "systemd-user", token)
@@ -79,8 +79,9 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 				}
 				assertServiceHarnessTokenAbsent(t, "failed service stdout", stdout.Bytes(), token)
 				assertServiceHarnessTokenAbsent(t, "failed service stderr", stderr.Bytes(), token)
-				if stdout.Len() != 0 || stderr.String() != test.reason+"\n" {
-					t.Fatal("adapter failure did not emit only its fixed reason on stderr")
+				if stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), test.reason+": ") ||
+					!strings.HasSuffix(stderr.String(), test.detail+"\n") || strings.Count(stderr.String(), "\n") != 1 {
+					t.Fatal("adapter failure did not preserve its fixed reason and wrapped detail on stderr")
 				}
 				calls, err := os.ReadFile(filepath.Join(manager, "calls"))
 				if err != nil || string(calls) != test.calls {
@@ -209,6 +210,7 @@ const serviceHarnessRecordingAdapterSource = `package localcell
 import (
  "context"
  "errors"
+ "fmt"
  "os"
  "path/filepath"
 )
@@ -221,9 +223,9 @@ func harnessRecordManagerCall(method string) error {
  if writeErr != nil || closeErr != nil { return errors.New("harness manager recorder failed") }
  if _, err := os.Stat(filepath.Join(os.Getenv("LC_S7A_TEST_MANAGER_DIR"), "fail-"+method)); err == nil {
   switch method {
-  case "Plan": return ErrServiceManagerUnavailable
-  case "Apply": return errors.New("service_registration_failed")
-  case "Remove": return ErrServiceOwnershipConflict
+  case "Plan": return fmt.Errorf("%w: runtime_dir_mode: 0755", ErrServiceManagerUnavailable)
+  case "Apply": return fmt.Errorf("%w: enable_now: refused <root> <home> <hex>", ErrServiceRegistrationFailed)
+  case "Remove": return fmt.Errorf("%w: unit_dir_walk:3:mode: 0775", ErrServiceOwnershipConflict)
   }
  }
  return nil

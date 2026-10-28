@@ -47,6 +47,9 @@ func NewServiceAdapter() ServiceAdapter {
 		// Resolve config paths once, then explicitly carry that same search path
 		// into systemctl enable. Never copy arbitrary caller values or credentials.
 		command.Env = []string{"XDG_RUNTIME_DIR=" + a.runtimeDir, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + a.runtimeDir + "/bus", "HOME=" + a.home, "XDG_CONFIG_HOME=" + filepath.Dir(filepath.Dir(a.unitDir))}
+		// Output keeps stderr on ExitError without mixing it into property JSON.
+		// The adapter wraps that stderr with the exact command step, sanitizing
+		// before truncation; never log this raw error or the command environment.
 		return command.Output()
 	}
 	return a

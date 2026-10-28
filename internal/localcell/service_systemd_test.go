@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -46,12 +47,35 @@ func (i systemdUnixModeInfo) Mode() os.FileMode {
 	return i.FileInfo.Mode()&^os.ModePerm | 0o600
 }
 
+type systemdFixtureModeInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (i systemdFixtureModeInfo) Mode() os.FileMode { return i.mode }
+
+func systemdFixtureMode(t *testing.T, a *systemdUserAdapter, target string, mode os.FileMode) {
+	t.Helper()
+	inspect := a.inspectFile
+	if inspect == nil {
+		inspect = os.Lstat
+	}
+	a.inspectFile = func(path string) (os.FileInfo, error) {
+		info, err := inspect(path)
+		if err == nil && path == target {
+			return systemdFixtureModeInfo{FileInfo: info, mode: info.Mode()&^os.ModePerm | mode}, nil
+		}
+		return info, err
+	}
+}
+
 type systemdFixtureManager struct {
 	t                   *testing.T
 	adapter             *systemdUserAdapter
 	descriptor          ServiceDescriptor
 	calls               [][]string
 	loaded              bool
+	active              bool
 	unavailable         bool
 	mismatch            string
 	failEnable          bool
@@ -80,6 +104,19 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 			return []byte(`{"type":"s","data":"fixture"}`), nil
 		}
 		if args[2] == "call" {
+			switch args[6] {
+			case "GetUnit":
+				if !m.active {
+					return nil, &exec.ExitError{Stderr: []byte("org.freedesktop.systemd1.NoSuchUnit: Unit not loaded")}
+				}
+			case "LoadUnit":
+				info, err := os.Lstat(filepath.Join(m.adapter.unitDir, args[8]))
+				if err != nil || !info.Mode().IsRegular() {
+					return nil, &exec.ExitError{Stderr: []byte("org.freedesktop.systemd1.NoSuchUnit: Unit not loaded")}
+				}
+			default:
+				m.t.Fatal("unexpected fixture manager method")
+			}
 			return json.Marshal(systemdBusResult{Type: "o", Data: json.RawMessage(`["/org/freedesktop/systemd1/unit/fixture"]`)})
 		}
 		path := m.descriptor.Payload.Host
@@ -137,8 +174,12 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 	if len(args) > 1 && args[1] == "enable" && m.busLostAfterEnable {
 		m.failBus = true
 	}
+	if len(args) > 1 && args[1] == "enable" {
+		m.active = true
+	}
 	if len(args) > 1 && args[1] == "disable" {
 		m.disabled = true
+		m.active = false
 	}
 	return nil, nil
 }
@@ -152,6 +193,204 @@ func TestServiceSystemdBusPropertyMessageEnvelope(t *testing.T) {
 	}
 	if err := a.Apply(context.Background(), plan); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func systemdInactiveReloadedFixture(t *testing.T) (*systemdUserAdapter, ServiceDescriptor, *systemdFixtureManager) {
+	t.Helper()
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	a, d, m := systemdFixture(t)
+	if err := a.inspectDirectories(true); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := RenderSystemdUserUnit(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.unitPath(d), unit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.command(t.Context(), a.systemctl, "--user", "daemon-reload"); err != nil {
+		t.Fatal(err)
+	}
+	return a, d, m
+}
+
+func TestServiceSystemdInactiveUnitUsesLoadUnit(t *testing.T) {
+	a, d, m := systemdInactiveReloadedFixture(t)
+	if !m.loaded || m.active {
+		t.Fatal("fixture must have a freshly reloaded, inactive unit")
+	}
+	before, err := os.Stat(a.unitPath(d))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pin the negative branch that the old always-successful fake omitted.
+	_, err = m.command(t.Context(), a.busctl, "--user", "--json=short", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", "s", serviceUnitLabel(d))
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !strings.Contains(string(exitErr.Stderr), "org.freedesktop.systemd1.NoSuchUnit") {
+		t.Fatal("GetUnit incorrectly found an inactive unit in the fixture")
+	}
+	start := len(m.calls)
+	observation, err := a.Inspect(t.Context(), d)
+	if err != nil || !observation.Available || !observation.Registered || !observation.Owned {
+		t.Fatal("LoadUnit did not inspect the freshly reloaded inactive unit")
+	}
+	loads, reads := 0, 0
+	for _, call := range m.calls[start:] {
+		if call[0] == a.busctl && call[3] == "call" {
+			if call[7] != "LoadUnit" || call[8] != "s" || call[9] != serviceUnitLabel(d) {
+				t.Fatal("inspection used the wrong unit-loading method or signature")
+			}
+			loads++
+		}
+		if call[0] == a.busctl && call[len(call)-1] == "ExecStart" {
+			reads++
+		}
+		if call[0] == a.systemctl && call[2] != "show" {
+			t.Fatal("inspection mutated manager state")
+		}
+	}
+	after, err := os.Stat(a.unitPath(d))
+	if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) || m.active || loads != 1 || reads != 1 {
+		t.Fatal("inspection changed the unit or did not load/read it exactly once")
+	}
+	unit, err := os.ReadFile(a.unitPath(d))
+	want, renderErr := RenderSystemdUserUnit(d)
+	if err != nil || renderErr != nil || !reflect.DeepEqual(unit, want) {
+		t.Fatal("inspection changed the unit bytes")
+	}
+	_, err = m.command(t.Context(), a.busctl, "--user", "--json=short", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "LoadUnit", "s", "absent.service")
+	if !errors.As(err, &exitErr) || !strings.Contains(string(exitErr.Stderr), "org.freedesktop.systemd1.NoSuchUnit") {
+		t.Fatal("LoadUnit incorrectly found an absent unit in the fixture")
+	}
+}
+
+func TestServiceSystemdExecStartReloadRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name, stderr, step string
+		reloadResponse     string
+		failures           int
+		failReload         bool
+		mismatch           bool
+		loads, reads       int
+		wantErr            error
+	}{
+		{name: "dbus-error-name", stderr: "org.freedesktop.systemd1.NoSuchUnit", failures: 1, loads: 2, reads: 2},
+		{name: "not-loaded-text", stderr: "Unit fixture.service not loaded", failures: 1, loads: 2, reads: 2},
+		{name: "retry-exhausted", stderr: "org.freedesktop.systemd1.NoSuchUnit: Unit not loaded", failures: 2, loads: 2, reads: 2, wantErr: ErrServiceManagerUnavailable, step: "inspect:busctl_exec_start"},
+		{name: "unrelated-error", stderr: "Access denied", failures: 1, loads: 1, reads: 1, wantErr: ErrServiceManagerUnavailable, step: "inspect:busctl_exec_start"},
+		{name: "sanitized-error", stderr: "FIXTURE_SECRET=not loaded", failures: 1, loads: 1, reads: 1, wantErr: ErrServiceManagerUnavailable, step: "inspect:busctl_exec_start"},
+		{name: "reload-failure", stderr: "Unit not loaded", failures: 1, failReload: true, loads: 2, reads: 1, wantErr: ErrServiceManagerUnavailable, step: "inspect:busctl_load_unit"},
+		{name: "reload-missing-type", stderr: "Unit not loaded", failures: 1, reloadResponse: `{}`, loads: 2, reads: 1, wantErr: ErrServiceOwnershipConflict, step: "inspect:busctl_load_unit"},
+		{name: "reload-missing-object", stderr: "Unit not loaded", failures: 1, reloadResponse: `{"type":"o"}`, loads: 2, reads: 1, wantErr: ErrServiceOwnershipConflict, step: "inspect:busctl_load_unit"},
+		{name: "retry-argv-mismatch", stderr: "Unit not loaded", failures: 1, mismatch: true, loads: 2, reads: 2, wantErr: ErrServiceOwnershipConflict, step: "inspect:exec_start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, d, m := systemdInactiveReloadedFixture(t)
+			var steps []string
+			loads, reads := 0, 0
+			a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
+				if binary == a.busctl && args[2] == "call" {
+					if args[6] != "LoadUnit" {
+						t.Fatal("retry did not use LoadUnit")
+					}
+					loads++
+					steps = append(steps, "load")
+					if loads == 2 {
+						if tc.failReload {
+							return nil, &exec.ExitError{Stderr: []byte("fixture reload denied")}
+						}
+						if tc.reloadResponse != "" {
+							return []byte(tc.reloadResponse), nil
+						}
+						// The retry must use the newly returned object, not the old one.
+						return []byte(`{"type":"o","data":["/org/freedesktop/systemd1/unit/reloaded"]}`), nil
+					}
+				}
+				if binary == a.busctl && args[len(args)-1] == "ExecStart" {
+					reads++
+					steps = append(steps, "read")
+					if reads <= tc.failures {
+						return []byte("not loaded"), &exec.ExitError{Stderr: []byte(tc.stderr)}
+					}
+					if reads == 2 && args[4] != "/org/freedesktop/systemd1/unit/reloaded" {
+						t.Fatal("retry used the stale object path")
+					}
+					if tc.mismatch {
+						m.mismatch = "arguments"
+					}
+				}
+				return m.command(ctx, binary, args...)
+			}
+			err := a.inspectExecStart(t.Context(), d)
+			if !errors.Is(err, tc.wantErr) || (err != nil && !strings.Contains(err.Error(), tc.step)) {
+				t.Fatal("ExecStart retry lost its expected outcome, sentinel, or command step")
+			}
+			wantSteps := []string{"load", "read", "load", "read"}
+			if loads != tc.loads || reads != tc.reads || !reflect.DeepEqual(steps, wantSteps[:tc.loads+tc.reads]) {
+				t.Fatal("ExecStart did not perform the exact bounded load/read sequence")
+			}
+		})
+	}
+}
+
+func TestServiceSystemdLoadUnitFailuresPreserveSanitizedCause(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		loads, reads int
+		steps        []string
+	}{
+		{name: "initial-load", loads: 1, reads: 0, steps: []string{"load"}},
+		{name: "retry-load", loads: 2, reads: 1, steps: []string{"load", "read", "load"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, d, m := systemdInactiveReloadedFixture(t)
+			privateHex := strings.Repeat("a", 64)
+			const suffix = "load unit refusal tail"
+			stderr := "denied " + d.Root + "\n" + a.home + "\n" + privateHex + "\nFIXTURE_SECRET=private-fixture-value\n" + suffix
+			var steps []string
+			loads, reads := 0, 0
+			a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
+				if binary == a.busctl && args[2] == "call" {
+					if args[6] != "LoadUnit" {
+						t.Fatal("inspection did not use LoadUnit")
+					}
+					loads++
+					steps = append(steps, "load")
+					if loads == tc.loads {
+						return nil, &exec.ExitError{Stderr: []byte(stderr)}
+					}
+				}
+				if binary == a.busctl && args[len(args)-1] == "ExecStart" {
+					reads++
+					steps = append(steps, "read")
+					return nil, &exec.ExitError{Stderr: []byte("org.freedesktop.systemd1.NoSuchUnit: Unit not loaded")}
+				}
+				return m.command(ctx, binary, args...)
+			}
+			err := a.inspectExecStart(t.Context(), d)
+			if !errors.Is(err, ErrServiceManagerUnavailable) || !strings.Contains(err.Error(), "inspect:busctl_load_unit") {
+				t.Fatal("LoadUnit refusal lost its unavailable sentinel or command step")
+			}
+			for _, private := range []string{d.Root, a.home, privateHex, "FIXTURE_SECRET", "private-fixture-value"} {
+				if strings.Contains(err.Error(), private) {
+					t.Fatal("LoadUnit refusal exposed an unsanitized diagnostic")
+				}
+			}
+			for _, want := range []string{"<root>", "<home>", "<hex>", "<environment>"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatal("LoadUnit refusal discarded sanitized stderr detail")
+				}
+			}
+			if !strings.HasSuffix(err.Error(), suffix) {
+				t.Fatal("LoadUnit refusal discarded its harmless diagnostic suffix")
+			}
+			if loads != tc.loads || reads != tc.reads || !reflect.DeepEqual(steps, tc.steps) {
+				t.Fatal("LoadUnit refusal did not stop at the exact expected load/read sequence")
+			}
+		})
 	}
 }
 
@@ -281,6 +520,73 @@ func TestServiceSystemdCapabilityRequiresUsableStorageAndBus(t *testing.T) {
 	}
 }
 
+func TestServiceSystemdDirectoryWalkRefusalsAgree(t *testing.T) {
+	for _, refusal := range []struct{ name, step string }{
+		{"group-writable", "unit_dir_walk:3:mode"},
+		{"foreign-owner", "unit_dir_walk:3:owner"},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			a, _, _ := systemdFixture(t)
+			if err := a.inspectDirectories(true); err != nil {
+				t.Fatal(err)
+			}
+			if refusal.name == "group-writable" {
+				systemdFixtureMode(t, a, a.unitDir, 0o770)
+			} else {
+				a.owned = func(path string, _ os.FileInfo) bool { return path != a.unitDir }
+			}
+			createErr, recheckErr := a.inspectDirectories(true), a.inspectDirectories(false)
+			for _, err := range []error{createErr, recheckErr, a.capability(t.Context())} {
+				if !errors.Is(err, ErrServiceOwnershipConflict) || !strings.Contains(err.Error(), refusal.step) {
+					t.Fatal("unsafe unit directory lost its ownership sentinel or exact refusal step")
+				}
+			}
+			if createErr.Error() != recheckErr.Error() {
+				t.Fatal("create and recheck disagree about the same unsafe unit directory")
+			}
+			if refusal.name == "group-writable" && !strings.Contains(createErr.Error(), "0770") {
+				t.Fatal("directory mode refusal omitted the offending mode bits")
+			}
+		})
+	}
+}
+
+func TestServiceSystemdCapabilityCauseSurvivesPlan(t *testing.T) {
+	for _, failure := range []struct{ name, step string }{
+		{"runtime-mode", "runtime_dir_mode"},
+		{"unit-access", "unit_dir_walk:3:access"},
+		{"systemctl-unreachable", "bus:systemctl_show"},
+		{"busctl-unreachable", "bus:busctl_version"},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			a, d, m := systemdFixture(t)
+			switch failure.name {
+			case "runtime-mode":
+				systemdFixtureMode(t, a, a.runtimeDir, 0o755)
+			case "unit-access":
+				if err := a.inspectDirectories(true); err != nil {
+					t.Fatal(err)
+				}
+				a.accessible = func(path string, write bool) bool { return path != a.unitDir || !write }
+			case "systemctl-unreachable":
+				m.unavailable = true
+			case "busctl-unreachable":
+				m.failBus = true
+			}
+			plan, err := a.Plan(t.Context(), d)
+			if !errors.Is(err, ErrServiceManagerUnavailable) || !strings.Contains(err.Error(), failure.step) {
+				t.Fatal("Plan discarded the exact capability refusal step")
+			}
+			if plan.Observation.Reason != "service_manager_unavailable" || plan.Observation.Fallback != serviceForegroundFallback || plan.Observation.Available {
+				t.Fatal("capability detail changed the closed observation reason or foreground fallback")
+			}
+			if failure.name == "runtime-mode" && !strings.Contains(err.Error(), "0755") {
+				t.Fatal("runtime mode refusal omitted the offending mode bits")
+			}
+		})
+	}
+}
+
 func TestServiceSystemdEmptyUserPropertyDoesNotConferOwnership(t *testing.T) {
 	a, d, m := systemdFixture(t)
 	m.emptyUserProperty = true
@@ -330,10 +636,117 @@ func TestServiceSystemdRegistrationFailuresAreNotOwnershipConflicts(t *testing.T
 			if err != nil {
 				t.Fatal("capability incorrectly requires registration permission")
 			}
-			if err := a.Apply(t.Context(), plan); err == nil || err.Error() != "service_registration_failed" {
+			if err := a.Apply(t.Context(), plan); !errors.Is(err, ErrServiceRegistrationFailed) || errors.Is(err, ErrServiceOwnershipConflict) {
 				t.Fatal("registration failure was lost or mislabeled as ownership conflict")
 			}
 		})
+	}
+}
+
+func TestServiceSystemdLoadedUnitBusFailurePreventsEnableAndRemove(t *testing.T) {
+	a, d, m := systemdFixture(t)
+	// The Version probe is usable, but the loaded-unit LoadUnit request fails.
+	// This reproduces a loaded, never-enabled unit without a failed reload or
+	// any disagreement between the create and capability directory walks.
+	m.failExecBus = true
+	plan, err := a.Plan(t.Context(), d)
+	if err != nil {
+		t.Fatal("read-only Version probe incorrectly required loaded-unit access")
+	}
+	err = a.Apply(t.Context(), plan)
+	if !errors.Is(err, ErrServiceRegistrationFailed) || !errors.Is(err, ErrServiceManagerUnavailable) ||
+		!strings.Contains(err.Error(), "post_reload") || !strings.Contains(err.Error(), "inspect:busctl_load_unit") {
+		t.Fatal("post-reload failure lost its registration prefix or loaded-unit bus cause")
+	}
+	if !m.loaded {
+		t.Fatal("fixture manager did not successfully load the written unit")
+	}
+	if info, err := os.Lstat(a.unitPath(d)); err != nil || !info.Mode().IsRegular() {
+		t.Fatal("failed loaded-unit inspection did not retain the unit for diagnostics")
+	}
+	if err := a.capability(t.Context()); err != nil {
+		t.Fatal("the same capability and directory recheck no longer accepts the created tree")
+	}
+	if err := a.Remove(t.Context(), d); !errors.Is(err, ErrServiceManagerUnavailable) ||
+		errors.Is(err, ErrServiceRegistrationFailed) || !strings.Contains(err.Error(), "inspect:busctl_load_unit") {
+		t.Fatal("Remove lost the same loaded-unit bus refusal")
+	}
+	reloads := 0
+	for _, call := range m.calls {
+		if call[0] != a.systemctl || len(call) < 3 {
+			continue
+		}
+		switch call[2] {
+		case "daemon-reload":
+			reloads++
+		case "enable", "disable":
+			t.Fatal("loaded-unit inspection failure enabled or disabled an unverified unit")
+		}
+	}
+	if reloads != 1 {
+		t.Fatal("fixture did not complete exactly the initial daemon-reload")
+	}
+}
+
+func TestServiceSystemdCommandFailuresPreserveSanitizedCause(t *testing.T) {
+	for _, failure := range []struct{ command, step string }{
+		{"daemon-reload", "daemon_reload"},
+		{"enable", "enable_now"},
+	} {
+		t.Run(failure.command, func(t *testing.T) {
+			a, d, m := systemdFixture(t)
+			privateHex := strings.Repeat("a", 64)
+			stderr := "denied " + d.Root + "\n" + a.home + "\n" + privateHex + "\nFIXTURE_SECRET=private-fixture-value\nmanager failure tail"
+			a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
+				if binary == a.systemctl && len(args) >= 2 && args[1] == failure.command {
+					return nil, &exec.ExitError{Stderr: []byte(stderr)}
+				}
+				return m.command(ctx, binary, args...)
+			}
+			plan, err := a.Plan(t.Context(), d)
+			if err != nil {
+				t.Fatal("read-only capability unexpectedly needs registration permission")
+			}
+			err = a.Apply(t.Context(), plan)
+			prefix := "service_registration_failed: " + failure.step + ": "
+			if !errors.Is(err, ErrServiceRegistrationFailed) || !strings.HasPrefix(err.Error(), prefix) {
+				t.Fatal("registration command error lost its sentinel or command step")
+			}
+			detail := strings.TrimPrefix(err.Error(), prefix)
+			for _, private := range []string{d.Root, a.home, privateHex, "private-fixture-value"} {
+				if strings.Contains(detail, private) {
+					t.Fatal("registration command error exposed an unsanitized diagnostic")
+				}
+			}
+			for _, want := range []string{"<root>", "<home>", "<hex>", "manager failure tail"} {
+				if !strings.Contains(detail, want) {
+					t.Fatal("registration command error omitted its sanitized stderr detail")
+				}
+			}
+			if len(detail) > 400 {
+				t.Fatal("registration command error exceeded the diagnostic byte limit")
+			}
+		})
+	}
+}
+
+func TestServiceSystemdDiagnosticTailBound(t *testing.T) {
+	root, home := "/fixture/home/cell", "/fixture/home"
+	privateHex := strings.Repeat("b", 64)
+	text := strings.Repeat("prefix ", 100) + root + " " + home + " " + privateHex + "\nFIXTURE_SECRET=private-fixture-value\nfinal diagnostic tail"
+	detail := sanitizeServiceSystemdDetail(text, root, home)
+	if len(detail) > 400 || !strings.HasSuffix(detail, "final diagnostic tail") {
+		t.Fatal("diagnostic did not retain its bounded stderr tail")
+	}
+	for _, private := range []string{root, home, privateHex, "private-fixture-value"} {
+		if strings.Contains(detail, private) {
+			t.Fatal("bounded diagnostic exposed private fixture data")
+		}
+	}
+	for _, marker := range []string{"<root>", "<home>", "<hex>"} {
+		if !strings.Contains(detail, marker) {
+			t.Fatal("bounded diagnostic lost a redaction marker from its tail")
+		}
 	}
 }
 
@@ -461,7 +874,7 @@ func TestServiceSystemdFailedRegistrationCleansOnlyOwnedUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Apply(context.Background(), plan); err == nil || err.Error() != "service_registration_failed" {
+	if err := a.Apply(context.Background(), plan); !errors.Is(err, ErrServiceRegistrationFailed) || !strings.Contains(err.Error(), "enable_now") {
 		t.Fatal("enable failure did not retain its fixed registration reason")
 	}
 	if _, err := os.Stat(a.unitPath(d)); !errors.Is(err, os.ErrNotExist) {

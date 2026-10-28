@@ -71,7 +71,7 @@ func RenderSystemdUserUnit(d ServiceDescriptor) ([]byte, error) {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
 		if strings.IndexFunc(arg, unicode.IsControl) >= 0 {
-			return nil, ErrServiceOwnershipConflict
+			return nil, serviceSystemdError(ErrServiceOwnershipConflict, "render:argument", "control_character")
 		}
 		arg = strings.ReplaceAll(arg, "\\", "\\\\")
 		arg = strings.ReplaceAll(arg, "\"", "\\\"")
@@ -88,17 +88,31 @@ func serviceUnitLabel(d ServiceDescriptor) string {
 
 func validateSystemdSpec(d ServiceDescriptor) error {
 	uid, err := strconv.ParseUint(d.UID, 10, 32)
-	if err != nil || uid == 0 || strconv.FormatUint(uid, 10) != d.UID || d.Runtime != "local" || d.Scope != "user" || d.Adapter != "systemd-user" || !filepath.IsAbs(d.Root) || filepath.Clean(d.Root) != d.Root || !filepath.IsAbs(d.Payload.Host) || filepath.Clean(d.Payload.Host) != d.Payload.Host || d.Payload.Generation == "" || d.InstallationID == "" {
-		return ErrServiceOwnershipConflict
+	for _, check := range []struct {
+		step string
+		ok   bool
+	}{
+		{"uid", err == nil && uid != 0 && strconv.FormatUint(uid, 10) == d.UID},
+		{"runtime", d.Runtime == "local"},
+		{"scope", d.Scope == "user"},
+		{"adapter", d.Adapter == "systemd-user"},
+		{"root", filepath.IsAbs(d.Root) && filepath.Clean(d.Root) == d.Root},
+		{"host", filepath.IsAbs(d.Payload.Host) && filepath.Clean(d.Payload.Host) == d.Payload.Host},
+		{"generation", d.Payload.Generation != ""},
+		{"installation_id", d.InstallationID != ""},
+	} {
+		if !check.ok {
+			return serviceSystemdError(ErrServiceOwnershipConflict, "spec:"+check.step, "invalid")
+		}
 	}
 	for _, r := range d.InstallationID {
 		allowed := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_'
 		if !allowed {
-			return ErrServiceOwnershipConflict
+			return serviceSystemdError(ErrServiceOwnershipConflict, "spec:installation_id", "invalid_character")
 		}
 	}
 	if len(d.InstallationID) > 128 {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "spec:installation_id", "too_long")
 	}
 	return nil
 }
@@ -123,31 +137,57 @@ func (a *systemdUserAdapter) lstat(path string) (os.FileInfo, error) {
 	return os.Lstat(path)
 }
 
-func serviceUnavailable() (ServiceObservation, error) {
-	return ServiceObservation{Reason: "service_manager_unavailable", Fallback: serviceForegroundFallback}, ErrServiceManagerUnavailable
+func serviceUnavailable(err error) (ServiceObservation, error) {
+	return ServiceObservation{Reason: "service_manager_unavailable", Fallback: serviceForegroundFallback}, err
 }
 
 func (a *systemdUserAdapter) capability(ctx context.Context) error {
+	return a.capabilityForRoot(ctx, "")
+}
+
+func (a *systemdUserAdapter) capabilityForRoot(ctx context.Context, root string) error {
 	// Probe the current non-root identity, absolute tools, private owned session
 	// directory, resolvable safe unit path, search/write access to its existing
 	// directories (or nearest existing parent), and bus reachability through both
 	// tools. Plan creates nothing and does not probe daemon-reload/enable permission;
 	// failures of those operations are registration failures during Apply.
-	if a.unavailable || a.uid == "" || a.uid == "0" || a.command == nil || a.systemctl == "" || a.busctl == "" || !filepath.IsAbs(a.runtimeDir) || !filepath.IsAbs(a.home) || !filepath.IsAbs(a.unitDir) {
-		return ErrServiceManagerUnavailable
+	for _, check := range []struct {
+		step string
+		ok   bool
+	}{
+		{"identity", !a.unavailable && a.uid != "" && a.uid != "0"},
+		{"command_runner", a.command != nil},
+		{"systemctl_path", filepath.IsAbs(a.systemctl)},
+		{"busctl_path", filepath.IsAbs(a.busctl)},
+		{"runtime_dir_path", filepath.IsAbs(a.runtimeDir)},
+		{"home_path", filepath.IsAbs(a.home)},
+		{"unit_dir_path", filepath.IsAbs(a.unitDir)},
+	} {
+		if !check.ok {
+			return serviceSystemdError(ErrServiceManagerUnavailable, check.step, "unavailable")
+		}
 	}
 	info, err := a.lstat(a.runtimeDir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || a.owned == nil || !a.owned(a.runtimeDir, info) {
-		return ErrServiceManagerUnavailable
+	if err != nil {
+		return a.commandError(ErrServiceManagerUnavailable, "runtime_dir_stat", err, root)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return serviceSystemdError(ErrServiceManagerUnavailable, "runtime_dir_type", "not_directory_or_symlink")
+	}
+	if info.Mode().Perm() != 0o700 {
+		return serviceSystemdError(ErrServiceManagerUnavailable, "runtime_dir_mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+	}
+	if a.owned == nil || !a.owned(a.runtimeDir, info) {
+		return serviceSystemdError(ErrServiceManagerUnavailable, "runtime_dir_owner", "not_current_uid")
 	}
 	if err := a.inspectDirectories(false); err != nil {
 		return err
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "show", "--property=Version", "--value"); err != nil {
-		return ErrServiceManagerUnavailable
+		return a.commandError(ErrServiceManagerUnavailable, "bus:systemctl_show", err, root)
 	}
 	if _, err := a.command(ctx, a.busctl, "--user", "--json=short", "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "Version"); err != nil {
-		return ErrServiceManagerUnavailable
+		return a.commandError(ErrServiceManagerUnavailable, "bus:busctl_version", err, root)
 	}
 	return nil
 }
@@ -165,35 +205,51 @@ func (a *systemdUserAdapter) inspectDirectories(create bool) error {
 		base = a.home
 	}
 	if !filepath.IsAbs(base) || !filepath.IsAbs(a.unitDir) || filepath.Clean(base) != base || filepath.Clean(a.unitDir) != a.unitDir {
-		return ErrServiceManagerUnavailable
+		return serviceSystemdError(ErrServiceManagerUnavailable, "unit_dir_path", "not_absolute_clean")
 	}
 	rel, err := filepath.Rel(base, a.unitDir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "unit_dir_path", "outside_base")
 	}
 	path := base
 	parts := append([]string{""}, strings.Split(rel, string(filepath.Separator))...)
 	for i, part := range parts {
+		step := fmt.Sprintf("unit_dir_walk:%d:", i)
 		parent := path
 		path = filepath.Join(path, part)
 		info, err := a.lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
-			if i == 0 || !a.directoryAccessible(parent, true) {
-				return ErrServiceManagerUnavailable
+			if i == 0 {
+				return serviceSystemdError(ErrServiceManagerUnavailable, step+"stat", "base_missing")
+			}
+			if !a.directoryAccessible(parent, true) {
+				return serviceSystemdError(ErrServiceManagerUnavailable, step+"parent_access", "write_search_denied")
 			}
 			if !create {
 				return nil
 			}
 			if err := os.Mkdir(path, 0o700); err != nil {
-				return ErrServiceManagerUnavailable
+				return a.commandError(ErrServiceManagerUnavailable, step+"mkdir", err, "")
 			}
 			info, err = a.lstat(path)
 		}
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || a.owned == nil || !a.owned(path, info) {
-			return ErrServiceOwnershipConflict
+		// Both walks use this same policy, including for freshly created paths.
+		// Manager-created wants entries are checked separately, never as private
+		// adapter-created directories. Owned 0755 directories are valid here.
+		if err != nil {
+			return a.commandError(ErrServiceOwnershipConflict, step+"stat", err, "")
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return serviceSystemdError(ErrServiceOwnershipConflict, step+"type", "not_directory_or_symlink")
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return serviceSystemdError(ErrServiceOwnershipConflict, step+"mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+		}
+		if a.owned == nil || !a.owned(path, info) {
+			return serviceSystemdError(ErrServiceOwnershipConflict, step+"owner", "not_current_uid")
 		}
 		if !a.directoryAccessible(path, i == len(parts)-1) {
-			return ErrServiceManagerUnavailable
+			return serviceSystemdError(ErrServiceManagerUnavailable, step+"access", "required_access_denied")
 		}
 	}
 	return nil
@@ -225,12 +281,24 @@ func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, 
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || a.owned == nil || !a.owned(path, info) {
-		return false, ErrServiceOwnershipConflict
+	if err != nil {
+		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:stat", err, d.Root)
+	}
+	if !info.Mode().IsRegular() {
+		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:type", "not_regular")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+	}
+	if a.owned == nil || !a.owned(path, info) {
+		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:owner", "not_current_uid")
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(data, want) {
-		return false, ErrServiceOwnershipConflict
+	if err != nil {
+		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root)
+	}
+	if !bytes.Equal(data, want) {
+		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:content", "mismatch")
 	}
 	return true, nil
 }
@@ -241,23 +309,41 @@ func (a *systemdUserAdapter) inspectEnablement(d ServiceDescriptor) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !a.owned(dir, info) {
-		return ErrServiceOwnershipConflict
+	if err != nil {
+		return a.commandError(ErrServiceOwnershipConflict, "enablement_dir:stat", err, d.Root)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_dir:type", "not_directory_or_symlink")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_dir:mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+	}
+	if a.owned == nil || !a.owned(dir, info) {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_dir:owner", "not_current_uid")
 	}
 	link := filepath.Join(dir, serviceUnitLabel(d))
 	info, err = a.lstat(link)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || info.Mode()&os.ModeSymlink == 0 || !a.owned(link, info) {
-		return ErrServiceOwnershipConflict
+	if err != nil {
+		return a.commandError(ErrServiceOwnershipConflict, "enablement_link:stat", err, d.Root)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_link:type", "not_symlink")
+	}
+	if !a.owned(link, info) {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_link:owner", "not_current_uid")
 	}
 	target, err := os.Readlink(link)
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(dir, target)
 	}
-	if err != nil || filepath.Clean(target) != a.unitPath(d) {
-		return ErrServiceOwnershipConflict
+	if err != nil {
+		return a.commandError(ErrServiceOwnershipConflict, "enablement_link:read", err, d.Root)
+	}
+	if filepath.Clean(target) != a.unitPath(d) {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "enablement_link:target", "mismatch")
 	}
 	return nil
 }
@@ -266,19 +352,22 @@ func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (Se
 	want, err := RenderSystemdUserUnit(d)
 	// uid is captured from os.Getuid by the native constructor. A user manager's
 	// optional User property is not an ownership boundary or identity authority.
-	if err != nil || d.UID != a.uid {
-		return ServiceObservation{Reason: "service_ownership_conflict"}, ErrServiceOwnershipConflict
+	if err != nil {
+		return ServiceObservation{Reason: "service_ownership_conflict"}, err
 	}
-	if err := a.capability(ctx); err != nil {
+	if d.UID != a.uid {
+		return ServiceObservation{Reason: "service_ownership_conflict"}, serviceSystemdError(ErrServiceOwnershipConflict, "inspect:uid", "not_current_uid")
+	}
+	if err := a.capabilityForRoot(ctx, d.Root); err != nil {
 		if errors.Is(err, ErrServiceOwnershipConflict) {
 			return ServiceObservation{Reason: "service_ownership_conflict"}, err
 		}
-		return serviceUnavailable()
+		return serviceUnavailable(err)
 	}
 	exists, err := a.ownedUnit(d, want)
 	if err != nil {
 		if errors.Is(err, ErrServiceManagerUnavailable) {
-			return serviceUnavailable()
+			return serviceUnavailable(err)
 		}
 		return ServiceObservation{Available: true, Reason: "service_ownership_conflict"}, err
 	}
@@ -286,7 +375,7 @@ func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (Se
 	// otherwise matching the main file would not establish the loaded contract.
 	raw, err := a.command(ctx, a.systemctl, "--user", "show", serviceUnitLabel(d), "--property=Id,LoadState,FragmentPath,DropInPaths", "--no-pager")
 	if err != nil {
-		return serviceUnavailable()
+		return serviceUnavailable(a.commandError(ErrServiceManagerUnavailable, "inspect:systemctl_show", err, d.Root))
 	}
 	properties, err := systemdProperties(raw)
 	if err != nil {
@@ -295,15 +384,25 @@ func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (Se
 	if properties["LoadState"] == "not-found" {
 		return ServiceObservation{Available: true, Registered: exists, Owned: exists}, nil
 	}
-	if !exists || properties["Id"] != serviceUnitLabel(d) || properties["FragmentPath"] != a.unitPath(d) || properties["DropInPaths"] != "" {
-		return ServiceObservation{Available: true, Registered: true, Reason: "service_ownership_conflict"}, ErrServiceOwnershipConflict
+	for _, check := range []struct {
+		step string
+		ok   bool
+	}{
+		{"unit_file", exists},
+		{"id", properties["Id"] == serviceUnitLabel(d)},
+		{"fragment", properties["FragmentPath"] == a.unitPath(d)},
+		{"drop_ins", properties["DropInPaths"] == ""},
+	} {
+		if !check.ok {
+			return ServiceObservation{Available: true, Registered: true, Reason: "service_ownership_conflict"}, serviceSystemdError(ErrServiceOwnershipConflict, "inspect:"+check.step, "mismatch")
+		}
 	}
 	if properties["LoadState"] != "loaded" {
-		return ServiceObservation{Available: true, Registered: true, Reason: "service_registration_failed"}, errors.New("service_registration_failed")
+		return ServiceObservation{Available: true, Registered: true, Reason: "service_registration_failed"}, serviceSystemdError(ErrServiceRegistrationFailed, "inspect:load_state", "not_loaded")
 	}
 	if err := a.inspectExecStart(ctx, d); err != nil {
 		if errors.Is(err, ErrServiceManagerUnavailable) {
-			return serviceUnavailable()
+			return serviceUnavailable(err)
 		}
 		return ServiceObservation{Available: true, Registered: true, Reason: "service_ownership_conflict"}, err
 	}
@@ -315,16 +414,16 @@ func systemdProperties(raw []byte) (map[string]string, error) {
 	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		key, value, ok := strings.Cut(line, "=")
 		if !ok || key == "" {
-			return nil, ErrServiceOwnershipConflict
+			return nil, serviceSystemdError(ErrServiceOwnershipConflict, "inspect:properties", "malformed")
 		}
 		if _, seen := props[key]; seen {
-			return nil, ErrServiceOwnershipConflict
+			return nil, serviceSystemdError(ErrServiceOwnershipConflict, "inspect:properties", "duplicate")
 		}
 		props[key] = value
 	}
 	for _, key := range []string{"Id", "LoadState", "FragmentPath", "DropInPaths"} {
 		if _, ok := props[key]; !ok {
-			return nil, ErrServiceOwnershipConflict
+			return nil, serviceSystemdError(ErrServiceOwnershipConflict, "inspect:properties", "missing_"+key)
 		}
 	}
 	return props, nil
@@ -336,32 +435,44 @@ type systemdBusResult struct {
 }
 
 func (a *systemdUserAdapter) inspectExecStart(ctx context.Context, d ServiceDescriptor) error {
-	raw, err := a.command(ctx, a.busctl, "--user", "--json=short", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", "s", serviceUnitLabel(d))
-	if err != nil {
-		return ErrServiceManagerUnavailable
-	}
+	var raw []byte
 	var result systemdBusResult
-	var object []string
-	if json.Unmarshal(raw, &result) != nil || result.Type != "o" {
-		return ErrServiceOwnershipConflict
-	}
-	if json.Unmarshal(result.Data, &object) != nil {
-		var path string
-		if json.Unmarshal(result.Data, &path) != nil {
-			return ErrServiceOwnershipConflict
+	for attempt := 0; ; attempt++ {
+		// GetUnit only finds units still held in memory. LoadUnit also resolves an
+		// inactive on-disk unit without starting it or changing persistent state.
+		loaded, err := a.command(ctx, a.busctl, "--user", "--json=short", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "LoadUnit", "s", serviceUnitLabel(d))
+		if err != nil {
+			return a.commandError(ErrServiceManagerUnavailable, "inspect:busctl_load_unit", err, d.Root)
 		}
-		object = []string{path}
-	}
-	if len(object) != 1 || !strings.HasPrefix(object[0], "/org/freedesktop/systemd1/unit/") {
-		return ErrServiceOwnershipConflict
-	}
-	raw, err = a.command(ctx, a.busctl, "--user", "--json=short", "get-property", "org.freedesktop.systemd1", object[0], "org.freedesktop.systemd1.Service", "ExecStart")
-	if err != nil {
-		return ErrServiceManagerUnavailable
+		var object []string
+		result = systemdBusResult{}
+		if json.Unmarshal(loaded, &result) != nil || result.Type != "o" {
+			return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:busctl_load_unit", "invalid_type_or_json")
+		}
+		if json.Unmarshal(result.Data, &object) != nil {
+			var path string
+			if json.Unmarshal(result.Data, &path) != nil {
+				return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:busctl_load_unit", "invalid_object_json")
+			}
+			object = []string{path}
+		}
+		if len(object) != 1 || !strings.HasPrefix(object[0], "/org/freedesktop/systemd1/unit/") {
+			return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:busctl_load_unit", "invalid_object_path")
+		}
+		raw, err = a.command(ctx, a.busctl, "--user", "--json=short", "get-property", "org.freedesktop.systemd1", object[0], "org.freedesktop.systemd1.Service", "ExecStart")
+		if err == nil {
+			break
+		}
+		failure := a.commandError(ErrServiceManagerUnavailable, "inspect:busctl_exec_start", err, d.Root)
+		// A transiently released unit gets one fresh load and property read.
+		// Classify only sanitized command detail; unrelated failures are final.
+		if attempt != 0 || (!strings.Contains(failure.Error(), "org.freedesktop.systemd1.NoSuchUnit") && !strings.Contains(failure.Error(), "not loaded")) {
+			return failure
+		}
 	}
 	var records [][]json.RawMessage
 	if json.Unmarshal(raw, &result) != nil || result.Type != "a(sasbttttuii)" || json.Unmarshal(result.Data, &records) != nil {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", "invalid_type_or_json")
 	}
 	// busctl's message serialization may wrap the single property value in
 	// the message's argument array. Accept either structural representation;
@@ -369,25 +480,25 @@ func (a *systemdUserAdapter) inspectExecStart(ctx context.Context, d ServiceDesc
 	if len(records) == 1 && len(records[0]) == 1 {
 		var envelope []json.RawMessage
 		if json.Unmarshal(result.Data, &envelope) != nil || len(envelope) != 1 || json.Unmarshal(envelope[0], &records) != nil {
-			return ErrServiceOwnershipConflict
+			return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", "invalid_envelope")
 		}
 	}
 	if len(records) != 1 || len(records[0]) != 10 {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", "invalid_record_count_or_shape")
 	}
 	var path string
 	var argv []string
 	var ignoreFailure bool
 	if json.Unmarshal(records[0][0], &path) != nil || json.Unmarshal(records[0][1], &argv) != nil || json.Unmarshal(records[0][2], &ignoreFailure) != nil || ignoreFailure || path != d.Payload.Host {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", "invalid_path_argv_or_failure_policy")
 	}
 	want := append([]string{d.Payload.Host}, d.Payload.Args...)
 	if len(argv) != len(want) {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", "argv_length_mismatch")
 	}
 	for i := range argv {
 		if argv[i] != want[i] {
-			return ErrServiceOwnershipConflict
+			return serviceSystemdError(ErrServiceOwnershipConflict, "inspect:exec_start", fmt.Sprintf("argv_%d_mismatch", i))
 		}
 	}
 	return nil
@@ -400,7 +511,7 @@ func (a *systemdUserAdapter) Plan(ctx context.Context, d ServiceSpec) (ServicePl
 
 func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error {
 	if plan.RequiredPrivilege != "user" {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:privilege", "not_user")
 	}
 	if _, err := a.Inspect(ctx, plan.Spec); err != nil {
 		return err
@@ -422,7 +533,7 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		// Exclusive creation cannot overwrite a registration that appeared after Plan.
 		file, err := os.OpenFile(a.unitPath(d), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
-			return ErrServiceOwnershipConflict
+			return a.commandError(ErrServiceOwnershipConflict, "unit_file:create", err, d.Root)
 		}
 		identity, statErr := file.Stat()
 		persist := a.writeUnit
@@ -441,44 +552,55 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		closeErr := file.Close()
 		if writeErr != nil || closeErr != nil {
 			a.removeCreatedUnit(d, identity)
-			return errors.New("service_registration_failed")
+			step := "unit_file:write"
+			if statErr != nil {
+				step = "unit_file:stat_created"
+			} else if writeErr == nil {
+				step, writeErr = "unit_file:close", closeErr
+			}
+			return a.commandError(ErrServiceRegistrationFailed, step, writeErr, d.Root)
 		}
 		created = true
 		if err := syncDirectory(a.unitDir); err != nil {
 			a.removeCreatedUnit(d, identity)
-			return err
+			return a.commandError(ErrServiceRegistrationFailed, "unit_dir:sync_created", err, d.Root)
 		}
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "daemon-reload"); err != nil {
 		if created {
 			a.cleanupPartial(ctx, d, want)
 		}
-		return errors.New("service_registration_failed")
+		return a.commandError(ErrServiceRegistrationFailed, "daemon_reload", err, d.Root)
 	}
 	// Loading may expose a conflicting registration/drop-in; never enable it.
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
 		if created {
 			a.cleanupPartial(ctx, d, want)
 		}
-		return serviceRegistrationError(err)
+		return serviceRegistrationError("post_reload", err)
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "enable", "--now", serviceUnitLabel(d)); err != nil {
 		if created {
 			a.cleanupPartial(ctx, d, want)
 		}
-		return errors.New("service_registration_failed")
+		return a.commandError(ErrServiceRegistrationFailed, "enable_now", err, d.Root)
 	}
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
-		return serviceRegistrationError(err)
+		return serviceRegistrationError("post_enable", err)
 	}
 	return nil
 }
 
-func serviceRegistrationError(err error) error {
+func serviceRegistrationError(step string, err error) error {
 	if errors.Is(err, ErrServiceOwnershipConflict) {
-		return ErrServiceOwnershipConflict
+		return fmt.Errorf("%w: %s: %w", ErrServiceOwnershipConflict, step, err)
 	}
-	return errors.New("service_registration_failed")
+	if err != nil {
+		// Keep the registration prefix and original cause/sentinel. The caller
+		// has already sanitized any command output before it reaches this layer.
+		return fmt.Errorf("%w: %s: %w", ErrServiceRegistrationFailed, step, err)
+	}
+	return serviceSystemdError(ErrServiceRegistrationFailed, step, "not_owned")
 }
 
 func (a *systemdUserAdapter) removeCreatedUnit(d ServiceDescriptor, identity os.FileInfo) {
@@ -521,26 +643,28 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 		return nil
 	}
 	if !observation.Owned {
-		return ErrServiceOwnershipConflict
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "disable", "--now", serviceUnitLabel(d)); err != nil {
-		return errors.New("service_removal_failed")
+		return a.commandError(ErrServiceRemovalFailed, "disable_now", err, d.Root)
 	}
 	want, err := RenderSystemdUserUnit(d)
 	if err != nil {
 		return err
 	}
-	if exists, err := a.ownedUnit(d, want); err != nil || !exists {
-		return ErrServiceOwnershipConflict
+	if exists, err := a.ownedUnit(d, want); err != nil {
+		return err
+	} else if !exists {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:unit_file", "missing")
 	}
 	if err := os.Remove(a.unitPath(d)); err != nil {
-		return errors.New("service_removal_failed")
+		return a.commandError(ErrServiceRemovalFailed, "unit_file:remove", err, d.Root)
 	}
 	if err := syncDirectory(a.unitDir); err != nil {
-		return err
+		return a.commandError(ErrServiceRemovalFailed, "unit_dir:sync_removed", err, d.Root)
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "daemon-reload"); err != nil {
-		return errors.New("service_removal_failed")
+		return a.commandError(ErrServiceRemovalFailed, "daemon_reload", err, d.Root)
 	}
 	return nil
 }
@@ -548,15 +672,15 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 type unavailableServiceAdapter struct{}
 
 func (unavailableServiceAdapter) Inspect(context.Context, ServiceIdentity) (ServiceObservation, error) {
-	return serviceUnavailable()
+	return serviceUnavailable(serviceSystemdError(ErrServiceManagerUnavailable, "adapter:platform", "unsupported"))
 }
 func (a unavailableServiceAdapter) Plan(ctx context.Context, d ServiceSpec) (ServicePlan, error) {
 	observation, err := a.Inspect(ctx, d)
 	return ServicePlan{Spec: d, Observation: observation, RequiredPrivilege: "user"}, err
 }
 func (unavailableServiceAdapter) Apply(context.Context, ServicePlan) error {
-	return fmt.Errorf("%w: %s", ErrServiceManagerUnavailable, serviceForegroundFallback)
+	return serviceSystemdError(ErrServiceManagerUnavailable, "adapter:platform", "unsupported")
 }
 func (unavailableServiceAdapter) Remove(context.Context, ServiceIdentity) error {
-	return fmt.Errorf("%w: %s", ErrServiceManagerUnavailable, serviceForegroundFallback)
+	return serviceSystemdError(ErrServiceManagerUnavailable, "adapter:platform", "unsupported")
 }
