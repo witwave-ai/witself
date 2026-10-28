@@ -1,0 +1,1 @@
+{"command": ["node", "--test", "scripts/ci-product-workflow.test.mjs"], "exit": 0, "wall_seconds": 24.48}

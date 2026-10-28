@@ -58,6 +58,13 @@ type systemdFixtureManager struct {
 	disabled            bool
 	wrappedBusProperty  bool
 	mismatchAfterEnable string
+	emptyUserProperty   bool
+	failBus             bool
+	failExecBus         bool
+	failReload          bool
+	busLostAfterReload  bool
+	busLostAfterEnable  bool
+	stayUnloaded        bool
 }
 
 func (m *systemdFixtureManager) command(_ context.Context, binary string, args ...string) ([]byte, error) {
@@ -66,6 +73,12 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 		return nil, errors.New("fixture unavailable")
 	}
 	if binary == m.adapter.busctl {
+		if m.failBus || (m.failExecBus && args[len(args)-1] != "Version") {
+			return nil, errors.New("fixture bus unavailable")
+		}
+		if args[len(args)-1] == "Version" {
+			return []byte(`{"type":"s","data":"fixture"}`), nil
+		}
 		if args[2] == "call" {
 			return json.Marshal(systemdBusResult{Type: "o", Data: json.RawMessage(`["/org/freedesktop/systemd1/unit/fixture"]`)})
 		}
@@ -87,7 +100,7 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 		if args[2] == "--property=Version" {
 			return []byte("fixture\n"), nil
 		}
-		id, uid, fragment, load, dropins := serviceUnitLabel(m.descriptor), m.descriptor.UID, "", "not-found", ""
+		id, fragment, load, dropins := serviceUnitLabel(m.descriptor), "", "not-found", ""
 		if m.loaded {
 			fragment = m.adapter.unitPath(m.descriptor)
 			load = "loaded"
@@ -95,18 +108,24 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 		switch m.mismatch {
 		case "label":
 			id = "foreign.service"
-		case "uid":
-			uid = "1002"
 		case "fragment":
 			fragment += "-foreign"
 		case "drop-in":
 			dropins = "foreign.conf"
 		}
-		return []byte("Id=" + id + "\nUser=" + uid + "\nFragmentPath=" + fragment + "\nLoadState=" + load + "\nDropInPaths=" + dropins + "\n"), nil
+		properties := "Id=" + id + "\nFragmentPath=" + fragment + "\nLoadState=" + load + "\nDropInPaths=" + dropins + "\n"
+		if m.emptyUserProperty {
+			properties += "User=\n"
+		}
+		return []byte(properties), nil
 	}
 	if len(args) > 1 && args[1] == "daemon-reload" {
+		if m.failReload {
+			return nil, errors.New("fixture reload denied")
+		}
 		_, err := os.Lstat(m.adapter.unitPath(m.descriptor))
-		m.loaded = err == nil
+		m.loaded = err == nil && !m.stayUnloaded
+		m.failBus = m.busLostAfterReload
 		return nil, nil
 	}
 	if len(args) > 1 && args[1] == "enable" && m.failEnable {
@@ -114,6 +133,9 @@ func (m *systemdFixtureManager) command(_ context.Context, binary string, args .
 	}
 	if len(args) > 1 && args[1] == "enable" && m.mismatchAfterEnable != "" {
 		m.mismatch = m.mismatchAfterEnable
+	}
+	if len(args) > 1 && args[1] == "enable" && m.busLostAfterEnable {
+		m.failBus = true
 	}
 	if len(args) > 1 && args[1] == "disable" {
 		m.disabled = true
@@ -141,12 +163,12 @@ func TestServiceSystemdUnitArgumentEscaping(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(unit)
-	for _, want := range []string{"Type=simple\n", "User=1001\n", "Environment=WITSELF_RUNTIME=local\n", "Restart=no\n", "KillMode=mixed\n", "TimeoutStopSec=90s\n", `"literal%%value$$dollar\"quoted\\slash"`, "cell's 日本 space"} {
+	for _, want := range []string{"Type=simple\n", "Environment=WITSELF_RUNTIME=local\n", "Restart=no\n", "KillMode=mixed\n", "TimeoutStopSec=90s\n", `"literal%%value$$dollar\"quoted\\slash"`, "cell's 日本 space"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing rendered invariant %q", want)
 		}
 	}
-	if strings.Contains(text, "/bin/sh") || strings.Contains(text, "ExecStop=") {
+	if strings.Contains(text, "/bin/sh") || strings.Contains(text, "ExecStop=") || strings.Contains(text, "\nUser=") {
 		t.Fatal("unit delegates a shell or competing lifecycle")
 	}
 	d.Payload.Args = append(d.Payload.Args, "bad\nExecStart=foreign")
@@ -165,7 +187,7 @@ func TestServiceSystemdPlanIsSideEffectFree(t *testing.T) {
 		t.Fatal("plan created registration directory")
 	}
 	for _, call := range m.calls {
-		if len(call) < 3 || call[2] != "show" {
+		if len(call) < 3 || (call[0] == a.systemctl && call[2] != "show") || (call[0] == a.busctl && (call[3] != "get-property" || call[len(call)-1] != "Version")) {
 			t.Fatal("plan issued mutating command")
 		}
 	}
@@ -180,6 +202,138 @@ func TestServiceSystemdUnavailableNamesForegroundFallback(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(a.home, ".config")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("unavailable manager mutated home")
+	}
+}
+
+func TestServiceSystemdUnitDirectoryResolution(t *testing.T) {
+	home, config := t.TempDir(), t.TempDir()
+	config, err := filepath.EvalSymlinks(config)
+	if err != nil {
+		t.Fatal("cannot canonicalize external config fixture")
+	}
+	missingHome := func() (string, error) { return "", errors.New("fixture HOME absent") }
+	passwdHome := func() (string, error) { return home, nil }
+	for _, test := range []struct {
+		name, config, wantBase, wantUnit string
+	}{
+		{"passwd-fallback", "", home, filepath.Join(home, ".config", "systemd", "user")},
+		{"xdg-home", filepath.Join(home, "config"), home, filepath.Join(home, "config", "systemd", "user")},
+		{"xdg-external", filepath.Join(config, "missing"), config, filepath.Join(config, "missing", "systemd", "user")},
+		{"relative-xdg-refused", "relative-config", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gotHome, base, unit := systemdUserDirectories(missingHome, passwdHome, test.config)
+			if gotHome != home || base != test.wantBase || unit != test.wantUnit {
+				t.Fatal("unit directory resolution differed from explicit home/config contract")
+			}
+		})
+	}
+	if gotHome, base, unit := systemdUserDirectories(missingHome, missingHome, ""); gotHome != "" || base != "" || unit != "" {
+		t.Fatal("unresolvable home accepted")
+	}
+}
+
+func TestServiceSystemdCapabilityRequiresUsableStorageAndBus(t *testing.T) {
+	for _, failure := range []string{"home-unresolved", "home-missing", "unit-unresolved", "parent-unwritable", "unit-unwritable", "parent-unsearchable", "busctl-unreachable"} {
+		t.Run(failure, func(t *testing.T) {
+			a, d, m := systemdFixture(t)
+			switch failure {
+			case "home-unresolved":
+				a.home = ""
+			case "home-missing":
+				a.home = filepath.Join(a.home, "missing-home")
+				a.unitDir = filepath.Join(a.home, ".config", "systemd", "user")
+			case "unit-unresolved":
+				a.unitDir = ""
+			case "unit-unwritable":
+				if err := a.inspectDirectories(true); err != nil {
+					t.Fatal(err)
+				}
+				a.accessible = func(path string, write bool) bool { return path != a.unitDir || !write }
+			case "parent-unwritable":
+				a.accessible = func(_ string, write bool) bool { return !write }
+			case "parent-unsearchable":
+				a.accessible = func(string, bool) bool { return false }
+			case "busctl-unreachable":
+				m.failBus = true
+			}
+			if err := a.capability(t.Context()); !errors.Is(err, ErrServiceManagerUnavailable) {
+				t.Fatal("direct capability accepted an unavailable manager")
+			}
+			plan, err := a.Plan(t.Context(), d)
+			if !errors.Is(err, ErrServiceManagerUnavailable) || plan.Observation.Available || plan.Observation.Reason != "service_manager_unavailable" || plan.Observation.Fallback != serviceForegroundFallback {
+				t.Fatal("unusable capability did not select the explicit foreground fallback")
+			}
+			if err := a.Apply(t.Context(), plan); !errors.Is(err, ErrServiceManagerUnavailable) {
+				t.Fatal("Apply did not repeat capability refusal")
+			}
+			for _, call := range m.calls {
+				if call[0] == a.systemctl && call[2] != "show" {
+					t.Fatal("unavailable capability mutated manager state")
+				}
+			}
+			if a.unitDir != "" {
+				if _, err := os.Lstat(a.unitPath(d)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("unavailable capability wrote a registration")
+				}
+			}
+		})
+	}
+}
+
+func TestServiceSystemdEmptyUserPropertyDoesNotConferOwnership(t *testing.T) {
+	a, d, m := systemdFixture(t)
+	m.emptyUserProperty = true
+	plan, err := a.Plan(t.Context(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(t.Context(), plan); err != nil {
+		t.Fatal("empty manager User property prevented exact current-user registration")
+	}
+	for _, call := range m.calls {
+		for _, arg := range call {
+			if strings.HasPrefix(arg, "--property=") && strings.Contains(arg, "User") {
+				t.Fatal("ownership inspection still requests the manager User property")
+			}
+		}
+	}
+	foreign := d
+	foreign.UID = "1002"
+	if _, err := a.Inspect(t.Context(), foreign); !errors.Is(err, ErrServiceOwnershipConflict) {
+		t.Fatal("empty User property permitted a foreign process UID")
+	}
+	if err := a.Remove(t.Context(), d); err != nil {
+		t.Fatal("empty User property prevented exact registration cleanup")
+	}
+}
+
+func TestServiceSystemdRegistrationFailuresAreNotOwnershipConflicts(t *testing.T) {
+	for _, failure := range []string{"reload-denied", "enable-denied", "not-found-enable-denied", "bus-after-reload", "exec-bus-unavailable", "bus-after-enable"} {
+		t.Run(failure, func(t *testing.T) {
+			a, d, m := systemdFixture(t)
+			switch failure {
+			case "reload-denied":
+				m.failReload = true
+			case "enable-denied":
+				m.failEnable = true
+			case "not-found-enable-denied":
+				m.stayUnloaded, m.failEnable = true, true
+			case "bus-after-reload":
+				m.busLostAfterReload = true
+			case "exec-bus-unavailable":
+				m.failExecBus = true
+			case "bus-after-enable":
+				m.busLostAfterEnable = true
+			}
+			plan, err := a.Plan(t.Context(), d)
+			if err != nil {
+				t.Fatal("capability incorrectly requires registration permission")
+			}
+			if err := a.Apply(t.Context(), plan); err == nil || err.Error() != "service_registration_failed" {
+				t.Fatal("registration failure was lost or mislabeled as ownership conflict")
+			}
+		})
 	}
 }
 
@@ -238,7 +392,7 @@ func TestServiceSystemdExactRegistrationAndRemovalRetainsData(t *testing.T) {
 }
 
 func TestServiceSystemdLoadedOwnershipConflicts(t *testing.T) {
-	for _, mismatch := range []string{"label", "uid", "fragment", "drop-in", "executable", "arguments"} {
+	for _, mismatch := range []string{"label", "process-uid", "fragment", "drop-in", "executable", "arguments"} {
 		t.Run(mismatch, func(t *testing.T) {
 			a, d, m := systemdFixture(t)
 			plan, err := a.Plan(context.Background(), d)
@@ -249,6 +403,10 @@ func TestServiceSystemdLoadedOwnershipConflicts(t *testing.T) {
 				t.Fatal(err)
 			}
 			m.mismatch = mismatch
+			if mismatch == "process-uid" {
+				d.UID = "1002"
+				plan.Spec = d
+			}
 			before := len(m.calls)
 			if _, err := a.Inspect(context.Background(), d); !errors.Is(err, ErrServiceOwnershipConflict) {
 				t.Fatal("foreign registration accepted")
@@ -303,8 +461,8 @@ func TestServiceSystemdFailedRegistrationCleansOnlyOwnedUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Apply(context.Background(), plan); err == nil {
-		t.Fatal("enable failure accepted")
+	if err := a.Apply(context.Background(), plan); err == nil || err.Error() != "service_registration_failed" {
+		t.Fatal("enable failure did not retain its fixed registration reason")
 	}
 	if _, err := os.Stat(a.unitPath(d)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("owned partial registration retained")

@@ -53,6 +53,43 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 		assertServiceHarnessTokenAbsent(t, "manager recording", calls, token)
 	})
 
+	t.Run("adapter_errors_reach_stderr", func(t *testing.T) {
+		for _, test := range []struct {
+			method, action, reason, calls string
+		}{
+			{"Plan", "install", localcell.ErrServiceManagerUnavailable.Error(), "New\nPlan\n"},
+			{"Apply", "install", "service_registration_failed", "New\nPlan\nApply\n"},
+			{"Remove", "remove", localcell.ErrServiceOwnershipConflict.Error(), "New\nRemove\n"},
+		} {
+			t.Run(test.method, func(t *testing.T) {
+				root, _ := prepareServiceHarnessInstallation(t, host, "systemd-user", token)
+				manager := serviceHarnessManagerDirectory(t)
+				if os.WriteFile(filepath.Join(manager, "fail-"+test.method), nil, 0o600) != nil {
+					t.Fatal("cannot prepare manager failure fixture")
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+				defer cancel()
+				command := exec.CommandContext(ctx, host, "service", test.action, "--root", root)
+				command.Env = serviceHarnessEnvironment(t, manager)
+				var stdout, stderr bytes.Buffer
+				command.Stdout, command.Stderr = &stdout, &stderr
+				var exitErr *exec.ExitError
+				if err := command.Run(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+					t.Fatal("adapter failure did not produce the harness failure exit")
+				}
+				assertServiceHarnessTokenAbsent(t, "failed service stdout", stdout.Bytes(), token)
+				assertServiceHarnessTokenAbsent(t, "failed service stderr", stderr.Bytes(), token)
+				if stdout.Len() != 0 || stderr.String() != test.reason+"\n" {
+					t.Fatal("adapter failure did not emit only its fixed reason on stderr")
+				}
+				calls, err := os.ReadFile(filepath.Join(manager, "calls"))
+				if err != nil || string(calls) != test.calls {
+					t.Fatal("failed adapter command did not stop at its injected failure")
+				}
+			})
+		}
+	})
+
 	t.Run("foreground_interrupt_and_status", func(t *testing.T) {
 		root, cell := prepareServiceHarnessInstallation(t, host, "foreground", token)
 		manager := serviceHarnessManagerDirectory(t)
@@ -182,6 +219,13 @@ func harnessRecordManagerCall(method string) error {
  _, writeErr := f.WriteString(method + "\n")
  closeErr := f.Close()
  if writeErr != nil || closeErr != nil { return errors.New("harness manager recorder failed") }
+ if _, err := os.Stat(filepath.Join(os.Getenv("LC_S7A_TEST_MANAGER_DIR"), "fail-"+method)); err == nil {
+  switch method {
+  case "Plan": return ErrServiceManagerUnavailable
+  case "Apply": return errors.New("service_registration_failed")
+  case "Remove": return ErrServiceOwnershipConflict
+  }
+ }
  return nil
 }
 func NewServiceAdapter() ServiceAdapter {

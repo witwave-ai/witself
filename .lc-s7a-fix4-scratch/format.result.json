@@ -1,0 +1,1 @@
+{"command": ["gofmt", "-w", "internal/localcell/service_native_diagnostics_test.go", "internal/localcell/service_native_test.go", "internal/localcell/service_systemd_test.go"], "exit": 0, "wall_seconds": 0.06}

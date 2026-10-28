@@ -15,6 +15,51 @@ import (
 
 const serviceForegroundFallback = "localcellharness run"
 
+// Resolve the same config search path as a user manager. HOME is optional: a
+// stripped child environment can still resolve its passwd home. An explicit XDG
+// config directory must be absolute; never silently register in another place.
+func systemdUserDirectories(userHome, passwdHome func() (string, error), configHome string) (home, base, unitDir string) {
+	home, err := userHome()
+	if err != nil || !filepath.IsAbs(home) {
+		home, err = passwdHome()
+	}
+	if err != nil || !filepath.IsAbs(home) {
+		return "", "", ""
+	}
+	home = filepath.Clean(home)
+	if configHome == "" {
+		configHome = filepath.Join(home, ".config")
+	}
+	if !filepath.IsAbs(configHome) {
+		return home, "", ""
+	}
+	configHome = filepath.Clean(configHome)
+	unitDir = filepath.Join(configHome, "systemd", "user")
+	rel, err := filepath.Rel(home, configHome)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return home, home, unitDir
+	}
+	// For a separate XDG config tree, validate from its nearest existing parent.
+	// capability will refuse an unsafe, unowned or unwritable anchor.
+	base = configHome
+	for {
+		if _, err := os.Lstat(base); err == nil {
+			resolved, err := filepath.EvalSymlinks(base)
+			if err != nil || resolved != base {
+				return home, "", ""
+			}
+			return home, base, unitDir
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return home, "", ""
+		}
+		parent := filepath.Dir(base)
+		if parent == base {
+			return home, "", ""
+		}
+		base = parent
+	}
+}
+
 // RenderSystemdUserUnit renders an explicitly selected per-user host. Systemd,
 // rather than a shell, parses these arguments; percent and dollar expansion are
 // disabled by escaping each argument. The supervisor owns child restarts.
@@ -34,7 +79,7 @@ func RenderSystemdUserUnit(d ServiceDescriptor) ([]byte, error) {
 		arg = strings.ReplaceAll(arg, "$", "$$")
 		quoted[i] = "\"" + arg + "\""
 	}
-	return []byte("[Unit]\nDescription=Witself local cell " + serviceUnitLabel(d) + "\n\n[Service]\nType=simple\nUser=" + d.UID + "\nEnvironment=WITSELF_RUNTIME=local\nExecStart=" + strings.Join(quoted, " ") + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=90s\n\n[Install]\nWantedBy=default.target\n"), nil
+	return []byte("[Unit]\nDescription=Witself local cell " + serviceUnitLabel(d) + "\n\n[Service]\nType=simple\nEnvironment=WITSELF_RUNTIME=local\nExecStart=" + strings.Join(quoted, " ") + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=90s\n\n[Install]\nWantedBy=default.target\n"), nil
 }
 
 func serviceUnitLabel(d ServiceDescriptor) string {
@@ -62,8 +107,10 @@ type serviceManagerCommand func(context.Context, string, ...string) ([]byte, err
 
 type systemdUserAdapter struct {
 	uid, home, runtimeDir, unitDir, systemctl, busctl string
+	unitBase                                          string
 	command                                           serviceManagerCommand
 	owned                                             func(string, os.FileInfo) bool
+	accessible                                        func(string, bool) bool
 	inspectFile                                       func(string) (os.FileInfo, error)
 	writeUnit                                         func(*os.File, []byte) error
 	unavailable                                       bool
@@ -81,14 +128,25 @@ func serviceUnavailable() (ServiceObservation, error) {
 }
 
 func (a *systemdUserAdapter) capability(ctx context.Context) error {
-	if a.unavailable || a.uid == "" || a.uid == "0" || a.command == nil || a.systemctl == "" || a.busctl == "" || !filepath.IsAbs(a.runtimeDir) {
+	// Probe the current non-root identity, absolute tools, private owned session
+	// directory, resolvable safe unit path, search/write access to its existing
+	// directories (or nearest existing parent), and bus reachability through both
+	// tools. Plan creates nothing and does not probe daemon-reload/enable permission;
+	// failures of those operations are registration failures during Apply.
+	if a.unavailable || a.uid == "" || a.uid == "0" || a.command == nil || a.systemctl == "" || a.busctl == "" || !filepath.IsAbs(a.runtimeDir) || !filepath.IsAbs(a.home) || !filepath.IsAbs(a.unitDir) {
 		return ErrServiceManagerUnavailable
 	}
 	info, err := a.lstat(a.runtimeDir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || a.owned == nil || !a.owned(a.runtimeDir, info) {
 		return ErrServiceManagerUnavailable
 	}
+	if err := a.inspectDirectories(false); err != nil {
+		return err
+	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "show", "--property=Version", "--value"); err != nil {
+		return ErrServiceManagerUnavailable
+	}
+	if _, err := a.command(ctx, a.busctl, "--user", "--json=short", "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "Version"); err != nil {
 		return ErrServiceManagerUnavailable
 	}
 	return nil
@@ -102,32 +160,57 @@ func (a *systemdUserAdapter) unitPath(d ServiceDescriptor) string {
 // symlink. Existing non-private config directories are accepted only if owned and
 // not group/world writable; the unit itself must be exactly owner-private.
 func (a *systemdUserAdapter) inspectDirectories(create bool) error {
-	if !filepath.IsAbs(a.home) || !filepath.IsAbs(a.unitDir) {
-		return ErrServiceOwnershipConflict
+	base := a.unitBase
+	if base == "" {
+		base = a.home
 	}
-	rel, err := filepath.Rel(a.home, a.unitDir)
+	if !filepath.IsAbs(base) || !filepath.IsAbs(a.unitDir) || filepath.Clean(base) != base || filepath.Clean(a.unitDir) != a.unitDir {
+		return ErrServiceManagerUnavailable
+	}
+	rel, err := filepath.Rel(base, a.unitDir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return ErrServiceOwnershipConflict
 	}
-	path := a.home
+	path := base
 	parts := append([]string{""}, strings.Split(rel, string(filepath.Separator))...)
-	for _, part := range parts {
+	for i, part := range parts {
+		parent := path
 		path = filepath.Join(path, part)
 		info, err := a.lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
+			if i == 0 || !a.directoryAccessible(parent, true) {
+				return ErrServiceManagerUnavailable
+			}
 			if !create {
 				return nil
 			}
 			if err := os.Mkdir(path, 0o700); err != nil {
-				return ErrServiceOwnershipConflict
+				return ErrServiceManagerUnavailable
 			}
 			info, err = a.lstat(path)
 		}
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || a.owned == nil || !a.owned(path, info) {
 			return ErrServiceOwnershipConflict
 		}
+		if !a.directoryAccessible(path, i == len(parts)-1) {
+			return ErrServiceManagerUnavailable
+		}
 	}
 	return nil
+}
+
+func (a *systemdUserAdapter) directoryAccessible(path string, write bool) bool {
+	if a.accessible != nil {
+		return a.accessible(path, write)
+	}
+	// Portable fixtures model Unix owner permissions. The Linux adapter also
+	// checks effective filesystem access, including ACL/read-only mount refusal.
+	info, err := a.lstat(path)
+	mode := os.FileMode(0o100)
+	if write {
+		mode |= 0o200
+	}
+	return err == nil && info.Mode().Perm()&mode == mode
 }
 
 func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, error) {
@@ -181,19 +264,27 @@ func (a *systemdUserAdapter) inspectEnablement(d ServiceDescriptor) error {
 
 func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (ServiceObservation, error) {
 	want, err := RenderSystemdUserUnit(d)
+	// uid is captured from os.Getuid by the native constructor. A user manager's
+	// optional User property is not an ownership boundary or identity authority.
 	if err != nil || d.UID != a.uid {
 		return ServiceObservation{Reason: "service_ownership_conflict"}, ErrServiceOwnershipConflict
 	}
 	if err := a.capability(ctx); err != nil {
+		if errors.Is(err, ErrServiceOwnershipConflict) {
+			return ServiceObservation{Reason: "service_ownership_conflict"}, err
+		}
 		return serviceUnavailable()
 	}
 	exists, err := a.ownedUnit(d, want)
 	if err != nil {
+		if errors.Is(err, ErrServiceManagerUnavailable) {
+			return serviceUnavailable()
+		}
 		return ServiceObservation{Available: true, Reason: "service_ownership_conflict"}, err
 	}
 	// Scalar show properties have no argument-array ambiguity. Reject drop-ins:
 	// otherwise matching the main file would not establish the loaded contract.
-	raw, err := a.command(ctx, a.systemctl, "--user", "show", serviceUnitLabel(d), "--property=Id,LoadState,FragmentPath,User,DropInPaths", "--no-pager")
+	raw, err := a.command(ctx, a.systemctl, "--user", "show", serviceUnitLabel(d), "--property=Id,LoadState,FragmentPath,DropInPaths", "--no-pager")
 	if err != nil {
 		return serviceUnavailable()
 	}
@@ -204,10 +295,16 @@ func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (Se
 	if properties["LoadState"] == "not-found" {
 		return ServiceObservation{Available: true, Registered: exists, Owned: exists}, nil
 	}
-	if !exists || properties["LoadState"] != "loaded" || properties["Id"] != serviceUnitLabel(d) || properties["User"] != d.UID || properties["FragmentPath"] != a.unitPath(d) || properties["DropInPaths"] != "" {
+	if !exists || properties["Id"] != serviceUnitLabel(d) || properties["FragmentPath"] != a.unitPath(d) || properties["DropInPaths"] != "" {
 		return ServiceObservation{Available: true, Registered: true, Reason: "service_ownership_conflict"}, ErrServiceOwnershipConflict
 	}
+	if properties["LoadState"] != "loaded" {
+		return ServiceObservation{Available: true, Registered: true, Reason: "service_registration_failed"}, errors.New("service_registration_failed")
+	}
 	if err := a.inspectExecStart(ctx, d); err != nil {
+		if errors.Is(err, ErrServiceManagerUnavailable) {
+			return serviceUnavailable()
+		}
 		return ServiceObservation{Available: true, Registered: true, Reason: "service_ownership_conflict"}, err
 	}
 	return ServiceObservation{Available: true, Registered: true, Owned: true}, nil
@@ -225,7 +322,7 @@ func systemdProperties(raw []byte) (map[string]string, error) {
 		}
 		props[key] = value
 	}
-	for _, key := range []string{"Id", "LoadState", "FragmentPath", "User", "DropInPaths"} {
+	for _, key := range []string{"Id", "LoadState", "FragmentPath", "DropInPaths"} {
 		if _, ok := props[key]; !ok {
 			return nil, ErrServiceOwnershipConflict
 		}
@@ -241,7 +338,7 @@ type systemdBusResult struct {
 func (a *systemdUserAdapter) inspectExecStart(ctx context.Context, d ServiceDescriptor) error {
 	raw, err := a.command(ctx, a.busctl, "--user", "--json=short", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", "s", serviceUnitLabel(d))
 	if err != nil {
-		return ErrServiceOwnershipConflict
+		return ErrServiceManagerUnavailable
 	}
 	var result systemdBusResult
 	var object []string
@@ -260,7 +357,7 @@ func (a *systemdUserAdapter) inspectExecStart(ctx context.Context, d ServiceDesc
 	}
 	raw, err = a.command(ctx, a.busctl, "--user", "--json=short", "get-property", "org.freedesktop.systemd1", object[0], "org.freedesktop.systemd1.Service", "ExecStart")
 	if err != nil {
-		return ErrServiceOwnershipConflict
+		return ErrServiceManagerUnavailable
 	}
 	var records [][]json.RawMessage
 	if json.Unmarshal(raw, &result) != nil || result.Type != "a(sasbttttuii)" || json.Unmarshal(result.Data, &records) != nil {
@@ -363,7 +460,7 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		if created {
 			a.cleanupPartial(ctx, d, want)
 		}
-		return ErrServiceOwnershipConflict
+		return serviceRegistrationError(err)
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "enable", "--now", serviceUnitLabel(d)); err != nil {
 		if created {
@@ -372,9 +469,16 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		return errors.New("service_registration_failed")
 	}
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
-		return ErrServiceOwnershipConflict
+		return serviceRegistrationError(err)
 	}
 	return nil
+}
+
+func serviceRegistrationError(err error) error {
+	if errors.Is(err, ErrServiceOwnershipConflict) {
+		return ErrServiceOwnershipConflict
+	}
+	return errors.New("service_registration_failed")
 }
 
 func (a *systemdUserAdapter) removeCreatedUnit(d ServiceDescriptor, identity os.FileInfo) {

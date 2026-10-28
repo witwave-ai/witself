@@ -23,13 +23,15 @@ func TestServiceSystemdManagerEnvironmentExcludesControlToken(t *testing.T) {
 	prepareSupervisorTest(t, c)
 	token := installServiceFixtureControlToken(t, c)
 	// A caller may already have a secret in its environment. The actual Linux
-	// command closure must supply only its two explicit session variables.
+	// command closure must supply only its explicit session and config paths.
 	t.Setenv("WITSELF_CONTROL_TOKEN", string(token))
 	adapter, ok := NewServiceAdapter().(*systemdUserAdapter)
 	if !ok {
 		t.Fatal("Linux adapter constructor did not provide the command fixture seam")
 	}
-	adapter.home, adapter.runtimeDir = t.TempDir(), t.TempDir()
+	adapter.runtimeDir = t.TempDir()
+	adapter.home = filepath.Join(adapter.runtimeDir, "home")
+	adapter.unitDir = filepath.Join(adapter.home, ".config", "systemd", "user")
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal("cannot resolve synthetic manager executable")
@@ -52,8 +54,8 @@ func TestServiceSystemdManagerEnvironmentExcludesControlToken(t *testing.T) {
 	if observation.TokenOffset >= 0 {
 		t.Errorf("control token present in manager environment (length=%d offset=%d)", observation.TokenLength, observation.TokenOffset)
 	}
-	if observation.Entries != 2 || !observation.Expected {
-		t.Fatal("manager process environment differed from the two explicit session variables")
+	if observation.Entries != 4 || !observation.Expected {
+		t.Fatal("manager process environment differed from the four explicit session and config variables")
 	}
 }
 
@@ -67,7 +69,7 @@ func TestServiceSystemdManagerCommandEnvironmentFixture(t *testing.T) {
 	// comparisons, so even a regression that inherits credentials cannot print
 	// or write those values into a fixture observation or failure message.
 	observed := os.Environ()
-	expected := []string{"XDG_RUNTIME_DIR=" + runtimeDir, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtimeDir + "/bus"}
+	expected := []string{"XDG_RUNTIME_DIR=" + runtimeDir, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtimeDir + "/bus", "HOME=" + filepath.Join(runtimeDir, "home"), "XDG_CONFIG_HOME=" + filepath.Join(runtimeDir, "home", ".config")}
 	observation := serviceManagerEnvironmentObservation{Entries: len(observed), Expected: reflect.DeepEqual(observed, expected), TokenOffset: -1, TokenLength: len(token)}
 	for _, entry := range observed {
 		if offset := bytes.Index([]byte(entry), token); offset >= 0 {

@@ -56,20 +56,24 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal("cannot reopen native service descriptor")
 	}
 	adapter := localcell.NewServiceAdapter()
+	diagnosticHome := nativeServiceDiagnosticHome()
+	label := "witself-cell-" + descriptor.InstallationID + ".service"
+	logFailure := func(err error, stderr []byte) {
+		t.Helper()
+		nativeServiceFailureDiagnostics(t.Logf, root, diagnosticHome, label, err, stderr, nativeServiceDiagnosticOutput)
+	}
 	_, planErr := adapter.Plan(t.Context(), descriptor)
 	manager := planErr == nil
 	if planErr != nil && !errors.Is(planErr, localcell.ErrServiceManagerUnavailable) {
+		logFailure(planErr, nil)
 		t.Fatal("native service ownership or capability preflight failed")
 	}
 	var command *exec.Cmd
 	var exited chan error
+	var foregroundStderr *nativeServiceDiagnosticBuffer
 	invoke := func(action string) error {
-		cmd := exec.CommandContext(t.Context(), host, "service", action, "--root", root)
-		// The user-manager probe needs only the session directory. Child runtime
-		// configuration and credentials are constructed by the lifecycle itself.
-		cmd.Env = []string{"WITSELF_RUNTIME=local", "XDG_RUNTIME_DIR=" + os.Getenv("XDG_RUNTIME_DIR")}
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		return cmd.Run()
+		return nativeServiceInvoke(t.Context(), host, root, diagnosticHome, label,
+			[]string{"service", action, "--root", root}, t.Logf, nativeServiceDiagnosticOutput)
 	}
 	start := func() {
 		t.Helper()
@@ -80,9 +84,12 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			return
 		}
 		command = exec.Command(host, "run", "--root", root)
-		command.Env = []string{"WITSELF_RUNTIME=local"}
-		command.Stdout, command.Stderr = io.Discard, io.Discard
+		command.Env = nativeServiceChildEnvironment(os.LookupEnv)
+		foregroundStderr = &nativeServiceDiagnosticBuffer{}
+		command.Stdout, command.Stderr = io.Discard, foregroundStderr
 		if err := command.Start(); err != nil {
+			logFailure(err, foregroundStderr.snapshot())
+			command = nil
 			t.Fatal("native foreground service host failed to start")
 		}
 		exited = make(chan error, 1)
@@ -92,22 +99,31 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		if manager {
 			// Disable the exact registration; reapplying it is a fresh host on
 			// this boot, with the same durable running fence and private data.
-			return adapter.Remove(context.Background(), descriptor)
+			err := adapter.Remove(context.Background(), descriptor)
+			if err != nil {
+				logFailure(err, nil)
+			}
+			return err
 		}
 		if command == nil {
 			return nil
 		}
 		if err := command.Process.Signal(os.Interrupt); err != nil {
+			logFailure(err, foregroundStderr.snapshot())
 			return errors.New("native foreground interrupt failed")
 		}
 		select {
 		case err := <-exited:
 			command = nil
+			if err != nil {
+				logFailure(err, foregroundStderr.snapshot())
+			}
 			return err
 		case <-time.After(75 * time.Second):
 			_ = command.Process.Kill()
-			<-exited
+			err := <-exited
 			command = nil
+			logFailure(err, foregroundStderr.snapshot())
 			return errors.New("native foreground shutdown timed out")
 		}
 	}

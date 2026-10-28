@@ -1,0 +1,20 @@
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/home-unresolved
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/home-missing
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/unit-unresolved
+    service_systemd_test.go:261: direct capability accepted an unavailable manager
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/parent-unwritable
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/unit-unwritable
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/parent-unsearchable
+=== RUN   TestServiceSystemdCapabilityRequiresUsableStorageAndBus/busctl-unreachable
+--- FAIL: TestServiceSystemdCapabilityRequiresUsableStorageAndBus (0.01s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/home-unresolved (0.00s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/home-missing (0.00s)
+    --- FAIL: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/unit-unresolved (0.00s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/parent-unwritable (0.00s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/unit-unwritable (0.00s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/parent-unsearchable (0.00s)
+    --- PASS: TestServiceSystemdCapabilityRequiresUsableStorageAndBus/busctl-unreachable (0.00s)
+FAIL
+FAIL	github.com/witwave-ai/witself/internal/localcell	0.591s
+FAIL
