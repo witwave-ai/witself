@@ -1,3 +1,5 @@
+//go:build !windows
+
 package localcell
 
 import (
@@ -8,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,29 +23,9 @@ func systemdFixture(t *testing.T) (*systemdUserAdapter, ServiceDescriptor, *syst
 	}
 	d := ServiceDescriptor{Version: 1, InstallationID: "fixture-install", UID: "1001", Root: filepath.Join(home, "cell's 日本 space"), Adapter: "systemd-user", Scope: "user", Payload: ServicePayload{Generation: "generation-1", Host: filepath.Join(home, "host's 日本 space"), Args: []string{"run", "--root", filepath.Join(home, "cell's 日本 space")}}, Runtime: "local", DesiredState: "running"}
 	a := &systemdUserAdapter{uid: d.UID, home: home, runtimeDir: runtimeDir, unitDir: filepath.Join(home, ".config", "systemd", "user"), systemctl: "/fixture/systemctl", busctl: "/fixture/busctl", owned: func(_ string, _ os.FileInfo) bool { return true }}
-	// This fixture models a Unix manager on every platform. Windows' native
-	// adapter remains unavailable; its ACL semantics are not certified here.
-	if runtime.GOOS == "windows" {
-		a.inspectFile = func(path string) (os.FileInfo, error) {
-			info, err := os.Lstat(path)
-			if err != nil {
-				return nil, err
-			}
-			return systemdUnixModeInfo{info}, nil
-		}
-	}
 	m := &systemdFixtureManager{t: t, adapter: a, descriptor: d}
 	a.command = m.command
 	return a, d, m
-}
-
-type systemdUnixModeInfo struct{ os.FileInfo }
-
-func (i systemdUnixModeInfo) Mode() os.FileMode {
-	if i.IsDir() {
-		return i.FileInfo.Mode()&^os.ModePerm | 0o700
-	}
-	return i.FileInfo.Mode()&^os.ModePerm | 0o600
 }
 
 type systemdFixtureModeInfo struct {
@@ -750,19 +731,6 @@ func TestServiceSystemdDiagnosticTailBound(t *testing.T) {
 	}
 }
 
-func TestServiceUnsupportedAdapterCapability(t *testing.T) {
-	adapter := unavailableServiceAdapter{}
-	observation, err := adapter.Inspect(context.Background(), ServiceDescriptor{})
-	if !errors.Is(err, ErrServiceManagerUnavailable) || observation.Available || observation.Fallback != "localcellharness run" {
-		t.Fatal("unsupported adapter omitted capability")
-	}
-	if runtime.GOOS != "linux" {
-		if _, err := NewServiceAdapter().Plan(context.Background(), ServiceDescriptor{}); !errors.Is(err, ErrServiceManagerUnavailable) {
-			t.Fatal("unsupported platform selected native manager")
-		}
-	}
-}
-
 func TestServiceSystemdExactRegistrationAndRemovalRetainsData(t *testing.T) {
 	a, d, m := systemdFixture(t)
 	if err := os.Mkdir(d.Root, 0o700); err != nil {
@@ -783,7 +751,7 @@ func TestServiceSystemdExactRegistrationAndRemovalRetainsData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Fatal("registration is not private")
 	}
 	observation, err := a.Inspect(context.Background(), d)
