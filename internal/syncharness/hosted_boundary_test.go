@@ -12,13 +12,13 @@ import (
 )
 
 func TestHostedCommandDependencyBoundary(t *testing.T) {
-	for _, command := range []string{"witself-server", "witself-worker", "witself", "witself-admin", "witself-infra", "witself-control-plane"} {
+	// witself-infra lives in the nested infra/pulumi module, whose dependencies
+	// are not available to this module's test job; that module cannot link this
+	// module's internal packages, and its own gate covers it.
+	for _, command := range []string{"witself-server", "witself-worker", "witself", "witself-admin", "witself-control-plane"} {
 		t.Run(command, func(t *testing.T) {
 			cmd := exec.Command("go", "list", "-deps", "./cmd/"+command)
 			cmd.Dir = "../.."
-			if command == "witself-infra" {
-				cmd.Dir = "../../infra/pulumi"
-			}
 			cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off")
 			out, err := cmd.Output()
 			if err != nil {
