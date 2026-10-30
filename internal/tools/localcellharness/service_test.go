@@ -17,7 +17,7 @@ func TestServiceCommandsRequireExplicitLocalSelection(t *testing.T) {
 		t.Run(selector, func(t *testing.T) {
 			t.Setenv("WITSELF_RUNTIME", selector)
 			root := privateHarnessRoot(t)
-			for _, action := range [][]string{{"run"}, {"service", "install"}, {"service", "start"}, {"service", "stop"}, {"service", "status"}, {"service", "remove"}, {"service", "repair"}} {
+			for _, action := range [][]string{{"run"}, {"service", "install"}, {"service", "start"}, {"service", "stop"}, {"service", "status"}, {"service", "observe"}, {"service", "remove"}, {"service", "repair"}} {
 				if err := run(context.Background(), append(action, "--root", root), io.Discard); err == nil {
 					t.Fatal("service command accepted an unselected local runtime")
 				}

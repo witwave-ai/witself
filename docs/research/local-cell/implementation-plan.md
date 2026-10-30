@@ -1016,7 +1016,7 @@ when a Linux user manager is unavailable; macOS records its unsupported adapter
 capability. This is per-user work only: availability after reboot means after
 the owning user logs in. No reboot receipt exists yet, and A provides no channel
 installer, macOS or Windows registration, resource-budget acceptance, or hosted
-default change.
+default change. Owner reboot receipt driver: see [service-reboot-receipt.md](service-reboot-receipt.md); receipt not yet recorded.
 
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic

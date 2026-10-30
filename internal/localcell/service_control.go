@@ -70,7 +70,7 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 
 func validServiceAction(action string) bool {
 	switch action {
-	case "status", "health", "start", "stop", "repair":
+	case "observe", "status", "health", "start", "stop", "repair":
 		return true
 	}
 	return false

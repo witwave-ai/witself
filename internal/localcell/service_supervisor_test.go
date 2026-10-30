@@ -3,10 +3,112 @@ package localcell
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestServiceSupervisorObserveUsesLastSnapshotWithoutHooks(t *testing.T) {
+	c, _ := unitCell(t)
+	d := prepareSupervisorTest(t, c)
+	h, _, starts, stops, _ := supervisorTestHooks()
+	healths, repairs, reconciles := 0, 0, 0
+	h.health = func(context.Context) error { healths++; return nil }
+	h.repair = func(context.Context) error { repairs++; return nil }
+	h.reconcile = func() error { reconciles++; return nil }
+	known := ProcessRecord{PID: 123, StartTime: "synthetic-start", Root: d.Root, Component: "server"}
+	if err := writeAtomic(c.path("run", "server.json"), known, nil); err != nil {
+		t.Fatal("cannot prepare known identity")
+	}
+	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
+	if err := s.load(d); err != nil {
+		t.Fatal(err)
+	}
+	before := supervisorSnapshotInventory(t, c.cfg.Root)
+	status, err := s.command(t.Context(), "observe")
+	if err != nil || status.Healthy || status.DesiredState != "running" || status.Generation != d.Payload.Generation || status.LastStepOutcome != "not_run" || len(status.Processes) != 1 || status.Processes[0].StartTime != known.StartTime {
+		t.Fatal("observe did not return the initial known snapshot")
+	}
+	if *starts != 0 || *stops != 0 || healths != 0 || repairs != 0 || reconciles != 0 || s.record.Attempts != 0 {
+		t.Fatal("observe invoked a lifecycle hook or changed supervisor attempts")
+	}
+	if !reflect.DeepEqual(before, supervisorSnapshotInventory(t, c.cfg.Root)) {
+		t.Fatal("observe changed the installation")
+	}
+	status.Processes[0].StartTime = "caller-modified"
+	if s.status.Processes[0].StartTime != known.StartTime {
+		t.Fatal("observe returned mutable supervisor identity storage")
+	}
+	if err := s.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(c.path("run", "server.json")); err != nil {
+		t.Fatal("cannot remove synthetic process record")
+	}
+	before = supervisorSnapshotInventory(t, c.cfg.Root)
+	status, err = s.command(t.Context(), "observe")
+	if err != nil || !status.Healthy || status.LastStepOutcome != "ok" || len(status.Processes) != 1 || *starts != 1 || *stops != 0 || healths != 1 || repairs != 0 || reconciles != 0 {
+		t.Fatal("observe refreshed or changed the last completed step")
+	}
+	if !reflect.DeepEqual(before, supervisorSnapshotInventory(t, c.cfg.Root)) {
+		t.Fatal("completed-step observation changed the installation")
+	}
+	// An error in the next ordinary step replaces the successful health result.
+	if err := os.Remove(c.path("service", "descriptor.json")); err != nil {
+		t.Fatal("cannot remove synthetic descriptor")
+	}
+	if err := s.step(t.Context()); err == nil {
+		t.Fatal("missing descriptor did not fail a normal step")
+	}
+	status, err = s.command(t.Context(), "observe")
+	if err != nil || status.Healthy || status.LastStepOutcome != "failed" {
+		t.Fatal("observe concealed the last failed step")
+	}
+}
+
+func supervisorSnapshotInventory(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := make(map[string]string)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			files[path] = "directory"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			files[path] = string(data)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal("cannot inventory synthetic supervisor files")
+	}
+	return files
+}
+
+func TestServiceSupervisorStatusAndHealthKeepStartingBehavior(t *testing.T) {
+	for _, action := range []string{"status", "health"} {
+		t.Run(action, func(t *testing.T) {
+			c, _ := unitCell(t)
+			d := prepareSupervisorTest(t, c)
+			h, _, starts, _, _ := supervisorTestHooks()
+			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
+			if err := s.load(d); err != nil {
+				t.Fatal(err)
+			}
+			status, err := s.command(t.Context(), action)
+			if err != nil || !status.Healthy || *starts != 1 || status.LastStepOutcome != "ok" {
+				t.Fatal("existing status or health action stopped performing a step")
+			}
+		})
+	}
+}
 
 func prepareSupervisorTest(t *testing.T, c *Cell) ServiceDescriptor {
 	t.Helper()

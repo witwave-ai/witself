@@ -98,12 +98,12 @@ func TestServiceControlAuthenticationPermissionsAndActions(t *testing.T) {
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
-	for _, token := range []string{"", "wrong"} {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://localcell/status", nil)
+	for _, probe := range []struct{ action, token string }{{"status", ""}, {"status", "wrong"}, {"observe", ""}, {"observe", "wrong"}} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://localcell/"+probe.action, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Authorization", token)
+		req.Header.Set("Authorization", probe.token)
 		response, err := client.Do(req)
 		if err != nil {
 			t.Fatal("cannot probe synthetic control socket")
@@ -119,17 +119,54 @@ func TestServiceControlAuthenticationPermissionsAndActions(t *testing.T) {
 		default:
 		}
 	}
+	descriptor, err := c.ServiceDescriptor()
+	if err != nil {
+		t.Fatal("cannot read synthetic service descriptor")
+	}
+	known := ServiceProcessIdentity{Component: "server", PID: 123, StartTime: "fixture-start"}
+	if err := writeAtomic(c.path("run", "server.json"), ProcessRecord{Component: known.Component, PID: known.PID, StartTime: known.StartTime, Root: descriptor.Root}, nil); err != nil {
+		t.Fatal("cannot prepare known process identity")
+	}
+	hooks, _, starts, _, _ := supervisorTestHooks()
+	supervisor := newSupervisor(c, SupervisorPolicy{hooks: &hooks})
+	if err := supervisor.load(descriptor); err != nil {
+		t.Fatal("cannot load synthetic supervisor")
+	}
+	type controlOutcome struct {
+		action string
+		starts int
+	}
+	outcomes := make(chan controlOutcome, 3)
+	ctx, cancel := context.WithCancel(t.Context())
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		command := <-commands
-		command.reply <- serviceReply{status: ServiceStatus{DesiredState: "running", State: "running", Healthy: true}}
+		for {
+			select {
+			case command := <-commands:
+				status, err := supervisor.command(command.ctx, command.action)
+				command.reply <- serviceReply{status: status, err: err}
+				outcomes <- controlOutcome{action: command.action, starts: *starts}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
-	status, err := c.Control(t.Context(), "status")
-	if err != nil || !status.Healthy {
-		t.Fatal("authenticated private socket request failed")
+	defer func() { cancel(); <-finished }()
+	for _, expected := range []struct {
+		action, lastStep string
+		healthy          bool
+		starts           int
+	}{{"observe", "not_run", false, 0}, {"status", "ok", true, 1}, {"health", "ok", true, 1}} {
+		status, err := c.Control(t.Context(), expected.action)
+		if err != nil || status.Healthy != expected.healthy || status.DesiredState != "running" || status.Generation != descriptor.Payload.Generation || status.LastStepOutcome != expected.lastStep || len(status.Processes) != 1 || status.Processes[0] != known {
+			t.Fatal("authenticated private socket request failed")
+		}
+		outcome := <-outcomes
+		if outcome.action != expected.action || outcome.starts != expected.starts {
+			t.Fatal("authenticated control changed the selected action or its start behavior")
+		}
 	}
-	<-finished
 	if _, err := c.Control(t.Context(), "unknown"); !errors.Is(err, ErrServiceControlRefused) {
 		t.Fatal("unknown action accepted")
 	}

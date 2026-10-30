@@ -106,10 +106,12 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 			}
 			// Status dispatch itself creates an adapter today. Keep its recorder
 			// separate so foreground zero-call evidence remains exact.
-			statusOutput := invokeServiceHarness(t, host, serviceHarnessManagerDirectory(t), token, "service", "status", "--root", root)
-			var status localcell.ServiceStatus
-			if json.Unmarshal(statusOutput, &status) != nil || status.DesiredState != "stopped" || status.State != "stopped" || status.Healthy {
-				t.Fatal("service status did not serialize the supervisor's stopped state")
+			for _, action := range []string{"status", "observe"} {
+				statusOutput := invokeServiceHarness(t, host, serviceHarnessManagerDirectory(t), token, "service", action, "--root", root)
+				var status localcell.ServiceStatus
+				if json.Unmarshal(statusOutput, &status) != nil || status.DesiredState != "stopped" || status.State != "stopped" || status.Healthy || status.Generation == "" || status.LastStepOutcome != "ok" {
+					t.Fatal("service observation did not serialize the supervisor's stopped snapshot")
+				}
 			}
 			hostProcess.interrupt(t)
 			assertServiceHarnessTokenAbsent(t, "foreground stdout", hostProcess.stdout.Bytes(), token)
