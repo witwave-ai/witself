@@ -61,7 +61,7 @@ func runServiceCommand(ctx context.Context, args []string, out io.Writer) error 
 			return errors.New("localcellharness: service action is required")
 		}
 		action, flags = flags[0], flags[1:]
-		if action != "install" && action != "status" && action != "remove" && action != "start" && action != "stop" && action != "health" && action != "repair" {
+		if action != "install" && action != "observe" && action != "status" && action != "remove" && action != "start" && action != "stop" && action != "health" && action != "repair" {
 			return errors.New("localcellharness: invalid service action")
 		}
 	}

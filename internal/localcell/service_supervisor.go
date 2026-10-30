@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -16,11 +17,21 @@ var (
 
 // ServiceStatus deliberately contains no process arguments, paths or credentials.
 type ServiceStatus struct {
-	DesiredState string `json:"desired_state"`
-	State        string `json:"state"`
-	Reason       string `json:"reason,omitempty"`
-	Healthy      bool   `json:"healthy"`
-	Restarts     int    `json:"restarts"`
+	DesiredState    string                   `json:"desired_state"`
+	State           string                   `json:"state"`
+	Reason          string                   `json:"reason,omitempty"`
+	Healthy         bool                     `json:"healthy"`
+	Restarts        int                      `json:"restarts"`
+	Generation      string                   `json:"generation"`
+	LastStepOutcome string                   `json:"last_step_outcome"`
+	Processes       []ServiceProcessIdentity `json:"processes,omitempty"`
+}
+
+// ServiceProcessIdentity is a known ownership fence, not a fresh liveness probe.
+type ServiceProcessIdentity struct {
+	Component string `json:"component"`
+	PID       int    `json:"pid"`
+	StartTime string `json:"start_time"`
 }
 
 // SupervisorPolicy bounds graceful host shutdown. The restart policy is fixed:
@@ -196,6 +207,8 @@ func (s *supervisor) load(d ServiceDescriptor) error {
 		s.record = supervisorRecord{RepairRevision: d.RepairRevision}
 	}
 	s.record.Version = 1
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run"}
+	s.rememberProcesses(d)
 	return nil
 }
 
@@ -203,11 +216,18 @@ func (s *supervisor) save() error {
 	return writeAtomic(s.cell.path("service", "supervisor.json"), s.record, nil)
 }
 
-func (s *supervisor) step(ctx context.Context) error {
+func (s *supervisor) step(ctx context.Context) (result error) {
+	defer func() {
+		s.status.LastStepOutcome = "ok"
+		if result != nil {
+			s.status.LastStepOutcome, s.status.Healthy = "failed", false
+		}
+	}()
 	d, err := s.cell.ServiceDescriptor()
 	if err != nil {
 		return err
 	}
+	defer s.rememberProcesses(d)
 	if s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}
 		if err := s.save(); err != nil {
@@ -222,7 +242,7 @@ func (s *supervisor) step(ctx context.Context) error {
 			return err
 		}
 	}
-	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1)}
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation}
 	// A crash can occur after the fifth failure is synced but before the
 	// descriptor is marked faulted. Preserve that circuit decision on restart.
 	if len(s.record.Failures) >= 5 && !d.Faulted {
@@ -309,6 +329,22 @@ func (s *supervisor) step(ctx context.Context) error {
 	return nil
 }
 
+// Cache only identities already recorded by the owned lifecycle. In particular,
+// observe never reads files, probes a process, or invokes a lifecycle hook.
+func (s *supervisor) rememberProcesses(d ServiceDescriptor) {
+	s.status.Processes = nil
+	for _, component := range []string{"postgres", "server", "worker"} {
+		var record ProcessRecord
+		if readJSON(s.cell.path("run", component+".json"), &record) == nil && record.PID > 1 && record.StartTime != "" && record.Root == d.Root && record.Component == component {
+			s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: component, PID: record.PID, StartTime: record.StartTime})
+		}
+	}
+	var lease serviceLeaseRecord
+	if readJSON(s.cell.path("service", "lease.json"), &lease) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
+		s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity})
+	}
+}
+
 func (s *supervisor) failed(ctx context.Context) error {
 	now := s.hooks.now()
 	recent := s.record.Failures[:0]
@@ -357,6 +393,12 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus, error) {
 	var err error
 	switch action {
+	case "observe":
+		// Return the last completed supervisor snapshot, including its health
+		// result. Periodic supervision alone refreshes this observational view.
+		status := s.status
+		status.Processes = slices.Clone(s.status.Processes)
+		return status, nil
 	case "status", "health":
 		err = s.step(ctx)
 	case "stop":
