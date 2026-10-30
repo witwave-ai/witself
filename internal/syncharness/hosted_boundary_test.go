@@ -12,19 +12,22 @@ import (
 )
 
 func TestHostedCommandDependencyBoundary(t *testing.T) {
-	for _, command := range []string{"witself-server", "witself-worker", "witself"} {
+	for _, command := range []string{"witself-server", "witself-worker", "witself", "witself-admin", "witself-infra", "witself-control-plane"} {
 		t.Run(command, func(t *testing.T) {
 			cmd := exec.Command("go", "list", "-deps", "./cmd/"+command)
 			cmd.Dir = "../.."
+			if command == "witself-infra" {
+				cmd.Dir = "../../infra/pulumi"
+			}
 			cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off")
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatal("hosted command dependency inspection failed")
 			}
 			for _, dependency := range strings.Fields(string(out)) {
-				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel"} {
+				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel", "/internal/localcell/trust"} {
 					if strings.HasSuffix(dependency, forbidden) || strings.Contains(dependency, forbidden+"/") {
-						t.Fatal("synthetic synchronization package entered hosted dependency graph")
+						t.Fatal("harness or trust package entered shipped command dependency graph")
 					}
 				}
 			}

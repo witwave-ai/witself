@@ -1,0 +1,209 @@
+{
+  "format_version": 1,
+  "critical": [
+    "kind",
+    "root_sequence",
+    "delegation_sequence",
+    "release_sequence",
+    "platforms"
+  ],
+  "kind": "component_set",
+  "root_sequence": 1,
+  "delegation_sequence": 1,
+  "release_sequence": 1,
+  "release_tag": "v1.2.3",
+  "channel": "stable",
+  "issued_at": "2026-01-01T00:00:00Z",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "source": {
+    "repository": "fixture/repository",
+    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "provenance": {
+    "checksums_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sigstore_bundle": "checksums.sigstore.json"
+  },
+  "license": "LICENSE",
+  "sbom": "sbom.json",
+  "rollback": {
+    "allowed_targets": []
+  },
+  "platforms": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "min_os": "fixture",
+      "glibc_floor": "2.31",
+      "components": [
+        {
+          "role": "app",
+          "version": "1.2.3",
+          "archive": {
+            "name": "app.tar.gz",
+            "size": 1024,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "tar.gz"
+          },
+          "inventory": [
+            {
+              "path": "bin/../escape",
+              "size": 4,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": "0755",
+              "executable": true
+            }
+          ],
+          "depends_on": [],
+          "required_extensions": [],
+          "schema": {
+            "target": 1,
+            "accepted_min": 1,
+            "accepted_max": 1
+          },
+          "ownership": {
+            "package_owned_paths": [],
+            "private_payload_paths": [
+              "bin/app"
+            ]
+          }
+        },
+        {
+          "role": "service_host",
+          "version": "1.2.3",
+          "archive": {
+            "name": "service_host.tar.gz",
+            "size": 1024,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "tar.gz"
+          },
+          "inventory": [
+            {
+              "path": "bin/service_host",
+              "size": 4,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": "0755",
+              "executable": true
+            }
+          ],
+          "depends_on": [],
+          "required_extensions": [],
+          "schema": {
+            "target": 1,
+            "accepted_min": 1,
+            "accepted_max": 1
+          },
+          "ownership": {
+            "package_owned_paths": [],
+            "private_payload_paths": [
+              "bin/service_host"
+            ]
+          }
+        },
+        {
+          "role": "server",
+          "version": "1.2.3",
+          "archive": {
+            "name": "server.tar.gz",
+            "size": 1024,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "tar.gz"
+          },
+          "inventory": [
+            {
+              "path": "bin/server",
+              "size": 4,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": "0755",
+              "executable": true
+            }
+          ],
+          "depends_on": [],
+          "required_extensions": [],
+          "schema": {
+            "target": 1,
+            "accepted_min": 1,
+            "accepted_max": 1
+          },
+          "ownership": {
+            "package_owned_paths": [],
+            "private_payload_paths": [
+              "bin/server"
+            ]
+          }
+        },
+        {
+          "role": "worker",
+          "version": "1.2.3",
+          "archive": {
+            "name": "worker.tar.gz",
+            "size": 1024,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "tar.gz"
+          },
+          "inventory": [
+            {
+              "path": "bin/worker",
+              "size": 4,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": "0755",
+              "executable": true
+            }
+          ],
+          "depends_on": [],
+          "required_extensions": [],
+          "schema": {
+            "target": 1,
+            "accepted_min": 1,
+            "accepted_max": 1
+          },
+          "ownership": {
+            "package_owned_paths": [],
+            "private_payload_paths": [
+              "bin/worker"
+            ]
+          }
+        },
+        {
+          "role": "postgresql",
+          "version": "16.4",
+          "archive": {
+            "name": "postgresql.tar.gz",
+            "size": 1024,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "tar.gz"
+          },
+          "inventory": [
+            {
+              "path": "bin/postgresql",
+              "size": 4,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": "0755",
+              "executable": true
+            }
+          ],
+          "depends_on": [],
+          "postgresql": {
+            "major": 16,
+            "version": "16.4",
+            "distribution": "test-only",
+            "build": "fixture",
+            "runtime_libraries": [],
+            "data_layout_version": 1
+          },
+          "required_extensions": [],
+          "schema": {
+            "target": 1,
+            "accepted_min": 1,
+            "accepted_max": 1
+          },
+          "ownership": {
+            "package_owned_paths": [],
+            "private_payload_paths": [
+              "bin/postgresql"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

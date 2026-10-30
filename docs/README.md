@@ -29,6 +29,8 @@ deployment cells under a thin global control plane.
   milestones, dependencies, acceptance gates and review points for Claude.
   The [draft synchronization contract](research/local-cell/sync-contract.md)
   records M0c rules, inspected code and owned gates for LC-S5 and M4.
+  The [component-set trust v1 format](research/local-cell/component-set-trust.md)
+  freezes the offline B1 verifier and fixture contract, with no production root.
   Research only; no implemented local-mode or synchronization claim.
 
 ## Product And Architecture

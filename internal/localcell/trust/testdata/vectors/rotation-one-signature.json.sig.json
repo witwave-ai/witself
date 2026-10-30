@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "kind": "root_rotation",
+  "algorithm": "rsa3072-pkcs1v15-sha256",
+  "signatures": [
+    {
+      "key_id": "67fb196d0f7b25ad22d9016330bcaf538fa8c34dff292208ce7c7a03ba43735c",
+      "signature": "1ndjh19ybNi1zx8EEQZIGpFdl7DDRGq+PCQhtZcrtrl7eu2fiLQhm1n3w+WyammZgrTpSWpZCb2yH0SNJNRrfS80b8j5HB1U1ta2G+u2xqPPWblslW3/QsmEofo8P9ltb5eSPsKvd97JE/hyOtg49JMUyQ8p6PVChuedx7C33b4NHj20+P1sAYs6gA//SycId+2Q5ji9fM2a+Q73776JcWJn2j7EtIhGujN0ZcMAb7N/yRKOCYROB5JFBPX4XYTEb5vRzW2ub6Qvf/NEftyshjEHWXsBfDLZ/uWrNXp/stvmCbns6CUChJI3hjKQK5dNT0MuyxqV/pqYt43GcnMn2zUjk/wSIQYooUYQjva9KW+ykqyA4LRPWvANq/w7rcedvfQIzq45oCuSsTsq5VeWCX6j75zKVaQASRPU7nadEnxOOQhJpijX3aV796XRdBSqL0uIBaBB7GCnBJ8lOWsUetfpPJPE/NMU7vh0yh5Gj37N+LHkc3LmsgTWsWcXlHz2"
+    }
+  ]
+}

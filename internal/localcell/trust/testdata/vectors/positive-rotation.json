@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "critical": [
+    "kind",
+    "new_root"
+  ],
+  "kind": "root_rotation",
+  "root_sequence": 1,
+  "new_sequence": 2,
+  "issued_at": "2026-01-01T00:00:00Z",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "new_root": {
+    "key_id": "e6edbb23417be7fa0acb206b0743e920ce39eb934d438b4996e686e8ba5a803d",
+    "spki": "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAm3oyXVP8NxADfLuVRqgYYMAGBYWOml/wsB1vqBFW9p9gd5QBoxMiRuvqizLPZ1V8mdLfRbuIgrp7HlMHQE15CqaIJi18O0TaiE43iMUKcpqWOa85z1OCDR5ZGjBu4wP3AeTRyYc2hc7QocaV/PMzgywduCCxAKRq6xeCQwR/TM5jELqRh2i2wJVDaUWeYSlmwL+Ucuj+latBHvevR9yxCufYMdRNUpUPlrKLqe417m5dwJ6HKZUj+t79KUO1bLsXyO4eIv+7RAk5kubZckMMS+09IEhCpWyZGaqNGYZAiXYfXjiagfjxE3cwTWB2GBkddgVWi9fFhVzoIrl0hzrJM7CYzIvh/wk7J0w3A9pJ984FgxszSDMcfqC60bUJtpd3jsHzz6A/e/xn1UioCbKZYaMkzOMuWSGyhWVuD6j3JDadP/iun7PoHXPi5/nAFupOc8LSTnVeETFbu20TrBm0VBIow618xH2l8hraB5qDqkVGjf7jjmr0JXqaa9zWTpjbAgMBAAE="
+  }
+}

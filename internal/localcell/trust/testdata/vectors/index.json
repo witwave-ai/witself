@@ -1,0 +1,1566 @@
+{
+  "format_version": 1,
+  "cases": [
+    {
+      "name": "positive-base",
+      "kind": "component_set",
+      "document": "positive-base.json",
+      "envelope": "positive-base.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-darwin",
+      "kind": "component_set",
+      "document": "positive-darwin.json",
+      "envelope": "positive-darwin.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-windows",
+      "kind": "component_set",
+      "document": "positive-windows.json",
+      "envelope": "positive-windows.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-arm64",
+      "kind": "component_set",
+      "document": "positive-arm64.json",
+      "envelope": "positive-arm64.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-nfc-path",
+      "kind": "component_set",
+      "document": "positive-nfc-path.json",
+      "envelope": "positive-nfc-path.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-release-two",
+      "kind": "component_set",
+      "document": "positive-release-two.json",
+      "envelope": "positive-release-two.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-second-worker",
+      "kind": "component_set",
+      "document": "positive-second-worker.json",
+      "envelope": "positive-second-worker.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-release-key-two",
+      "kind": "component_set",
+      "document": "positive-release-key-two.json",
+      "envelope": "positive-release-key-two.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-2"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-noncritical-field",
+      "kind": "component_set",
+      "document": "positive-noncritical-field.json",
+      "envelope": "positive-noncritical-field.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-uppercase-aliases-ignored",
+      "kind": "component_set",
+      "document": "positive-uppercase-aliases-ignored.json",
+      "envelope": "positive-uppercase-aliases-ignored.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-delegation",
+      "kind": "delegation",
+      "document": "positive-delegation.json",
+      "envelope": "positive-delegation.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "positive-delegation-two",
+      "kind": "delegation",
+      "document": "positive-delegation-two.json",
+      "envelope": "positive-delegation-two.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "positive-rotation",
+      "kind": "root_rotation",
+      "document": "positive-rotation.json",
+      "envelope": "positive-rotation.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "root-a",
+        "root-b"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "positive-rotation-reversed",
+      "kind": "root_rotation",
+      "document": "positive-rotation-reversed.json",
+      "envelope": "positive-rotation-reversed.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "root-b",
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "tampered-document",
+      "kind": "component_set",
+      "document": "tampered-document.json",
+      "envelope": "tampered-document.json.sig.json",
+      "expected_reason": "signature_invalid",
+      "positive": false,
+      "negative_signature": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "tampered-signature",
+      "kind": "component_set",
+      "document": "tampered-signature.json",
+      "envelope": "tampered-signature.json.sig.json",
+      "expected_reason": "signature_invalid",
+      "positive": false,
+      "negative_signature": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unknown-key",
+      "kind": "component_set",
+      "document": "unknown-key.json",
+      "envelope": "unknown-key.json.sig.json",
+      "expected_reason": "unknown_key",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "wrong-algorithm",
+      "kind": "component_set",
+      "document": "wrong-algorithm.json",
+      "envelope": "wrong-algorithm.json.sig.json",
+      "expected_reason": "wrong_algorithm",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "wrong-signature-length",
+      "kind": "component_set",
+      "document": "wrong-signature-length.json",
+      "envelope": "wrong-signature-length.json.sig.json",
+      "expected_reason": "signature_length",
+      "positive": false,
+      "negative_signature": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "invalid-signature-encoding",
+      "kind": "component_set",
+      "document": "invalid-signature-encoding.json",
+      "envelope": "invalid-signature-encoding.json.sig.json",
+      "expected_reason": "invalid_encoding",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "extra-signature",
+      "kind": "component_set",
+      "document": "extra-signature.json",
+      "envelope": "extra-signature.json.sig.json",
+      "expected_reason": "signature_count",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "wrong-envelope-kind",
+      "kind": "component_set",
+      "document": "wrong-envelope-kind.json",
+      "envelope": "wrong-envelope-kind.json.sig.json",
+      "expected_reason": "wrong_kind",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "tampered-envelope",
+      "kind": "component_set",
+      "document": "tampered-envelope.json",
+      "envelope": "tampered-envelope.json.sig.json",
+      "expected_reason": "invalid_json",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "oversized-envelope",
+      "kind": "component_set",
+      "document": "oversized-envelope.json",
+      "envelope": "oversized-envelope.json.sig.json",
+      "expected_reason": "envelope_too_large",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "root-signs-component",
+      "kind": "component_set",
+      "document": "root-signs-component.json",
+      "envelope": "root-signs-component.json.sig.json",
+      "expected_reason": "wrong_signer",
+      "positive": false,
+      "signers": [
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "release-signs-delegation",
+      "kind": "delegation",
+      "document": "release-signs-delegation.json",
+      "envelope": "release-signs-delegation.json.sig.json",
+      "expected_reason": "wrong_signer",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "rotation-one-signature",
+      "kind": "root_rotation",
+      "document": "rotation-one-signature.json",
+      "envelope": "rotation-one-signature.json.sig.json",
+      "expected_reason": "signature_count",
+      "positive": false,
+      "signers": [
+        "root-a",
+        "root-b"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "rotation-sequence-skip",
+      "kind": "root_rotation",
+      "document": "rotation-sequence-skip.json",
+      "envelope": "rotation-sequence-skip.json.sig.json",
+      "expected_reason": "sequence_invalid",
+      "positive": false,
+      "signers": [
+        "root-a",
+        "root-b"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "revoked-key",
+      "kind": "component_set",
+      "document": "revoked-key.json",
+      "envelope": "revoked-key.json.sig.json",
+      "expected_reason": "revoked_key",
+      "positive": false,
+      "signers": [
+        "revoked-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-revocation.json",
+          "envelope": "setup-revocation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "rsa2048",
+      "kind": "delegation",
+      "document": "rsa2048.json",
+      "envelope": "rsa2048.json.sig.json",
+      "expected_reason": "invalid_key",
+      "positive": false,
+      "signers": [
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "exponent-three",
+      "kind": "delegation",
+      "document": "exponent-three.json",
+      "envelope": "exponent-three.json.sig.json",
+      "expected_reason": "invalid_key",
+      "positive": false,
+      "signers": [
+        "root-a"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": []
+    },
+    {
+      "name": "expired",
+      "kind": "component_set",
+      "document": "expired.json",
+      "envelope": "expired.json.sig.json",
+      "expected_reason": "expired",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "not-yet-valid",
+      "kind": "component_set",
+      "document": "not-yet-valid.json",
+      "envelope": "not-yet-valid.json.sig.json",
+      "expected_reason": "not_yet_valid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "untrusted-clock",
+      "kind": "component_set",
+      "document": "untrusted-clock.json",
+      "envelope": "untrusted-clock.json.sig.json",
+      "expected_reason": "unknown_clock",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ],
+      "untrusted_clock": true
+    },
+    {
+      "name": "wrong-tag",
+      "kind": "component_set",
+      "document": "wrong-tag.json",
+      "envelope": "wrong-tag.json.sig.json",
+      "expected_reason": "wrong_tag",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unexpected-tag",
+      "kind": "component_set",
+      "document": "unexpected-tag.json",
+      "envelope": "unexpected-tag.json.sig.json",
+      "expected_reason": "wrong_tag",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ],
+      "expected_tag": "v2.0.0"
+    },
+    {
+      "name": "wrong-platform",
+      "kind": "component_set",
+      "document": "wrong-platform.json",
+      "envelope": "wrong-platform.json.sig.json",
+      "expected_reason": "wrong_platform",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unexpected-platform",
+      "kind": "component_set",
+      "document": "unexpected-platform.json",
+      "envelope": "unexpected-platform.json.sig.json",
+      "expected_reason": "wrong_platform",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ],
+      "os": "darwin",
+      "arch": "amd64"
+    },
+    {
+      "name": "schema-excludes-target",
+      "kind": "component_set",
+      "document": "schema-excludes-target.json",
+      "envelope": "schema-excludes-target.json.sig.json",
+      "expected_reason": "schema_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "postgresql-major",
+      "kind": "component_set",
+      "document": "postgresql-major.json",
+      "envelope": "postgresql-major.json.sig.json",
+      "expected_reason": "postgresql_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "required-extension",
+      "kind": "component_set",
+      "document": "required-extension.json",
+      "envelope": "required-extension.json.sig.json",
+      "expected_reason": "extensions_unsupported",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "missing-role",
+      "kind": "component_set",
+      "document": "missing-role.json",
+      "envelope": "missing-role.json.sig.json",
+      "expected_reason": "roles_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-role",
+      "kind": "component_set",
+      "document": "duplicate-role.json",
+      "envelope": "duplicate-role.json.sig.json",
+      "expected_reason": "roles_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unknown-role",
+      "kind": "component_set",
+      "document": "unknown-role.json",
+      "envelope": "unknown-role.json.sig.json",
+      "expected_reason": "roles_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-parent",
+      "kind": "component_set",
+      "document": "path-parent.json",
+      "envelope": "path-parent.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-absolute",
+      "kind": "component_set",
+      "document": "path-absolute.json",
+      "envelope": "path-absolute.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-backslash",
+      "kind": "component_set",
+      "document": "path-backslash.json",
+      "envelope": "path-backslash.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-nul",
+      "kind": "component_set",
+      "document": "path-nul.json",
+      "envelope": "path-nul.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-nfd",
+      "kind": "component_set",
+      "document": "path-nfd.json",
+      "envelope": "path-nfd.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-drive",
+      "kind": "component_set",
+      "document": "path-drive.json",
+      "envelope": "path-drive.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-dot",
+      "kind": "component_set",
+      "document": "path-dot.json",
+      "envelope": "path-dot.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-long",
+      "kind": "component_set",
+      "document": "path-long.json",
+      "envelope": "path-long.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "path-empty-segment",
+      "kind": "component_set",
+      "document": "path-empty-segment.json",
+      "envelope": "path-empty-segment.json.sig.json",
+      "expected_reason": "path_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-inventory",
+      "kind": "component_set",
+      "document": "duplicate-inventory.json",
+      "envelope": "duplicate-inventory.json.sig.json",
+      "expected_reason": "inventory_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "mode-0600",
+      "kind": "component_set",
+      "document": "mode-0600.json",
+      "envelope": "mode-0600.json.sig.json",
+      "expected_reason": "mode_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "inventory-exceeds-archive",
+      "kind": "component_set",
+      "document": "inventory-exceeds-archive.json",
+      "envelope": "inventory-exceeds-archive.json.sig.json",
+      "expected_reason": "inventory_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "archive-over-two-gib",
+      "kind": "component_set",
+      "document": "archive-over-two-gib.json",
+      "envelope": "archive-over-two-gib.json.sig.json",
+      "expected_reason": "inventory_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "executable-mode-mismatch",
+      "kind": "component_set",
+      "document": "executable-mode-mismatch.json",
+      "envelope": "executable-mode-mismatch.json.sig.json",
+      "expected_reason": "mode_invalid",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-top-level",
+      "kind": "component_set",
+      "document": "duplicate-top-level.json",
+      "envelope": "duplicate-top-level.json.sig.json",
+      "expected_reason": "duplicate_key",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-escaped-key",
+      "kind": "component_set",
+      "document": "duplicate-escaped-key.json",
+      "envelope": "duplicate-escaped-key.json.sig.json",
+      "expected_reason": "duplicate_key",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-nested",
+      "kind": "component_set",
+      "document": "duplicate-nested.json",
+      "envelope": "duplicate-nested.json.sig.json",
+      "expected_reason": "duplicate_key",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "float-integer",
+      "kind": "component_set",
+      "document": "float-integer.json",
+      "envelope": "float-integer.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "exponent-integer",
+      "kind": "component_set",
+      "document": "exponent-integer.json",
+      "envelope": "exponent-integer.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unknown-critical",
+      "kind": "component_set",
+      "document": "unknown-critical.json",
+      "envelope": "unknown-critical.json.sig.json",
+      "expected_reason": "unknown_critical",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "unknown-nested",
+      "kind": "component_set",
+      "document": "unknown-nested.json",
+      "envelope": "unknown-nested.json.sig.json",
+      "expected_reason": "unknown_field",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "oversized-document",
+      "kind": "component_set",
+      "document": "oversized-document.json",
+      "envelope": "oversized-document.json.sig.json",
+      "expected_reason": "document_too_large",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "overlong-string",
+      "kind": "component_set",
+      "document": "overlong-string.json",
+      "envelope": "overlong-string.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "excessive-nesting",
+      "kind": "component_set",
+      "document": "excessive-nesting.json",
+      "envelope": "excessive-nesting.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "lone-surrogate",
+      "kind": "component_set",
+      "document": "lone-surrogate.json",
+      "envelope": "lone-surrogate.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "invalid-utf8",
+      "kind": "component_set",
+      "document": "invalid-utf8.json",
+      "envelope": "invalid-utf8.json.sig.json",
+      "expected_reason": "profile_violation",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "trailing-document",
+      "kind": "component_set",
+      "document": "trailing-document.json",
+      "envelope": "trailing-document.json.sig.json",
+      "expected_reason": "invalid_json",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "release-replay",
+      "kind": "component_set",
+      "document": "release-replay.json",
+      "envelope": "release-replay.json.sig.json",
+      "expected_reason": "replay",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        },
+        {
+          "kind": "component_set",
+          "document": "setup-high-release.json",
+          "envelope": "setup-high-release.json.sig.json"
+        }
+      ]
+    },
+    {
+      "name": "rollback-denied",
+      "kind": "component_set",
+      "document": "rollback-denied.json",
+      "envelope": "rollback-denied.json.sig.json",
+      "expected_reason": "rollback_denied",
+      "positive": false,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        },
+        {
+          "kind": "component_set",
+          "document": "setup-high-release.json",
+          "envelope": "setup-high-release.json.sig.json"
+        }
+      ],
+      "allow_rollback": true
+    },
+    {
+      "name": "positive-allowed-rollback",
+      "kind": "component_set",
+      "document": "positive-allowed-rollback.json",
+      "envelope": "positive-allowed-rollback.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        },
+        {
+          "kind": "component_set",
+          "document": "setup-rollback-policy.json",
+          "envelope": "setup-rollback-policy.json.sig.json"
+        }
+      ],
+      "allow_rollback": true
+    },
+    {
+      "name": "positive-built-dist",
+      "kind": "component_set",
+      "document": "positive-built-dist.json",
+      "envelope": "positive-built-dist.json.sig.json",
+      "expected_reason": "accepted",
+      "positive": true,
+      "signers": [
+        "release-1"
+      ],
+      "roots": [
+        "root-a"
+      ],
+      "setup": [
+        {
+          "kind": "delegation",
+          "document": "setup-delegation.json",
+          "envelope": "setup-delegation.json.sig.json"
+        }
+      ]
+    }
+  ]
+}
