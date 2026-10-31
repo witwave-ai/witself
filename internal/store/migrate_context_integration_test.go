@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"testing"
 	"testing/fstest"
@@ -253,7 +254,9 @@ func TestMigrateContextPreflightCanceledReleasesLockPostgres(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- st.MigrateContext(ctx) }()
-	assertMigrationCanceled(t, awaitMigrationResult(t, result, 10*wait), "preflight")
+	// Under load the deadline may expire before preflight, while acquiring the
+	// advisory lock. Both paths must release the lock without creating Goose state.
+	assertMigrationCanceled(t, awaitMigrationResult(t, result, 10*wait), "preflight", "advisory lock")
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
@@ -363,11 +366,21 @@ func TestMigrateContextFreshAndLegacyPostgres(t *testing.T) {
 	}
 }
 
-func assertMigrationCanceled(t *testing.T, err error, phase string) {
+// migrationCancellationReporter is the slice of testing.TB the cancellation
+// assertion needs, so a recording reporter can test the assertion itself.
+type migrationCancellationReporter interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+func assertMigrationCanceled(t migrationCancellationReporter, err error, phases ...string) {
 	t.Helper()
-	if !errors.Is(err, ErrMigrationWaitCanceled) || MigrationWaitPhase(err) != phase || err.Error() != "migration wait canceled: "+phase {
-		t.Fatalf("error = %v, want value-free cancellation in %s", err, phase)
+	for _, phase := range phases {
+		if errors.Is(err, ErrMigrationWaitCanceled) && MigrationWaitPhase(err) == phase && err.Error() == "migration wait canceled: "+phase {
+			return
+		}
 	}
+	t.Fatalf("error = %v, want value-free cancellation in %v", err, phases)
 }
 
 func awaitMigrationResult(t *testing.T, result <-chan error, wait time.Duration) error {
@@ -394,5 +407,76 @@ func assertMigrationLockAvailable(t *testing.T, conn *sql.Conn) {
 	}
 	if err := releaseMigrationAdvisoryLock(context.Background(), conn); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// recordingCancellationReporter records Fatalf calls instead of stopping the
+// test, so the assertion helper's acceptance predicate can be exercised with
+// inputs that never occur in a passing integration run.
+type recordingCancellationReporter struct{ fatal []string }
+
+func (r *recordingCancellationReporter) Helper() {}
+func (r *recordingCancellationReporter) Fatalf(format string, args ...any) {
+	r.fatal = append(r.fatal, fmt.Sprintf(format, args...))
+}
+
+// phaseOnlyCancellation exposes a typed phase through errors.As but never
+// unwraps to the sentinel, so errors.Is must fail.
+type phaseOnlyCancellation struct{ wait *migrationWaitError }
+
+func (e *phaseOnlyCancellation) Error() string { return e.wait.Error() }
+func (e *phaseOnlyCancellation) As(target any) bool {
+	if p, ok := target.(**migrationWaitError); ok {
+		*p = e.wait
+		return true
+	}
+	return false
+}
+
+// textMismatchCancellation carries the sentinel and a typed phase but renders
+// a different message, so the exact value-free text check must fail.
+type textMismatchCancellation struct{ wait *migrationWaitError }
+
+func (e *textMismatchCancellation) Error() string {
+	return ErrMigrationWaitCanceled.Error() + ": other"
+}
+func (e *textMismatchCancellation) Unwrap() error { return e.wait }
+
+// TestAssertMigrationCanceledContract pins the cancellation assertion itself:
+// it accepts only the sentinel with a typed phase from the allowed list and the
+// exact value-free message, and rejects everything else. Without this test a
+// weakened predicate (for example err != nil) survives every integration run.
+func TestAssertMigrationCanceledContract(t *testing.T) {
+	t.Parallel()
+	preflight := &migrationWaitError{phase: "preflight"}
+	lock := &migrationWaitError{phase: "advisory lock"}
+	cases := []struct {
+		name   string
+		err    error
+		phases []string
+		accept bool
+	}{
+		{"preflight exact", preflight, []string{"preflight"}, true},
+		{"advisory lock exact", lock, []string{"advisory lock"}, true},
+		{"either stage, second listed", lock, []string{"preflight", "advisory lock"}, true},
+		{"either stage, first listed", preflight, []string{"advisory lock", "preflight"}, true},
+		{"nil error", nil, []string{"preflight"}, false},
+		{"plain error", errors.New("boom"), []string{"preflight"}, false},
+		{"wrong phase", preflight, []string{"advisory lock"}, false},
+		{"no allowed phases", preflight, nil, false},
+		{"sentinel without typed phase", fmt.Errorf("%w: preflight", ErrMigrationWaitCanceled), []string{"preflight"}, false},
+		{"extra message around typed cancellation", fmt.Errorf("synthetic detail: %w", preflight), []string{"preflight"}, false},
+		{"typed phase without sentinel", &phaseOnlyCancellation{wait: preflight}, []string{"preflight"}, false},
+		{"sentinel and phase with other text", &textMismatchCancellation{wait: preflight}, []string{"preflight"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reporter := &recordingCancellationReporter{}
+			assertMigrationCanceled(reporter, tc.err, tc.phases...)
+			if rejected := len(reporter.fatal) > 0; rejected == tc.accept {
+				t.Fatalf("accept=%v but reporter recorded %d failures: %v", tc.accept, len(reporter.fatal), reporter.fatal)
+			}
+		})
 	}
 }
