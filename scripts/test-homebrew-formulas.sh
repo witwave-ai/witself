@@ -85,6 +85,12 @@ done
 
 HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$tap_name" >/dev/null
 tap_created=true
+# Homebrew 7 refuses to load formulae from a tap that has not been trusted
+# explicitly; the temporary CI tap is ours, so trust it for this run. Older
+# Homebrew releases have no `brew trust` and need nothing here.
+if HOMEBREW_NO_AUTO_UPDATE=1 brew trust --help >/dev/null 2>&1; then
+  HOMEBREW_NO_AUTO_UPDATE=1 brew trust "$tap_name" >/dev/null
+fi
 tap_dir=$(brew --repo "$tap_name")
 install -m 0644 "$output_dir"/Formula/*.rb "$tap_dir/Formula/"
 
