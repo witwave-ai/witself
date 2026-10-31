@@ -1282,6 +1282,14 @@ infrastructure provisioner or its Pulumi dependency.
 The shell installer installs released binaries for macOS and Linux. The
 PowerShell installer installs the native Windows x64 CLI.
 
+Component-set bootstrap verification is off by default: only an explicit
+`WS_COMPONENT_SET_DIR` selects it, and fixture verification additionally needs
+`WS_TRUST_ROOT_PEM_FILE`; no production root exists and no component manifest is
+published yet. Homebrew includes the verifier only for a future formula opting
+into `LocalCell`; the current `witself`, `witself-admin` and `witself-infra`
+formulae are unchanged. See [Bootstrap verifiers](research/local-cell/component-set-trust.md#bootstrap-verifiers)
+for the trusted-verifier prerequisites and remaining channel boundary.
+
 Expected invocation:
 
 ```sh
