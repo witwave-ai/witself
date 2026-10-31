@@ -1018,14 +1018,18 @@ the owning user logs in. No reboot receipt exists yet, and A provides no channel
 installer, macOS or Windows registration, resource-budget acceptance, or hosted
 default change. Owner reboot receipt driver: see [service-reboot-receipt.md](service-reboot-receipt.md); receipt not yet recorded.
 
-| LC-S7 | Codex GPT-6 Astra (B1 implementer); Fable (integration owner) | LC-S7B1 implemented: format v1 frozen, Go verifier/vectors/tooling; no production root; owner gate pending | [component-set trust v1](component-set-trust.md) | offline strict-profile, cryptographic, state and extraction fixtures | owner gate; B2 bootstrap verification; B3 channel ownership; S7-F1 Windows channel and S7-F2 signing custody | review and gate B1 before dependent delivery integration |
+| LC-S7 | Codex GPT-6 Astra (B2 implementer); Fable (integration owner) | LC-S7B2 implemented: bootstrap verifiers dark, parity on the B1 corpus; owner gate pending | [component-set trust v1](component-set-trust.md#bootstrap-verifiers) | offline bootstrap verifier corpus, default installer and remote-only archive boundaries; native evidence remains separate | owner gate; B3 channel ownership; S7-F1 Windows channel and S7-F2 signing custody | gate B2 on Linux, macOS and Windows before channel integration |
 
-LC-S7B1 supplies only the frozen component-set format, offline Go verification,
-fixture vectors and manifest tooling. B2 still owns shell, PowerShell and Homebrew
-bootstrap verification; B3 still owns channel ownership and the private payload
-handoff. S7-F1 gates the production Windows channel and S7-F2 gates production
-signing identities and custody. No production root or installer behavior is
-introduced, and M3 and M9 remain incomplete.
+LC-S7B1 supplies the frozen component-set format, offline Go verification,
+fixture vectors and manifest tooling. LC-S7B2 adds explicitly selected shell and
+PowerShell bootstrap verification and a dormant Homebrew helper, with parity
+suites over the unchanged B1 corpus. Default installer behavior and all three
+current Homebrew formulae remain unchanged. No production root, manifest
+publication or release-pipeline change is introduced. The bootstrap session does
+not persist trust state across invocations; B3 still owns channel ownership,
+persisted acquisition state and the private payload handoff. S7-F1 gates the
+production Windows channel and S7-F2 gates production signing identities and
+custody. The owner gate is pending; M3 and M9 remain incomplete.
 
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic

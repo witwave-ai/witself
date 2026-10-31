@@ -9,3 +9,8 @@ import _ "embed"
 //
 //go:embed formula.rb.tmpl
 var FormulaTemplate string
+
+// BootstrapVerifier is embedded only in explicitly opted-in local-cell formulae.
+//
+//go:embed component_set_verifier.rb
+var BootstrapVerifier string

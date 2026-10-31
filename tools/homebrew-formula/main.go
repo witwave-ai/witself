@@ -35,6 +35,7 @@ type product struct {
 	Dependency   string
 	Alias        string
 	TestArgument string
+	LocalCell    bool
 }
 
 var products = []product{
@@ -70,11 +71,12 @@ type archive struct {
 
 type formulaData struct {
 	product
-	Version     string
-	DarwinAMD64 archive
-	DarwinARM64 archive
-	LinuxAMD64  archive
-	LinuxARM64  archive
+	Version           string
+	BootstrapVerifier string
+	DarwinAMD64       archive
+	DarwinARM64       archive
+	LinuxAMD64        archive
+	LinuxARM64        archive
 }
 
 type renderedFormula struct {
@@ -234,12 +236,13 @@ func loadFormulaData(version, distDir string, product product) (formulaData, err
 	}
 
 	return formulaData{
-		product:     product,
-		Version:     version,
-		DarwinAMD64: darwinAMD64,
-		DarwinARM64: darwinARM64,
-		LinuxAMD64:  linuxAMD64,
-		LinuxARM64:  linuxARM64,
+		product:           product,
+		Version:           version,
+		BootstrapVerifier: homebrewtemplate.BootstrapVerifier,
+		DarwinAMD64:       darwinAMD64,
+		DarwinARM64:       darwinARM64,
+		LinuxAMD64:        linuxAMD64,
+		LinuxARM64:        linuxARM64,
 	}, nil
 }
 
