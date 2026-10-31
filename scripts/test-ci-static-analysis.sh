@@ -4,6 +4,8 @@ set -euo pipefail
 source_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 bash "$source_root/scripts/check-conflict-markers.sh"
 bash "$source_root/scripts/test-conflict-markers.sh"
+# shellcheck source=scripts/lib/static-analysis.sh
+source "$source_root/scripts/lib/static-analysis.sh"
 
 fail() {
   printf 'static analysis: %s\n' "$1" >&2
@@ -20,7 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-shellcheck_version=0.11.0
+shellcheck_version=$STATIC_SHELLCHECK_VERSION
 shellcheck_archive="shellcheck-v${shellcheck_version}.linux.x86_64.tar.gz"
 shellcheck_sha256=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
 curl --fail --silent --show-error --location \
@@ -30,7 +32,7 @@ printf '%s  %s\n' "$shellcheck_sha256" "$work_dir/$shellcheck_archive" | sha256s
   || fail "ShellCheck archive checksum mismatch"
 tar -xzf "$work_dir/$shellcheck_archive" -C "$work_dir"
 
-actionlint_version=1.7.12
+actionlint_version=$STATIC_ACTIONLINT_VERSION
 actionlint_archive="actionlint_${actionlint_version}_linux_amd64.tar.gz"
 actionlint_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 curl --fail --silent --show-error --location \
@@ -40,9 +42,6 @@ printf '%s  %s\n' "$actionlint_sha256" "$work_dir/$actionlint_archive" | sha256s
   || fail "actionlint archive checksum mismatch"
 tar -xzf "$work_dir/$actionlint_archive" -C "$work_dir"
 
-mapfile -d '' shell_files < <(find scripts -type f -name '*.sh' -print0)
-(( ${#shell_files[@]} > 0 )) || fail "no shell scripts found"
-"$work_dir/shellcheck-v${shellcheck_version}/shellcheck" install.sh "${shell_files[@]}"
-"$work_dir/actionlint" .github/workflows/*.yml
+static_analysis_run "$work_dir/shellcheck-v${shellcheck_version}/shellcheck" "$work_dir/actionlint"
 
 printf 'pinned ShellCheck %s and actionlint %s passed\n' "$shellcheck_version" "$actionlint_version"

@@ -283,9 +283,15 @@ test('Unix PostgreSQL pins cover every native row with exact versions and verifi
 });
 
 test('Unix PostgreSQL provisioner is enrolled in the repository shell static analysis', () => {
+  // The file set lives once in the shared library that both the CI script and
+  // the local `make check-static` runner source; `scripts/test-check-static-local.sh`
+  // proves the discovered set executably, this test pins the wiring.
+  const library = readFileSync(new URL('./lib/static-analysis.sh', import.meta.url), 'utf8');
+  assert(library.includes("find scripts -type f -name '*.sh' -print0"), 'Static analysis discovers every shell script');
+  assert(library.includes("printf '%s\\0' install.sh"), 'Static analysis includes the installer');
   const source = readFileSync(new URL('./test-ci-static-analysis.sh', import.meta.url), 'utf8');
-  assert(source.includes("mapfile -d '' shell_files < <(find scripts -type f -name '*.sh' -print0)"), 'Static analysis discovers every shell script');
-  assert(source.includes('"$work_dir/shellcheck-v${shellcheck_version}/shellcheck" install.sh "${shell_files[@]}"'), 'Static analysis checks every discovered shell script');
+  assert(source.includes('source "$source_root/scripts/lib/static-analysis.sh"'), 'CI static analysis sources the shared library');
+  assert(source.includes('static_analysis_run "$work_dir/shellcheck-v${shellcheck_version}/shellcheck" "$work_dir/actionlint"'), 'CI static analysis checks every discovered shell script through the shared runner');
 });
 
 for (const [name, mutate] of [

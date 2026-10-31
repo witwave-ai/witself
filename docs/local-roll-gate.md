@@ -13,6 +13,10 @@ the full path as described in [CLAUDE.md](../CLAUDE.md). The selector requires d
 Node tests on that path; an unset database cannot silently skip integration
 coverage.
 
+`make check` also runs `check-static` for ShellCheck and actionlint; set
+`WITSELF_TEST_REQUIRE_STATIC=1` to fail when either local tool is missing instead
+of accepting a `NOT RUN` result.
+
 ## What qualifies
 
 The first version deliberately accepts only one existing catalog cell at a
