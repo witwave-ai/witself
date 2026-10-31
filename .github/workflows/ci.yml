@@ -359,6 +359,7 @@ jobs:
           WITSELF_TEST_REQUIRE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_NODE: "1"
           WITSELF_TEST_REQUIRE_OPENSSL: "1"
+          WITSELF_TEST_REQUIRE_BOOTSTRAP_PARITY: "1"
         run: |
           # Keep package discovery in a checked pipeline: a failed go list
           # must fail this gate, not leave a partial package list to test.
@@ -663,6 +664,12 @@ jobs:
 
       - name: Record native target
         run: go env GOOS GOARCH
+
+      - name: Component-set bootstrap parity and remote-only archive boundary
+        env:
+          WITSELF_TEST_REQUIRE_OPENSSL: "1"
+          WITSELF_TEST_REQUIRE_BOOTSTRAP_PARITY: "1"
+        run: go test ./internal/localcell/trust/... -count=1
 
       - name: Build native Witself client
         shell: bash

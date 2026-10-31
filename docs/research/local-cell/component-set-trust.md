@@ -316,3 +316,80 @@ Extraction reasons:
 `archive_missing_entry`, `entry_size_mismatch`, `entry_digest_mismatch`,
 `entry_mode_mismatch`, `inventory_limit`, `staging_not_fresh`, `filesystem_error`,
 `cancelled`.
+
+
+## Bootstrap verifiers
+
+LC-S7B2 adds an off-by-default bootstrap path to `install.sh` and `install.ps1`
+and a dormant helper for an explicitly opted-in Homebrew formula. This updates
+B1's historical statement above that installer verification was still pending;
+the frozen format, Go acceptance and vector bytes remain unchanged. No production
+root or component manifest is published, and `ProductionRoots()` is still empty.
+
+Only `WS_COMPONENT_SET_DIR` selects installer verification. It names a local
+bundle containing `component-set.json`, `delegation.json`, their adjacent
+`.sig.json` envelopes, and at most 32 optional consecutive
+`root-rotation-N.json` pairs. Numbering starts at 1 for the first transition;
+the signed root sequences are checked separately.
+`WS_TRUST_ROOT_PEM_FILE` explicitly supplies a public test root; without it the
+selected path refuses with `no_trust_root`. There is no ambient root discovery or
+unsigned fallback. `WS_UNTRUSTED_CLOCK=1` refuses acquisition with `unknown_clock`.
+Normal acquisition uses the system UTC clock; corpus clocks are injected only
+through the sourceable test interfaces.
+
+The shell verifier is embedded in the installer and uses POSIX shell, a bounded
+awk JSON parser and an already-installed OpenSSL. It never fetches a verifier.
+Missing OpenSSL produces a fixed dependency message and refuses. PowerShell uses
+a bounded strict JSON parser compiled locally by trusted .NET `Add-Type`, with
+`RSA.ImportSubjectPublicKeyInfo` and `VerifyData`; the selected path requires
+PowerShell 7 with those .NET APIs. The default Windows PowerShell 5.1 installer
+path retains its existing behavior. Ruby uses standard-library JSON parsing
+primitives and OpenSSL RSA verification. The Homebrew `LocalCell` template flag
+adds `depends_on "openssl@3"` and the private `verify_component_set!(dir,
+root_pem)` helper only when true. Every current product leaves it false, and
+render tests compare all three current formulae byte-for-byte with their pre-B2
+template output.
+
+All implementations bound document and envelope reads, check the fixed algorithm,
+RSA modulus and exponent, canonical SPKI/base64 and signature counts, and verify
+the exact file bytes before parsing document fields. Delegation, dual-signed root
+rotation, freshness, revocation, schema, target selection and in-session
+sequence checks share the frozen corpus. The installers select the `app` archive
+from one authenticated platform and check its exact length and SHA-256 before
+the existing single-binary archive preflight, extraction or candidate execution.
+Refusals are fixed codes from the closed list; metadata and key material are not
+printed by the selected path.
+
+Bootstrap scope is deliberately bounded. Its trust state lasts for one invocation;
+it does not provide durable rollback protection across separate invocations or an
+installed-generation receipt. Shell path validation accepts printable ASCII and NFC-safe Latin-1
+paths; Ruby and .NET refuse characters unknown to their runtime Unicode tables
+before checking NFC. These checks do not replace Go's frozen Unicode 16 inventory
+validation. Full component extraction, inventory recheck, durable state and the
+protected activation handoff remain B3 work. Homebrew's trusted tap and pinned
+archive hash remain its first-stage extraction boundary: the dormant formula
+helper is not a claim of verification before Homebrew extracts its formula
+archive. Existing Sigstore evidence remains independent of component signatures.
+
+The bash and PowerShell parity scripts and the rendered Ruby helper load every
+case from the unchanged B1 index: 75 cases, with 16 positives and 59 negatives,
+including 3 negative-signature cases. No corpus case is excluded. Exact refusal
+reasons are checked except explicitly enumerated bootstrap diagnostic differences
+in the suites; success/refusal classification must always match. One frozen
+compatibility detail takes precedence over the earlier general numeric prose:
+`positive-uppercase-aliases-ignored` contains a fractional value within an ignored
+unknown top-level alias. B1's Go verifier accepts it. Bootstrap parsers likewise
+preserve JSON numbers in ignored fields and enforce unsigned uint64 values in
+understood integer fields. This does not broaden any understood schema field.
+
+`TestBootstrapVerifierParity` runs the bash/OpenSSL and PowerShell suites where
+the interpreters exist, plus the portable Windows installer verifier assertions
+through `-BootstrapOnly` under PowerShell 7. Missing interpreters are reported as
+`NOT_RUN <interpreter>_unavailable`; `WITSELF_TEST_REQUIRE_BOOTSTRAP_PARITY=1`
+makes missing prerequisites fail. CI sets this requirement on existing native
+Linux, macOS and Windows rows, and on the non-store Go lane. Native execution and
+owner gating remain separate from local hermetic evidence. The remote-only
+installer mocks reject service-manager calls and cell/server/worker/PostgreSQL
+URLs, while Go checks keep client archive declarations limited to their matching
+client binaries and declared client assets. Neither release configuration nor
+publication is changed by B2.

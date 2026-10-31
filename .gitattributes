@@ -2,3 +2,5 @@
 .goreleaser.yaml text eol=lf
 # Recovery patch fixtures legitimately contain space-then-tab context lines.
 scripts/testdata/monitoring-recovery/*.patch -whitespace
+# Frozen trust fixtures sign exact bytes; never convert their line endings.
+internal/localcell/trust/testdata/** -text

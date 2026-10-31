@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$GoReleaserDist,
-    [string]$InstalledBinaryOutput
+    [string]$InstalledBinaryOutput,
+    # Run the portable verifier units under pwsh without a native install.
+    [switch]$BootstrapOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -123,11 +125,14 @@ function Invoke-Installer {
         [string]$ReleaseRoot,
         [string]$InstallDir,
         [string]$Version,
-        [bool]$NoPathUpdate = $true
+        [bool]$NoPathUpdate = $true,
+        [ref]$CapturedOutput
     )
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $Installer,
+        '-File', $script:remoteOnlyWrapper,
+        '-InstallerPath', $Installer,
+        '-BoundaryMarker', $script:remoteBoundaryMarker,
         '-ReleaseRoot', $ReleaseRoot,
         '-InstallDir', $InstallDir
     )
@@ -145,13 +150,18 @@ function Invoke-Installer {
     try {
         $ErrorActionPreference = 'Continue'
         $windowsPowerShell = Join-Path $PSHOME 'powershell.exe'
+        if (-not (Test-Path -LiteralPath $windowsPowerShell)) { $windowsPowerShell = (Get-Command pwsh -ErrorAction Stop).Source }
         $output = @(& $windowsPowerShell @arguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+    if (Test-Path -LiteralPath $script:remoteBoundaryMarker) {
+        throw 'TestRemoteOnlyBoundary touched a service manager or component URL'
+    }
+    if ($null -ne $CapturedOutput) { $CapturedOutput.Value = [string[]]@($output | ForEach-Object { [string]$_ }) }
     foreach ($line in $output) {
-        Write-Host $line
+        Write-Host ([regex]::Replace([string]$line, '(?i)[0-9a-f]{64}', '[digest]'))
     }
     return [int]$exitCode
 }
@@ -413,13 +423,267 @@ function Test-GoReleaserWindowsArchive {
     }
 }
 
+function Assert-WSBootstrapRefusal {
+    param([string]$Name, [string]$Expected, [scriptblock]$Action)
+    $reason = 'accepted'
+    try { $null = & $Action } catch { $reason = Get-WSComponentRefusal $_ }
+    if ($reason -cne $Expected) { throw "$Name expected $Expected got $reason" }
+}
+
+function Test-WSBootstrapVerifier {
+    param([string]$Installer, [string]$RepositoryRoot, [string]$TemporaryRoot)
+    . $Installer -VerifierOnly
+    Assert-WSBootstrapRefusal 'TestComponentSetClosedRefusal' 'invalid_document' { throw 'synthetic_unlisted_refusal' }
+    # Simulate an unsuitable trusted runtime before Add-Type has loaded the type.
+    if (-not ('WSB2Verifier' -as [type])) {
+        & {
+            function Deny-WSTypeLoad { throw 'synthetic_dependency_unavailable' }
+            Set-Alias -Name Add-Type -Value Deny-WSTypeLoad
+            $refused = $false
+            try { Initialize-WSComponentVerifier } catch {
+                $refused = $_.Exception.Message -ceq 'invalid_key: trusted PowerShell 7 with .NET RSA SubjectPublicKeyInfo support is required'
+            }
+            if (-not $refused) { throw 'TestComponentSetUnavailableVerifier did not fail closed' }
+        }
+    }
+    Initialize-WSComponentVerifier
+    $vectors = Join-Path $RepositoryRoot 'internal/localcell/trust/testdata/vectors'
+    $root = Join-Path $RepositoryRoot 'internal/localcell/trust/testdata/keys/TEST-ONLY-root-a.public.pem'
+    $wrongRoot = Join-Path $RepositoryRoot 'internal/localcell/trust/testdata/keys/TEST-ONLY-root-b.public.pem'
+    $now = [DateTime]::Parse('2026-10-27T12:00:00Z').ToUniversalTime()
+    $bundle = Join-Path $TemporaryRoot 'component-bundle'
+    New-Item -ItemType Directory -Path $bundle | Out-Null
+    Copy-Item (Join-Path $vectors 'setup-delegation.json') (Join-Path $bundle 'delegation.json')
+    Copy-Item (Join-Path $vectors 'setup-delegation.json.sig.json') (Join-Path $bundle 'delegation.json.sig.json')
+    Copy-Item (Join-Path $vectors 'positive-windows.json') (Join-Path $bundle 'component-set.json')
+    Copy-Item (Join-Path $vectors 'positive-windows.json.sig.json') (Join-Path $bundle 'component-set.json.sig.json')
+    Assert-WSBootstrapRefusal 'TestComponentSetNoRoot' 'no_trust_root' { Get-WSVerifiedComponentSet $bundle '' '' }
+    $priorClock = $env:WS_UNTRUSTED_CLOCK
+    try {
+        $env:WS_UNTRUSTED_CLOCK = '1'
+        Assert-WSBootstrapRefusal 'TestComponentSetUntrustedClockInput' 'unknown_clock' { Get-WSVerifiedComponentSet $bundle $root '' }
+    } finally { $env:WS_UNTRUSTED_CLOCK = $priorClock }
+    Assert-WSBootstrapRefusal 'TestComponentSetWrongRoot' 'wrong_signer' {
+        $v = New-Object WSB2Verifier -ArgumentList (,[string[]]@($wrongRoot))
+        $v.Verify((Join-Path $bundle 'delegation.json'), (Join-Path $bundle 'delegation.json.sig.json'), 'delegation', $now, $true, '', '', '', $false)
+    }
+    foreach ($rootOrder in @(@($root,$wrongRoot), @($wrongRoot,$root))) {
+        foreach ($rotation in @('positive-rotation','positive-rotation-reversed')) {
+            $rotationVerifier = New-Object WSB2Verifier -ArgumentList (,[string[]]$rootOrder)
+            try {
+                $null = $rotationVerifier.Verify((Join-Path $vectors "$rotation.json"), (Join-Path $vectors "$rotation.json.sig.json"), 'root_rotation', $now, $true, '', '', '', $false)
+            } catch { throw "TestComponentSetRootAndSignatureOrder failed: $(Get-WSComponentRefusal $_)" }
+        }
+    }
+    $v = New-Object WSB2Verifier -ArgumentList (,[string[]]@($root))
+    $null = $v.Verify((Join-Path $bundle 'delegation.json'), (Join-Path $bundle 'delegation.json.sig.json'), 'delegation', $now, $true, '', '', '', $false)
+    foreach ($test in @(
+        @('TestComponentSetExpired', 'expired', 'expired'),
+        @('TestComponentSetTamperedDocument', 'tampered-document', 'signature_invalid'),
+        @('TestComponentSetTamperedEnvelope', 'tampered-envelope', 'invalid_json'),
+        @('TestComponentSetEnvelopeCap', 'oversized-envelope', 'envelope_too_large'),
+        @('TestComponentSetDocumentCap', 'oversized-document', 'document_too_large')
+    )) {
+        Assert-WSBootstrapRefusal $test[0] $test[2] {
+            $v.Verify((Join-Path $vectors "$($test[1]).json"), (Join-Path $vectors "$($test[1]).json.sig.json"), 'component_set', $now, $true, '', '', '', $false)
+        }
+    }
+    $largeAuthority = Join-Path $TemporaryRoot 'large-authority.json'
+    [IO.File]::WriteAllBytes($largeAuthority, (New-Object byte[] 16385))
+    Assert-WSBootstrapRefusal 'TestComponentSetAuthorityCap' 'document_too_large' {
+        $v.Verify($largeAuthority, (Join-Path $bundle 'delegation.json.sig.json'), 'delegation', $now, $true, '', '', '', $false)
+    }
+    Assert-WSBootstrapRefusal 'TestComponentSetUntrustedClock' 'unknown_clock' {
+        $v.Verify((Join-Path $bundle 'component-set.json'), (Join-Path $bundle 'component-set.json.sig.json'), 'component_set', $now, $false, '', '', '', $false)
+    }
+    $null = $v.Verify((Join-Path $bundle 'component-set.json'), (Join-Path $bundle 'component-set.json.sig.json'), 'component_set', $now, $true, '', 'windows', 'amd64', $false)
+    $archive = $v.App('windows','amd64')
+    $payload = Join-Path $TemporaryRoot 'archive-fixture'
+    [IO.File]::WriteAllBytes($payload, (New-Object byte[] 1))
+    Assert-WSBootstrapRefusal 'TestComponentSetArchiveSize' 'archive_size_mismatch' { $v.CheckArchive($payload, $archive) }
+    [IO.File]::WriteAllBytes($payload, (New-Object byte[] ([int]$archive['size'])))
+    Assert-WSBootstrapRefusal 'TestComponentSetArchiveDigest' 'archive_digest_mismatch' { $v.CheckArchive($payload, $archive) }
+    $other = New-Object WSB2Verifier -ArgumentList (,[string[]]@($root))
+    $null = $other.Verify((Join-Path $bundle 'delegation.json'), (Join-Path $bundle 'delegation.json.sig.json'), 'delegation', $now, $true, '', '', '', $false)
+    $null = $other.Verify((Join-Path $bundle 'component-set.json'), (Join-Path $bundle 'component-set.json.sig.json'), 'component_set', $now, $true, '', '', '', $false)
+    $otherArchive = $other.App('windows','amd64')
+    Assert-WSBootstrapRefusal 'TestComponentSetMixedManifest' 'mixed_set' { $v.CheckArchive($payload, $otherArchive) }
+    $archive['size'] = [uint64]1
+    Assert-WSBootstrapRefusal 'TestComponentSetMutatedReceipt' 'mixed_set' { $v.CheckArchive($payload, $archive) }
+    Write-Host 'PowerShell bootstrap units: 20 cases passed.'
+}
+
+
+function Test-WSDefaultByteIdentity {
+    param([string]$RepositoryRoot, [string]$Installer, [string]$FixtureRoot, [string]$TemporaryRoot)
+    $baseline = Join-Path $TemporaryRoot 'baseline-install.ps1'
+    # Pin the pre-B2 ancestor so this remains a regression check after merge.
+    # Provider CI uses fetch-depth: 0 and preserves this ancestor.
+    $baselineSource = @(& git -C $RepositoryRoot show 86c80419597c5d03815cee4aa3782606fbbc7b48:install.ps1 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'TestDefaultByteIdentity cannot read committed installer' }
+    [IO.File]::WriteAllText($baseline, ([string]::Join("`n", $baselineSource) + "`n"), (New-Object Text.UTF8Encoding $false))
+    $identityDir = Join-Path $TemporaryRoot 'byte-identity-install'
+    $baselineOutput = $null
+    if ((Invoke-Installer $baseline $FixtureRoot $identityDir '9.9.9' $true ([ref]$baselineOutput)) -ne 0) {
+        throw 'TestDefaultByteIdentity committed installer failed'
+    }
+    $baselineFiles = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $identityDir -File -Recurse) {
+        $baselineFiles[$file.FullName.Substring($identityDir.Length)] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+    Remove-Item -LiteralPath $identityDir -Recurse -Force
+    $candidateOutput = $null
+    if ((Invoke-Installer $Installer $FixtureRoot $identityDir '9.9.9' $true ([ref]$candidateOutput)) -ne 0) {
+        throw 'TestDefaultByteIdentity candidate installer failed'
+    }
+    if ([string]::Join("`n", $baselineOutput) -cne [string]::Join("`n", $candidateOutput)) {
+        throw 'TestDefaultByteIdentity changed default installer output'
+    }
+    $candidateFiles = @(Get-ChildItem -LiteralPath $identityDir -File -Recurse)
+    if ($candidateFiles.Count -ne $baselineFiles.Count) { throw 'TestDefaultByteIdentity changed installed inventory' }
+    foreach ($file in $candidateFiles) {
+        $relative = $file.FullName.Substring($identityDir.Length)
+        if (-not $baselineFiles.ContainsKey($relative) -or $baselineFiles[$relative] -cne (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash) {
+            throw 'TestDefaultByteIdentity changed installed bytes'
+        }
+    }
+    Write-Host 'PowerShell default byte identity: committed installer output and installed bytes match.'
+}
+
+function New-RemoteOnlyInstallerWrapper {
+    param([string]$TemporaryRoot)
+    $wrapper = Join-Path $TemporaryRoot 'remote-only-installer.ps1'
+    $script:remoteBoundaryMarker = Join-Path $TemporaryRoot 'remote-only-boundary-violation'
+    @'
+param([string]$InstallerPath, [string]$BoundaryMarker, [string]$Version, [string]$InstallDir, [string]$ReleaseRoot, [switch]$NoPathUpdate, [switch]$BoundaryControlsOnly, [string]$BoundaryFixture)
+$ErrorActionPreference = 'Stop'
+$global:WSB2BoundaryMarker = $BoundaryMarker
+$global:WSB2BoundaryFixture = ''
+if ($BoundaryControlsOnly) { $global:WSB2BoundaryFixture = $BoundaryFixture }
+function global:Set-RemoteBoundaryFailure {
+    [IO.File]::WriteAllText($global:WSB2BoundaryMarker, 'refused')
+    throw 'remote_only_boundary'
+}
+function global:systemctl { Set-RemoteBoundaryFailure }
+function global:launchctl { Set-RemoteBoundaryFailure }
+function global:schtasks { Set-RemoteBoundaryFailure }
+function global:schtasks.exe { Set-RemoteBoundaryFailure }
+function global:sc.exe { Set-RemoteBoundaryFailure }
+function global:Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, $Headers, [switch]$UseBasicParsing)
+    if ($Uri -match '(?i)cell|server|worker|postgres') { Set-RemoteBoundaryFailure }
+    if (-not [string]::IsNullOrEmpty($global:WSB2BoundaryFixture)) {
+        Copy-Item -LiteralPath $global:WSB2BoundaryFixture -Destination $OutFile
+        return
+    }
+    throw 'remote_only_unexpected_network'
+}
+function global:Invoke-RestMethod {
+    param([string]$Uri, $Headers, [switch]$UseBasicParsing)
+    if ($Uri -match '(?i)cell|server|worker|postgres') { Set-RemoteBoundaryFailure }
+    if (-not [string]::IsNullOrEmpty($global:WSB2BoundaryFixture)) {
+        return [IO.File]::ReadAllText($global:WSB2BoundaryFixture)
+    }
+    throw 'remote_only_unexpected_network'
+}
+if ($BoundaryControlsOnly) {
+    # These functions are portable under pwsh; the real installer still needs
+    # native Windows. Exercise the exact mocks the child installer will use.
+    $outputPath = "$BoundaryFixture.output"
+    $fixtureContent = [IO.File]::ReadAllText($BoundaryFixture)
+    foreach ($fetcher in @('Invoke-WebRequest', 'Invoke-RestMethod')) {
+        if ($fetcher -eq 'Invoke-WebRequest') {
+            & $fetcher -Uri 'https://example.invalid/client/checksums.txt' -OutFile $outputPath
+            if ([IO.File]::ReadAllText($outputPath) -cne $fixtureContent) {
+                throw "TestRemoteOnlyFetcherControls/$fetcher positive fixture was not copied"
+            }
+            Remove-Item -LiteralPath $outputPath -Force
+        } else {
+            if ((& $fetcher -Uri 'https://example.invalid/client/checksums.txt') -cne $fixtureContent) {
+                throw "TestRemoteOnlyFetcherControls/$fetcher positive fixture was not returned"
+            }
+        }
+        foreach ($category in @('cell', 'server', 'worker', 'postgres')) {
+            $refused = $false
+            $result = $null
+            try {
+                if ($fetcher -eq 'Invoke-WebRequest') {
+                    $result = & $fetcher -Uri "https://example.invalid/$category/checksums.txt" -OutFile $outputPath
+                } else {
+                    $result = & $fetcher -Uri "https://example.invalid/$category/checksums.txt"
+                }
+            } catch { $refused = $_.Exception.Message -ceq 'remote_only_boundary' }
+            if (-not $refused) { throw "TestRemoteOnlyFetcherControls/$fetcher/$category did not refuse" }
+            if (-not (Test-Path -LiteralPath $BoundaryMarker) -or [IO.File]::ReadAllText($BoundaryMarker) -cne 'refused') {
+                throw "TestRemoteOnlyFetcherControls/$fetcher/$category missing boundary marker"
+            }
+            if ((Test-Path -LiteralPath $outputPath) -or $null -ne $result) {
+                throw "TestRemoteOnlyFetcherControls/$fetcher/$category copied forbidden output"
+            }
+            Remove-Item -LiteralPath $BoundaryMarker -Force
+        }
+    }
+    foreach ($manager in @('systemctl', 'launchctl', 'schtasks', 'schtasks.exe', 'sc.exe')) {
+        $refused = $false
+        try { & $manager status synthetic-service } catch { $refused = $_.Exception.Message -ceq 'remote_only_boundary' }
+        if (-not $refused) { throw "TestRemoteOnlyServiceControls/$manager did not refuse" }
+        if (-not (Test-Path -LiteralPath $BoundaryMarker) -or [IO.File]::ReadAllText($BoundaryMarker) -cne 'refused') {
+            throw "TestRemoteOnlyServiceControls/$manager missing boundary marker"
+        }
+        Remove-Item -LiteralPath $BoundaryMarker -Force
+    }
+    Write-Host 'PowerShell remote-only boundary controls: 8 URL refusals, 5 service refusals, 2 copy controls passed.'
+    exit 0
+}
+& $InstallerPath -Version $Version -InstallDir $InstallDir -ReleaseRoot $ReleaseRoot -NoPathUpdate:$NoPathUpdate
+'@ | Set-Content -LiteralPath $wrapper -Encoding UTF8
+    return $wrapper
+}
+
+function Test-WSRemoteBoundaryControl {
+    param([string]$Wrapper, [string]$TemporaryRoot)
+    $fixture = Join-Path $TemporaryRoot 'boundary-control-fixture'
+    [IO.File]::WriteAllText($fixture, 'synthetic local downloader fixture')
+    $powerShell = Join-Path $PSHOME 'pwsh'
+    if ($env:OS -eq 'Windows_NT') { $powerShell = Join-Path $PSHOME 'pwsh.exe' }
+    & $powerShell -NoLogo -NoProfile -NonInteractive -File $Wrapper `
+        -BoundaryMarker $script:remoteBoundaryMarker -BoundaryControlsOnly -BoundaryFixture $fixture
+    if ($LASTEXITCODE -ne 0) { throw 'TestRemoteOnlyBoundaryControls child failed' }
+    if (Test-Path -LiteralPath $script:remoteBoundaryMarker) {
+        throw 'TestRemoteOnlyBoundaryControls left a boundary marker before installer tests'
+    }
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $installer = Join-Path $repositoryRoot 'install.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("witself-install-smoke-" + [Guid]::NewGuid().ToString('N'))
 $installDir = $null
 $pathFixture = $null
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+$previousWitselfHome = $env:WITSELF_HOME
+$previousDshHome = $env:DSH_HOME
+$previousComponentSet = $env:WS_COMPONENT_SET_DIR
+$previousRootPEM = $env:WS_TRUST_ROOT_PEM_FILE
+$previousClock = $env:WS_UNTRUSTED_CLOCK
+$env:WITSELF_HOME = Join-Path $temporaryRoot 'witself-home'
+$env:DSH_HOME = Join-Path $temporaryRoot 'dsh-home'
+$env:WS_COMPONENT_SET_DIR = ''
+$env:WS_TRUST_ROOT_PEM_FILE = ''
+$env:WS_UNTRUSTED_CLOCK = ''
 try {
+    $script:remoteOnlyWrapper = New-RemoteOnlyInstallerWrapper $temporaryRoot
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        Test-WSRemoteBoundaryControl $script:remoteOnlyWrapper $temporaryRoot
+        Test-WSBootstrapVerifier $installer $repositoryRoot $temporaryRoot
+    } else {
+        if ($BootstrapOnly) { throw 'bootstrap_units_require_pwsh7' }
+        Write-Host 'NOT_RUN bootstrap_units_require_pwsh7'
+    }
+    if ($BootstrapOnly) { return }
+    if ($env:OS -ne 'Windows_NT') {
+        Write-Host 'NOT_RUN native_windows_installer_requires_windows'
+        return
+    }
     $fixtureRoot = Join-Path $temporaryRoot 'releases'
     $installDir = Join-Path $temporaryRoot 'installed'
     $goodBinary = Join-Path $temporaryRoot 'witself-good.exe'
@@ -443,6 +707,7 @@ try {
 
     New-LocalRelease $fixtureRoot 'v9.9.9' $goodBinary
     New-LocalRelease $fixtureRoot 'v9.9.13' $alternateBinary
+    Test-WSDefaultByteIdentity $repositoryRoot $installer $fixtureRoot $temporaryRoot
     Set-Content `
         -LiteralPath (Join-Path $fixtureRoot 'latest.json') `
         -Value '{"tag_name":"v9.9.9"}' `
@@ -869,6 +1134,11 @@ func main() {
     $pathFixture = $null
     Write-Host 'Windows installer smoke passed.'
 } finally {
+    $env:WITSELF_HOME = $previousWitselfHome
+    $env:DSH_HOME = $previousDshHome
+    $env:WS_COMPONENT_SET_DIR = $previousComponentSet
+    $env:WS_TRUST_ROOT_PEM_FILE = $previousRootPEM
+    $env:WS_UNTRUSTED_CLOCK = $previousClock
     try {
         Restore-TestUserPathFixture $installDir $pathFixture
     } finally {
