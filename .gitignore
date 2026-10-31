@@ -49,3 +49,6 @@ dist-charts/
 /infra/pulumi/cmd/witself-infra/witself-infra
 # Local acceptance evidence (make dashboard-acceptance); CI uploads its own copy.
 evidence/
+
+# Per-slice scratch directories that Codex fix passes create beside the sources; never commit them.
+.*-scratch/

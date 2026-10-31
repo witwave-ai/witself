@@ -1,1 +1,0 @@
-{"command": ["go", "run", "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0", "run", "./internal/localcell/..."], "exit": 0, "wall_seconds": 14.73}

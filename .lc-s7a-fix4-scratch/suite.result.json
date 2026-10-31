@@ -1,1 +1,0 @@
-{"command": ["go", "test", "./internal/localcell/...", "./internal/runtimeconfig/...", "./internal/tools/localcellharness/...", "-count=1", "-json", "-timeout=10m", "-skip", "^TestRealLifecycle$"], "exit": 0, "wall_seconds": 41.55}
