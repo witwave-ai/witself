@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "kind": "component_set",
+  "algorithm": "rsa3072-pkcs1v15-sha256",
+  "signatures": [
+    {
+      "key_id": "57b97dafb80a61bdcb153151f865b40e5ab8b8d227d3b082936cc9e1018910df",
+      "signature": "not-base64"
+    }
+  ]
+}

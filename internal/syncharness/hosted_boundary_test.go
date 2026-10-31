@@ -12,7 +12,10 @@ import (
 )
 
 func TestHostedCommandDependencyBoundary(t *testing.T) {
-	for _, command := range []string{"witself-server", "witself-worker", "witself"} {
+	// witself-infra lives in the nested infra/pulumi module, whose dependencies
+	// are not available to this module's test job; that module cannot link this
+	// module's internal packages, and its own gate covers it.
+	for _, command := range []string{"witself-server", "witself-worker", "witself", "witself-admin", "witself-control-plane"} {
 		t.Run(command, func(t *testing.T) {
 			cmd := exec.Command("go", "list", "-deps", "./cmd/"+command)
 			cmd.Dir = "../.."
@@ -22,9 +25,9 @@ func TestHostedCommandDependencyBoundary(t *testing.T) {
 				t.Fatal("hosted command dependency inspection failed")
 			}
 			for _, dependency := range strings.Fields(string(out)) {
-				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel"} {
+				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel", "/internal/localcell/trust"} {
 					if strings.HasSuffix(dependency, forbidden) || strings.Contains(dependency, forbidden+"/") {
-						t.Fatal("synthetic synchronization package entered hosted dependency graph")
+						t.Fatal("harness or trust package entered shipped command dependency graph")
 					}
 				}
 			}

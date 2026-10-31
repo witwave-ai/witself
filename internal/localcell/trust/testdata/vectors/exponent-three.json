@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "critical": [
+    "kind",
+    "keys"
+  ],
+  "kind": "delegation",
+  "root_sequence": 1,
+  "delegation_sequence": 1,
+  "issued_at": "2026-01-01T00:00:00Z",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "keys": [
+    {
+      "key_id": "728ac452e196fd4448af6857cfac95909bc89447aaf3770dc85b2f922b9eeaaf",
+      "spki": "MIIBoDANBgkqhkiG9w0BAQEFAAOCAY0AMIIBiAKCAYEAwjTcorn5NfAIX3ThK7lT1V6bbumB0E7Ak6VopfGY0jNNvuhnn22vMYDjQgWbgJUjPTu4zlommbG8z9lEYNlOE5dByi9t0zm4ZFx7pzoSKbMTWojSAfqPTD1bQLmO8GCwMggX8+xW5g/2uktHRp563rbqTsw9HO0n/9hxvRBhxDU3kCom6PtZnZ/D8PGgbOdgp5xB2x5Yc5/xU41k8xPzWXo0cz+W0YmXCitivlXKklqP6Fc1FZuNkXbcEqSi0LsukPWV0IYAR1HO3xYTetdTNtBTqUd8v6k66ITaX85Cf2f9HBSjsSck93WaCA6EhSioN9CiArNQnQUox8Qri7nZxs1ZokoGB/5o+ZnZeBhx8+Sul6/+QQEU4woWDeJc5ARBDiqQxHIS+8nOuuhANoOmV3FMyOOLK1jxlOb1In03uxWJYGldMFtt2HYsfoF1q9QgcL3Vxlj39f9QV58DLFNjVDFHozLz1tHL6dnFzk1UyBSlGRkGRM9cHqcp+Hv1s6kHAgED"
+    }
+  ],
+  "revoked_key_ids": []
+}
